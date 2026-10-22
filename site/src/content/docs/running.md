@@ -50,8 +50,12 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | Request | Response |
 |---|---|
 | `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs, the memory budget |
-| `POST /v1/repositories/{owner}/{name}/pause` | `204`; the repository gets no new runners, running jobs finish |
+| `POST /v1/repositories/{owner}/{name}/pause?force=` | no new runners; `409` naming the running job, unless `force=true` cancels its run |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
+| `POST /v1/profiles/{name}/reseed` | `202`; reseeds once the profile's slots are free |
+| `POST /v1/caches/{name}/clean` | `204`; `409` naming the jobs that use it |
+| `GET /v1/config`, `PUT /v1/config`, `POST /v1/config/check` | the config file; replace it and reload, or check one |
+| `GET /v1/doctor` | `runnerd doctor`'s checks |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
 
 ```sh
