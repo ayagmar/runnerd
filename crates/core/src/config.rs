@@ -28,6 +28,13 @@ pub struct Host {
     /// Must be set for `isolation = "unsafe-dind"`, so a copied config cannot turn it on silently.
     #[serde(default)]
     pub allow_unsafe: bool,
+    /// How often GitHub is asked for queued jobs.
+    #[serde(default = "default_poll_interval", deserialize_with = "duration")]
+    pub poll_interval: Duration,
+}
+
+fn default_poll_interval() -> Duration {
+    Duration::from_secs(15)
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
@@ -38,16 +45,24 @@ pub enum Isolation {
     UnsafeDind,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Caches {
     pub mirror: Mirror,
     pub pnpm: CacheLimit,
     pub maven: CacheLimit,
+    /// When a profile has no job running and its slot 1 changed its layers by at least this much, slot 1's
+    /// layers become the profile's new snapshot.
+    #[serde(default = "default_reseed_at")]
+    pub reseed_at: ByteSize,
+}
+
+fn default_reseed_at() -> ByteSize {
+    ByteSize(2 << 30)
 }
 
 /// The Docker Hub pull-through mirror shared by all runners.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mirror {
     pub enabled: bool,
@@ -58,7 +73,7 @@ pub struct Mirror {
     pub ttl: Duration,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheLimit {
     /// The cache is emptied above this size when no job runs.
@@ -69,6 +84,7 @@ pub struct CacheLimit {
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
+    /// The stage of `image/Dockerfile`; runners run the image `runnerd-runner:<image_stage>`.
     pub image_stage: String,
     pub cpus: u32,
     pub memory: ByteSize,
@@ -105,7 +121,7 @@ pub enum ConfigError {
          set allow_unsafe = true under [host] to use it anyway"
     )]
     UnsafeNotAllowed,
-    #[error("{field} is 0, which Docker reads as no limit; set it above 0")]
+    #[error("{field} is 0; set it above 0")]
     ZeroLimit { field: String },
     #[error("slots × memory over all profiles plus the mirror is too large to add up")]
     BudgetOverflow,
@@ -191,6 +207,10 @@ impl Config {
             (
                 mirror.enabled && mirror.cpus == 0,
                 "caches.mirror.cpus".to_owned(),
+            ),
+            (
+                self.host.poll_interval.is_zero(),
+                "host.poll_interval".to_owned(),
             ),
         ];
         if let Some((_, field)) = zero_limits
