@@ -110,8 +110,8 @@ pub(super) async fn check_config(
     }
 }
 
-/// Validates the new config, writes it in place of the file and has the engine run with it. An invalid config
-/// leaves the file and the engine as they were.
+/// Validates the new config, has the engine run with it and writes it in place of the file. A config that is
+/// invalid, or that the engine cannot take, leaves the file and the engine as they were.
 pub(super) async fn replace_config(
     Authenticated(principal): Authenticated,
     State(state): State<AppState>,
@@ -132,7 +132,24 @@ pub(super) async fn replace_config(
             .warnings
             .push("history.database takes effect when runnerd restarts".to_owned());
     }
+    // The engine first: if it cannot take the config, the file stays as it was.
+    if let Err(control_error) = state
+        .handle
+        .control
+        .reload(config, checked.memory_max)
+        .await
+    {
+        return refused(&control_error);
+    }
     if let Err(io_error) = write_atomically(&file.path, &text) {
+        // Back to the config the file still holds.
+        if let Ok((Some(old), old_checked)) = check(state.memory_max, file.text.clone()).await {
+            let _ = state
+                .handle
+                .control
+                .reload(old, old_checked.memory_max)
+                .await;
+        }
         return error(
             StatusCode::INTERNAL_SERVER_ERROR,
             &format!("cannot write {}: {io_error}", file.path.display()),
@@ -140,15 +157,7 @@ pub(super) async fn replace_config(
     }
     file.text = text;
     info!("{} replaced by {principal:?}", file.path.display());
-    match state
-        .handle
-        .control
-        .reload(config, checked.memory_max)
-        .await
-    {
-        Ok(()) => Json(checked).into_response(),
-        Err(control_error) => refused(&control_error),
-    }
+    Json(checked).into_response()
 }
 
 /// Replaces the file `path` points to, through a symlink if it is one, with `text`: a temporary file in the same

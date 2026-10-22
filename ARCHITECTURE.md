@@ -88,5 +88,5 @@ nothing until Docker has listed them.
 - A reload never stops a running job: slots a new config removes go once their runners finish, and a profile starts
   no runner while it runs as many as its configured `slots` (`scheduler::Slot::Closed`).
 - A forced pause cancels runs only of jobs this daemon's runners hold, and only of the paused repository.
-- The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
-  renamed over it.
+- The config file is replaced only by a config that validates against the slice's `MemoryMax` and that the engine
+  took, by a temporary file renamed over it.

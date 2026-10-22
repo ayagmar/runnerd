@@ -148,12 +148,21 @@ impl Daemon {
 }
 
 async fn start(dir: &Path, owner: Option<u32>) -> Daemon {
+    start_with(dir, owner, true).await
+}
+
+/// `start`; without `engine`, nothing answers the engine's commands, as once it stopped.
+async fn start_with(dir: &Path, owner: Option<u32>, engine: bool) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
     let (control, commands) = Control::new(["o/app".to_owned(), "o/busy".to_owned()]);
     let control = Arc::new(control);
     let (reloaded, reloads) = mpsc::unbounded_channel();
-    tokio::spawn(fake_engine(control.clone(), commands, reloaded));
+    if engine {
+        tokio::spawn(fake_engine(control.clone(), commands, reloaded));
+    } else {
+        drop(commands);
+    }
     let (sender, receiver) = watch::channel(status());
     let handle = Handle {
         status: receiver,
@@ -362,6 +371,36 @@ async fn a_config_over_the_budget_is_refused_with_both_numbers_and_the_file_is_u
     );
     assert_eq!(std::fs::read(&daemon.config).unwrap(), before);
     assert!(daemon.reloads.try_recv().is_err());
+    let shown: ConfigFile = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .get("http://runnerd/v1/config")
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(shown.text, EXAMPLE);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_config_the_engine_cannot_take_leaves_the_file_unchanged() {
+    let dir = tempdir::Dir::new();
+    let daemon = start_with(&dir.0, None, false).await;
+    let before = std::fs::read_to_string(&daemon.config).unwrap();
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(EXAMPLE.replacen("slots = 2", "slots = 1", 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), before);
     let shown: ConfigFile = serde_json::from_slice(
         &body(
             daemon
