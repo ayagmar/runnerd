@@ -191,19 +191,28 @@ pub(crate) async fn job(
     respond(receiver)
 }
 
-async fn append_lines(patches: &Patches, lines: &[String]) -> bool {
+/// Appends log lines `first`, `first + 1`, … (counted from 0) to the page's, and drops the page's oldest beyond
+/// `LOG_TAIL`, so a page left open on a busy job keeps a bounded tail; the full log has the rest.
+async fn append_lines(patches: &Patches, first: u64, lines: &[String]) -> bool {
     if lines.is_empty() {
         return true;
     }
-    let html: String = lines
-        .iter()
-        .map(|line| job::log_line(line).into_string())
+    let html: String = (first + 1..)
+        .zip(lines)
+        .map(|(number, line)| job::log_line(number, line).into_string())
         .collect();
-    let event = PatchElements::new(html)
+    let append = PatchElements::new(html)
         .selector("#log-lines")
         .mode(ElementPatchMode::Append)
         .write_as_axum_sse_event();
-    patches.send(event).await.is_ok()
+    let trim = PatchElements::new("")
+        .selector(format!(
+            "#log-lines > li:nth-last-child(n+{})",
+            job::LOG_TAIL + 1
+        ))
+        .mode(ElementPatchMode::Remove)
+        .write_as_axum_sse_event();
+    patches.send(append).await.is_ok() && patches.send(trim).await.is_ok()
 }
 
 async fn run_job(app: &App, patches: &Patches, id: u64, from: u64) -> Result<(), Error> {
@@ -224,7 +233,7 @@ async fn run_job(app: &App, patches: &Patches, id: u64, from: u64) -> Result<(),
         .await?;
     let missed: Vec<String> = missed.lines().map(str::to_owned).collect();
     let mut next_line = from + missed.len() as u64;
-    if !append_lines(patches, &missed).await {
+    if !append_lines(patches, from, &missed).await {
         return Ok(());
     }
     let mut sent = Sent::default();
@@ -250,6 +259,7 @@ async fn run_job(app: &App, patches: &Patches, id: u64, from: u64) -> Result<(),
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
         let mut changed = false;
+        let first_line = next_line;
         let mut lines = Vec::new();
         for event in batch {
             match event {
@@ -265,7 +275,7 @@ async fn run_job(app: &App, patches: &Patches, id: u64, from: u64) -> Result<(),
                 _ => {}
             }
         }
-        if !append_lines(patches, &lines).await {
+        if !append_lines(patches, first_line, &lines).await {
             return Ok(());
         }
         if changed {

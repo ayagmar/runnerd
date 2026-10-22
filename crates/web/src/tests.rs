@@ -462,6 +462,156 @@ async fn a_running_jobs_stream_appends_new_log_lines_and_updates_its_charts() {
     assert!(update.contains("sampled peak 8G"), "{update}");
 }
 
+/// The log lines a browser shows, as `(number, text)`: what the job page rendered, then each of the job stream's
+/// patches to `#log-lines` applied the way Datastar applies them.
+struct ShownLog(Vec<(Option<u64>, String)>);
+
+impl ShownLog {
+    /// The `<li value="N">text</li>` items in `html`; the number is `None` on an `<li>` without one.
+    fn items(html: &str) -> Vec<(Option<u64>, String)> {
+        html.split("<li")
+            .skip(1)
+            .map(|item| {
+                let (attributes, rest) = item.split_once('>').unwrap();
+                let number = attributes
+                    .split_once("value=\"")
+                    .map(|(_, value)| value.trim_end_matches('"').parse().unwrap());
+                (number, rest.split_once("</li>").unwrap().0.to_owned())
+            })
+            .collect()
+    }
+
+    fn of_page(page: &str) -> ShownLog {
+        let list = page.split_once(r#"id="log-lines""#).unwrap().1;
+        ShownLog(Self::items(list.split_once("</ol>").unwrap().0))
+    }
+
+    /// Applies the patches to `#log-lines` among the stream's `events`.
+    fn apply(&mut self, events: &str) {
+        for event in events.split("\n\n") {
+            let data: Vec<&str> = event
+                .lines()
+                .filter_map(|line| line.strip_prefix("data: "))
+                .collect();
+            let field = |name: &str| {
+                data.iter()
+                    .find_map(|line| line.strip_prefix(name).map(str::trim))
+            };
+            let elements: String = data
+                .iter()
+                .filter_map(|line| line.strip_prefix("elements "))
+                .collect();
+            match (field("selector "), field("mode ")) {
+                (Some("#log-lines"), Some("append")) => self.0.extend(Self::items(&elements)),
+                (Some(selector), Some("remove")) => {
+                    // The only removal the stream sends: all but the last `keep` lines.
+                    let keep: usize = selector
+                        .strip_prefix("#log-lines > li:nth-last-child(n+")
+                        .and_then(|rest| rest.strip_suffix(')'))
+                        .unwrap()
+                        .parse::<usize>()
+                        .unwrap()
+                        - 1;
+                    let excess = self.0.len().saturating_sub(keep);
+                    self.0.drain(..excess);
+                }
+                _ if elements.contains(r#"id="log-lines""#) => {
+                    self.0 = ShownLog::of_page(&elements).0;
+                }
+                _ => {}
+            }
+        }
+    }
+}
+
+impl Dashboard {
+    /// Adds a line to the running job's log, as the daemon stores and announces it.
+    fn log(&self, text: &str) {
+        let mut fixtures = self.fake.fixtures.lock().unwrap();
+        let lines = fixtures.logs.entry(LEDGER_RUNNING).or_default();
+        let line = lines.len() as u64;
+        lines.push(text.to_owned());
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        job.summary.log.lines = line + 1;
+        let _ = self.fake.events.send(EventEnvelope {
+            id: None,
+            at: NOW,
+            event: Event::LogLine {
+                job: LEDGER_RUNNING,
+                line,
+                text: text.to_owned(),
+            },
+        });
+    }
+
+    /// The job page and the URL its live stream connects to, as the page names it.
+    async fn job_page(&self, cookie: &str) -> (String, String) {
+        let page = self
+            .page(cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+            .await
+            .body;
+        let url = page
+            .split_once("@get(&#39;")
+            .or_else(|| page.split_once("@get('"))
+            .unwrap()
+            .1
+            .split(['&', '\''])
+            .next()
+            .unwrap()
+            .to_owned();
+        (page, url)
+    }
+}
+
+#[tokio::test]
+async fn a_job_left_open_on_a_noisy_log_keeps_only_its_last_lines() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let (page, url) = dashboard.job_page(&cookie).await;
+    let mut shown = ShownLog::of_page(&page);
+    let mut stream = dashboard.stream(&cookie, &url).await;
+    let mut events = read_until(&mut stream, |text| text.contains(r#"id="metrics""#)).await;
+    let tail = usize::try_from(crate::views::job::LOG_TAIL).unwrap();
+    // In batches, so the fake's event channel never drops one.
+    for batch in 0..6 {
+        let last = format!("noisy line {}", batch * 200 + 199);
+        for n in batch * 200..batch * 200 + 200 {
+            dashboard.log(&format!("noisy line {n}"));
+        }
+        events.push_str(&read_until(&mut stream, |text| text.contains(&last)).await);
+    }
+    // A sample after the last line: its chart comes after whatever the stream sends for the lines.
+    let _ = dashboard.fake.events.send(EventEnvelope {
+        id: None,
+        at: NOW + 2,
+        event: Event::JobSample {
+            job: LEDGER_RUNNING,
+            sample: Sample {
+                at: NOW + 2,
+                cpu: 1000,
+                memory: 13 << 30,
+                network_received: 0,
+                network_sent: 0,
+            },
+        },
+    });
+    events.push_str(&read_until(&mut stream, |text| text.contains("sampled peak 13G")).await);
+    shown.apply(&events);
+    assert!(
+        shown.0.len() <= tail,
+        "the page shows {} lines",
+        shown.0.len()
+    );
+    assert_eq!(
+        shown.0.last().map(|line| line.1.as_str()),
+        Some("noisy line 1199")
+    );
+}
+
 #[tokio::test]
 async fn the_dashboard_refuses_to_listen_beyond_loopback() {
     let error = crate::listen("0.0.0.0:0").await.unwrap_err();

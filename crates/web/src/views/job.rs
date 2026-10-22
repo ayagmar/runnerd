@@ -362,16 +362,17 @@ pub(crate) fn log(view: &JobView) -> Markup {
             @if view.log.is_empty() && summary.log.lines > 0 {
                 p.muted { "The log's lines are past " code { "history.logs" } " and were deleted." }
             }
-            ol #log-lines .log-lines start=(view.log_from + 1) tabindex="0" aria-label="Log lines" {
-                @for line in &view.log { (log_line(line)) }
+            ol #log-lines .log-lines tabindex="0" aria-label="Log lines" {
+                @for (number, line) in (view.log_from + 1..).zip(&view.log) { (log_line(number, line)) }
             }
         }
     }
 }
 
-/// One log line, without the terminal colour codes steps print.
-pub(crate) fn log_line(text: &str) -> Markup {
-    html! { li { (strip_escapes(text)) } }
+/// Log line `number`, counted from 1, without the terminal colour codes steps print. Each line carries its number,
+/// so the stream can drop the oldest from the page without renumbering the rest.
+pub(crate) fn log_line(number: u64, text: &str) -> Markup {
+    html! { li value=(number) { (strip_escapes(text)) } }
 }
 
 /// `text` without ANSI escape sequences: `ESC [ … final byte` and lone escapes.
@@ -403,8 +404,8 @@ mod tests {
     fn a_coloured_log_line_shows_as_its_text() {
         let line = "\u{1b}[36;1mdocker info --format x\u{1b}[0m done";
         assert_eq!(
-            log_line(line).into_string(),
-            "<li>docker info --format x done</li>"
+            log_line(7, line).into_string(),
+            r#"<li value="7">docker info --format x done</li>"#
         );
     }
 }
