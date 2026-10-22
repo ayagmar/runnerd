@@ -190,7 +190,7 @@ h1#_top {
   }
 }
 
-/* JetBrains Mono 2.304 (OFL, JetBrainsMono-OFL.txt), cut to ASCII and the frames' glyphs: one font for every cell, so
+/* JetBrains Mono 2.304 (OFL, public/fonts/JetBrainsMono-OFL.txt, credited where frames show), cut to ASCII and the frames' glyphs: one font for every cell, so
    box drawing and blocks keep the columns whatever monospace the reader has. */
 @font-face {
   font-family: 'runnerd tui';
@@ -227,6 +227,14 @@ h1#_top {
   white-space: pre;
   border: 0;
   border-radius: 0;
+}
+
+.tui-cue {
+  margin: 0;
+  padding: 0.4rem 0.25rem 0;
+  font-family: var(--font-display);
+  font-size: 0.8125rem;
+  color: var(--muted);
 }
 
 .tui span {
