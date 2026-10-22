@@ -2,12 +2,19 @@
 # Makes slot 1's view of each layer the profile's new read-only snapshot in /base, then drops every slot's own
 # changes, which the snapshot now holds. Runs as root in a throwaway container while none of the profile's slots
 # runs a job, with /base and each slot's /state mounted at /workers/<N>. With an argument, does nothing unless
-# slot 1's changes reach that many GB.
+# slot 1's changes to the layers (not its Docker Engine's data) reach that many bytes.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/layers.sh
 . /usr/local/lib/runnerd-layers.sh
 
-if [ "$(size_gb /workers/1)" -lt "${1:-0}" ]; then
+changes=0
+for layer in "${LAYERS[@]}"; do
+    name=${layer%%:*}
+    [ ! -d "/workers/1/$name/upper" ] \
+        || changes=$((changes + $(du -sxb "/workers/1/$name/upper" | cut -f1)))
+done
+if [ "$changes" -lt "${1:-0}" ]; then
+    echo "not seeded: slot 1 changed $changes bytes"
     exit 0
 fi
 mkdir -p /mnt/merged
