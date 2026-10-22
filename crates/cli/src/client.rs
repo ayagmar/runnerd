@@ -391,8 +391,8 @@ impl SseParser {
     }
 }
 
-/// `GET /v1/events`, read event by event. When the daemon closes the stream (it does for a client too far behind)
-/// or the stream stays silent, it reconnects, resuming after the last durable event read. `next` is cancel-safe:
+/// `GET /v1/events`, read event by event. When the daemon closes the stream (it does for a client too far behind),
+/// the connection breaks or the stream stays silent, it reconnects, resuming after the last durable event read. `next` is cancel-safe:
 /// dropped while waiting, it loses no event.
 #[derive(Debug)]
 pub(crate) struct Events {
@@ -430,9 +430,10 @@ impl Events {
                 self.connect().await?;
                 continue;
             };
+            // A silent stream, and one cut off mid-body as when the daemon is killed, end like a closed one.
             let line = match lines.next().await {
                 Ok(line) => line,
-                Err(ClientError::Timeout(_)) => None,
+                Err(ClientError::Timeout(_) | ClientError::Transport(_)) => None,
                 Err(error) => return Err(error),
             };
             let Some(line) = line else {
@@ -462,8 +463,12 @@ mod tests {
     use axum::Router;
     use axum::body::{Body, Bytes};
     use axum::routing::get;
-    use futures_util::stream;
-    use runnerd_core::api::LogQuery;
+    use futures_util::{StreamExt, stream};
+    use std::sync::{Arc, Mutex};
+
+    use axum::extract::State;
+    use axum::http::HeaderMap;
+    use runnerd_core::api::{Budget, Event, EventEnvelope, EventQuery, LogQuery};
 
     use super::{ClientError, RawEvent, SseParser};
     use crate::testing::Fake;
@@ -471,6 +476,70 @@ mod tests {
     /// A 200 response whose body never comes.
     fn stalled() -> Body {
         Body::from_stream(stream::pending::<Result<Bytes, Infallible>>())
+    }
+
+    fn budget_event(id: u64) -> Bytes {
+        let envelope = EventEnvelope {
+            id: Some(id),
+            at: 1_700_000_000,
+            event: Event::BudgetChanged {
+                budget: Budget {
+                    slice: "runnerd.slice".to_owned(),
+                    memory_max: None,
+                    memory_in_use: id,
+                },
+            },
+        };
+        Bytes::from(format!(
+            "event: budget.changed\nid: {id}\ndata: {}\n\n",
+            serde_json::to_string(&envelope).unwrap()
+        ))
+    }
+
+    /// The first stream sends event 7 and breaks off mid-body, as when the daemon is killed; the next sends 8.
+    async fn breaking_stream(
+        State(seen): State<Arc<Mutex<Vec<Option<String>>>>>,
+        headers: HeaderMap,
+    ) -> Body {
+        let mut seen = seen.lock().unwrap();
+        seen.push(
+            headers
+                .get("last-event-id")
+                .map(|id| id.to_str().unwrap().to_owned()),
+        );
+        if seen.len() == 1 {
+            // The break comes after event 7 reached the client.
+            Body::from_stream(
+                stream::iter([Ok(budget_event(7))]).chain(stream::once(async {
+                    tokio::time::sleep(Duration::from_millis(100)).await;
+                    Err(std::io::Error::other("killed"))
+                })),
+            )
+        } else {
+            Body::from_stream(
+                stream::iter([Ok::<_, std::io::Error>(budget_event(8))]).chain(stream::pending()),
+            )
+        }
+    }
+
+    #[tokio::test]
+    async fn an_event_stream_cut_off_mid_body_resumes_after_the_last_event() {
+        let seen = Arc::new(Mutex::new(Vec::new()));
+        let fake = Fake::serve(
+            Router::new()
+                .route("/v1/events", get(breaking_stream))
+                .with_state(seen.clone()),
+        );
+        let client = fake.client(Duration::from_secs(5), Duration::from_secs(5));
+        let read = async {
+            let mut events = client.events(EventQuery::default(), None).await?;
+            Ok::<_, ClientError>((events.next().await?.id, events.next().await?.id))
+        };
+        let ids = tokio::time::timeout(Duration::from_secs(10), read)
+            .await
+            .expect("the events should come");
+        assert_eq!(ids.unwrap(), (Some(7), Some(8)));
+        assert_eq!(*seen.lock().unwrap(), [None, Some("7".to_owned())]);
     }
 
     #[tokio::test]
