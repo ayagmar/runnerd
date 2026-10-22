@@ -623,3 +623,144 @@ fn a_late_answer_to_an_earlier_history_filter_is_ignored() {
         "{history}"
     );
 }
+
+/// A daemon where job 42 runs until the event stream breaks, and has finished by the time it is back. The first
+/// stream sends only a live sample, so the client has no event ID to resume from.
+#[derive(Default)]
+struct Outage {
+    streams: std::sync::atomic::AtomicU32,
+    /// `Last-Event-ID` of each stream opened after the outage.
+    resumed_after: Mutex<Vec<Option<String>>>,
+}
+
+impl Outage {
+    fn finished(&self) -> bool {
+        self.streams.load(std::sync::atomic::Ordering::Relaxed) > 1
+    }
+}
+
+async fn outage_events(Shared(outage): Shared<Arc<Outage>>, headers: HeaderMap) -> Response {
+    let stream = outage
+        .streams
+        .fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    match stream {
+        0 => {
+            let envelope = EventEnvelope {
+                id: None,
+                at: NOW,
+                event: Event::HostSample {
+                    sample: runnerd_core::api::HostSample {
+                        at: NOW,
+                        cpu: 10,
+                        memory: 1 << 20,
+                    },
+                },
+            };
+            format!(
+                "event: host.sample\ndata: {}\n\n",
+                serde_json::to_string(&envelope).unwrap()
+            )
+            .into_response()
+        }
+        1 => StatusCode::SERVICE_UNAVAILABLE.into_response(),
+        _ => {
+            outage.resumed_after.lock().unwrap().push(
+                headers
+                    .get("last-event-id")
+                    .map(|id| id.to_str().unwrap().to_owned()),
+            );
+            Body::from_stream(stream::pending::<Result<Bytes, Infallible>>()).into_response()
+        }
+    }
+}
+
+async fn outage_jobs(
+    Shared(outage): Shared<Arc<Outage>>,
+    axum::extract::Query(query): axum::extract::Query<runnerd_core::api::JobQuery>,
+) -> axum::Json<runnerd_core::api::JobPage> {
+    let job = if outage.finished() {
+        let mut done = summary(42, JobState::Completed);
+        done.conclusion = Some("success".to_owned());
+        done.timeline.finished_at = Some(1095);
+        done
+    } else {
+        summary(42, JobState::Running)
+    };
+    let jobs = match query.state {
+        None => vec![job],
+        Some(state) if state == job.state => vec![job],
+        Some(_) => Vec::new(),
+    };
+    axum::Json(runnerd_core::api::JobPage { jobs, next: None })
+}
+
+#[tokio::test]
+async fn a_reconnect_with_no_event_to_resume_after_reads_the_state_again() {
+    let outage = Arc::new(Outage::default());
+    let fake = Fake::serve(
+        Router::new()
+            .route("/v1/events", get(outage_events))
+            .route(
+                "/v1/status",
+                get(|| async { axum::Json(app().live.status) }),
+            )
+            .route("/v1/jobs", get(outage_jobs))
+            .with_state(outage.clone()),
+    );
+    let client = fake.client(Duration::from_secs(5), Duration::from_secs(5));
+    let events = client.events(EventQuery::default(), None).await.unwrap();
+    let mut app = app();
+    running_job(&mut app);
+    assert!(app.live.running.contains_key(&42));
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(feed(client, events, send, Duration::from_millis(50)));
+
+    let mut was_reconnecting = false;
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            app.update(receive.recv().await.unwrap());
+            match app.connection {
+                Connection::Reconnecting(_) => was_reconnecting = true,
+                Connection::Live if was_reconnecting => break,
+                Connection::Live => {}
+            }
+        }
+    })
+    .await
+    .expect("the feed should come back");
+    // Let anything sent with the reconnect arrive.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    while let Ok(msg) = receive.try_recv() {
+        app.update(msg);
+    }
+    assert_eq!(*outage.resumed_after.lock().unwrap(), [None]);
+    assert!(
+        app.live.running.is_empty(),
+        "job 42 finished during the outage"
+    );
+    assert_eq!(
+        app.live
+            .recent
+            .first()
+            .map(|job| (job.id, job.conclusion.as_deref())),
+        Some((42, Some("success")))
+    );
+    let overview = screen(&app, 120, 40, false);
+    assert!(overview.contains("SUCCESS"), "{overview}");
+    assert!(!overview.contains("Unit tests"), "{overview}");
+}
+
+#[test]
+fn a_job_read_again_as_finished_leaves_the_slots() {
+    let mut app = app();
+    running_job(&mut app);
+    app.update(key(KeyCode::Enter));
+    let mut done = summary(42, JobState::Completed);
+    done.conclusion = Some("success".to_owned());
+    app.update(Msg::Job(Job {
+        summary: done,
+        steps: Vec::new(),
+    }));
+    assert!(app.live.running.is_empty() && app.series.is_empty());
+    assert!(screen(&app, 120, 40, false).contains("SUCCESS"));
+}

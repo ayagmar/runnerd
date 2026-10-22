@@ -34,6 +34,8 @@ pub(crate) enum Msg {
     Disconnected(String),
     /// The feed is reading events again, resumed after the last one it read.
     Reconnected,
+    /// The daemon's state read again, after a reconnect with no event to resume after.
+    Snapshot(Box<watch::State>),
     Job(Job),
     Samples(SampleSeries),
     /// The answer to the history request of this generation.
@@ -231,13 +233,24 @@ impl App {
                     return vec![Effect::RefreshJob(open.job.summary.id)];
                 }
             }
+            Msg::Snapshot(live) => {
+                self.live = *live;
+                let running = &self.live.running;
+                self.series.retain(|id, _| running.contains_key(id));
+            }
             Msg::Job(job) => {
                 if let Some(open) = &mut self.job
                     && open.job.summary.id == job.summary.id
                 {
                     open.job = job.clone();
                 }
-                self.live.refresh(job);
+                if job.summary.state.is_final() {
+                    // Its `job.finished` was missed, as across an outage.
+                    self.live.running.remove(&job.summary.id);
+                    self.series.remove(&job.summary.id);
+                } else {
+                    self.live.refresh(job);
+                }
             }
             Msg::Samples(series) => {
                 if let Some(open) = &mut self.job

@@ -111,8 +111,9 @@ fn local(error: &std::io::Error) -> Error {
 }
 
 /// Reads events into the loop. When the stream fails for good (the daemon stopped), it says so and tries again
-/// every `retry`, resuming after the last durable event it read. It owns the stream, so a read is never dropped
-/// half-way and the stream's idle timeout is not restarted by redraws.
+/// every `retry`. With an event read before, the new stream resumes after it and replays what was missed. Without
+/// one there is nothing to replay from, so it reads the state again once the new stream is open. It owns the
+/// stream, so a read is never dropped half-way and the stream's idle timeout is not restarted by redraws.
 async fn feed(client: Client, mut events: Events, send: UnboundedSender<Msg>, retry: Duration) {
     let mut last = None;
     loop {
@@ -131,8 +132,23 @@ async fn feed(client: Client, mut events: Events, send: UnboundedSender<Msg>, re
                 }
                 events = loop {
                     tokio::time::sleep(retry).await;
-                    match client.events(EventQuery::default(), last).await {
-                        Ok(events) => break events,
+                    let reopened = match client.events(EventQuery::default(), last).await {
+                        Ok(events) if last.is_some() => Ok((events, None)),
+                        // Opened before the state is read, so nothing that happens meanwhile is missed.
+                        Ok(events) => watch::State::read(&client)
+                            .await
+                            .map(|state| (events, Some(state))),
+                        Err(error) => Err(error),
+                    };
+                    match reopened {
+                        Ok((events, state)) => {
+                            if let Some(state) = state
+                                && send.send(Msg::Snapshot(Box::new(state))).is_err()
+                            {
+                                return;
+                            }
+                            break events;
+                        }
                         Err(error) => {
                             if send.send(Msg::Disconnected(short(&error))).is_err() {
                                 return;
