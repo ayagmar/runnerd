@@ -2,22 +2,259 @@ name: ci
 
 on:
   pull_request:
+    # edited covers a base branch change, which changes the files the changes job compares.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [main]
+  schedule:
+    # Weekly cargo deny, so new advisories show up without a dependency change.
+    - cron: '17 5 * * 1'
 
 permissions:
   contents: read
 
+# A new push to a pull request cancels its older run. Runs on main and scheduled runs each get their own group, so
+# every commit on main is checked.
+concurrency:
+  group: ci-${{ github.event_name == 'pull_request' && github.ref || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
 jobs:
-  gate:
-    name: gate
+  # Decides which jobs run. Pushes to main run everything, the schedule runs cargo deny, drafts run nothing.
+  changes:
+    name: changes
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      pull-requests: read # paths-filter lists the pull request's files through the API
+    outputs:
+      rust: ${{ steps.pick.outputs.rust }}
+      deny: ${{ steps.pick.outputs.deny }}
+      image: ${{ steps.pick.outputs.image }}
+      site: ${{ steps.pick.outputs.site }}
+      lint: ${{ steps.pick.outputs.lint }}
+    steps:
+      - id: filter
+        if: github.event_name == 'pull_request' && !github.event.pull_request.draft
+        uses: dorny/paths-filter@ceb8a2b8f2d89434be7ff52d3de7ec3738c5cc9d # v4.0.3
+        with:
+          # A change to this file runs every job it defines.
+          filters: |
+            rust:
+              - 'crates/**'
+              - 'examples/**'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - 'rustfmt.toml'
+              - '.cargo/**'
+              - 'clippy.toml'
+              - '.clippy.toml'
+              - 'deny.toml'
+              - '.github/workflows/ci.yml'
+            deny:
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'deny.toml'
+              - '.github/workflows/ci.yml'
+            image:
+              - 'image/**'
+              - '.github/workflows/ci.yml'
+            site:
+              - 'site/**'
+              - '.github/workflows/ci.yml'
+            lint:
+              - '.github/**'
+              - '**/*.sh'
+      - id: pick
+        env:
+          EVENT: ${{ github.event_name }}
+          RUST: ${{ steps.filter.outputs.rust }}
+          DENY: ${{ steps.filter.outputs.deny }}
+          IMAGE: ${{ steps.filter.outputs.image }}
+          SITE: ${{ steps.filter.outputs.site }}
+          LINT: ${{ steps.filter.outputs.lint }}
+        run: |
+          case "$EVENT" in
+            push) RUST=true DENY=true IMAGE=true SITE=true LINT=true ;;
+            schedule) RUST=false DENY=true IMAGE=false SITE=false LINT=false ;;
+          esac
+          {
+            echo "rust=$RUST"
+            echo "deny=$DENY"
+            echo "image=$IMAGE"
+            echo "site=$SITE"
+            echo "lint=$LINT"
+          } | tee -a "$GITHUB_OUTPUT"
+
+  rust:
+    name: rust
+    needs: changes
+    if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # rustup installs the toolchain pinned in rust-toolchain.toml on first use.
+      # Installs the toolchain pinned in rust-toolchain.toml. rust-cache keys on every installed toolchain, and the
+      # runner image's stable changes between image versions, so remove it to keep the key stable.
+      - run: |
+          rustup toolchain install
+          rustup toolchain uninstall stable
+      # Pull requests restore main's cache but never write their own, so the cache stays within the repository limit.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
+
+  deny:
+    name: deny
+    needs: changes
+    if: needs.changes.outputs.deny == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
       - uses: EmbarkStudios/cargo-deny-action@3c6349835b2b7b196a839186cb8b78e02f7b5f25 # v2.1.1
+
+  # Builds both runner image stages without pushing them anywhere. Layers are cached per stage in the Actions cache.
+  image:
+    name: image
+    needs: changes
+    if: needs.changes.outputs.image == 'true'
+    runs-on: ubuntu-24.04
+    strategy:
+      matrix:
+        stage: [trellis, glowly]
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: image
+          target: ${{ matrix.stage }}
+          push: false
+          cache-from: type=gha,scope=${{ matrix.stage }}
+          cache-to: type=gha,mode=max,scope=${{ matrix.stage }}
+
+  site:
+    name: site-build
+    needs: changes
+    if: needs.changes.outputs.site == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Reads the pnpm version from packageManager in site/package.json.
+      - uses: pnpm/action-setup@ea17c68df8912ef543352723c149a84f56e3d413 # v6.1.0
+        with:
+          package_json_file: site/package.json
+      - uses: actions/setup-node@949feb2413d6458794dcd2491c4babbbce0c15c1 # v7.1.0
+        with:
+          node-version: 24.22.1
+          cache: pnpm
+          cache-dependency-path: site/pnpm-lock.yaml
+      - run: pnpm -C site install --frozen-lockfile
+      - run: pnpm -C site build
+      - if: github.event_name == 'push'
+        uses: actions/upload-pages-artifact@fc324d3547104276b827a68afc52ff2a11cc49c9 # v5.0.0
+        with:
+          path: site/dist
+
+  deploy:
+    name: deploy
+    needs: site
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: ubuntu-24.04
+    # One deployment at a time; a newer push waits instead of cancelling a live deploy.
+    concurrency:
+      group: pages
+      cancel-in-progress: false
+    permissions:
+      pages: write # publish the site
+      id-token: write # deploy-pages proves the run's identity with an OIDC token
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - id: deployment
+        uses: actions/deploy-pages@368f82528645a54fb793d4d04e342629a3f51346 # v5.0.1
+
+  # Workflows and shell scripts. actionlint also runs shellcheck on every inline run: block.
+  lint:
+    name: lint
+    needs: changes
+    if: needs.changes.outputs.lint == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      SHELLCHECK_VERSION: 0.11.0
+      SHELLCHECK_SHA256: b7af85e41cc99489dcc21d66c6d5f3685138f06d34651e6d34b42ec6d54fe6f6
+      ACTIONLINT_VERSION: 1.7.12
+      ACTIONLINT_SHA256: 8aca8db96f1b94770f1b0d72b6dddcb1ebb8123cb3712530b08cc387b349a3d8
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: shellcheck
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/shellcheck.tar.gz" \
+            "https://github.com/koalaman/shellcheck/releases/download/v${SHELLCHECK_VERSION}/shellcheck-v${SHELLCHECK_VERSION}.linux.x86_64.tar.gz"
+          echo "$SHELLCHECK_SHA256  $RUNNER_TEMP/shellcheck.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/shellcheck.tar.gz" -C "$RUNNER_TEMP" --strip-components=1 "shellcheck-v${SHELLCHECK_VERSION}/shellcheck"
+          # actionlint below picks up this shellcheck instead of the runner image's.
+          echo "$RUNNER_TEMP" >> "$GITHUB_PATH"
+          git ls-files -z '*.sh' | xargs -0 -r "$RUNNER_TEMP/shellcheck"
+      - name: actionlint
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/actionlint.tar.gz" \
+            "https://github.com/rhysd/actionlint/releases/download/v${ACTIONLINT_VERSION}/actionlint_${ACTIONLINT_VERSION}_linux_amd64.tar.gz"
+          echo "$ACTIONLINT_SHA256  $RUNNER_TEMP/actionlint.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/actionlint.tar.gz" -C "$RUNNER_TEMP" actionlint
+          "$RUNNER_TEMP/actionlint" -color
+      - uses: zizmorcore/zizmor-action@85b2b9fb8e3325e7a23d7d0a9d7ba5ae0f999e3e # v0.7.1
+        with:
+          version: 1.31.1
+          advanced-security: false
+          annotations: true
+
+  # The one required check. It passes when every job it needs passed or was skipped by the changes job.
+  gate:
+    name: gate
+    needs: [changes, rust, deny, image, site, lint]
+    if: ${{ !cancelled() }}
+    runs-on: ubuntu-24.04
+    permissions:
+      actions: read # read this run's job timings
+    steps:
+      - name: Job timings
+        continue-on-error: true
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_ID: ${{ github.run_id }}
+        run: |
+          {
+            echo '| job | result | seconds |'
+            echo '|---|---|---|'
+            gh run view "$RUN_ID" -R "$GITHUB_REPOSITORY" --json jobs --jq '.jobs[]
+              | select(.status == "completed")
+              | "| \(.name) | \(.conclusion) | \((.completedAt | fromdateiso8601) - (.startedAt | fromdateiso8601)) |"'
+          } >> "$GITHUB_STEP_SUMMARY"
+      - name: Check needed jobs
+        env:
+          DRAFT: ${{ github.event.pull_request.draft }}
+          CHANGES: ${{ needs.changes.result }}
+          RESULTS: ${{ join(needs.*.result, ' ') }}
+        run: |
+          # A green gate on a draft would still count on the same commit after it is marked ready.
+          [ "$DRAFT" != true ] || { echo "draft: nothing was checked"; exit 1; }
+          echo "changes: $CHANGES; all: $RESULTS"
+          [ "$CHANGES" = success ] || exit 1
+          for result in $RESULTS; do
+            case "$result" in success|skipped) ;; *) exit 1 ;; esac
+          done

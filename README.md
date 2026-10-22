@@ -56,6 +56,8 @@ cargo test --workspace
 cargo deny check
 ```
 
+[CONTRIBUTING.md](CONTRIBUTING.md) explains which CI jobs a change triggers.
+
 The test that starts a real runner container is ignored by default. It needs Docker with sysbox and the image above:
 
 ```sh
