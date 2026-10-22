@@ -140,8 +140,8 @@ h1#_top {
   display: none;
 }
 
-/* Starlight's phone header and menus: 44px tap targets. */
-@media (max-width: 72rem) {
+/* Starlight's header and menus: 44px tap targets on phones and narrow screens, and on any touch screen. */
+@media (max-width: 72rem), (pointer: coarse) {
   :root {
     --sl-menu-button-size: 2.75rem;
   }
@@ -153,7 +153,8 @@ h1#_top {
   .sidebar-content a,
   .sidebar-content summary,
   mobile-starlight-toc summary,
-  mobile-starlight-toc .dropdown a {
+  mobile-starlight-toc .dropdown a,
+  starlight-toc a {
     min-height: 44px;
     align-items: center;
   }
@@ -165,7 +166,8 @@ h1#_top {
   }
 
   .sidebar-content a,
-  mobile-starlight-toc .dropdown a {
+  mobile-starlight-toc .dropdown a,
+  starlight-toc a {
     display: flex;
   }
 
