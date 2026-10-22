@@ -33,6 +33,7 @@ jobs:
       image: ${{ steps.pick.outputs.image }}
       site: ${{ steps.pick.outputs.site }}
       lint: ${{ steps.pick.outputs.lint }}
+      text: ${{ steps.pick.outputs.text }}
     steps:
       - id: filter
         if: github.event_name == 'pull_request' && !github.event.pull_request.draft
@@ -51,6 +52,7 @@ jobs:
               - 'clippy.toml'
               - '.clippy.toml'
               - 'deny.toml'
+              - '.github/scripts/check-boundaries.sh'
               - '.github/workflows/ci.yml'
             deny:
               - '**/Cargo.toml'
@@ -66,6 +68,8 @@ jobs:
             lint:
               - '.github/**'
               - '**/*.sh'
+            text:
+              - '**'
       - id: pick
         env:
           EVENT: ${{ github.event_name }}
@@ -74,10 +78,11 @@ jobs:
           IMAGE: ${{ steps.filter.outputs.image }}
           SITE: ${{ steps.filter.outputs.site }}
           LINT: ${{ steps.filter.outputs.lint }}
+          TEXT: ${{ steps.filter.outputs.text }}
         run: |
           case "$EVENT" in
-            push) RUST=true DENY=true IMAGE=true SITE=true LINT=true ;;
-            schedule) RUST=false DENY=true IMAGE=false SITE=false LINT=false ;;
+            push) RUST=true DENY=true IMAGE=true SITE=true LINT=true TEXT=true ;;
+            schedule) RUST=false DENY=true IMAGE=false SITE=false LINT=false TEXT=false ;;
           esac
           {
             echo "rust=$RUST"
@@ -85,6 +90,7 @@ jobs:
             echo "image=$IMAGE"
             echo "site=$SITE"
             echo "lint=$LINT"
+            echo "text=$TEXT"
           } | tee -a "$GITHUB_OUTPUT"
 
   rust:
@@ -92,6 +98,9 @@ jobs:
     needs: changes
     if: needs.changes.outputs.rust == 'true'
     runs-on: ubuntu-24.04
+    env:
+      MACHETE_VERSION: 0.9.2
+      MACHETE_SHA256: 48200087f54c55aabcd4db4af1e25742b49846c02a1b1bfa134711945b35b2e9
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -107,7 +116,23 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
+      # What clients build: runnerd-core without the host feature.
+      - run: cargo clippy -p runnerd-core --no-default-features --locked -- -D warnings
       - run: cargo test --workspace --locked
+      # Broken intra-doc links and other rustdoc warnings.
+      - run: cargo doc --workspace --no-deps --locked
+        env:
+          RUSTDOCFLAGS: -D warnings
+      # Clients must not build the Docker or GitHub clients.
+      - run: .github/scripts/check-boundaries.sh
+      - name: cargo-machete
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/machete.tar.gz" \
+            "https://github.com/bnjbvr/cargo-machete/releases/download/v${MACHETE_VERSION}/cargo-machete-v${MACHETE_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "$MACHETE_SHA256  $RUNNER_TEMP/machete.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/machete.tar.gz" -C "$RUNNER_TEMP" --strip-components=1 \
+            "cargo-machete-v${MACHETE_VERSION}-x86_64-unknown-linux-musl/cargo-machete"
+          "$RUNNER_TEMP/cargo-machete"
 
   deny:
     name: deny
@@ -223,10 +248,41 @@ jobs:
           advanced-security: false
           annotations: true
 
+  # Spelling in code and docs, and TOML formatting (taplo.toml).
+  text:
+    name: text
+    needs: changes
+    if: needs.changes.outputs.text == 'true'
+    runs-on: ubuntu-24.04
+    env:
+      TYPOS_VERSION: 1.51.1
+      TYPOS_SHA256: 93c301fd4120ff076e2cc2a6d6a61cab4a4bdb81899287c0938b452e56d1f454
+      TAPLO_VERSION: 0.10.0
+      TAPLO_SHA256: 8fe196b894ccf9072f98d4e1013a180306e17d244830b03986ee5e8eabeb6156
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: typos
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/typos.tar.gz" \
+            "https://github.com/crate-ci/typos/releases/download/v${TYPOS_VERSION}/typos-v${TYPOS_VERSION}-x86_64-unknown-linux-musl.tar.gz"
+          echo "$TYPOS_SHA256  $RUNNER_TEMP/typos.tar.gz" | sha256sum -c -
+          tar -xzf "$RUNNER_TEMP/typos.tar.gz" -C "$RUNNER_TEMP" ./typos
+          "$RUNNER_TEMP/typos"
+      - name: taplo
+        run: |
+          curl -sSfL -o "$RUNNER_TEMP/taplo.gz" \
+            "https://github.com/tamasfe/taplo/releases/download/${TAPLO_VERSION}/taplo-linux-x86_64.gz"
+          echo "$TAPLO_SHA256  $RUNNER_TEMP/taplo.gz" | sha256sum -c -
+          gunzip "$RUNNER_TEMP/taplo.gz"
+          chmod +x "$RUNNER_TEMP/taplo"
+          "$RUNNER_TEMP/taplo" fmt --check
+
   # The one required check. It passes when every job it needs passed or was skipped by the changes job.
   gate:
     name: gate
-    needs: [changes, rust, deny, image, site, lint]
+    needs: [changes, rust, deny, image, site, lint, text]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:

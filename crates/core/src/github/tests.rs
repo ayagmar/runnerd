@@ -230,7 +230,7 @@ async fn deleting_a_runner_tells_gone_and_busy_apart() {
 }
 
 #[tokio::test]
-async fn a_jit_config_registers_the_runner_with_the_repositorys_labels() {
+async fn a_jit_config_registers_the_runner_with_the_repository_labels() {
     let (url, seen) = fake_github(|request| {
         assert_eq!(request.method, Method::POST);
         (
