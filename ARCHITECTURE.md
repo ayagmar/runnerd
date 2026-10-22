@@ -29,7 +29,8 @@ client → transport → principal → handler → core
 3. Handlers take that principal, read `Handle::status` or the job store (`Handle::store`), or call `Control`
    (pause, resume, reseed, cache clean, reload, shutdown). `GET /v1/events` streams the store's events as server-sent
    events. The config routes ([`crates/daemon/src/api/control.rs`](crates/daemon/src/api/control.rs)) validate a
-   new config and write the file; the engine only receives the parsed config.
+   new config and hand the engine the parsed config with a `Commit` that writes the file; the engine runs the
+   commit between ticks and runs with the config before its next tick, only if the file was written.
 4. The engine ([`crates/core/src/scheduler/engine.rs`](crates/core/src/scheduler/engine.rs)) owns all slot state.
    It publishes `api::Status` after every tick and takes commands only through `Control`: a command that needs slot
    state is a `Command` on a channel the engine answers between ticks, so it sees the same state a tick does.
@@ -88,5 +89,7 @@ nothing until Docker has listed them.
 - A reload never stops a running job: slots a new config removes go once their runners finish, and a profile starts
   no runner while it runs as many as its configured `slots` (`scheduler::Slot::Closed`).
 - A forced pause cancels runs only of jobs this daemon's runners hold, and only of the paused repository.
-- The config file is replaced only by a config that validates against the slice's `MemoryMax` and that the engine
-  took, by a temporary file renamed over it.
+- The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
+  renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
+- After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the
+  config, which a reload may have lowered since they started.

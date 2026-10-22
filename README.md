@@ -111,7 +111,7 @@ bytes, CPU millicores.
 | `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache; `409` naming the jobs that use it |
 | `GET /v1/config` | the config file's path and text |
 | `POST /v1/config/check` with TOML | what `runnerd check-config` says about it |
-| `PUT /v1/config` with TOML | checks it, runs with it and writes it in place of the file; the file stays unchanged if it is invalid (`422`) or runnerd is stopping (`503`) |
+| `PUT /v1/config` with TOML | checks it, writes it in place of the file and runs with it; if it is invalid (`422`), cannot be written (`500`) or runnerd is stopping (`503`), the file and what runs stay as they were |
 | `GET /v1/doctor` | what `runnerd doctor` checks, for the config runnerd runs with |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
 | `GET /v1/jobs?repository=&state=&conclusion=&since=&until=&before=&limit=` | a page of jobs, newest first; `next` is the `before` of the next page |

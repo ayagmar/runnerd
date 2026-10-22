@@ -220,6 +220,7 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
         path,
         text,
         memory_max: slice_memory_max,
+        sync_dir: api::sync_dir,
     };
     let server = tokio::spawn(api::serve(listener, handle, config, async {
         let _ = stop.await;

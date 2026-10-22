@@ -15,7 +15,7 @@ use runnerd_core::config::Config;
 use runnerd_core::scheduler::engine::{Commit, ControlError};
 use tracing::info;
 
-use super::{AppState, Authenticated, MemoryMax, error};
+use super::{AppState, Authenticated, MemoryMax, SyncDir, error};
 
 fn refused(control_error: &ControlError) -> Response {
     let status = match control_error {
@@ -134,11 +134,15 @@ pub(super) async fn replace_config(
     }
     // The engine writes the file between its ticks and runs with the config before the next: nothing runs under a
     // config whose file was not written, and nothing changes if it was not.
-    let (path, written) = (file.path.clone(), text.clone());
-    let commit = Commit::new(move || {
-        write_atomically(&path, &written)
-            .map(|()| None)
-            .map_err(|io_error| format!("cannot write {}: {io_error}", path.display()))
+    let (path, written, sync) = (file.path.clone(), text.clone(), state.sync_dir);
+    let commit = Commit::new(move || match write_atomically(&path, &written, sync) {
+        Ok(None) => Ok(None),
+        // In place: the engine runs with it, as it would after a restart.
+        Ok(Some(io_error)) => Ok(Some(format!(
+            "{} is replaced, but flushing its directory to disk failed, so a crash may bring back the old file: {io_error}",
+            path.display()
+        ))),
+        Err(io_error) => Err(format!("cannot write {}: {io_error}", path.display())),
     });
     match state
         .handle
@@ -156,9 +160,16 @@ pub(super) async fn replace_config(
     }
 }
 
+/// Flushes a directory's entries, such as a rename in it, to disk.
+pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
+    std::fs::File::open(dir)?.sync_all()
+}
+
 /// Replaces the file `path` points to, through a symlink if it is one, with `text`: a temporary file in the same
-/// directory with the same permissions, renamed over it, so a reader sees the old file or the new one.
-fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
+/// directory with the same permissions, renamed over it, so a reader sees the old file or the new one. `Err` leaves
+/// the old file; once renamed, the new file is in place, and `Ok` carries the error if flushing the rename to disk
+/// with `sync_dir` failed, which a crash could undo.
+fn write_atomically(path: &Path, text: &str, sync_dir: SyncDir) -> io::Result<Option<io::Error>> {
     let target = std::fs::canonicalize(path)?;
     let mode = std::fs::metadata(&target)?.permissions().mode();
     let dir = target.parent().unwrap_or(Path::new("/"));
@@ -177,13 +188,13 @@ fn write_atomically(path: &Path, text: &str) -> io::Result<()> {
         file.set_permissions(std::fs::Permissions::from_mode(mode))?;
         file.write_all(text.as_bytes())?;
         file.sync_all()?;
-        std::fs::rename(&temporary, &target)?;
-        std::fs::File::open(dir)?.sync_all()
+        std::fs::rename(&temporary, &target)
     })();
-    if written.is_err() {
+    if let Err(io_error) = written {
         let _ = std::fs::remove_file(&temporary);
+        return Err(io_error);
     }
-    written
+    Ok(sync_dir(dir).err())
 }
 
 pub(super) async fn doctor(_: Authenticated, State(state): State<AppState>) -> Response {

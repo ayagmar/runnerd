@@ -16,7 +16,7 @@ use runnerd_core::scheduler::engine::{Command, Commands, Control, ControlError, 
 use runnerd_core::store::{LogPosition, RunnerRecord, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 
-use super::{ConfigSource, bind, serve, serve_for};
+use super::{ConfigSource, SyncDir, bind, serve, serve_for, sync_dir};
 
 const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
 
@@ -156,11 +156,17 @@ impl Daemon {
 }
 
 async fn start(dir: &Path, owner: Option<u32>) -> Daemon {
-    start_with(dir, owner, true).await
+    start_with(dir, owner, true, sync_dir).await
 }
 
-/// `start`; without `engine`, nothing answers the engine's commands, as once it stopped.
-async fn start_with(dir: &Path, owner: Option<u32>, engine: bool) -> Daemon {
+/// Fails as flushing a directory does on an I/O error.
+fn failing_sync(_dir: &Path) -> std::io::Result<()> {
+    Err(std::io::Error::other("input/output error"))
+}
+
+/// `start`; without `engine`, nothing answers the engine's commands, as once it stopped. Directories are flushed
+/// with `sync_dir`.
+async fn start_with(dir: &Path, owner: Option<u32>, engine: bool, sync_dir: SyncDir) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
     let (control, commands) = Control::new(["o/app".to_owned(), "o/busy".to_owned()]);
@@ -189,6 +195,7 @@ async fn start_with(dir: &Path, owner: Option<u32>, engine: bool) -> Daemon {
         path: config.clone(),
         text: EXAMPLE.to_owned(),
         memory_max,
+        sync_dir,
     };
     let listener = bind(&socket).await.unwrap();
     let mode = std::fs::metadata(&socket).unwrap();
@@ -398,7 +405,7 @@ async fn a_config_over_the_budget_is_refused_with_both_numbers_and_the_file_is_u
 #[tokio::test]
 async fn a_config_the_engine_cannot_take_leaves_the_file_unchanged() {
     let dir = tempdir::Dir::new();
-    let daemon = start_with(&dir.0, None, false).await;
+    let daemon = start_with(&dir.0, None, false, sync_dir).await;
     let before = std::fs::read_to_string(&daemon.config).unwrap();
     let response = daemon
         .client
@@ -459,6 +466,50 @@ async fn a_config_whose_file_cannot_be_written_is_refused_and_not_run() {
     )
     .unwrap();
     assert_eq!(shown.text, EXAMPLE);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_config_in_place_whose_directory_cannot_be_flushed_is_run_and_shown_with_a_warning() {
+    let dir = tempdir::Dir::new();
+    let mut daemon = start_with(&dir.0, None, true, failing_sync).await;
+    let new = EXAMPLE.replacen("slots = 2", "slots = 1", 1);
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(new.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let checked: ConfigCheck = serde_json::from_slice(&body(response).await).unwrap();
+    assert!(
+        checked
+            .warnings
+            .iter()
+            .any(|warning| warning.contains("input/output error")),
+        "{:?}",
+        checked.warnings
+    );
+    // The file, the engine and what the API shows agree.
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), new);
+    assert_eq!(
+        daemon.reloads.recv().await.unwrap().profiles["jvm"].slots,
+        1
+    );
+    let shown: ConfigFile = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .get("http://runnerd/v1/config")
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(shown.text, new);
     daemon.stop().await;
 }
 
