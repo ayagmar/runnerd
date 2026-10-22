@@ -24,10 +24,34 @@ pub fn image(stage: &str) -> String {
     format!("runnerd-runner:{stage}")
 }
 
-/// This machine's name as runner names carry it: lower case, letters, digits and dashes, at most 20 characters.
-pub fn host_name() -> String {
-    let raw = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
-    let name: String = raw
+/// This machine as runner names carry it: its host name and the start of its systemd machine ID, so two machines
+/// with the same or overlapping host names never take each other's runners for their own.
+pub fn host_name() -> std::io::Result<String> {
+    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+    let machine_id = std::fs::read_to_string("/etc/machine-id")
+        .or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id"))
+        .map_err(|error| {
+            std::io::Error::new(
+                error.kind(),
+                format!("cannot read /etc/machine-id: {error}"),
+            )
+        })?;
+    host_id(&hostname, &machine_id).ok_or_else(|| {
+        std::io::Error::new(
+            std::io::ErrorKind::InvalidData,
+            "/etc/machine-id does not hold a machine ID",
+        )
+    })
+}
+
+/// `<host>-<id>`: the host name in lower case, letters, digits and dashes, at most 20 characters, then the first 8
+/// hex digits of the machine ID. The ID's fixed length keeps one machine's prefix from starting another's names.
+fn host_id(hostname: &str, machine_id: &str) -> Option<String> {
+    let id: String = machine_id.trim().chars().take(8).collect();
+    if id.len() < 8 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+        return None;
+    }
+    let name: String = hostname
         .trim()
         .chars()
         .map(|c| {
@@ -40,11 +64,8 @@ pub fn host_name() -> String {
         .take(20)
         .collect();
     let name = name.trim_matches('-');
-    if name.is_empty() {
-        "host".to_owned()
-    } else {
-        name.to_owned()
-    }
+    let name = if name.is_empty() { "host" } else { name };
+    Some(format!("{name}-{}", id.to_ascii_lowercase()))
 }
 
 /// How the daemon is asked to stop.
@@ -951,3 +972,6 @@ impl Engine {
         self.status.send_replace(status);
     }
 }
+
+#[cfg(test)]
+mod tests;

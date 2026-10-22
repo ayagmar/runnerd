@@ -154,6 +154,7 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
         Github::new(github::API_URL, Box::new(github::gh_token)).map_err(|error| fail(&error))?;
     let docker = Docker::connect().map_err(|error| fail(&error))?;
     docker.info().await.map_err(|error| fail(&error))?;
+    let host = host_name().map_err(|error| fail(&error))?;
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
     let (engine, handle) = Engine::new(
@@ -161,7 +162,7 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
         github,
         docker,
         Names::new("runnerd"),
-        &host_name(),
+        &host,
         memory_max.map(|max| max.0),
     );
     let control = handle.control.clone();
