@@ -64,9 +64,43 @@ A slot is one concurrent job of a profile. Containers are new for every job, but
 
 A restarted runnerd adopts the runner containers still running and deletes this host's runners that have no container. SIGTERM or SIGINT, or `runnerd stop`, stops polling and waits for running jobs; a second signal, or `runnerd stop --force`, kills them.
 
+### History
+
+runnerd records every job its runners may run in a SQLite database, `$XDG_STATE_HOME/runnerd/runnerd.db` by default
+(`[history]` in the config changes the path and what is kept how long). For each job it keeps:
+
+- its timeline: queued, its runner's container started, the job started, finished, and the container and runner
+  registration removed;
+- its steps with their start and end, as GitHub shows them;
+- CPU, memory and network of its container, sampled every 2 s from the container's cgroup files (memory without page
+  cache, as `docker stats` counts it) and `/proc/<pid>/net/dev`; the samples for 7 days, the job's totals and peaks
+  for good;
+- the bytes the Docker Hub mirror served it, from the mirror's access log;
+- its log, up to 50M, as GitHub shows it, with the secrets the runner masked still masked.
+
+It also keeps the sizes of the cache volumes, measured at start and whenever no runner runs after jobs ended, and the
+slice's CPU and memory use.
+
+Where the data comes from:
+
+- **The job a runner took** comes from inside its container: runnerd runs a small script there (`docker exec`, as
+  root) that reads the job's ID from the runner's `_diag/Worker_*.log` within a second of the job starting. That is
+  sooner than GitHub's API, whose list of queued jobs still shows a job for several seconds after a runner took it;
+  runnerd does not start a second runner for a job one of its runners holds.
+- **Step timing comes from GitHub's jobs API** (`GET /repos/{owner}/{repo}/actions/jobs/{id}`), read every poll while a
+  job runs, not from the runner's `_diag` logs. At runner 2.338.1 the Worker log has every step's start and end, but
+  under the runner's internal names (`Set up runner`, `Pre Job Hook`), not the ones GitHub shows (`Set up job`,
+  `Complete job`), and in a free-form trace that changes between runner versions. The API's steps have second
+  precision, which is all GitHub keeps.
+- **The log** comes from the runner's `_diag/pages`, which the same script follows. The runner writes the job's log
+  there in 4 KiB blocks and deletes each page once uploaded, so lines arrive in blocks of 4 KiB, and a quiet step's
+  lines arrive when it ends.
+
 ### API
 
-runnerd serves JSON on `$XDG_RUNTIME_DIR/runnerd.sock` (mode 0600; only the user it runs as may connect). The types are in `crates/core/src/api.rs`.
+runnerd serves JSON on `$XDG_RUNTIME_DIR/runnerd.sock` (mode 0600; only the user it runs as may connect). The types are
+in [`crates/core/src/api.rs`](crates/core/src/api.rs) and its modules. Times are seconds since the Unix epoch, sizes
+bytes, CPU millicores.
 
 | Request | Response |
 |---|---|
@@ -74,9 +108,21 @@ runnerd serves JSON on `$XDG_RUNTIME_DIR/runnerd.sock` (mode 0600; only the user
 | `POST /v1/repositories/{owner}/{name}/pause` | `204`; the repository gets no new runners, running jobs finish |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
+| `GET /v1/jobs?repository=&state=&conclusion=&since=&until=&before=&limit=` | a page of jobs, newest first; `next` is the `before` of the next page |
+| `GET /v1/jobs/{id}` | a job with its timeline, steps, metrics and log size |
+| `GET /v1/jobs/{id}/samples` | its CPU, memory and network over time |
+| `GET /v1/jobs/{id}/logs?from=&follow=` | its log as text; with `follow=true`, open until the job's record is final |
+| `GET /v1/host/samples?since=` | the slice's CPU and memory over time |
+| `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`): counts, queue and run time, CPU, memory, mirror bytes |
+| `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
+| `GET /v1/events?job=&logs=` | server-sent events: `job.queued`, `job.started`, `job.step`, `job.finished`, `slot.changed`, `budget.changed`, `cache.reseeded`, and live `job.sample`, `host.sample` and (with `logs=true`) `log.line` |
+
+Every event but the live ones has an ID; send the last one seen as `Last-Event-ID` and the stream resumes after it,
+across daemon restarts. Live events are not stored: a client that missed some reads the job's samples or log.
 
 ```sh
 curl --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/status
+curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 ```
 
 ## Config
