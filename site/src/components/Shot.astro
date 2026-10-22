@@ -1,0 +1,75 @@
+---
+// A dashboard screenshot in the page's theme: one <picture> per theme, AVIF then WebP, and a phone crop below
+// 600px when there is one. The picture of the other theme is display: none, so its lazy image never loads.
+import type { ImageMetadata } from 'astro';
+import { getImage } from 'astro:assets';
+
+interface Props {
+  name: string;
+  alt: string;
+  sizes: string;
+  eager?: boolean;
+}
+
+const { name, alt, sizes, eager = false } = Astro.props;
+const files = import.meta.glob<{ default: ImageMetadata }>('../assets/dashboard/*.webp', { eager: true });
+const find = (file: string) => files[`../assets/dashboard/${file}.webp`]?.default;
+
+const formats = ['avif', 'webp'] as const;
+const srcset = async (src: ImageMetadata, widths: number[], format: string) => {
+  const images = await Promise.all(
+    widths.filter((w) => w <= src.width).map((width) => getImage({ src, width, format, quality: 70 })),
+  );
+  return images.map((image) => `${image.src} ${image.attributes.width}w`).join(', ');
+};
+
+const themes = await Promise.all(
+  (['light', 'dark'] as const).map(async (theme) => {
+    const desktop = find(`${name}-${theme}`);
+    if (!desktop) throw new Error(`no dashboard shot ${name}-${theme}`);
+    const phone = find(`${name}-phone-${theme}`);
+    const fallback = await getImage({ src: desktop, width: 1280, format: 'webp', quality: 70 });
+    return {
+      theme,
+      desktop,
+      fallback,
+      phone: phone && {
+        image: phone,
+        sources: await Promise.all(formats.map(async (f) => ({ type: `image/${f}`, srcset: await srcset(phone, [390, 780], f) }))),
+      },
+      sources: await Promise.all(
+        formats.map(async (f) => ({ type: `image/${f}`, srcset: await srcset(desktop, [640, 960, 1280, 1920], f) })),
+      ),
+    };
+  }),
+);
+---
+
+{
+  themes.map(({ theme, desktop, fallback, phone, sources }) => (
+    <picture class="shot" data-shot-theme={theme}>
+      {phone &&
+        phone.sources.map((s) => (
+          <source
+            media="(max-width: 600px)"
+            type={s.type}
+            srcset={s.srcset}
+            sizes="100vw"
+            width={phone.image.width}
+            height={phone.image.height}
+          />
+        ))}
+      {sources.map((s) => (
+        <source type={s.type} srcset={s.srcset} sizes={sizes} />
+      ))}
+      <img
+        src={fallback.src}
+        alt={alt}
+        width={desktop.width}
+        height={desktop.height}
+        loading={eager ? 'eager' : 'lazy'}
+        decoding="async"
+      />
+    </picture>
+  ))
+}

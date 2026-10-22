@@ -122,6 +122,24 @@ h1#_top {
   outline-offset: 2px;
 }
 
+/* Dashboard screenshots: framed like a slot in the slice, only the one matching the theme is shown (and loaded). */
+.shot {
+  display: block;
+  padding: 8px;
+  background: var(--surface);
+}
+
+.shot img {
+  display: block;
+  width: 100%;
+  height: auto;
+}
+
+[data-theme='light'] .shot[data-shot-theme='dark'],
+[data-theme='dark'] .shot[data-shot-theme='light'] {
+  display: none;
+}
+
 /* Starlight's phone header and menus: 44px tap targets. */
 @media (max-width: 72rem) {
   :root {
