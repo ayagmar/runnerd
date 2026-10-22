@@ -779,21 +779,43 @@ fn badge(job: &JobSummary, theme: Theme) -> Span<'static> {
     )
 }
 
+/// How long ago a job finished, or nothing while it has not.
+fn finished_ago(job: &JobSummary, now: u64) -> String {
+    job.timeline
+        .finished_at
+        .map_or_else(String::new, |at| human::ago(at, now))
+}
+
 fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let focused = app.pane == Pane::Latest;
     let width = usize::from(area.width);
-    let lines: Vec<Line<'_>> = app
+    let rows: Vec<_> = app
         .live
         .recent
         .iter()
-        .enumerate()
-        .map(|(position, job)| {
+        .map(|job| {
             let ran = human::ran(job, now).map_or_else(String::new, duration);
-            let ago = job
-                .timeline
-                .finished_at
-                .map_or_else(String::new, |at| human::ago(at, now));
-            let name_width = width.saturating_sub(10 + 9 + 10).max(8);
+            (job, ran, finished_ago(job, now))
+        })
+        .collect();
+    // The times are as wide as the widest of them; the job's name takes what is left.
+    let ran_width = rows
+        .iter()
+        .map(|(_, ran, _)| ran.chars().count())
+        .max()
+        .unwrap_or(0);
+    let ago_width = rows
+        .iter()
+        .map(|(_, _, ago)| ago.chars().count())
+        .max()
+        .unwrap_or(0);
+    let name_width = width
+        .saturating_sub(10 + ran_width + 1 + ago_width + 1)
+        .max(8);
+    let lines: Vec<Line<'_>> = rows
+        .into_iter()
+        .enumerate()
+        .map(|(position, (job, ran, ago))| {
             let line = Line::from(vec![
                 badge(job, theme),
                 Span::raw(" "),
@@ -801,8 +823,8 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
                     &format!("{} {}", human::title(job), job.repository),
                     name_width,
                 )),
-                Span::raw(format!("{ran:>8} ")),
-                Span::styled(format!("{ago:>9}"), theme.dim()),
+                Span::raw(format!(" {ran:>ran_width$} ")),
+                Span::styled(format!("{ago:>ago_width$}"), theme.dim()),
             ]);
             if focused && position == app.latest {
                 line.style(selected())
@@ -862,9 +884,7 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
             ));
         }
         cells.push(Cell::from(Span::styled(
-            job.timeline
-                .finished_at
-                .map_or_else(String::new, |at| human::ago(at, now)),
+            finished_ago(job, now),
             theme.dim(),
         )));
         Row::new(cells)
@@ -890,7 +910,16 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         widths.push(Constraint::Length(5));
     }
     header.push("FINISHED");
-    widths.push(Constraint::Length(10));
+    let finished = jobs
+        .jobs
+        .iter()
+        .map(|job| finished_ago(job, now).chars().count())
+        .chain(["FINISHED".len()])
+        .max()
+        .unwrap_or(0);
+    widths.push(Constraint::Length(
+        u16::try_from(finished).unwrap_or(u16::MAX),
+    ));
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(theme.dim()))
         .row_highlight_style(selected());

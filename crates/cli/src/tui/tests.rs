@@ -765,6 +765,45 @@ fn a_job_read_again_as_finished_leaves_the_slots() {
     assert!(screen(&app, 120, 40, false).contains("SUCCESS"));
 }
 
+/// halyard/ledger's job `id`, which succeeded `ago` seconds before now.
+fn finished(id: u64, ago: u64) -> JobSummary {
+    let mut job = summary(id, JobState::Completed);
+    job.conclusion = Some("success".to_owned());
+    job.timeline.finished_at = Some(NOW - ago);
+    job.timeline.started_at = Some(0);
+    job
+}
+
+#[test]
+fn how_long_ago_a_job_finished_reads_in_full_at_every_width() {
+    let mut app = app();
+    app.live.recent = vec![finished(7, 17 * 60 + 31), finished(8, 5)];
+    for width in [80, 96, 104, 120, 136] {
+        let overview = screen(&app, width, 40, false);
+        assert!(
+            overview.contains("17m 31s ago"),
+            "the age reads in full at {width}: {overview}"
+        );
+        assert!(
+            overview.contains("5s ago"),
+            "the age reads in full at {width}: {overview}"
+        );
+    }
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(
+        generation,
+        vec![finished(7, 17 * 60 + 31)],
+        None,
+    ));
+    for width in [80, 96, 120, 136] {
+        let history = screen(&app, width, 24, false);
+        assert!(
+            history.contains("17m 31s ago"),
+            "the age reads in full at {width}: {history}"
+        );
+    }
+}
+
 /// A daemon whose first event stream sends only a live sample and ends; the stream the client opens again at
 /// once succeeds, live only. The budget changed in between, and no event says so.
 async fn cursorless_gap(
