@@ -138,7 +138,7 @@ function themeToggle() {
 function entrances() {
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
   const groups = document.querySelectorAll<HTMLElement>(
-    '.calc-text, .calc-result, .board, .doctor-text, .roadmap, .install-tile, .footer',
+    '.calc-text, .calc-result, .slots-head, .slot-steps, .isolation, .doctor-text, .roadmap, .install-tile, .footer',
   );
   const observer = new IntersectionObserver(
     (entries) => {

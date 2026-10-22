@@ -72,6 +72,34 @@ const checks = [
   },
 ];
 
+// One slot over two jobs: the container is new each time, the slot's cache layer is kept.
+const steps = [
+  {
+    container: 'new',
+    label: 'new container',
+    title: 'Runner starts',
+    text: "runnerd registers a just-in-time runner and starts a new container in a free slot, over the slot's cache layer.",
+  },
+  {
+    container: 'job',
+    label: 'job',
+    title: 'Job runs',
+    text: "The runner takes one queued job. Its Docker builds and Testcontainers run in the container's own Docker Engine.",
+  },
+  {
+    container: 'gone',
+    label: 'removed',
+    title: 'Container removed',
+    text: 'The runner unregisters, the container exits and runnerd removes it. The layer keeps its Docker images, ~/.cache and the tool cache.',
+  },
+  {
+    container: 'new',
+    label: 'new container',
+    title: 'Next job',
+    text: 'The next job gets a new container over the same layer: warm caches, nothing else left from the last job.',
+  },
+];
+
 const today = [
   ['The scheduler', 'runnerd serve polls GitHub for queued jobs and starts a just-in-time runner for each one, from one pool shared by every configured repository, while the slice has room.'],
   ['Warm caches', 'a read-only snapshot per profile with a writable layer per slot, a shared pnpm store and Maven repository, and a Docker Hub mirror.'],
@@ -236,49 +264,41 @@ const next = [
         </div>
       </section>
 
-      <section class="jobs" aria-labelledby="jobs-title">
-        <div class="wrap board">
-          <div class="tile tile-head">
-            <h2 id="jobs-title">A fresh container for every job</h2>
-          </div>
-          <div class="tile tile-jit">
-            <code class="macro" aria-hidden="true">--jitconfig</code>
-            <h3>One runner, one job</h3>
-            <p>
-              Each runner starts from a just-in-time config, takes one job and unregisters, and runnerd removes its
-              container. The next job gets a new one; only the slot's caches carry over.
-            </p>
-          </div>
-          <div class="tile tile-sysbox">
-            <code class="macro" aria-hidden="true">sysbox-runc</code>
+      <section class="slots wrap" aria-labelledby="slots-title">
+        <div class="slots-head">
+          <h2 id="slots-title">A fresh container for every job</h2>
+          <p>
+            A slot is one concurrent job of a profile. Its container lives for one job; its cache layer stays, so the
+            next job starts new but warm. Here is one trellis slot over two jobs.
+          </p>
+        </div>
+        <ol class="slot-steps">
+          {
+            steps.map((step) => (
+              <li>
+                <div class={`slot ${step.container}`} aria-hidden="true">
+                  <div class="slot-container">{step.label}</div>
+                  <div class="slot-layer">slot layer</div>
+                </div>
+                <h3>{step.title}</h3>
+                <p>{step.text}</p>
+              </li>
+            ))
+          }
+        </ol>
+        <div class="isolation">
+          <div>
             <h3>Docker inside, no --privileged</h3>
             <p>
               Sysbox gives every runner container its own Docker Engine, so <code>docker build</code> and
               Testcontainers work while the container stays unprivileged.
             </p>
           </div>
-          <div class="tile tile-unsafe">
-            <code class="macro" aria-hidden="true">allow_unsafe</code>
+          <div>
             <h3>Privileged only when you say so</h3>
             <p>
               <code>isolation = "unsafe-dind"</code> runs privileged containers, which a job can use to take over the
               host. runnerd refuses it unless <code>[host]</code> also sets <code>allow_unsafe = true</code>.
-            </p>
-          </div>
-          <div class="tile tile-profile">
-            <code class="macro" aria-hidden="true">image_stage</code>
-            <h3>A profile per kind of build</h3>
-            <p>
-              The runner image has one Dockerfile stage per profile on a shared base. A Gradle and Android repository
-              and a pnpm and Playwright repository each get the tools they need, and their own caps.
-            </p>
-          </div>
-          <div class="tile tile-host">
-            <code class="macro" aria-hidden="true">cgroup v2</code>
-            <h3>On machines you already have</h3>
-            <p>
-              A laptop, a VM or a home server running Linux. runnerd never provisions machines, and it serves
-              repositories on GitHub.
             </p>
           </div>
         </div>
@@ -854,103 +874,100 @@ const next = [
     color: var(--block-ink);
   }
 
-  /* A fresh container for every job: a board of filled tiles, each with one real token cropped by its edges. */
-  .jobs {
+  /* One slot over time: the same block as the budget bar, split into the container and the layer it keeps. */
+  .slots {
     padding-top: var(--section);
+    display: grid;
+    gap: clamp(2rem, 4vw, 3.5rem);
   }
 
-  .board {
+  .slots-head {
     display: grid;
-    grid-template-columns: repeat(12, minmax(0, 1fr));
-    grid-auto-rows: minmax(104px, auto);
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    gap: clamp(1.5rem, 4vw, 4rem);
+    align-items: end;
+  }
+
+  .slots-head h2 {
+    max-width: 12ch;
+  }
+
+  .slot-steps {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(4, minmax(0, 1fr));
     gap: var(--gap);
   }
 
-  .tile {
-    position: relative;
-    overflow: hidden;
+  .slot-steps li {
+    display: grid;
+    grid-template-rows: auto auto 1fr;
+    gap: 0.6rem;
+    align-content: start;
+  }
+
+  .slot-steps p {
+    font-size: 1rem;
+    padding-right: 1rem;
+  }
+
+  .slot {
     display: flex;
     flex-direction: column;
-    justify-content: flex-end;
-    gap: 0.5rem;
-    padding: clamp(1.25rem, 2vw, 2rem);
+    gap: var(--gap);
+    height: clamp(14rem, 34vh, 22rem);
+    padding: var(--gap);
+    margin-bottom: 0.6rem;
     background: var(--surface);
-    color: var(--ink);
-  }
-
-  .tile p {
-    font-size: 1rem;
-    max-width: 46ch;
-    position: relative;
-  }
-
-  .tile h3 {
-    position: relative;
-  }
-
-  .tile .macro {
-    position: absolute;
-    top: clamp(1.25rem, 2vw, 2rem);
-    left: clamp(1.25rem, 2vw, 2rem);
-    font-size: clamp(2.25rem, 1rem + 4.5vw, 6rem);
+    font-family: var(--font-display);
     font-weight: 700;
-    letter-spacing: -0.04em;
+  }
+
+  .slot-container,
+  .slot-layer {
+    display: flex;
+    align-items: flex-end;
+    padding: clamp(0.6rem, 1.2vw, 1rem);
+    color: var(--block-ink);
+  }
+
+  .slot-container {
+    flex: 3;
+    background: var(--mint);
+    font-size: clamp(1.25rem, 0.8rem + 1.2vw, 2rem);
+    letter-spacing: -0.03em;
     line-height: 1;
-    white-space: nowrap;
-    color: inherit;
   }
 
-  /* Three rows of two tiles, each row split differently, all three tracks tall, so the board has no holes. */
-  .tile-head,
-  .tile-jit,
-  .tile-sysbox,
-  .tile-unsafe,
-  .tile-profile,
-  .tile-host {
-    grid-row: span 3;
-  }
-
-  .tile-head {
-    grid-column: span 5;
-    justify-content: flex-start;
+  .slot.job .slot-container {
     background: var(--ink);
     color: var(--bg);
   }
 
-  .tile-head h2 {
-    max-width: 10ch;
+  .slot.gone .slot-container {
+    background: none;
+    color: var(--muted);
   }
 
-  .tile-jit {
-    grid-column: span 7;
-    background: var(--mint);
-    color: var(--block-ink);
+  .slot-layer {
+    flex: 1;
+    background: #8fcf9f;
+    font-size: 1rem;
   }
 
-  .tile-sysbox {
-    grid-column: span 7;
-    background: var(--pink);
-    color: var(--block-ink);
+  .isolation {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: clamp(1.5rem, 4vw, 4rem);
+    padding-top: clamp(1rem, 2vw, 2rem);
   }
 
-  .tile-jit p code,
-  .tile-sysbox p code {
-    background: rgb(0 0 0 / 0.07);
-  }
-
-  .tile-unsafe {
-    grid-column: span 5;
-  }
-
-  .tile-profile,
-  .tile-host {
-    grid-column: span 6;
-  }
-
-  .tile-unsafe .macro,
-  .tile-profile .macro,
-  .tile-host .macro {
-    font-size: clamp(2rem, 1rem + 2.6vw, 3.75rem);
+  .isolation > div {
+    display: grid;
+    gap: 0.6rem;
+    align-content: start;
   }
 
   /* doctor: a list of checks and one frame that shows the selected check's two answers. */
@@ -1344,29 +1361,18 @@ const next = [
       margin-top: 0;
     }
 
-    .tile p {
-      max-width: none;
+    .slots-head,
+    .isolation {
+      grid-template-columns: minmax(0, 1fr);
     }
 
-    .board {
+    .slot-steps {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 6px;
+      row-gap: 2rem;
     }
 
-    .tile,
-    .tile-head,
-    .tile-jit,
-    .tile-sysbox,
-    .tile-unsafe,
-    .tile-profile,
-    .tile-host {
-      grid-column: span 2;
-      grid-row: auto;
-      min-height: 15rem;
-    }
-
-    .tile-head {
-      min-height: 10rem;
+    .slot {
+      height: 12rem;
     }
 
     .check-tabs {
