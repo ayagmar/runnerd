@@ -1,7 +1,37 @@
 //! The daemon's JSON API, version 1: the request and response types every client deserializes, and the
 //! principal a transport authenticates. Plain data only: no I/O, no Docker or GitHub types, no secrets.
+//!
+//! Routes, all under the authenticated principal:
+//!
+//! | Route | Body |
+//! |---|---|
+//! | `GET /v1/status` | [`Status`] |
+//! | `POST /v1/repositories/{owner}/{name}/pause`, `…/resume` | none, 204 |
+//! | `POST /v1/shutdown` | [`ShutdownRequest`] in, 202 |
+//! | `GET /v1/jobs?`[`JobQuery`] | [`JobPage`] |
+//! | `GET /v1/jobs/{id}` | [`Job`] |
+//! | `GET /v1/jobs/{id}/samples` | [`SampleSeries`] |
+//! | `GET /v1/jobs/{id}/logs?`[`LogQuery`] | `text/plain`, one line per log line |
+//! | `GET /v1/host/samples?`[`HostSampleQuery`] | [`HostSamples`] |
+//! | `GET /v1/stats?`[`StatsQuery`] | [`Stats`] |
+//! | `GET /v1/caches` | [`Caches`] |
+//! | `GET /v1/caches/history?`[`CacheHistoryQuery`] | [`CacheHistory`] |
+//! | `GET /v1/events?`[`EventQuery`] | `text/event-stream` of [`EventEnvelope`] |
+//!
+//! Errors carry an [`ErrorResponse`].
 
 use serde::{Deserialize, Serialize};
+
+mod events;
+mod jobs;
+
+pub use events::{Event, EventEnvelope, EventQuery};
+pub use jobs::{
+    Bucket, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, HostSample,
+    HostSampleQuery, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState,
+    JobSummary, LogQuery, LogSummary, Sample, SampleSeries, Stats, StatsQuery, StatsRow, Step,
+    Timeline,
+};
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
 /// has to produce one.
