@@ -8,6 +8,12 @@ FROM ghcr.io/actions/actions-runner:2.338.1@sha256:e275409999c37162649aa050ca573
 
 USER root
 
+# Every apt-get in this image and the stages on top resolves against Ubuntu's archive as it was at this moment
+# (snapshot.ubuntu.com), so a rebuild installs the same package versions until someone moves the date. apt also maps the base image's git-core
+# PPA to its snapshot (snapshot.ppa.launchpadcontent.net). docs/adr/0023 says how to bump.
+ARG UBUNTU_SNAPSHOT=20261022T000000Z
+RUN echo "APT::Snapshot \"${UBUNTU_SNAPSHOT}\";" > /etc/apt/apt.conf.d/50runnerd-snapshot
+
 # What the workflows expect from GitHub's ubuntu-24.04 image and the base image lacks: iptables for dockerd, make,
 # xz-utils and zstd (setup-* archives, actions/cache), zip, and a JDK 17 for sdkmanager and Android builds.
 RUN apt-get update \
@@ -33,19 +39,28 @@ RUN curl -sSfL -o /tmp/gh.tar.gz \
     && tar -xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_amd64/bin/gh" \
     && rm /tmp/gh.tar.gz
 
-# Android SDK command-line tools. The entrypoint adds platform-tools, which records the license, and Android builds
-# download the platforms, build tools and NDK they need into the slot's layer of the SDK (entrypoint.sh). The
-# SHA-256 was computed from Google's published archive.
+# Android SDK command-line tools and platform-tools, plus the accepted SDK license as the file sdkmanager writes when
+# it installs a package. Android builds download the platforms, build tools and NDK they need into the slot's
+# layer of the SDK (entrypoint.sh). The SHA-256s were computed from Google's archives, whose SHA-1s match Google's
+# repository index (repository2-3.xml).
 ARG ANDROID_CMDLINE_TOOLS=16111833
 ARG ANDROID_CMDLINE_TOOLS_SHA256=0877a1d048fe4a24efe2eff536ca4223f7adeb58648bb81909d33c446918cfa8
+ARG ANDROID_PLATFORM_TOOLS=37.0.1
+ARG ANDROID_PLATFORM_TOOLS_SHA256=d230f13842f60f782a8645f9c813f8f845bf36089ea7289f28c48f17979313f1
+ARG ANDROID_SDK_LICENSE=24333f8a63b6825ea9c5514f83c2829b004d1fee
 ENV ANDROID_HOME=/opt/android-sdk ANDROID_SDK_ROOT=/opt/android-sdk
 RUN curl -sSfL -o /tmp/cmdline-tools.zip \
         "https://dl.google.com/android/repository/commandlinetools-linux-${ANDROID_CMDLINE_TOOLS}_latest.zip" \
     && echo "${ANDROID_CMDLINE_TOOLS_SHA256}  /tmp/cmdline-tools.zip" | sha256sum --check \
-    && mkdir -p "$ANDROID_HOME/cmdline-tools" \
+    && curl -sSfL -o /tmp/platform-tools.zip \
+        "https://dl.google.com/android/repository/platform-tools_r${ANDROID_PLATFORM_TOOLS}-linux.zip" \
+    && echo "${ANDROID_PLATFORM_TOOLS_SHA256}  /tmp/platform-tools.zip" | sha256sum --check \
+    && mkdir -p "$ANDROID_HOME/cmdline-tools" "$ANDROID_HOME/licenses" \
     && unzip -q /tmp/cmdline-tools.zip -d "$ANDROID_HOME/cmdline-tools" \
     && mv "$ANDROID_HOME/cmdline-tools/cmdline-tools" "$ANDROID_HOME/cmdline-tools/latest" \
-    && rm /tmp/cmdline-tools.zip \
+    && unzip -q /tmp/platform-tools.zip -d "$ANDROID_HOME" \
+    && printf '\n%s' "$ANDROID_SDK_LICENSE" > "$ANDROID_HOME/licenses/android-sdk-license" \
+    && rm /tmp/cmdline-tools.zip /tmp/platform-tools.zip \
     && chown -R runner:runner "$ANDROID_HOME"
 
 # Job code runs as `runner` without sudo, so it cannot read the root entrypoint's environment or reconfigure its
