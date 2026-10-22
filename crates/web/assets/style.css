@@ -446,7 +446,7 @@ html {
   container-type: inline-size;
 }
 
-@container (max-width: 3.5rem) {
+@container (max-width: 2.25rem) {
   .block > span:not(.fill),
   .free > span {
     display: none;
@@ -1451,6 +1451,23 @@ html {
   .block .repo,
   .free .name {
     display: none;
+  }
+
+  /* Narrow blocks keep their labels: less padding and gap, and a name that may wrap. */
+  .bar {
+    --gap: 4px;
+  }
+
+  .block,
+  .free {
+    padding: 0.45rem 0.4rem;
+  }
+
+  .block > .name {
+    font-size: 0.8125rem;
+    line-height: 1.15;
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .slot-figures {
