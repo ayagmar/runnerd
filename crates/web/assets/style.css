@@ -809,8 +809,11 @@ html {
   transform: translateY(1px);
 }
 
-.button-quiet[aria-busy='true'] {
+[aria-busy='true'] {
   cursor: progress;
+}
+
+.button-quiet[aria-busy='true'] {
   color: var(--muted);
 }
 

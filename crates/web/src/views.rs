@@ -127,7 +127,9 @@ pub(crate) fn question(message: &str, action: &str, label: &str) -> Markup {
             div.toast.failed.question {
                 p { (message) }
                 div.toast-actions {
-                    button.button-danger type="button" data-on:click=(action) { (label) }
+                    button.button-danger type="button" data-indicator:_answering=""
+                        data-attr:aria-busy="$_answering && 'true'" data-attr:disabled="$_answering"
+                        data-on:click=(action) { (label) }
                     button.button-quiet type="button" data-on:click="el.closest('.toast').remove()" { "Keep it running" }
                 }
             }

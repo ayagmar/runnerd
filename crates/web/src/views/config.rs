@@ -57,7 +57,7 @@ pub(crate) fn render(view: &ConfigView) -> Markup {
                     "data-on:input__debounce.400ms"="@post('/config/check')" { (view.file.text) }
                 div.editor-actions {
                     button.button type="button" data-indicator:_saving=""
-                        data-attr:aria-busy="$_saving" data-attr:disabled="$_saving"
+                        data-attr:aria-busy="$_saving && 'true'" data-attr:disabled="$_saving"
                         data-on:click="@put('/config')" { "Save and reload" }
                     button.button-quiet type="button" data-on:click="@post('/config/check')" { "Check" }
                     p.muted { "Running jobs keep their slots; slots a change removes go once their jobs finish." }

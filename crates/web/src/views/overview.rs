@@ -496,7 +496,7 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
             @let busy = format!("_busy_{}", slug(&repository.name).replace('-', "_"));
             button.button-quiet type="button"
                 data-indicator=(busy)
-                data-attr:aria-busy=(format!("${busy}"))
+                data-attr:aria-busy=(format!("${busy} && 'true'"))
                 data-attr:disabled=(format!("${busy}"))
                 data-on:click=(format!("@post('/v1/repositories/{}/{action}')", repository.name))
                 aria-label=(format!("{label} {}", repository.name)) { (label) }
