@@ -243,9 +243,16 @@ Usage: runnerctl`;
       <section class="checks wrap" id="doctor" aria-labelledby="doctor-title">
         <h2 id="doctor-title">Every failure names its fix</h2>
         <div class="check-runs">
-          <pre class="terminal transcript"><code><span class="prompt">$ runnerd doctor runnerd.toml</span>
+          <div class="doctor-run">
+            <pre class="terminal transcript"><code><span class="prompt">$ runnerd doctor runnerd.toml | grep -A4 FAIL</span>
+<span class="fail">{doctorFail}</span></code></pre>
+            <details>
+              <summary>The whole run: eight checks</summary>
+              <pre class="terminal transcript"><code><span class="prompt">$ runnerd doctor runnerd.toml</span>
 {doctorOk.join('\n')}
 <span class="fail">{doctorFail}</span>{doctorRest.join('\n')}</code></pre>
+            </details>
+          </div>
           <div class="unsafe">
             <h3>Privileged only when you say so</h3>
             <pre class="terminal transcript"><code><span class="prompt"># [host] isolation = "unsafe-dind"
@@ -864,9 +871,22 @@ $ runnerd check-config runnerd.toml</span>
     align-items: start;
   }
 
-  .unsafe {
+  .unsafe,
+  .doctor-run {
     display: grid;
     gap: 1rem;
+  }
+
+  .doctor-run summary {
+    padding-block: 0.6rem;
+    min-height: 44px;
+    font-family: var(--font-display);
+    font-weight: 600;
+    cursor: pointer;
+  }
+
+  .doctor-run details[open] summary {
+    margin-bottom: var(--gap);
   }
 
   .transcript .fail {
