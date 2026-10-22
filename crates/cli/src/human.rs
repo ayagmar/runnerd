@@ -212,10 +212,12 @@ pub(crate) fn outcome(job: &JobSummary) -> (String, Tone) {
     (word, tone)
 }
 
-/// `workflow / job`, or the job's name alone.
+/// `workflow / job`, or the job's name alone; `job <id>` until the daemon knows its name, as for a job its runner
+/// took before the daemon saw it queued.
 pub(crate) fn title(job: &JobSummary) -> String {
     match &job.workflow {
         Some(workflow) => format!("{workflow} / {}", job.name),
+        None if job.name.is_empty() => format!("job {}", job.id),
         None => job.name.clone(),
     }
 }

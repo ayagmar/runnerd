@@ -563,7 +563,11 @@ async fn watch(client: &Client, json: bool, paint: human::Paint) -> Result<(), E
             return Ok(());
         }
         tokio::select! {
-            envelope = events.next() => state.apply(&envelope?),
+            envelope = events.next() => {
+                if let Some(id) = state.apply(&envelope?) {
+                    state.refresh(client.get(&format!("/v1/jobs/{id}")).await?);
+                }
+            }
             _ = tick.tick() => {}
         }
     }

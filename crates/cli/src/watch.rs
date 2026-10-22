@@ -70,8 +70,9 @@ impl State {
         })
     }
 
-    /// Applies one event.
-    pub(crate) fn apply(&mut self, envelope: &EventEnvelope) {
+    /// Applies one event. Returns a running job to read again: `job.started` carries no name for a job its runner
+    /// took before the daemon saw it queued, and only the job's record gets it later.
+    pub(crate) fn apply(&mut self, envelope: &EventEnvelope) -> Option<u64> {
         match &envelope.event {
             Event::JobQueued { job } => {
                 self.queued.insert(job.id, job.clone());
@@ -91,8 +92,8 @@ impl State {
                     },
                 );
             }
-            Event::JobStep { job, step } => {
-                if let Some(job) = self.running.get_mut(job) {
+            Event::JobStep { job: id, step } => {
+                if let Some(job) = self.running.get_mut(id) {
                     if let Some(known) = job
                         .steps
                         .iter_mut()
@@ -102,6 +103,9 @@ impl State {
                     } else {
                         job.steps.push(step.clone());
                         job.steps.sort_by_key(|step| step.number);
+                    }
+                    if job.summary.name.is_empty() {
+                        return Some(*id);
                     }
                 }
             }
@@ -131,6 +135,14 @@ impl State {
             }
             Event::HostSample { sample } => self.host = Some(sample.clone()),
             Event::CacheReseeded { .. } | Event::LogLine { .. } => {}
+        }
+        None
+    }
+
+    /// Replaces a running job with its record as read again.
+    pub(crate) fn refresh(&mut self, job: Job) {
+        if let Some(known) = self.running.get_mut(&job.summary.id) {
+            *known = job;
         }
     }
 
@@ -446,5 +458,58 @@ mod tests {
             "{done}"
         );
         assert!(state.running.is_empty());
+    }
+
+    #[test]
+    fn a_job_started_before_the_daemon_knew_its_name_shows_its_id_and_is_read_again() {
+        let mut state = state();
+        let mut unnamed = summary(JobState::Running);
+        unnamed.workflow = None;
+        unnamed.name = String::new();
+        state.apply(&event(Event::SlotChanged {
+            profile: "jvm".to_owned(),
+            slot: SlotStatus {
+                slot: 1,
+                runner: Some(RunnerStatus {
+                    repository: "halyard/ledger".to_owned(),
+                    name: "runnerd-ab12-jvm-1".to_owned(),
+                    runner_id: 3,
+                    container: "c0ffee".to_owned(),
+                    busy: true,
+                    started_at: 1005,
+                }),
+            },
+        }));
+        assert_eq!(
+            state.apply(&event(Event::JobStarted { job: unnamed })),
+            None
+        );
+        let reread = state.apply(&event(Event::JobStep {
+            job: 42,
+            step: step(1, "Set up job", "completed"),
+        }));
+        assert_eq!(reread, Some(42));
+        assert!(
+            screen(&state).contains("halyard/ledger job 42"),
+            "{}",
+            screen(&state)
+        );
+
+        state.refresh(runnerd_core::api::Job {
+            summary: summary(JobState::Running),
+            steps: vec![step(1, "Set up job", "completed")],
+        });
+        assert!(
+            screen(&state).contains("halyard/ledger build / test"),
+            "{}",
+            screen(&state)
+        );
+        assert_eq!(
+            state.apply(&event(Event::JobStep {
+                job: 42,
+                step: step(2, "Run tests", "in_progress"),
+            })),
+            None
+        );
     }
 }
