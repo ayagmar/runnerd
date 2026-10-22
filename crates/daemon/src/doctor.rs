@@ -175,7 +175,8 @@ pub fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
                 format!("unreachable: {error}"),
                 "start Docker and let your user reach its socket:\n\
                  sudo systemctl enable --now docker\n\
-                 sudo usermod -aG docker \"$USER\"   (then log in again)",
+                 sudo usermod -aG docker \"$USER\"   (then log in again)\n\
+                 runnerd reaches Docker only through a unix:// socket: unset DOCKER_HOST or point it at one",
             ));
             None
         }

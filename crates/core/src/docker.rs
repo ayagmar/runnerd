@@ -88,11 +88,9 @@ pub struct Docker {
 }
 
 impl Docker {
-    /// Connects to the Docker Engine at `DOCKER_HOST`, or its local socket.
+    /// Connects to the Docker Engine at `DOCKER_HOST`, or its local socket. Only `unix://` hosts are supported.
     pub fn connect() -> Result<Docker, Error> {
-        Ok(Docker {
-            api: bollard::Docker::connect_with_local_defaults()?,
-        })
+        connect_to(std::env::var("DOCKER_HOST").ok().as_deref())
     }
 
     pub async fn info(&self) -> Result<SystemInfo, Error> {
@@ -148,6 +146,22 @@ impl Docker {
         let options = RemoveContainerOptionsBuilder::new().force(true).build();
         self.api.remove_container(container, Some(options)).await
     }
+}
+
+fn connect_to(docker_host: Option<&str>) -> Result<Docker, Error> {
+    let api = match docker_host.filter(|host| !host.is_empty()) {
+        None => bollard::Docker::connect_with_socket_defaults()?,
+        Some(host) if host.starts_with("unix://") => {
+            bollard::Docker::connect_with_socket(host, 120, bollard::API_DEFAULT_VERSION)?
+        }
+        // Bollard would quietly fall back to the local socket: a different Engine than the one asked for.
+        Some(host) => {
+            return Err(Error::UnsupportedURISchemeError {
+                uri: host.to_owned(),
+            });
+        }
+    };
+    Ok(Docker { api })
 }
 
 /// A tar archive, to extract at `/`, holding the config as a root-only file at `JIT_CONFIG_PATH`.
