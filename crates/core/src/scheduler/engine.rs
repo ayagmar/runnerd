@@ -24,56 +24,78 @@ pub fn image(stage: &str) -> String {
     format!("runnerd-runner:{stage}")
 }
 
-/// This machine as runner names carry it: its host name and the start of its systemd machine ID, so two machines
-/// with the same or overlapping host names never take each other's runners for their own.
-pub fn host_name() -> std::io::Result<String> {
-    let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
-    let machine_id = std::fs::read_to_string("/etc/machine-id")
-        .or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id"))
-        .map_err(|error| {
-            std::io::Error::new(
-                error.kind(),
-                format!("cannot read /etc/machine-id: {error}"),
-            )
-        })?;
-    host_id(&hostname, &machine_id).ok_or_else(|| {
-        std::io::Error::new(
-            std::io::ErrorKind::InvalidData,
-            "/etc/machine-id does not hold a machine ID",
-        )
-    })
+/// This machine as its runner names carry it: `runnerd-<id>-<host>-<profile>-<slot>-<secs>`. Only `runnerd-<id>-`
+/// identifies the machine, so a changed host name still matches the runners started before the change, and two
+/// machines with the same or overlapping host names never take each other's runners for their own.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct HostIdentity {
+    /// 8 hex digits: a hash of the systemd machine ID, never the ID itself, as machine-id(5) asks.
+    id: String,
+    /// The host name in lower case, letters, digits and dashes, at most 20 characters: for people reading names.
+    host: String,
 }
 
-/// `<host>-<id>`: the host name in lower case, letters, digits and dashes, at most 20 characters, then 8 hex digits
-/// derived from the machine ID. The ID's fixed length keeps one machine's prefix from starting another's names. It
-/// is a hash, not the start of the machine ID, which machine-id(5) asks applications not to expose.
-fn host_id(hostname: &str, machine_id: &str) -> Option<String> {
-    let machine_id = machine_id.trim();
-    if machine_id.len() != 32 || !machine_id.chars().all(|c| c.is_ascii_hexdigit()) {
-        return None;
-    }
-    // FNV-1a: stable across Rust releases, unlike std's hasher, so a new build recognizes the runners of the old.
-    let hash = format!("runnerd:{}", machine_id.to_ascii_lowercase())
-        .bytes()
-        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
-            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-        });
-    let id = format!("{:08x}", hash >> 32);
-    let name: String = hostname
-        .trim()
-        .chars()
-        .map(|c| {
-            if c.is_ascii_alphanumeric() {
-                c.to_ascii_lowercase()
-            } else {
-                '-'
-            }
+impl HostIdentity {
+    /// This machine's identity, from `/etc/machine-id` and its host name.
+    pub fn read() -> std::io::Result<HostIdentity> {
+        let hostname = std::fs::read_to_string("/proc/sys/kernel/hostname").unwrap_or_default();
+        let machine_id = std::fs::read_to_string("/etc/machine-id")
+            .or_else(|_| std::fs::read_to_string("/var/lib/dbus/machine-id"))
+            .map_err(|error| {
+                std::io::Error::new(
+                    error.kind(),
+                    format!("cannot read /etc/machine-id: {error}"),
+                )
+            })?;
+        HostIdentity::new(&hostname, &machine_id).ok_or_else(|| {
+            std::io::Error::new(
+                std::io::ErrorKind::InvalidData,
+                "/etc/machine-id does not hold a machine ID",
+            )
         })
-        .take(20)
-        .collect();
-    let name = name.trim_matches('-');
-    let name = if name.is_empty() { "host" } else { name };
-    Some(format!("{name}-{id}"))
+    }
+
+    /// The identity for a host name and a machine ID; `None` unless the ID is 32 hex digits.
+    pub fn new(hostname: &str, machine_id: &str) -> Option<HostIdentity> {
+        let machine_id = machine_id.trim();
+        if machine_id.len() != 32 || !machine_id.chars().all(|c| c.is_ascii_hexdigit()) {
+            return None;
+        }
+        // FNV-1a: stable across Rust releases, unlike std's hasher, so a new build recognizes the runners of the old.
+        let hash = format!("runnerd:{}", machine_id.to_ascii_lowercase())
+            .bytes()
+            .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+                (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+            });
+        let host: String = hostname
+            .trim()
+            .chars()
+            .map(|c| {
+                if c.is_ascii_alphanumeric() {
+                    c.to_ascii_lowercase()
+                } else {
+                    '-'
+                }
+            })
+            .take(20)
+            .collect();
+        let host = host.trim_matches('-');
+        Some(HostIdentity {
+            id: format!("{:08x}", hash >> 32),
+            host: if host.is_empty() { "host" } else { host }.to_owned(),
+        })
+    }
+
+    /// What every runner name of this machine starts with. The ID's fixed length keeps it from starting another
+    /// machine's names.
+    pub fn prefix(&self) -> String {
+        format!("runnerd-{}-", self.id)
+    }
+
+    /// The name of a runner, and of its container, started in `slot` (1-based) of `profile` at `secs`.
+    pub fn runner_name(&self, profile: &str, slot: usize, secs: u64) -> String {
+        format!("{}{}-{profile}-{slot}-{secs}", self.prefix(), self.host)
+    }
 }
 
 /// How the daemon is asked to stop.
@@ -183,6 +205,7 @@ pub struct Engine {
     docker: Arc<Docker>,
     names: Names,
     isolation: &'static dyn Isolation,
+    identity: HostIdentity,
     runner_prefix: String,
     memory_max: Option<u64>,
     slots: BTreeMap<String, Vec<Option<Occupant>>>,
@@ -221,14 +244,14 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 }
 
 impl Engine {
-    /// An engine for a validated config. `host` names this machine's runners (`host_name`), so a restarted daemon
-    /// recognizes them; `memory_max` is the slice's.
+    /// An engine for a validated config. `identity` names this machine's runners, so a restarted daemon recognizes
+    /// them; `memory_max` is the slice's.
     pub fn new(
         config: Config,
         github: Github,
         docker: Docker,
         names: Names,
-        host: &str,
+        identity: HostIdentity,
         memory_max: Option<u64>,
     ) -> (Engine, Handle) {
         let slots = config
@@ -274,7 +297,8 @@ impl Engine {
             docker: Arc::new(docker),
             names,
             isolation,
-            runner_prefix: format!("runnerd-{host}-"),
+            runner_prefix: identity.prefix(),
+            identity,
             memory_max,
             slots,
             repositories,
@@ -771,12 +795,9 @@ impl Engine {
         };
         let number = slot.index + 1;
         let now = SystemTime::now();
-        let name = format!(
-            "{}{}-{number}-{}",
-            self.runner_prefix,
-            slot.profile,
-            unix_secs(now)
-        );
+        let name = self
+            .identity
+            .runner_name(&slot.profile, number, unix_secs(now));
         if let Err(error) = cache::prepare(&self.docker, &self.names, &slot.profile, number).await {
             warn!(
                 "cannot prepare the caches of {} slot {number}: {error}",
