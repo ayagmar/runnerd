@@ -1,0 +1,22 @@
+# The end-to-end test setup: the throwaway repository ayagmar/runnerd-sandbox on the image's base stage
+# (`docker build --target base -t runnerd-runner:base image`). 2 × 4G + 512M for the mirror fits ci.slice.
+
+[host]
+slice = "ci.slice"
+isolation = "sysbox"
+
+[caches]
+mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+[profiles.sandbox]
+image_stage = "base"
+cpus = 2
+memory = "4G"
+slots = 2
+
+[[repositories]]
+name = "ayagmar/runnerd-sandbox"
+profile = "sandbox"
+labels = ["self-hosted", "linux", "x64", "sandbox"]

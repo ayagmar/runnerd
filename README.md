@@ -2,7 +2,7 @@
 
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development. Today it checks its config and the host; it does not start runners yet.
+It is in early development: the daemon schedules runners and serves a small JSON API; job history, metrics, the CLI client and the web dashboard come next.
 
 ## Install
 
@@ -48,7 +48,36 @@ runnerd doctor runnerd.toml
 docker build --target trellis -t runnerd-runner:trellis image
 ```
 
+`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it.
+
 Documentation: <https://ayagmar.github.io/runnerd/>
+
+## Running
+
+```sh
+runnerd serve --config runnerd.toml
+```
+
+Without `--config`, it reads `$XDG_CONFIG_HOME/runnerd/runnerd.toml`. It reads the `gh` CLI's token at start (and again when GitHub rejects it), then every `poll_interval` (`[host]`, default `15s`) asks GitHub for each repository's queued jobs. A job is served when every label in its `runs-on` is one of its repository's `labels`. For each such job it registers a just-in-time runner on the repository and starts it in a free slot of the repository's profile, if the slice's `MemoryMax` still has room for the profile's `memory`. The runner takes one job, its container exits, and runnerd removes it; a runner that got no job within 5 minutes is removed. Jobs that cannot be served yet wait in GitHub's queue.
+
+A slot is one concurrent job of a profile. Containers are new for every job, but each slot keeps a volume with its Docker Engine's images and its own changes to `~/.cache`, the tool cache and the Android SDK, over the profile's read-only snapshot. When a profile has no job running and its slot 1 changed those by `reseed_at` (`[caches]`, default `2G`), slot 1's changes become the new snapshot. The pnpm store and the Maven repository are shared by all slots and emptied above their `max_size` when no job runs. The Docker Hub mirror runs while any runner does.
+
+A restarted runnerd adopts the runner containers still running and deletes this host's runners that have no container. SIGTERM or SIGINT, or `runnerd stop`, stops polling and waits for running jobs; a second signal, or `runnerd stop --force`, kills them.
+
+### API
+
+runnerd serves JSON on `$XDG_RUNTIME_DIR/runnerd.sock` (mode 0600; only the user it runs as may connect). The types are in `crates/core/src/api.rs`.
+
+| Request | Response |
+|---|---|
+| `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs, the memory budget |
+| `POST /v1/repositories/{owner}/{name}/pause` | `204`; the repository gets no new runners, running jobs finish |
+| `POST /v1/repositories/{owner}/{name}/resume` | `204` |
+| `POST /v1/shutdown` with `{"force": false}` | `202` |
+
+```sh
+curl --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/status
+```
 
 ## Config
 
@@ -81,11 +110,15 @@ cargo deny check
 
 [CONTRIBUTING.md](CONTRIBUTING.md) explains which CI jobs a change triggers.
 
-The test that starts a real runner container is ignored by default. It needs Docker with sysbox and the image above:
+The tests that start real containers are ignored by default. They need Docker with sysbox and the images:
 
 ```sh
-cargo test -p runnerd-core --test docker_smoke -- --ignored
+docker build --target trellis -t runnerd-runner:trellis image
+docker build --target base -t runnerd-runner:base image
+cargo test -p runnerd-core --test docker_smoke --test cache_reseed -- --ignored
 ```
+
+[`examples/sandbox.toml`](examples/sandbox.toml) is the setup for the end-to-end test against the throwaway repository `ayagmar/runnerd-sandbox`.
 
 ## License
 
