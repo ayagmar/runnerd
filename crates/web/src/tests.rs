@@ -1,0 +1,428 @@
+//! The dashboard against a fake daemon on a real Unix socket: who gets in, and that every page renders from API
+//! data.
+
+use std::path::PathBuf;
+use std::sync::atomic::{AtomicU32, Ordering};
+
+/// A fresh directory under the system temp dir, removed on drop.
+pub(crate) struct TempDir(pub(crate) PathBuf);
+
+impl TempDir {
+    pub(crate) fn new() -> TempDir {
+        static NEXT: AtomicU32 = AtomicU32::new(0);
+        let n = NEXT.fetch_add(1, Ordering::Relaxed);
+        let path =
+            std::env::temp_dir().join(format!("runnerd-web-test-{}-{n}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&path);
+        std::fs::create_dir_all(&path).unwrap();
+        TempDir(path)
+    }
+}
+
+impl Drop for TempDir {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_dir_all(&self.0);
+    }
+}
+
+#[path = "../examples/demo/fake.rs"]
+mod fake;
+
+use std::net::SocketAddr;
+use std::time::Duration;
+
+use axum::body::Bytes;
+use axum::http::{Request, StatusCode, header};
+use http_body_util::{BodyExt, Full};
+use hyper_util::rt::TokioIo;
+use runnerd_core::api::{Event, EventEnvelope, HostSample, Sample};
+
+/// 2026-10-22T14:03:07Z.
+const NOW: u64 = 1_792_677_787;
+const LEDGER_RUNNING: u64 = 120_055_991_700;
+
+/// The dashboard serving a fake daemon's fixtures, and a browser for it.
+struct Dashboard {
+    addr: SocketAddr,
+    dir: TempDir,
+    fake: fake::Fake,
+}
+
+struct Reply {
+    status: StatusCode,
+    headers: axum::http::HeaderMap,
+    body: String,
+}
+
+impl Dashboard {
+    async fn start() -> Dashboard {
+        let dir = TempDir::new();
+        let socket = dir.0.join("runnerd.sock");
+        let fake = fake::Fake::new(fake::Fixtures::new(NOW));
+        fake::serve(&socket, fake.clone());
+        let listener = crate::listen("127.0.0.1:0").await.unwrap().unwrap();
+        let addr = listener.local_addr().unwrap();
+        crate::spawn(listener, socket, std::future::pending::<()>());
+        // The login file is written before the first request is served.
+        for _ in 0..100 {
+            if crate::login_file(&dir.0.join("runnerd.sock")).exists() {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        Dashboard { addr, dir, fake }
+    }
+
+    fn login_url(&self) -> String {
+        std::fs::read_to_string(crate::login_file(&self.dir.0.join("runnerd.sock")))
+            .unwrap()
+            .trim()
+            .to_owned()
+    }
+
+    /// Signs in with the one-time URL and returns the session cookie.
+    async fn sign_in(&self) -> String {
+        let url = self.login_url();
+        let path = url.strip_prefix(&format!("http://{}", self.addr)).unwrap();
+        let reply = self.request("GET", path, &[]).await;
+        assert_eq!(reply.status, StatusCode::SEE_OTHER);
+        let cookie = reply.headers[header::SET_COOKIE].to_str().unwrap();
+        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+        cookie.split(';').next().unwrap().to_owned()
+    }
+
+    async fn connect(&self) -> hyper::client::conn::http1::SendRequest<Full<Bytes>> {
+        let stream = tokio::net::TcpStream::connect(self.addr).await.unwrap();
+        let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+            .await
+            .unwrap();
+        tokio::spawn(connection);
+        sender
+    }
+
+    fn build(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> Request<Full<Bytes>> {
+        let mut request = Request::builder()
+            .method(method)
+            .uri(path)
+            .header(header::HOST, self.addr.to_string());
+        for (name, value) in headers {
+            request = request.header(*name, *value);
+        }
+        request.body(Full::new(Bytes::new())).unwrap()
+    }
+
+    async fn request(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> Reply {
+        let mut sender = self.connect().await;
+        let response = sender
+            .send_request(self.build(method, path, headers))
+            .await
+            .unwrap();
+        let status = response.status();
+        let headers = response.headers().clone();
+        let body = response.into_body().collect().await.unwrap().to_bytes();
+        Reply {
+            status,
+            headers,
+            body: String::from_utf8(body.to_vec()).unwrap(),
+        }
+    }
+
+    async fn page(&self, cookie: &str, path: &str) -> Reply {
+        self.request("GET", path, &[("cookie", cookie)]).await
+    }
+
+    /// Opens a live stream and returns a reader of its body.
+    async fn stream(&self, cookie: &str, path: &str) -> hyper::body::Incoming {
+        let mut sender = self.connect().await;
+        let response = sender
+            .send_request(self.build("GET", path, &[("cookie", cookie)]))
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::OK);
+        // The connection lives as long as the stream is read.
+        std::mem::forget(sender);
+        response.into_body()
+    }
+}
+
+/// Reads the stream until `found` holds for what arrived, or fails after 5 s.
+async fn read_until(body: &mut hyper::body::Incoming, found: impl Fn(&str) -> bool) -> String {
+    let mut text = String::new();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while !found(&text) {
+            let frame = body.frame().await.unwrap().unwrap();
+            if let Ok(data) = frame.into_data() {
+                text.push_str(&String::from_utf8_lossy(&data));
+            }
+        }
+    })
+    .await
+    .unwrap_or_else(|_| panic!("the stream never sent what was expected; it sent:\n{text}"));
+    text
+}
+
+#[tokio::test]
+async fn without_the_session_cookie_every_page_and_write_is_401() {
+    let dashboard = Dashboard::start().await;
+    for (method, path) in [
+        ("GET", "/"),
+        ("GET", "/jobs/1"),
+        ("GET", "/live/overview"),
+        ("POST", "/v1/repositories/x/pause"),
+        ("POST", "/v1/repositories/halyard/ledger/pause"),
+    ] {
+        let reply = dashboard.request(method, path, &[]).await;
+        assert_eq!(reply.status, StatusCode::UNAUTHORIZED, "{method} {path}");
+    }
+    let wrong = dashboard
+        .request(
+            "POST",
+            "/v1/repositories/halyard/ledger/pause",
+            &[("cookie", "runnerd-1=0")],
+        )
+        .await;
+    assert_eq!(wrong.status, StatusCode::UNAUTHORIZED);
+    assert!(!dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
+    // The assets need no session: the sign-in page uses them.
+    let style = dashboard.request("GET", "/assets/style.css", &[]).await;
+    assert_eq!(style.status, StatusCode::OK);
+}
+
+#[tokio::test]
+async fn a_write_from_another_origin_is_403_even_with_the_cookie() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    for origin in [
+        Some("http://evil.example"),
+        Some("http://127.0.0.1:1"),
+        None,
+    ] {
+        let mut headers = vec![("cookie", cookie.as_str())];
+        if let Some(origin) = origin {
+            headers.push(("origin", origin));
+        }
+        let reply = dashboard
+            .request("POST", "/v1/repositories/halyard/ledger/pause", &headers)
+            .await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "origin {origin:?}");
+    }
+    assert!(!dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
+}
+
+#[tokio::test]
+async fn a_pause_from_the_dashboard_reaches_the_daemon_and_returns_the_row_with_resume() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let origin = format!("http://{}", dashboard.addr);
+    let reply = dashboard
+        .request(
+            "POST",
+            "/v1/repositories/halyard/ledger/pause",
+            &[("cookie", &cookie), ("origin", &origin)],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
+    assert!(
+        reply.body.contains(r#"id="repo-halyard-ledger""#),
+        "{}",
+        reply.body
+    );
+    assert!(reply.body.contains("Resume") && reply.body.contains("paused"));
+    // A repository the daemon does not know comes back as a notice Datastar shows.
+    let unknown = dashboard
+        .request(
+            "POST",
+            "/v1/repositories/halyard/nope/pause",
+            &[("cookie", &cookie), ("origin", &origin)],
+        )
+        .await;
+    assert!(
+        unknown.body.contains(r#"id="notice""#)
+            && unknown.body.contains("not a configured repository")
+    );
+}
+
+#[tokio::test]
+async fn a_login_link_signs_in_once() {
+    let dashboard = Dashboard::start().await;
+    let used = dashboard.login_url();
+    dashboard.sign_in().await;
+    let path = used
+        .strip_prefix(&format!("http://{}", dashboard.addr))
+        .unwrap();
+    let again = dashboard.request("GET", path, &[]).await;
+    assert_eq!(again.status, StatusCode::UNAUTHORIZED);
+    assert_ne!(dashboard.login_url(), used);
+}
+
+#[tokio::test]
+async fn every_page_renders_from_the_daemons_data() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await;
+    assert_eq!(overview.status, StatusCode::OK);
+    for expected in [
+        "ci.slice",
+        "halyard/ledger",
+        "halyard/storefront",
+        "Integration tests (Testcontainers)",
+        "MemoryMax 33G",
+        "Sampled peak",
+    ] {
+        assert!(
+            overview.body.contains(expected),
+            "overview lacks {expected:?}"
+        );
+    }
+    let csp = overview.headers[header::CONTENT_SECURITY_POLICY]
+        .to_str()
+        .unwrap();
+    assert!(csp.contains("default-src 'none'") && csp.contains("connect-src 'self'"));
+
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await;
+    assert_eq!(job.status, StatusCode::OK);
+    for expected in [
+        "Set up JDK 21",
+        "slot cap 9G",
+        "sampled peak",
+        "Waiting for a runner",
+        "Set up job: line 1",
+        "/live/jobs/",
+    ] {
+        assert!(job.body.contains(expected), "job page lacks {expected:?}");
+    }
+
+    let history = dashboard.page(&cookie, "/history").await;
+    assert_eq!(history.status, StatusCode::OK);
+    assert!(history.body.contains("Jobs per day") && history.body.contains("playwright"));
+
+    let caches = dashboard.page(&cookie, "/caches").await;
+    assert_eq!(caches.status, StatusCode::OK);
+    assert!(caches.body.contains("runnerd-pnpm") && caches.body.contains("emptied above 5G"));
+
+    let log = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}/log"))
+        .await;
+    assert!(log.body.starts_with("##[group]Set up job\n"));
+
+    let missing = dashboard.page(&cookie, "/jobs/7").await;
+    assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn history_shows_only_the_repository_and_outcome_filtered_for() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let failed = dashboard
+        .page(
+            &cookie,
+            "/history?repository=halyard%2Fledger&outcome=failure",
+        )
+        .await;
+    let rows: Vec<&str> = failed.body.split("<tr class=").skip(1).collect();
+    assert_ne!(rows.len(), 0);
+    for row in &rows {
+        assert!(
+            row.contains("halyard/ledger") && row.contains("badge failure"),
+            "{row}"
+        );
+    }
+    let everything = dashboard
+        .page(&cookie, "/history?repository=&outcome=")
+        .await;
+    assert!(everything.body.split("<tr class=").count() > rows.len() + 1);
+}
+
+#[tokio::test]
+async fn the_overview_stream_patches_the_slice_when_a_sample_arrives() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    let first = read_until(&mut stream, |text| text.contains(r#"id="recent""#)).await;
+    assert!(first.contains("event: datastar-patch-elements") && first.contains(r#"id="budget""#));
+    let at = NOW + 2;
+    let sample = HostSample {
+        at,
+        cpu: 31_000,
+        memory: 21 << 30,
+    };
+    dashboard
+        .fake
+        .fixtures
+        .lock()
+        .unwrap()
+        .host
+        .push(sample.clone());
+    dashboard
+        .fake
+        .events
+        .send(EventEnvelope {
+            id: None,
+            at,
+            event: Event::HostSample { sample },
+        })
+        .unwrap();
+    let update = read_until(&mut stream, |text| text.contains(r#"id="host""#)).await;
+    assert!(update.contains("31 cores"), "{update}");
+}
+
+#[tokio::test]
+async fn a_running_jobs_stream_appends_new_log_lines_and_updates_its_charts() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let lines = dashboard.fake.fixtures.lock().unwrap().logs[&LEDGER_RUNNING].len() as u64;
+    let mut stream = dashboard
+        .stream(
+            &cookie,
+            &format!("/live/jobs/{LEDGER_RUNNING}?from={lines}"),
+        )
+        .await;
+    read_until(&mut stream, |text| text.contains(r#"id="metrics""#)).await;
+    let at = NOW + 2;
+    for event in [
+        Event::LogLine {
+            job: LEDGER_RUNNING,
+            line: lines,
+            text: "BUILD SUCCESSFUL in 2m 28s".to_owned(),
+        },
+        Event::JobSample {
+            job: LEDGER_RUNNING,
+            sample: Sample {
+                at,
+                cpu: 7000,
+                memory: 8 << 30,
+                network_received: 0,
+                network_sent: 0,
+            },
+        },
+    ] {
+        dashboard
+            .fake
+            .events
+            .send(EventEnvelope {
+                id: None,
+                at,
+                event,
+            })
+            .unwrap();
+    }
+    let update = read_until(&mut stream, |text| {
+        text.contains("BUILD SUCCESSFUL") && text.contains(r#"id="metrics""#)
+    })
+    .await;
+    assert!(
+        update.contains("selector #log-lines") && update.contains("mode append"),
+        "{update}"
+    );
+    assert!(update.contains("sampled peak 8G"), "{update}");
+}
+
+#[tokio::test]
+async fn the_dashboard_refuses_to_listen_beyond_loopback() {
+    let error = crate::listen("0.0.0.0:0").await.unwrap_err();
+    assert!(error.to_string().contains("loopback only"));
+    assert!(crate::listen("off").await.unwrap().is_none());
+}

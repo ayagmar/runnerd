@@ -13,6 +13,7 @@ clap.workspace = true
 futures-util.workspace = true
 reqwest.workspace = true
 runnerd-core = { workspace = true, features = ["host"] }
+runnerd-web.workspace = true
 serde_json.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "signal", "sync", "time"] }
 tracing.workspace = true

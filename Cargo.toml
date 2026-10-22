@@ -1,6 +1,6 @@
 [workspace]
 resolver = "3"
-members = ["crates/core", "crates/daemon", "crates/cli"]
+members = ["crates/core", "crates/daemon", "crates/cli", "crates/web"]
 
 [workspace.package]
 version = "0.0.1"
@@ -11,6 +11,7 @@ repository = "https://github.com/ayagmar/runnerd"
 
 [workspace.dependencies]
 runnerd-core = { path = "crates/core", version = "0.0.1", default-features = false }
+runnerd-web = { path = "crates/web", version = "0.0.1" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 bollard = { version = "0.21.1", default-features = false, features = ["pipe"] }
 clap = { version = "4.6.7", features = ["derive"] }

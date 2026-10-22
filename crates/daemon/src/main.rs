@@ -56,6 +56,9 @@ enum Command {
         /// The API socket [default: $XDG_RUNTIME_DIR/runnerd.sock].
         #[arg(long)]
         socket: Option<PathBuf>,
+        /// Serve the web dashboard on this loopback address; `off` serves none.
+        #[arg(long, default_value = runnerd_web::DEFAULT_ADDR)]
+        web: String,
     },
     /// Ask the running daemon to stop once its running jobs finish.
     Stop {
@@ -72,9 +75,11 @@ fn main() -> ExitCode {
     let result = match Cli::parse().command {
         Some(Command::CheckConfig { path, memory_max }) => Ok(check_config(&path, memory_max)),
         Some(Command::Doctor { config }) => Ok(doctor(config.as_deref())),
-        Some(Command::Serve { config, socket }) => {
-            runtime().and_then(|runtime| runtime.block_on(serve(config, socket)))
-        }
+        Some(Command::Serve {
+            config,
+            socket,
+            web,
+        }) => runtime().and_then(|runtime| runtime.block_on(serve(config, socket, &web))),
         Some(Command::Stop { force, socket }) => {
             runtime().and_then(|runtime| runtime.block_on(stop(force, socket)))
         }
@@ -147,7 +152,11 @@ fn socket_or_default(socket: Option<PathBuf>) -> Result<PathBuf, ExitCode> {
         .ok_or_else(|| fail(&"XDG_RUNTIME_DIR is not set; pass --socket"))
 }
 
-async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitCode, ExitCode> {
+async fn serve(
+    config: Option<PathBuf>,
+    socket: Option<PathBuf>,
+    web: &str,
+) -> Result<ExitCode, ExitCode> {
     tracing_subscriber::fmt()
         .with_target(false)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
@@ -184,6 +193,9 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
     info!("job history in {}", database.display());
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
+    let web_listener = runnerd_web::listen(web)
+        .await
+        .map_err(|error| fail(&format_args!("--web {web}: {error}")))?;
     let (engine, handle) = Engine::new(
         config,
         github,
@@ -225,10 +237,16 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
     let server = tokio::spawn(api::serve(listener, handle, config, async {
         let _ = stop.await;
     }));
+    let (web_stopped, web_stop) = tokio::sync::oneshot::channel::<()>();
+    let web = web_listener.map(|listener| runnerd_web::spawn(listener, socket.clone(), web_stop));
     let engine_done = engine.await;
+    let _ = web_stopped.send(());
     let _ = stopped.send(());
     store.flush().await;
     let server_done = server.await;
+    if let Some(web) = web {
+        let _ = web.await;
+    }
     let _ = std::fs::remove_file(&socket);
     engine_done.map_err(|error| fail(&error))?;
     server_done
