@@ -179,7 +179,7 @@ unchanged.
 
 ```console
 $ runnerctl status
-runnerd 0.0.1  4.5G of 33G reserved in runnerd.slice
+runnerd 0.0.2  4.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY      RUNNER                       UP
 jvm         1  busy   halyard/ledger  runnerd-5f2a91c0-jvm-1-k3j9  21s

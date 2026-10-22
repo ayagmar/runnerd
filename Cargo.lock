@@ -1008,7 +1008,7 @@ dependencies = [
 
 [[package]]
 name = "runnerctl"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "axum",
  "clap",
@@ -1025,7 +1025,7 @@ dependencies = [
 
 [[package]]
 name = "runnerd"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "axum",
  "clap",
@@ -1041,7 +1041,7 @@ dependencies = [
 
 [[package]]
 name = "runnerd-core"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "axum",
  "bollard",
@@ -1061,7 +1061,7 @@ dependencies = [
 
 [[package]]
 name = "runnerd-web"
-version = "0.0.1"
+version = "0.0.2"
 dependencies = [
  "axum",
  "datastar",
