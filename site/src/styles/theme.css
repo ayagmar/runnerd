@@ -7,7 +7,7 @@
   --font-display: 'Libre Franklin Variable', 'Helvetica Neue', Arial, sans-serif;
   --font-text: 'Source Serif 4 Variable', Georgia, 'Times New Roman', serif;
 
-  /* Two profiles in the example config, two colours: mint is trellis, pink is glowly. */
+  /* Two profiles in the made-up example config, two colours: mint is jvm, pink is node. */
   --mint: #c3edce;
   --pink: #f8c7c9;
   --block-ink: #0a0a0a;

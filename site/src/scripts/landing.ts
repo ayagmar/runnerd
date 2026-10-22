@@ -1,5 +1,5 @@
-// The landing page's behaviour: the budget calculator, the copy button, the theme switch and
-// the section entrances. Everything here is an enhancement; without it the page shows the example config.
+// The landing page's behaviour: the budget calculator, the copy button, the theme switch and the entrances
+// of the slot steps and the free slots. Everything here is an enhancement; without it the page shows the example config.
 
 const GIB = 1024 ** 3;
 const UNITS: [string, number][] = [
@@ -29,7 +29,7 @@ function calculator() {
 
   const render = () => {
     const max = number('max') * GIB;
-    const profiles = ['trellis', 'glowly'].map((kind) => ({
+    const profiles = ['jvm', 'node'].map((kind) => ({
       kind,
       memory: number(`${kind}-memory`) * GIB,
       slots: number(`${kind}-slots`),
@@ -39,7 +39,9 @@ function calculator() {
 
     for (const output of form.querySelectorAll<HTMLOutputElement>('output[data-for]')) {
       const name = output.dataset.for!;
-      output.value = name.endsWith('slots') ? String(number(name)) : size(number(name) * GIB);
+      const value = number(name);
+      // The profile memory reads as its TOML value; slots and the slice's MemoryMax as plain values.
+      output.value = name.endsWith('slots') ? String(value) : name === 'max' ? size(value * GIB) : `"${size(value * GIB)}"`;
     }
 
     const scale = Math.max(max, total);
@@ -102,11 +104,10 @@ function themeToggle() {
   label();
 }
 
+/** The slot steps and the free slots arrive one after another as they scroll in; nothing else on the page fades. */
 function entrances() {
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const groups = document.querySelectorAll<HTMLElement>(
-    '.calc-text, .calc-result, .slots-head, .slot-steps, .isolation, .doctor-text, .roadmap, .install-tile, .footer',
-  );
+  const groups = document.querySelectorAll<HTMLElement>('.slot-steps, .strip');
   const observer = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {

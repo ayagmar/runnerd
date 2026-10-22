@@ -3,36 +3,32 @@ title: Install
 description: Install runnerd and runnerctl on a Linux host and check that the host can run runners.
 ---
 
-runnerd is in early development: the daemon schedules runners and serves a small JSON API; job history, metrics, the CLI client and the web dashboard come next. Releases are early 0.0.x builds for Linux on x86_64 and aarch64.
+runnerd is early: 0.0.x schedules runners and serves a small JSON API; job history, metrics, `runnerctl`'s commands and the web dashboard come next. Releases are Linux builds for x86_64 and aarch64.
 
 ## What the host needs
 
-- Linux with cgroup v2, and Docker using the systemd cgroup driver.
-- [Sysbox](https://github.com/nestybox/sysbox), so each runner container can run its own Docker Engine without being privileged. Sysbox publishes `.deb` packages; on Arch Linux it is the AUR package `sysbox-ce-bin`; elsewhere, build it from source.
+- Linux with cgroup v2, and Docker with the systemd cgroup driver.
+- [Sysbox](https://github.com/nestybox/sysbox), so runner containers run Docker unprivileged: `.deb` packages, the AUR package `sysbox-ce-bin` on Arch Linux, or a source build.
 - A systemd slice whose `MemoryMax` is the budget for all runners.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 
-You do not need to set these up first: `runnerd doctor` checks each one and prints the fix for what is missing.
+`runnerd doctor` checks each of these and prints the fix for what is missing.
 
 ## Install
-
-The installer downloads `runnerd` and `runnerctl` from the latest release, checks their SHA-256 against the release's checksum files, copies them to `~/.local/bin` and runs `runnerd doctor`:
 
 ```sh
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh
 ```
 
-Pass `--prefix DIR` to install into `DIR/bin` instead, or `--version v0.0.1` for a specific release:
+It downloads `runnerd` and `runnerctl` from the latest release, checks their SHA-256, copies them to `~/.local/bin` and runs `runnerd doctor`. It never uses sudo and installs nothing else. `--prefix DIR` installs into `DIR/bin`, `--version v0.0.1` picks a release:
 
 ```sh
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd
 ```
 
-It never uses sudo and installs nothing else.
-
 ## Verify a release
 
-Every release archive, `install.sh` and `sha256.sum` has a GitHub build provenance attestation. To check `install.sh` before running it, or an archive you downloaded yourself:
+Every release archive, `install.sh` and `sha256.sum` has a GitHub build provenance attestation:
 
 ```sh
 curl -fsSLO https://github.com/ayagmar/runnerd/releases/latest/download/install.sh
@@ -43,15 +39,10 @@ gh attestation verify runnerd-x86_64-unknown-linux-musl.tar.xz -R ayagmar/runner
 
 ## Check the host
 
-`runnerd doctor` runs its checks in the order a new machine needs them. Given a config, it also checks the slice the config names and that the config fits in it:
-
-```sh
-runnerd doctor runnerd.toml
-```
-
-On a host that is ready:
+Given a config, `doctor` also checks the slice it names and that the config fits:
 
 ```text
+$ runnerd doctor runnerd.toml
 ok    Docker: reachable, Docker 29.9.2
 ok    cgroups: cgroup v2 with the systemd driver
 info  isolation: sysbox: runners run unprivileged
@@ -62,7 +53,7 @@ ok    gh: logged in to github.com with the repo scope
 info  /dev/kvm: present, for a future Kata Containers backend
 ```
 
-A failed check prints its fix under it. Here the config names a slice that has no unit file yet:
+A failed check prints its fix under it, and `doctor` exits non-zero. Here the config names a slice with no unit file:
 
 ```text
 FAIL  slice: demo.slice has no unit file with a MemoryMax, so nothing holds runners to the budget
@@ -72,4 +63,4 @@ FAIL  slice: demo.slice has no unit file with a MemoryMax, so nothing holds runn
            then: sudo systemctl daemon-reload
 ```
 
-`doctor` exits non-zero while any check fails. Next, write a [config](../configuration/), then [run the daemon](../running/).
+Next: write a [config](../configuration/), then [run the daemon](../running/).
