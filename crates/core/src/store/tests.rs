@@ -1,9 +1,13 @@
 //! The history database: migrations, the log cap, and job listing.
 
+use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
+
 use rusqlite::Connection;
 
 use super::{
-    LogPosition, MIGRATIONS, MirrorPosition, RunnerRecord, SampleRecord, Store, StoreError,
+    LOG_BACKLOG, LogPosition, MIGRATIONS, MirrorPosition, RunnerRecord, SampleRecord, Store,
+    StoreError,
 };
 use crate::api::{JobQuery, JobState, StatsQuery};
 use crate::github::QueuedJob;
@@ -63,8 +67,10 @@ async fn a_log_stops_at_its_cap_and_says_so() {
     store.queued("o/r", &queued(1));
     let position = LogPosition { page: 1, offset: 0 };
     // Each line takes its length plus a newline: 6 bytes.
-    store.log(1, vec!["line1".to_owned(); 3], position, 15);
-    store.log(1, vec!["line2".to_owned()], position, 15);
+    store
+        .log(1, vec!["line1".to_owned(); 3], position, 15)
+        .await;
+    store.log(1, vec!["line2".to_owned()], position, 15).await;
     store.flush().await;
     let job = store.job(1).await.unwrap().unwrap();
     assert_eq!((job.summary.log.lines, job.summary.log.bytes), (2, 12));
@@ -244,4 +250,40 @@ async fn mirror_bytes_and_the_log_position_are_counted_together_or_not_at_all() 
     store.flush().await;
     assert_eq!(counted(&fault), [10, 20]);
     assert_eq!(store.mirror_log_until().await.unwrap(), until);
+}
+
+#[tokio::test]
+async fn log_lines_wait_while_the_writer_is_behind_by_the_backlog() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.queued("o/r", &queued(1));
+    store.flush().await;
+    // Another process holds the database: the writer waits.
+    let holder = Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    let sent = Arc::new(AtomicU64::new(0));
+    let producer = tokio::spawn({
+        let (store, sent) = (store.clone(), sent.clone());
+        async move {
+            // A noisy job: 64 MiB of log, in 1 MiB batches.
+            for _ in 0..64 {
+                let line = "x".repeat((1 << 20) - 1);
+                store
+                    .log(1, vec![line], LogPosition { page: 1, offset: 0 }, u64::MAX)
+                    .await;
+                sent.fetch_add(1, Ordering::SeqCst);
+            }
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let queued_mib = sent.load(Ordering::SeqCst);
+    holder.execute_batch("COMMIT").unwrap();
+    producer.await.unwrap();
+    assert!(
+        queued_mib <= LOG_BACKLOG / (1 << 20) + 1,
+        "{queued_mib} MiB queued"
+    );
+    store.flush().await;
+    assert_eq!(store.job(1).await.unwrap().unwrap().summary.log.lines, 64);
 }

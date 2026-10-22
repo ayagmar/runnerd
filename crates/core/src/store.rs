@@ -9,7 +9,7 @@ use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
-use tokio::sync::{broadcast, mpsc, oneshot};
+use tokio::sync::{OwnedSemaphorePermit, Semaphore, broadcast, mpsc, oneshot};
 use tracing::warn;
 
 use crate::api::{self, Event, EventEnvelope};
@@ -21,6 +21,10 @@ mod write;
 
 /// The schema's migrations, in order; the database's `user_version` is how many ran.
 const MIGRATIONS: &[&str] = &[include_str!("store/migrations/0001_history.sql")];
+
+/// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
+/// disk holds back that job's log, not the daemon's memory.
+pub(crate) const LOG_BACKLOG: u64 = 8 << 20;
 
 /// How many events a slow client may fall behind before its stream ends; it reconnects with `Last-Event-ID`.
 const EVENT_BUFFER: usize = 4096;
@@ -157,6 +161,8 @@ enum Write {
         lines: Vec<String>,
         position: LogPosition,
         max_bytes: u64,
+        /// The lines' share of `LOG_BACKLOG`, given back once they are stored.
+        _backlog: OwnedSemaphorePermit,
     },
     Samples(Vec<SampleRecord>),
     HostSample(api::HostSample),
@@ -182,6 +188,7 @@ pub struct Store {
     writes: mpsc::UnboundedSender<Write>,
     reader: Arc<Mutex<Connection>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
+    backlog: Arc<Semaphore>,
 }
 
 impl Store {
@@ -218,6 +225,9 @@ impl Store {
             writes,
             reader: Arc::new(Mutex::new(reader)),
             events,
+            backlog: Arc::new(Semaphore::new(
+                usize::try_from(LOG_BACKLOG).unwrap_or(usize::MAX),
+            )),
         })
     }
 
@@ -272,13 +282,21 @@ impl Store {
         self.send(Write::Lost { job, at });
     }
 
-    /// Appends log lines to a job, up to `max_bytes` per job, and records where the capture continues.
-    pub fn log(&self, job: u64, lines: Vec<String>, position: LogPosition, max_bytes: u64) {
+    /// Appends log lines to a job, up to `max_bytes` per job, and records where the capture continues. Waits while
+    /// `LOG_BACKLOG` bytes of lines are waiting to be stored.
+    pub async fn log(&self, job: u64, lines: Vec<String>, position: LogPosition, max_bytes: u64) {
+        let bytes: u64 = lines.iter().map(|line| line.len() as u64 + 1).sum();
+        let share = u32::try_from(bytes.clamp(1, LOG_BACKLOG)).unwrap_or(u32::MAX);
+        // The semaphore is never closed.
+        let Ok(backlog) = self.backlog.clone().acquire_many_owned(share).await else {
+            return;
+        };
         self.send(Write::Log {
             job,
             lines,
             position,
             max_bytes,
+            _backlog: backlog,
         });
     }
 

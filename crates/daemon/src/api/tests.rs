@@ -317,12 +317,14 @@ async fn a_followed_log_sends_stored_and_new_lines_and_ends_when_the_job_finishe
     });
     store.claimed(1, 2, "runner-1", 2_000);
     let position = LogPosition { page: 1, offset: 0 };
-    store.log(
-        1,
-        vec!["one".to_owned(), "two".to_owned()],
-        position,
-        1 << 20,
-    );
+    store
+        .log(
+            1,
+            vec!["one".to_owned(), "two".to_owned()],
+            position,
+            1 << 20,
+        )
+        .await;
     store.flush().await;
     let mut response = daemon
         .client
@@ -337,7 +339,9 @@ async fn a_followed_log_sends_stored_and_new_lines_and_ends_when_the_job_finishe
             &response.chunk().await.unwrap().unwrap(),
         ));
     }
-    store.log(1, vec!["three".to_owned()], position, 1 << 20);
+    store
+        .log(1, vec!["three".to_owned()], position, 1 << 20)
+        .await;
     store.details(JobDetails {
         id: 1,
         run_id: 2,

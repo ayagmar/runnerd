@@ -1496,6 +1496,8 @@ async fn capture_job<D: DockerApi>(
     };
     let mut parser = Parser::default();
     let mut job = None;
+    // Bytes of the job's log stored or sent: past `max_bytes` the store keeps no more, so the capture stops.
+    let mut sent = 0;
     while let Some(chunk) = output.next().await {
         // An error: the container stopped.
         let Ok(chunk) = chunk else { break };
@@ -1509,11 +1511,22 @@ async fn capture_job<D: DockerApi>(
                             runner: runner.clone(),
                             job: id,
                         });
+                        // After a restart, the part stored before.
+                        if let Ok(Some(stored)) = store.job(id).await {
+                            if stored.summary.log.truncated {
+                                return;
+                            }
+                            sent = stored.summary.log.bytes;
+                        }
                     }
                 }
                 Captured::Lines { lines, position } => {
                     if let Some(job) = job {
-                        store.log(job, lines, position, max_bytes);
+                        sent += lines.iter().map(|line| line.len() as u64 + 1).sum::<u64>();
+                        store.log(job, lines, position, max_bytes).await;
+                        if sent > max_bytes {
+                            return;
+                        }
                     }
                 }
             }

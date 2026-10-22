@@ -5,7 +5,7 @@
 
 use std::sync::Arc;
 
-use rusqlite::{Connection, OptionalExtension, params};
+use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use tokio::sync::{broadcast, mpsc};
 
 use super::read::{self, secs};
@@ -81,6 +81,7 @@ impl Writer<'_> {
                 lines,
                 position,
                 max_bytes,
+                _backlog,
             } => {
                 self.change("store log lines", |announced| {
                     self.log(job, lines, position, max_bytes, announced)
@@ -148,7 +149,8 @@ impl Writer<'_> {
     /// IDs, to every subscriber. On any error nothing is kept or sent.
     fn change(&self, what: &str, change: impl FnOnce(&mut Announced) -> rusqlite::Result<()>) {
         let result = (|| {
-            let transaction = self.db.unchecked_transaction()?;
+            // Immediate, so a busy database is waited for: a deferred transaction that read first fails at once.
+            let transaction = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
             let mut announced = Vec::new();
             change(&mut announced)?;
             let envelopes = announced
