@@ -58,17 +58,17 @@ Jobs per day, run and wait times and memory peaks over 30 days, then every job, 
 
 ## runnerctl
 
-It talks to the socket (`--socket` picks another), prints aligned text, coloured on a terminal unless `NO_COLOR` is set, and with `--json` prints the API's response unchanged.
+It talks to the socket (`--socket` picks another), prints aligned text, coloured on a terminal unless `NO_COLOR` is set, and with `--json` prints the API's response unchanged. Sizes of 10 or more round to whole units, so the demo's 23.5G reads 24G.
 
 ```console wrap=false
 $ runnerctl status
-runnerd 0.0.1  24G of 33G reserved in ci.slice
+runnerd 0.0.2  24G of 33G reserved in ci.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
-jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792706088   7m 13s
+jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792708105    7m 9s
 jvm         2  free
-node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792706206  5m 15s
-node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792706503     18s
+node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792708223  5m 11s
+node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792708520     14s
 
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
 halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
@@ -93,11 +93,11 @@ halyard/storefront  node     active       1  self-hosted,linux,x64,node
 
 ```console wrap=false
 $ runnerctl jobs --repo halyard/ledger --limit 4
-JOB           REPOSITORY      WORKFLOW / NAME  BRANCH            RESULT   WAITED      RAN  MEM PEAK  QUEUED
-120055991700  halyard/ledger  CI / build       main              running      9s  11m 27s      6.6G  11m 36s ago
-120055991600  halyard/ledger  CI / build       main              success      9s   11m 5s      6.6G  34m 36s ago
-120055991526  halyard/ledger  CI / build       feat/checkout-v2  success     27s   11m 5s      6.6G  1h 56m ago
-120055991489  halyard/ledger  CI / build       main              failure     11s   11m 5s      6.6G  2h 36m ago
+JOB           REPOSITORY      WORKFLOW / NAME  BRANCH            RESULT   WAITED     RAN  MEM PEAK  QUEUED
+120055991700  halyard/ledger  CI / build       main              running      9s   7m 4s      6.6G  7m 13s ago
+120055991600  halyard/ledger  CI / build       main              success      9s  11m 5s      6.6G  30m 13s ago
+120055991526  halyard/ledger  CI / build       feat/checkout-v2  success     27s  11m 5s      6.6G  1h 52m ago
+120055991489  halyard/ledger  CI / build       main              failure     11s  11m 5s      6.6G  2h 31m ago
 memory peaks are sampled every few seconds; spikes shorter than that do not show
 older jobs: --before 120055991489
 ```
@@ -105,19 +105,19 @@ older jobs: --before 120055991489
 One frame of `runnerctl watch`:
 
 ```console wrap=false
-runnerd 0.0.1  24G of 33G reserved  ci.slice uses 4.20 cores, 10G
+runnerd 0.0.2  24G of 33G reserved  ci.slice uses 5.18 cores, 11G
 
 SLOT    JOB                                      STEP                                         RAN   CPU   MEM
-jvm 1   halyard/ledger CI / build                Integration tests (Testcontainers) (7/9)  7m 26s  3.52  4.1G
+jvm 1   halyard/ledger CI / build                Integration tests (Testcontainers) (7/9)   7m 7s  2.01  4.4G
 jvm 2   free
-node 1  halyard/storefront E2E / playwright      Playwright e2e (6/8)                      5m 29s  3.52  2.6G
+node 1  halyard/storefront E2E / playwright      Playwright e2e (6/8)                      5m 10s  2.01  2.8G
 node 2  waiting for a job of halyard/storefront
 
 Finished
-  success  halyard/ledger      CI / build        11m 5s  19m 21s ago
+  success  halyard/ledger      CI / build        11m 5s  19m 2s ago
   success  halyard/storefront  E2E / playwright  8m 57s  1h 1m ago
-  success  halyard/ledger      CI / build        11m 5s  1h 41m ago
-  failure  halyard/ledger      CI / build        11m 5s  2h 21m ago
+  success  halyard/ledger      CI / build        11m 5s  1h 40m ago
+  failure  halyard/ledger      CI / build        11m 5s  2h 20m ago
   success  halyard/storefront  E2E / playwright  8m 57s  3h 5m ago
 
 CPU and MEM are the last sample, taken every few seconds. Ctrl-C quits.
@@ -127,6 +127,6 @@ CPU and MEM are the last sample, taken every few seconds. Ctrl-C quits.
 
 ```console
 $ runnerctl pause halyard/ledger
-error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792706088; pause with force to cancel it
+error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105; pause with force to cancel it
 `runnerctl pause --force halyard/ledger` cancels its runs and removes their runners
 ```

@@ -59,18 +59,18 @@ const steps = [
 
 // Real output of runnerctl from main, against the web dashboard's demo daemon (crates/web/examples/demo),
 // whose made-up machine is this setup.
-const status = `runnerd 0.0.1  24G of 33G reserved in ci.slice
+const status = `runnerd 0.0.2  24G of 33G reserved in ci.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
-jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792706088   7m 13s
+jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792708105    7m 9s
 jvm         2  free
-node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792706206  5m 15s
-node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792706503     18s
+node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792708223  5m 11s
+node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792708520     14s
 
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
 halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
 halyard/storefront  node     active       1  self-hosted,linux,x64,node`;
-const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792706088; pause with force to cancel it
+const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105; pause with force to cancel it
 \`runnerctl pause --force halyard/ledger\` cancels its runs and removes their runners`;
 
 // The clients, each a slot: filled once released, with a link to it; free until it ships with real output.
@@ -180,8 +180,11 @@ const clients = [
           />
         </figure>
         <div class="live-cli">
-          <pre class="terminal table" tabindex="0" aria-label="runnerctl status output"><code><span class="prompt">$ runnerctl status</span>
+          <figure class="live-status">
+            <pre class="terminal table" tabindex="0" aria-label="runnerctl status output"><code><span class="prompt">$ runnerctl status</span>
 {status}</code></pre>
+            <figcaption>The dashboard's demo daemon. runnerctl rounds 23.5G to 24G.</figcaption>
+          </figure>
           <div class="live-pause">
             <h3>A pause asks first</h3>
             <pre class="terminal transcript"><code><span class="prompt">$ runnerctl pause halyard/ledger</span>
@@ -319,9 +322,7 @@ $ runnerd check-config runnerd.toml</span>
           }
         </ul>
         <p class="shipped-list">
-          0.0.2 is <code>runnerd serve</code>, <code>stop</code>, <code>check-config</code> and <code>doctor</code>; job
-          history, metrics, logs and live events, forced pause, reseed and cache cleaning on a JSON API over a Unix socket;
-          <code>runnerctl</code> and the web dashboard; the runner image; x86_64 and aarch64 builds.
+          History, metrics, live events and controls on a JSON API, with the CLI and the dashboard.
         </p>
       </section>
 
@@ -724,6 +725,18 @@ $ runnerd check-config runnerd.toml</span>
     grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
     gap: clamp(1.5rem, 4vw, 4rem);
     align-items: start;
+  }
+
+  .live-status {
+    display: grid;
+    gap: 0.6rem;
+    margin: 0;
+  }
+
+  .live-status figcaption {
+    font-family: var(--font-display);
+    font-size: var(--step-small);
+    color: var(--muted);
   }
 
   .live-pause {
