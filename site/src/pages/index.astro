@@ -2,6 +2,7 @@
 import '../styles/theme.css';
 import mark from '../assets/mark.svg?raw';
 import Shot from '../components/Shot.astro';
+import Tui from '../components/Tui.astro';
 
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 const docs = `${base}install/`;
@@ -74,12 +75,11 @@ const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9
 \`runnerctl pause --force halyard/ledger\` cancels its runs and removes their runners`;
 
 // The clients, each a slot: filled once released, with a link to it; free until it ships with real output.
-// The TUI's slot takes its frames when plan 014 lands.
 const clientsDoc = `${base}clients/`;
 const clients = [
   { name: 'runnerctl', state: 'In 0.0.2', href: `${clientsDoc}#runnerctl` },
   { name: 'Web dashboard', state: 'In 0.0.2', href: `${clientsDoc}#dashboard` },
-  { name: 'TUI', state: 'Coming' },
+  { name: 'TUI', state: 'In 0.0.3', href: `${clientsDoc}#runnerctl-tui` },
   { name: 'Desktop app', state: 'Coming' },
 ];
 ---
@@ -133,7 +133,7 @@ const clients = [
             <a class="button" href="#install">Install</a>
             <a class="text-link" href={docs}>Read the docs</a>
           </div>
-          <p class="status">Early: 0.0.2 schedules runners and ships a CLI and a web dashboard.</p>
+          <p class="status">Early: 0.0.3 schedules runners and ships a CLI, a TUI and a web dashboard.</p>
         </div>
 
         <figure class="budget budget-hero">
@@ -192,6 +192,16 @@ const clients = [
             <a class="text-link" href={clientsDoc}>Dashboard and CLI</a>
           </div>
         </div>
+        <figure class="live-tui">
+          <figcaption>
+            <h3>Over SSH, the same in a terminal</h3>
+            <p><code>runnerctl tui</code></p>
+          </figcaption>
+          <Tui
+            name="overview"
+            label="runnerctl tui's overview at 136 by 28: the budget bar with jvm slot 1 at 4.4G and node slot 1 at 2.8G used, four slot cards, the slice's memory and CPU charts, the repositories and the latest jobs."
+          />
+        </figure>
       </section>
 
       <section class="calc wrap" id="budget" aria-labelledby="budget-title">
@@ -297,10 +307,10 @@ $ runnerd check-config runnerd.toml</span>
       </section>
 
       <section class="roadmap wrap" aria-labelledby="roadmap-title">
-        <h2 id="roadmap-title">Two slots still free</h2>
+        <h2 id="roadmap-title">One slot still free</h2>
         <ul class="strip">
           <li class="shipped">
-            <strong>runnerd 0.0.2</strong>
+            <strong>runnerd 0.0.3</strong>
             <span>Released</span>
           </li>
           {
@@ -322,7 +332,7 @@ $ runnerd check-config runnerd.toml</span>
           }
         </ul>
         <p class="shipped-list">
-          History, metrics, live events and controls on a JSON API, with the CLI and the dashboard.
+          History, metrics, live events and controls on a JSON API, with the CLI, the TUI and the dashboard.
         </p>
       </section>
 
@@ -697,7 +707,7 @@ $ runnerd check-config runnerd.toml</span>
     font-weight: 600;
   }
 
-  /* The clients, live: the dashboard's screenshot under the hero's bar, then runnerctl's real output. */
+  /* The clients, live: the dashboard's screenshot under the hero's bar, then runnerctl's real output and a frame of its TUI. */
   .live {
     padding-top: var(--section);
     display: grid;
@@ -747,6 +757,19 @@ $ runnerd check-config runnerd.toml</span>
 
   .live-pause pre {
     width: 100%;
+  }
+
+  .live-tui {
+    display: grid;
+    gap: 1rem;
+    margin: 0;
+  }
+
+  .live-tui figcaption {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0.5rem 1.5rem;
   }
 
   /* Column output keeps its columns: it scrolls in its box rather than wrap. */

@@ -3,7 +3,7 @@ title: Install
 description: Install runnerd and runnerctl on a Linux host and check that the host can run runners.
 ---
 
-runnerd is early: 0.0.2 schedules runners, records job history, metrics and events, and ships `runnerctl` and the [web dashboard](../clients/). Releases are Linux builds for x86_64 and aarch64.
+runnerd is early: 0.0.3 schedules runners, records job history, metrics and events, and ships `runnerctl`, its [TUI](../clients/#runnerctl-tui) and the [web dashboard](../clients/). Releases are Linux builds for x86_64 and aarch64.
 
 ## What the host needs
 
