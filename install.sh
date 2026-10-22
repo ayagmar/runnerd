@@ -11,13 +11,14 @@ set -eu
 repo=ayagmar/runnerd
 # The release workflow replaces "latest" with the release's tag in the copy it publishes.
 version=${RUNNERD_VERSION:-latest}
-prefix=$HOME/.local
+# Empty when HOME is unset; --prefix is then required.
+prefix=${HOME:+$HOME/.local}
 
 usage() {
   cat <<EOF
 Usage: install.sh [--prefix DIR] [--version TAG]
 
-  --prefix DIR   install into DIR/bin (default: $HOME/.local)
+  --prefix DIR   install into DIR/bin (default: ~/.local)
   --version TAG  release to install, such as v0.0.1 (default: $version)
 EOF
 }
@@ -38,6 +39,7 @@ while [ $# -gt 0 ]; do
   esac
 done
 
+[ -n "$prefix" ] || die "HOME is not set; pass --prefix DIR"
 [ "$(uname -s)" = Linux ] || die "runnerd runs on Linux only, not $(uname -s)"
 case "$(uname -m)" in
   x86_64|amd64) target=x86_64-unknown-linux-musl ;;
