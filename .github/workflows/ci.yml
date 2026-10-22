@@ -1,9 +1,9 @@
 name: ci
 
-# Every push, not only to main, so a branch is checked before its pull request exists.
 on:
   pull_request:
   push:
+    branches: [main]
 
 permissions:
   contents: read
