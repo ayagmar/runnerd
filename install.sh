@@ -60,7 +60,8 @@ base=${RUNNERD_DOWNLOAD_BASE:-$base}
 bindir=$prefix/bin
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+# Also removes copies left in bindir when the install stops before renaming them.
+trap 'rm -rf "$tmp" "$bindir/.runnerd.new" "$bindir/.runnerctl.new"' EXIT
 trap 'exit 1' INT TERM
 
 # Download and verify every archive before installing anything.
@@ -79,10 +80,13 @@ done
 
 mkdir -p "$bindir" || die "cannot create $bindir; pick another directory with --prefix"
 [ -w "$bindir" ] || die "$bindir is not writable; pick another directory with --prefix"
+# Copy both binaries next to their targets first, then rename both, so a failed copy (a full disk) leaves the old pair
+# in place, and a running binary is replaced in one step.
 for app in runnerd runnerctl; do
-  # Copy then rename, so a running binary is replaced in one step.
   cp "$tmp/$app-$target/$app" "$bindir/.$app.new"
   chmod 755 "$bindir/.$app.new"
+done
+for app in runnerd runnerctl; do
   mv -f "$bindir/.$app.new" "$bindir/$app"
 done
 echo "installed $("$bindir/runnerd" --version) and runnerctl to $bindir"
