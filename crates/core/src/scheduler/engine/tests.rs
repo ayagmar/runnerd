@@ -775,3 +775,19 @@ async fn a_job_whose_container_vanished_while_the_daemon_was_down_closes_after_t
     let job = until_state(&handle, 1, JobState::Completed).await;
     assert!(job.summary.timeline.cleaned_at.is_some());
 }
+
+#[tokio::test]
+async fn an_adopted_job_that_runs_long_after_a_restart_is_not_lost() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    run_until_restart(&github, &docker, &dir).await;
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    tokio::time::pause();
+    tokio::time::advance(super::LOST_AFTER + Duration::from_secs(60)).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let job = handle.store.job(1).await.unwrap().unwrap();
+    assert_eq!(job.summary.state, JobState::Running);
+}

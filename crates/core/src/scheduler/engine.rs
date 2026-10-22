@@ -238,6 +238,26 @@ struct RepositoryState {
     failures: u32,
 }
 
+/// A job whose runner is gone, waiting for GitHub to report it completed.
+#[derive(Debug, Clone)]
+struct Closing {
+    repository: String,
+    /// When the runner was found gone, on Tokio's clock, which tests can advance.
+    since: tokio::time::Instant,
+    /// The same, in milliseconds since the epoch.
+    since_ms: u64,
+}
+
+impl Closing {
+    fn now(repository: &str) -> Closing {
+        Closing {
+            repository: repository.to_owned(),
+            since: tokio::time::Instant::now(),
+            since_ms: time::now_ms(),
+        }
+    }
+}
+
 /// A runner's log capture found its job.
 #[derive(Debug)]
 struct Found {
@@ -286,8 +306,8 @@ pub struct Engine<G = Github, D = Docker> {
     mirror_until: MirrorPosition,
     /// Jobs recorded queued and not yet taken or closed, with their repository.
     queued_jobs: BTreeMap<u64, String>,
-    /// Jobs whose runner is gone, waiting for GitHub to report them completed: repository, and since when.
-    closing: BTreeMap<u64, (String, SystemTime)>,
+    /// Jobs whose runner is gone, waiting for GitHub to report them completed.
+    closing: BTreeMap<u64, Closing>,
     last_prune: Option<SystemTime>,
 }
 
@@ -494,7 +514,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 container: container.id.clone(),
                 busy: true,
                 started_at: SystemTime::now(),
-                job: None,
+                // Its capture reports it again; until then, or if it cannot, the history knows it.
+                job: self.store.runner_job(&container.name).await.ok().flatten(),
             };
             let known_repository = self.repositories.contains_key(&occupant.repository);
             let free = index.and_then(|index| {
@@ -538,7 +559,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Reads what the history left open: queued jobs to watch, and jobs to close. A job whose runner's container
-    /// is not `running` lost it while no daemon watched: its runner is recorded removed now, unless it was before.
+    /// is still `running` is left to run: `forget` closes it once its container is gone. Any other lost its
+    /// container while no daemon watched: its runner is recorded removed now, unless it was before.
     async fn recover_history(&mut self, running: &BTreeSet<String>) {
         match self.store.open_jobs().await {
             Ok(open) => {
@@ -547,13 +569,13 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                         self.queued_jobs.insert(job.id, job.repository);
                         continue;
                     }
-                    if let Some(runner) = &job.runner
-                        && !running.contains(runner)
-                    {
+                    if let Some(runner) = &job.runner {
+                        if running.contains(runner) {
+                            continue;
+                        }
                         self.store.runner_removed(runner, time::now_ms());
                     }
-                    self.closing
-                        .insert(job.id, (job.repository, SystemTime::now()));
+                    self.closing.insert(job.id, Closing::now(&job.repository));
                 }
             }
             Err(error) => warn!("cannot read the job history: {error}"),
@@ -737,21 +759,29 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
-        let closing: Vec<(u64, String, SystemTime)> = self
+        let closing: Vec<(u64, Closing)> = self
             .closing
             .iter()
-            .map(|(id, (repository, since))| (*id, repository.clone(), *since))
+            .map(|(id, closing)| (*id, closing.clone()))
             .collect();
-        for (id, repository, since) in closing {
+        for (
+            id,
+            Closing {
+                repository,
+                since,
+                since_ms,
+            },
+        ) in closing
+        {
             match self.github.job(&repository, id).await {
                 Ok(details) if details.status == "completed" => {
                     self.closing.remove(&id);
                     self.store.details(details);
                 }
-                Ok(_) | Err(_) if since.elapsed().is_ok_and(|waited| waited >= LOST_AFTER) => {
+                Ok(_) | Err(_) if since.elapsed() >= LOST_AFTER => {
                     warn!("{repository}: job {id} lost: GitHub did not report it completed");
                     self.closing.remove(&id);
-                    self.store.lost(id, time::ms(since));
+                    self.store.lost(id, since_ms);
                 }
                 Ok(details) => self.store.details(details),
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
@@ -1085,7 +1115,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .and_then(|(_, candidate)| candidate.job)
             .or(occupant.job);
         if let Some(job) = job {
-            self.closing.insert(job, (occupant.repository.clone(), now));
+            self.closing.insert(job, Closing::now(&occupant.repository));
         }
     }
 
