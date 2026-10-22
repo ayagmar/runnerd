@@ -2,4 +2,5 @@
 
 pub mod config;
 pub mod docker;
+pub mod github;
 pub mod isolation;
