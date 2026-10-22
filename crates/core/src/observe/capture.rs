@@ -8,6 +8,8 @@
 //! many bytes, and `@@end <page>` once a page is complete. `Parser` turns it into whole lines and the position to
 //! resume from, so a restarted daemon continues where the stored log ends.
 
+use std::fmt::Write as _;
+
 use crate::store::LogPosition;
 
 /// The script; `bash -c SCRIPT capture <page> <offset>` resumes at that page and byte offset.
@@ -95,9 +97,17 @@ pub struct Parser {
     /// The page being read, and the offset in it where `partial` starts.
     page: u64,
     partial_offset: u64,
-    /// The start of a line whose end has not arrived.
+    /// The start of a line whose end has not arrived, at most `MAX_LINE` bytes of it.
     partial: Vec<u8>,
+    /// That line's length so far, with the bytes past `MAX_LINE` that were dropped.
+    partial_len: u64,
 }
+
+/// The longest line kept: the rest of a longer one is dropped as it arrives, so one line never holds more memory.
+pub const MAX_LINE: usize = 1 << 20;
+
+/// Bytes of lines per `Captured::Lines`, about: a long page comes in batches, each with where to resume after it.
+const BATCH: usize = 1 << 20;
 
 const BOM: &[u8] = "\u{feff}".as_bytes();
 
@@ -144,17 +154,16 @@ impl Parser {
                 run_id: *run_id,
             }),
             (Some("@@page"), [page, offset, length]) => {
-                if *page != self.page || *offset != self.partial_offset + self.partial.len() as u64
-                {
+                if *page != self.page || *offset != self.partial_offset + self.partial_len {
                     // A new page, or a resumed one: whatever was pending belongs to a page now complete.
                     self.page = *page;
-                    self.partial.clear();
+                    self.take_line();
                     self.partial_offset = *offset;
                 }
                 self.remaining = usize::try_from(*length).unwrap_or(usize::MAX);
             }
-            (Some("@@end"), [page]) if *page == self.page && !self.partial.is_empty() => {
-                let line = text(&std::mem::take(&mut self.partial));
+            (Some("@@end"), [page]) if *page == self.page && self.partial_len > 0 => {
+                let line = self.take_line();
                 self.partial_offset = 0;
                 captured.push(Captured::Lines {
                     lines: vec![line],
@@ -179,24 +188,64 @@ impl Parser {
         }
     }
 
+    /// The pending line as text, said to be cut if it was; clears it.
+    fn take_line(&mut self) -> String {
+        let mut line = text(&self.partial);
+        let dropped = self.partial_len - self.partial.len() as u64;
+        if dropped > 0 {
+            let _ = write!(
+                line,
+                " [runnerd: {dropped} more bytes of this line not kept]"
+            );
+        }
+        self.partial.clear();
+        self.partial_len = 0;
+        line
+    }
+
     fn data(&mut self, data: &[u8], captured: &mut Vec<Captured>) {
-        self.partial.extend_from_slice(data);
-        let Some(last) = self.partial.iter().rposition(|byte| *byte == b'\n') else {
-            return;
-        };
-        let rest = self.partial.split_off(last + 1);
-        let complete = std::mem::replace(&mut self.partial, rest);
-        let lines = complete[..last]
-            .split(|byte| *byte == b'\n')
-            .map(text)
-            .collect();
-        self.partial_offset += complete.len() as u64;
-        captured.push(Captured::Lines {
-            lines,
-            position: LogPosition {
-                page: self.page,
-                offset: self.partial_offset,
-            },
-        });
+        let mut lines = Vec::new();
+        let mut bytes = 0;
+        for (index, segment) in data.split(|byte| *byte == b'\n').enumerate() {
+            // Every segment but the first follows a newline, which ended the pending line.
+            if index > 0 {
+                let length = self.partial_len + 1;
+                let line = self.take_line();
+                self.partial_offset += length;
+                bytes += line.len() + 1;
+                lines.push(line);
+                if bytes >= BATCH {
+                    bytes = 0;
+                    captured.push(Captured::Lines {
+                        lines: std::mem::take(&mut lines),
+                        position: self.position(),
+                    });
+                }
+            }
+            let room = MAX_LINE - self.partial.len();
+            self.partial
+                .extend_from_slice(&segment[..room.min(segment.len())]);
+            self.partial_len += segment.len() as u64;
+        }
+        if !lines.is_empty() {
+            captured.push(Captured::Lines {
+                lines,
+                position: self.position(),
+            });
+        }
+    }
+
+    /// Where the capture resumes: after the last complete line.
+    fn position(&self) -> LogPosition {
+        LogPosition {
+            page: self.page,
+            offset: self.partial_offset,
+        }
+    }
+
+    /// Bytes held for the pending line.
+    #[cfg(test)]
+    pub(crate) fn pending(&self) -> usize {
+        self.partial.capacity()
     }
 }

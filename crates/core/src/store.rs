@@ -159,7 +159,8 @@ enum Write {
     Log {
         job: u64,
         lines: Vec<String>,
-        position: LogPosition,
+        /// Where the capture resumes once these lines are stored; `None` for all but the last part of a batch.
+        position: Option<LogPosition>,
         max_bytes: u64,
         /// The lines' share of `LOG_BACKLOG`, given back once they are stored.
         _backlog: OwnedSemaphorePermit,
@@ -283,21 +284,45 @@ impl Store {
     }
 
     /// Appends log lines to a job, up to `max_bytes` per job, and records where the capture continues. Waits while
-    /// `LOG_BACKLOG` bytes of lines are waiting to be stored.
+    /// `LOG_BACKLOG` bytes of lines are waiting to be stored; a larger batch goes in parts, each waiting its turn.
     pub async fn log(&self, job: u64, lines: Vec<String>, position: LogPosition, max_bytes: u64) {
-        let bytes: u64 = lines.iter().map(|line| line.len() as u64 + 1).sum();
-        let share = u32::try_from(bytes.clamp(1, LOG_BACKLOG)).unwrap_or(u32::MAX);
-        // The semaphore is never closed.
-        let Ok(backlog) = self.backlog.clone().acquire_many_owned(share).await else {
-            return;
-        };
-        self.send(Write::Log {
-            job,
-            lines,
-            position,
-            max_bytes,
-            _backlog: backlog,
+        let size = |line: &String| line.len() as u64 + 1;
+        let mut lines = lines.into_iter().map(|mut line| {
+            // No line takes the whole backlog; the capture already cuts lines far shorter.
+            if size(&line) > LOG_BACKLOG {
+                let mut end = usize::try_from(LOG_BACKLOG / 2).unwrap_or(usize::MAX);
+                while !line.is_char_boundary(end) {
+                    end -= 1;
+                }
+                line.truncate(end);
+            }
+            line
         });
+        let mut next = lines.next();
+        loop {
+            let (mut part, mut bytes) = (Vec::new(), 0);
+            while let Some(line) = next.take_if(|line| bytes + size(line) <= LOG_BACKLOG) {
+                bytes += size(&line);
+                part.push(line);
+                next = lines.next();
+            }
+            let last = next.is_none();
+            let share = u32::try_from(bytes.max(1)).unwrap_or(u32::MAX);
+            // The semaphore is never closed.
+            let Ok(backlog) = self.backlog.clone().acquire_many_owned(share).await else {
+                return;
+            };
+            self.send(Write::Log {
+                job,
+                lines: part,
+                position: last.then_some(position),
+                max_bytes,
+                _backlog: backlog,
+            });
+            if last {
+                return;
+            }
+        }
     }
 
     /// Records samples of runner containers.

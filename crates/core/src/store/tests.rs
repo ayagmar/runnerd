@@ -287,3 +287,39 @@ async fn log_lines_wait_while_the_writer_is_behind_by_the_backlog() {
     store.flush().await;
     assert_eq!(store.job(1).await.unwrap().unwrap().summary.log.lines, 64);
 }
+
+#[tokio::test]
+async fn a_log_batch_larger_than_the_backlog_waits_for_the_writer_too() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.queued("o/r", &queued(1));
+    store.flush().await;
+    let holder = Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
+    // One batch of twice the backlog.
+    let mib = usize::try_from((2 * LOG_BACKLOG) >> 20).unwrap();
+    let batch = vec!["z".repeat((1 << 20) - 1); mib];
+    let producer = tokio::spawn({
+        let store = store.clone();
+        async move {
+            store
+                .log(1, batch, LogPosition { page: 1, offset: 9 }, u64::MAX)
+                .await;
+        }
+    });
+    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    let waited = !producer.is_finished();
+    holder.execute_batch("COMMIT").unwrap();
+    producer.await.unwrap();
+    assert!(waited, "the whole batch was queued past the backlog");
+    store.flush().await;
+    assert_eq!(
+        store.job(1).await.unwrap().unwrap().summary.log.lines,
+        mib as u64
+    );
+    assert_eq!(
+        store.log_position(1).await.unwrap(),
+        LogPosition { page: 1, offset: 9 }
+    );
+}

@@ -3,11 +3,10 @@
 
 use std::path::Path;
 
-use super::capture::{Captured, Parser};
+use super::capture::{Captured, MAX_LINE, Parser};
 use super::metrics::{Paths, Sampler, Tracked};
 use super::mirror::{self, Leases};
-use crate::store::LogPosition;
-use crate::store::MirrorPosition;
+use crate::store::{LOG_BACKLOG, LogPosition, MirrorPosition};
 use crate::testdir::TestDir;
 
 /// Writes a container's cgroup files under the `ci.slice` fixture, and its network counters.
@@ -212,4 +211,57 @@ fn a_response_logged_in_the_same_millisecond_as_the_last_one_counted_is_counted_
     let (bytes, until) = leases.attribute(&second, until);
     assert_eq!(bytes, [("runner-1".to_owned(), 1200)]);
     assert_eq!(leases.attribute(&second, until).0, []);
+}
+
+#[test]
+fn a_line_larger_than_the_backlog_and_the_log_cap_is_cut_as_it_arrives() {
+    let total = 3 * usize::try_from(LOG_BACKLOG).unwrap();
+    let mut parser = Parser::default();
+    let mut captured = parser.feed(format!("@@page 1 0 {}\n", total + 1).as_bytes());
+    let chunk = vec![b'x'; 1 << 20];
+    for _ in 0..total / chunk.len() {
+        captured.extend(parser.feed(&chunk));
+        assert!(
+            parser.pending() <= MAX_LINE,
+            "{} bytes held",
+            parser.pending()
+        );
+    }
+    captured.extend(parser.feed(b"\n"));
+    let lines = lines(&captured);
+    assert_eq!(lines.len(), 1);
+    assert!(lines[0].starts_with(&"x".repeat(MAX_LINE)));
+    assert!(lines[0].len() < MAX_LINE + 100, "{} bytes", lines[0].len());
+    // Resuming continues after the whole line, not after the part kept.
+    assert!(matches!(
+        captured.last(),
+        Some(Captured::Lines { position: LogPosition { page: 1, offset }, .. }) if *offset == total as u64 + 1
+    ));
+}
+
+#[test]
+fn many_lines_in_one_chunk_come_in_batches_each_with_where_to_resume() {
+    let line = "y".repeat(999);
+    let count = 3000_u64;
+    let mut parser = Parser::default();
+    let mut body = format!("@@page 1 0 {}\n", count * 1000).into_bytes();
+    for _ in 0..count {
+        body.extend_from_slice(line.as_bytes());
+        body.push(b'\n');
+    }
+    let captured = parser.feed(&body);
+    let mut resumed_at = 0;
+    for batch in &captured {
+        let Captured::Lines { lines, position } = batch else {
+            panic!("{batch:?}");
+        };
+        assert!(
+            lines.len() * 1000 <= MAX_LINE + 1000,
+            "{} lines",
+            lines.len()
+        );
+        resumed_at += lines.len() as u64 * 1000;
+        assert_eq!(position.offset, resumed_at);
+    }
+    assert_eq!(resumed_at, count * 1000);
 }

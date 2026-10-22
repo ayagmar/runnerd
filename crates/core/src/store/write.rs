@@ -417,7 +417,7 @@ impl Writer<'_> {
         &self,
         job: u64,
         lines: Vec<String>,
-        position: LogPosition,
+        position: Option<LogPosition>,
         max_bytes: u64,
         announced: &mut Announced,
     ) -> rusqlite::Result<()> {
@@ -448,9 +448,16 @@ impl Writer<'_> {
             bytes += size;
         }
         self.db.execute(
-            "UPDATE jobs SET log_lines = ?2, log_bytes = ?3, log_truncated = ?4, log_page = ?5, \
-             log_offset = ?6 WHERE id = ?1",
-            params![job, count, bytes, truncated, position.page, position.offset],
+            "UPDATE jobs SET log_lines = ?2, log_bytes = ?3, log_truncated = ?4, \
+             log_page = coalesce(?5, log_page), log_offset = coalesce(?6, log_offset) WHERE id = ?1",
+            params![
+                job,
+                count,
+                bytes,
+                truncated,
+                position.map(|position| position.page),
+                position.map(|position| position.offset)
+            ],
         )?;
         Ok(())
     }
