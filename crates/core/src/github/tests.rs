@@ -1,3 +1,6 @@
+//! The GitHub client against a fake GitHub on a loopback port: queued jobs, conditional requests, rate limits,
+//! token refresh, runner registration and deletion, and that the token never shows in `Debug` output or errors.
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 

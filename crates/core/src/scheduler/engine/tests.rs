@@ -1,3 +1,6 @@
+//! Runner names, and the engine against fake GitHub and Docker: polling order, restart recovery, a Docker that
+//! does not answer, and which runners it deletes.
+
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;

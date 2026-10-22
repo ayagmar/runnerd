@@ -1,4 +1,6 @@
-//! Runner containers through the Docker Engine API.
+//! Runner containers through the Docker Engine API: the connection, container and volume requests, and the
+//! `DockerApi` trait the engine and the caches call. It decides nothing about scheduling, and a JIT config only
+//! ever reaches a container as a root-only file, never the create request or a log line.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;

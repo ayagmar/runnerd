@@ -1,3 +1,5 @@
+//! Parsing `runnerd.toml` and checking it against a slice's budget.
+
 use std::path::Path;
 
 use super::{ByteSize, Config, Warning, parse_memory_max};

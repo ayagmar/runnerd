@@ -1,3 +1,6 @@
+//! That the JIT config stays out of `Debug` output, the create request and the log, and that only `unix://` Docker
+//! hosts are accepted. No Docker needed.
+
 use std::collections::BTreeMap;
 
 use super::{DockerApi, JitConfig, RunnerSpec, connect_to, create_body};

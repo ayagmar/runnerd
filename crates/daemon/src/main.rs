@@ -1,3 +1,6 @@
+//! `runnerd`: the daemon and its commands (`serve`, `stop`, `doctor`, `check-config`). Wires config, GitHub,
+//! Docker and the engine together; scheduling lives in `runnerd_core::scheduler`, the API in `api`.
+
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 

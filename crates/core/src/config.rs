@@ -1,5 +1,6 @@
 //! `runnerd.toml`: the repositories to serve, the runner profiles they use, the shared caches and the host
-//! budget they must fit in.
+//! budget they must fit in. Builds without the `host` feature, so clients can read a config; its only I/O is
+//! reading the file and asking `systemctl` for a slice's `MemoryMax`. It never talks to Docker or GitHub.
 
 use std::collections::BTreeMap;
 use std::fmt;

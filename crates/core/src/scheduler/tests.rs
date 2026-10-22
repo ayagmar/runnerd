@@ -1,3 +1,5 @@
+//! `plan` as a pure function: slots, labels, the budget, idle runners, paused and held repositories.
+
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 

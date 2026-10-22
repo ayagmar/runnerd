@@ -1,4 +1,5 @@
-//! `runnerd doctor`: what the host is missing to run runners, each with the fix.
+//! `runnerd doctor`: what the host is missing to run runners, each with the fix. It reads the host and changes
+//! nothing; the user runs the fixes.
 
 use std::fmt;
 use std::path::Path;

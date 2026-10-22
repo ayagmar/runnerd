@@ -1,3 +1,5 @@
+//! The API over a real Unix socket: routes, owner-only access, and socket takeover.
+
 use std::sync::Arc;
 
 use reqwest::StatusCode;

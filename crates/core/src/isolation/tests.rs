@@ -1,3 +1,5 @@
+//! What each isolation backend sets on a runner container.
+
 use std::collections::BTreeMap;
 
 use bollard::models::HostConfig;
