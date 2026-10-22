@@ -7,11 +7,20 @@ use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
-use super::{Engine, Occupant, image, unix_secs};
+use super::{Engine, Occupant, RunningJobs, image, unix_secs};
 use crate::cache::{self, runner_mounts};
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
 use crate::scheduler::SlotRef;
+
+/// Why a slot's runner is removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Release {
+    /// Its container stopped on its own.
+    Ended,
+    /// It was idle and is no longer needed.
+    Idle,
+}
 
 /// Where the next backoff of a repository whose runners keep failing ends.
 fn backoff(failures: u32) -> Duration {
@@ -36,16 +45,16 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             };
             if !running {
                 info!("{}: {} ended", occupant.repository, occupant.runner_name);
-                self.release(&slot, &occupant, true).await;
+                self.release(&slot, &occupant, Release::Ended).await;
             }
         }
     }
 
-    /// Removes a slot's container and its runner, then frees the slot. With `ended`, the container stopped on its
-    /// own, and if its runner took no job, the repository's next runners are held back for a while.
-    async fn release(&mut self, slot: &SlotRef, occupant: &Occupant, ended: bool) {
+    /// Removes a slot's container and its runner, then frees the slot. If the container `Ended` and its runner took
+    /// no job, the repository's next runners are held back for a while.
+    async fn release(&mut self, slot: &SlotRef, occupant: &Occupant, why: Release) {
         // The runner logs each job it takes; its exit code says nothing (run.sh exits 0 when it fails to start).
-        let took_job = if ended {
+        let took_job = if why == Release::Ended {
             match self.docker.logs(&occupant.container).await {
                 Ok(logs) => Some(logs.contains("Running job: ")),
                 Err(error) => {
@@ -113,8 +122,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         self.drop_closed_slots();
     }
 
-    /// Removes an idle runner, or with `force` a busy one and its job.
-    pub(super) async fn stop(&mut self, slot: &SlotRef, force: bool) {
+    /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job.
+    pub(super) async fn stop(&mut self, slot: &SlotRef, jobs: RunningJobs) {
         let Some(occupant) = self
             .slots
             .get(&slot.profile)
@@ -124,7 +133,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         else {
             return;
         };
-        if force {
+        if jobs == RunningJobs::Kill {
             info!("{}: killing {}", occupant.repository, occupant.runner_name);
             if let Err(error) = self.docker.remove(&occupant.container).await
                 && !is_not_found(&error)
@@ -171,7 +180,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     "{}: removed idle {}",
                     occupant.repository, occupant.runner_name
                 );
-                self.release(slot, &occupant, false).await;
+                self.release(slot, &occupant, Release::Idle).await;
             }
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }

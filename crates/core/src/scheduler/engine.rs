@@ -27,7 +27,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use self::caches::Trimmed;
-pub use self::control::{Command, Commands, Commit, Control, ControlError, Shutdown};
+pub use self::control::{Command, Commands, Commit, Control, ControlError, RunningJobs, Shutdown};
 use self::history::{Closing, Found};
 use super::SlotRef;
 use crate::api;

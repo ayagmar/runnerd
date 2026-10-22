@@ -34,6 +34,15 @@ pub enum Shutdown {
     Force,
 }
 
+/// What a pause, a shutdown or a runner's removal does with the jobs runners are running.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunningJobs {
+    /// Leave them running: a pause refuses, a shutdown waits for them, a busy runner stays.
+    Keep,
+    /// Kill them: a pause cancels their runs, a shutdown and a removal kill their runners.
+    Kill,
+}
+
 /// Why the engine refused or failed a command from the API.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ControlError {
@@ -65,12 +74,12 @@ pub enum ControlError {
 /// A command the engine carries out between ticks, with where its answer goes.
 #[derive(Debug)]
 pub enum Command {
-    /// Pause a repository; with `force`, cancel its running jobs.
+    /// Pause a repository; with `RunningJobs::Kill`, cancel its running jobs.
     Pause {
         /// `owner/name`.
         repository: String,
-        /// Cancel running jobs instead of refusing.
-        force: bool,
+        /// Cancel running jobs, or refuse while there are any.
+        jobs: RunningJobs,
         /// The answer.
         reply: oneshot::Sender<Result<api::Paused, ControlError>>,
     },
@@ -188,11 +197,10 @@ impl Control {
     }
 
     /// Asks the loop to stop; a forced request overrides a graceful one, never the other way.
-    pub fn shutdown(&self, force: bool) {
-        let mode = if force {
-            Shutdown::Force
-        } else {
-            Shutdown::Graceful
+    pub fn shutdown(&self, jobs: RunningJobs) {
+        let mode = match jobs {
+            RunningJobs::Keep => Shutdown::Graceful,
+            RunningJobs::Kill => Shutdown::Force,
         };
         let mut shutdown = lock(&self.shutdown);
         *shutdown = (*shutdown).max(mode);
@@ -216,13 +224,17 @@ impl Control {
         answer.await.map_err(|_| ControlError::Stopped)
     }
 
-    /// Pauses a repository. Without `force`, refuses while it runs a job; with it, cancels the runs of its running
-    /// jobs on GitHub, whose runners are removed once they report it or `CANCEL_GRACE` later, and removes its other
-    /// runners at once.
-    pub async fn pause(&self, repository: &str, force: bool) -> Result<api::Paused, ControlError> {
+    /// Pauses a repository. With `RunningJobs::Keep`, refuses while it runs a job; with `Kill`, cancels the runs of
+    /// its running jobs on GitHub, whose runners are removed once they report it or `CANCEL_GRACE` later, and
+    /// removes its other runners at once.
+    pub async fn pause(
+        &self,
+        repository: &str,
+        jobs: RunningJobs,
+    ) -> Result<api::Paused, ControlError> {
         self.send(|reply| Command::Pause {
             repository: repository.to_owned(),
-            force,
+            jobs,
             reply,
         })
         .await?
@@ -286,10 +298,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         match command {
             Command::Pause {
                 repository,
-                force,
+                jobs,
                 reply,
             } => {
-                let _ = reply.send(self.pause(&repository, force).await);
+                let _ = reply.send(self.pause(&repository, jobs).await);
             }
             Command::Reseed { profile, reply } => {
                 let _ = reply.send(self.request_reseed(&profile));
@@ -315,13 +327,13 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Pauses a repository. A runner that holds a job, or that GitHub reports busy, refuses it unless `force`;
-    /// with `force`, the runs of the repository's jobs are cancelled, and its runners removed once they exit or
-    /// `CANCEL_GRACE` later; a runner whose run cannot be cancelled is removed at once.
+    /// Pauses a repository. A runner that holds a job, or that GitHub reports busy, refuses it with
+    /// `RunningJobs::Keep`; with `Kill`, the runs of the repository's jobs are cancelled, and its runners removed
+    /// once they exit or `CANCEL_GRACE` later; a runner whose run cannot be cancelled is removed at once.
     pub(super) async fn pause(
         &mut self,
         repository: &str,
-        force: bool,
+        running: RunningJobs,
     ) -> Result<api::Paused, ControlError> {
         if !self.repositories.contains_key(repository) {
             return Err(ControlError::NotFound(format!(
@@ -339,7 +351,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .filter(|(_, occupant)| occupant.busy || occupant.job.is_some())
             .map(|(_, occupant)| occupant.running_job())
             .collect();
-        if !force && !jobs.is_empty() {
+        if running == RunningJobs::Keep && !jobs.is_empty() {
             return Err(ControlError::Busy {
                 message: format!(
                     "{repository} runs {}; pause with force to cancel it",
@@ -351,7 +363,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         self.control.set_paused(repository, true);
         info!("{repository}: paused");
         let mut stopped = Vec::new();
-        if !force {
+        if running == RunningJobs::Keep {
             return Ok(api::Paused { stopped });
         }
         for (slot, occupant) in runners {
@@ -373,7 +385,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     tokio::time::Instant::now() + CANCEL_GRACE,
                 );
             } else {
-                self.stop(&slot, true).await;
+                self.stop(&slot, RunningJobs::Kill).await;
                 if self
                     .occupied()
                     .any(|(_, candidate)| candidate.runner_name == occupant.runner_name)
@@ -409,7 +421,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 CANCEL_GRACE.as_secs()
             );
             // The deadline stays until the runner is gone, so a failed removal is tried again next tick.
-            self.stop(&slot, true).await;
+            self.stop(&slot, RunningJobs::Kill).await;
         }
     }
 

@@ -10,7 +10,7 @@ use runnerd_core::config::{ByteSize, Config, slice_memory_max};
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
-use runnerd_core::scheduler::engine::{Engine, HostIdentity, Setup};
+use runnerd_core::scheduler::engine::{Engine, HostIdentity, RunningJobs, Setup};
 use runnerd_core::store::Store;
 use tracing::{info, warn};
 
@@ -210,19 +210,19 @@ async fn serve(
     );
     let control = handle.control.clone();
     tokio::spawn(async move {
-        for force in [false, true] {
+        for jobs in [RunningJobs::Keep, RunningJobs::Kill] {
             if wait_for_signal().await.is_err() {
                 return;
             }
             info!(
                 "{}",
-                if force {
+                if jobs == RunningJobs::Kill {
                     "killing running jobs"
                 } else {
                     "stopping once running jobs finish; signal again to kill them"
                 }
             );
-            control.shutdown(force);
+            control.shutdown(jobs);
         }
     });
     info!("serving the API on {}", socket.display());

@@ -12,7 +12,9 @@ use runnerd_core::api::{
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::github::{JobDetails, QueuedJob};
-use runnerd_core::scheduler::engine::{Command, Commands, Control, ControlError, Handle, Shutdown};
+use runnerd_core::scheduler::engine::{
+    Command, Commands, Control, ControlError, Handle, RunningJobs, Shutdown,
+};
 use runnerd_core::store::{LogPosition, RunnerRecord, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 
@@ -54,7 +56,7 @@ async fn fake_engine(
         match command {
             Command::Pause {
                 repository,
-                force,
+                jobs,
                 reply,
             } => {
                 let busy = repository == "o/busy";
@@ -62,7 +64,7 @@ async fn fake_engine(
                     Err(ControlError::NotFound(format!(
                         "{repository} is not configured"
                     )))
-                } else if busy && !force {
+                } else if busy && jobs == RunningJobs::Keep {
                     Err(ControlError::Busy {
                         message: "o/busy runs job 7 on runner-1".to_owned(),
                         jobs: vec![busy_job()],

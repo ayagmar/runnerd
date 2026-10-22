@@ -7,7 +7,7 @@ use std::time::SystemTime;
 
 use tracing::{info, warn};
 
-use super::{Engine, Shutdown};
+use super::{Engine, RunningJobs, Shutdown};
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi};
 use crate::scheduler::{Decision, Profile, Repository, RunnerSlot, Slot, plan};
@@ -42,7 +42,13 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         };
         for decision in decisions {
             match decision {
-                Decision::Stop { slot } => self.stop(&slot, mode == Shutdown::Force).await,
+                Decision::Stop { slot } => {
+                    let jobs = match mode {
+                        Shutdown::Force => RunningJobs::Kill,
+                        Shutdown::No | Shutdown::Graceful => RunningJobs::Keep,
+                    };
+                    self.stop(&slot, jobs).await;
+                }
                 Decision::Start { slot, repository } => self.start(&slot, &repository).await,
             }
         }
