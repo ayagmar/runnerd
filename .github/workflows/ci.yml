@@ -86,8 +86,11 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
-      # Installs the toolchain pinned in rust-toolchain.toml; rust-cache keys on its rustc version and Cargo.lock.
-      - run: rustup toolchain install
+      # Installs the toolchain pinned in rust-toolchain.toml. rust-cache keys on every installed toolchain, and the
+      # runner image's stable changes between image versions, so remove it to keep the key stable.
+      - run: |
+          rustup toolchain install
+          rustup toolchain uninstall stable
       # Pull requests restore main's cache but never write their own, so the cache stays within the repository limit.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
