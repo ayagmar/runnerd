@@ -9,13 +9,16 @@ Where things live and which rules hold them together. The why behind each rule i
 | `runnerd-core` | `crates/core` | config, API types, scheduling, Docker and GitHub clients, caches, job history | anything; Docker, GitHub and Tokio only behind the `host` feature |
 | `runnerd` | `crates/daemon` | the daemon binary: `serve`, `stop`, `doctor`, `check-config`, the Unix-socket API | `runnerd-core` with `host` |
 | `runnerctl` | `crates/cli` | the command-line client | `runnerd-core` without `host` |
+| `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` without `host` |
 
 `runnerd-core` modules:
 
 - `api`, `config`: build without `host`. Every client reads these.
 - `docker`, `github`, `cache`, `isolation`, `scheduler`, `observe`, `store`: `host` only ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)).
 
-The web dashboard (`crates/web`) and the desktop app (`crates/desktop`) will be clients like `runnerctl`.
+The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and
+writes only through the API on the Unix socket ([ADR 0020](docs/adr/0020-dashboard-is-an-api-client-on-loopback.md)).
+The desktop app (`crates/desktop`) will be another.
 [`.github/scripts/check-boundaries.sh`](.github/scripts/check-boundaries.sh) fails CI when any workspace crate other
 than `runnerd` and `runnerd-core` builds `bollard`, `reqwest` or core's `host` feature.
 
@@ -36,6 +39,10 @@ client → transport → principal → handler → core
    state is a `Command` on a channel the engine answers between ticks, so it sees the same state a tick does.
 
 A new transport (SSH, Tailscale) produces a `Principal` and reuses the handlers.
+
+The dashboard's path is browser → loopback TCP → session check → `runnerd-web` → Unix socket → the path above. Its
+session check ([`crates/web/src/auth.rs`](crates/web/src/auth.rs)) admits a request only with the session cookie, and
+a write only with the dashboard's own `Origin`; the daemon then sees the dashboard as its own user.
 
 ## Job lifecycle
 
@@ -67,6 +74,7 @@ nothing until Docker has listed them.
 | Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
+| Dashboard session | in memory, new each daemon run; the one-time login URL in `runnerd.web` next to the socket (0600) |
 
 | Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes; times in ms |
 
@@ -93,3 +101,5 @@ nothing until Docker has listed them.
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the
   config, which a reload may have lowered since they started.
+- The dashboard listens on loopback only, never logs its session token or login code, and serves every file its
+  pages load; its Content-Security-Policy allows nothing else.

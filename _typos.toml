@@ -1,0 +1,3 @@
+[files]
+# Vendored and minified: its short identifiers read as typos.
+extend-exclude = ["crates/web/assets/datastar.js"]
