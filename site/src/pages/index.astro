@@ -5,6 +5,10 @@ import mark from '../assets/mark.svg?raw';
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 const docs = `${base}install/`;
 const repo = 'https://github.com/ayagmar/runnerd';
+const title = 'runnerd: GitHub Actions runners on your own Linux machine';
+const description =
+  'runnerd runs GitHub Actions jobs on a Linux machine you already have: a fresh container per job, Docker inside it without --privileged, every runner inside one memory budget.';
+const url = new URL(base, Astro.site).href;
 const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
 
 // examples/runnerd.toml, in GiB: two trellis runners, two glowly runners and the Docker Hub mirror in ci.slice.
@@ -84,11 +88,15 @@ const next = [
   <head>
     <meta charset="utf-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1" />
-    <title>runnerd: GitHub Actions runners on your own Linux machine</title>
-    <meta
-      name="description"
-      content="runnerd runs GitHub Actions jobs on a Linux machine you already have: a fresh container per job, Docker inside it without --privileged, every runner inside one memory budget."
-    />
+    <title>{title}</title>
+    <meta name="description" content={description} />
+    <link rel="canonical" href={url} />
+    <meta property="og:title" content={title} />
+    <meta property="og:description" content={description} />
+    <meta property="og:url" content={url} />
+    <meta property="og:type" content="website" />
+    <meta property="og:site_name" content="runnerd" />
+    <meta name="twitter:card" content="summary" />
     <link rel="icon" href={`${base}favicon.svg`} type="image/svg+xml" />
     <script is:inline>
       // Same key as Starlight's theme picker, so the landing page and the docs agree.
