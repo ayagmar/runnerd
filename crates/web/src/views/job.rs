@@ -354,7 +354,42 @@ pub(crate) fn log(view: &JobView) -> Markup {
     }
 }
 
-/// One log line.
+/// One log line, without the terminal colour codes steps print.
 pub(crate) fn log_line(text: &str) -> Markup {
-    html! { li { (text) } }
+    html! { li { (strip_escapes(text)) } }
+}
+
+/// `text` without ANSI escape sequences: `ESC [ … final byte` and lone escapes.
+fn strip_escapes(text: &str) -> String {
+    let mut plain = String::with_capacity(text.len());
+    let mut chars = text.chars().peekable();
+    while let Some(c) = chars.next() {
+        if c != '\u{1b}' {
+            plain.push(c);
+            continue;
+        }
+        if chars.next_if_eq(&'[').is_some() {
+            // Parameters and intermediates up to the final byte, `@` to `~`.
+            for c in chars.by_ref() {
+                if ('@'..='~').contains(&c) {
+                    break;
+                }
+            }
+        }
+    }
+    plain
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_coloured_log_line_shows_as_its_text() {
+        let line = "\u{1b}[36;1mdocker info --format x\u{1b}[0m done";
+        assert_eq!(
+            log_line(line).into_string(),
+            "<li>docker info --format x done</li>"
+        );
+    }
 }
