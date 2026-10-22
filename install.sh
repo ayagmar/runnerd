@@ -58,7 +58,8 @@ base=${RUNNERD_DOWNLOAD_BASE:-$base}
 bindir=$prefix/bin
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT INT TERM
+trap 'rm -rf "$tmp"' EXIT
+trap 'exit 1' INT TERM
 
 # Download and verify every archive before installing anything.
 for app in runnerd runnerctl; do
