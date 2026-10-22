@@ -47,6 +47,9 @@ jobs:
               - 'Cargo.lock'
               - 'rust-toolchain.toml'
               - 'rustfmt.toml'
+              - '.cargo/**'
+              - 'clippy.toml'
+              - '.clippy.toml'
               - 'deny.toml'
               - '.github/workflows/ci.yml'
             deny:

@@ -10,7 +10,7 @@ starts only the jobs those paths can affect:
 
 | Job | Runs on a pull request that changes |
 |---|---|
-| `rust`: fmt, clippy, tests | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `deny.toml` |
+| `rust`: fmt, clippy, tests | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `trellis` and `glowly` stages, pushes nothing | `image/**` |
 | `site-build`: Astro build | `site/**` |
