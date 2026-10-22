@@ -121,7 +121,7 @@ bytes, CPU millicores.
 | `GET /v1/host/samples?since=` | the slice's CPU and memory over time |
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`): counts, queue and run time, CPU, memory, mirror bytes |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
-| `GET /v1/events?job=&logs=` | server-sent events: `job.queued`, `job.started`, `job.step`, `job.finished`, `slot.changed`, `budget.changed`, `cache.reseeded`, and live `job.sample`, `host.sample` and (with `logs=true`) `log.line` |
+| `GET /v1/events?job=&logs=` | server-sent events: `job.queued`, `job.started`, `job.step`, `job.finished`, `slot.changed`, `budget.changed`, `repository.changed` (paused or resumed, its queue, or a reload changed or added it), `repository.removed` (a reload removed it), `cache.reseeded`, and live `job.sample`, `host.sample` and (with `logs=true`) `log.line` |
 
 A forced pause cancels the run of each of the repository's running jobs (GitHub cancels runs, not single jobs, so
 the run's other jobs are cancelled too) and lets the runner report it cancelled, which takes under a minute; a runner

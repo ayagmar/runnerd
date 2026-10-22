@@ -1659,3 +1659,104 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
         .unwrap()
         .unwrap();
 }
+
+/// The `repository.*` events stored after `after`, and the last event's ID.
+async fn repository_events(handle: &Handle, after: &mut u64) -> Vec<api::Event> {
+    handle.store.flush().await;
+    let events = handle.store.events_after(*after, 100).await.unwrap();
+    if let Some(last) = events.last() {
+        *after = last.id.unwrap();
+    }
+    events
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .filter(|event| event.kind().starts_with("repository."))
+        .collect()
+}
+
+fn repository_status(paused: bool, queued_jobs: usize) -> api::RepositoryStatus {
+    api::RepositoryStatus {
+        name: "o/r".to_owned(),
+        profile: "app".to_owned(),
+        labels: vec!["self-hosted".to_owned(), "app".to_owned()],
+        paused,
+        queued_jobs,
+    }
+}
+
+#[tokio::test]
+async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    let mut after = 0;
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: repository_status(false, 0)
+        }]
+    );
+    engine.publish();
+    assert_eq!(repository_events(&handle, &mut after).await, []);
+
+    engine.pause("o/r", RunningJobs::Keep).await.unwrap();
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: repository_status(true, 0)
+        }]
+    );
+
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: repository_status(true, 1)
+        }]
+    );
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(repository_events(&handle, &mut after).await, []);
+
+    assert!(handle.control.set_paused("o/r", false), "o/r is configured");
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: repository_status(false, 1)
+        }]
+    );
+
+    let with_s = format!(
+        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\"]\n"
+    );
+    engine.reload(Config::parse(&with_s).unwrap(), None);
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: api::RepositoryStatus {
+                name: "o/s".to_owned(),
+                profile: "app".to_owned(),
+                labels: vec!["self-hosted".to_owned()],
+                paused: false,
+                queued_jobs: 0,
+            }
+        }]
+    );
+    engine.reload(Config::parse(&with_s).unwrap(), None);
+    engine.publish();
+    assert_eq!(repository_events(&handle, &mut after).await, []);
+
+    engine.reload(Config::parse(CONFIG).unwrap(), None);
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryRemoved {
+            repository: "o/s".to_owned()
+        }]
+    );
+}
