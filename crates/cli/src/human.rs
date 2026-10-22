@@ -517,7 +517,7 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
             parts.push(format!("{} cores average", cores(average)));
         }
         if let Some(peak) = metrics.cpu_peak {
-            parts.push(format!("{} sampled peak", cores(peak)));
+            parts.push(format!("{} cores sampled peak", cores(peak)));
         }
         usage.row(vec![plain("cpu"), plain(parts.join(", "))]);
     }
@@ -539,13 +539,14 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
     let log = &summary.log;
     usage.row(vec![
         plain("log"),
+        // The last column: the hint's colour codes pad nothing after it.
         plain(format!(
-            "{} lines, {}{}",
+            "{} lines, {}{}  {}",
             log.lines,
             bytes(log.bytes),
-            if log.truncated { ", truncated" } else { "" }
+            if log.truncated { ", truncated" } else { "" },
+            paint.paint(Tone::Dim, &format!("runnerctl logs {}", summary.id))
         )),
-        cell(format!("runnerctl logs {}", summary.id), Tone::Dim),
     ]);
     out.push_str(&usage.render(paint, "  "));
     if metrics.memory_peak.is_some() {
