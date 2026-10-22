@@ -1,5 +1,6 @@
 //! `runnerctl`: the command-line client. It talks to the daemon's API only, never to Docker or GitHub. Commands map
-//! to API calls here; the transport is `client`, text for people `human`, the live view `watch`, printing `output`.
+//! to API calls here; the transport is `client`, text for people `human`, the live view `watch`, the full-screen
+//! dashboard `tui`, printing `output`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -17,6 +18,8 @@ mod human;
 mod output;
 #[cfg(test)]
 mod testing;
+#[cfg(feature = "tui")]
+mod tui;
 mod watch;
 
 use client::{Client, ClientError};
@@ -84,6 +87,11 @@ enum Command {
     ///
     /// Redraws in place on a terminal; otherwise prints one line per event.
     Watch,
+    /// Full-screen dashboard: budget, slots with their memory and CPU, history, and each job's steps and log.
+    ///
+    /// Keys: 1 overview, 2 history, tab and j/k to move, enter to open a job, p/r to pause or resume, ? for all.
+    #[cfg(feature = "tui")]
+    Tui,
     /// Give a repository no new runners. Refused while it runs a job, unless --force.
     Pause {
         /// owner/name
@@ -280,8 +288,20 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
             }
             output::text(&human::job(&job, now(), paint));
         }
-        Command::Logs { id, follow, from } => logs(client, id, follow, from.unwrap_or(0)).await?,
+        Command::Logs { id, follow, from } => {
+            logs(client, id, follow, from.unwrap_or(0), output::line).await?;
+        }
         Command::Watch => watch(client, json, paint).await?,
+        #[cfg(feature = "tui")]
+        Command::Tui => {
+            if json || !output::is_terminal() {
+                return Err(Error::Local(
+                    "runnerctl tui needs a terminal; `runnerctl watch` prints events as lines"
+                        .to_owned(),
+                ));
+            }
+            tui::run(client, paint.colour).await?;
+        }
         Command::Pause { repository, force } => {
             return pause(client, json, &repository, force).await;
         }
@@ -505,10 +525,17 @@ fn web(client: &Client, no_open: bool) -> Result<ExitCode, Error> {
     }
 }
 
-/// Prints the log from line `from`. Following, it reads until the daemon ends the response, which it does once the
-/// job's record is final; if the response ended for another reason (a daemon restart), it asks again from the next
-/// line. A response cut short after the job became final is read once more, for the lines it missed.
-async fn logs(client: &Client, id: u64, follow: bool, mut from: u64) -> Result<(), Error> {
+/// Hands the log from line `from` to `line`, until it returns false. Following, it reads until the daemon ends the
+/// response, which it does once the job's record is final; if the response ended for another reason (a daemon
+/// restart), it asks again from the next line. A response cut short after the job became final is read once more,
+/// for the lines it missed.
+async fn logs(
+    client: &Client,
+    id: u64,
+    follow: bool,
+    mut from: u64,
+    mut line: impl FnMut(String) -> bool,
+) -> Result<(), Error> {
     let mut last_read = false;
     loop {
         let mut lines = client
@@ -522,8 +549,8 @@ async fn logs(client: &Client, id: u64, follow: bool, mut from: u64) -> Result<(
             .await?;
         let ended = loop {
             match lines.next().await {
-                Ok(Some(line)) => {
-                    if !output::line(line) {
+                Ok(Some(text)) => {
+                    if !line(text) {
                         return Ok(());
                     }
                     from += 1;

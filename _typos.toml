@@ -1,3 +1,7 @@
 [files]
 # Vendored and minified: its short identifiers read as typos.
 extend-exclude = ["crates/web/assets/datastar.js"]
+
+[default.extend-words]
+# The terminal UI crate (ADR 0022), not a misspelt ratatouille.
+ratatui = "ratatui"

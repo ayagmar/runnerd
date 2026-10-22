@@ -1,6 +1,7 @@
 //! `runnerctl watch`: the daemon's state kept current from `/v1/events`. A snapshot (status, queued and running
 //! jobs, the last finished ones) read after the stream is open, then each event applied to it. Draws nothing
 //! itself: `run` hands the state to a drawing function, and `frame` turns it into text for `output::redraw`.
+//! `runnerctl tui` keeps the same `State` under its own.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -19,12 +20,14 @@ const RECENT: usize = 5;
 /// What the screen shows.
 #[derive(Debug)]
 pub(crate) struct State {
-    status: Status,
-    queued: BTreeMap<u64, JobSummary>,
-    running: BTreeMap<u64, Job>,
-    samples: BTreeMap<u64, Sample>,
-    host: Option<HostSample>,
-    recent: Vec<JobSummary>,
+    pub(crate) status: Status,
+    pub(crate) queued: BTreeMap<u64, JobSummary>,
+    pub(crate) running: BTreeMap<u64, Job>,
+    /// Each running job's last sample.
+    pub(crate) samples: BTreeMap<u64, Sample>,
+    pub(crate) host: Option<HostSample>,
+    /// The last finished jobs, newest first.
+    pub(crate) recent: Vec<JobSummary>,
 }
 
 impl State {
@@ -95,16 +98,7 @@ impl State {
             }
             Event::JobStep { job: id, step } => {
                 if let Some(job) = self.running.get_mut(id) {
-                    if let Some(known) = job
-                        .steps
-                        .iter_mut()
-                        .find(|known| known.number == step.number)
-                    {
-                        *known = step.clone();
-                    } else {
-                        job.steps.push(step.clone());
-                        job.steps.sort_by_key(|step| step.number);
-                    }
+                    update_step(&mut job.steps, step);
                     if job.summary.name.is_empty() {
                         return Some(*id);
                     }
@@ -148,7 +142,7 @@ impl State {
     }
 
     /// The running job in a profile's slot.
-    fn job_in(&self, profile: &str, slot: usize) -> Option<&Job> {
+    pub(crate) fn job_in(&self, profile: &str, slot: usize) -> Option<&Job> {
         self.running.values().find(|job| {
             job.summary
                 .runner
@@ -186,14 +180,24 @@ pub(crate) async fn run(
     }
 }
 
+/// Replaces the step with the same number, or adds it in order.
+pub(crate) fn update_step(steps: &mut Vec<Step>, step: &Step) {
+    if let Some(known) = steps.iter_mut().find(|known| known.number == step.number) {
+        *known = step.clone();
+    } else {
+        steps.push(step.clone());
+        steps.sort_by_key(|step| step.number);
+    }
+}
+
 /// The next event, handing the stream back for the read after it.
 async fn next_event(mut events: Events) -> (Events, Result<EventEnvelope, ClientError>) {
     let envelope = events.next().await;
     (events, envelope)
 }
 
-/// The step a job is in: the one in progress, else the last one completed.
-fn current_step(job: &Job) -> Option<(&Step, usize)> {
+/// The step a job is in: the one in progress, else the last one completed; and its position, 1-based.
+pub(crate) fn current_step(job: &Job) -> Option<(&Step, usize)> {
     let position = job
         .steps
         .iter()
