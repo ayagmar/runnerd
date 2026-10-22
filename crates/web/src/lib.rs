@@ -1,7 +1,7 @@
 //! `runnerd-web`: the dashboard the daemon serves on a loopback TCP port. It is a client of the daemon's API like
 //! `runnerctl`: it reads `runnerd_core::api` types over the daemon's Unix socket (`daemon`), renders HTML on the
-//! server (`views`, `chart`), and keeps open pages current over SSE with Datastar (`live`). Writes (pause, resume)
-//! are passed on to the same API. It holds no state of its own beyond the session (`auth`), and never talks to
+//! server (`views`, `chart`), and keeps open pages current over SSE with Datastar (`live`). Writes (pause, reseed,
+//! the config) are passed on to the same API (`actions`). It holds no state of its own beyond the session (`auth`), and never talks to
 //! Docker or GitHub.
 
 use std::future::Future;
@@ -13,17 +13,17 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use axum::Router;
 use axum::extract::{Path as UrlPath, Query, Request, State};
-use axum::http::{HeaderValue, Method, StatusCode, header};
+use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use maud::Markup;
-use runnerd_core::api::Status;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
+mod actions;
 mod assets;
 mod auth;
 mod chart;
@@ -35,6 +35,7 @@ mod views;
 pub use auth::login_file;
 use daemon::{Daemon, Error};
 use views::caches::CachesView;
+use views::config::ConfigView;
 use views::history::{Filter, History};
 use views::job::JobView;
 use views::overview::Overview;
@@ -125,8 +126,18 @@ fn router(daemon: Daemon, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .route("/jobs/{id}/log", get(job_log))
         .route("/live/overview", get(live::overview))
         .route("/live/jobs/{id}", get(live::job))
-        .route("/v1/repositories/{owner}/{name}/pause", post(pause))
-        .route("/v1/repositories/{owner}/{name}/resume", post(resume))
+        .route("/config", get(config).put(actions::save_config))
+        .route("/config/check", post(actions::check_config))
+        .route(
+            "/v1/repositories/{owner}/{name}/pause",
+            post(actions::pause),
+        )
+        .route(
+            "/v1/repositories/{owner}/{name}/resume",
+            post(actions::resume),
+        )
+        .route("/v1/profiles/{name}/reseed", post(actions::reseed))
+        .route("/v1/caches/{name}/clean", post(actions::clean))
         .route("/assets/{name}", get(assets::serve))
         .fallback(|| async {
             (
@@ -210,6 +221,14 @@ async fn caches(State(app): State<App>) -> Response {
     )
 }
 
+async fn config(State(app): State<App>) -> Response {
+    page(
+        ConfigView::load(&app.daemon)
+            .await
+            .map(|config| views::config::render(&config)),
+    )
+}
+
 async fn job(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {
     page(
         JobView::load(&app.daemon, id, now())
@@ -224,48 +243,6 @@ async fn job_log(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response 
         Ok(text) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response(),
         Err(Error::Status(status, message)) => (status, message).into_response(),
         Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
-    }
-}
-
-async fn pause(
-    State(app): State<App>,
-    UrlPath((owner, name)): UrlPath<(String, String)>,
-) -> Response {
-    set_paused(&app, &owner, &name, "pause").await
-}
-
-async fn resume(
-    State(app): State<App>,
-    UrlPath((owner, name)): UrlPath<(String, String)>,
-) -> Response {
-    set_paused(&app, &owner, &name, "resume").await
-}
-
-/// Passes a pause or resume on to the daemon and answers with the repository's row as it is now, or a notice
-/// saying why not. Datastar applies only 200 responses, so a refusal is a 200 with the notice.
-async fn set_paused(app: &App, owner: &str, name: &str, action: &str) -> Response {
-    let path = format!("/v1/repositories/{owner}/{name}/{action}");
-    let refused =
-        |message: String| Html(views::notice(&message, true).into_string()).into_response();
-    match app.daemon.request(Method::POST, &path, None).await {
-        Ok(reply) if reply.status.is_success() => {}
-        Ok(reply) => return refused(reply.message()),
-        Err(error) => return refused(error.to_string()),
-    }
-    let status: Status = match app.daemon.get("/v1/status").await {
-        Ok(status) => status,
-        Err(error) => return refused(error.to_string()),
-    };
-    let repository = format!("{owner}/{name}");
-    match status
-        .repositories
-        .iter()
-        .find(|candidate| candidate.name == repository)
-    {
-        Some(row) => {
-            Html(views::overview::repository_row(&status, row).into_string()).into_response()
-        }
-        None => refused(format!("{repository} is not a configured repository")),
     }
 }
 

@@ -24,9 +24,10 @@ use axum::routing::{get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
 use runnerd_core::api::{
-    Bucket, Budget, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, ErrorResponse,
-    EventEnvelope, HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner,
-    JobState, JobSummary, LogQuery, LogSummary, ProfileStatus, RepositoryStatus, RunnerStatus,
+    Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
+    CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, EventEnvelope, HostSample,
+    HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery,
+    LogSummary, PauseQuery, Paused, ProfileStatus, RepositoryStatus, RunnerStatus, RunningJob,
     Sample, SampleSeries, SlotStatus, Stats, StatsRow, Status, Step, Timeline,
 };
 use tokio::net::UnixListener;
@@ -48,6 +49,10 @@ pub struct Fixtures {
     pub stats: Vec<StatsRow>,
     pub caches: Caches,
     pub cache_history: Vec<CacheSize>,
+    /// What `GET /v1/config` reads and `PUT /v1/config` replaces.
+    pub config: String,
+    /// The requests to the control endpoints, such as `POST /v1/profiles/jvm/reseed`.
+    pub controls: Vec<String>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -555,6 +560,8 @@ impl Fixtures {
             stats,
             caches,
             cache_history,
+            config: include_str!("../../../../examples/runnerd.toml").to_owned(),
+            controls: Vec::new(),
         }
     }
 
@@ -621,6 +628,60 @@ fn find_job(fake: &Fake, id: u64) -> Option<Job> {
         .cloned()
 }
 
+/// The slice the fixtures' config names has a `MemoryMax` of 33G.
+fn check(text: &str) -> (Option<runnerd_core::config::Config>, ConfigCheck) {
+    runnerd_core::config::Config::check(text, |_| {
+        Ok(Some(runnerd_core::config::ByteSize(33 * GIB)))
+    })
+}
+
+fn running_jobs(fixtures: &Fixtures, repository: &str) -> Vec<RunningJob> {
+    fixtures
+        .jobs
+        .iter()
+        .filter(|job| {
+            job.summary.state == JobState::Running && job.summary.repository == repository
+        })
+        .map(|job| RunningJob {
+            repository: repository.to_owned(),
+            runner: job
+                .summary
+                .runner
+                .as_ref()
+                .map(|runner| runner.name.clone())
+                .unwrap_or_default(),
+            job: Some(job.summary.id),
+        })
+        .collect()
+}
+
+fn pause(fake: &Fake, repository: &str, force: bool) -> Response {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    fixtures
+        .controls
+        .push(format!("pause {repository} force={force}"));
+    let running = running_jobs(&fixtures, repository);
+    if !running.is_empty() && !force {
+        let message = format!("{repository} runs {}", running[0]);
+        return (
+            StatusCode::CONFLICT,
+            Json(Busy {
+                message,
+                jobs: running,
+            }),
+        )
+            .into_response();
+    }
+    drop(fixtures);
+    match set_paused(fake, repository, true) {
+        response if response.status().is_success() => Json(Paused {
+            stopped: if force { running } else { Vec::new() },
+        })
+        .into_response(),
+        response => response,
+    }
+}
+
 fn set_paused(fake: &Fake, repository: &str, paused: bool) -> Response {
     let mut fixtures = fake.fixtures.lock().unwrap();
     match fixtures
@@ -645,9 +706,13 @@ fn router(fake: Fake) -> Router {
         )
         .route(
             "/v1/repositories/{owner}/{name}/pause",
-            post(|State(fake): State<Fake>, UrlPath((owner, name)): UrlPath<(String, String)>| async move {
-                set_paused(&fake, &format!("{owner}/{name}"), true)
-            }),
+            post(
+                |State(fake): State<Fake>,
+                 UrlPath((owner, name)): UrlPath<(String, String)>,
+                 Query(query): Query<PauseQuery>| async move {
+                    pause(&fake, &format!("{owner}/{name}"), query.force)
+                },
+            ),
         )
         .route(
             "/v1/repositories/{owner}/{name}/resume",
@@ -716,6 +781,55 @@ fn router(fake: Fake) -> Router {
             get(|State(fake): State<Fake>| async move {
                 Json(CacheHistory {
                     sizes: fake.fixtures.lock().unwrap().cache_history.clone(),
+                })
+            }),
+        )
+        .route(
+            "/v1/profiles/{name}/reseed",
+            post(|State(fake): State<Fake>, UrlPath(name): UrlPath<String>| async move {
+                fake.fixtures.lock().unwrap().controls.push(format!("reseed {name}"));
+                StatusCode::ACCEPTED
+            }),
+        )
+        .route(
+            "/v1/caches/{name}/clean",
+            post(|State(fake): State<Fake>, UrlPath(name): UrlPath<String>| async move {
+                fake.fixtures.lock().unwrap().controls.push(format!("clean {name}"));
+                StatusCode::NO_CONTENT
+            }),
+        )
+        .route(
+            "/v1/config",
+            get(|State(fake): State<Fake>| async move {
+                Json(ConfigFile {
+                    path: "/home/forge/.config/runnerd/runnerd.toml".to_owned(),
+                    text: fake.fixtures.lock().unwrap().config.clone(),
+                })
+            })
+            .put(|State(fake): State<Fake>, text: String| async move {
+                let (config, checked) = check(&text);
+                if config.is_none() {
+                    return (StatusCode::UNPROCESSABLE_ENTITY, Json(checked)).into_response();
+                }
+                fake.fixtures.lock().unwrap().config = text;
+                Json(checked).into_response()
+            }),
+        )
+        .route("/v1/config/check", post(|text: String| async move { Json(check(&text).1) }))
+        .route(
+            "/v1/doctor",
+            get(|| async {
+                Json(Doctor {
+                    checks: vec![
+                        Check { name: "Docker".to_owned(), status: CheckStatus::Pass, detail: "29.1.3, reachable".to_owned(), fix: None },
+                        Check { name: "sysbox".to_owned(), status: CheckStatus::Pass, detail: "sysbox-runc registered".to_owned(), fix: None },
+                        Check {
+                            name: "slice".to_owned(),
+                            status: CheckStatus::Warn,
+                            detail: "ci.slice has MemoryMax=33G but no MemoryHigh".to_owned(),
+                            fix: Some("systemctl edit ci.slice, then add MemoryHigh=30G under [Slice]".to_owned()),
+                        },
+                    ],
                 })
             }),
         )

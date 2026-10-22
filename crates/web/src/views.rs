@@ -9,6 +9,7 @@ use crate::assets;
 use crate::format;
 
 pub(crate) mod caches;
+pub(crate) mod config;
 pub(crate) mod history;
 pub(crate) mod job;
 pub(crate) mod overview;
@@ -19,6 +20,7 @@ pub(crate) enum Page {
     Overview,
     History,
     Caches,
+    Config,
 }
 
 const MARK: &str = include_str!("../assets/mark.svg");
@@ -29,6 +31,7 @@ pub(crate) fn page(title: &str, active: Option<Page>, live: Option<&str>, main: 
         (Page::Overview, "/", "Overview"),
         (Page::History, "/history", "History"),
         (Page::Caches, "/caches", "Caches"),
+        (Page::Config, "/config", "Config"),
     ];
     html! {
         (DOCTYPE)
@@ -108,11 +111,26 @@ pub(crate) fn error_page(title: &str, message: &str) -> Markup {
     page(title, None, None, &main)
 }
 
-/// A notice for `#notice`, such as why a pause failed.
+/// A notice for `#notice`, such as why a pause failed. It goes away by itself.
 pub(crate) fn notice(message: &str, failed: bool) -> Markup {
     html! {
         div #notice role="status" aria-live="polite" {
             p class=(if failed { "toast failed" } else { "toast" }) data-init="setTimeout(() => el.remove(), 8000)" { (message) }
+        }
+    }
+}
+
+/// A notice that offers a next step, such as cancelling the job a pause waits for. It stays until answered.
+pub(crate) fn question(message: &str, action: &str, label: &str) -> Markup {
+    html! {
+        div #notice role="status" aria-live="polite" {
+            div.toast.failed.question {
+                p { (message) }
+                div.toast-actions {
+                    button.button-danger type="button" data-on:click=(action) { (label) }
+                    button.button-quiet type="button" data-on:click="el.closest('.toast').remove()" { "Keep it running" }
+                }
+            }
         }
     }
 }

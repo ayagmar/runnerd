@@ -1219,6 +1219,153 @@ html {
   height: 5rem;
 }
 
+.volume-action {
+  justify-self: start;
+  min-height: 36px;
+  padding: 0 0.75rem;
+  font-size: 0.875rem;
+}
+
+.volume-head {
+  flex-wrap: wrap;
+}
+
+/* The config editor: the file on the left, what it asks of the budget on the right. */
+.config-layout {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: clamp(1.5rem, 4vw, 3rem);
+  align-items: start;
+}
+
+.editor {
+  display: grid;
+  gap: 0.5rem;
+}
+
+.editor-label {
+  font-weight: 600;
+}
+
+.editor textarea {
+  width: 100%;
+  min-height: 32rem;
+  padding: 0.85rem 1rem;
+  font-family: var(--mono);
+  font-size: 0.875rem;
+  line-height: 1.55;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+  resize: vertical;
+  tab-size: 2;
+}
+
+.editor-actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1rem;
+}
+
+.editor-actions p {
+  flex: 1 1 18rem;
+  font-size: 0.875rem;
+}
+
+.config-side {
+  display: grid;
+  gap: 2.5rem;
+}
+
+.check-result {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1rem;
+  background: var(--surface);
+  border-top: 6px solid var(--memory);
+}
+
+.check-result.invalid {
+  border-top-color: var(--failure-ink);
+}
+
+.check-result.invalid h2,
+.check-result.invalid .check-message {
+  color: var(--failure-ink);
+}
+
+.bar-small {
+  position: relative;
+  height: 6rem;
+  background: var(--bg);
+}
+
+.bar-small .block .size,
+.bar-small .free .size {
+  font-size: 1.125rem;
+}
+
+.bar:has(.max-mark) {
+  margin-top: 1.6rem;
+}
+
+.max-mark {
+  position: absolute;
+  top: -0.4rem;
+  bottom: -0.4rem;
+  left: var(--at);
+  border-left: 3px solid var(--failure-ink);
+}
+
+.max-label {
+  position: absolute;
+  bottom: 100%;
+  right: 0.3rem;
+  font-size: 0.75rem;
+  font-weight: 700;
+  white-space: nowrap;
+  color: var(--failure-ink);
+}
+
+.warnings {
+  margin: 0;
+  padding-left: 1.1rem;
+  font-size: 0.9375rem;
+}
+
+.check-list {
+  list-style: none;
+  margin: 1rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.check-list li {
+  display: grid;
+  grid-template-columns: 3.5rem minmax(0, 1fr);
+  gap: 0.75rem;
+  align-items: start;
+  padding: 0.6rem 0.75rem;
+  background: var(--surface);
+  font-size: 0.9375rem;
+}
+
+.check-list .badge {
+  justify-self: stretch;
+  justify-content: center;
+}
+
+.fix {
+  margin: 0.4rem 0 0;
+  padding: 0.5rem 0.65rem;
+  background: var(--bg);
+  font-size: 0.8125rem;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
 /* Notices and the signed-out page. */
 #notice {
   position: fixed;
@@ -1241,11 +1388,50 @@ html {
   color: var(--failure-ink);
 }
 
+.question {
+  display: grid;
+  gap: 0.75rem;
+}
+
+.toast-actions {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.5rem;
+}
+
+.button-danger {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  padding: 0 1rem;
+  border: 0;
+  font: inherit;
+  font-weight: 600;
+  cursor: pointer;
+  background: var(--failure-ink);
+  color: var(--failure-bg);
+}
+
+.button-danger:hover {
+  background: color-mix(in srgb, var(--failure-ink) 85%, var(--ink));
+}
+
+.button:disabled {
+  cursor: progress;
+  opacity: 0.7;
+}
+
 .signed-out {
   max-width: 40rem;
   padding-top: clamp(2rem, 10vh, 6rem);
   display: grid;
   gap: 1rem;
+}
+
+@media (max-width: 60rem) {
+  .config-layout {
+    grid-template-columns: minmax(0, 1fr);
+  }
 }
 
 @media (max-width: 40rem) {

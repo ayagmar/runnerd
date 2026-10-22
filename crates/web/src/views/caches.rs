@@ -47,6 +47,23 @@ fn kind(volume: &CacheVolume) -> (String, Option<&str>) {
     }
 }
 
+/// Reseed for a snapshot, empty for the rest; the daemon refuses either while a runner uses the volume.
+fn action(volume: &CacheVolume) -> Markup {
+    if let CacheKind::Snapshot { profile } = &volume.kind {
+        html! {
+            button.button-quiet.volume-action type="button"
+                data-on:click=(format!("@post('/v1/profiles/{profile}/reseed')"))
+                aria-label=(format!("Reseed {profile}'s snapshot from slot 1")) { "Reseed" }
+        }
+    } else {
+        html! {
+            button.button-quiet.volume-action type="button"
+                data-on:click=(format!("confirm('Empty {}? Its next job starts cold.') && @post('/v1/caches/{}/clean')", volume.name, volume.name))
+                aria-label=(format!("Empty {}", volume.name)) { "Empty" }
+        }
+    }
+}
+
 /// The whole page.
 pub(crate) fn render(view: &CachesView) -> Markup {
     let total: u64 = view.caches.volumes.iter().map(|volume| volume.bytes).sum();
@@ -84,6 +101,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                         h2 { (label) }
                     }
                     p.volume-name { code { (volume.name) } }
+                    (action(volume))
                     p.volume-size {
                         span.big { (format::bytes(volume.bytes)) }
                         @if let Some(limit) = volume.limit { span.muted { " of " (format::bytes(limit)) } }

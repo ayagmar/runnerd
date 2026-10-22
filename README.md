@@ -150,8 +150,11 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 - the slice's memory and CPU over the last half hour, against `MemoryMax` and the CPUs of all slots;
 - each job's phases, its steps on one time axis, its CPU and memory against the slot's limits, and its log;
 - the history, filtered by repository and outcome, with 30 days of jobs per day, run and wait times and memory peaks;
-- the cache volumes with their bounds and their sizes over 30 days;
-- pause and resume for each repository.
+- the cache volumes with their bounds and their sizes over 30 days, with a button to reseed a snapshot or empty a
+  cache;
+- `runnerd.toml` in an editor that checks it against the slice's `MemoryMax` as you type and saves and reloads it
+  only when it fits, next to the doctor's checks;
+- pause and resume for each repository; a pause while a job runs asks first, and confirming cancels the job.
 
 Open pages update as things happen, over one server-sent event stream per page. Memory and CPU are sampled every 2 s,
 so a peak shorter than that does not show; the dashboard calls them sampled peaks.

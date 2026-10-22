@@ -11,7 +11,7 @@ use futures_util::{Stream, stream};
 use http_body_util::{BodyExt, Full};
 use hyper::body::Incoming;
 use hyper_util::rt::TokioIo;
-use runnerd_core::api::{ErrorResponse, EventEnvelope, EventQuery};
+use runnerd_core::api::{ConfigCheck, ErrorResponse, EventEnvelope, EventQuery};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
@@ -54,6 +54,23 @@ impl Reply {
     }
 }
 
+/// A request body and its type.
+#[derive(Debug)]
+pub(crate) struct Body {
+    pub(crate) content_type: &'static str,
+    pub(crate) bytes: Vec<u8>,
+}
+
+impl Body {
+    /// A config file, as `PUT /v1/config` and `POST /v1/config/check` take it.
+    pub(crate) fn toml(text: String) -> Body {
+        Body {
+            content_type: "application/toml",
+            bytes: text.into_bytes(),
+        }
+    }
+}
+
 /// The daemon at a socket path.
 #[derive(Debug, Clone)]
 pub(crate) struct Daemon {
@@ -71,7 +88,7 @@ impl Daemon {
         &self,
         method: Method,
         path: &str,
-        body: Option<Vec<u8>>,
+        body: Option<Body>,
     ) -> Result<hyper::Response<Incoming>, Error> {
         let unreachable = |error: &dyn fmt::Display| Error::Unreachable(error.to_string());
         let stream = UnixStream::connect(&self.socket)
@@ -88,11 +105,13 @@ impl Daemon {
             .method(method)
             .uri(path)
             .header(header::HOST, "runnerd");
-        if body.is_some() {
-            request = request.header(header::CONTENT_TYPE, "application/json");
+        if let Some(body) = &body {
+            request = request.header(header::CONTENT_TYPE, body.content_type);
         }
         let request = request
-            .body(Full::new(Bytes::from(body.unwrap_or_default())))
+            .body(Full::new(Bytes::from(
+                body.map(|body| body.bytes).unwrap_or_default(),
+            )))
             .map_err(|error| Error::Decode(error.to_string()))?;
         sender
             .send_request(request)
@@ -135,7 +154,7 @@ impl Daemon {
         &self,
         method: Method,
         path: &str,
-        body: Option<Vec<u8>>,
+        body: Option<Body>,
     ) -> Result<Reply, Error> {
         let response = self.send(method, path, body).await?;
         let status = response.status();
@@ -146,6 +165,17 @@ impl Daemon {
             .map_err(|error| Error::Unreachable(error.to_string()))?
             .to_bytes();
         Ok(Reply { status, body })
+    }
+
+    /// `POST /v1/config/check`: what the daemon says of a config.
+    pub(crate) async fn check(&self, text: String) -> Result<ConfigCheck, Error> {
+        let reply = self
+            .request(Method::POST, "/v1/config/check", Some(Body::toml(text)))
+            .await?;
+        if !reply.status.is_success() {
+            return Err(Error::Status(reply.status, reply.message()));
+        }
+        serde_json::from_slice(&reply.body).map_err(|error| Error::Decode(error.to_string()))
     }
 
     /// `GET /v1/events`, from now on: every event the query matches, until the daemon ends the stream.

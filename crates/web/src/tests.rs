@@ -101,6 +101,16 @@ impl Dashboard {
     }
 
     fn build(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> Request<Full<Bytes>> {
+        self.build_with(method, path, headers, Bytes::new())
+    }
+
+    fn build_with(
+        &self,
+        method: &str,
+        path: &str,
+        headers: &[(&str, &str)],
+        body: Bytes,
+    ) -> Request<Full<Bytes>> {
         let mut request = Request::builder()
             .method(method)
             .uri(path)
@@ -108,15 +118,36 @@ impl Dashboard {
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
-        request.body(Full::new(Bytes::new())).unwrap()
+        request.body(Full::new(body)).unwrap()
     }
 
     async fn request(&self, method: &str, path: &str, headers: &[(&str, &str)]) -> Reply {
-        let mut sender = self.connect().await;
-        let response = sender
-            .send_request(self.build(method, path, headers))
+        self.send(self.build(method, path, headers)).await
+    }
+
+    /// A write from the dashboard's own page, as Datastar sends it: the cookie, the origin, the signals as JSON.
+    async fn write(
+        &self,
+        cookie: &str,
+        method: &str,
+        path: &str,
+        signals: &serde_json::Value,
+    ) -> Reply {
+        let origin = format!("http://{}", self.addr);
+        let headers = [
+            ("cookie", cookie),
+            ("origin", origin.as_str()),
+            ("content-type", "application/json"),
+            ("datastar-request", "true"),
+        ];
+        let body = Bytes::from(signals.to_string());
+        self.send(self.build_with(method, path, &headers, body))
             .await
-            .unwrap();
+    }
+
+    async fn send(&self, request: Request<Full<Bytes>>) -> Reply {
+        let mut sender = self.connect().await;
+        let response = sender.send_request(request).await.unwrap();
         let status = response.status();
         let headers = response.headers().clone();
         let body = response.into_body().collect().await.unwrap().to_bytes();
@@ -210,25 +241,30 @@ async fn a_write_from_another_origin_is_403_even_with_the_cookie() {
 }
 
 #[tokio::test]
-async fn a_pause_from_the_dashboard_reaches_the_daemon_and_returns_the_row_with_resume() {
+async fn a_resume_from_the_dashboard_reaches_the_daemon_and_returns_the_row_with_pause() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let origin = format!("http://{}", dashboard.addr);
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
     let reply = dashboard
         .request(
             "POST",
-            "/v1/repositories/halyard/ledger/pause",
+            "/v1/repositories/halyard/ledger/resume",
             &[("cookie", &cookie), ("origin", &origin)],
         )
         .await;
     assert_eq!(reply.status, StatusCode::OK);
-    assert!(dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
+    assert!(!dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
     assert!(
         reply.body.contains(r#"id="repo-halyard-ledger""#),
         "{}",
         reply.body
     );
-    assert!(reply.body.contains("Resume") && reply.body.contains("paused"));
+    assert!(
+        reply.body.contains(">Pause<") && !reply.body.contains("badge neutral"),
+        "{}",
+        reply.body
+    );
     // A repository the daemon does not know comes back as a notice Datastar shows.
     let unknown = dashboard
         .request(
@@ -425,4 +461,172 @@ async fn the_dashboard_refuses_to_listen_beyond_loopback() {
     let error = crate::listen("0.0.0.0:0").await.unwrap_err();
     assert!(error.to_string().contains("loopback only"));
     assert!(crate::listen("off").await.unwrap().is_none());
+}
+
+/// The fixtures' config with jvm's memory raised from 9G to `memory`.
+fn with_jvm_memory(dashboard: &Dashboard, memory: &str) -> String {
+    let config = dashboard.fake.fixtures.lock().unwrap().config.clone();
+    let raised = config.replacen("memory = \"9G\"", &format!("memory = \"{memory}\""), 1);
+    assert_ne!(raised, config);
+    raised
+}
+
+#[tokio::test]
+async fn a_config_over_the_budget_is_not_saved_and_the_page_shows_both_numbers() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let before = dashboard.fake.fixtures.lock().unwrap().config.clone();
+    // 2 × 12G + 2 × 7G + 512M = 38.5G, over ci.slice's 33G.
+    let toml = with_jvm_memory(&dashboard, "12G");
+    let reply = dashboard
+        .write(
+            &cookie,
+            "PUT",
+            "/config",
+            &serde_json::json!({ "toml": toml }),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(
+        reply.body.contains(r#"id="config-result""#) && reply.body.contains("Not saved"),
+        "{}",
+        reply.body
+    );
+    assert!(
+        reply.body.contains("38.5G") && reply.body.contains("33G"),
+        "{}",
+        reply.body
+    );
+    assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, before);
+}
+
+#[tokio::test]
+async fn a_config_that_fits_is_saved_and_checking_one_saves_nothing() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let toml = with_jvm_memory(&dashboard, "8G");
+    let checked = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/config/check",
+            &serde_json::json!({ "toml": toml }),
+        )
+        .await;
+    assert!(checked.body.contains("Fits the budget"), "{}", checked.body);
+    assert_ne!(dashboard.fake.fixtures.lock().unwrap().config, toml);
+    let saved = dashboard
+        .write(
+            &cookie,
+            "PUT",
+            "/config",
+            &serde_json::json!({ "toml": toml }),
+        )
+        .await;
+    assert!(saved.body.contains("Saved and reloaded"), "{}", saved.body);
+    assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, toml);
+}
+
+#[tokio::test]
+async fn the_config_page_shows_the_file_its_budget_and_the_doctor() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard.page(&cookie, "/config").await;
+    assert_eq!(page.status, StatusCode::OK);
+    for expected in [
+        "halyard/ledger",
+        "/home/forge/.config/runnerd/runnerd.toml",
+        "Fits the budget",
+        "jvm 2",
+        "MemoryHigh=30G",
+    ] {
+        assert!(
+            page.body.contains(expected),
+            "config page lacks {expected:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn pausing_a_repository_with_a_running_job_asks_first_and_cancels_only_when_told() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let asked = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/v1/repositories/halyard/ledger/pause",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        asked.body.contains("Cancel and pause") && asked.body.contains("pause?force=true"),
+        "{}",
+        asked.body
+    );
+    assert!(
+        asked.body.contains(&LEDGER_RUNNING.to_string()),
+        "the question names the job: {}",
+        asked.body
+    );
+    assert!(!dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
+    let forced = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/v1/repositories/halyard/ledger/pause?force=true",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        forced.body.contains(r#"id="repo-halyard-ledger""#) && forced.body.contains("stopped job"),
+        "{}",
+        forced.body
+    );
+    let fixtures = dashboard.fake.fixtures.lock().unwrap();
+    assert!(fixtures.status.repositories[0].paused);
+    assert_eq!(
+        fixtures.controls,
+        [
+            "pause halyard/ledger force=false",
+            "pause halyard/ledger force=true"
+        ]
+    );
+}
+
+#[tokio::test]
+async fn reseed_and_empty_from_the_caches_page_reach_the_daemon() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard.page(&cookie, "/caches").await;
+    assert!(
+        page.body.contains("/v1/profiles/jvm/reseed")
+            && page.body.contains("/v1/caches/runnerd-pnpm/clean")
+    );
+    let reseed = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/v1/profiles/jvm/reseed",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(reseed.body.contains("Reseeding jvm"), "{}", reseed.body);
+    let clean = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/v1/caches/runnerd-pnpm/clean",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        clean.body.contains("Emptied runnerd-pnpm"),
+        "{}",
+        clean.body
+    );
+    assert_eq!(
+        dashboard.fake.fixtures.lock().unwrap().controls,
+        ["reseed jvm", "clean runnerd-pnpm"]
+    );
 }
