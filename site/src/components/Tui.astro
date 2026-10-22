@@ -1,0 +1,37 @@
+---
+// A frame of `runnerctl tui` as terminal text: its cells, captured from a pseudo-terminal, as runs of text in the
+// TUI's colours. The frame stays a dark terminal in both themes, since the TUI's pastels are drawn for one.
+interface Props {
+  name: string;
+  label: string;
+}
+
+type Run = string | [string, string];
+interface Frame {
+  cols: number;
+  rows: number;
+  lines: Run[][];
+}
+
+const { name, label } = Astro.props;
+const frames = import.meta.glob<{ default: Frame }>('../assets/tui/*.json', { eager: true });
+const frame = frames[`../assets/tui/${name}.json`]?.default;
+if (!frame) throw new Error(`no tui frame ${name}`);
+const lines = Array.from({ length: frame.rows }, (_, i) => frame.lines[i] ?? []);
+const cls = (c: string) =>
+  c
+    .split(' ')
+    .map((part) => `t-${part}`)
+    .join(' ');
+---
+
+<div class="tui-frame">
+  <pre
+    class="tui"
+    style={`--cols: ${frame.cols}`}
+    role="img"
+    aria-label={label}
+    tabindex="0">{lines.map((line, i) => (
+    <Fragment>{line.map((run) => (typeof run === 'string' ? run : <span class={cls(run[1])}>{run[0]}</span>))}{i < lines.length - 1 && '\n'}</Fragment>
+  ))}</pre>
+</div>
