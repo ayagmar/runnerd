@@ -5,7 +5,7 @@ use runnerd_core::api::{Budget, ProfileStatus, Status};
 use runnerd_core::scheduler::engine::{Control, Handle, Shutdown};
 use tokio::sync::watch;
 
-use super::{bind, serve};
+use super::{bind, serve, serve_for};
 
 fn status() -> Status {
     Status {
@@ -30,6 +30,11 @@ fn status() -> Status {
 
 /// Serves the API on a socket in a fresh directory; returns a client bound to it and the controls behind it.
 async fn daemon() -> (reqwest::Client, Arc<Control>, tempdir::Dir) {
+    daemon_for(None).await
+}
+
+/// `daemon`, serving only the user `owner` when given, instead of the user the test runs as.
+async fn daemon_for(owner: Option<u32>) -> (reqwest::Client, Arc<Control>, tempdir::Dir) {
     let dir = tempdir::Dir::new();
     let socket = dir.0.join("runnerd.sock");
     let control = Arc::new(Control::new(["o/app".to_owned()]));
@@ -46,9 +51,11 @@ async fn daemon() -> (reqwest::Client, Arc<Control>, tempdir::Dir) {
     );
     tokio::spawn(async move {
         let _sender = _sender;
-        serve(listener, handle, std::future::pending())
-            .await
-            .unwrap();
+        match owner {
+            Some(owner) => serve_for(listener, handle, owner, std::future::pending()).await,
+            None => serve(listener, handle, std::future::pending()).await,
+        }
+        .unwrap();
     });
     runnerd_core::github::install_crypto_provider();
     let client = reqwest::Client::builder()
@@ -112,6 +119,29 @@ async fn shutdown_is_graceful_unless_forced() {
         .await
         .unwrap();
     assert_eq!(control.mode(), Shutdown::Force);
+}
+
+#[tokio::test]
+async fn every_route_refuses_other_users() {
+    let me = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata("/proc/self").unwrap());
+    let (client, control, _dir) = daemon_for(Some(me + 1)).await;
+    let requests = [
+        client.get("http://runnerd/v1/status"),
+        client.post("http://runnerd/v1/repositories/o/app/pause"),
+        client.post("http://runnerd/v1/repositories/o/app/resume"),
+        client.post("http://runnerd/v1/shutdown"),
+    ];
+    for request in requests {
+        let response = request.send().await.unwrap();
+        assert_eq!(
+            response.status(),
+            StatusCode::FORBIDDEN,
+            "{}",
+            response.url()
+        );
+    }
+    assert!(!control.is_paused("o/app"));
+    assert_eq!(control.mode(), Shutdown::No);
 }
 
 #[tokio::test]

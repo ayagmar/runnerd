@@ -159,6 +159,16 @@ pub async fn serve(
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let owner = std::fs::metadata("/proc/self")?.uid();
+    serve_for(listener, handle, owner, stop).await
+}
+
+/// Serves the API to the user `owner` only.
+async fn serve_for(
+    listener: UnixListener,
+    handle: Handle,
+    owner: u32,
+    stop: impl Future<Output = ()> + Send + 'static,
+) -> io::Result<()> {
     let app = router(handle, owner).into_make_service_with_connect_info::<Peer>();
     axum::serve(listener, app)
         .with_graceful_shutdown(stop)
