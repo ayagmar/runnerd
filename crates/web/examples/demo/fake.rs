@@ -662,7 +662,10 @@ fn pause(fake: &Fake, repository: &str, force: bool) -> Response {
         .push(format!("pause {repository} force={force}"));
     let running = running_jobs(&fixtures, repository);
     if !running.is_empty() && !force {
-        let message = format!("{repository} runs {}", running[0]);
+        let message = format!(
+            "{repository} runs {}; pause with force to cancel it",
+            running[0]
+        );
         return (
             StatusCode::CONFLICT,
             Json(Busy {

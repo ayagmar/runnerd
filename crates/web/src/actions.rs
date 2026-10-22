@@ -75,10 +75,19 @@ pub(crate) async fn pause(
         Err(notice) => return html(&[notice]),
     };
     if reply.status == StatusCode::CONFLICT && !query.force {
-        let message = serde_json::from_slice::<Busy>(&reply.body)
-            .map_or_else(|_| reply.message(), |busy| busy.message);
+        // The daemon's message tells a CLI user how to force it; the question asks instead.
+        let message = match serde_json::from_slice::<Busy>(&reply.body) {
+            Ok(busy) if !busy.jobs.is_empty() => {
+                let jobs: Vec<String> = busy.jobs.iter().map(ToString::to_string).collect();
+                format!(
+                    "{repository} runs {}. Pausing now cancels it on GitHub.",
+                    jobs.join(", ")
+                )
+            }
+            _ => reply.message(),
+        };
         return html(&[views::question(
-            &format!("{message}. Pausing now cancels it on GitHub."),
+            &message,
             &format!("@post('/v1/repositories/{repository}/pause?force=true')"),
             "Cancel and pause",
         )]);

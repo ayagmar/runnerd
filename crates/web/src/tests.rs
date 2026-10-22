@@ -565,6 +565,11 @@ async fn pausing_a_repository_with_a_running_job_asks_first_and_cancels_only_whe
         asked.body
     );
     assert!(
+        !asked.body.contains("pause with force"),
+        "the question asks rather than repeating the CLI's hint: {}",
+        asked.body
+    );
+    assert!(
         asked.body.contains(&LEDGER_RUNNING.to_string()),
         "the question names the job: {}",
         asked.body
