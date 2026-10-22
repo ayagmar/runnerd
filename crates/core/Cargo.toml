@@ -8,9 +8,14 @@ license.workspace = true
 repository.workspace = true
 
 [dependencies]
+bollard.workspace = true
 serde.workspace = true
 thiserror.workspace = true
 toml.workspace = true
+
+[dev-dependencies]
+futures-util.workspace = true
+tokio = { workspace = true, features = ["macros", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
