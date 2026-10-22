@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 clap.workspace = true
 runnerd-core.workspace = true
+tokio = { workspace = true, features = ["rt"] }
 
 [lints]
 workspace = true

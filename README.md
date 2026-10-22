@@ -2,7 +2,28 @@
 
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development. Today it only reads and checks its config; it does not start runners yet.
+It is in early development. Today it checks its config and the host; it does not start runners yet.
+
+## Requirements
+
+- Linux with cgroup v2, and Docker using the systemd cgroup driver.
+- [Sysbox](https://github.com/nestybox/sysbox), so each runner container can run its own Docker Engine without being privileged. Sysbox publishes `.deb` packages; on Arch Linux it is the AUR package `sysbox-ce-bin`; elsewhere, build it from source.
+- A systemd slice whose `MemoryMax` is the budget for all runners.
+- The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
+
+`runnerd doctor` checks each of these and prints the fix for what is missing. Given a config, it also checks the slice the config names and that the config fits in it:
+
+```sh
+runnerd doctor runnerd.toml
+```
+
+## Runner image
+
+[`image/`](image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base. A profile's `image_stage` picks the stage:
+
+```sh
+docker build --target trellis -t runnerd-runner:trellis image
+```
 
 ## Config
 
@@ -31,6 +52,12 @@ cargo fmt --check
 cargo clippy --workspace --all-targets -- -D warnings
 cargo test --workspace
 cargo deny check
+```
+
+The test that starts a real runner container is ignored by default. It needs Docker with sysbox and the image above:
+
+```sh
+cargo test -p runnerd-core --test docker_smoke -- --ignored
 ```
 
 ## License

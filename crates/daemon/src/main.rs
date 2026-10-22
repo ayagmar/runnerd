@@ -1,8 +1,10 @@
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
 use runnerd_core::config::{ByteSize, Config, slice_memory_max};
+
+mod doctor;
 
 /// Runs ephemeral GitHub Actions runners in containers within a host budget.
 #[derive(Parser)]
@@ -21,16 +23,22 @@ enum Command {
         #[arg(long)]
         memory_max: Option<ByteSize>,
     },
+    /// Check that the host can run runners, and print the fix for what it is missing.
+    Doctor {
+        /// Also check this config against the slice it names.
+        config: Option<PathBuf>,
+    },
 }
 
 fn main() -> ExitCode {
     match Cli::parse().command {
         Some(Command::CheckConfig { path, memory_max }) => check_config(&path, memory_max),
+        Some(Command::Doctor { config }) => doctor(config.as_deref()),
         None => ExitCode::SUCCESS,
     }
 }
 
-fn check_config(path: &std::path::Path, memory_max: Option<ByteSize>) -> ExitCode {
+fn check_config(path: &Path, memory_max: Option<ByteSize>) -> ExitCode {
     let config = match Config::load(path) {
         Ok(config) => config,
         Err(error) => return fail(&error),
@@ -54,6 +62,26 @@ fn check_config(path: &std::path::Path, memory_max: Option<ByteSize>) -> ExitCod
             ExitCode::SUCCESS
         }
         Err(error) => fail(&error),
+    }
+}
+
+fn doctor(path: Option<&Path>) -> ExitCode {
+    let config = match path.map(Config::load).transpose() {
+        Ok(config) => config,
+        Err(error) => return fail(&error),
+    };
+    let host = doctor::Host::read(config.as_ref());
+    let checks = doctor::checks(&host, config.as_ref());
+    for check in &checks {
+        println!("{check}");
+    }
+    if checks
+        .iter()
+        .any(|check| check.status == doctor::Status::Fail)
+    {
+        ExitCode::FAILURE
+    } else {
+        ExitCode::SUCCESS
     }
 }
 
