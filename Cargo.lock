@@ -599,14 +599,14 @@ dependencies = [
 
 [[package]]
 name = "runnerctl"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "clap",
 ]
 
 [[package]]
 name = "runnerd"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "clap",
  "runnerd-core",
@@ -615,7 +615,7 @@ dependencies = [
 
 [[package]]
 name = "runnerd-core"
-version = "0.1.0"
+version = "0.0.1"
 dependencies = [
  "bollard",
  "futures-util",
