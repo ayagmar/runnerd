@@ -133,6 +133,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
             self.end_capture(&occupant.runner_name).await;
+            // Responses the mirror logged since this tick's count: on a shutdown, the mirror and its log go next.
+            self.count_mirror_bytes().await;
             self.forget(&occupant);
             match self
                 .github

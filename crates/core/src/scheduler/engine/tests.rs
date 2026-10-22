@@ -182,6 +182,8 @@ struct DockerState {
     fail_removes: u32,
     /// What the Docker Hub mirror's log says.
     mirror_log: String,
+    /// What the mirror logs while a runner container is removed, as when the runner's last pulls land just then.
+    mirror_log_on_remove: String,
     /// What `volume_sizes` measures, by volume name.
     volume_sizes: BTreeMap<String, u64>,
     /// What the log capture prints in a container, by the position it is started at.
@@ -270,6 +272,10 @@ impl DockerApi for FakeDocker {
                 status_code: 500,
                 message: "the Engine is busy".to_owned(),
             });
+        }
+        if container.starts_with("container-") {
+            let late = std::mem::take(&mut state.mirror_log_on_remove);
+            state.mirror_log.push_str(&late);
         }
         state
             .containers
@@ -1110,6 +1116,31 @@ async fn killing_the_runner_of_a_cancelled_run_trims_the_shared_caches_and_resee
     until_called(&mut engine, &docker, "remove volume runnerd-pnpm").await;
     let seed = format!("start {}", Names::new("runnerd").seed("app"));
     until_called(&mut engine, &docker, &seed).await;
+}
+
+#[tokio::test]
+async fn a_forced_shutdown_counts_the_mirror_bytes_its_last_runner_pulled_before_it_was_killed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_runner(&github, &docker, "@@job 1 1\n");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    docker.0.lock().unwrap().mirror_log_on_remove = "2026-10-22T19:27:25.869343464Z 172.18.0.3 - - \
+        [22/Oct/2026:19:27:25 +0000] \"GET /v2/library/alpine/blobs/sha256:aa HTTP/1.1\" 200 577 \"\" \"docker/29.9.2\"\n"
+        .to_owned();
+    let dir = TestDir::new("mirror");
+    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::Force).await;
+    handle.store.flush().await;
+    let job = handle.store.job(1).await.unwrap().unwrap();
+    assert_eq!(job.summary.metrics.mirror_bytes, 577);
 }
 
 #[tokio::test]
