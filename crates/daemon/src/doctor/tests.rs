@@ -41,6 +41,7 @@ fn ready_host(os_release: &str) -> Host {
             "repo".to_owned(),
             "workflow".to_owned(),
         ]),
+        sysbox_services: true,
         kvm: true,
     }
 }
@@ -90,6 +91,24 @@ fn missing_sysbox_fails_with_the_package_for_the_distribution() {
             "{os_release}: {sysbox}"
         );
     }
+}
+
+#[test]
+fn sysbox_with_stopped_services_fails_with_the_command_to_start_them() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.sysbox_services = false;
+    let checks = checks(&host, Some(&config));
+    assert_eq!(failed(&checks), ["sysbox"]);
+    let sysbox = checks.iter().find(|check| check.name == "sysbox").unwrap();
+    assert!(
+        sysbox
+            .fix
+            .as_deref()
+            .unwrap()
+            .contains("systemctl enable --now sysbox"),
+        "{sysbox}"
+    );
 }
 
 #[test]

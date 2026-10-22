@@ -16,6 +16,8 @@ pub struct Host {
     pub slice: Option<Result<Slice, String>>,
     /// The scopes of `gh`'s token for github.com.
     pub gh_scopes: Result<Vec<String>, String>,
+    /// Whether `sysbox-mgr` and `sysbox-fs` run: Docker keeps the runtime registered without them.
+    pub sysbox_services: bool,
     pub kvm: bool,
 }
 
@@ -77,6 +79,10 @@ impl Host {
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
             gh_scopes: read_gh_scopes(),
+            sysbox_services: Command::new("systemctl")
+                .args(["is-active", "--quiet", "sysbox-mgr", "sysbox-fs"])
+                .status()
+                .is_ok_and(|status| status.success()),
             kvm: Path::new("/dev/kvm").exists(),
         }
     }
@@ -200,9 +206,21 @@ pub fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     let isolation = config.map_or(Isolation::Sysbox, |config| config.host.isolation);
     checks.push(match docker {
         None => skip("sysbox", "needs Docker"),
-        Some(docker) if docker.runtimes.iter().any(|r| r == "sysbox-runc") => {
-            pass("sysbox", "Docker has the sysbox-runc runtime".to_owned())
+        Some(docker)
+            if docker.runtimes.iter().any(|r| r == "sysbox-runc") && !host.sysbox_services =>
+        {
+            fail(
+                "sysbox",
+                "Docker has the sysbox-runc runtime, but sysbox-mgr or sysbox-fs does not run, so runner \
+                 containers fail to start"
+                    .to_owned(),
+                "sudo systemctl enable --now sysbox",
+            )
         }
+        Some(docker) if docker.runtimes.iter().any(|r| r == "sysbox-runc") => pass(
+            "sysbox",
+            "Docker has the sysbox-runc runtime and sysbox's services run".to_owned(),
+        ),
         Some(_) if isolation == Isolation::UnsafeDind => Check {
             name: "sysbox",
             status: Status::Info,
