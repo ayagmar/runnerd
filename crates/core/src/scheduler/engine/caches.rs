@@ -1,0 +1,191 @@
+//! Cache upkeep: reseeds idle profiles, stops the mirror and empties the shared caches over their limit when no
+//! runner runs, and counts what the mirror served each runner. Reseeds and cache checks run as background tasks
+//! the tick collects; it must not start or stop runners.
+
+use std::collections::BTreeMap;
+
+use tokio::task::JoinHandle;
+use tracing::{info, warn};
+
+use super::{Engine, Shutdown, image};
+use crate::api;
+use crate::cache;
+use crate::config::ByteSize;
+use crate::docker::{DockerApi, is_not_found};
+use crate::github::GithubApi;
+use crate::time;
+
+/// What `trim_shared` measured, and the shared caches it emptied with their sizes.
+pub(super) type Trimmed = (BTreeMap<String, u64>, Vec<(String, ByteSize)>);
+
+impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+    /// Counts what the mirror served each runner since the last count.
+    pub(super) async fn count_mirror_bytes(&mut self) {
+        if !self.config.caches.mirror.enabled || !self.mirror_up {
+            return;
+        }
+        let log = match self
+            .docker
+            .logs_since(&self.names.mirror(), self.mirror_until.at / 1_000_000_000)
+            .await
+        {
+            Ok(log) => log,
+            Err(error) if is_not_found(&error) => return,
+            Err(error) => {
+                warn!("cannot read the mirror's log: {error}");
+                return;
+            }
+        };
+        let (bytes, until) = self.leases.attribute(&log, self.mirror_until);
+        // Past these lines only once they are stored: if not, the next count reads them again.
+        if until != self.mirror_until && self.store.mirror_bytes(bytes, until).await {
+            self.mirror_until = until;
+            self.leases.forget_before(until.at / 1_000_000);
+        }
+    }
+
+    /// Reseeds the idle profiles whose slot 1 ran a job; with no runner running at all, stops the mirror and
+    /// empties the shared caches over their limit.
+    pub(super) async fn idle_caches(&mut self, mode: Shutdown) {
+        if mode == Shutdown::No {
+            let due: Vec<String> = self
+                .reseed_due
+                .union(&self.reseed_requested)
+                .filter(|name| {
+                    self.slots
+                        .get(*name)
+                        .is_some_and(|slots| slots.iter().all(Option::is_none))
+                })
+                .cloned()
+                .collect();
+            for name in due {
+                self.reseed_due.remove(&name);
+                let requested = self.reseed_requested.remove(&name);
+                self.spawn_reseed(name, requested);
+            }
+        }
+        if self.occupied().next().is_some() {
+            return;
+        }
+        if self.mirror_up {
+            match cache::mirror_down(&*self.docker, &self.names).await {
+                Ok(()) => self.mirror_up = false,
+                Err(error) => warn!("cannot stop the mirror: {error}"),
+            }
+        }
+        if self.trim_due && self.trim.is_none() {
+            self.trim_due = false;
+            let docker = self.docker.clone();
+            let names = self.names.clone();
+            let caches = self.config.caches.clone();
+            self.trim = Some(tokio::spawn(async move {
+                cache::trim_shared(&*docker, &names, &caches).await
+            }));
+        }
+    }
+
+    /// Rebuilds a profile's snapshot in the background; its slots start nothing until it is done. A `requested`
+    /// reseed runs however little slot 1 changed.
+    fn spawn_reseed(&mut self, name: String, requested: bool) {
+        let Some(profile) = self.config.profiles.get(&name) else {
+            return;
+        };
+        let docker = self.docker.clone();
+        let names = self.names.clone();
+        let image = image(&profile.image_stage);
+        let slice = self.config.host.slice.clone();
+        let (slots, cpus, memory) = (profile.slots as usize, profile.cpus, profile.memory);
+        let min_changes = if requested {
+            ByteSize(0)
+        } else {
+            self.config.caches.reseed_at
+        };
+        let isolation = self.isolation;
+        let profile_name = name.clone();
+        let task = tokio::spawn(async move {
+            cache::reseed(
+                &*docker,
+                &cache::Reseed {
+                    names: &names,
+                    profile: &profile_name,
+                    image: &image,
+                    slots,
+                    slice: &slice,
+                    cpus,
+                    memory,
+                    min_changes,
+                    isolation,
+                },
+            )
+            .await
+        });
+        self.reseed_memory.insert(name.clone(), memory.0);
+        self.reseeds.insert(name, task);
+    }
+
+    pub(super) async fn collect_trim(&mut self) {
+        if !self.trim.as_ref().is_some_and(JoinHandle::is_finished) {
+            return;
+        }
+        let Some(task) = self.trim.take() else {
+            return;
+        };
+        match task.await {
+            Ok(Ok((sizes, emptied))) => {
+                let ours = self.names.network();
+                self.store.cache_sizes(
+                    time::now_ms(),
+                    sizes
+                        .into_iter()
+                        .filter(|(name, _)| name.starts_with(&format!("{ours}-")))
+                        .collect(),
+                );
+                for (name, size) in emptied {
+                    info!("emptied {name}, which had grown to {size}");
+                }
+            }
+            Ok(Err(error)) => warn!("cannot check the shared caches: {error}"),
+            Err(error) => warn!("checking the shared caches stopped: {error}"),
+        }
+    }
+
+    pub(super) async fn collect_reseeds(&mut self) {
+        let finished: Vec<String> = self
+            .reseeds
+            .iter()
+            .filter(|(_, task)| task.is_finished())
+            .map(|(name, _)| name.clone())
+            .collect();
+        for name in finished {
+            self.reseed_memory.remove(&name);
+            let Some(task) = self.reseeds.remove(&name) else {
+                continue;
+            };
+            let (output, error) = match task.await {
+                Ok(Ok(output)) => {
+                    info!("{name}: {}", output.trim().replace('\n', "; "));
+                    (output, None)
+                }
+                Ok(Err(error)) => {
+                    warn!("{name}: reseeding failed: {error}");
+                    (String::new(), Some(error.to_string()))
+                }
+                Err(error) => {
+                    warn!("{name}: reseeding stopped: {error}");
+                    (String::new(), Some(error.to_string()))
+                }
+            };
+            self.store.event(api::Event::CacheReseeded {
+                profile: name,
+                output: output.trim().to_owned(),
+                error,
+            });
+        }
+        self.drop_closed_slots();
+    }
+
+    /// Whether a profile's snapshot is being rebuilt, or will be once its slots are free.
+    pub(super) fn is_reseeding(&self, profile: &str) -> bool {
+        self.reseeds.contains_key(profile) || self.reseed_requested.contains(profile)
+    }
+}
