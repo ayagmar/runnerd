@@ -83,9 +83,6 @@ fn y_of(value: u64, top: u64) -> f64 {
 
 /// The highest value per pixel column, so a reduced series keeps its peaks.
 fn reduce(points: &[(u64, u64)], start: u64, end: u64) -> Vec<(u64, u64)> {
-    if points.len() <= MAX_POINTS {
-        return points.to_vec();
-    }
     let mut reduced: Vec<(u64, u64)> = Vec::with_capacity(MAX_POINTS);
     let mut column = None;
     for &(at, value) in points {
@@ -111,33 +108,34 @@ fn reduce(points: &[(u64, u64)], start: u64, end: u64) -> Vec<(u64, u64)> {
     reduced
 }
 
-/// The line through the points, split where they are more than `gap` apart; and the area under each part.
+/// The line through the points, split where the samples are more than `gap` apart, and the area under each part.
+/// A long series is reduced after the split, so the points kept, further apart than the samples, stay joined.
 fn paths(points: &[(u64, u64)], chart: &TimeChart, top: u64) -> (String, String) {
     let mut line = String::new();
     let mut area = String::new();
-    let mut run: Vec<(f64, f64)> = Vec::new();
-    let mut flush = |run: &mut Vec<(f64, f64)>| {
+    let long = points.len() > MAX_POINTS;
+    let runs = points.chunk_by(|a, b| b.0.saturating_sub(a.0) <= chart.gap);
+    for run in runs {
+        let run = if long {
+            reduce(run, chart.start, chart.end)
+        } else {
+            run.to_vec()
+        };
+        let run: Vec<(f64, f64)> = run
+            .iter()
+            .map(|&(at, value)| (x_of(at, chart.start, chart.end), y_of(value, top)))
+            .collect();
         if let (Some(first), Some(last)) = (run.first(), run.last()) {
             for (i, (x, y)) in run.iter().enumerate() {
                 let _ = write!(line, "{}{x:.1},{y:.2}", if i == 0 { "M" } else { "L" });
             }
             let _ = write!(area, "M{:.1},{HEIGHT}", first.0);
-            for (x, y) in run.iter() {
+            for (x, y) in &run {
                 let _ = write!(area, "L{x:.1},{y:.2}");
             }
             let _ = write!(area, "L{:.1},{HEIGHT}Z", last.0);
         }
-        run.clear();
-    };
-    let mut previous: Option<u64> = None;
-    for &(at, value) in points {
-        if previous.is_some_and(|previous| at.saturating_sub(previous) > chart.gap) {
-            flush(&mut run);
-        }
-        run.push((x_of(at, chart.start, chart.end), y_of(value, top)));
-        previous = Some(at);
     }
-    flush(&mut run);
     (line, area)
 }
 
@@ -187,8 +185,7 @@ impl TimeChart {
                             role="img" aria-label=(format!("{}: {summary}", self.title)) {
                             line.grid x1="0" x2=(WIDTH) y1="50" y2="50" vector-effect="non-scaling-stroke" {}
                             @for series in &self.series {
-                                @let points = reduce(&series.points, self.start, self.end);
-                                @let (line, area) = paths(&points, self, top);
+                                @let (line, area) = paths(&series.points, self, top);
                                 @if series.area {
                                     path class=(format!("area {}", series.class)) d=(area) {}
                                 }
@@ -232,7 +229,7 @@ pub(crate) fn sparkline(
         time: |_| String::new(),
         gap: u64::MAX,
     };
-    let (line, area) = paths(&reduce(points, start, end), &chart, top);
+    let (line, area) = paths(points, &chart, top);
     html! {
         svg.sparkline viewBox=(format!("0 0 {WIDTH} {HEIGHT}")) preserveAspectRatio="none" aria-hidden="true" {
             path class=(format!("area {class}")) d=(area) {}
@@ -328,5 +325,41 @@ mod tests {
         let reduced = reduce(&points, 0, 4999);
         assert!(reduced.len() <= MAX_POINTS + 1);
         assert_eq!(reduced.iter().map(|point| point.1).max(), Some(9000));
+    }
+
+    /// The `d` of the drawn line of a job's memory chart over `points`, sampled every 2 s.
+    fn drawn_line(points: Vec<(u64, u64)>) -> String {
+        let chart = TimeChart {
+            title: "Memory".to_owned(),
+            start: 0,
+            end: 7200,
+            series: vec![Series::line("memory", "memory", points)],
+            limit: None,
+            value: |_| String::new(),
+            time: |_| String::new(),
+            gap: 6,
+        };
+        let html = chart.render(2 << 30).into_string();
+        let from =
+            html.find(r#"class="line memory" d=""#).unwrap() + r#"class="line memory" d=""#.len();
+        html[from..from + html[from..].find('"').unwrap()].to_owned()
+    }
+
+    #[test]
+    fn a_two_hour_job_sampled_every_two_seconds_draws_one_connected_line() {
+        let line = drawn_line((0..=3600).map(|i| (i * 2, 1 << 30)).collect());
+        assert_eq!(line.matches('M').count(), 1, "{line}");
+        assert!(line.matches('L').count() > 100, "{line}");
+    }
+
+    #[test]
+    fn a_long_job_with_a_pause_in_its_samples_draws_two_lines() {
+        let line = drawn_line(
+            (0..=3600)
+                .filter(|i| !(1000..1100).contains(i))
+                .map(|i| (i * 2, 1 << 30))
+                .collect(),
+        );
+        assert_eq!(line.matches('M').count(), 2, "{line}");
     }
 }
