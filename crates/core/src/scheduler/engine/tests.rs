@@ -1131,3 +1131,90 @@ async fn a_cache_is_cleaned_only_when_no_runner_uses_it() {
         .collect();
     assert_eq!(volumes, ["remove volume runnerd-app-slot-2"]);
 }
+
+/// Two profiles and their repositories, with the mirror's memory: `app` for `o/r`, `small` for `o/s`.
+fn sized(mirror: &str, app: &str, small: &str) -> String {
+    format!(
+        r#"
+[host]
+slice = "ci.slice"
+isolation = "sysbox"
+
+[caches]
+mirror = {{ enabled = {}, memory = "{mirror}", cpus = 1, ttl = "168h" }}
+pnpm = {{ max_size = "5G" }}
+maven = {{ max_size = "5G" }}
+
+[profiles.app]
+image_stage = "app"
+cpus = 2
+memory = "{app}"
+slots = 1
+
+[profiles.small]
+image_stage = "small"
+cpus = 2
+memory = "{small}"
+slots = 1
+
+[[repositories]]
+name = "o/r"
+profile = "app"
+labels = ["self-hosted", "app"]
+
+[[repositories]]
+name = "o/s"
+profile = "small"
+labels = ["self-hosted", "small"]
+"#,
+        mirror != "0G"
+    )
+}
+
+fn small_job(id: u64) -> QueuedJob {
+    QueuedJob {
+        labels: vec!["self-hosted".to_owned(), "small".to_owned()],
+        ..job(id)
+    }
+}
+
+#[tokio::test]
+async fn a_running_reseed_keeps_its_memory_when_a_reload_lowers_its_profiles() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &sized("0G", "8G", "1G"));
+    engine.memory_max = Some(10 << 30);
+    engine.recover().await.unwrap();
+    engine.request_reseed("app").unwrap();
+    engine.tick(Shutdown::No).await;
+    assert!(engine.reseeds.contains_key("app"));
+    // The seed container still runs with 8G; 8G more for `small` would not fit in 10G.
+    engine.reload(
+        Config::parse(&sized("0G", "1G", "8G")).unwrap(),
+        Some(10 << 30),
+    );
+    github.0.lock().unwrap().queued = vec![small_job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
+async fn a_running_mirror_keeps_its_memory_when_a_reload_lowers_it() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &sized("4G", "6G", "1G"));
+    engine.memory_max = Some(10 << 30);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    // The mirror still runs with 4G and the runner with 6G: 3G more would not fit in 10G.
+    engine.reload(
+        Config::parse(&sized("512M", "6G", "3G")).unwrap(),
+        Some(10 << 30),
+    );
+    github.0.lock().unwrap().queued = vec![small_job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}

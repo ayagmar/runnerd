@@ -449,6 +449,8 @@ pub struct Engine<G = Github, D = Docker> {
     slots: BTreeMap<String, Vec<Option<Occupant>>>,
     repositories: BTreeMap<String, RepositoryState>,
     reseeds: BTreeMap<String, JoinHandle<Result<String, docker::Error>>>,
+    /// The memory cap each running reseed's container started with, which a reload does not change.
+    reseed_memory: BTreeMap<String, u64>,
     /// Profiles the API asked to reseed: they start nothing until their slots are free and the reseed ran.
     reseed_requested: BTreeSet<String>,
     /// Profiles a reload removed, kept while their runners or reseed still run.
@@ -460,6 +462,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// The running check of the shared caches: Docker takes many seconds to measure volumes.
     trim: Option<JoinHandle<Result<Trimmed, docker::Error>>>,
     mirror_up: bool,
+    /// The memory cap the running mirror started with.
+    mirror_memory: u64,
     rate_limit_logged: bool,
     /// Runners without a container that GitHub still holds busy, already logged.
     busy_orphans: BTreeSet<u64>,
@@ -545,6 +549,12 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             repositories: Vec::new(),
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
+        // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
+        let mirror_memory = if config.caches.mirror.enabled {
+            config.caches.mirror.memory.0
+        } else {
+            0
+        };
         let mut engine = Engine {
             config,
             github,
@@ -557,6 +567,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             slots,
             repositories,
             reseeds: BTreeMap::new(),
+            reseed_memory: BTreeMap::new(),
             reseed_requested: BTreeSet::new(),
             retired: BTreeMap::new(),
             reseed_due: BTreeSet::new(),
@@ -565,6 +576,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             trim: None,
             // Unknown: an earlier run may have left it up, so the first idle tick stops it.
             mirror_up: true,
+            mirror_memory,
             rate_limit_logged: false,
             busy_orphans: BTreeSet::new(),
             status,
@@ -656,6 +668,12 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             info!("{profile}: waiting for the reseed an earlier run started");
             let docker = self.docker.clone();
             let id = container.id.clone();
+            let memory = self
+                .config
+                .profiles
+                .get(&profile)
+                .map_or(0, |settings| settings.memory.0);
+            self.reseed_memory.insert(profile.clone(), memory);
             self.reseeds.insert(
                 profile,
                 tokio::spawn(async move { cache::finish_reseed(&*docker, &id).await }),
@@ -1091,18 +1109,17 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
 
     /// Memory caps of the runners, the seed containers (which run with their profile's limits) and the mirror.
     fn memory_in_use(&self) -> u64 {
+        // The configured mirror is reserved for; a running one keeps the cap it started with until it stops.
         let mirror = &self.config.caches.mirror;
-        let mirror = if mirror.enabled { mirror.memory.0 } else { 0 };
-        let profile_memory = |name: &String| {
-            self.config
-                .profiles
-                .get(name)
-                .or_else(|| self.retired.get(name))
-                .map_or(0, |profile| profile.memory.0)
+        let configured = if mirror.enabled { mirror.memory.0 } else { 0 };
+        let running = if self.mirror_up {
+            self.mirror_memory
+        } else {
+            0
         };
         let runners: u64 = self.occupied().map(|(_, occupant)| occupant.memory).sum();
-        let reseeds: u64 = self.reseeds.keys().map(profile_memory).sum();
-        runners + reseeds + mirror
+        let reseeds: u64 = self.reseed_memory.values().sum();
+        runners + reseeds + configured.max(running)
     }
 
     async fn poll_queued(&mut self) {
@@ -1417,7 +1434,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             match cache::mirror_up(&*self.docker, &self.names, mirror, &self.config.host.slice)
                 .await
             {
-                Ok(()) => self.mirror_up = true,
+                Ok(()) => {
+                    self.mirror_up = true;
+                    self.mirror_memory = mirror.memory.0;
+                }
                 // Runners pull from Docker Hub directly when the mirror does not answer.
                 Err(error) => warn!("cannot start the mirror: {error}"),
             }
@@ -1559,6 +1579,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             )
             .await
         });
+        self.reseed_memory.insert(name.clone(), memory.0);
         self.reseeds.insert(name, task);
     }
 
@@ -1596,6 +1617,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .map(|(name, _)| name.clone())
             .collect();
         for name in finished {
+            self.reseed_memory.remove(&name);
             let Some(task) = self.reseeds.remove(&name) else {
                 continue;
             };
