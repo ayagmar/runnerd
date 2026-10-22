@@ -131,10 +131,10 @@ async fn cache_sizes_now_are_the_last_measurement_of_each_volume() {
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     assert_eq!(store.cache_sizes_now().await.unwrap(), Measured::default());
     let sizes = |pnpm: u64, maven: u64| {
-        vec![
+        BTreeMap::from([
             ("runnerd-pnpm".to_owned(), pnpm),
             ("runnerd-maven".to_owned(), maven),
-        ]
+        ])
     };
     store.cache_sizes(1_000, sizes(10, 20));
     store.cache_sizes(61_000, sizes(30, 40));

@@ -189,7 +189,7 @@ enum Write {
     },
     CacheSizes {
         at: u64,
-        sizes: Vec<(String, u64)>,
+        sizes: BTreeMap<String, u64>,
     },
     Event(Event),
     Prune {
@@ -359,8 +359,8 @@ impl Store {
         committed.await.unwrap_or(false)
     }
 
-    /// Records volume sizes measured at `at` (ms).
-    pub fn cache_sizes(&self, at: u64, sizes: Vec<(String, u64)>) {
+    /// Records volume sizes in bytes, by name, measured at `at` (ms).
+    pub fn cache_sizes(&self, at: u64, sizes: BTreeMap<String, u64>) {
         self.send(Write::CacheSizes { at, sizes });
     }
 

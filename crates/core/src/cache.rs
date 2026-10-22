@@ -178,13 +178,30 @@ pub async fn mirror_down(docker: &impl DockerApi, names: &Names) -> Result<(), E
     }
 }
 
-/// Empties the shared caches that outgrew their limit; call only while no runner runs. Returns every volume's size
-/// as measured before, and what it emptied with how large it was.
+/// What `trim_shared` measured and emptied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Trimmed {
+    /// Every volume's size in bytes, by name, as measured before emptying any.
+    pub sizes: BTreeMap<String, u64>,
+    /// The shared caches it emptied.
+    pub emptied: Vec<Emptied>,
+}
+
+/// A shared cache `trim_shared` emptied.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Emptied {
+    /// The volume.
+    pub name: String,
+    /// How large it had grown.
+    pub size: ByteSize,
+}
+
+/// Empties the shared caches that outgrew their limit; call only while no runner runs.
 pub async fn trim_shared(
     docker: &impl DockerApi,
     names: &Names,
     caches: &config::Caches,
-) -> Result<(BTreeMap<String, u64>, Vec<(String, ByteSize)>), Error> {
+) -> Result<Trimmed, Error> {
     let sizes = docker.volume_sizes().await?;
     let mut emptied = Vec::new();
     for (name, limit) in [
@@ -195,10 +212,13 @@ pub async fn trim_shared(
             && size > limit.0
         {
             docker.remove_volume(&name).await?;
-            emptied.push((name, ByteSize(size)));
+            emptied.push(Emptied {
+                name,
+                size: ByteSize(size),
+            });
         }
     }
-    Ok((sizes, emptied))
+    Ok(Trimmed { sizes, emptied })
 }
 
 /// Every cache volume the config's profiles use, what it holds and its limit, with size 0.
