@@ -1,4 +1,9 @@
-use super::{JitConfig, RunnerSpec, connect_to, create_body};
+//! That the JIT config stays out of `Debug` output, the create request and the log, and that only `unix://` Docker
+//! hosts are accepted. No Docker needed.
+
+use std::collections::BTreeMap;
+
+use super::{DockerApi, JitConfig, RunnerSpec, connect_to, create_body};
 use crate::isolation::Sysbox;
 
 const SECRET: &str = "sentinel-jit-config-c2VjcmV0";
@@ -14,7 +19,7 @@ fn spec() -> RunnerSpec {
         env: Vec::new(),
         mounts: Vec::new(),
         network: None,
-        labels: Default::default(),
+        labels: BTreeMap::new(),
         entrypoint: None,
         jit_config: Some(JitConfig(SECRET.to_owned())),
     }

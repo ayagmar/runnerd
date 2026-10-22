@@ -1,0 +1,4 @@
+# `taplo fmt --check` in CI. Lines up to 120 columns, as in the Rust code; comments stay where they are written.
+[formatting]
+column_width = 120
+align_comments = false

@@ -5,10 +5,15 @@
 //! cargo test -p runnerd-core --test cache_reseed -- --ignored --nocapture
 //! ```
 
+#![allow(
+    clippy::print_stdout,
+    reason = "run with --nocapture, these tests show what the containers report"
+)]
+
 use std::collections::BTreeMap;
 
 use runnerd_core::cache::{self, Names, Reseed, runner_mounts};
-use runnerd_core::docker::{Docker, RunnerSpec};
+use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
 const PROFILE: &str = "cache";

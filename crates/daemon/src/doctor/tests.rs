@@ -1,3 +1,5 @@
+//! `doctor`'s checks on made-up hosts.
+
 use runnerd_core::config::{ByteSize, Config};
 
 use super::{Check, DockerFacts, Host, SYSBOX_SERVICES, Slice, Status, checks};

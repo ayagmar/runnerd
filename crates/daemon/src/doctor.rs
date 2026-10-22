@@ -1,4 +1,5 @@
-//! `runnerd doctor`: what the host is missing to run runners, each with the fix.
+//! `runnerd doctor`: what the host is missing to run runners, each with the fix. It reads the host and changes
+//! nothing; the user runs the fixes.
 
 use std::fmt;
 use std::path::Path;
@@ -8,7 +9,7 @@ use runnerd_core::config::{self, ByteSize, Config, Isolation};
 use runnerd_core::docker::Docker;
 
 /// What doctor reads from the host, gathered before any check so the checks can be tested without one.
-pub struct Host {
+pub(crate) struct Host {
     pub docker: Result<DockerFacts, String>,
     /// `/etc/os-release`, empty when missing.
     pub os_release: String,
@@ -22,16 +23,16 @@ pub struct Host {
 }
 
 /// The services sysbox-runc needs; `sysbox.service` starts both.
-pub const SYSBOX_SERVICES: [&str; 2] = ["sysbox-mgr", "sysbox-fs"];
+pub(crate) const SYSBOX_SERVICES: [&str; 2] = ["sysbox-mgr", "sysbox-fs"];
 
-pub struct DockerFacts {
+pub(crate) struct DockerFacts {
     pub version: String,
     pub cgroup_version: String,
     pub cgroup_driver: String,
     pub runtimes: Vec<String>,
 }
 
-pub struct Slice {
+pub(crate) struct Slice {
     /// The slice's unit file; without one, systemd creates the slice without limits.
     pub unit_file: Option<String>,
     pub memory_max: Option<ByteSize>,
@@ -40,7 +41,7 @@ pub struct Slice {
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Status {
+pub(crate) enum Status {
     Pass,
     Fail,
     /// Works, but unsafe.
@@ -50,7 +51,7 @@ pub enum Status {
     Info,
 }
 
-pub struct Check {
+pub(crate) struct Check {
     pub name: &'static str,
     pub status: Status,
     pub detail: String,
@@ -79,7 +80,7 @@ impl fmt::Display for Check {
 }
 
 impl Host {
-    pub fn read(config: Option<&Config>) -> Host {
+    pub(crate) fn read(config: Option<&Config>) -> Host {
         Host {
             docker: read_docker(),
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
@@ -175,7 +176,11 @@ fn read_gh_scopes() -> Result<Vec<String>, String> {
 }
 
 /// Every check, in the order a new user fixes them.
-pub fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
+#[allow(
+    clippy::too_many_lines,
+    reason = "one flat list of checks reads better than helpers per check"
+)]
+pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     let mut checks = Vec::new();
     let docker = match &host.docker {
         Ok(docker) => {
@@ -315,32 +320,33 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             ];
         }
     };
-    let slice_check = match (&slice.unit_file, slice.memory_max) {
-        (Some(unit_file), Some(memory_max)) => pass(
+    let slice_check = if let (Some(unit_file), Some(memory_max)) =
+        (&slice.unit_file, slice.memory_max)
+    {
+        pass(
             "slice",
             format!(
                 "{name} ({unit_file}): MemoryMax={memory_max}, CPU quota {}",
                 slice.cpu_quota
             ),
-        ),
-        _ => {
-            let caps = config.memory_caps().map_or_else(
-                |_| "<total of your caps>".to_owned(),
-                |caps| caps.to_string(),
-            );
-            fail(
-                "slice",
-                format!(
-                    "{name} has no unit file with a MemoryMax, so nothing holds runners to the budget"
-                ),
-                &format!(
-                    "create /etc/systemd/system/{name} with\n\
+        )
+    } else {
+        let caps = config.memory_caps().map_or_else(
+            |_| "<total of your caps>".to_owned(),
+            |caps| caps.to_string(),
+        );
+        fail(
+            "slice",
+            format!(
+                "{name} has no unit file with a MemoryMax, so nothing holds runners to the budget"
+            ),
+            &format!(
+                "create /etc/systemd/system/{name} with\n\
                      [Slice]\n\
                      MemoryMax={caps}\n\
                      then: sudo systemctl daemon-reload"
-                ),
-            )
-        }
+            ),
+        )
     };
     let config_check = match config.validate(slice.memory_max) {
         Ok(warnings) if warnings.is_empty() => pass("config", format!("fits in {name}")),

@@ -1,0 +1,24 @@
+# Architecture decision records
+
+One short record per decision: its context, the decision, and what follows from it. Add the next number when a
+decision changes a boundary, and update [ARCHITECTURE.md](../../ARCHITECTURE.md) with it. A replaced decision stays,
+with a line pointing to the record that replaces it.
+
+| # | Decision |
+|---|---|
+| [0001](0001-core-owns-domain-logic-and-api-types.md) | `runnerd-core` owns domain logic and API types |
+| [0002](0002-json-and-sse-over-a-unix-socket.md) | JSON and SSE over a Unix socket; the web UI on loopback TCP |
+| [0003](0003-server-rendered-web-ui-with-datastar.md) | Web UI: axum, server-rendered HTML and Datastar |
+| [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md) | GPUI desktop app pinned to a Zed commit |
+| [0005](0005-isolation-backends-sysbox-by-default.md) | Isolation backends: sysbox by default, privileged DinD only when asked |
+| [0006](0006-ephemeral-jit-runners.md) | Ephemeral JIT runners, one per job |
+| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer |
+| [0008](0008-auth-with-the-gh-token.md) | Authenticate with the `gh` CLI's token |
+| [0009](0009-newest-stable-and-locked-dependencies.md) | Every dependency newest stable and locked |
+| [0010](0010-mit-license-public-repository.md) | MIT license, public repository |
+| [0011](0011-linux-and-github-only-for-v1.md) | Linux hosts and GitHub only, for v1 |
+| [0012](0012-principal-from-one-place.md) | Handlers take a principal from one place |
+| [0013](0013-runs-on-existing-machines.md) | Runs on the user's existing machines |
+| [0014](0014-host-feature-for-daemon-only-code.md) | Daemon-only code behind core's `host` feature |
+| [0015](0015-engine-behind-github-and-docker-traits.md) | The engine calls GitHub and Docker through traits |
+| [0016](0016-strict-lints.md) | Strict lints, every exception with a reason |

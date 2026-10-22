@@ -59,25 +59,41 @@ pub fn install_crypto_provider() {
 pub enum Error {
     /// GitHub's rate limit is used up; no request is sent before `until`.
     #[error("GitHub's rate limit is used up until {}s after the epoch", secs(*until))]
-    RateLimited { until: SystemTime },
+    RateLimited {
+        /// When the limit resets.
+        until: SystemTime,
+    },
+    /// GitHub answered with an error status.
     #[error("GitHub answered {status} to {method} {path}: {message}")]
     Status {
+        /// The request's method.
         method: Method,
+        /// The request's path, without the host.
         path: String,
+        /// What GitHub answered.
         status: StatusCode,
+        /// GitHub's error message, or the body as text.
         message: String,
     },
+    /// The request did not get an answer.
     #[error("{method} {path}: {source}")]
     Http {
+        /// The request's method.
         method: Method,
+        /// The request's path, without the host.
         path: String,
+        /// What failed, without the URL.
         source: reqwest::Error,
     },
+    /// The answer is not the JSON expected.
     #[error("{path}: unexpected response: {source}")]
     Decode {
+        /// The request's path, without the host.
         path: String,
+        /// What did not parse.
         source: serde_json::Error,
     },
+    /// No token could be read.
     #[error("no GitHub token: {0}")]
     Token(String),
 }
@@ -91,8 +107,11 @@ fn secs(time: SystemTime) -> u64 {
 /// A job waiting for a runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedJob {
+    /// The job's ID; IDs grow with time.
     pub id: u64,
+    /// The workflow run it belongs to.
     pub run_id: u64,
+    /// The job's name in the workflow.
     pub name: String,
     /// The workflow's `runs-on` labels.
     pub labels: Vec<String>,
@@ -101,7 +120,9 @@ pub struct QueuedJob {
 /// A runner registered on a repository.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Runner {
+    /// The runner's ID.
     pub id: u64,
+    /// Its name; runnerd's runners start with the host's prefix.
     pub name: String,
     /// `online` or `offline`.
     pub status: String,
@@ -112,11 +133,36 @@ pub struct Runner {
 /// What deleting a runner did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Deleted {
+    /// GitHub removed it.
     Deleted,
     /// It was gone already: an ephemeral runner removes itself after its job.
     NotFound,
     /// GitHub refused because the runner runs a job.
     Busy,
+}
+
+/// The GitHub calls the scheduler makes. `Github` is the real client; the engine's tests use a fake.
+pub trait GithubApi: Send + Sync {
+    /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
+    fn queued_jobs(
+        &self,
+        repository: &str,
+    ) -> impl Future<Output = Result<Vec<QueuedJob>, Error>> + Send;
+    /// The repository's self-hosted runners.
+    fn runners(&self, repository: &str) -> impl Future<Output = Result<Vec<Runner>, Error>> + Send;
+    /// Registers a runner for one job and returns it with the config `run.sh --jitconfig` takes.
+    fn jit_config(
+        &self,
+        repository: &str,
+        name: &str,
+        labels: &[String],
+    ) -> impl Future<Output = Result<(Runner, JitConfig), Error>> + Send;
+    /// Removes a runner from the repository.
+    fn delete_runner(
+        &self,
+        repository: &str,
+        id: u64,
+    ) -> impl Future<Output = Result<Deleted, Error>> + Send;
 }
 
 /// A GitHub API client for one token. Requests on one URL are conditional on its last `ETag`, so an unchanged
@@ -132,7 +178,9 @@ pub struct Github {
 
 impl fmt::Debug for Github {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Github").field("base", &self.base).finish()
+        f.debug_struct("Github")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
     }
 }
 
@@ -215,86 +263,6 @@ impl Github {
         blocked.filter(|until| *until > SystemTime::now())
     }
 
-    /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
-    pub async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, Error> {
-        let mut jobs = Vec::new();
-        let mut listed = Vec::new();
-        for status in ["queued", "in_progress"] {
-            let runs: Runs = self
-                .get(&format!(
-                    "/repos/{repository}/actions/runs?status={status}&per_page=100"
-                ))
-                .await?;
-            for run in runs.workflow_runs {
-                let path = jobs_path(repository, run.id);
-                let run_jobs: Jobs = self.get(&path).await?;
-                listed.push(path);
-                jobs.extend(
-                    run_jobs
-                        .jobs
-                        .into_iter()
-                        .filter(|job| job.status == "queued")
-                        .map(|job| QueuedJob {
-                            id: job.id,
-                            run_id: job.run_id,
-                            name: job.name,
-                            labels: job.labels,
-                        }),
-                );
-            }
-        }
-        // The cached answers of runs that ended: nothing asks for them again.
-        let runs_prefix = format!("/repos/{repository}/actions/runs/");
-        lock(&self.etags).retain(|path, _| {
-            !(path.starts_with(&runs_prefix) && path.contains("/jobs?")) || listed.contains(path)
-        });
-        jobs.sort_by_key(|job| job.id);
-        jobs.dedup_by_key(|job| job.id);
-        Ok(jobs)
-    }
-
-    /// The repository's self-hosted runners.
-    pub async fn runners(&self, repository: &str) -> Result<Vec<Runner>, Error> {
-        let runners: Runners = self
-            .get(&format!("/repos/{repository}/actions/runners?per_page=100"))
-            .await?;
-        Ok(runners.runners)
-    }
-
-    /// Registers a runner for one job and returns it with the config `run.sh --jitconfig` takes.
-    pub async fn jit_config(
-        &self,
-        repository: &str,
-        name: &str,
-        labels: &[String],
-    ) -> Result<(Runner, JitConfig), Error> {
-        let body = serde_json::json!({
-            "name": name,
-            // The repository's default runner group.
-            "runner_group_id": 1,
-            "labels": labels,
-            "work_folder": "_work",
-        });
-        let path = format!("/repos/{repository}/actions/runners/generate-jitconfig");
-        let response = self.send(Method::POST, &path, Some(&body)).await?;
-        let response = expect_success(Method::POST, &path, response).await?;
-        let jit: JitResponse = decode(&path, &response.bytes)?;
-        Ok((jit.runner, JitConfig(jit.encoded_jit_config)))
-    }
-
-    /// Removes a runner from the repository.
-    pub async fn delete_runner(&self, repository: &str, id: u64) -> Result<Deleted, Error> {
-        let path = format!("/repos/{repository}/actions/runners/{id}");
-        let response = self.send(Method::DELETE, &path, None).await?;
-        match response.status {
-            StatusCode::NOT_FOUND => Ok(Deleted::NotFound),
-            StatusCode::UNPROCESSABLE_ENTITY => Ok(Deleted::Busy),
-            _ => expect_success(Method::DELETE, &path, response)
-                .await
-                .map(|_| Deleted::Deleted),
-        }
-    }
-
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
         let response = self.send(Method::GET, path, None).await?;
         let bytes = if response.status == StatusCode::NOT_MODIFIED {
@@ -312,7 +280,7 @@ impl Github {
             }
         } else {
             let etag = response.etag.clone();
-            let response = expect_success(Method::GET, path, response).await?;
+            let response = expect_success(Method::GET, path, response)?;
             if let Some(etag) = etag {
                 lock(&self.etags).insert(path.to_owned(), (etag, response.bytes.clone()));
             }
@@ -392,6 +360,82 @@ impl Github {
     }
 }
 
+impl GithubApi for Github {
+    async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, Error> {
+        let mut jobs = Vec::new();
+        let mut listed = Vec::new();
+        for status in ["queued", "in_progress"] {
+            let runs: Runs = self
+                .get(&format!(
+                    "/repos/{repository}/actions/runs?status={status}&per_page=100"
+                ))
+                .await?;
+            for run in runs.workflow_runs {
+                let path = jobs_path(repository, run.id);
+                let run_jobs: Jobs = self.get(&path).await?;
+                listed.push(path);
+                jobs.extend(
+                    run_jobs
+                        .jobs
+                        .into_iter()
+                        .filter(|job| job.status == "queued")
+                        .map(|job| QueuedJob {
+                            id: job.id,
+                            run_id: job.run_id,
+                            name: job.name,
+                            labels: job.labels,
+                        }),
+                );
+            }
+        }
+        // The cached answers of runs that ended: nothing asks for them again.
+        let runs_prefix = format!("/repos/{repository}/actions/runs/");
+        lock(&self.etags).retain(|path, _| {
+            !(path.starts_with(&runs_prefix) && path.contains("/jobs?")) || listed.contains(path)
+        });
+        jobs.sort_by_key(|job| job.id);
+        jobs.dedup_by_key(|job| job.id);
+        Ok(jobs)
+    }
+
+    async fn runners(&self, repository: &str) -> Result<Vec<Runner>, Error> {
+        let runners: Runners = self
+            .get(&format!("/repos/{repository}/actions/runners?per_page=100"))
+            .await?;
+        Ok(runners.runners)
+    }
+
+    async fn jit_config(
+        &self,
+        repository: &str,
+        name: &str,
+        labels: &[String],
+    ) -> Result<(Runner, JitConfig), Error> {
+        let body = serde_json::json!({
+            "name": name,
+            // The repository's default runner group.
+            "runner_group_id": 1,
+            "labels": labels,
+            "work_folder": "_work",
+        });
+        let path = format!("/repos/{repository}/actions/runners/generate-jitconfig");
+        let response = self.send(Method::POST, &path, Some(&body)).await?;
+        let response = expect_success(Method::POST, &path, response)?;
+        let jit: JitResponse = decode(&path, &response.bytes)?;
+        Ok((jit.runner, JitConfig(jit.encoded_jit_config)))
+    }
+
+    async fn delete_runner(&self, repository: &str, id: u64) -> Result<Deleted, Error> {
+        let path = format!("/repos/{repository}/actions/runners/{id}");
+        let response = self.send(Method::DELETE, &path, None).await?;
+        match response.status {
+            StatusCode::NOT_FOUND => Ok(Deleted::NotFound),
+            StatusCode::UNPROCESSABLE_ENTITY => Ok(Deleted::Busy),
+            _ => expect_success(Method::DELETE, &path, response).map(|_| Deleted::Deleted),
+        }
+    }
+}
+
 fn jobs_path(repository: &str, run: u64) -> String {
     format!("/repos/{repository}/actions/runs/{run}/jobs?filter=latest&per_page=100")
 }
@@ -402,13 +446,14 @@ struct Response {
     bytes: Vec<u8>,
 }
 
-async fn expect_success(method: Method, path: &str, response: Response) -> Result<Response, Error> {
+fn expect_success(method: Method, path: &str, response: Response) -> Result<Response, Error> {
     if response.status.is_success() {
         return Ok(response);
     }
-    let message = serde_json::from_slice::<ErrorBody>(&response.bytes)
-        .map(|body| body.message)
-        .unwrap_or_else(|_| String::from_utf8_lossy(&response.bytes).into_owned());
+    let message = serde_json::from_slice::<ErrorBody>(&response.bytes).map_or_else(
+        |_| String::from_utf8_lossy(&response.bytes).into_owned(),
+        |body| body.message,
+    );
     Err(Error::Status {
         method,
         path: path.to_owned(),

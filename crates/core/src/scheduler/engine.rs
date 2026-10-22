@@ -15,8 +15,8 @@ use super::{Decision, Profile, Repository, RunnerSlot, Slot, SlotRef, plan};
 use crate::api;
 use crate::cache::{self, Names, runner_mounts};
 use crate::config::{ByteSize, Config};
-use crate::docker::{self, Docker, RunnerSpec, is_not_found};
-use crate::github::{self, Deleted, Github, QueuedJob};
+use crate::docker::{self, Docker, DockerApi, RunnerSpec, is_not_found};
+use crate::github::{self, Deleted, Github, GithubApi, QueuedJob};
 use crate::isolation::{self, Isolation};
 
 /// The image a profile's runners run.
@@ -172,7 +172,9 @@ impl Control {
 /// What the API needs from a running engine.
 #[derive(Debug, Clone)]
 pub struct Handle {
+    /// The latest status, replaced after every tick.
     pub status: watch::Receiver<api::Status>,
+    /// Pause, resume and shutdown requests.
     pub control: Arc<Control>,
 }
 
@@ -198,11 +200,12 @@ struct RepositoryState {
 /// The shared caches `trim_shared` emptied, with their sizes.
 type Emptied = Vec<(String, ByteSize)>;
 
-/// The scheduler with its side effects.
-pub struct Engine {
+/// The scheduler with its side effects, on the real GitHub and Docker unless a test passes fakes.
+#[derive(Debug)]
+pub struct Engine<G = Github, D = Docker> {
     config: Config,
-    github: Github,
-    docker: Arc<Docker>,
+    github: G,
+    docker: Arc<D>,
     names: Names,
     isolation: &'static dyn Isolation,
     identity: HostIdentity,
@@ -243,17 +246,17 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
         .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
-impl Engine {
+impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     /// An engine for a validated config. `identity` names this machine's runners, so a restarted daemon recognizes
     /// them; `memory_max` is the slice's.
     pub fn new(
         config: Config,
-        github: Github,
-        docker: Docker,
+        github: G,
+        docker: D,
         names: Names,
         identity: HostIdentity,
         memory_max: Option<u64>,
-    ) -> (Engine, Handle) {
+    ) -> (Engine<G, D>, Handle) {
         let slots = config
             .profiles
             .iter()
@@ -355,7 +358,7 @@ impl Engine {
                 () = self.control.wake.notified() => {}
             }
         }
-        if let Err(error) = cache::mirror_down(&self.docker, &self.names).await {
+        if let Err(error) = cache::mirror_down(&*self.docker, &self.names).await {
             warn!("cannot stop the mirror: {error}");
         }
         info!("stopped");
@@ -377,7 +380,7 @@ impl Engine {
             let id = container.id.clone();
             self.reseeds.insert(
                 profile,
-                tokio::spawn(async move { cache::finish_reseed(&docker, &id).await }),
+                tokio::spawn(async move { cache::finish_reseed(&*docker, &id).await }),
             );
         }
     }
@@ -803,7 +806,8 @@ impl Engine {
         let name = self
             .identity
             .runner_name(&slot.profile, number, unix_secs(now));
-        if let Err(error) = cache::prepare(&self.docker, &self.names, &slot.profile, number).await {
+        if let Err(error) = cache::prepare(&*self.docker, &self.names, &slot.profile, number).await
+        {
             warn!(
                 "cannot prepare the caches of {} slot {number}: {error}",
                 slot.profile
@@ -812,7 +816,8 @@ impl Engine {
         }
         let mirror = &self.config.caches.mirror;
         if mirror.enabled && !self.mirror_up {
-            match cache::mirror_up(&self.docker, &self.names, mirror, &self.config.host.slice).await
+            match cache::mirror_up(&*self.docker, &self.names, mirror, &self.config.host.slice)
+                .await
             {
                 Ok(()) => self.mirror_up = true,
                 // Runners pull from Docker Hub directly when the mirror does not answer.
@@ -900,7 +905,7 @@ impl Engine {
             return;
         }
         if self.mirror_up {
-            match cache::mirror_down(&self.docker, &self.names).await {
+            match cache::mirror_down(&*self.docker, &self.names).await {
                 Ok(()) => self.mirror_up = false,
                 Err(error) => warn!("cannot stop the mirror: {error}"),
             }
@@ -911,7 +916,7 @@ impl Engine {
             let names = self.names.clone();
             let caches = self.config.caches.clone();
             self.trim = Some(tokio::spawn(async move {
-                cache::trim_shared(&docker, &names, &caches).await
+                cache::trim_shared(&*docker, &names, &caches).await
             }));
         }
     }
@@ -931,7 +936,7 @@ impl Engine {
         let profile_name = name.clone();
         let task = tokio::spawn(async move {
             cache::reseed(
-                &docker,
+                &*docker,
                 &cache::Reseed {
                     names: &names,
                     profile: &profile_name,

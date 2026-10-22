@@ -1,11 +1,14 @@
+//! The GitHub client against a fake GitHub on a loopback port: queued jobs, conditional requests, rate limits,
+//! token refresh, runner registration and deletion, and that the token never shows in `Debug` output or errors.
+
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use axum::Router;
-use axum::http::{HeaderMap, Method, StatusCode, Uri};
+use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 
-use super::{Deleted, Error, Github, QueuedJob, Token};
+use super::{Deleted, Error, Github, GithubApi, QueuedJob, Token};
 
 const TOKEN: &str = "ghp_sentinelTokenValue0123456789";
 
@@ -93,7 +96,12 @@ async fn queued_jobs_come_from_queued_and_started_runs() {
 #[tokio::test]
 async fn an_unchanged_answer_is_served_from_the_last_response() {
     let (url, seen) = fake_github(|request| {
-        if request.headers.get("if-none-match").map(|v| v.as_bytes()) == Some(b"\"v1\"") {
+        if request
+            .headers
+            .get("if-none-match")
+            .map(HeaderValue::as_bytes)
+            == Some(b"\"v1\"")
+        {
             return StatusCode::NOT_MODIFIED.into_response();
         }
         (
@@ -167,7 +175,12 @@ async fn a_secondary_rate_limit_waits_for_retry_after() {
 #[tokio::test]
 async fn a_rejected_token_is_read_again_once() {
     let (url, seen) = fake_github(|request| {
-        if request.headers.get("authorization").map(|v| v.as_bytes()) == Some(b"Bearer new") {
+        if request
+            .headers
+            .get("authorization")
+            .map(HeaderValue::as_bytes)
+            == Some(b"Bearer new")
+        {
             json(r#"{"runners":[]}"#)
         } else {
             StatusCode::UNAUTHORIZED.into_response()
@@ -217,7 +230,7 @@ async fn deleting_a_runner_tells_gone_and_busy_apart() {
 }
 
 #[tokio::test]
-async fn a_jit_config_registers_the_runner_with_the_repositorys_labels() {
+async fn a_jit_config_registers_the_runner_with_the_repository_labels() {
     let (url, seen) = fake_github(|request| {
         assert_eq!(request.method, Method::POST);
         (

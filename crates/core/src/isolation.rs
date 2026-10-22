@@ -1,11 +1,14 @@
 //! How a runner container is kept from the host while it runs its own Docker Engine. A backend decides only how
 //! the container is created; its name, limits, labels and slice are the same for every backend (`docker`).
 
+use std::fmt;
+
 use bollard::models::HostConfig;
 
 use crate::config;
 
-pub trait Isolation: Send + Sync {
+/// An isolation backend: how runner containers are created so their Docker Engine cannot reach the host.
+pub trait Isolation: Send + Sync + fmt::Debug {
     /// The name `runnerd.toml` uses, also put on the container's `runnerd.isolation` label.
     fn name(&self) -> &'static str;
     /// Whether a job in the container can take over the host.
@@ -15,6 +18,7 @@ pub trait Isolation: Send + Sync {
 }
 
 /// Sysbox runs Docker inside an unprivileged container, in its own user namespace.
+#[derive(Debug)]
 pub struct Sysbox;
 
 impl Isolation for Sysbox {
@@ -33,6 +37,7 @@ impl Isolation for Sysbox {
 }
 
 /// Privileged Docker-in-Docker: root in the container is root on the host.
+#[derive(Debug)]
 pub struct UnsafeDind;
 
 impl Isolation for UnsafeDind {
@@ -51,6 +56,7 @@ impl Isolation for UnsafeDind {
     }
 }
 
+/// The backend `runnerd.toml` names.
 pub fn backend(isolation: config::Isolation) -> &'static dyn Isolation {
     match isolation {
         config::Isolation::Sysbox => &Sysbox,

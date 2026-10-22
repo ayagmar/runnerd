@@ -99,16 +99,9 @@ Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them.
 cargo build --release
 ```
 
-The toolchain is pinned in `rust-toolchain.toml`. Before sending a change, run the same checks as CI:
-
-```sh
-cargo fmt --check
-cargo clippy --workspace --all-targets -- -D warnings
-cargo test --workspace
-cargo deny check
-```
-
-[CONTRIBUTING.md](CONTRIBUTING.md) explains which CI jobs a change triggers.
+The toolchain is pinned in `rust-toolchain.toml`. Before sending a change, run the checks listed under "The gate" in
+[AGENTS.md](AGENTS.md); CI runs the same. [CONTRIBUTING.md](CONTRIBUTING.md) explains which CI jobs a change triggers,
+and [ARCHITECTURE.md](ARCHITECTURE.md) where the code lives.
 
 The tests that start real containers are ignored by default. They need Docker with sysbox and the images:
 

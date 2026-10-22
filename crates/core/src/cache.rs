@@ -10,7 +10,7 @@ use bollard::models::{
 };
 
 use crate::config::{self, ByteSize};
-use crate::docker::{Docker, Error, RunnerSpec, is_not_found};
+use crate::docker::{DockerApi, Error, RunnerSpec, is_not_found};
 use crate::isolation::Isolation;
 
 /// The Docker Hub pull-through cache (`registry` 3.1.2, multi-platform index).
@@ -130,7 +130,7 @@ pub fn mirror_body(names: &Names, mirror: &config::Mirror, slice: &str) -> Conta
 
 /// Creates what a profile's runner in `slot` (1-based) mounts and joins, if missing.
 pub async fn prepare(
-    docker: &Docker,
+    docker: &impl DockerApi,
     names: &Names,
     profile: &str,
     slot: usize,
@@ -149,7 +149,7 @@ pub async fn prepare(
 
 /// Starts the mirror unless it runs.
 pub async fn mirror_up(
-    docker: &Docker,
+    docker: &impl DockerApi,
     names: &Names,
     mirror: &config::Mirror,
     slice: &str,
@@ -170,7 +170,7 @@ pub async fn mirror_up(
 }
 
 /// Stops the mirror; its storage stays.
-pub async fn mirror_down(docker: &Docker, names: &Names) -> Result<(), Error> {
+pub async fn mirror_down(docker: &impl DockerApi, names: &Names) -> Result<(), Error> {
     match docker.remove(&names.mirror()).await {
         Err(error) if is_not_found(&error) => Ok(()),
         other => other,
@@ -180,7 +180,7 @@ pub async fn mirror_down(docker: &Docker, names: &Names) -> Result<(), Error> {
 /// Empties the shared caches that outgrew their limit; call only while no runner runs. Returns what it emptied
 /// and how large it was.
 pub async fn trim_shared(
-    docker: &Docker,
+    docker: &impl DockerApi,
     names: &Names,
     caches: &config::Caches,
 ) -> Result<Vec<(String, ByteSize)>, Error> {
@@ -201,23 +201,32 @@ pub async fn trim_shared(
 }
 
 /// What `reseed` runs on: the profile's image and limits, its slots and the isolation backend.
+#[derive(Debug)]
 pub struct Reseed<'a> {
+    /// Where the profile's volumes are.
     pub names: &'a Names,
+    /// The profile to reseed.
     pub profile: &'a str,
+    /// The profile's runner image, which holds the seed script.
     pub image: &'a str,
+    /// How many slots the profile has; each slot's layer changes are dropped.
     pub slots: usize,
+    /// The systemd slice the seed container runs in.
     pub slice: &'a str,
+    /// The profile's CPUs.
     pub cpus: u32,
+    /// The profile's memory.
     pub memory: ByteSize,
     /// Slot 1's layers must have changed at least this much (`caches.reseed_at`).
     pub min_changes: ByteSize,
+    /// How the seed container is isolated, as runners are.
     pub isolation: &'a dyn Isolation,
 }
 
 /// Makes slot 1's layers the profile's new snapshot and drops every slot's own layer changes (`image/seed.sh`),
 /// if slot 1 changed at least `min_changes`. Call only while none of the profile's slots runs. Returns the seed
 /// container's output.
-pub async fn reseed(docker: &Docker, reseed: &Reseed<'_>) -> Result<String, Error> {
+pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<String, Error> {
     let names = reseed.names;
     let mut mounts = vec![volume(names.base(reseed.profile), "/base", false)];
     mounts.extend((1..=reseed.slots).map(|slot| {
@@ -261,7 +270,7 @@ pub async fn reseed(docker: &Docker, reseed: &Reseed<'_>) -> Result<String, Erro
 
 /// Waits for a seed container to exit, removes it, and returns its output. Also takes over a seed container an
 /// earlier daemon left running: stopping it between its `rm` and `mv` would lose that snapshot layer.
-pub async fn finish_reseed(docker: &Docker, container: &str) -> Result<String, Error> {
+pub async fn finish_reseed(docker: &impl DockerApi, container: &str) -> Result<String, Error> {
     let result = async {
         let code = docker.wait(container).await?;
         let output = docker.logs(container).await?;
