@@ -24,7 +24,7 @@ use crate::isolation::{self, Isolation};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::{self, Paths, Sampler, Tracked};
 use crate::observe::mirror::Leases;
-use crate::store::{LogPosition, RunnerRecord, Store};
+use crate::store::{LogPosition, MirrorPosition, RunnerRecord, Store};
 use crate::time;
 
 /// How long the history waits for GitHub to report a job completed after its container is gone, before it records
@@ -282,8 +282,8 @@ pub struct Engine<G = Github, D = Docker> {
     captures: BTreeMap<String, JoinHandle<()>>,
     /// Who held which address, for the mirror's log.
     leases: Leases,
-    /// The Docker timestamp (ms) of the last mirror log line counted.
-    mirror_until: u64,
+    /// How far the mirror's log was counted.
+    mirror_until: MirrorPosition,
     /// Jobs recorded queued and not yet taken or closed, with their repository.
     queued_jobs: BTreeMap<u64, String>,
     /// Jobs whose runner is gone, waiting for GitHub to report them completed: repository, and since when.
@@ -387,7 +387,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             found: mpsc::unbounded_channel(),
             captures: BTreeMap::new(),
             leases: Leases::default(),
-            mirror_until: 0,
+            mirror_until: MirrorPosition::default(),
             queued_jobs: BTreeMap::new(),
             closing: BTreeMap::new(),
             last_prune: None,
@@ -760,7 +760,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         }
         let log = match self
             .docker
-            .logs_since(&self.names.mirror(), self.mirror_until / 1000)
+            .logs_since(&self.names.mirror(), self.mirror_until.at / 1_000_000_000)
             .await
         {
             Ok(log) => log,
@@ -771,9 +771,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             }
         };
         let (bytes, until) = self.leases.attribute(&log, self.mirror_until);
-        if until > self.mirror_until {
+        if until != self.mirror_until {
             self.mirror_until = until;
-            self.leases.forget_before(until);
+            self.leases.forget_before(until.at / 1_000_000);
             self.store.mirror_bytes(bytes, until);
         }
     }

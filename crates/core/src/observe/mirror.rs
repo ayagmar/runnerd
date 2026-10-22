@@ -2,12 +2,15 @@
 //! timestamps, in the combined log format) attributed by source address. A runner container's Docker Engine pulls
 //! for every container of its job, so the mirror sees the runner container's address. An address belongs to a
 //! runner only between its container's start and its removal, so a later container given the same address never
-//! gets an earlier one's bytes.
+//! gets an earlier one's bytes. Docker's `--since` takes whole seconds, so each read starts with lines already
+//! counted; a `MirrorPosition` skips them by their exact time, and among lines of the same time, by how many.
+
+use crate::store::MirrorPosition;
 
 /// One response the mirror logged.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Served {
-    /// When Docker received the log line, in milliseconds since the epoch.
+    /// When Docker received the log line, in nanoseconds since the epoch.
     pub at: u64,
     /// The client's address.
     pub address: String,
@@ -19,7 +22,7 @@ pub struct Served {
 /// <status> <bytes> …`. Lines of another format (the registry's own messages) are `None`.
 pub fn parse(line: &str) -> Option<Served> {
     let (timestamp, line) = line.split_once(' ')?;
-    let at = crate::time::parse_ms(timestamp)?;
+    let at = crate::time::parse_ns(timestamp)?;
     let (address, rest) = line.split_once(" - - [")?;
     let (_, rest) = rest.split_once("] \"")?;
     let (_request, rest) = rest.split_once("\" ")?;
@@ -92,17 +95,35 @@ impl Leases {
             .map(|lease| lease.runner.as_str())
     }
 
-    /// Bytes per runner in log lines after `after` (ms), and the timestamp of the last line read.
-    pub fn attribute(&self, log: &str, after: u64) -> (Vec<(String, u64)>, u64) {
+    /// Bytes per runner in log lines after `after`, and where the lines read end.
+    pub fn attribute(
+        &self,
+        log: &str,
+        after: MirrorPosition,
+    ) -> (Vec<(String, u64)>, MirrorPosition) {
         let mut totals: Vec<(String, u64)> = Vec::new();
         let mut until = after;
-        for served in log
-            .lines()
-            .filter_map(parse)
-            .filter(|served| served.at > after)
-        {
-            until = until.max(served.at);
-            let Some(runner) = self.holder(&served.address, served.at) else {
+        // Lines logged at `after.at` in this read; the first `after.seen` were counted before.
+        let mut at_after = 0;
+        for served in log.lines().filter_map(parse) {
+            if served.at < after.at {
+                continue;
+            }
+            if served.at == after.at {
+                at_after += 1;
+                if at_after <= after.seen {
+                    continue;
+                }
+            }
+            if served.at == until.at {
+                until.seen += 1;
+            } else {
+                until = MirrorPosition {
+                    at: served.at,
+                    seen: 1,
+                };
+            }
+            let Some(runner) = self.holder(&served.address, served.at / 1_000_000) else {
                 continue;
             };
             match totals.iter_mut().find(|(name, _)| name == runner) {

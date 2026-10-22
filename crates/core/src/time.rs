@@ -18,6 +18,12 @@ pub(crate) fn ms(time: SystemTime) -> u64 {
 /// Milliseconds since the Unix epoch of a UTC RFC 3339 timestamp (`Z` only, fractions of a second optional);
 /// `None` for anything else.
 pub(crate) fn parse_ms(text: &str) -> Option<u64> {
+    parse_ns(text).map(|ns| ns / 1_000_000)
+}
+
+/// Nanoseconds since the Unix epoch of a UTC RFC 3339 timestamp, as `parse_ms` takes it; Docker's log timestamps
+/// have all nine digits.
+pub(crate) fn parse_ns(text: &str) -> Option<u64> {
     let text = text.strip_suffix('Z')?;
     let (date, time) = text.split_once('T')?;
     let mut date = date.splitn(3, '-').map(str::parse::<u64>);
@@ -35,9 +41,10 @@ pub(crate) fn parse_ms(text: &str) -> Option<u64> {
     {
         return None;
     }
-    let millis = format!("{fraction:0<3}")[..3].parse::<u64>().ok()?;
+    let nanos = format!("{fraction:0<9}")[..9].parse::<u64>().ok()?;
     let days = days_from_civil(year, month, day);
-    Some(((days * 24 + hour) * 60 + minute) * 60_000 + second * 1000 + millis)
+    let seconds = ((days * 24 + hour) * 60 + minute) * 60 + second;
+    seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
 }
 
 /// Days from 1970-01-01 to a date of the proleptic Gregorian calendar, for years from 1970 (Howard Hinnant's

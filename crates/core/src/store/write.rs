@@ -9,7 +9,7 @@ use rusqlite::{Connection, OptionalExtension, params};
 use tokio::sync::{broadcast, mpsc};
 
 use super::read::{self, secs};
-use super::{LogPosition, RunnerRecord, SampleRecord, Write, logged};
+use super::{LogPosition, MirrorPosition, RunnerRecord, SampleRecord, Write, logged};
 use crate::api::{self, Event, EventEnvelope};
 use crate::github::{JobDetails, JobStep, QueuedJob};
 use crate::time;
@@ -494,7 +494,7 @@ impl Writer<'_> {
 
     /// Counts a batch of the mirror's log and where it ends, together: counting part of it, or counting it without
     /// moving past it, would count it again after a restart.
-    fn mirror_bytes(&self, bytes: &[(String, u64)], until: u64) {
+    fn mirror_bytes(&self, bytes: &[(String, u64)], until: MirrorPosition) {
         self.change("count mirror bytes", |_| {
             for (runner, bytes) in bytes {
                 self.db.execute(
@@ -503,9 +503,8 @@ impl Writer<'_> {
                 )?;
             }
             self.db.execute(
-                "INSERT INTO meta (key, value) VALUES ('mirror_log_until', ?1) \
-                 ON CONFLICT (key) DO UPDATE SET value = max(value, excluded.value)",
-                [until],
+                "INSERT OR REPLACE INTO meta (key, value) VALUES ('mirror_log_until', ?1), ('mirror_log_seen', ?2)",
+                [until.at, until.seen],
             )?;
             Ok(())
         });

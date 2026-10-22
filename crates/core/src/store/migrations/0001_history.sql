@@ -103,7 +103,8 @@ CREATE TABLE cache_sizes (
     PRIMARY KEY (at, name)
 ) WITHOUT ROWID;
 
--- mirror_log_until: the Docker timestamp of the last mirror log line counted.
+-- mirror_log_until: the Docker timestamp (ns) of the last mirror log line counted; mirror_log_seen: how many lines
+-- logged at exactly that time were counted.
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL

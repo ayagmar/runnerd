@@ -501,13 +501,17 @@ pub(super) fn log_position(db: &Connection, job: u64) -> rusqlite::Result<LogPos
         .unwrap_or(LogPosition { page: 1, offset: 0 }))
 }
 
-pub(super) fn mirror_log_until(db: &Connection) -> rusqlite::Result<u64> {
-    Ok(db
-        .query_row(
-            "SELECT value FROM meta WHERE key = 'mirror_log_until'",
-            [],
-            |row| row.get(0),
-        )
-        .optional()?
-        .unwrap_or(0))
+pub(super) fn mirror_log_until(db: &Connection) -> rusqlite::Result<super::MirrorPosition> {
+    let value = |key: &str| -> rusqlite::Result<u64> {
+        Ok(db
+            .query_row("SELECT value FROM meta WHERE key = ?1", [key], |row| {
+                row.get(0)
+            })
+            .optional()?
+            .unwrap_or(0))
+    };
+    Ok(super::MirrorPosition {
+        at: value("mirror_log_until")?,
+        seen: value("mirror_log_seen")?,
+    })
 }

@@ -7,6 +7,7 @@ use super::capture::{Captured, Parser};
 use super::metrics::{Paths, Sampler, Tracked};
 use super::mirror::{self, Leases};
 use crate::store::LogPosition;
+use crate::store::MirrorPosition;
 use crate::testdir::TestDir;
 
 /// Writes a container's cgroup files under the `ci.slice` fixture, and its network counters.
@@ -176,12 +177,39 @@ fn mirror_bytes_go_to_the_runner_that_held_the_address_at_the_time() {
     leases.start("172.18.0.3", "runner-1", 1_792_697_240_000);
     leases.end("runner-1", 1_792_697_248_000);
     leases.start("172.18.0.3", "runner-2", 1_792_697_249_000);
-    let (bytes, until) = leases.attribute(MIRROR_LOG, 0);
+    let (bytes, until) = leases.attribute(MIRROR_LOG, MirrorPosition::default());
     assert_eq!(
         bytes,
         [("runner-1".to_owned(), 2992), ("runner-2".to_owned(), 1000)]
     );
-    assert_eq!(until, 1_792_697_251_000);
+    assert_eq!(
+        until,
+        MirrorPosition {
+            at: 1_792_697_251_000_000_000,
+            seen: 1
+        }
+    );
     // Read again from there: nothing is counted twice.
     assert_eq!(leases.attribute(MIRROR_LOG, until).0, []);
+}
+
+#[test]
+fn a_response_logged_in_the_same_millisecond_as_the_last_one_counted_is_counted_next_time() {
+    let served = |at: &str, bytes: u64| {
+        format!(
+            "2026-10-22T19:27:25.{at}Z 172.18.0.3 - - [22/Oct/2026:19:27:25 +0000] \"GET /v2/x/blobs/sha256:{at} \
+             HTTP/1.1\" 200 {bytes} \"\" \"docker/29.9.2\"\n"
+        )
+    };
+    let mut leases = Leases::default();
+    leases.start("172.18.0.3", "runner-1", 1_792_697_240_000);
+    let first = served("869100000", 100) + &served("869100000", 200);
+    let (bytes, until) = leases.attribute(&first, MirrorPosition::default());
+    assert_eq!(bytes, [("runner-1".to_owned(), 300)]);
+    // The next read starts at the same second and has two more responses: one logged at the very same time, one
+    // later in the same millisecond.
+    let second = first + &served("869100000", 400) + &served("869900000", 800);
+    let (bytes, until) = leases.attribute(&second, until);
+    assert_eq!(bytes, [("runner-1".to_owned(), 1200)]);
+    assert_eq!(leases.attribute(&second, until).0, []);
 }

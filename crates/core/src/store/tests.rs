@@ -2,7 +2,9 @@
 
 use rusqlite::Connection;
 
-use super::{LogPosition, MIGRATIONS, RunnerRecord, SampleRecord, Store, StoreError};
+use super::{
+    LogPosition, MIGRATIONS, MirrorPosition, RunnerRecord, SampleRecord, Store, StoreError,
+};
 use crate::api::{JobQuery, JobState, StatsQuery};
 use crate::github::QueuedJob;
 use crate::testdir::TestDir;
@@ -212,6 +214,7 @@ async fn mirror_bytes_and_the_log_position_are_counted_together_or_not_at_all() 
     store.runner_started(runner("a", 1));
     store.runner_started(runner("b", 1));
     store.flush().await;
+    let until = MirrorPosition { at: 500, seen: 2 };
     let fault = Connection::open(&path).unwrap();
     fault
         .execute_batch(
@@ -219,7 +222,7 @@ async fn mirror_bytes_and_the_log_position_are_counted_together_or_not_at_all() 
              BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
         )
         .unwrap();
-    store.mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], 500);
+    store.mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], until);
     store.flush().await;
     let counted = |db: &Connection| -> Vec<u64> {
         db.prepare("SELECT mirror_bytes FROM runners ORDER BY name")
@@ -230,12 +233,15 @@ async fn mirror_bytes_and_the_log_position_are_counted_together_or_not_at_all() 
             .unwrap()
     };
     assert_eq!(counted(&fault), [0, 0]);
-    assert_eq!(store.mirror_log_until().await.unwrap(), 0);
+    assert_eq!(
+        store.mirror_log_until().await.unwrap(),
+        MirrorPosition::default()
+    );
 
     // Read again from the same position, the batch counts once.
     fault.execute_batch("DROP TRIGGER no_b").unwrap();
-    store.mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], 500);
+    store.mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], until);
     store.flush().await;
     assert_eq!(counted(&fault), [10, 20]);
-    assert_eq!(store.mirror_log_until().await.unwrap(), 500);
+    assert_eq!(store.mirror_log_until().await.unwrap(), until);
 }

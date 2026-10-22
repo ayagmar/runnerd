@@ -113,6 +113,17 @@ pub struct LogPosition {
     pub offset: u64,
 }
 
+/// How far the mirror's log was counted: the time of the last response counted, in nanoseconds since the epoch as
+/// Docker logs it, and how many responses logged at exactly that time were counted, so the next read counts the
+/// ones it was too early to see.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct MirrorPosition {
+    /// Nanoseconds since the epoch.
+    pub at: u64,
+    /// Responses logged at `at` already counted.
+    pub seen: u64,
+}
+
 /// What the writer thread is asked to do, in order.
 #[derive(Debug)]
 enum Write {
@@ -151,7 +162,7 @@ enum Write {
     HostSample(api::HostSample),
     MirrorBytes {
         bytes: Vec<(String, u64)>,
-        until: u64,
+        until: MirrorPosition,
     },
     CacheSizes {
         at: u64,
@@ -281,8 +292,8 @@ impl Store {
         self.send(Write::HostSample(sample));
     }
 
-    /// Adds bytes the mirror served to runners, counted from its log up to the Docker timestamp `until` (ms).
-    pub fn mirror_bytes(&self, bytes: Vec<(String, u64)>, until: u64) {
+    /// Adds bytes the mirror served to runners, counted from its log up to `until`.
+    pub fn mirror_bytes(&self, bytes: Vec<(String, u64)>, until: MirrorPosition) {
         self.send(Write::MirrorBytes { bytes, until });
     }
 
@@ -402,8 +413,8 @@ impl Store {
         self.read(move |db| read::log_position(db, job)).await
     }
 
-    /// The Docker timestamp (ms) of the last mirror log line counted.
-    pub async fn mirror_log_until(&self) -> Result<u64, StoreError> {
+    /// How far the mirror's log was counted.
+    pub async fn mirror_log_until(&self) -> Result<MirrorPosition, StoreError> {
         self.read(read::mirror_log_until).await
     }
 }
