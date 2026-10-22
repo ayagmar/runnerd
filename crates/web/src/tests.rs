@@ -322,7 +322,8 @@ async fn every_page_renders_from_the_daemons_data() {
     assert_eq!(job.status, StatusCode::OK);
     for expected in [
         "Set up JDK 21",
-        "slot cap 9G",
+        "jvm now 9G",
+        "jvm now 8 CPUs",
         "sampled peak",
         "Waiting for a runner",
         "Set up job: line 1",
@@ -330,6 +331,11 @@ async fn every_page_renders_from_the_daemons_data() {
     ] {
         assert!(job.body.contains(expected), "job page lacks {expected:?}");
     }
+    // The API has the profile's limits as configured now, not the caps the job's container had.
+    assert!(
+        !job.body.contains("slot cap"),
+        "the job page presents today's config as the job's caps"
+    );
 
     let history = dashboard.page(&cookie, "/history").await;
     assert_eq!(history.status, StatusCode::OK);

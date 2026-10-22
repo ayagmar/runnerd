@@ -1,5 +1,5 @@
 //! `/jobs/{id}`: one job's phases, its steps on a shared time axis, its CPU and memory over time against the
-//! slot's limits, and its log, live while it runs.
+//! profile's limits as configured now, and its log, live while it runs.
 
 use maud::{Markup, html};
 use runnerd_core::api::{Job, Sample, SampleSeries, Status, Step};
@@ -18,7 +18,8 @@ pub(crate) struct JobView {
     pub(crate) now: u64,
     pub(crate) job: Job,
     pub(crate) samples: SampleSeries,
-    /// The slot's memory and CPUs, while its profile is configured.
+    /// The memory and CPUs the job's profile has in the config now, while it is configured. The API does not keep
+    /// the caps the job's container had, which a reload since may have changed.
     pub(crate) limits: Option<(u64, u32)>,
     /// The number of the first line in `log`.
     pub(crate) log_from: u64,
@@ -52,7 +53,7 @@ impl JobView {
     }
 }
 
-/// The memory and CPUs of the job's profile.
+/// The memory and CPUs of the job's profile as configured now.
 pub(crate) fn limits(status: &Status, job: &Job) -> Option<(u64, u32)> {
     let runner = job.summary.runner.as_ref()?;
     status
@@ -243,7 +244,7 @@ pub(crate) fn steps(view: &JobView) -> Markup {
     }
 }
 
-/// CPU and memory over the job's life, against the slot's limits, with the totals.
+/// CPU and memory over the job's life, against its profile's limits as configured now, with the totals.
 pub(crate) fn metrics(view: &JobView) -> Markup {
     let summary = &view.job.summary;
     let metrics = &summary.metrics;
@@ -262,6 +263,10 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
     let cpu_peak = samples.iter().map(|s| s.cpu).max().unwrap_or(0);
     let memory_limit = view.limits.map(|(memory, _)| memory);
     let cpu_limit = view.limits.map(|(_, cpus)| u64::from(cpus) * 1000);
+    let profile = summary
+        .runner
+        .as_ref()
+        .map_or("profile", |runner| runner.profile.as_str());
     let time = |at: u64| format!("{} UTC", format::clock(at));
     let memory = TimeChart {
         title: "Memory over the job".to_owned(),
@@ -273,7 +278,7 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
             points: samples.iter().map(|s| (s.at, s.memory)).collect(),
             area: true,
         }],
-        limit: memory_limit.map(|limit| (limit, format!("slot cap {}", format::bytes(limit)))),
+        limit: memory_limit.map(|limit| (limit, format!("{profile} now {}", format::bytes(limit)))),
         value: format::bytes,
         time,
         gap,
@@ -288,7 +293,12 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
             points: samples.iter().map(|s| (s.at, s.cpu)).collect(),
             area: true,
         }],
-        limit: cpu_limit.map(|limit| (limit, format!("{} CPUs", format::cores(limit)))),
+        limit: cpu_limit.map(|limit| {
+            (
+                limit,
+                format!("{profile} now {} CPUs", format::cores(limit)),
+            )
+        }),
         value: |millicores| format!("{} cores", format::cores(millicores)),
         time,
         gap,
@@ -299,7 +309,12 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
         section #metrics .metrics aria-labelledby="metrics-title" {
             div.section-head {
                 h2 #metrics-title { "Resources" }
-                p.muted { "Sampled every " (view.samples.interval) " s; a peak between samples does not show." }
+                p.muted {
+                    "Sampled every " (view.samples.interval) " s; a peak between samples does not show."
+                    @if view.limits.is_some() {
+                        " The dashed lines are " (profile) "'s limits in the config now, which may not be the ones the job ran with."
+                    }
+                }
             }
             @if samples.is_empty() {
                 p.muted { "No samples: the runner's container never ran, or its samples are past `history.samples`." }
