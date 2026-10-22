@@ -109,6 +109,8 @@ fn job(state: JobState) -> Job {
                 name: "runnerd-5f2a-jvm-1-k3j9".to_owned(),
                 profile: "jvm".to_owned(),
                 slot: 1,
+                memory_cap: Some(6 << 30),
+                cpu_cap: Some(4000),
             }),
             timeline: Timeline {
                 queued_at: 1_700_000_000,
@@ -549,4 +551,18 @@ fn web_prints_the_login_url_the_daemon_wrote_next_to_its_socket() {
     let output = runnerctl(&socket, &["web", "--no-open"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), format!("{url}\n"));
+}
+
+#[test]
+fn a_job_shows_the_caps_its_container_ran_with() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let output = runnerctl(&socket, &["job", "9001"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("(profile jvm, slot 1, capped at 6.0G and 4.00 cores)"),
+        "{}",
+        stdout(&output)
+    );
 }

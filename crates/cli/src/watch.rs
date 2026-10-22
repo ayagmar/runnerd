@@ -389,6 +389,8 @@ mod tests {
                 name: "runnerd-ab12-jvm-1".to_owned(),
                 profile: "jvm".to_owned(),
                 slot: 1,
+                memory_cap: Some(4 << 30),
+                cpu_cap: Some(2000),
             }),
             timeline: Timeline {
                 queued_at: 1000,

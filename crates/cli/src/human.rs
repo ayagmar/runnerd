@@ -5,7 +5,8 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobState, JobSummary, Status, Step,
+    CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobState, JobSummary, Status,
+    Step,
 };
 
 /// How a piece of text should stand out.
@@ -408,6 +409,22 @@ fn step_took(step: &Step, now: u64) -> Option<u64> {
     Some(end.saturating_sub(started))
 }
 
+/// `, capped at 6.0G and 4.00 cores`: what the job's container was held to, when the record has it.
+fn caps(runner: &JobRunner) -> String {
+    let caps: Vec<String> = [
+        runner.memory_cap.map(bytes),
+        runner.cpu_cap.map(|cpu| format!("{} cores", cores(cpu))),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    if caps.is_empty() {
+        String::new()
+    } else {
+        format!(", capped at {}", caps.join(" and "))
+    }
+}
+
 /// `runnerctl job <id>`.
 pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
     let summary = &job.summary;
@@ -439,7 +456,12 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
             runner.name,
             paint.paint(
                 Tone::Dim,
-                &format!("(profile {}, slot {})", runner.profile, runner.slot)
+                &format!(
+                    "(profile {}, slot {}{})",
+                    runner.profile,
+                    runner.slot,
+                    caps(runner)
+                )
             )
         );
     }
