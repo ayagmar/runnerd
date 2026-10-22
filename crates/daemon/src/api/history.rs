@@ -110,6 +110,7 @@ pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> R
             let volumes = state
                 .handle
                 .caches
+                .borrow()
                 .iter()
                 .cloned()
                 .map(|mut volume| {

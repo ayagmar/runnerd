@@ -1,26 +1,29 @@
 //! Serves `runnerd_core::api` on the local Unix socket. Owns routing, the socket file and authentication: every
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
 //! no scheduling state of its own and never returns secrets. History reads are in `history`, the event stream in
-//! `events`.
+//! `events`, pause, reseed, cache clean, the config file and the doctor in `control`.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
 use std::path::{Path, PathBuf};
+use std::sync::Arc;
 
 use axum::extract::connect_info::Connected;
 use axum::extract::{ConnectInfo, FromRequestParts, Path as UrlPath, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{get, post, put};
 use axum::serve::IncomingStream;
 use axum::{Json, Router};
 use runnerd_core::api::{ErrorResponse, Principal, ShutdownRequest, Status};
+use runnerd_core::config::ByteSize;
 use runnerd_core::scheduler::engine::Handle;
 use tokio::net::UnixListener;
-use tokio::sync::watch;
+use tokio::sync::{Mutex, watch};
 use tracing::info;
 
+mod control;
 mod events;
 mod history;
 
@@ -43,6 +46,23 @@ impl Connected<IncomingStream<'_, UnixListener>> for Peer {
     }
 }
 
+/// Reads a slice's `MemoryMax`: systemd's (`config::slice_memory_max`), or a test's.
+pub(crate) type MemoryMax = fn(&str) -> io::Result<Option<ByteSize>>;
+
+/// The config file the daemon runs with, which the config routes show and replace.
+pub(crate) struct ConfigSource {
+    pub path: PathBuf,
+    /// As the daemon read it.
+    pub text: String,
+    pub memory_max: MemoryMax,
+}
+
+/// The config file as last read or written.
+struct ConfigText {
+    path: PathBuf,
+    text: String,
+}
+
 #[derive(Clone)]
 struct AppState {
     handle: Handle,
@@ -50,6 +70,8 @@ struct AppState {
     owner: u32,
     /// Set when the server stops, so streams that would never end do.
     stopping: watch::Receiver<bool>,
+    config: Arc<Mutex<ConfigText>>,
+    memory_max: MemoryMax,
 }
 
 /// The authenticated sender of a request.
@@ -84,11 +106,25 @@ fn error(status: StatusCode, message: &str) -> Response {
 }
 
 /// The API's routes, for a daemon running as `owner`.
-fn router(handle: Handle, owner: u32, stopping: watch::Receiver<bool>) -> Router {
+fn router(
+    handle: Handle,
+    owner: u32,
+    stopping: watch::Receiver<bool>,
+    config: ConfigSource,
+) -> Router {
     Router::new()
         .route("/v1/status", get(status))
-        .route("/v1/repositories/{owner}/{name}/pause", post(pause))
+        .route(
+            "/v1/repositories/{owner}/{name}/pause",
+            post(control::pause),
+        )
         .route("/v1/repositories/{owner}/{name}/resume", post(resume))
+        .route("/v1/profiles/{name}/reseed", post(control::reseed))
+        .route("/v1/caches/{name}/clean", post(control::clean_cache))
+        .route("/v1/config", get(control::config))
+        .route("/v1/config", put(control::replace_config))
+        .route("/v1/config/check", post(control::check_config))
+        .route("/v1/doctor", get(control::doctor))
         .route("/v1/shutdown", post(shutdown))
         .route("/v1/jobs", get(history::jobs))
         .route("/v1/jobs/{id}", get(history::job))
@@ -104,6 +140,11 @@ fn router(handle: Handle, owner: u32, stopping: watch::Receiver<bool>) -> Router
             handle,
             owner,
             stopping,
+            config: Arc::new(Mutex::new(ConfigText {
+                path: config.path,
+                text: config.text,
+            })),
+            memory_max: config.memory_max,
         })
 }
 
@@ -111,28 +152,14 @@ async fn status(_: Authenticated, State(state): State<AppState>) -> Json<Status>
     Json(state.handle.status.borrow().clone())
 }
 
-async fn pause(
-    Authenticated(principal): Authenticated,
-    State(state): State<AppState>,
-    UrlPath((owner, name)): UrlPath<(String, String)>,
-) -> Response {
-    set_paused(&principal, &state, &format!("{owner}/{name}"), true)
-}
-
 async fn resume(
     Authenticated(principal): Authenticated,
     State(state): State<AppState>,
     UrlPath((owner, name)): UrlPath<(String, String)>,
 ) -> Response {
-    set_paused(&principal, &state, &format!("{owner}/{name}"), false)
-}
-
-fn set_paused(principal: &Principal, state: &AppState, repository: &str, paused: bool) -> Response {
-    if state.handle.control.set_paused(repository, paused) {
-        info!(
-            "{repository} {} by {principal:?}",
-            if paused { "paused" } else { "resumed" }
-        );
+    let repository = format!("{owner}/{name}");
+    if state.handle.control.set_paused(&repository, false) {
+        info!("{repository} resumed by {principal:?}");
         StatusCode::NO_CONTENT.into_response()
     } else {
         error(
@@ -176,22 +203,24 @@ pub(crate) async fn bind(path: &Path) -> io::Result<UnixListener> {
 pub(crate) async fn serve(
     listener: UnixListener,
     handle: Handle,
+    config: ConfigSource,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let owner = std::fs::metadata("/proc/self")?.uid();
-    serve_for(listener, handle, owner, stop).await
+    serve_for(listener, handle, config, owner, stop).await
 }
 
 /// Serves the API to the user `owner` only.
 async fn serve_for(
     listener: UnixListener,
     handle: Handle,
+    config: ConfigSource,
     owner: u32,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let (stopping, stopping_receiver) = watch::channel(false);
-    let app =
-        router(handle, owner, stopping_receiver).into_make_service_with_connect_info::<Peer>();
+    let app = router(handle, owner, stopping_receiver, config)
+        .into_make_service_with_connect_info::<Peer>();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stop.await;

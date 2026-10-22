@@ -84,33 +84,22 @@ fn main() -> ExitCode {
 }
 
 fn check_config(path: &Path, memory_max: Option<ByteSize>) -> ExitCode {
-    let config = match Config::load(path) {
-        Ok(config) => config,
-        Err(error) => return fail(&error),
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(error) => return fail(&format_args!("cannot read {}: {error}", path.display())),
     };
-    let memory_max = match memory_max {
-        Some(memory_max) => Some(memory_max),
-        None => match slice_memory_max(&config.host.slice) {
-            Ok(memory_max) => memory_max,
-            Err(error) => return fail(&error),
-        },
-    };
-    let checked = config
-        .validate(memory_max)
-        .and_then(|warnings| Ok((warnings, config.memory_caps()?)));
-    match checked {
-        Ok((warnings, total)) => {
-            for warning in warnings {
-                output::warning(warning);
-            }
-            output::line(format_args!(
-                "{}: valid, memory caps sum to {total}",
-                path.display()
-            ));
-            ExitCode::SUCCESS
-        }
-        Err(error) => fail(&error),
+    let (_, check) = Config::check(&text, |slice| match memory_max {
+        Some(memory_max) => Ok(Some(memory_max)),
+        None => slice_memory_max(slice),
+    });
+    if !check.valid {
+        return fail(&check.message);
     }
+    for warning in &check.warnings {
+        output::warning(warning);
+    }
+    output::line(format_args!("{}: {}", path.display(), check.message));
+    ExitCode::SUCCESS
 }
 
 fn doctor(path: Option<&Path>) -> ExitCode {
@@ -125,7 +114,7 @@ fn doctor(path: Option<&Path>) -> ExitCode {
     }
     if checks
         .iter()
-        .any(|check| check.status == doctor::Status::Fail)
+        .any(|check| check.status == runnerd_core::api::CheckStatus::Fail)
     {
         ExitCode::FAILURE
     } else {
@@ -166,7 +155,9 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
     let path = config
         .or_else(default_config)
         .ok_or_else(|| fail(&"neither XDG_CONFIG_HOME nor HOME is set; pass --config"))?;
-    let config = Config::load(&path).map_err(|error| fail(&error))?;
+    let text = std::fs::read_to_string(&path)
+        .map_err(|error| fail(&format_args!("cannot read {}: {error}", path.display())))?;
+    let config = Config::parse(&text).map_err(|error| fail(&error))?;
     let memory_max = slice_memory_max(&config.host.slice).map_err(|error| fail(&error))?;
     for warning in config.validate(memory_max).map_err(|error| fail(&error))? {
         warn!("{warning}");
@@ -225,7 +216,12 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
     info!("serving the API on {}", socket.display());
     let engine = tokio::spawn(engine.run());
     let (stopped, stop) = tokio::sync::oneshot::channel::<()>();
-    let server = tokio::spawn(api::serve(listener, handle, async {
+    let config = api::ConfigSource {
+        path,
+        text,
+        memory_max: slice_memory_max,
+    };
+    let server = tokio::spawn(api::serve(listener, handle, config, async {
         let _ = stop.await;
     }));
     let engine_done = engine.await;

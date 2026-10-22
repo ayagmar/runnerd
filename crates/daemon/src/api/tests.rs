@@ -1,18 +1,92 @@
 //! The API over a real Unix socket: routes, owner-only access, socket takeover, the event stream resumed across a
-//! restart, and a followed log.
+//! restart, a followed log, and the control routes' answers and config file over a fake engine.
 
 use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
 use reqwest::StatusCode;
-use runnerd_core::api::{Budget, Event, EventEnvelope, JobState, ProfileStatus, Status};
+use runnerd_core::api::{
+    Budget, Busy, ConfigCheck, ConfigFile, Event, EventEnvelope, JobState, Paused, ProfileStatus,
+    RunningJob, Status,
+};
+use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::github::{JobDetails, QueuedJob};
-use runnerd_core::scheduler::engine::{Control, Handle, Shutdown};
+use runnerd_core::scheduler::engine::{Command, Commands, Control, ControlError, Handle, Shutdown};
 use runnerd_core::store::{LogPosition, RunnerRecord, Store};
-use tokio::sync::{oneshot, watch};
+use tokio::sync::{mpsc, oneshot, watch};
 
-use super::{bind, serve, serve_for};
+use super::{ConfigSource, bind, serve, serve_for};
+
+const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
+
+/// The slice's `MemoryMax`, in place of systemd's: the example's caps sum to 32.5G.
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "it stands in for config::slice_memory_max"
+)]
+fn memory_max(_slice: &str) -> std::io::Result<Option<ByteSize>> {
+    Ok(Some(ByteSize(33 << 30)))
+}
+
+/// A response's body.
+async fn body(response: reqwest::Response) -> Vec<u8> {
+    response.bytes().await.unwrap().to_vec()
+}
+
+/// The runner `o/busy` runs job 7 on, in the fake engine.
+fn busy_job() -> RunningJob {
+    RunningJob {
+        repository: "o/busy".to_owned(),
+        runner: "runner-1".to_owned(),
+        job: Some(7),
+    }
+}
+
+/// Answers commands as an engine whose repository `o/busy` runs job 7, `o/app` nothing, and no other is configured; sends every config it
+/// is told to run with to `reloads`.
+async fn fake_engine(
+    control: Arc<Control>,
+    mut commands: Commands,
+    reloads: mpsc::UnboundedSender<Config>,
+) {
+    while let Some(command) = commands.recv().await {
+        match command {
+            Command::Pause {
+                repository,
+                force,
+                reply,
+            } => {
+                let busy = repository == "o/busy";
+                let _ = reply.send(if !busy && repository != "o/app" {
+                    Err(ControlError::NotFound(format!(
+                        "{repository} is not configured"
+                    )))
+                } else if busy && !force {
+                    Err(ControlError::Busy {
+                        message: "o/busy runs job 7 on runner-1".to_owned(),
+                        jobs: vec![busy_job()],
+                    })
+                } else {
+                    control.set_paused(&repository, true);
+                    Ok(Paused {
+                        stopped: if busy { vec![busy_job()] } else { Vec::new() },
+                    })
+                });
+            }
+            Command::Reseed { reply, .. } => {
+                let _ = reply.send(Err(ControlError::Conflict("reseeding already".to_owned())));
+            }
+            Command::CleanCache { reply, .. } => {
+                let _ = reply.send(Ok(()));
+            }
+            Command::Reload { config, reply, .. } => {
+                let _ = reloads.send(*config);
+                let _ = reply.send(());
+            }
+        }
+    }
+}
 
 fn status() -> Status {
     Status {
@@ -54,6 +128,9 @@ struct Daemon {
     client: reqwest::Client,
     control: Arc<Control>,
     store: Store,
+    /// `runnerd.toml`, a symlink to the file it serves.
+    config: std::path::PathBuf,
+    reloads: mpsc::UnboundedReceiver<Config>,
     stop: oneshot::Sender<()>,
     served: tokio::task::JoinHandle<()>,
 }
@@ -73,13 +150,28 @@ impl Daemon {
 async fn start(dir: &Path, owner: Option<u32>) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
-    let control = Arc::new(Control::new(["o/app".to_owned()]));
+    let (control, commands) = Control::new(["o/app".to_owned(), "o/busy".to_owned()]);
+    let control = Arc::new(control);
+    let (reloaded, reloads) = mpsc::unbounded_channel();
+    tokio::spawn(fake_engine(control.clone(), commands, reloaded));
     let (sender, receiver) = watch::channel(status());
     let handle = Handle {
         status: receiver,
         control: control.clone(),
         store: store.clone(),
-        caches: Vec::new(),
+        caches: watch::channel(Vec::new()).1,
+    };
+    let config = dir.join("runnerd.toml");
+    let file = dir.join("config.toml");
+    std::fs::write(&file, EXAMPLE).unwrap();
+    std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o640)).unwrap();
+    if !config.exists() {
+        std::os::unix::fs::symlink(&file, &config).unwrap();
+    }
+    let source = ConfigSource {
+        path: config.clone(),
+        text: EXAMPLE.to_owned(),
+        memory_max,
     };
     let listener = bind(&socket).await.unwrap();
     let mode = std::fs::metadata(&socket).unwrap();
@@ -94,8 +186,8 @@ async fn start(dir: &Path, owner: Option<u32>) -> Daemon {
     let served = tokio::spawn(async move {
         let _sender = sender;
         match owner {
-            Some(owner) => serve_for(listener, handle, owner, stopped).await,
-            None => serve(listener, handle, stopped).await,
+            Some(owner) => serve_for(listener, handle, source, owner, stopped).await,
+            None => serve(listener, handle, source, stopped).await,
         }
         .unwrap();
     });
@@ -108,6 +200,8 @@ async fn start(dir: &Path, owner: Option<u32>) -> Daemon {
         client,
         control,
         store,
+        config,
+        reloads,
         stop,
         served,
     }
@@ -133,10 +227,7 @@ async fn repositories_pause_and_resume_by_owner_and_name() {
             .unwrap()
             .status()
     };
-    assert_eq!(
-        post("/v1/repositories/o/app/pause").await,
-        StatusCode::NO_CONTENT
-    );
+    assert_eq!(post("/v1/repositories/o/app/pause").await, StatusCode::OK);
     assert!(control.is_paused("o/app"));
     assert_eq!(
         post("/v1/repositories/o/app/resume").await,
@@ -187,6 +278,13 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/caches"),
         client.get("http://runnerd/v1/caches/history"),
         client.get("http://runnerd/v1/events"),
+        client.post("http://runnerd/v1/repositories/o/busy/pause?force=true"),
+        client.post("http://runnerd/v1/profiles/jvm/reseed"),
+        client.post("http://runnerd/v1/caches/runnerd-pnpm/clean"),
+        client.get("http://runnerd/v1/config"),
+        client.post("http://runnerd/v1/config/check").body(EXAMPLE),
+        client.put("http://runnerd/v1/config").body(EXAMPLE),
+        client.get("http://runnerd/v1/doctor"),
     ];
     for request in requests {
         let response = request.send().await.unwrap();
@@ -198,7 +296,124 @@ async fn every_route_refuses_other_users() {
         );
     }
     assert!(!control.is_paused("o/app"));
+    assert!(!control.is_paused("o/busy"));
     assert_eq!(control.mode(), Shutdown::No);
+}
+
+#[tokio::test]
+async fn a_pause_while_a_job_runs_is_refused_naming_the_job_unless_forced() {
+    let (client, control, _dir) = daemon().await;
+    let response = client
+        .post("http://runnerd/v1/repositories/o/busy/pause")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    let busy: Busy = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(busy.jobs, [busy_job()]);
+    assert!(busy.message.contains("job 7"), "{}", busy.message);
+    assert!(!control.is_paused("o/busy"));
+    let response = client
+        .post("http://runnerd/v1/repositories/o/busy/pause?force=true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let paused: Paused = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(paused.stopped, [busy_job()]);
+    assert!(control.is_paused("o/busy"));
+}
+
+#[tokio::test]
+async fn a_config_over_the_budget_is_refused_with_both_numbers_and_the_file_is_unchanged() {
+    let dir = tempdir::Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let before = std::fs::read(&daemon.config).unwrap();
+    // A third jvm slot: 3 × 9G + 2 × 7G + 512M = 41.5G.
+    let over = EXAMPLE.replacen("slots = 2", "slots = 3", 1);
+    let checked: ConfigCheck = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .post("http://runnerd/v1/config/check")
+                .body(over.clone())
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert!(!checked.valid);
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(over)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let refused: ConfigCheck = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(refused, checked);
+    assert!(
+        refused.message.contains("41.5G") && refused.message.contains("33G"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(std::fs::read(&daemon.config).unwrap(), before);
+    assert!(daemon.reloads.try_recv().is_err());
+    let shown: ConfigFile = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .get("http://runnerd/v1/config")
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(shown.text, EXAMPLE);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_valid_config_replaces_the_file_it_links_to_with_its_permissions_and_is_reloaded() {
+    let dir = tempdir::Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let new = EXAMPLE.replacen("slots = 2", "slots = 1", 1);
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(new.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let checked: ConfigCheck = serde_json::from_slice(&body(response).await).unwrap();
+    assert!(checked.valid, "{}", checked.message);
+    assert!(
+        std::fs::symlink_metadata(&daemon.config)
+            .unwrap()
+            .is_symlink()
+    );
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), new);
+    let mode = std::fs::metadata(&daemon.config).unwrap().permissions();
+    assert_eq!(
+        std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
+        0o640
+    );
+    let reloaded = daemon.reloads.recv().await.unwrap();
+    assert_eq!(reloaded.profiles["jvm"].slots, 1);
+    let leftovers: Vec<_> = std::fs::read_dir(&dir.0)
+        .unwrap()
+        .filter_map(|entry| entry.unwrap().file_name().into_string().ok())
+        // Temporary files start with a dot.
+        .filter(|name| name.starts_with('.'))
+        .collect();
+    assert_eq!(leftovers, Vec::<String>::new());
+    daemon.stop().await;
 }
 
 #[tokio::test]

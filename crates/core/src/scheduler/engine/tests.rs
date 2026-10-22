@@ -1,5 +1,6 @@
 //! Runner names, and the engine against fake GitHub and Docker: polling order, restart recovery, a Docker that
-//! does not answer, which runners it deletes, and the job history it keeps across restarts.
+//! does not answer, which runners it deletes, the job history it keeps across restarts, and the API's commands:
+//! forced pause, reseed, cache clean and reload.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -8,7 +9,7 @@ use std::time::Duration;
 use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
-use super::{Engine, Handle, HostIdentity, Setup, Shutdown};
+use super::{ControlError, Engine, Handle, HostIdentity, Setup, Shutdown};
 use crate::api::{self, JobState};
 use crate::cache::Names;
 use crate::config::Config;
@@ -139,6 +140,12 @@ impl GithubApi for FakeGithub {
             .cloned()
             .ok_or(github::Error::Token(format!("no job {id}")))
     }
+
+    async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), github::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("cancel {repository} {run}"));
+        Ok(())
+    }
 }
 
 /// What the fake Docker Engine runs and what it was asked.
@@ -151,6 +158,8 @@ struct DockerState {
     mirror_log: String,
     /// What the log capture prints in a container, by the position it is started at.
     captures: HashMap<(String, String), String>,
+    /// What the log capture prints in one container, whatever the position, before `captures`.
+    container_captures: HashMap<String, String>,
     /// The capture commands run: container, page, offset.
     captured: Vec<(String, String, String)>,
     calls: Vec<String>,
@@ -263,8 +272,9 @@ impl DockerApi for FakeDocker {
             .captured
             .push((container.to_owned(), page.clone(), offset.clone()));
         let output = state
-            .captures
-            .get(&(page, offset))
+            .container_captures
+            .get(container)
+            .or_else(|| state.captures.get(&(page, offset)))
             .cloned()
             .unwrap_or_default();
         Ok(futures_util::stream::iter([Ok(output.into_bytes())]).boxed())
@@ -282,7 +292,12 @@ impl DockerApi for FakeDocker {
         Ok(())
     }
 
-    async fn remove_volume(&self, _name: &str) -> Result<(), docker::Error> {
+    async fn remove_volume(&self, name: &str) -> Result<(), docker::Error> {
+        self.0
+            .lock()
+            .unwrap()
+            .calls
+            .push(format!("remove volume {name}"));
         Ok(())
     }
 
@@ -836,4 +851,252 @@ async fn mirror_bytes_the_history_failed_to_store_are_counted_on_the_next_tick()
     handle.store.flush().await;
     let job = handle.store.job(1).await.unwrap().unwrap();
     assert_eq!(job.summary.metrics.mirror_bytes, 577);
+}
+
+/// `CONFIG` with a second repository, `o/s`, on the same profile.
+fn two_repositories() -> String {
+    format!(
+        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\n"
+    )
+}
+
+/// A running runner container of `repository` in slot `slot`, whose capture reports job `job` of run `job`.
+fn running_job(github: &FakeGithub, docker: &FakeDocker, repository: &str, slot: usize, job: u64) {
+    let mut container = runner_container(slot, 6 + slot as u64, true);
+    container
+        .labels
+        .insert("runnerd.repository".to_owned(), repository.to_owned());
+    let mut state = docker.0.lock().unwrap();
+    state
+        .container_captures
+        .insert(container.id.clone(), format!("@@job {job} {job}\n"));
+    state.containers.push(container);
+    let mut github = github.0.lock().unwrap();
+    github.runners.push(runner(
+        6 + slot as u64,
+        &identity("ci", ID_A).runner_name("app", slot, 1),
+        true,
+    ));
+    let mut details = details(job, "in_progress", None);
+    details.run_id = job;
+    github.jobs.insert(job, details);
+}
+
+/// The runner containers removed.
+fn removed(calls: &[String]) -> Vec<&String> {
+    calls
+        .iter()
+        .filter(|call| call.starts_with("remove container-"))
+        .collect()
+}
+
+fn runner_in(handle: &Handle, slot: usize) -> Option<String> {
+    let status = handle.status.borrow();
+    let profile = status
+        .profiles
+        .iter()
+        .find(|profile| profile.name == "app")
+        .unwrap();
+    profile
+        .slots
+        .iter()
+        .find(|candidate| candidate.slot == slot)
+        .and_then(|candidate| candidate.runner.as_ref())
+        .map(|runner| runner.repository.clone())
+}
+
+#[tokio::test]
+async fn a_pause_is_refused_while_the_repository_runs_a_job_and_forced_cancels_only_its_job() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    running_job(&github, &docker, "o/s", 2, 2);
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    until_state(&handle, 2, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+
+    let Err(ControlError::Busy { jobs, .. }) = engine.pause("o/r", false).await else {
+        panic!("a pause while o/r runs a job went through");
+    };
+    assert_eq!(
+        jobs.iter().map(|job| job.job).collect::<Vec<_>>(),
+        [Some(1)]
+    );
+    assert!(!handle.control.is_paused("o/r"));
+
+    let paused = engine.pause("o/r", true).await.unwrap();
+    assert_eq!(
+        paused.stopped.iter().map(|job| job.job).collect::<Vec<_>>(),
+        [Some(1)]
+    );
+    assert!(handle.control.is_paused("o/r"));
+    assert!(!handle.control.is_paused("o/s"));
+    let cancelled: Vec<String> = github
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with("cancel "))
+        .collect();
+    assert_eq!(cancelled, ["cancel o/r 1"]);
+    // Its runner reports the job cancelled and exits; then it is removed like any other.
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None);
+    assert_eq!(runner_in(&handle, 2).as_deref(), Some("o/s"));
+}
+
+#[tokio::test]
+async fn the_runner_of_a_cancelled_run_that_does_not_exit_is_removed_after_a_while() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    engine.pause("o/r", true).await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    tokio::time::pause();
+    tokio::time::advance(super::CANCEL_GRACE).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+}
+
+#[tokio::test]
+async fn a_reload_while_a_job_runs_keeps_the_job() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    // The repository moves to a new profile; `app` is gone from the config.
+    let config = CONFIG
+        .replace("[profiles.app]", "[profiles.big]")
+        .replace("profile = \"app\"", "profile = \"big\"");
+    engine.reload(Config::parse(&config).unwrap(), None);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    assert_eq!(runner_in(&handle, 1).as_deref(), Some("o/r"));
+    // Its memory still counts against the budget.
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 4 << 30);
+
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let names: Vec<String> = handle
+        .status
+        .borrow()
+        .profiles
+        .iter()
+        .map(|profile| profile.name.clone())
+        .collect();
+    assert_eq!(names, ["big"]);
+}
+
+#[tokio::test]
+async fn fewer_slots_stop_new_starts_but_not_the_running_job() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 2, 1);
+    github.0.lock().unwrap().queued = vec![job(3)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.reload(
+        Config::parse(&CONFIG.replace("slots = 2", "slots = 1")).unwrap(),
+        None,
+    );
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    assert_eq!(runner_in(&handle, 2).as_deref(), Some("o/r"));
+
+    // Once it finishes, the one slot left takes the queued job.
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(registered(&github.calls()).len(), 1);
+    let slots: Vec<usize> = handle.status.borrow().profiles[0]
+        .slots
+        .iter()
+        .map(|slot| slot.slot)
+        .collect();
+    assert_eq!(slots, [1]);
+}
+
+#[tokio::test]
+async fn a_requested_reseed_holds_back_new_runners_until_the_profile_is_free_and_then_runs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.request_reseed("app").unwrap();
+    assert!(matches!(
+        engine.request_reseed("app"),
+        Err(ControlError::Conflict(_))
+    ));
+    assert!(matches!(
+        engine.request_reseed("nope"),
+        Err(ControlError::NotFound(_))
+    ));
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert!(handle.status.borrow().profiles[0].reseeding);
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    let seed = format!("start {}", Names::new("runnerd").seed("app"));
+    for _ in 0..100 {
+        if docker.calls().contains(&seed) {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(docker.calls().contains(&seed), "{:?}", docker.calls());
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
+async fn a_cache_is_cleaned_only_when_no_runner_uses_it() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    for used in ["runnerd-app-slot-1", "runnerd-pnpm"] {
+        let Err(ControlError::Busy { jobs, .. }) = engine.clean_cache(used).await else {
+            panic!("{used} was cleaned while a runner used it");
+        };
+        assert_eq!(
+            jobs.iter().map(|job| job.job).collect::<Vec<_>>(),
+            [Some(1)]
+        );
+    }
+    assert!(matches!(
+        engine.clean_cache("runnerd-app-base").await,
+        Err(ControlError::Invalid(_))
+    ));
+    assert!(matches!(
+        engine.clean_cache("runnerd-other").await,
+        Err(ControlError::NotFound(_))
+    ));
+    engine.clean_cache("runnerd-app-slot-2").await.unwrap();
+    let volumes: Vec<String> = docker
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with("remove volume "))
+        .collect();
+    assert_eq!(volumes, ["remove volume runnerd-app-slot-2"]);
 }

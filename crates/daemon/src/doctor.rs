@@ -1,10 +1,10 @@
 //! `runnerd doctor`: what the host is missing to run runners, each with the fix. It reads the host and changes
-//! nothing; the user runs the fixes.
+//! nothing; the user runs the fixes. The checks are `api::Check`s, so `GET /v1/doctor` serves the same ones.
 
-use std::fmt;
 use std::path::Path;
 use std::process::Command;
 
+use runnerd_core::api::{Check, CheckStatus as Status};
 use runnerd_core::config::{self, ByteSize, Config, Isolation};
 use runnerd_core::docker::Docker;
 
@@ -38,45 +38,6 @@ pub(crate) struct Slice {
     pub memory_max: Option<ByteSize>,
     /// `CPUQuotaPerSecUSec` as `systemctl show` prints it, such as `16s` or `infinity`.
     pub cpu_quota: String,
-}
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Status {
-    Pass,
-    Fail,
-    /// Works, but unsafe.
-    Warn,
-    /// Not checked, because a check it depends on failed or no config was given.
-    Skip,
-    Info,
-}
-
-pub(crate) struct Check {
-    pub name: &'static str,
-    pub status: Status,
-    pub detail: String,
-    /// What to run or change to pass, for a failed check.
-    pub fix: Option<String>,
-}
-
-impl fmt::Display for Check {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status = match self.status {
-            Status::Pass => "ok",
-            Status::Fail => "FAIL",
-            Status::Warn => "WARN",
-            Status::Skip => "skip",
-            Status::Info => "info",
-        };
-        write!(f, "{status:<5} {}: {}", self.name, self.detail)?;
-        if let Some(fix) = &self.fix {
-            for (i, line) in fix.lines().enumerate() {
-                let label = if i == 0 { "fix:" } else { "" };
-                write!(f, "\n      {label:<4} {line}")?;
-            }
-        }
-        Ok(())
-    }
 }
 
 impl Host {
@@ -221,7 +182,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     let isolation = config.map_or(Isolation::Sysbox, |config| config.host.isolation);
     checks.push(match isolation {
         Isolation::Sysbox => Check {
-            name: "isolation",
+            name: "isolation".to_owned(),
             status: Status::Info,
             detail: format!(
                 "sysbox: runners run unprivileged{}",
@@ -234,7 +195,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             fix: None,
         },
         Isolation::UnsafeDind => Check {
-            name: "isolation",
+            name: "isolation".to_owned(),
             status: Status::Warn,
             detail: "unsafe-dind: runners run privileged, so a job can take over the host"
                 .to_owned(),
@@ -291,7 +252,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     checks.push(Check {
-        name: "/dev/kvm",
+        name: "/dev/kvm".to_owned(),
         status: Status::Info,
         detail: if host.kvm {
             "present, for a future Kata Containers backend".to_owned()
@@ -351,7 +312,7 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     let config_check = match config.validate(slice.memory_max) {
         Ok(warnings) if warnings.is_empty() => pass("config", format!("fits in {name}")),
         Ok(warnings) => Check {
-            name: "config",
+            name: "config".to_owned(),
             status: Status::Pass,
             detail: format!(
                 "valid, with warnings: {}",
@@ -406,27 +367,27 @@ fn sysbox_fix(os_release: &str) -> String {
     }
 }
 
-fn pass(name: &'static str, detail: String) -> Check {
+fn pass(name: &str, detail: String) -> Check {
     Check {
-        name,
+        name: name.to_owned(),
         status: Status::Pass,
         detail,
         fix: None,
     }
 }
 
-fn fail(name: &'static str, detail: String, fix: &str) -> Check {
+fn fail(name: &str, detail: String, fix: &str) -> Check {
     Check {
-        name,
+        name: name.to_owned(),
         status: Status::Fail,
         detail,
         fix: Some(fix.to_owned()),
     }
 }
 
-fn skip(name: &'static str, detail: &str) -> Check {
+fn skip(name: &str, detail: &str) -> Check {
     Check {
-        name,
+        name: name.to_owned(),
         status: Status::Skip,
         detail: detail.to_owned(),
         fix: None,

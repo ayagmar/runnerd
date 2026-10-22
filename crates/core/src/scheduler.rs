@@ -47,6 +47,9 @@ pub enum Slot {
     Free,
     /// A runner, waiting for its job or running it.
     Runner(RunnerSlot),
+    /// Free, but over the profile's number of slots, which a reload lowered while its runners ran: nothing starts
+    /// here.
+    Closed,
 }
 
 /// A slot whose container runs a runner registered for one job.
