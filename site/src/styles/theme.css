@@ -150,4 +150,22 @@ h1#_top {
   mobile-starlight-toc .dropdown a {
     display: flex;
   }
+
+  .sl-markdown-content .expressive-code .copy button {
+    width: 2.75rem;
+    height: 2.75rem;
+  }
+
+  .sl-skip-link {
+    display: flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .sl-markdown-content .sl-anchor-link {
+    min-width: 44px;
+    min-height: 44px;
+    align-items: center;
+    justify-content: center;
+  }
 }
