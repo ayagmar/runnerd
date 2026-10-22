@@ -4,6 +4,8 @@ runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh contain
 
 It is in early development. Today it only reads and checks its config; it does not start runners yet.
 
+Documentation: <https://ayagmar.github.io/runnerd/>
+
 ## Config
 
 One file, `runnerd.toml`, lists the repositories to serve, the runner profile each one uses, the shared caches and the systemd slice whose limits form the budget. [`examples/runnerd.toml`](examples/runnerd.toml) is a complete example.
