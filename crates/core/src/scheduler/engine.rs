@@ -18,7 +18,7 @@ use super::{Decision, Profile, Repository, RunnerSlot, Slot, SlotRef, plan};
 use crate::api;
 use crate::cache::{self, Names, runner_mounts};
 use crate::config::{ByteSize, Config};
-use crate::docker::{self, Docker, DockerApi, RunnerSpec, is_not_found};
+use crate::docker::{self, Docker, DockerApi, RunnerSpec, RunnerState, is_not_found};
 use crate::github::{self, Deleted, Github, GithubApi, QueuedJob};
 use crate::isolation::{self, Isolation};
 use crate::observe::capture::{self, Captured, Parser};
@@ -659,7 +659,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
 
     /// Takes over the seed containers a previous daemon left: a running one counts as its profile's reseed, so no
     /// runner of the profile starts while it rewrites the snapshot and the slots' layers.
-    fn recover_reseeds(&mut self, containers: Vec<docker::Container>) {
+    async fn recover_reseeds(&mut self, containers: Vec<docker::Container>) {
         for container in containers {
             let Some(profile) = container.labels.get("runnerd.profile").cloned() else {
                 continue;
@@ -671,16 +671,28 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             info!("{profile}: waiting for the reseed an earlier run started");
             let docker = self.docker.clone();
             let id = container.id.clone();
-            let memory = self
-                .config
-                .profiles
-                .get(&profile)
-                .map_or(0, |settings| settings.memory.0);
+            let memory = self.running_cap(&container.id, &profile).await;
             self.reseed_memory.insert(profile.clone(), memory);
             self.reseeds.insert(
                 profile,
                 tokio::spawn(async move { cache::finish_reseed(&*docker, &id).await }),
             );
+        }
+    }
+
+    /// The memory cap a container left by an earlier daemon runs with, which a reload since may have changed in the
+    /// config; the profile's configured cap only when Docker cannot tell.
+    async fn running_cap(&self, container: &str, profile: &str) -> u64 {
+        match self.docker.inspect(container).await {
+            Ok(RunnerState {
+                memory: Some(memory),
+                ..
+            }) => memory,
+            _ => self
+                .config
+                .profiles
+                .get(profile)
+                .map_or(0, |settings| settings.memory.0),
         }
     }
 
@@ -690,7 +702,17 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
-        self.recover_reseeds(seeds);
+        self.recover_reseeds(seeds).await;
+        // A reload may have lowered the configured cap since the mirror started.
+        match self.docker.inspect(&self.names.mirror()).await {
+            Ok(state) if state.running => {
+                self.mirror_memory = state.memory.unwrap_or(self.mirror_memory);
+            }
+            Ok(_) => self.mirror_memory = 0,
+            Err(error) if is_not_found(&error) => self.mirror_memory = 0,
+            // Unknown: the configured cap.
+            Err(_) => {}
+        }
         // Runner containers still running once recovery is done.
         let mut running = BTreeSet::new();
         for container in containers {
@@ -710,11 +732,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 container: container.id.clone(),
                 busy: true,
                 started_at: SystemTime::now(),
-                memory: self
-                    .config
-                    .profiles
-                    .get(&profile)
-                    .map_or(0, |settings| settings.memory.0),
+                memory: self.running_cap(&container.id, &profile).await,
                 // Its capture reports it again; until then, or if it cannot, the history knows it.
                 job: self.store.runner_job(&container.name).await.ok().flatten(),
             };

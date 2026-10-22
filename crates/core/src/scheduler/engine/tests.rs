@@ -172,6 +172,8 @@ struct DockerState {
     containers: Vec<Container>,
     /// Every `list` fails, as when the Engine does not answer.
     fail_lists: bool,
+    /// The memory cap of each container that has one, by ID.
+    memory: HashMap<String, u64>,
     /// How many `remove`s fail next, as when the Engine is busy.
     fail_removes: u32,
     /// What the Docker Hub mirror's log says.
@@ -209,6 +211,7 @@ impl DockerApi for FakeDocker {
     ) -> Result<String, docker::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("start {}", spec.name));
+        state.memory.insert(spec.name.clone(), spec.memory.0);
         let mut labels: HashMap<String, String> = spec.labels.clone().into_iter().collect();
         labels.insert("runnerd.profile".to_owned(), spec.profile.clone());
         state.containers.push(Container {
@@ -235,6 +238,7 @@ impl DockerApi for FakeDocker {
             pid: Some(4242),
             address: Some("172.18.0.3".to_owned()),
             started_at: Some(1_000),
+            memory: state.memory.get(&found.id).copied(),
         })
     }
 
@@ -254,7 +258,18 @@ impl DockerApi for FakeDocker {
         Ok(())
     }
 
-    async fn run(&self, name: &str, _body: ContainerCreateBody) -> Result<String, docker::Error> {
+    async fn run(&self, name: &str, body: ContainerCreateBody) -> Result<String, docker::Error> {
+        let mut state = self.0.lock().unwrap();
+        let memory = body.host_config.and_then(|host| host.memory).unwrap_or(0);
+        state
+            .memory
+            .insert(name.to_owned(), u64::try_from(memory).unwrap_or(0));
+        state.containers.push(Container {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            running: true,
+            labels: HashMap::from([("runnerd.mirror".to_owned(), String::new())]),
+        });
         Ok(name.to_owned())
     }
 
@@ -1222,6 +1237,13 @@ async fn a_running_mirror_keeps_its_memory_when_a_reload_lowers_it() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
     running_job(&github, &docker, "o/r", 1, 1);
+    let mirror = Container {
+        id: Names::new("runnerd").mirror(),
+        name: Names::new("runnerd").mirror(),
+        running: true,
+        labels: HashMap::from([("runnerd.mirror".to_owned(), String::new())]),
+    };
+    left_running(&docker, mirror, 4 << 30);
     let dir = TestDir::new("engine");
     let (mut engine, _handle) = engine_with(&github, &docker, &dir, &sized("4G", "6G", "1G"));
     engine.memory_max = Some(10 << 30);
@@ -1290,4 +1312,75 @@ async fn the_runner_of_a_removed_repository_github_held_busy_is_deleted_once_it_
     // Its container is removed; GitHub still holds the registration, which the same tick's poll deletes.
     assert_eq!(removed(&docker.calls()), ["remove container-1"]);
     assert_eq!(github.0.lock().unwrap().runners.len(), 0);
+}
+
+/// A container left running by an earlier daemon, with its memory cap.
+fn left_running(docker: &FakeDocker, container: Container, memory: u64) {
+    let mut state = docker.0.lock().unwrap();
+    state.memory.insert(container.id.clone(), memory);
+    state.containers.push(container);
+}
+
+/// An engine on `config` with a 10G budget, after recovery.
+async fn recovered_with(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    config: &str,
+) -> Engine<FakeGithub, FakeDocker> {
+    let (mut engine, _handle) = engine_with(github, docker, dir, config);
+    engine.memory_max = Some(10 << 30);
+    engine.recover().await.unwrap();
+    engine
+}
+
+#[tokio::test]
+async fn after_a_restart_a_seed_container_counts_at_the_cap_it_runs_with() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    left_running(
+        &docker,
+        Container {
+            id: "seed".to_owned(),
+            name: Names::new("runnerd").seed("app"),
+            running: true,
+            labels: HashMap::from([
+                ("runnerd.seed".to_owned(), String::new()),
+                ("runnerd.profile".to_owned(), "app".to_owned()),
+            ]),
+        },
+        8 << 30,
+    );
+    let dir = TestDir::new("engine");
+    // A reload lowered `app` to 1G while the seed container ran with 8G, then runnerd restarted.
+    let mut engine = recovered_with(&github, &docker, &dir, &sized("0G", "1G", "8G")).await;
+    github.0.lock().unwrap().queued = vec![small_job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
+async fn after_a_restart_a_runner_and_the_mirror_count_at_the_caps_they_run_with() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .memory
+        .insert("container-1".to_owned(), 6 << 30);
+    let mirror = Container {
+        id: Names::new("runnerd").mirror(),
+        name: Names::new("runnerd").mirror(),
+        running: true,
+        labels: HashMap::from([("runnerd.mirror".to_owned(), String::new())]),
+    };
+    left_running(&docker, mirror, 3 << 30);
+    let dir = TestDir::new("engine");
+    // A reload lowered the mirror to 512M and `app` to 1G; their containers still run with 3G and 6G.
+    let mut engine = recovered_with(&github, &docker, &dir, &sized("512M", "1G", "2G")).await;
+    github.0.lock().unwrap().queued = vec![small_job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
 }
