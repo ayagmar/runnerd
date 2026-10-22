@@ -87,10 +87,28 @@ fn config_with_unlimited_slice_validates_with_a_warning() {
 }
 
 #[test]
-fn config_rejects_unknown_fields() {
-    let text = MINIMAL.replace("slots = 1", "slot = 1");
-    let error = Config::parse(&text).unwrap_err().to_string();
-    assert!(error.contains("slot"), "{error}");
+fn config_rejects_unknown_fields_in_every_table() {
+    for (table, with_typo) in [
+        ("top level", format!("typo = 1\n{MINIMAL}")),
+        ("host", MINIMAL.replace("[host]", "[host]\ntypo = 1")),
+        ("caches", MINIMAL.replace("[caches]", "[caches]\ntypo = 1")),
+        (
+            "mirror",
+            MINIMAL.replace("ttl = \"168h\"", "ttl = \"168h\", typo = 1"),
+        ),
+        ("pnpm", MINIMAL.replace("pnpm = {", "pnpm = { typo = 1,")),
+        (
+            "profile",
+            MINIMAL.replace("slots = 1", "slots = 1\ntypo = 1"),
+        ),
+        (
+            "repository",
+            MINIMAL.replace("profile = \"app\"", "profile = \"app\"\ntypo = 1"),
+        ),
+    ] {
+        let error = Config::parse(&with_typo).unwrap_err().to_string();
+        assert!(error.contains("unknown field `typo`"), "{table}: {error}");
+    }
 }
 
 #[test]
