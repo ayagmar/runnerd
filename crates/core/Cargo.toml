@@ -40,5 +40,14 @@ axum.workspace = true
 log.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
 
+# They start real containers through the host modules.
+[[test]]
+name = "docker_smoke"
+required-features = ["host"]
+
+[[test]]
+name = "cache_reseed"
+required-features = ["host"]
+
 [lints]
 workspace = true

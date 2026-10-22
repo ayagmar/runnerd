@@ -117,7 +117,7 @@ jobs:
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
       # What clients build: runnerd-core without the host feature.
-      - run: cargo clippy -p runnerd-core --no-default-features --locked -- -D warnings
+      - run: cargo clippy -p runnerd-core --no-default-features --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       # Broken intra-doc links and other rustdoc warnings.
       - run: cargo doc --workspace --no-deps --locked
