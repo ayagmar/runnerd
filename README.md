@@ -2,7 +2,7 @@
 
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development: the daemon schedules runners and serves a small JSON API; job history, metrics, the CLI client and the web dashboard come next.
+It is in early development: the daemon schedules runners, records every job and serves a JSON API, and `runnerctl` reads it from a terminal; the web dashboard comes next.
 
 ## Install
 
@@ -170,6 +170,46 @@ xdg-open "$(cat "$XDG_RUNTIME_DIR/runnerd.web")"
 
 Writes such as a pause also need an `Origin` of the dashboard itself, so another site the browser has open cannot
 send them. The pages load nothing from elsewhere: the Datastar script and the font are in the binary.
+
+## runnerctl
+
+`runnerctl` is the daemon's command-line client. It talks to the socket only (`--socket` to pick another), prints
+aligned text, coloured on a terminal unless `NO_COLOR` is set, and with `--json` prints the API's response type
+unchanged.
+
+```console
+$ runnerctl status
+runnerd 0.0.1  4.5G of 33G reserved in runnerd.slice
+
+PROFILE  SLOT  STATE  REPOSITORY      RUNNER                       UP
+jvm         1  busy   halyard/ledger  runnerd-5f2a91c0-jvm-1-k3j9  21s
+jvm         2  free
+
+REPOSITORY          PROFILE  STATE   QUEUED  LABELS
+halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
+halyard/storefront  node     paused       2  self-hosted,linux,x64,node
+```
+
+| Command | What it shows or does |
+|---|---|
+| `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queues |
+| `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
+| `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
+| `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final |
+| `runnerctl watch` | slots, running jobs with their current step and last sample, queued and finished jobs, redrawn as events arrive; one line per event when not on a terminal, one JSON event per line with `--json` |
+| `runnerctl pause <repo>`, `resume <repo>` | the repository gets no new runners, its running jobs finish; and back |
+| `runnerctl caches` | the cache volumes, their sizes and limits |
+
+Memory and CPU come from samples every 2 s, so a peak is the highest sample: a spike shorter than that does not show.
+
+From the bash `ci` tool:
+
+| `ci` | Now |
+|---|---|
+| `ci up <repo>` | `runnerd serve` (or its systemd unit) once; `runnerctl resume <repo>` for a paused repository |
+| `ci down <repo>` | `runnerctl pause <repo>`; running jobs finish |
+| `ci status` | `runnerctl status`, `runnerctl watch` |
+| `ci autoscale` | nothing: the daemon starts a runner for each queued job |
 
 ## Config
 
