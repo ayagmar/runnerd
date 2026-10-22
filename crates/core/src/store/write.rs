@@ -492,24 +492,23 @@ impl Writer<'_> {
         Ok(())
     }
 
+    /// Counts a batch of the mirror's log and where it ends, together: counting part of it, or counting it without
+    /// moving past it, would count it again after a restart.
     fn mirror_bytes(&self, bytes: &[(String, u64)], until: u64) {
-        for (runner, bytes) in bytes {
-            logged(
-                "count mirror bytes",
+        self.change("count mirror bytes", |_| {
+            for (runner, bytes) in bytes {
                 self.db.execute(
                     "UPDATE runners SET mirror_bytes = mirror_bytes + ?2 WHERE name = ?1",
                     params![runner, bytes],
-                ),
-            );
-        }
-        logged(
-            "record the mirror log's position",
+                )?;
+            }
             self.db.execute(
                 "INSERT INTO meta (key, value) VALUES ('mirror_log_until', ?1) \
                  ON CONFLICT (key) DO UPDATE SET value = max(value, excluded.value)",
                 [until],
-            ),
-        );
+            )?;
+            Ok(())
+        });
     }
 
     fn prune(&self, now: u64, history: &crate::config::History) {

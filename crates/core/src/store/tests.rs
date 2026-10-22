@@ -203,3 +203,39 @@ async fn a_change_whose_event_cannot_be_stored_is_not_made_or_announced() {
     assert_eq!(stored.len(), 1);
     assert_eq!(events.try_recv().unwrap().id, stored[0].id);
 }
+
+#[tokio::test]
+async fn mirror_bytes_and_the_log_position_are_counted_together_or_not_at_all() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.runner_started(runner("a", 1));
+    store.runner_started(runner("b", 1));
+    store.flush().await;
+    let fault = Connection::open(&path).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_b BEFORE UPDATE OF mirror_bytes ON runners WHEN new.name = 'b' \
+             BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    store.mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], 500);
+    store.flush().await;
+    let counted = |db: &Connection| -> Vec<u64> {
+        db.prepare("SELECT mirror_bytes FROM runners ORDER BY name")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap()
+    };
+    assert_eq!(counted(&fault), [0, 0]);
+    assert_eq!(store.mirror_log_until().await.unwrap(), 0);
+
+    // Read again from the same position, the batch counts once.
+    fault.execute_batch("DROP TRIGGER no_b").unwrap();
+    store.mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], 500);
+    store.flush().await;
+    assert_eq!(counted(&fault), [10, 20]);
+    assert_eq!(store.mirror_log_until().await.unwrap(), 500);
+}
