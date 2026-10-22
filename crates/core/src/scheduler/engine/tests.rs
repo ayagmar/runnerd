@@ -182,6 +182,8 @@ struct DockerState {
     fail_removes: u32,
     /// What the Docker Hub mirror's log says.
     mirror_log: String,
+    /// What `volume_sizes` measures, by volume name.
+    volume_sizes: BTreeMap<String, u64>,
     /// What the log capture prints in a container, by the position it is started at.
     captures: HashMap<(String, String), String>,
     /// What the log capture prints in one container, whatever the position, before `captures`.
@@ -361,7 +363,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, docker::Error> {
-        Ok(BTreeMap::new())
+        Ok(self.0.lock().unwrap().volume_sizes.clone())
     }
 }
 
@@ -1047,6 +1049,67 @@ async fn the_runner_of_a_cancelled_run_is_removed_on_a_later_tick_when_docker_fa
     engine.publish();
     assert_eq!(runner_in(&handle, 1), None);
     assert_eq!(docker.0.lock().unwrap().containers.len(), 0);
+}
+
+/// Ticks until Docker was asked `call`, as background cache upkeep finishes.
+async fn until_called(
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    docker: &FakeDocker,
+    call: &str,
+) {
+    for _ in 0..100 {
+        if docker.calls().iter().any(|made| made == call) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    panic!("Docker was never asked to {call}: {:?}", docker.calls());
+}
+
+#[tokio::test]
+async fn killing_the_runner_of_a_cancelled_run_trims_the_shared_caches_and_reseeds_its_profile() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    // The startup check finds the shared caches within their limits, and is collected.
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    // A job runs in slot 1 and grows the pnpm cache past its limit.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .captures
+        .insert(("1".to_owned(), "0".to_owned()), "@@job 1 1\n".to_owned());
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.jobs.insert(1, details(1, "in_progress", None));
+    }
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 1, JobState::Running).await;
+    github.0.lock().unwrap().queued.clear();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volume_sizes
+        .insert("runnerd-pnpm".to_owned(), 6_000_000_000);
+    engine.tick(Shutdown::No).await;
+
+    // Its run is cancelled, but the runner does not exit and is killed.
+    engine.pause("o/r", true).await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(super::control::CANCEL_GRACE).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(docker.0.lock().unwrap().containers.len(), 0);
+
+    until_called(&mut engine, &docker, "remove volume runnerd-pnpm").await;
+    let seed = format!("start {}", Names::new("runnerd").seed("app"));
+    until_called(&mut engine, &docker, &seed).await;
 }
 
 #[tokio::test]

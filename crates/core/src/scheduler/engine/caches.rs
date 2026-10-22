@@ -44,8 +44,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Reseeds the idle profiles whose slot 1 ran a job; with no runner running at all, stops the mirror and
-    /// empties the shared caches over their limit.
+    /// Reseeds the idle profiles whose slot 1 ran a job; with no runner running at all, stops the mirror and,
+    /// unless shutting down, empties the shared caches over their limit.
     pub(super) async fn idle_caches(&mut self, mode: Shutdown) {
         if mode == Shutdown::No {
             let due: Vec<String> = self
@@ -73,7 +73,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 Err(error) => warn!("cannot stop the mirror: {error}"),
             }
         }
-        if self.trim_due && self.trim.is_none() {
+        // On a shutdown, left to the next start, which checks them first.
+        if mode == Shutdown::No && self.trim_due && self.trim.is_none() {
             self.trim_due = false;
             let docker = self.docker.clone();
             let names = self.names.clone();

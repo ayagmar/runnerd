@@ -92,6 +92,13 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 None => {}
             }
         }
+        self.vacate(slot);
+    }
+
+    /// Frees a slot whose runner is gone. Its runner may have grown the shared caches, and in slot 1 its
+    /// profile's layers: both are checked once idle. A killed job's partial writes count too: they stay in slot 1
+    /// and would reach the snapshot on any later reseed, like those of a job cancelled or out of memory.
+    fn vacate(&mut self, slot: &SlotRef) {
         if let Some(entry) = self
             .slots
             .get_mut(&slot.profile)
@@ -140,14 +147,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 Ok(_) => {}
                 Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
             }
-            if let Some(entry) = self
-                .slots
-                .get_mut(&slot.profile)
-                .and_then(|slots| slots.get_mut(slot.index))
-            {
-                *entry = None;
-            }
-            self.drop_closed_slots();
+            self.vacate(slot);
             return;
         }
         match self
