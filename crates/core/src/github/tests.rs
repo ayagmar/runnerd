@@ -5,7 +5,7 @@ use axum::Router;
 use axum::http::{HeaderMap, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 
-use super::{Deleted, Error, Github, QueuedJob, Token};
+use super::{Deleted, Error, Github, GithubApi, QueuedJob, Token};
 
 const TOKEN: &str = "ghp_sentinelTokenValue0123456789";
 

@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 
 use runnerd_core::cache::{self, Names, Reseed, runner_mounts};
-use runnerd_core::docker::{Docker, RunnerSpec};
+use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
 const PROFILE: &str = "cache";

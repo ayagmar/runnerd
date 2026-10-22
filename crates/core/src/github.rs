@@ -119,6 +119,30 @@ pub enum Deleted {
     Busy,
 }
 
+/// The GitHub calls the scheduler makes. `Github` is the real client; the engine's tests use a fake.
+pub trait GithubApi: Send + Sync {
+    /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
+    fn queued_jobs(
+        &self,
+        repository: &str,
+    ) -> impl Future<Output = Result<Vec<QueuedJob>, Error>> + Send;
+    /// The repository's self-hosted runners.
+    fn runners(&self, repository: &str) -> impl Future<Output = Result<Vec<Runner>, Error>> + Send;
+    /// Registers a runner for one job and returns it with the config `run.sh --jitconfig` takes.
+    fn jit_config(
+        &self,
+        repository: &str,
+        name: &str,
+        labels: &[String],
+    ) -> impl Future<Output = Result<(Runner, JitConfig), Error>> + Send;
+    /// Removes a runner from the repository.
+    fn delete_runner(
+        &self,
+        repository: &str,
+        id: u64,
+    ) -> impl Future<Output = Result<Deleted, Error>> + Send;
+}
+
 /// A GitHub API client for one token. Requests on one URL are conditional on its last `ETag`, so an unchanged
 /// answer costs no rate limit.
 pub struct Github {
@@ -215,86 +239,6 @@ impl Github {
         blocked.filter(|until| *until > SystemTime::now())
     }
 
-    /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
-    pub async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, Error> {
-        let mut jobs = Vec::new();
-        let mut listed = Vec::new();
-        for status in ["queued", "in_progress"] {
-            let runs: Runs = self
-                .get(&format!(
-                    "/repos/{repository}/actions/runs?status={status}&per_page=100"
-                ))
-                .await?;
-            for run in runs.workflow_runs {
-                let path = jobs_path(repository, run.id);
-                let run_jobs: Jobs = self.get(&path).await?;
-                listed.push(path);
-                jobs.extend(
-                    run_jobs
-                        .jobs
-                        .into_iter()
-                        .filter(|job| job.status == "queued")
-                        .map(|job| QueuedJob {
-                            id: job.id,
-                            run_id: job.run_id,
-                            name: job.name,
-                            labels: job.labels,
-                        }),
-                );
-            }
-        }
-        // The cached answers of runs that ended: nothing asks for them again.
-        let runs_prefix = format!("/repos/{repository}/actions/runs/");
-        lock(&self.etags).retain(|path, _| {
-            !(path.starts_with(&runs_prefix) && path.contains("/jobs?")) || listed.contains(path)
-        });
-        jobs.sort_by_key(|job| job.id);
-        jobs.dedup_by_key(|job| job.id);
-        Ok(jobs)
-    }
-
-    /// The repository's self-hosted runners.
-    pub async fn runners(&self, repository: &str) -> Result<Vec<Runner>, Error> {
-        let runners: Runners = self
-            .get(&format!("/repos/{repository}/actions/runners?per_page=100"))
-            .await?;
-        Ok(runners.runners)
-    }
-
-    /// Registers a runner for one job and returns it with the config `run.sh --jitconfig` takes.
-    pub async fn jit_config(
-        &self,
-        repository: &str,
-        name: &str,
-        labels: &[String],
-    ) -> Result<(Runner, JitConfig), Error> {
-        let body = serde_json::json!({
-            "name": name,
-            // The repository's default runner group.
-            "runner_group_id": 1,
-            "labels": labels,
-            "work_folder": "_work",
-        });
-        let path = format!("/repos/{repository}/actions/runners/generate-jitconfig");
-        let response = self.send(Method::POST, &path, Some(&body)).await?;
-        let response = expect_success(Method::POST, &path, response).await?;
-        let jit: JitResponse = decode(&path, &response.bytes)?;
-        Ok((jit.runner, JitConfig(jit.encoded_jit_config)))
-    }
-
-    /// Removes a runner from the repository.
-    pub async fn delete_runner(&self, repository: &str, id: u64) -> Result<Deleted, Error> {
-        let path = format!("/repos/{repository}/actions/runners/{id}");
-        let response = self.send(Method::DELETE, &path, None).await?;
-        match response.status {
-            StatusCode::NOT_FOUND => Ok(Deleted::NotFound),
-            StatusCode::UNPROCESSABLE_ENTITY => Ok(Deleted::Busy),
-            _ => expect_success(Method::DELETE, &path, response)
-                .await
-                .map(|_| Deleted::Deleted),
-        }
-    }
-
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
         let response = self.send(Method::GET, path, None).await?;
         let bytes = if response.status == StatusCode::NOT_MODIFIED {
@@ -389,6 +333,84 @@ impl Github {
         token
             .clone()
             .ok_or_else(|| Error::Token("the token source returned nothing".to_owned()))
+    }
+}
+
+impl GithubApi for Github {
+    async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, Error> {
+        let mut jobs = Vec::new();
+        let mut listed = Vec::new();
+        for status in ["queued", "in_progress"] {
+            let runs: Runs = self
+                .get(&format!(
+                    "/repos/{repository}/actions/runs?status={status}&per_page=100"
+                ))
+                .await?;
+            for run in runs.workflow_runs {
+                let path = jobs_path(repository, run.id);
+                let run_jobs: Jobs = self.get(&path).await?;
+                listed.push(path);
+                jobs.extend(
+                    run_jobs
+                        .jobs
+                        .into_iter()
+                        .filter(|job| job.status == "queued")
+                        .map(|job| QueuedJob {
+                            id: job.id,
+                            run_id: job.run_id,
+                            name: job.name,
+                            labels: job.labels,
+                        }),
+                );
+            }
+        }
+        // The cached answers of runs that ended: nothing asks for them again.
+        let runs_prefix = format!("/repos/{repository}/actions/runs/");
+        lock(&self.etags).retain(|path, _| {
+            !(path.starts_with(&runs_prefix) && path.contains("/jobs?")) || listed.contains(path)
+        });
+        jobs.sort_by_key(|job| job.id);
+        jobs.dedup_by_key(|job| job.id);
+        Ok(jobs)
+    }
+
+    async fn runners(&self, repository: &str) -> Result<Vec<Runner>, Error> {
+        let runners: Runners = self
+            .get(&format!("/repos/{repository}/actions/runners?per_page=100"))
+            .await?;
+        Ok(runners.runners)
+    }
+
+    async fn jit_config(
+        &self,
+        repository: &str,
+        name: &str,
+        labels: &[String],
+    ) -> Result<(Runner, JitConfig), Error> {
+        let body = serde_json::json!({
+            "name": name,
+            // The repository's default runner group.
+            "runner_group_id": 1,
+            "labels": labels,
+            "work_folder": "_work",
+        });
+        let path = format!("/repos/{repository}/actions/runners/generate-jitconfig");
+        let response = self.send(Method::POST, &path, Some(&body)).await?;
+        let response = expect_success(Method::POST, &path, response).await?;
+        let jit: JitResponse = decode(&path, &response.bytes)?;
+        Ok((jit.runner, JitConfig(jit.encoded_jit_config)))
+    }
+
+    async fn delete_runner(&self, repository: &str, id: u64) -> Result<Deleted, Error> {
+        let path = format!("/repos/{repository}/actions/runners/{id}");
+        let response = self.send(Method::DELETE, &path, None).await?;
+        match response.status {
+            StatusCode::NOT_FOUND => Ok(Deleted::NotFound),
+            StatusCode::UNPROCESSABLE_ENTITY => Ok(Deleted::Busy),
+            _ => expect_success(Method::DELETE, &path, response)
+                .await
+                .map(|_| Deleted::Deleted),
+        }
     }
 }
 

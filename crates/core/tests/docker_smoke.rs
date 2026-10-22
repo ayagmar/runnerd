@@ -14,7 +14,7 @@ use bollard::exec::{StartExecOptions, StartExecResults};
 use bollard::models::{ExecConfig, Mount, MountType, VolumeCreateRequest};
 use futures_util::StreamExt;
 use runnerd_core::config::Isolation;
-use runnerd_core::docker::{Docker, JIT_CONFIG_PATH, JitConfig, RunnerSpec};
+use runnerd_core::docker::{Docker, DockerApi, JIT_CONFIG_PATH, JitConfig, RunnerSpec};
 use runnerd_core::isolation::backend;
 
 const JIT_CONFIG: &str = "smoke-test-jit-config";

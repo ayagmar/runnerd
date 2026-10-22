@@ -114,6 +114,43 @@ pub fn is_not_found(error: &Error) -> bool {
     )
 }
 
+/// The Docker Engine calls the scheduler and the caches make. `Docker` is the real one; the engine's tests use a
+/// fake.
+pub trait DockerApi: Send + Sync {
+    /// Creates and starts a runner container; returns its ID.
+    fn start(
+        &self,
+        spec: &RunnerSpec,
+        isolation: &dyn Isolation,
+    ) -> impl Future<Output = Result<String, Error>> + Send;
+    /// A container's state and isolation.
+    fn inspect(&self, container: &str) -> impl Future<Output = Result<RunnerState, Error>> + Send;
+    /// Removes a runner container, stopping it first if it runs.
+    fn remove(&self, container: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Creates and starts a container that is not a runner, such as the mirror; returns its ID.
+    fn run(
+        &self,
+        name: &str,
+        body: ContainerCreateBody,
+    ) -> impl Future<Output = Result<String, Error>> + Send;
+    /// Every container, running or not, that has the label.
+    fn list(&self, label: &str) -> impl Future<Output = Result<Vec<Container>, Error>> + Send;
+    /// Waits for a container to exit; returns its exit code.
+    fn wait(&self, container: &str) -> impl Future<Output = Result<i64, Error>> + Send;
+    /// A container's output so far, stdout and stderr interleaved.
+    fn logs(&self, container: &str) -> impl Future<Output = Result<String, Error>> + Send;
+    /// Pulls an image unless it is present.
+    fn ensure_image(&self, image: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Creates a bridge network unless it exists.
+    fn ensure_network(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Creates a volume unless it exists.
+    fn ensure_volume(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Removes a volume; a volume that does not exist is not an error.
+    fn remove_volume(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    /// The disk size of every volume Docker knows, by name. Slow: Docker measures each volume.
+    fn volume_sizes(&self) -> impl Future<Output = Result<BTreeMap<String, u64>, Error>> + Send;
+}
+
 /// The local Docker Engine.
 pub struct Docker {
     api: bollard::Docker,
@@ -129,13 +166,10 @@ impl Docker {
     pub async fn info(&self) -> Result<SystemInfo, Error> {
         self.api.info().await
     }
+}
 
-    /// Creates and starts a runner container; returns its ID.
-    pub async fn start(
-        &self,
-        spec: &RunnerSpec,
-        isolation: &dyn Isolation,
-    ) -> Result<String, Error> {
+impl DockerApi for Docker {
+    async fn start(&self, spec: &RunnerSpec, isolation: &dyn Isolation) -> Result<String, Error> {
         let options = CreateContainerOptionsBuilder::new()
             .name(&spec.name)
             .build();
@@ -164,8 +198,7 @@ impl Docker {
         Ok(id)
     }
 
-    /// A container's state and isolation.
-    pub async fn inspect(&self, container: &str) -> Result<RunnerState, Error> {
+    async fn inspect(&self, container: &str) -> Result<RunnerState, Error> {
         let response = self.api.inspect_container(container, None).await?;
         let state = response.state.unwrap_or_default();
         let host_config = response.host_config.unwrap_or_default();
@@ -177,14 +210,12 @@ impl Docker {
         })
     }
 
-    /// Removes a runner container, stopping it first if it runs.
-    pub async fn remove(&self, container: &str) -> Result<(), Error> {
+    async fn remove(&self, container: &str) -> Result<(), Error> {
         let options = RemoveContainerOptionsBuilder::new().force(true).build();
         self.api.remove_container(container, Some(options)).await
     }
 
-    /// Creates and starts a container that is not a runner, such as the mirror; returns its ID.
-    pub async fn run(&self, name: &str, body: ContainerCreateBody) -> Result<String, Error> {
+    async fn run(&self, name: &str, body: ContainerCreateBody) -> Result<String, Error> {
         let options = CreateContainerOptionsBuilder::new().name(name).build();
         let id = self.api.create_container(Some(options), body).await?.id;
         if let Err(error) = self.api.start_container(&id, None).await {
@@ -194,8 +225,7 @@ impl Docker {
         Ok(id)
     }
 
-    /// Every container, running or not, that has the label.
-    pub async fn list(&self, label: &str) -> Result<Vec<Container>, Error> {
+    async fn list(&self, label: &str) -> Result<Vec<Container>, Error> {
         let options = ListContainersOptionsBuilder::new()
             .all(true)
             .filters(&HashMap::from([("label", vec![label])]))
@@ -218,8 +248,7 @@ impl Docker {
             .collect())
     }
 
-    /// Waits for a container to exit; returns its exit code.
-    pub async fn wait(&self, container: &str) -> Result<i64, Error> {
+    async fn wait(&self, container: &str) -> Result<i64, Error> {
         let options = WaitContainerOptionsBuilder::new()
             .condition("not-running")
             .build();
@@ -233,8 +262,7 @@ impl Docker {
         }
     }
 
-    /// A container's output so far, stdout and stderr interleaved.
-    pub async fn logs(&self, container: &str) -> Result<String, Error> {
+    async fn logs(&self, container: &str) -> Result<String, Error> {
         let options = LogsOptionsBuilder::new().stdout(true).stderr(true).build();
         let chunks: Vec<_> = self
             .api
@@ -244,8 +272,7 @@ impl Docker {
         Ok(chunks.iter().map(ToString::to_string).collect())
     }
 
-    /// Pulls an image unless it is present.
-    pub async fn ensure_image(&self, image: &str) -> Result<(), Error> {
+    async fn ensure_image(&self, image: &str) -> Result<(), Error> {
         match self.api.inspect_image(image).await {
             Err(error) if is_not_found(&error) => {
                 let options = CreateImageOptionsBuilder::new().from_image(image).build();
@@ -259,8 +286,7 @@ impl Docker {
         }
     }
 
-    /// Creates a bridge network unless it exists.
-    pub async fn ensure_network(&self, name: &str) -> Result<(), Error> {
+    async fn ensure_network(&self, name: &str) -> Result<(), Error> {
         match self.api.inspect_network(name, None).await {
             Err(error) if is_not_found(&error) => {
                 let request = NetworkCreateRequest {
@@ -274,8 +300,8 @@ impl Docker {
         }
     }
 
-    /// Creates a volume unless it exists (creating an existing volume is a no-op in Docker).
-    pub async fn ensure_volume(&self, name: &str) -> Result<(), Error> {
+    async fn ensure_volume(&self, name: &str) -> Result<(), Error> {
+        // Creating a volume that exists is a no-op in Docker.
         let request = VolumeCreateRequest {
             name: Some(name.to_owned()),
             ..Default::default()
@@ -283,8 +309,7 @@ impl Docker {
         self.api.create_volume(request).await.map(|_| ())
     }
 
-    /// Removes a volume; a volume that does not exist is not an error.
-    pub async fn remove_volume(&self, name: &str) -> Result<(), Error> {
+    async fn remove_volume(&self, name: &str) -> Result<(), Error> {
         let options = RemoveVolumeOptionsBuilder::new().build();
         match self.api.remove_volume(name, Some(options)).await {
             Err(error) if is_not_found(&error) => Ok(()),
@@ -292,8 +317,7 @@ impl Docker {
         }
     }
 
-    /// The disk size of every volume Docker knows, by name. Slow: Docker measures each volume.
-    pub async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, Error> {
+    async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, Error> {
         // Without a type filter: bollard cannot encode one in the query.
         let options = DataUsageOptionsBuilder::new().verbose(true).build();
         let usage = self.api.df(Some(options)).await?;

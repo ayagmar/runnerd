@@ -1,4 +1,4 @@
-use super::{JitConfig, RunnerSpec, connect_to, create_body};
+use super::{DockerApi, JitConfig, RunnerSpec, connect_to, create_body};
 use crate::isolation::Sysbox;
 
 const SECRET: &str = "sentinel-jit-config-c2VjcmV0";
