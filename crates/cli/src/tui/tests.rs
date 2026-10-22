@@ -838,6 +838,37 @@ fn every_slot_card_title_keeps_its_slot_number_and_a_rule() {
     }
 }
 
+#[test]
+fn the_open_job_header_drops_whole_details_to_fit() {
+    let mut app = app();
+    running_job(&mut app);
+    app.live.running.get_mut(&42).unwrap().summary.run_id = 40_018_663_900;
+    app.update(key(KeyCode::Enter));
+    let whole = [
+        "branch main",
+        "run 40018663900",
+        "slot jvm",
+        "1",
+        "capped at 9.0G and 8.00 cores",
+        "waited 9s",
+        "ran 1m 31s",
+    ];
+    for width in [80, 96, 104, 120] {
+        let job = screen(&app, width, 40, false);
+        let header = rows_with(&job, "slot jvm · 1")[0].trim_end();
+        assert!(
+            header.ends_with("ran 1m 31s"),
+            "the run time stays at {width}: {header}"
+        );
+        for detail in header.split(" · ") {
+            assert!(
+                whole.contains(&detail),
+                "{detail:?} is whole at {width}: {header}"
+            );
+        }
+    }
+}
+
 /// A daemon whose first event stream sends only a live sample and ends; the stream the client opens again at
 /// once succeeds, live only. The budget changed in between, and no event says so.
 async fn cursorless_gap(

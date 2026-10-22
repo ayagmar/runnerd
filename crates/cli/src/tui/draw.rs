@@ -981,35 +981,39 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
             .iter()
             .find(|p| p.name == runner.profile)
     });
+    // Each detail with its rank: when they do not fit one line, the least important go first.
     let mut details = vec![];
     if let Some(branch) = &summary.branch {
-        details.push(format!("branch {branch}"));
+        details.push((3, format!("branch {branch}")));
     }
-    details.push(format!("run {}", summary.run_id));
+    details.push((5, format!("run {}", summary.run_id)));
     if let Some(runner) = &summary.runner {
-        details.push(format!("slot {} · {}", runner.profile, runner.slot));
+        details.push((1, format!("slot {} · {}", runner.profile, runner.slot)));
         match (runner.memory_cap, runner.cpu_cap, profile) {
             (Some(memory), Some(cpu), _) => {
-                details.push(format!(
-                    "capped at {} and {} cores",
-                    bytes(memory),
-                    cores(cpu)
+                details.push((
+                    4,
+                    format!("capped at {} and {} cores", bytes(memory), cores(cpu)),
                 ));
             }
-            (_, _, Some(profile)) => details.push(format!(
-                "profile now {} and {} CPUs",
-                bytes(profile.memory),
-                profile.cpus
+            (_, _, Some(profile)) => details.push((
+                4,
+                format!(
+                    "profile now {} and {} CPUs",
+                    bytes(profile.memory),
+                    profile.cpus
+                ),
             )),
             _ => {}
         }
     }
     if let Some(waited) = human::waited(summary, now) {
-        details.push(format!("waited {}", duration(waited)));
+        details.push((2, format!("waited {}", duration(waited))));
     }
     if let Some(ran) = human::ran(summary, now) {
-        details.push(format!("ran {}", duration(ran)));
+        details.push((0, format!("ran {}", duration(ran))));
     }
+    let details = fit_details(details, usize::from(head.width));
     let style = summary.runner.as_ref().map_or_else(
         || theme.dim(),
         |runner| theme.profile(app.profile_index(&runner.profile)),
@@ -1044,7 +1048,7 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
                 ),
                 badge(summary, theme),
             ]),
-            Line::styled(details.join(" · "), theme.dim()),
+            Line::styled(details, theme.dim()),
         ]),
         head,
     );
@@ -1056,6 +1060,29 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
         job_spark(frame, charts_area, app, open, theme);
     }
     log(frame, log_area, open, theme);
+}
+
+/// `details` joined by ` · ` in their order, without the least important (highest rank) that do not fit `width`.
+fn fit_details(mut details: Vec<(u8, String)>, width: usize) -> String {
+    loop {
+        let line = details
+            .iter()
+            .map(|(_, detail)| detail.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ");
+        if line.chars().count() <= width {
+            return line;
+        }
+        let Some(least) = details
+            .iter()
+            .enumerate()
+            .max_by_key(|(_, (rank, _))| *rank)
+            .map(|(position, _)| position)
+        else {
+            return line;
+        };
+        details.remove(least);
+    }
 }
 
 /// Waiting for a runner, the runner starting, and running, as one bar.
