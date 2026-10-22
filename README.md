@@ -197,8 +197,12 @@ halyard/storefront  node     paused       2  self-hosted,linux,x64,node
 | `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
 | `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final |
 | `runnerctl watch` | slots, running jobs with their current step and last sample, queued and finished jobs, redrawn as events arrive; one line per event when not on a terminal, one JSON event per line with `--json` |
-| `runnerctl pause <repo>`, `resume <repo>` | the repository gets no new runners, its running jobs finish; and back |
-| `runnerctl caches` | the cache volumes, their sizes and limits |
+| `runnerctl pause <repo> [--force]`, `resume <repo>` | the repository gets no new runners; refused while it runs a job, naming the job, unless `--force` cancels the job's run and removes its runner; and back |
+| `runnerctl reseed <profile>` | makes slot 1's layers the profile's snapshot once its slots are free, and waits for it (`--no-wait`) |
+| `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
+| `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
+| `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
+| `runnerctl web` | opens the web dashboard with the one-time login URL the daemon writes to `$XDG_RUNTIME_DIR/runnerd.web` (`--no-open` prints it) |
 
 Memory and CPU come from samples every 2 s, so a peak is the highest sample: a spike shorter than that does not show.
 
@@ -207,8 +211,11 @@ From the bash `ci` tool:
 | `ci` | Now |
 |---|---|
 | `ci up <repo>` | `runnerd serve` (or its systemd unit) once; `runnerctl resume <repo>` for a paused repository |
-| `ci down <repo>` | `runnerctl pause <repo>`; running jobs finish |
-| `ci status` | `runnerctl status`, `runnerctl watch` |
+| `ci down <repo>` | `runnerctl pause <repo>`, refused while it runs a job |
+| `FORCE=1 ci down <repo>` | `runnerctl pause --force <repo>` |
+| `ci clean <repo>` | `runnerctl caches --clean runnerd-<profile>-slot-<n>`; `--clean runnerd-pnpm` and the other shared caches for `ci clean all` |
+| `ci seed <repo>` | `runnerctl reseed <profile>` |
+| `ci status` | `runnerctl status`, `runnerctl caches`, `runnerctl watch` |
 | `ci autoscale` | nothing: the daemon starts a runner for each queued job |
 
 ## Config
