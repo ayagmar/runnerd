@@ -22,6 +22,8 @@ pub mod observe;
 pub mod scheduler;
 #[cfg(feature = "host")]
 pub mod store;
+#[cfg(feature = "host")]
+mod sync;
 #[cfg(all(test, feature = "host"))]
 mod testdir;
 #[cfg(feature = "host")]

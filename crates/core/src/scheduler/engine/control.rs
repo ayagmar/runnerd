@@ -18,6 +18,7 @@ use crate::docker::DockerApi;
 use crate::github::GithubApi;
 use crate::isolation;
 use crate::scheduler::SlotRef;
+use crate::sync::lock;
 
 /// How long the runner of a run a forced pause cancelled gets to report its job cancelled and exit, before it is
 /// removed: GitHub completes a cancelled run only once its runner reports it, which took 40s in a test.
@@ -148,6 +149,8 @@ impl Commands {
 /// Commands from the API and signals to the loop.
 #[derive(Debug)]
 pub struct Control {
+    // Locked with `sync::lock`: the guarded data stays consistent, as every critical section is a single insert,
+    // remove or read.
     repositories: Mutex<BTreeSet<String>>,
     paused: Mutex<BTreeSet<String>>,
     shutdown: Mutex<Shutdown>,
@@ -283,13 +286,6 @@ fn list(jobs: &[api::RunningJob]) -> String {
         .map(ToString::to_string)
         .collect::<Vec<_>>()
         .join(", ")
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    // The guarded data stays consistent: every critical section is a single insert, remove or read.
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
