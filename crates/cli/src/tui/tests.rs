@@ -974,6 +974,36 @@ fn wide_characters_are_fitted_by_the_cells_they_take() {
     );
 }
 
+#[test]
+fn the_open_job_metrics_drop_whole_figures_to_fit() {
+    let mut app = app();
+    running_job(&mut app);
+    app.live.running.get_mut(&42).unwrap().summary.metrics = JobMetrics {
+        cpu_time: Some(1_454_000),
+        cpu_peak: Some(7_960),
+        cpu_average: Some(3_310),
+        memory_peak: Some(7 << 30),
+        memory_average: Some(5 << 30),
+        network_received: Some(329 << 20),
+        network_sent: Some(37 << 20),
+        mirror_bytes: 110 << 20,
+    };
+    app.update(key(KeyCode::Enter));
+    let full = screen(&app, 240, 40, false);
+    let figures: Vec<&str> = rows_with(&full, "mem peak")[0].trim().split("  ").collect();
+    assert!(figures.contains(&"mirror 110M"), "{full}");
+    for (width, height) in [(80, 24), (96, 24), (96, 30), (104, 30)] {
+        let job = screen(&app, width, height, false);
+        let row = rows_with(&job, "mem peak")[0].trim();
+        for figure in row.split("  ") {
+            assert!(
+                figures.contains(&figure),
+                "{figure:?} is whole at {width}×{height}: {row}"
+            );
+        }
+    }
+}
+
 /// A daemon whose first event stream sends only a live sample and ends; the stream the client opens again at
 /// once succeeds, live only. The budget changed in between, and no event says so.
 async fn cursorless_gap(

@@ -1323,7 +1323,8 @@ fn caps(app: &App, job: &JobSummary) -> (u64, u64) {
     )
 }
 
-fn metrics_line(open: &JobView, theme: Theme) -> Line<'static> {
+/// The job's figures that fit `width`, in order; the rest go whole.
+fn metrics_line(open: &JobView, width: usize, theme: Theme) -> Line<'static> {
     let metrics = &open.job.summary.metrics;
     let peak_memory = metrics
         .memory_peak
@@ -1343,14 +1344,17 @@ fn metrics_line(open: &JobView, theme: Theme) -> Line<'static> {
     if metrics.mirror_bytes > 0 {
         parts.push(("mirror", Some(bytes(metrics.mirror_bytes))));
     }
-    let mut spans = Vec::new();
+    let mut line = Line::default();
     for (label, value) in parts {
-        if let Some(value) = value {
-            spans.push(Span::styled(format!("{label} "), theme.dim()));
-            spans.push(Span::styled(format!("{value}  "), bold()));
+        let Some(value) = value else { continue };
+        let gap = if line.spans.is_empty() { "" } else { "  " };
+        if line.width() + gap.width() + label.width() + 1 + value.width() > width {
+            break;
         }
+        line.push_span(Span::styled(format!("{gap}{label} "), theme.dim()));
+        line.push_span(Span::styled(value, bold()));
     }
-    Line::from(spans)
+    line
 }
 
 fn job_charts(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, theme: Theme) {
@@ -1377,7 +1381,10 @@ fn job_charts(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, them
         style: theme.cpu(),
     }
     .render(frame, cpu_area, theme);
-    frame.render_widget(metrics_line(open, theme), metrics);
+    frame.render_widget(
+        metrics_line(open, usize::from(metrics.width), theme),
+        metrics,
+    );
 }
 
 /// Memory and CPU as one line of sparklines, for a terminal too small for charts.
@@ -1412,7 +1419,10 @@ fn job_spark(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, theme
         ]),
         sparks,
     );
-    frame.render_widget(metrics_line(open, theme), metrics);
+    frame.render_widget(
+        metrics_line(open, usize::from(metrics.width), theme),
+        metrics,
+    );
 }
 
 fn log(frame: &mut Frame<'_>, area: Rect, open: &JobView, theme: Theme) {
