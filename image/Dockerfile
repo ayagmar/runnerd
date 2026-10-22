@@ -9,8 +9,8 @@ FROM ghcr.io/actions/actions-runner:2.338.1@sha256:e275409999c37162649aa050ca573
 USER root
 
 # Every apt-get in this image and the stages on top resolves against Ubuntu's archive as it was at this moment
-# (snapshot.ubuntu.com), so a rebuild installs the same package versions until someone moves the date. The base
-# image's git-core PPA is not in the snapshot; nothing installed here comes from it. docs/adr/0023 says how to bump.
+# (snapshot.ubuntu.com), so a rebuild installs the same package versions until someone moves the date. apt also maps the base image's git-core
+# PPA to its snapshot (snapshot.ppa.launchpadcontent.net). docs/adr/0023 says how to bump.
 ARG UBUNTU_SNAPSHOT=20261022T000000Z
 RUN echo "APT::Snapshot \"${UBUNTU_SNAPSHOT}\";" > /etc/apt/apt.conf.d/50runnerd-snapshot
 

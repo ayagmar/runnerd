@@ -12,8 +12,8 @@ Everything in `image/Dockerfile` resolves to fixed content:
 
 - Images (`dockerfile` syntax, `docker:dind`, `actions-runner`): by digest.
 - Ubuntu packages: from `snapshot.ubuntu.com` at the date in `UBUNTU_SNAPSHOT`, written to apt's config in the
-  `base` stage so every stage uses it. The base image's git-core PPA is not covered; nothing the image installs
-  comes from it.
+  `base` stage so every stage uses it. apt maps the base image's git-core PPA to its dated snapshot on
+  `snapshot.ppa.launchpadcontent.net` too.
 - Downloads (GitHub CLI, Android command-line tools and platform-tools): an exact version and its SHA-256, checked at
   build time. Platform-tools is in the image instead of being installed when a container starts; the image writes
   the SDK license file that installing it used to leave.
