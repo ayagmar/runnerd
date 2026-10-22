@@ -133,13 +133,13 @@ h3 {
 }
 
 h1 {
-  font-size: clamp(1.75rem, 1.2rem + 2.2vw, 2.75rem);
-  letter-spacing: -0.035em;
+  font-size: 2.25rem;
+  letter-spacing: -0.03em;
   line-height: 1.05;
 }
 
 h2 {
-  font-size: clamp(1.25rem, 1.1rem + 0.6vw, 1.5rem);
+  font-size: 1.375rem;
 }
 
 h3 {
@@ -172,6 +172,23 @@ code {
 
 .muted {
   color: var(--muted);
+}
+
+::selection {
+  background: var(--p0);
+  color: var(--block-ink);
+}
+
+html {
+  scrollbar-color: var(--line) transparent;
+}
+
+.log-lines {
+  scrollbar-color: var(--muted) var(--surface);
+}
+
+.log-lines li:target {
+  background: var(--surface-2);
 }
 
 .visually-hidden {
@@ -323,7 +340,7 @@ code {
 }
 
 .big {
-  font-size: clamp(1.5rem, 1.1rem + 1.6vw, 2.25rem);
+  font-size: 2rem;
   font-weight: 700;
   letter-spacing: -0.04em;
   line-height: 1;
@@ -367,14 +384,17 @@ code {
   background: var(--profile, var(--surface-2));
 }
 
+/* A free slot keeps its place in the budget as an outline: reserved, nothing in it. */
 .block.idle {
-  background: repeating-linear-gradient(-45deg, transparent 0 6px, color-mix(in srgb, var(--profile) 45%, transparent) 6px 8px);
+  background: transparent;
   color: var(--ink);
   box-shadow: inset 0 0 0 2px var(--profile);
 }
 
+/* A runner registered and waiting for its job: the block, paler. */
 .block.starting {
-  background: repeating-linear-gradient(-45deg, var(--profile) 0 10px, color-mix(in srgb, var(--profile) 70%, var(--bg)) 10px 20px);
+  background: color-mix(in srgb, var(--profile) 55%, var(--bg));
+  color: var(--ink);
 }
 
 .block.other {
@@ -776,9 +796,22 @@ code {
   color: var(--ink);
 }
 
-.button:hover,
+.button:hover {
+  background: color-mix(in srgb, var(--accent) 85%, var(--ink));
+}
+
 .button-quiet:hover {
-  filter: brightness(1.08);
+  background: var(--line);
+}
+
+.button:active,
+.button-quiet:active {
+  transform: translateY(1px);
+}
+
+.button-quiet[aria-busy='true'] {
+  cursor: progress;
+  color: var(--muted);
 }
 
 .job-list a {
@@ -869,7 +902,7 @@ code {
 }
 
 .headline dd {
-  font-size: clamp(1.4rem, 1.1rem + 1.2vw, 2rem);
+  font-size: 1.5rem;
   font-weight: 700;
   letter-spacing: -0.04em;
 }
@@ -903,16 +936,10 @@ code {
   background: var(--profile);
 }
 
+/* The phase still going on ends in a fading edge, and breathes. */
 .phase.ongoing {
-  background: repeating-linear-gradient(-45deg, var(--profile) 0 10px, color-mix(in srgb, var(--profile) 60%, var(--bg)) 10px 20px);
-  background-size: 28px 28px;
-  animation: crawl 1.2s linear infinite;
-}
-
-@keyframes crawl {
-  to {
-    background-position: 28px 0;
-  }
+  background: linear-gradient(to right, var(--profile) 70%, color-mix(in srgb, var(--profile) 35%, transparent));
+  animation: beat 2.4s var(--ease) infinite;
 }
 
 .phase-legend {
@@ -1105,13 +1132,16 @@ code {
   background: var(--surface);
 }
 
-.job-table tbody th {
-  border-left: 6px solid var(--profile);
-}
-
 .job-table tbody th a {
   display: grid;
+  grid-template-columns: auto minmax(0, 1fr);
+  column-gap: 0.6rem;
+  align-items: center;
   text-decoration: none;
+}
+
+.job-table tbody th .swatch {
+  grid-row: 1 / span 2;
 }
 
 .job-table .job-name {
@@ -1158,6 +1188,10 @@ code {
   border-top: 6px solid var(--profile);
 }
 
+.volume-head h2 {
+  font-size: 1rem;
+}
+
 .volume-head {
   display: flex;
   align-items: center;
@@ -1195,6 +1229,7 @@ code {
 }
 
 .toast {
+  box-shadow: 0 6px 24px rgb(0 0 0 / 0.18);
   padding: 0.85rem 1rem;
   background: var(--ink);
   color: var(--bg);

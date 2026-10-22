@@ -112,7 +112,7 @@ pub(crate) fn error_page(title: &str, message: &str) -> Markup {
 pub(crate) fn notice(message: &str, failed: bool) -> Markup {
     html! {
         div #notice role="status" aria-live="polite" {
-            p class=(if failed { "toast failed" } else { "toast" }) { (message) }
+            p class=(if failed { "toast failed" } else { "toast" }) data-init="setTimeout(() => el.remove(), 8000)" { (message) }
         }
     }
 }

@@ -274,6 +274,9 @@ pub(crate) fn slots(overview: &Overview) -> Markup {
                     (status.repositories.iter().map(|repository| repository.queued_jobs).sum::<usize>()) " queued"
                 }
             }
+            @if status.profiles.is_empty() {
+                p.muted { "No profiles in runnerd.toml, so no slots." }
+            }
             ul.slot-grid {
                 @for profile in &status.profiles {
                     @for slot in &profile.slots {
@@ -458,6 +461,9 @@ pub(crate) fn repositories(status: &Status) -> Markup {
     html! {
         section #repositories .repositories aria-labelledby="repositories-title" {
             h2 #repositories-title { "Repositories" }
+            @if status.repositories.is_empty() {
+                p.muted { "No repositories yet. Add a " code { "[[repositories]]" } " table to runnerd.toml." }
+            }
             ul.repo-list {
                 @for repository in &status.repositories {
                     (repository_row(status, repository))
@@ -486,7 +492,12 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
                 span { (repository.queued_jobs) " queued" }
                 @if repository.paused { span.badge.neutral { "paused" } }
             }
+            // One busy signal per row, so a pending pause greys out only its own button.
+            @let busy = format!("_busy_{}", slug(&repository.name).replace('-', "_"));
             button.button-quiet type="button"
+                data-indicator=(busy)
+                data-attr:aria-busy=(format!("${busy}"))
+                data-attr:disabled=(format!("${busy}"))
                 data-on:click=(format!("@post('/v1/repositories/{}/{action}')", repository.name))
                 aria-label=(format!("{label} {}", repository.name)) { (label) }
         }

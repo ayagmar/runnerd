@@ -69,6 +69,9 @@ pub(crate) fn render(view: &CachesView) -> Markup {
 pub(crate) fn volumes(view: &CachesView) -> Markup {
     let start = view.now.saturating_sub(WINDOW);
     html! {
+        @if view.caches.volumes.is_empty() {
+            p.muted { "No volumes yet: runnerd creates them when a profile's first runner starts." }
+        }
         ul #volumes .volume-grid {
             @for volume in &view.caches.volumes {
                 @let (label, profile) = kind(volume);

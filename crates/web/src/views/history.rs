@@ -354,6 +354,7 @@ fn jobs(history: &History) -> Markup {
                                 tr class=(class) {
                                     th scope="row" {
                                         a href=(format!("/jobs/{}", job.id)) {
+                                            span.swatch aria-hidden="true" {}
                                             span.job-name { (job.name) }
                                             span.repo { (job.repository) @if let Some(branch) = &job.branch { " · " (branch) } }
                                         }
