@@ -133,15 +133,17 @@ impl Writer<'_> {
         logged(
             "record a runner",
             self.db.execute(
-                "INSERT OR IGNORE INTO runners (name, repository, profile, slot, container, started_at) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6)",
+                "INSERT OR IGNORE INTO runners (name, repository, profile, slot, container, started_at, \
+                 memory_cap, cpu_cap) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
                 params![
                     runner.name,
                     runner.repository,
                     runner.profile,
                     runner.slot,
                     runner.container,
-                    runner.started_at
+                    runner.started_at,
+                    runner.memory_cap,
+                    runner.cpu_cap
                 ],
             ),
         );

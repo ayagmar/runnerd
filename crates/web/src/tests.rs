@@ -55,6 +55,19 @@ struct Reply {
 }
 
 impl Dashboard {
+    /// Sets the caps the running job's record says its container ran with.
+    fn runner_caps(&self, memory: Option<u64>, cpus: Option<u64>) {
+        let mut fixtures = self.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        let runner = job.summary.runner.as_mut().unwrap();
+        runner.memory_cap = memory;
+        runner.cpu_cap = cpus;
+    }
+
     async fn start() -> Dashboard {
         let dir = TempDir::new();
         let socket = dir.0.join("runnerd.sock");
@@ -322,8 +335,6 @@ async fn every_page_renders_from_the_daemons_data() {
     assert_eq!(job.status, StatusCode::OK);
     for expected in [
         "Set up JDK 21",
-        "jvm now 9G",
-        "jvm now 8 CPUs",
         "sampled peak",
         "Waiting for a runner",
         "Set up job: line 1",
@@ -331,11 +342,6 @@ async fn every_page_renders_from_the_daemons_data() {
     ] {
         assert!(job.body.contains(expected), "job page lacks {expected:?}");
     }
-    // The API has the profile's limits as configured now, not the caps the job's container had.
-    assert!(
-        !job.body.contains("slot cap"),
-        "the job page presents today's config as the job's caps"
-    );
 
     let history = dashboard.page(&cookie, "/history").await;
     assert_eq!(history.status, StatusCode::OK);
@@ -352,6 +358,41 @@ async fn every_page_renders_from_the_daemons_data() {
 
     let missing = dashboard.page(&cookie, "/jobs/7").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_job_chart_shows_the_caps_its_container_ran_with_not_the_profiles_now() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    // jvm is configured with 9G and 8 CPUs now; the job's container ran with 12G and 6.
+    dashboard.runner_caps(Some(12 << 30), Some(6000));
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await;
+    for expected in ["slot cap 12G", "6 CPUs"] {
+        assert!(job.body.contains(expected), "job page lacks {expected:?}");
+    }
+    assert!(
+        !job.body.contains("jvm now"),
+        "the job page shows today's config next to the job's own caps"
+    );
+}
+
+#[tokio::test]
+async fn a_job_recorded_without_its_caps_is_charted_against_the_profiles_limits_now() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    dashboard.runner_caps(None, None);
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await;
+    for expected in ["jvm now 9G", "jvm now 8 CPUs", "limits in the config now"] {
+        assert!(job.body.contains(expected), "job page lacks {expected:?}");
+    }
+    assert!(
+        !job.body.contains("slot cap"),
+        "the job page presents today's config as the job's caps"
+    );
 }
 
 #[tokio::test]

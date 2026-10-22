@@ -174,6 +174,10 @@ struct DockerState {
     fail_lists: bool,
     /// The memory cap of each container that has one, by ID.
     memory: HashMap<String, u64>,
+    /// The CPU limit in millicores of each container that has one, by ID.
+    cpus: HashMap<String, u64>,
+    /// How many `inspect`s of a container fail next, by ID, as when the Engine is busy.
+    fail_inspects: HashMap<String, u32>,
     /// How many `remove`s fail next, as when the Engine is busy.
     fail_removes: u32,
     /// What the Docker Hub mirror's log says.
@@ -212,6 +216,9 @@ impl DockerApi for FakeDocker {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("start {}", spec.name));
         state.memory.insert(spec.name.clone(), spec.memory.0);
+        state
+            .cpus
+            .insert(spec.name.clone(), u64::from(spec.cpus) * 1000);
         let mut labels: HashMap<String, String> = spec.labels.clone().into_iter().collect();
         labels.insert("runnerd.profile".to_owned(), spec.profile.clone());
         state.containers.push(Container {
@@ -224,7 +231,16 @@ impl DockerApi for FakeDocker {
     }
 
     async fn inspect(&self, container: &str) -> Result<RunnerState, docker::Error> {
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        if let Some(failures) = state.fail_inspects.get_mut(container)
+            && *failures > 0
+        {
+            *failures -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
         let found = state
             .containers
             .iter()
@@ -239,6 +255,7 @@ impl DockerApi for FakeDocker {
             address: Some("172.18.0.3".to_owned()),
             started_at: Some(1_000),
             memory: state.memory.get(&found.id).copied(),
+            cpus: state.cpus.get(&found.id).copied(),
         })
     }
 
@@ -1383,6 +1400,73 @@ async fn after_a_restart_a_runner_and_the_mirror_count_at_the_caps_they_run_with
     github.0.lock().unwrap().queued = vec![small_job(3)];
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
+async fn a_jobs_record_keeps_the_caps_its_container_ran_with_after_a_reload_lowered_its_profile() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.memory.insert("container-1".to_owned(), 6 << 30);
+        state.cpus.insert("container-1".to_owned(), 4000);
+    }
+    let dir = TestDir::new("engine");
+    // A reload lowered `app` to 1G and 2 CPUs, then runnerd restarted; the container still runs with 6G and 4.
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &sized("0G", "1G", "1G"));
+    engine.recover().await.unwrap();
+    let job = until_state(&handle, 1, JobState::Running).await;
+    let runner = job.summary.runner.unwrap();
+    assert_eq!(
+        (runner.memory_cap, runner.cpu_cap),
+        (Some(6 << 30), Some(4000))
+    );
+}
+
+/// The caps the job's record says its container ran with, once recovery under `app` at 1G and 2 CPUs saw it running.
+async fn recorded_caps(docker: &FakeDocker, github: &FakeGithub) -> (Option<u64>, Option<u64>) {
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(github, docker, &dir, &sized("0G", "1G", "1G"));
+    engine.recover().await.unwrap();
+    let runner = until_state(&handle, 1, JobState::Running)
+        .await
+        .summary
+        .runner
+        .unwrap();
+    (runner.memory_cap, runner.cpu_cap)
+}
+
+#[tokio::test]
+async fn a_jobs_record_takes_its_containers_cap_when_recovery_could_not_inspect_it() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.memory.insert("container-1".to_owned(), 6 << 30);
+        state.cpus.insert("container-1".to_owned(), 4000);
+        // Recovery counts it at the configured 1G; the inspect when it is observed sees 6G.
+        state.fail_inspects.insert("container-1".to_owned(), 1);
+    }
+    assert_eq!(
+        recorded_caps(&docker, &github).await,
+        (Some(6 << 30), Some(4000))
+    );
+}
+
+#[tokio::test]
+async fn a_container_docker_reports_without_a_memory_cap_is_recorded_without_one() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .cpus
+        .insert("container-1".to_owned(), 4000);
+    assert_eq!(recorded_caps(&docker, &github).await, (None, Some(4000)));
 }
 
 /// `CONFIG` with `o/r` replaced by `o/x`, whose runners take jobs labelled `other`.

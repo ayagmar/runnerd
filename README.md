@@ -148,8 +148,8 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 - the memory budget as blocks, one per slot sized by its memory cap and filled to the job's last sampled memory;
 - every slot with its job, current step, and memory and CPU over the last minutes;
 - the slice's memory and CPU over the last half hour, against `MemoryMax` and the CPUs of all slots;
-- each job's phases, its steps on one time axis, its CPU and memory against its profile's limits as configured now,
-  and its log;
+- each job's phases, its steps on one time axis, its CPU and memory against the caps its container ran with (the
+  profile's limits as configured now for jobs recorded before runnerd kept them), and its log;
 - the history, filtered by repository and outcome, with 30 days of jobs per day, run and wait times and memory peaks;
 - the cache volumes with their bounds and their sizes over 30 days, with a button to reseed a snapshot or empty a
   cache;

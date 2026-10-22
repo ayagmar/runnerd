@@ -44,6 +44,28 @@ async fn a_fresh_database_migrates_to_the_latest_version() {
     assert!(Store::open(&path).is_ok());
 }
 
+#[tokio::test]
+async fn a_job_recorded_before_runners_kept_their_caps_reads_without_them() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    {
+        let db = Connection::open(&path).unwrap();
+        db.execute_batch(MIGRATIONS[0]).unwrap();
+        db.execute_batch(
+            "INSERT INTO runners (name, repository, profile, slot, container, started_at) \
+             VALUES ('r1', 'o/r', 'app', 1, 'c1', 1000); \
+             INSERT INTO jobs (id, repository, run_id, run_attempt, name, labels, state, runner, queued_at) \
+             VALUES (1, 'o/r', 10, 1, 'build', '[]', 'running', 'r1', 900);",
+        )
+        .unwrap();
+        db.pragma_update(None, "user_version", 1).unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let runner = store.job(1).await.unwrap().unwrap().summary.runner.unwrap();
+    assert_eq!((runner.name.as_str(), runner.slot), ("r1", 1));
+    assert_eq!((runner.memory_cap, runner.cpu_cap), (None, None));
+}
+
 #[test]
 fn a_database_from_a_newer_runnerd_is_refused() {
     let dir = TestDir::new("store");
@@ -110,6 +132,8 @@ fn runner(name: &str, started_at: u64) -> RunnerRecord {
         slot: 1,
         container: format!("{name}-container"),
         started_at,
+        memory_cap: Some(4 << 30),
+        cpu_cap: Some(2000),
     }
 }
 

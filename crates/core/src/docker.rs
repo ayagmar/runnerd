@@ -84,6 +84,8 @@ pub struct RunnerState {
     pub started_at: Option<u64>,
     /// Its memory cap in bytes; `None` when it has none.
     pub memory: Option<u64>,
+    /// Its CPU limit in millicores; `None` when it has none.
+    pub cpus: Option<u64>,
 }
 
 /// What a command run in a container prints on stdout, as it prints it.
@@ -268,6 +270,10 @@ impl DockerApi for Docker {
                 .memory
                 .and_then(|memory| u64::try_from(memory).ok())
                 .filter(|memory| *memory > 0),
+            cpus: host_config
+                .nano_cpus
+                .and_then(|nano| u64::try_from(nano / 1_000_000).ok())
+                .filter(|cpus| *cpus > 0),
         })
     }
 
