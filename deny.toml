@@ -4,6 +4,7 @@ all-features = true
 [advisories]
 # Every advisory fails the check, including unmaintained and yanked crates.
 unmaintained = "all"
+unsound = "all"
 yanked = "deny"
 
 [licenses]
