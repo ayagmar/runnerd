@@ -4,8 +4,9 @@
 set -eu
 
 status=0
-clients=$(cargo metadata --no-deps --format-version 1 --locked |
-  jq -r '.packages[].name | select(. != "runnerd" and . != "runnerd-core")')
+metadata=$(cargo metadata --no-deps --format-version 1 --locked)
+clients=$(printf '%s' "$metadata" | jq -r '.packages[].name | select(. != "runnerd" and . != "runnerd-core")')
+[ -n "$clients" ] || { echo "no client crates found" >&2; exit 1; }
 for client in $clients; do
   tree=$(cargo tree --locked -p "$client" -e normal,build,features --prefix none)
   found=$(echo "$tree" | grep -E '^(bollard|reqwest) v|^runnerd-core feature "host"' | sort -u || true)
