@@ -140,6 +140,37 @@ curl --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/status
 curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 ```
 
+### Dashboard
+
+`runnerd serve` also serves a web dashboard on `127.0.0.1:7477` (`--web <address>` picks another loopback address,
+`--web off` serves none). It shows:
+
+- the memory budget as blocks, one per slot sized by its memory cap and filled to the job's last sampled memory;
+- every slot with its job, current step, and memory and CPU over the last minutes;
+- the slice's memory and CPU over the last half hour, against `MemoryMax` and the CPUs of all slots;
+- each job's phases, its steps on one time axis, its CPU and memory against its profile's limits as configured now,
+  and its log;
+- the history, filtered by repository and outcome, with 30 days of jobs per day, run and wait times and memory peaks;
+- the cache volumes with their bounds and their sizes over 30 days, with a button to reseed a snapshot or empty a
+  cache;
+- `runnerd.toml` in an editor that checks it against the slice's `MemoryMax` as you type and saves and reloads it
+  only when it fits, next to the doctor's checks;
+- pause and resume for each repository; a pause while a job runs asks first, and confirming cancels the job.
+
+Open pages update as things happen, over one server-sent event stream per page. Memory and CPU are sampled every 2 s,
+so a peak shorter than that does not show; the dashboard calls them sampled peaks.
+
+Any local user can reach the port, so every page needs a session cookie, which a browser gets from a one-time login
+URL. The daemon keeps the current URL in `runnerd.web` next to its socket (`$XDG_RUNTIME_DIR/runnerd.web`, mode 0600)
+and writes a new one each time one is used. `runnerctl web` opens it; without the CLI:
+
+```sh
+xdg-open "$(cat "$XDG_RUNTIME_DIR/runnerd.web")"
+```
+
+Writes such as a pause also need an `Origin` of the dashboard itself, so another site the browser has open cannot
+send them. The pages load nothing from elsewhere: the Datastar script and the font are in the binary.
+
 ## Config
 
 One file, `runnerd.toml`, lists the repositories to serve, the runner profile each one uses, the shared caches and the systemd slice whose limits form the budget. [`examples/runnerd.toml`](examples/runnerd.toml) is a complete example.
