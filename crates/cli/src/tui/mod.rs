@@ -189,54 +189,75 @@ fn resume(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
 
 /// Reads events into the loop. When the stream fails for good (the daemon stopped), it says so and tries again
 /// every `retry`. With an event read before, the new stream resumes after it and replays what was missed. Without
-/// one there is nothing to replay from, so it reads the state again once the new stream is open. It owns the
-/// stream, so a read is never dropped half-way and the stream's idle timeout is not restarted by redraws.
+/// one there is nothing to replay from, so it reads the state again once the new stream is open, whether this feed
+/// opened it or `Events` did, by itself, after a short break. It owns the stream, so a read is never dropped half-way
+/// and the stream's idle timeout is not restarted by redraws.
 async fn feed(client: Client, mut events: Events, send: UnboundedSender<Msg>, retry: Duration) {
     let mut last = None;
     loop {
-        match events.next().await {
-            Ok(envelope) => {
+        let read = events.next().await;
+        // Read after the new stream opened, so it misses nothing; the event read from it comes after.
+        let reread = if events.missed_events() {
+            watch::State::read(&client).await.map(Some)
+        } else {
+            Ok(None)
+        };
+        let failed = match (read, reread) {
+            (Ok(envelope), Ok(state)) => {
+                if let Some(state) = state
+                    && send.send(Msg::Snapshot(Box::new(state))).is_err()
+                {
+                    return;
+                }
                 if envelope.id.is_some() {
                     last = envelope.id;
                 }
                 if send.send(Msg::Event(envelope)).is_err() {
                     return;
                 }
+                continue;
             }
-            Err(error) => {
-                if send.send(Msg::Disconnected(short(&error))).is_err() {
-                    return;
+            (Err(error), _) | (_, Err(error)) => error,
+        };
+        if send.send(Msg::Disconnected(short(&failed))).is_err() {
+            return;
+        }
+        match reopen(&client, last, &send, retry).await {
+            Some(reopened) => events = reopened,
+            None => return,
+        }
+        if send.send(Msg::Reconnected).is_err() {
+            return;
+        }
+    }
+}
+
+/// Opens the stream again, every `retry` until it opens: after `last`, or else with the state read again. `None`
+/// once the loop is gone.
+async fn reopen(
+    client: &Client,
+    last: Option<u64>,
+    send: &UnboundedSender<Msg>,
+    retry: Duration,
+) -> Option<Events> {
+    loop {
+        tokio::time::sleep(retry).await;
+        let reopened = match client.events(EventQuery::default(), last).await {
+            Ok(events) if last.is_some() => Ok((events, None)),
+            // Opened before the state is read, so nothing that happens meanwhile is missed.
+            Ok(events) => watch::State::read(client)
+                .await
+                .map(|state| (events, Some(state))),
+            Err(error) => Err(error),
+        };
+        match reopened {
+            Ok((events, state)) => {
+                if let Some(state) = state {
+                    send.send(Msg::Snapshot(Box::new(state))).ok()?;
                 }
-                events = loop {
-                    tokio::time::sleep(retry).await;
-                    let reopened = match client.events(EventQuery::default(), last).await {
-                        Ok(events) if last.is_some() => Ok((events, None)),
-                        // Opened before the state is read, so nothing that happens meanwhile is missed.
-                        Ok(events) => watch::State::read(&client)
-                            .await
-                            .map(|state| (events, Some(state))),
-                        Err(error) => Err(error),
-                    };
-                    match reopened {
-                        Ok((events, state)) => {
-                            if let Some(state) = state
-                                && send.send(Msg::Snapshot(Box::new(state))).is_err()
-                            {
-                                return;
-                            }
-                            break events;
-                        }
-                        Err(error) => {
-                            if send.send(Msg::Disconnected(short(&error))).is_err() {
-                                return;
-                            }
-                        }
-                    }
-                };
-                if send.send(Msg::Reconnected).is_err() {
-                    return;
-                }
+                return Some(events);
             }
+            Err(error) => send.send(Msg::Disconnected(short(&error))).ok()?,
         }
     }
 }

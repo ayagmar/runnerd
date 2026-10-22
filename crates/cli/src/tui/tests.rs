@@ -764,3 +764,88 @@ fn a_job_read_again_as_finished_leaves_the_slots() {
     assert!(app.live.running.is_empty() && app.series.is_empty());
     assert!(screen(&app, 120, 40, false).contains("SUCCESS"));
 }
+
+/// A daemon whose first event stream sends only a live sample and ends; the stream the client opens again at
+/// once succeeds, live only. The budget changed in between, and no event says so.
+async fn cursorless_gap(
+    Shared(streams): Shared<Arc<Mutex<Vec<Option<String>>>>>,
+    headers: HeaderMap,
+) -> Response {
+    let opened = {
+        let mut streams = streams.lock().unwrap();
+        streams.push(
+            headers
+                .get("last-event-id")
+                .map(|id| id.to_str().unwrap().to_owned()),
+        );
+        streams.len()
+    };
+    let sample = EventEnvelope {
+        id: None,
+        at: NOW,
+        event: Event::HostSample {
+            sample: runnerd_core::api::HostSample {
+                at: NOW,
+                cpu: 10,
+                memory: 1 << 20,
+            },
+        },
+    };
+    let data = Bytes::from(format!(
+        "event: host.sample\ndata: {}\n\n",
+        serde_json::to_string(&sample).unwrap()
+    ));
+    if opened == 1 {
+        Body::from(data).into_response()
+    } else {
+        Body::from_stream(stream::iter([Ok::<_, Infallible>(data)]).chain(stream::pending()))
+            .into_response()
+    }
+}
+
+/// The status: 1G in use once a second event stream was opened, nothing before.
+async fn gap_status(
+    Shared(streams): Shared<Arc<Mutex<Vec<Option<String>>>>>,
+) -> axum::Json<Status> {
+    let mut status = app().live.status;
+    if streams.lock().unwrap().len() > 1 {
+        status.budget.memory_in_use = 1 << 30;
+    }
+    axum::Json(status)
+}
+
+#[tokio::test]
+async fn a_stream_reopened_at_once_with_no_event_to_resume_after_reads_the_state_again() {
+    let streams = Arc::new(Mutex::new(Vec::new()));
+    let fake = Fake::serve(
+        Router::new()
+            .route("/v1/events", get(cursorless_gap))
+            .route("/v1/status", get(gap_status))
+            .route(
+                "/v1/jobs",
+                get(|| async {
+                    axum::Json(runnerd_core::api::JobPage {
+                        jobs: Vec::new(),
+                        next: None,
+                    })
+                }),
+            )
+            .with_state(streams.clone()),
+    );
+    let client = fake.client(Duration::from_secs(5), Duration::from_secs(5));
+    let events = client.events(EventQuery::default(), None).await.unwrap();
+    let mut app = app();
+    let (send, mut receive) = tokio::sync::mpsc::unbounded_channel();
+    tokio::spawn(feed(client, events, send, Duration::from_millis(50)));
+
+    tokio::time::timeout(Duration::from_secs(5), async {
+        while app.live.status.budget.memory_in_use != 1 << 30 {
+            app.update(receive.recv().await.unwrap());
+        }
+    })
+    .await
+    .expect("the state should be read again after the gap");
+    assert_eq!(app.connection, Connection::Live);
+    assert!(screen(&app, 120, 40, false).contains("1.0G of 33G reserved"));
+    assert_eq!(*streams.lock().unwrap(), [None, None]);
+}

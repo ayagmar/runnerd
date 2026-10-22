@@ -169,8 +169,13 @@ pub(crate) async fn run(
             return Ok(());
         }
         tokio::select! {
-            (events, envelope) = &mut next => {
+            (mut events, envelope) = &mut next => {
+                // The stream is open again already, so nothing after this read is missed.
+                let missed = events.missed_events();
                 next = Box::pin(next_event(events));
+                if missed {
+                    state = State::read(client).await?;
+                }
                 if let Some(id) = state.apply(&envelope?) {
                     state.refresh(client.get(&format!("/v1/jobs/{id}")).await?);
                 }
@@ -619,6 +624,69 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(8), watched)
             .await
             .expect("watch should reconnect the stalled stream")
+            .unwrap();
+        assert_eq!(streams.load(Ordering::Relaxed), 2);
+    }
+
+    /// The first event stream sends a live sample and ends; the one opened again at once stays open. The budget
+    /// changed in between, and no event says so.
+    async fn gap_events(Shared(streams): Shared<Arc<AtomicU32>>) -> Body {
+        let sample = EventEnvelope {
+            id: None,
+            at: 1030,
+            event: Event::HostSample {
+                sample: runnerd_core::api::HostSample {
+                    at: 1030,
+                    cpu: 1,
+                    memory: 1,
+                },
+            },
+        };
+        let data = Bytes::from(format!(
+            "event: host.sample\ndata: {}\n\n",
+            serde_json::to_string(&sample).unwrap()
+        ));
+        if streams.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Body::from(data);
+        }
+        Body::from_stream(stream::iter([Ok::<_, Infallible>(data)]).chain(stream::pending()))
+    }
+
+    #[tokio::test]
+    async fn a_stream_reopened_with_no_event_to_resume_after_reads_the_state_again() {
+        let streams = Arc::new(AtomicU32::new(0));
+        let fake = Fake::serve(
+            Router::new()
+                .route(
+                    "/v1/status",
+                    get(|Shared(streams): Shared<Arc<AtomicU32>>| async move {
+                        let mut status = state().status;
+                        if streams.load(Ordering::Relaxed) > 1 {
+                            status.budget.memory_in_use = 7;
+                        }
+                        axum::Json(status)
+                    }),
+                )
+                .route(
+                    "/v1/jobs",
+                    get(|| async {
+                        axum::Json(JobPage {
+                            jobs: Vec::new(),
+                            next: None,
+                        })
+                    }),
+                )
+                .route("/v1/events", get(gap_events))
+                .with_state(streams.clone()),
+        );
+        let client = fake.client(Duration::from_secs(5), Duration::from_secs(5));
+        let events = client.events(EventQuery::default(), None).await.unwrap();
+        let watched = run(&client, events, |state| {
+            state.status.budget.memory_in_use != 7
+        });
+        tokio::time::timeout(Duration::from_secs(5), watched)
+            .await
+            .expect("watch should read the state again after the gap")
             .unwrap();
         assert_eq!(streams.load(Ordering::Relaxed), 2);
     }

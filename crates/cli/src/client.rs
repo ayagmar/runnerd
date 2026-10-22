@@ -263,6 +263,7 @@ impl Client {
             last_id,
             lines: None,
             closed: 0,
+            missed: false,
         };
         events.connect().await?;
         Ok(events)
@@ -394,7 +395,9 @@ impl SseParser {
 /// `GET /v1/events`, read event by event. When the daemon closes the stream (it does for a client too far behind),
 /// the connection breaks or the stream stays silent, it reconnects, resuming after the last durable event read.
 /// Dropping a pending `next` loses no event but restarts the idle timeout, so a caller that also waits on something
-/// else (a redraw tick) keeps one `next` pending across it, as `watch::run` does.
+/// else (a redraw tick) keeps one `next` pending across it, as `watch::run` does. With no durable event read yet
+/// there is nothing to resume after, so the new stream is live only and what happened in between is lost:
+/// [`Events::missed_events`] says so, and a caller that keeps state reads it again.
 #[derive(Debug)]
 pub(crate) struct Events {
     client: Client,
@@ -403,9 +406,17 @@ pub(crate) struct Events {
     lines: Option<(Lines, SseParser)>,
     /// Streams that ended since the last event; a second one in a row is an error.
     closed: u32,
+    /// Set when a stream was opened again with no event to resume after.
+    missed: bool,
 }
 
 impl Events {
+    /// Whether, since the last call, the stream was opened again with no event ID to resume after, so events from
+    /// the time it was closed are lost. Cleared by the call.
+    pub(crate) fn missed_events(&mut self) -> bool {
+        std::mem::take(&mut self.missed)
+    }
+
     async fn connect(&mut self) -> Result<(), ClientError> {
         let path = with_query("/v1/events", &self.query)?;
         let response = self
@@ -429,6 +440,7 @@ impl Events {
                 }
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 self.connect().await?;
+                self.missed |= self.last_id.is_none();
                 continue;
             };
             // A silent stream, and one cut off mid-body as when the daemon is killed, end like a closed one.
