@@ -355,10 +355,13 @@ impl Engine {
         self.collect_reseeds().await;
         self.collect_trim().await;
         self.collect_finished().await;
+        // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
+        // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
+        // order sees the job queued and its runner busy, and starts a second runner for it.
+        self.poll_runners().await;
         if mode == Shutdown::No {
             self.poll_queued().await;
         }
-        self.poll_runners().await;
         let decisions = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Force => self
