@@ -172,7 +172,9 @@ impl Control {
 /// What the API needs from a running engine.
 #[derive(Debug, Clone)]
 pub struct Handle {
+    /// The latest status, replaced after every tick.
     pub status: watch::Receiver<api::Status>,
+    /// Pause, resume and shutdown requests.
     pub control: Arc<Control>,
 }
 
@@ -199,6 +201,7 @@ struct RepositoryState {
 type Emptied = Vec<(String, ByteSize)>;
 
 /// The scheduler with its side effects, on the real GitHub and Docker unless a test passes fakes.
+#[derive(Debug)]
 pub struct Engine<G = Github, D = Docker> {
     config: Config,
     github: G,

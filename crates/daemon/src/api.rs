@@ -20,7 +20,7 @@ use tokio::net::UnixListener;
 use tracing::info;
 
 /// The socket's default path: `$XDG_RUNTIME_DIR/runnerd.sock`.
-pub fn default_socket() -> Option<PathBuf> {
+pub(crate) fn default_socket() -> Option<PathBuf> {
     std::env::var_os("XDG_RUNTIME_DIR").map(|dir| Path::new(&dir).join("runnerd.sock"))
 }
 
@@ -137,7 +137,7 @@ async fn shutdown(
 }
 
 /// Binds the socket with mode 0600. A socket file no daemon answers on is replaced; a live one is an error.
-pub async fn bind(path: &Path) -> io::Result<UnixListener> {
+pub(crate) async fn bind(path: &Path) -> io::Result<UnixListener> {
     if path.exists() {
         if tokio::net::UnixStream::connect(path).await.is_ok() {
             return Err(io::Error::new(
@@ -153,7 +153,7 @@ pub async fn bind(path: &Path) -> io::Result<UnixListener> {
 }
 
 /// Serves the API on `listener` until `stop` completes.
-pub async fn serve(
+pub(crate) async fn serve(
     listener: UnixListener,
     handle: Handle,
     stop: impl Future<Output = ()> + Send + 'static,

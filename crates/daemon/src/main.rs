@@ -11,6 +11,9 @@ use tracing::{info, warn};
 
 mod api;
 mod doctor;
+mod output;
+
+use output::fail;
 
 /// Runs ephemeral GitHub Actions runners in containers within a host budget.
 #[derive(Parser)]
@@ -21,6 +24,10 @@ struct Cli {
 }
 
 #[derive(Subcommand)]
+#[allow(
+    clippy::doc_markdown,
+    reason = "clap prints these comments as --help, where backticks would show"
+)]
 enum Command {
     /// Validate a config file against the slice's memory budget.
     CheckConfig {
@@ -89,9 +96,12 @@ fn check_config(path: &Path, memory_max: Option<ByteSize>) -> ExitCode {
     match checked {
         Ok((warnings, total)) => {
             for warning in warnings {
-                eprintln!("warning: {warning}");
+                output::warning(warning);
             }
-            println!("{}: valid, memory caps sum to {total}", path.display());
+            output::line(format_args!(
+                "{}: valid, memory caps sum to {total}",
+                path.display()
+            ));
             ExitCode::SUCCESS
         }
         Err(error) => fail(&error),
@@ -106,7 +116,7 @@ fn doctor(path: Option<&Path>) -> ExitCode {
     let host = doctor::Host::read(config.as_ref());
     let checks = doctor::checks(&host, config.as_ref());
     for check in &checks {
-        println!("{check}");
+        output::line(check);
     }
     if checks
         .iter()
@@ -190,10 +200,10 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
     }));
     let engine_done = engine.await;
     let _ = stopped.send(());
-    let served = server.await;
+    let server_done = server.await;
     let _ = std::fs::remove_file(&socket);
     engine_done.map_err(|error| fail(&error))?;
-    served
+    server_done
         .map_err(|error| fail(&error))?
         .map_err(|error| fail(&error))?;
     Ok(ExitCode::SUCCESS)
@@ -229,18 +239,13 @@ async fn stop(force: bool, socket: Option<PathBuf>) -> Result<ExitCode, ExitCode
     if !response.status().is_success() {
         return Err(fail(&format!("the daemon answered {}", response.status())));
     }
-    println!(
+    output::line(format_args!(
         "runnerd stops {}",
         if force {
             "now, killing running jobs"
         } else {
             "once running jobs finish"
         }
-    );
+    ));
     Ok(ExitCode::SUCCESS)
-}
-
-fn fail(error: &dyn std::fmt::Display) -> ExitCode {
-    eprintln!("error: {error}");
-    ExitCode::FAILURE
 }

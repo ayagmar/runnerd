@@ -38,7 +38,7 @@ async fn daemon_for(owner: Option<u32>) -> (reqwest::Client, Arc<Control>, tempd
     let dir = tempdir::Dir::new();
     let socket = dir.0.join("runnerd.sock");
     let control = Arc::new(Control::new(["o/app".to_owned()]));
-    let (_sender, receiver) = watch::channel(status());
+    let (sender, receiver) = watch::channel(status());
     let handle = Handle {
         status: receiver,
         control: control.clone(),
@@ -50,7 +50,7 @@ async fn daemon_for(owner: Option<u32>) -> (reqwest::Client, Arc<Control>, tempd
         0o600
     );
     tokio::spawn(async move {
-        let _sender = _sender;
+        let _sender = sender;
         match owner {
             Some(owner) => serve_for(listener, handle, owner, std::future::pending()).await,
             None => serve(listener, handle, std::future::pending()).await,
@@ -154,10 +154,10 @@ mod tempdir {
     use std::path::PathBuf;
 
     /// A directory under the system temp dir, removed on drop.
-    pub struct Dir(pub PathBuf);
+    pub(crate) struct Dir(pub PathBuf);
 
     impl Dir {
-        pub fn new() -> Dir {
+        pub(crate) fn new() -> Dir {
             static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
             let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
             let path =

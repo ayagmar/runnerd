@@ -10,20 +10,27 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, de};
 
+/// A parsed `runnerd.toml`. `validate` checks it against the host's budget.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Config {
+    /// The host's budget and isolation.
     pub host: Host,
+    /// The caches runners share.
     pub caches: Caches,
+    /// Runner profiles by name.
     pub profiles: BTreeMap<String, Profile>,
+    /// The repositories to serve.
     pub repositories: Vec<Repository>,
 }
 
+/// `[host]`: where runner containers run and how they are isolated.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Host {
     /// The systemd slice every runner container is placed in; its `MemoryMax` is the budget.
     pub slice: String,
+    /// How runner containers are kept from the host.
     pub isolation: Isolation,
     /// Must be set for `isolation = "unsafe-dind"`, so a copied config cannot turn it on silently.
     #[serde(default)]
@@ -37,19 +44,25 @@ fn default_poll_interval() -> Duration {
     Duration::from_secs(15)
 }
 
+/// How runner containers are kept from the host: `isolation` under `[host]`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum Isolation {
+    /// Sysbox: Docker inside an unprivileged container.
     Sysbox,
     /// Privileged Docker-in-Docker: a job can take over the host.
     UnsafeDind,
 }
 
+/// `[caches]`: what runners share and keep between jobs.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Caches {
+    /// The Docker Hub mirror.
     pub mirror: Mirror,
+    /// The shared pnpm store.
     pub pnpm: CacheLimit,
+    /// The shared Maven repository.
     pub maven: CacheLimit,
     /// When a profile has no job running and its slot 1 changed its layers by at least this much, slot 1's
     /// layers become the profile's new snapshot.
@@ -65,14 +78,18 @@ fn default_reseed_at() -> ByteSize {
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Mirror {
+    /// Whether runners pull through the mirror.
     pub enabled: bool,
+    /// The mirror container's memory limit.
     pub memory: ByteSize,
+    /// The mirror container's CPUs.
     pub cpus: u32,
     /// How long content not pulled again is kept.
     #[serde(deserialize_with = "duration")]
     pub ttl: Duration,
 }
 
+/// A size limit on a shared cache.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct CacheLimit {
@@ -86,60 +103,96 @@ pub struct CacheLimit {
 pub struct Profile {
     /// The stage of `image/Dockerfile`; runners run the image `runnerd-runner:<image_stage>`.
     pub image_stage: String,
+    /// CPUs per slot.
     pub cpus: u32,
+    /// Memory per slot; the container's hard limit.
     pub memory: ByteSize,
     /// The most jobs of this profile running at once.
     pub slots: u32,
 }
 
+/// A repository to serve: `[[repositories]]`.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Repository {
     /// `owner/name` on GitHub.
     pub name: String,
+    /// The profile its jobs run in.
     pub profile: String,
+    /// The labels its runners register with; a job runs on them when every label it asks for is one of these.
     pub labels: Vec<String>,
 }
 
+/// Why a config cannot be used.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
+    /// The file cannot be read.
     #[error("cannot read {}: {source}", path.display())]
     Read {
+        /// The config file.
         path: PathBuf,
+        /// Why reading it failed.
         source: std::io::Error,
     },
+    /// The file is not valid TOML or does not match the config's shape.
     #[error(transparent)]
     Parse(#[from] toml::de::Error),
+    /// A repository names a profile `[profiles]` does not define.
     #[error(
         "repository {repository} uses profile {profile:?}, which is not defined under [profiles]"
     )]
-    UnknownProfile { repository: String, profile: String },
+    UnknownProfile {
+        /// The repository's `owner/name`.
+        repository: String,
+        /// The profile it names.
+        profile: String,
+    },
+    /// A repository has no labels, or an empty one.
     #[error("repository {repository} needs at least one non-empty label")]
-    MissingLabels { repository: String },
+    MissingLabels {
+        /// The repository's `owner/name`.
+        repository: String,
+    },
+    /// `unsafe-dind` without `allow_unsafe = true`.
     #[error(
         "isolation \"unsafe-dind\" runs runner containers privileged, so a job can take over the host; \
          set allow_unsafe = true under [host] to use it anyway"
     )]
     UnsafeNotAllowed,
+    /// A limit is 0.
     #[error("{field} is 0; set it above 0")]
-    ZeroLimit { field: String },
+    ZeroLimit {
+        /// The setting, such as `profiles.app.cpus`.
+        field: String,
+    },
+    /// The caps add up past `u64::MAX` bytes.
     #[error("slots × memory over all profiles plus the mirror is too large to add up")]
     BudgetOverflow,
+    /// The caps add up to more than the slice's `MemoryMax`.
     #[error(
         "slots × memory over all profiles plus the mirror is {total}, \
          the slice {slice}'s MemoryMax is {memory_max}"
     )]
     OverBudget {
+        /// What every runner and the mirror may use at once.
         total: ByteSize,
+        /// The slice runners run in.
         slice: String,
+        /// The slice's `MemoryMax`.
         memory_max: ByteSize,
     },
 }
 
+/// What a valid config should still fix.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Warning {
     /// The slice has no unit file, so systemd creates it without limits.
-    UnlimitedSlice { slice: String, total: ByteSize },
+    UnlimitedSlice {
+        /// The slice runners run in.
+        slice: String,
+        /// What every runner and the mirror may use at once.
+        total: ByteSize,
+    },
 }
 
 impl fmt::Display for Warning {
@@ -155,6 +208,7 @@ impl fmt::Display for Warning {
 }
 
 impl Config {
+    /// Reads and parses a config file.
     pub fn load(path: &Path) -> Result<Config, ConfigError> {
         let text = std::fs::read_to_string(path).map_err(|source| ConfigError::Read {
             path: path.to_owned(),
@@ -163,6 +217,7 @@ impl Config {
         Config::parse(&text)
     }
 
+    /// Parses a config from TOML text.
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
         Ok(toml::from_str(text)?)
     }
@@ -291,6 +346,12 @@ const UNITS: [(char, u64); 4] = [
 impl FromStr for ByteSize {
     type Err = String;
 
+    #[allow(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "sizes in a config are far below 2^52 bytes, and the result is checked against u64's range first"
+    )]
     fn from_str(s: &str) -> Result<Self, Self::Err> {
         let invalid = || {
             format!(
@@ -314,6 +375,10 @@ impl FromStr for ByteSize {
 }
 
 impl fmt::Display for ByteSize {
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "shown with two decimals, far coarser than f64's precision"
+    )]
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let Some((unit, factor)) = UNITS.iter().find(|(_, factor)| self.0 >= *factor) else {
             return write!(f, "{}B", self.0);

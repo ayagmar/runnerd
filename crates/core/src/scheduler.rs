@@ -15,13 +15,17 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// A repository as the planner sees it.
 #[derive(Debug, Clone)]
 pub struct Repository {
+    /// `owner/name` on GitHub.
     pub name: String,
+    /// The profile its jobs run in.
     pub profile: String,
+    /// The labels its runners register with.
     pub labels: Vec<String>,
     /// Paused repositories get no new runners; their running jobs finish.
     pub paused: bool,
     /// No runner starts for this repository before then, after runners failed to take a job.
     pub held_until: Option<SystemTime>,
+    /// Its queued jobs at the last poll.
     pub queued: Vec<QueuedJob>,
 }
 
@@ -36,34 +40,50 @@ pub struct Profile {
     pub slots: Vec<Slot>,
 }
 
+/// What a slot holds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Slot {
+    /// Nothing: a runner may start here.
     Free,
+    /// A runner, waiting for its job or running it.
     Runner(RunnerSlot),
 }
 
 /// A slot whose container runs a runner registered for one job.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerSlot {
+    /// `owner/name` the runner is registered on.
     pub repository: String,
     /// Whether GitHub reports the runner running a job.
     pub busy: bool,
+    /// When its container started.
     pub started_at: SystemTime,
 }
 
 /// Where slots are, by profile name and slot index (0 is slot 1).
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub struct SlotRef {
+    /// The profile's name.
     pub profile: String,
+    /// 0 is slot 1.
     pub index: usize,
 }
 
+/// What `plan` decides for one slot.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Decision {
     /// Register a runner for the repository and start it in the slot.
-    Start { slot: SlotRef, repository: String },
+    Start {
+        /// The free slot.
+        slot: SlotRef,
+        /// `owner/name` the runner registers on.
+        repository: String,
+    },
     /// Remove the slot's runner, which waited `IDLE_TIMEOUT` for a job no longer queued.
-    Stop { slot: SlotRef },
+    Stop {
+        /// The slot whose runner stops.
+        slot: SlotRef,
+    },
 }
 
 /// Whether a job may run on a repository's runners: every label it asks for is one of theirs. GitHub compares

@@ -29,6 +29,31 @@ tracing-subscriber = { version = "0.3.23", default-features = false, features = 
 
 [workspace.lints.rust]
 unsafe_code = "forbid"
+unreachable_pub = "warn"
+missing_debug_implementations = "warn"
+unused_qualifications = "warn"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[workspace.lints.clippy]
+pedantic = { level = "warn", priority = -1 }
+# Pedantic lints that fight the codebase's style:
+# Results and futures already warn when unused; #[must_use] on every getter adds noise and catches nothing.
+must_use_candidate = "allow"
+# Doc comments name the failure in their first line; an `# Errors` section per function would repeat it.
+missing_errors_doc = "allow"
+# An impl of an async trait method reads as `async fn` even when it awaits nothing, as fakes and extractors do.
+unused_async_trait_impl = "allow"
+unwrap_used = "warn"
+expect_used = "warn"
+panic = "warn"
+todo = "warn"
+unimplemented = "warn"
+dbg_macro = "warn"
+print_stdout = "warn"
+print_stderr = "warn"
+allow_attributes_without_reason = "warn"
+large_futures = "warn"
+await_holding_lock = "warn"
 
 [profile.dist]
 inherits = "release"

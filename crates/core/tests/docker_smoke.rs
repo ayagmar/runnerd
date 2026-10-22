@@ -8,12 +8,18 @@
 //! `RUNNERD_TEST_ISOLATION=unsafe-dind` tests privileged Docker-in-Docker instead of sysbox, and
 //! `RUNNERD_TEST_IMAGE` another image.
 
+#![allow(
+    clippy::print_stdout,
+    reason = "run with --nocapture, these tests show what the containers report"
+)]
+
+use std::collections::BTreeMap;
 use std::time::Duration;
 
 use bollard::exec::{StartExecOptions, StartExecResults};
 use bollard::models::{ExecConfig, Mount, MountType, VolumeCreateRequest};
 use futures_util::StreamExt;
-use runnerd_core::config::Isolation;
+use runnerd_core::config::{ByteSize, Isolation};
 use runnerd_core::docker::{Docker, DockerApi, JIT_CONFIG_PATH, JitConfig, RunnerSpec};
 use runnerd_core::isolation::backend;
 
@@ -102,7 +108,7 @@ async fn with_runner(
         // Docker's default slice: outside the runners' budget, and it exists already, so the test leaves no unit.
         slice: "system.slice".to_owned(),
         cpus: 2,
-        memory: "2G".parse().unwrap(),
+        memory: ByteSize(2 << 30),
         env: Vec::new(),
         mounts: vec![Mount {
             target: Some("/state".to_owned()),
@@ -111,7 +117,7 @@ async fn with_runner(
             ..Default::default()
         }],
         network: None,
-        labels: Default::default(),
+        labels: BTreeMap::new(),
         // The container's Docker Engine alone, so the JIT config stays where `start` put it.
         entrypoint: Some(vec!["dind".to_owned(), "dockerd".to_owned()]),
         jit_config: Some(JitConfig(JIT_CONFIG.to_owned())),

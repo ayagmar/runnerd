@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use super::{DockerApi, JitConfig, RunnerSpec, connect_to, create_body};
 use crate::isolation::Sysbox;
 
@@ -14,7 +16,7 @@ fn spec() -> RunnerSpec {
         env: Vec::new(),
         mounts: Vec::new(),
         network: None,
-        labels: Default::default(),
+        labels: BTreeMap::new(),
         entrypoint: None,
         jit_config: Some(JitConfig(SECRET.to_owned())),
     }

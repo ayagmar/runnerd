@@ -1,3 +1,5 @@
+use std::collections::BTreeMap;
+
 use bollard::models::HostConfig;
 
 use super::backend;
@@ -15,7 +17,7 @@ fn host_config(isolation: Isolation) -> HostConfig {
         env: Vec::new(),
         mounts: Vec::new(),
         network: None,
-        labels: Default::default(),
+        labels: BTreeMap::new(),
         entrypoint: None,
         jit_config: None,
     };

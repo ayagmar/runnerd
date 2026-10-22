@@ -9,23 +9,31 @@ use serde::{Deserialize, Serialize};
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum Principal {
     /// The user the daemon runs as, on the local Unix socket.
-    LocalOwner { uid: u32 },
+    LocalOwner {
+        /// The Unix user ID the socket's peer runs as.
+        uid: u32,
+    },
 }
 
 /// `GET /v1/status`: what the daemon serves and runs right now.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Status {
+    /// The daemon's version, from its `Cargo.toml`.
     pub version: String,
     /// Set once the daemon stops polling to shut down.
     pub shutting_down: bool,
+    /// The memory budget and what runners use of it.
     pub budget: Budget,
+    /// Every configured profile with its slots.
     pub profiles: Vec<ProfileStatus>,
+    /// Every configured repository.
     pub repositories: Vec<RepositoryStatus>,
 }
 
 /// The memory budget runners and the mirror share, in bytes.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Budget {
+    /// The systemd slice runner containers run in.
     pub slice: String,
     /// The slice's `MemoryMax`; `None` when it is unlimited.
     pub memory_max: Option<u64>,
@@ -33,18 +41,24 @@ pub struct Budget {
     pub memory_in_use: u64,
 }
 
+/// A runner profile and what runs in its slots.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ProfileStatus {
+    /// The name under `[profiles]` in `runnerd.toml`.
     pub name: String,
+    /// The image its runners run, such as `runnerd-runner:base`.
     pub image: String,
+    /// CPUs per slot.
     pub cpus: u32,
     /// Bytes per slot.
     pub memory: u64,
     /// Set while slot 1's layers become the profile's snapshot.
     pub reseeding: bool,
+    /// Index 0 is slot 1.
     pub slots: Vec<SlotStatus>,
 }
 
+/// One slot of a profile: room for one job.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SlotStatus {
     /// 1-based.
@@ -56,9 +70,13 @@ pub struct SlotStatus {
 /// A runner registered for one job, in its container.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunnerStatus {
+    /// `owner/name` the runner is registered on.
     pub repository: String,
+    /// The runner's name, also its container's.
     pub name: String,
+    /// The runner's ID on GitHub.
     pub runner_id: u64,
+    /// The Docker container ID.
     pub container: String,
     /// Whether GitHub reports it running a job.
     pub busy: bool,
@@ -66,11 +84,16 @@ pub struct RunnerStatus {
     pub started_at: u64,
 }
 
+/// A configured repository and its queue.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RepositoryStatus {
+    /// `owner/name` on GitHub.
     pub name: String,
+    /// The profile its jobs run in.
     pub profile: String,
+    /// The labels its runners register with.
     pub labels: Vec<String>,
+    /// Paused repositories get no new runners; their running jobs finish.
     pub paused: bool,
     /// Queued jobs whose labels these runners match, at the last poll.
     pub queued_jobs: usize,
@@ -87,5 +110,6 @@ pub struct ShutdownRequest {
 /// The body of every error response.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ErrorResponse {
+    /// What went wrong, for people to read.
     pub message: String,
 }

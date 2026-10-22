@@ -59,25 +59,41 @@ pub fn install_crypto_provider() {
 pub enum Error {
     /// GitHub's rate limit is used up; no request is sent before `until`.
     #[error("GitHub's rate limit is used up until {}s after the epoch", secs(*until))]
-    RateLimited { until: SystemTime },
+    RateLimited {
+        /// When the limit resets.
+        until: SystemTime,
+    },
+    /// GitHub answered with an error status.
     #[error("GitHub answered {status} to {method} {path}: {message}")]
     Status {
+        /// The request's method.
         method: Method,
+        /// The request's path, without the host.
         path: String,
+        /// What GitHub answered.
         status: StatusCode,
+        /// GitHub's error message, or the body as text.
         message: String,
     },
+    /// The request did not get an answer.
     #[error("{method} {path}: {source}")]
     Http {
+        /// The request's method.
         method: Method,
+        /// The request's path, without the host.
         path: String,
+        /// What failed, without the URL.
         source: reqwest::Error,
     },
+    /// The answer is not the JSON expected.
     #[error("{path}: unexpected response: {source}")]
     Decode {
+        /// The request's path, without the host.
         path: String,
+        /// What did not parse.
         source: serde_json::Error,
     },
+    /// No token could be read.
     #[error("no GitHub token: {0}")]
     Token(String),
 }
@@ -91,8 +107,11 @@ fn secs(time: SystemTime) -> u64 {
 /// A job waiting for a runner.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct QueuedJob {
+    /// The job's ID; IDs grow with time.
     pub id: u64,
+    /// The workflow run it belongs to.
     pub run_id: u64,
+    /// The job's name in the workflow.
     pub name: String,
     /// The workflow's `runs-on` labels.
     pub labels: Vec<String>,
@@ -101,7 +120,9 @@ pub struct QueuedJob {
 /// A runner registered on a repository.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 pub struct Runner {
+    /// The runner's ID.
     pub id: u64,
+    /// Its name; runnerd's runners start with the host's prefix.
     pub name: String,
     /// `online` or `offline`.
     pub status: String,
@@ -112,6 +133,7 @@ pub struct Runner {
 /// What deleting a runner did.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Deleted {
+    /// GitHub removed it.
     Deleted,
     /// It was gone already: an ephemeral runner removes itself after its job.
     NotFound,
@@ -156,7 +178,9 @@ pub struct Github {
 
 impl fmt::Debug for Github {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        f.debug_struct("Github").field("base", &self.base).finish()
+        f.debug_struct("Github")
+            .field("base", &self.base)
+            .finish_non_exhaustive()
     }
 }
 
@@ -256,7 +280,7 @@ impl Github {
             }
         } else {
             let etag = response.etag.clone();
-            let response = expect_success(Method::GET, path, response).await?;
+            let response = expect_success(Method::GET, path, response)?;
             if let Some(etag) = etag {
                 lock(&self.etags).insert(path.to_owned(), (etag, response.bytes.clone()));
             }
@@ -396,7 +420,7 @@ impl GithubApi for Github {
         });
         let path = format!("/repos/{repository}/actions/runners/generate-jitconfig");
         let response = self.send(Method::POST, &path, Some(&body)).await?;
-        let response = expect_success(Method::POST, &path, response).await?;
+        let response = expect_success(Method::POST, &path, response)?;
         let jit: JitResponse = decode(&path, &response.bytes)?;
         Ok((jit.runner, JitConfig(jit.encoded_jit_config)))
     }
@@ -407,9 +431,7 @@ impl GithubApi for Github {
         match response.status {
             StatusCode::NOT_FOUND => Ok(Deleted::NotFound),
             StatusCode::UNPROCESSABLE_ENTITY => Ok(Deleted::Busy),
-            _ => expect_success(Method::DELETE, &path, response)
-                .await
-                .map(|_| Deleted::Deleted),
+            _ => expect_success(Method::DELETE, &path, response).map(|_| Deleted::Deleted),
         }
     }
 }
@@ -424,13 +446,14 @@ struct Response {
     bytes: Vec<u8>,
 }
 
-async fn expect_success(method: Method, path: &str, response: Response) -> Result<Response, Error> {
+fn expect_success(method: Method, path: &str, response: Response) -> Result<Response, Error> {
     if response.status.is_success() {
         return Ok(response);
     }
-    let message = serde_json::from_slice::<ErrorBody>(&response.bytes)
-        .map(|body| body.message)
-        .unwrap_or_else(|_| String::from_utf8_lossy(&response.bytes).into_owned());
+    let message = serde_json::from_slice::<ErrorBody>(&response.bytes).map_or_else(
+        |_| String::from_utf8_lossy(&response.bytes).into_owned(),
+        |body| body.message,
+    );
     Err(Error::Status {
         method,
         path: path.to_owned(),

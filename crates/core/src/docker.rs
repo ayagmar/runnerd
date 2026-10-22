@@ -21,14 +21,21 @@ pub use bollard::errors::Error;
 /// One runner container: a profile's image stage with the profile's limits.
 #[derive(Debug, Clone)]
 pub struct RunnerSpec {
+    /// The container's name; for a runner, also the runner's.
     pub name: String,
+    /// The image, such as `runnerd-runner:base`.
     pub image: String,
+    /// The profile, put on the `runnerd.profile` label.
     pub profile: String,
     /// The systemd slice the container is placed in.
     pub slice: String,
+    /// CPUs the container may use.
     pub cpus: u32,
+    /// Memory the container may use, swap included.
     pub memory: ByteSize,
+    /// `NAME=value` environment variables.
     pub env: Vec<String>,
+    /// Volumes to mount.
     pub mounts: Vec<Mount>,
     /// The network the container joins; `None` is Docker's default bridge.
     pub network: Option<String>,
@@ -57,10 +64,13 @@ impl fmt::Debug for JitConfig {
 /// What `inspect` reports about a runner container.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RunnerState {
+    /// Whether the container runs.
     pub running: bool,
+    /// Its exit code, once it stopped.
     pub exit_code: Option<i64>,
     /// True under `unsafe-dind`: a job in the container can take over the host.
     pub privileged: bool,
+    /// The runtime Docker runs it with, such as `sysbox-runc`.
     pub runtime: Option<String>,
 }
 
@@ -96,10 +106,13 @@ pub fn create_body(spec: &RunnerSpec, isolation: &dyn Isolation) -> ContainerCre
 /// A container `list` found.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Container {
+    /// The Docker container ID.
     pub id: String,
     /// Without Docker's leading `/`.
     pub name: String,
+    /// Whether it runs.
     pub running: bool,
+    /// Its labels.
     pub labels: HashMap<String, String>,
 }
 
@@ -152,6 +165,7 @@ pub trait DockerApi: Send + Sync {
 }
 
 /// The local Docker Engine.
+#[derive(Debug)]
 pub struct Docker {
     api: bollard::Docker,
 }
