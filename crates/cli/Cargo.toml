@@ -12,15 +12,23 @@ clap.workspace = true
 http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
+ratatui = { workspace = true, optional = true }
 runnerd-core.workspace = true
+rustix = { workspace = true, features = ["process"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
 serde_urlencoded.workspace = true
-tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
+tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
+
+[features]
+default = ["tui"]
+# `runnerctl tui`, the full-screen terminal dashboard.
+tui = ["dep:ratatui", "dep:rustix", "tokio/signal"]
 
 [dev-dependencies]
 axum.workspace = true
 futures-util.workspace = true
+rustix = { workspace = true, features = ["fs", "process", "pty", "termios"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [lints]

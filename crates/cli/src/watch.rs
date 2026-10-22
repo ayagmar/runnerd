@@ -1,6 +1,7 @@
 //! `runnerctl watch`: the daemon's state kept current from `/v1/events`. A snapshot (status, queued and running
 //! jobs, the last finished ones) read after the stream is open, then each event applied to it. Draws nothing
 //! itself: `run` hands the state to a drawing function, and `frame` turns it into text for `output::redraw`.
+//! `runnerctl tui` keeps the same `State` under its own.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -19,12 +20,14 @@ const RECENT: usize = 5;
 /// What the screen shows.
 #[derive(Debug)]
 pub(crate) struct State {
-    status: Status,
-    queued: BTreeMap<u64, JobSummary>,
-    running: BTreeMap<u64, Job>,
-    samples: BTreeMap<u64, Sample>,
-    host: Option<HostSample>,
-    recent: Vec<JobSummary>,
+    pub(crate) status: Status,
+    pub(crate) queued: BTreeMap<u64, JobSummary>,
+    pub(crate) running: BTreeMap<u64, Job>,
+    /// Each running job's last sample.
+    pub(crate) samples: BTreeMap<u64, Sample>,
+    pub(crate) host: Option<HostSample>,
+    /// The last finished jobs, newest first.
+    pub(crate) recent: Vec<JobSummary>,
 }
 
 impl State {
@@ -95,16 +98,7 @@ impl State {
             }
             Event::JobStep { job: id, step } => {
                 if let Some(job) = self.running.get_mut(id) {
-                    if let Some(known) = job
-                        .steps
-                        .iter_mut()
-                        .find(|known| known.number == step.number)
-                    {
-                        *known = step.clone();
-                    } else {
-                        job.steps.push(step.clone());
-                        job.steps.sort_by_key(|step| step.number);
-                    }
+                    update_step(&mut job.steps, step);
                     if job.summary.name.is_empty() {
                         return Some(*id);
                     }
@@ -148,7 +142,7 @@ impl State {
     }
 
     /// The running job in a profile's slot.
-    fn job_in(&self, profile: &str, slot: usize) -> Option<&Job> {
+    pub(crate) fn job_in(&self, profile: &str, slot: usize) -> Option<&Job> {
         self.running.values().find(|job| {
             job.summary
                 .runner
@@ -175,8 +169,13 @@ pub(crate) async fn run(
             return Ok(());
         }
         tokio::select! {
-            (events, envelope) = &mut next => {
+            (mut events, envelope) = &mut next => {
+                // The stream is open again already, so nothing after this read is missed.
+                let missed = events.missed_events();
                 next = Box::pin(next_event(events));
+                if missed {
+                    state = State::read(client).await?;
+                }
                 if let Some(id) = state.apply(&envelope?) {
                     state.refresh(client.get(&format!("/v1/jobs/{id}")).await?);
                 }
@@ -186,14 +185,24 @@ pub(crate) async fn run(
     }
 }
 
+/// Replaces the step with the same number, or adds it in order.
+pub(crate) fn update_step(steps: &mut Vec<Step>, step: &Step) {
+    if let Some(known) = steps.iter_mut().find(|known| known.number == step.number) {
+        *known = step.clone();
+    } else {
+        steps.push(step.clone());
+        steps.sort_by_key(|step| step.number);
+    }
+}
+
 /// The next event, handing the stream back for the read after it.
 async fn next_event(mut events: Events) -> (Events, Result<EventEnvelope, ClientError>) {
     let envelope = events.next().await;
     (events, envelope)
 }
 
-/// The step a job is in: the one in progress, else the last one completed.
-fn current_step(job: &Job) -> Option<(&Step, usize)> {
+/// The step a job is in: the one in progress, else the last one completed; and its position, 1-based.
+pub(crate) fn current_step(job: &Job) -> Option<(&Step, usize)> {
     let position = job
         .steps
         .iter()
@@ -615,6 +624,69 @@ mod tests {
         tokio::time::timeout(Duration::from_secs(8), watched)
             .await
             .expect("watch should reconnect the stalled stream")
+            .unwrap();
+        assert_eq!(streams.load(Ordering::Relaxed), 2);
+    }
+
+    /// The first event stream sends a live sample and ends; the one opened again at once stays open. The budget
+    /// changed in between, and no event says so.
+    async fn gap_events(Shared(streams): Shared<Arc<AtomicU32>>) -> Body {
+        let sample = EventEnvelope {
+            id: None,
+            at: 1030,
+            event: Event::HostSample {
+                sample: runnerd_core::api::HostSample {
+                    at: 1030,
+                    cpu: 1,
+                    memory: 1,
+                },
+            },
+        };
+        let data = Bytes::from(format!(
+            "event: host.sample\ndata: {}\n\n",
+            serde_json::to_string(&sample).unwrap()
+        ));
+        if streams.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Body::from(data);
+        }
+        Body::from_stream(stream::iter([Ok::<_, Infallible>(data)]).chain(stream::pending()))
+    }
+
+    #[tokio::test]
+    async fn a_stream_reopened_with_no_event_to_resume_after_reads_the_state_again() {
+        let streams = Arc::new(AtomicU32::new(0));
+        let fake = Fake::serve(
+            Router::new()
+                .route(
+                    "/v1/status",
+                    get(|Shared(streams): Shared<Arc<AtomicU32>>| async move {
+                        let mut status = state().status;
+                        if streams.load(Ordering::Relaxed) > 1 {
+                            status.budget.memory_in_use = 7;
+                        }
+                        axum::Json(status)
+                    }),
+                )
+                .route(
+                    "/v1/jobs",
+                    get(|| async {
+                        axum::Json(JobPage {
+                            jobs: Vec::new(),
+                            next: None,
+                        })
+                    }),
+                )
+                .route("/v1/events", get(gap_events))
+                .with_state(streams.clone()),
+        );
+        let client = fake.client(Duration::from_secs(5), Duration::from_secs(5));
+        let events = client.events(EventQuery::default(), None).await.unwrap();
+        let watched = run(&client, events, |state| {
+            state.status.budget.memory_in_use != 7
+        });
+        tokio::time::timeout(Duration::from_secs(5), watched)
+            .await
+            .expect("watch should read the state again after the gap")
             .unwrap();
         assert_eq!(streams.load(Ordering::Relaxed), 2);
     }

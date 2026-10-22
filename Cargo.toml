@@ -20,10 +20,14 @@ http-body-util = "0.1.5"
 hyper = { version = "1.12.0", default-features = false }
 hyper-util = { version = "0.1.21", default-features = false }
 log = "0.4.34"
+# The terminal UI: the crossterm backend only; the calendar widget would pull in `time`.
+ratatui = { version = "0.30.2", default-features = false, features = ["crossterm", "layout-cache"] }
 reqwest = { version = "0.13.5", default-features = false, features = ["rustls-no-provider"] }
 # Bundled: SQLite is compiled in, so release binaries need no system libsqlite3. fallible_uint: u64 columns, which
 # fail rather than wrap above i64::MAX.
 rusqlite = { version = "0.40.2", features = ["bundled", "fallible_uint"] }
+# Safe system calls: runnerctl tui stops itself on Ctrl-Z, and its tests drive it in a pseudo-terminal.
+rustix = { version = "1.1.5", default-features = false, features = ["std"] }
 rustls = { version = "0.23.46", default-features = false, features = ["ring", "std", "tls12"] }
 serde = { version = "1.0.229", features = ["derive"] }
 serde_json = "1.0.154"

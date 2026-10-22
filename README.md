@@ -195,8 +195,9 @@ halyard/storefront  node     paused       2  self-hosted,linux,x64,node
 | `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queues |
 | `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
 | `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
-| `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final |
+| `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |
 | `runnerctl watch` | slots, running jobs with their current step and last sample, queued and finished jobs, redrawn as events arrive; one line per event when not on a terminal, one JSON event per line with `--json` |
+| `runnerctl tui` | the full-screen dashboard below |
 | `runnerctl pause <repo> [--force]`, `resume <repo>` | the repository gets no new runners; refused while it runs a job, naming the job, unless `--force` cancels the job's run and removes its runner; and back |
 | `runnerctl reseed <profile>` | makes slot 1's layers the profile's snapshot once its slots are free, and waits for it (`--no-wait`) |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
@@ -205,6 +206,37 @@ halyard/storefront  node     paused       2  self-hosted,linux,x64,node
 | `runnerctl web` | opens the web dashboard with the one-time login URL the daemon writes to `$XDG_RUNTIME_DIR/runnerd.web` (`--no-open` prints it) |
 
 Memory and CPU come from samples every 2 s, so a peak is the highest sample: a spike shorter than that does not show.
+
+### runnerctl tui
+
+A full-screen dashboard for hosts reached over SSH, where the web dashboard is not open. It shows what the web
+dashboard does:
+
+- the budget as one bar, a block per slot as wide as its memory and filled as far as its job uses it;
+- a card per slot with the job, its step, run time, and memory and CPU sparklines;
+- the slice's memory and CPU, the repositories, and the latest jobs;
+- the history, filtered by outcome and repository;
+- a job: its timeline, its steps as bars on one time axis, memory and CPU against its container's caps, and its log,
+  followed while the job runs.
+
+Profiles take the dashboard's colours in config order, mint first and pink second. `NO_COLOR` leaves bold, dim and
+block glyphs. At 80×24 the slots become one line each and the charts drop out first.
+
+| Key | |
+|---|---|
+| `1` `2` | overview, history |
+| `tab`, `j` `k` (or arrows) | the overview's pane (slots, repositories, latest jobs); move in it, or scroll a log |
+| `enter`, `esc` | open the selected job; back |
+| `p` `r` | pause or resume the selected repository; a pause refused while it runs a job asks before forcing it |
+| `R` | reseed the selected slot's profile |
+| `c` `s` `]` `[` | history: cycle the outcome and repository filters, next and previous page |
+| `G` `g` | follow the log, or go to its start |
+| `?` `q` | all keys; quit |
+| `ctrl-z` | suspend; `fg` brings it back, redrawn |
+
+SIGINT, SIGTERM and SIGHUP quit and SIGTSTP suspends, each after giving the terminal back. When the daemon goes
+away the header says `reconnecting`. Once it is back, the event stream resumes after the last event read, or the
+state is read again if none was; an open job's log carries on from its next line. Build without it with `cargo build -p runnerctl --no-default-features`.
 
 From the bash `ci` tool:
 

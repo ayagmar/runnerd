@@ -224,7 +224,7 @@ pub(crate) fn title(job: &JobSummary) -> String {
 }
 
 /// Seconds the job waited for a runner, until now while it waits.
-fn waited(job: &JobSummary, now: u64) -> Option<u64> {
+pub(crate) fn waited(job: &JobSummary, now: u64) -> Option<u64> {
     let end = match job.timeline.started_at {
         Some(started) => started,
         None if job.state == JobState::Queued => now,
@@ -234,7 +234,7 @@ fn waited(job: &JobSummary, now: u64) -> Option<u64> {
 }
 
 /// Seconds the job ran, until now while it runs.
-fn ran(job: &JobSummary, now: u64) -> Option<u64> {
+pub(crate) fn ran(job: &JobSummary, now: u64) -> Option<u64> {
     let started = job.timeline.started_at?;
     let end = match job.timeline.finished_at {
         Some(finished) => finished,
