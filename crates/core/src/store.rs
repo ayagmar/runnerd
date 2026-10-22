@@ -20,7 +20,10 @@ mod read;
 mod write;
 
 /// The schema's migrations, in order; the database's `user_version` is how many ran.
-const MIGRATIONS: &[&str] = &[include_str!("store/migrations/0001_history.sql")];
+const MIGRATIONS: &[&str] = &[
+    include_str!("store/migrations/0001_history.sql"),
+    include_str!("store/migrations/0002_runner_caps.sql"),
+];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
 /// disk holds back that job's log, not the daemon's memory.
@@ -69,6 +72,10 @@ pub struct RunnerRecord {
     pub container: String,
     /// When the container started, in milliseconds since the epoch.
     pub started_at: u64,
+    /// The container's memory cap in bytes.
+    pub memory_cap: Option<u64>,
+    /// The container's CPU limit in millicores.
+    pub cpu_cap: Option<u64>,
 }
 
 /// One sample of one runner's container.

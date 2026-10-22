@@ -664,6 +664,8 @@ async fn a_followed_log_sends_stored_and_new_lines_and_ends_when_the_job_finishe
         slot: 1,
         container: "c1".to_owned(),
         started_at: 1_000,
+        memory_cap: Some(4 << 30),
+        cpu_cap: Some(2000),
     });
     store.claimed(1, 2, "runner-1", 2_000);
     let position = LogPosition { page: 1, offset: 0 };

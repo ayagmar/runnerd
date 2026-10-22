@@ -84,6 +84,12 @@ pub struct JobRunner {
     pub profile: String,
     /// The slot it ran in, 1-based.
     pub slot: usize,
+    /// Its container's memory cap in bytes, which a reload since may have changed in the profile. `None` in records
+    /// from before runnerd kept it.
+    pub memory_cap: Option<u64>,
+    /// Its container's CPU limit in millicores, the unit of the CPU use in `Sample` and `JobMetrics`. `None` in
+    /// records from before runnerd kept it, or when Docker reports no limit.
+    pub cpu_cap: Option<u64>,
 }
 
 /// A job's phases, in the order they happen. A runner's container starts before GitHub gives it a job.

@@ -43,7 +43,8 @@ fn state(name: &str) -> JobState {
 const SUMMARY: &str = "j.id, j.repository, j.run_id, j.run_attempt, j.workflow, j.name, j.branch, j.url, j.labels, \
      j.state, j.conclusion, j.runner, r.profile, r.slot, j.queued_at, r.started_at, j.started_at, j.finished_at, \
      r.removed_at, j.cpu_time, j.cpu_peak, j.cpu_average, j.memory_peak, j.memory_average, j.network_received, \
-     j.network_sent, coalesce(r.mirror_bytes, 0), j.log_lines, j.log_bytes, j.log_truncated \
+     j.network_sent, coalesce(r.mirror_bytes, 0), j.log_lines, j.log_bytes, j.log_truncated, \
+     r.memory_cap, r.cpu_cap \
      FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
 
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
@@ -69,6 +70,8 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
                 name,
                 profile,
                 slot,
+                memory_cap: row.get(30)?,
+                cpu_cap: row.get(31)?,
             }),
             _ => None,
         },

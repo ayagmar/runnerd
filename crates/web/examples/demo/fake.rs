@@ -231,6 +231,12 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             ),
             profile: spec.profile.to_owned(),
             slot: spec.slot,
+            memory_cap: Some(if spec.profile == "jvm" {
+                9 * GIB
+            } else {
+                7 * GIB
+            }),
+            cpu_cap: Some(8000),
         }),
         timeline: Timeline {
             queued_at: spec.queued_at,
