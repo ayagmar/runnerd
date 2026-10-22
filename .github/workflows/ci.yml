@@ -243,9 +243,12 @@ jobs:
           } >> "$GITHUB_STEP_SUMMARY"
       - name: Check needed jobs
         env:
+          DRAFT: ${{ github.event.pull_request.draft }}
           CHANGES: ${{ needs.changes.result }}
           RESULTS: ${{ join(needs.*.result, ' ') }}
         run: |
+          # A green gate on a draft would still count on the same commit after it is marked ready.
+          [ "$DRAFT" != true ] || { echo "draft: nothing was checked"; exit 1; }
           echo "changes: $CHANGES; all: $RESULTS"
           [ "$CHANGES" = success ] || exit 1
           for result in $RESULTS; do

@@ -22,7 +22,8 @@ marking one ready for review starts a full run. A new push to a pull request can
 never cancelled.
 
 `gate` is the only required check. It passes when every job it needs passed or was skipped, and fails otherwise. It
-also writes the run's job timings to the run summary.
+always fails on a draft, so a draft's run can't satisfy it once the pull request is marked ready. It also writes the
+run's job timings to the run summary.
 
 Caches:
 
