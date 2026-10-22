@@ -6,7 +6,10 @@ use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
-use runnerd_core::api::{Caches, EventQuery, Job, JobPage, JobQuery, JobState, LogQuery, Status};
+use runnerd_core::api::{
+    Caches, CheckStatus, ConfigCheck, ConfigFile, Doctor, Event, EventQuery, Job, JobPage,
+    JobQuery, JobState, LogQuery, PauseQuery, Paused, Status,
+};
 use serde::Serialize;
 
 mod client;
@@ -79,18 +82,78 @@ enum Command {
     ///
     /// Redraws in place on a terminal; otherwise prints one line per event.
     Watch,
-    /// Give a repository no new runners; its running jobs finish.
+    /// Give a repository no new runners. Refused while it runs a job, unless --force.
     Pause {
         /// owner/name
         repository: String,
+        /// Cancel its running jobs' workflow runs and remove their runners.
+        #[arg(long)]
+        force: bool,
     },
     /// Let a paused repository get runners again.
     Resume {
         /// owner/name
         repository: String,
     },
+    /// Make a profile's slot 1 layers its new snapshot, once its slots are free; waits until it is done.
+    Reseed {
+        profile: String,
+        /// Return once the daemon accepted the request.
+        #[arg(long)]
+        no_wait: bool,
+    },
     /// Show the cache volumes, their sizes and limits.
-    Caches,
+    Caches {
+        /// Empty this volume (a slot layer or a shared cache) instead; refused while a runner uses it.
+        #[arg(long, value_name = "VOLUME")]
+        clean: Option<String>,
+    },
+    /// Show or check the daemon's config.
+    Config {
+        #[command(subcommand)]
+        command: ConfigCommand,
+    },
+    /// Check that the host can run runners. Runs `runnerd doctor` here when the daemon is not running.
+    Doctor,
+    /// Open the web dashboard, logging in with the daemon's one-time URL.
+    Web {
+        /// Print the URL instead of opening it.
+        #[arg(long)]
+        no_open: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum ConfigCommand {
+    /// Print the config the daemon runs with, and its path.
+    Show,
+    /// Check a config file against the daemon's budget, as `runnerd check-config` does; without a file, the
+    /// daemon's own config.
+    Check { file: Option<PathBuf> },
+}
+
+/// Why a command failed.
+#[derive(Debug)]
+enum Error {
+    /// The daemon could not be asked, or refused.
+    Client(ClientError),
+    /// Something here: an argument, a file, a program to run.
+    Local(String),
+}
+
+impl std::fmt::Display for Error {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Error::Client(error) => error.fmt(f),
+            Error::Local(error) => f.write_str(error),
+        }
+    }
+}
+
+impl From<ClientError> for Error {
+    fn from(error: ClientError) -> Error {
+        Error::Client(error)
+    }
 }
 
 fn main() -> ExitCode {
@@ -106,7 +169,7 @@ fn main() -> ExitCode {
         Err(error) => return fail(&error),
     };
     match runtime.block_on(run(&Client::new(socket), cli.json, cli.command)) {
-        Ok(()) => ExitCode::SUCCESS,
+        Ok(code) => code,
         Err(error) => fail(&error),
     }
 }
@@ -146,26 +209,31 @@ fn parse_age(text: &str) -> Result<u64, String> {
 }
 
 /// `owner/name` as the API's path.
-fn repository_path(repository: &str) -> Result<String, ClientError> {
+fn repository_path(repository: &str) -> Result<String, Error> {
     match repository.split_once('/') {
         Some((owner, name)) if !owner.is_empty() && !name.is_empty() && !name.contains('/') => {
             Ok(format!("/v1/repositories/{owner}/{name}"))
         }
-        _ => Err(ClientError::Api {
-            status: hyper::StatusCode::BAD_REQUEST,
-            message: format!("{repository}: expected owner/name"),
-        }),
+        _ => Err(Error::Local(format!("{repository}: expected owner/name"))),
     }
 }
 
-fn print_json(value: &impl Serialize) -> Result<(), ClientError> {
-    let text = serde_json::to_string_pretty(value)
-        .map_err(|error| ClientError::Decode(error.to_string()))?;
+fn print_json(value: &impl Serialize) -> Result<ExitCode, Error> {
+    let text =
+        serde_json::to_string_pretty(value).map_err(|error| Error::Local(error.to_string()))?;
     output::line(text);
-    Ok(())
+    Ok(ExitCode::SUCCESS)
 }
 
-async fn run(client: &Client, json: bool, command: Command) -> Result<(), ClientError> {
+fn exit(success: bool) -> ExitCode {
+    if success {
+        ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
+    }
+}
+
+async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, Error> {
     let paint = output::paint();
     match command {
         Command::Status => {
@@ -212,45 +280,227 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<(), Client
         }
         Command::Logs { id, follow, from } => logs(client, id, follow, from.unwrap_or(0)).await?,
         Command::Watch => watch(client, json, paint).await?,
-        Command::Pause { repository } => {
-            client
-                .post(
-                    &format!("{}/pause", repository_path(&repository)?),
-                    None::<&()>,
-                )
-                .await?;
-            if !json {
-                output::line(format_args!(
-                    "{repository} paused: it gets no new runners; its running jobs finish"
-                ));
-            }
+        Command::Pause { repository, force } => {
+            return pause(client, json, &repository, force).await;
         }
         Command::Resume { repository } => {
             client
-                .post(
-                    &format!("{}/resume", repository_path(&repository)?),
-                    None::<&()>,
-                )
+                .post(&format!("{}/resume", repository_path(&repository)?), &())
                 .await?;
             if !json {
                 output::line(format_args!("{repository} resumed"));
             }
         }
-        Command::Caches => {
+        Command::Reseed { profile, no_wait } => {
+            return reseed(client, json, &profile, no_wait).await;
+        }
+        Command::Caches {
+            clean: Some(volume),
+        } => {
+            client
+                .post(&format!("/v1/caches/{volume}/clean"), &())
+                .await?;
+            if !json {
+                output::line(format_args!("{volume} emptied"));
+            }
+        }
+        Command::Caches { clean: None } => {
             let caches: Caches = client.get("/v1/caches").await?;
             if json {
                 return print_json(&caches);
             }
             output::text(&human::caches(&caches, now(), paint));
         }
+        Command::Config { command } => return config(client, json, command).await,
+        Command::Doctor => return doctor(client, json).await,
+        Command::Web { no_open } => return web(client, no_open),
     }
-    Ok(())
+    Ok(ExitCode::SUCCESS)
+}
+
+async fn pause(
+    client: &Client,
+    json: bool,
+    repository: &str,
+    force: bool,
+) -> Result<ExitCode, Error> {
+    let path = format!("{}/pause", repository_path(repository)?);
+    let paused: Paused = match client.post_json(&path, &PauseQuery { force }).await {
+        Ok(paused) => paused,
+        Err(ClientError::Api { status, message }) if status == hyper::StatusCode::CONFLICT => {
+            return Err(Error::Local(format!(
+                "{message}\n`runnerctl pause --force {repository}` cancels its runs and removes their runners"
+            )));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    if json {
+        return print_json(&paused);
+    }
+    output::line(format_args!("{repository} paused: it gets no new runners"));
+    for stopped in &paused.stopped {
+        output::line(format_args!("stopped {stopped}"));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Asks for a reseed and, unless `no_wait`, waits for its `cache.reseeded`. The event stream is open before the
+/// request, so the event cannot be missed.
+async fn reseed(
+    client: &Client,
+    json: bool,
+    profile: &str,
+    no_wait: bool,
+) -> Result<ExitCode, Error> {
+    let mut events = if no_wait {
+        None
+    } else {
+        Some(client.events(EventQuery::default(), None).await?)
+    };
+    client
+        .post(&format!("/v1/profiles/{profile}/reseed"), &())
+        .await?;
+    let Some(events) = &mut events else {
+        if !json {
+            output::line(format_args!(
+                "{profile}: reseed requested; it runs once the profile's slots are free"
+            ));
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    if !json {
+        output::line(format_args!(
+            "{profile}: reseeding once its slots are free; Ctrl-C stops waiting, not the reseed"
+        ));
+    }
+    loop {
+        let envelope = events.next().await?;
+        let Event::CacheReseeded {
+            profile: reseeded,
+            output,
+            error,
+        } = &envelope.event
+        else {
+            continue;
+        };
+        if reseeded != profile {
+            continue;
+        }
+        if json {
+            print_json(&envelope)?;
+        } else {
+            let output = output.trim();
+            if !output.is_empty() {
+                output::line(output);
+            }
+            match error {
+                Some(error) => output::line(format_args!("{profile}: reseed failed: {error}")),
+                None => output::line(format_args!("{profile}: reseeded")),
+            };
+        }
+        return Ok(exit(error.is_none()));
+    }
+}
+
+async fn config(client: &Client, json: bool, command: ConfigCommand) -> Result<ExitCode, Error> {
+    let (path, text) = match command {
+        ConfigCommand::Show => {
+            let file: ConfigFile = client.get("/v1/config").await?;
+            if json {
+                return print_json(&file);
+            }
+            output::line(format_args!("# {}", file.path));
+            output::text(&file.text);
+            return Ok(ExitCode::SUCCESS);
+        }
+        ConfigCommand::Check { file: Some(path) } => {
+            let text = std::fs::read_to_string(&path).map_err(|error| {
+                Error::Local(format!("cannot read {}: {error}", path.display()))
+            })?;
+            (path.display().to_string(), text)
+        }
+        ConfigCommand::Check { file: None } => {
+            let file: ConfigFile = client.get("/v1/config").await?;
+            (file.path, file.text)
+        }
+    };
+    let checked: ConfigCheck = client.post_toml("/v1/config/check", text).await?;
+    if json {
+        print_json(&checked)?;
+    } else {
+        for warning in &checked.warnings {
+            output::line(format_args!("warning: {warning}"));
+        }
+        output::line(format_args!("{path}: {}", checked.message));
+    }
+    Ok(exit(checked.valid))
+}
+
+/// The daemon's checks; when it is not running, `runnerd doctor` run here, which checks the same.
+async fn doctor(client: &Client, json: bool) -> Result<ExitCode, Error> {
+    let doctor: Doctor = match client.get("/v1/doctor").await {
+        Ok(doctor) => doctor,
+        Err(ClientError::NotRunning(_)) if !json => {
+            output::line("runnerd is not running; running `runnerd doctor` here");
+            let status = std::process::Command::new("runnerd")
+                .arg("doctor")
+                .status()
+                .map_err(|error| Error::Local(format!("cannot run runnerd doctor: {error}")))?;
+            return Ok(exit(status.success()));
+        }
+        Err(error) => return Err(error.into()),
+    };
+    let passed = !doctor
+        .checks
+        .iter()
+        .any(|check| check.status == CheckStatus::Fail);
+    if json {
+        print_json(&doctor)?;
+    } else {
+        for check in &doctor.checks {
+            output::line(check);
+        }
+    }
+    Ok(exit(passed))
+}
+
+/// Opens the dashboard with the one-time login URL the daemon writes next to its socket.
+fn web(client: &Client, no_open: bool) -> Result<ExitCode, Error> {
+    let file = client.socket().with_extension("web");
+    let url = match std::fs::read_to_string(&file) {
+        Ok(text) => text.trim().to_owned(),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
+            return Err(Error::Local(format!(
+                "no {}: runnerd is not running, or was started with --web off",
+                file.display()
+            )));
+        }
+        Err(error) => {
+            return Err(Error::Local(format!(
+                "cannot read {}: {error}",
+                file.display()
+            )));
+        }
+    };
+    if no_open {
+        output::line(url);
+        return Ok(ExitCode::SUCCESS);
+    }
+    match std::process::Command::new("xdg-open").arg(&url).status() {
+        Ok(status) if status.success() => {
+            output::line("opened the dashboard in your browser");
+            Ok(ExitCode::SUCCESS)
+        }
+        _ => Err(Error::Local(format!(
+            "cannot open a browser with xdg-open; open this URL, which works once: {url}"
+        ))),
+    }
 }
 
 /// Prints the log from line `from`. Following, it reads until the daemon ends the response, which it does once the
 /// job's record is final; if the response ended for another reason (a daemon restart), it asks again from the next
 /// line.
-async fn logs(client: &Client, id: u64, follow: bool, mut from: u64) -> Result<(), ClientError> {
+async fn logs(client: &Client, id: u64, follow: bool, mut from: u64) -> Result<(), Error> {
     loop {
         let mut lines = client
             .logs(
@@ -274,7 +524,7 @@ async fn logs(client: &Client, id: u64, follow: bool, mut from: u64) -> Result<(
             }
         };
         if !follow {
-            return ended;
+            return ended.map_err(Error::from);
         }
         let job: Job = client.get(&format!("/v1/jobs/{id}")).await?;
         if job.summary.state.is_final() {
@@ -284,7 +534,7 @@ async fn logs(client: &Client, id: u64, follow: bool, mut from: u64) -> Result<(
     }
 }
 
-async fn watch(client: &Client, json: bool, paint: human::Paint) -> Result<(), ClientError> {
+async fn watch(client: &Client, json: bool, paint: human::Paint) -> Result<(), Error> {
     let mut events = client.events(EventQuery::default(), None).await?;
     if json || !output::is_terminal() {
         loop {

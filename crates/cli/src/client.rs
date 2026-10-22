@@ -4,7 +4,7 @@
 
 use std::fmt;
 use std::io;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Full};
@@ -84,6 +84,10 @@ impl Client {
         Client { socket }
     }
 
+    pub(crate) fn socket(&self) -> &Path {
+        &self.socket
+    }
+
     /// `GET path` and decode the JSON answer.
     pub(crate) async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
         let bytes = self.call(Method::GET, path, None).await?;
@@ -99,24 +103,42 @@ impl Client {
         self.get(&with_query(path, query)?).await
     }
 
-    /// `POST path` with an optional JSON body; the answer's body, which may be empty.
+    /// `POST path?query` without a body; the answer's body, which may be empty.
     pub(crate) async fn post(
         &self,
         path: &str,
-        body: Option<&impl Serialize>,
+        query: &impl Serialize,
     ) -> Result<Bytes, ClientError> {
-        let body = body
-            .map(serde_json::to_vec)
-            .transpose()
-            .map_err(|error| ClientError::Decode(error.to_string()))?;
-        self.call(Method::POST, path, body).await
+        self.call(Method::POST, &with_query(path, query)?, None)
+            .await
+    }
+
+    /// `POST path` with a TOML body, and decode the JSON answer.
+    pub(crate) async fn post_toml<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        toml: String,
+    ) -> Result<T, ClientError> {
+        let body = (toml.into_bytes(), "application/toml");
+        let bytes = self.call(Method::POST, path, Some(body)).await?;
+        serde_json::from_slice(&bytes).map_err(|error| ClientError::Decode(error.to_string()))
+    }
+
+    /// `POST path?query` without a body, and decode the JSON answer.
+    pub(crate) async fn post_json<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        query: &impl Serialize,
+    ) -> Result<T, ClientError> {
+        let bytes = self.post(path, query).await?;
+        serde_json::from_slice(&bytes).map_err(|error| ClientError::Decode(error.to_string()))
     }
 
     async fn call(
         &self,
         method: Method,
         path: &str,
-        body: Option<Vec<u8>>,
+        body: Option<(Vec<u8>, &'static str)>,
     ) -> Result<Bytes, ClientError> {
         tokio::time::timeout(REQUEST_TIMEOUT, async {
             let response = self.send(method, path, body, None).await?;
@@ -138,7 +160,7 @@ impl Client {
         &self,
         method: Method,
         path: &str,
-        body: Option<Vec<u8>>,
+        body: Option<(Vec<u8>, &'static str)>,
         last_event_id: Option<u64>,
     ) -> Result<Response<Incoming>, ClientError> {
         let stream =
@@ -159,14 +181,16 @@ impl Client {
             .method(method)
             .uri(path)
             .header(header::HOST, "runnerd");
-        if body.is_some() {
-            request = request.header(header::CONTENT_TYPE, "application/json");
+        let mut bytes = Vec::new();
+        if let Some((body, content_type)) = body {
+            request = request.header(header::CONTENT_TYPE, content_type);
+            bytes = body;
         }
         if let Some(id) = last_event_id {
             request = request.header("last-event-id", HeaderValue::from(id));
         }
         let request = request
-            .body(Full::new(Bytes::from(body.unwrap_or_default())))
+            .body(Full::new(Bytes::from(bytes)))
             .map_err(transport)?;
         let response = sender.send_request(request).await.map_err(transport)?;
         if response.status().is_success() {

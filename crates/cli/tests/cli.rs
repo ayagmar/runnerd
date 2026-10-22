@@ -20,8 +20,9 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use runnerd_core::api::{
-    Budget, ErrorResponse, Event, EventEnvelope, Job, JobMetrics, JobRunner, JobState, JobSummary,
-    LogSummary, ProfileStatus, RepositoryStatus, RunnerStatus, SlotStatus, Status, Timeline,
+    Budget, Busy, Check, CheckStatus, ConfigCheck, Doctor, ErrorResponse, Event, EventEnvelope,
+    Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary, Paused, ProfileStatus,
+    RepositoryStatus, RunnerStatus, RunningJob, SlotStatus, Status, Timeline,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -128,6 +129,10 @@ struct Fake {
     log_queries: Vec<String>,
     /// The `Last-Event-ID` of every event stream request.
     event_ids: Vec<Option<String>>,
+    /// Every request but log and status reads, in order, as `METHOD path`.
+    requests: Vec<String>,
+    /// The body of every config check.
+    checked: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -156,14 +161,76 @@ async fn get_logs(State(fake): State<Shared>, RawQuery(query): RawQuery) -> Stri
     }
 }
 
-async fn pause(UrlPath((owner, name)): UrlPath<(String, String)>) -> Response {
-    (
-        StatusCode::NOT_FOUND,
-        axum::Json(ErrorResponse {
-            message: format!("{owner}/{name} is not a configured repository"),
-        }),
-    )
-        .into_response()
+/// `halyard/ledger` runs a job: a pause without force is refused, a forced one stops it.
+async fn pause(
+    UrlPath((owner, name)): UrlPath<(String, String)>,
+    RawQuery(query): RawQuery,
+) -> Response {
+    let repository = format!("{owner}/{name}");
+    let running = RunningJob {
+        repository: repository.clone(),
+        runner: "runnerd-5f2a-jvm-1-k3j9".to_owned(),
+        job: Some(9001),
+    };
+    match (repository.as_str(), query.as_deref()) {
+        ("halyard/ledger", Some("force=true")) => axum::Json(Paused {
+            stopped: vec![running],
+        })
+        .into_response(),
+        ("halyard/ledger", _) => (
+            StatusCode::CONFLICT,
+            axum::Json(Busy {
+                message: format!("{repository} runs {running}"),
+                jobs: vec![running],
+            }),
+        )
+            .into_response(),
+        _ => (
+            StatusCode::NOT_FOUND,
+            axum::Json(ErrorResponse {
+                message: format!("{repository} is not a configured repository"),
+            }),
+        )
+            .into_response(),
+    }
+}
+
+async fn reseed(State(fake): State<Shared>, UrlPath(profile): UrlPath<String>) -> StatusCode {
+    fake.lock()
+        .unwrap()
+        .requests
+        .push(format!("POST /v1/profiles/{profile}/reseed"));
+    StatusCode::ACCEPTED
+}
+
+async fn check_config(State(fake): State<Shared>, body: String) -> axum::Json<ConfigCheck> {
+    fake.lock().unwrap().checked.push(body);
+    axum::Json(ConfigCheck {
+        valid: false,
+        message: "memory caps sum to 20G, more than runnerd.slice's MemoryMax of 16G".to_owned(),
+        warnings: Vec::new(),
+        memory_caps: Some(20 << 30),
+        memory_max: Some(16 << 30),
+    })
+}
+
+async fn get_doctor() -> axum::Json<Doctor> {
+    axum::Json(Doctor {
+        checks: vec![
+            Check {
+                name: "Docker".to_owned(),
+                status: CheckStatus::Pass,
+                detail: "29.1.0".to_owned(),
+                fix: None,
+            },
+            Check {
+                name: "sysbox".to_owned(),
+                status: CheckStatus::Fail,
+                detail: "sysbox-runc is not a Docker runtime".to_owned(),
+                fix: Some("install sysbox".to_owned()),
+            },
+        ],
+    })
 }
 
 fn sse(envelope: &EventEnvelope) -> String {
@@ -180,6 +247,7 @@ fn sse(envelope: &EventEnvelope) -> String {
 
 async fn events(State(fake): State<Shared>, headers: HeaderMap) -> Response {
     let mut fake = fake.lock().unwrap();
+    fake.requests.push("GET /v1/events".to_owned());
     fake.event_ids.push(
         headers
             .get("last-event-id")
@@ -190,7 +258,7 @@ async fn events(State(fake): State<Shared>, headers: HeaderMap) -> Response {
         let mut summary = job(JobState::Running).summary;
         summary.state = JobState::Running;
         format!(
-            ": keep-alive\n\n{}{}",
+            ": keep-alive\n\n{}{}{}{}",
             sse(&EventEnvelope {
                 id: Some(41),
                 at: 1_700_000_004,
@@ -203,6 +271,24 @@ async fn events(State(fake): State<Shared>, headers: HeaderMap) -> Response {
                     job: 9001,
                     line: 0,
                     text: "live only".to_owned()
+                },
+            }),
+            sse(&EventEnvelope {
+                id: Some(42),
+                at: 1_700_000_007,
+                event: Event::CacheReseeded {
+                    profile: "node".to_owned(),
+                    output: "node: slot 1 changed 3.0G".to_owned(),
+                    error: None,
+                },
+            }),
+            sse(&EventEnvelope {
+                id: Some(43),
+                at: 1_700_000_008,
+                event: Event::CacheReseeded {
+                    profile: "jvm".to_owned(),
+                    output: "jvm: slot 1 changed 2.1G".to_owned(),
+                    error: None,
                 },
             }),
         )
@@ -220,6 +306,9 @@ fn serve(socket: &Path) -> Shared {
         .route("/v1/jobs/{id}", get(get_job))
         .route("/v1/jobs/{id}/logs", get(get_logs))
         .route("/v1/repositories/{owner}/{name}/pause", post(pause))
+        .route("/v1/profiles/{name}/reseed", post(reseed))
+        .route("/v1/config/check", post(check_config))
+        .route("/v1/doctor", get(get_doctor))
         .route("/v1/events", get(events))
         .with_state(fake.clone());
     let runtime = tokio::runtime::Runtime::new().unwrap();
@@ -332,11 +421,11 @@ fn watch_resumes_after_the_last_durable_event_when_the_stream_ends() {
         .lines()
         .map(|line| serde_json::from_str(line).unwrap())
         .collect();
-    assert_eq!(printed.len(), 2);
+    assert_eq!(printed.len(), 4);
     assert_eq!(printed[0].id, Some(41));
     assert_eq!(
         fake.lock().unwrap().event_ids,
-        [None, Some("41".to_owned())]
+        [None, Some("43".to_owned())]
     );
 }
 
@@ -362,4 +451,102 @@ fn the_daemons_error_message_reaches_the_user() {
         "{}",
         stderr(&output)
     );
+}
+
+#[test]
+fn a_pause_while_the_repository_runs_a_job_names_the_job_and_how_to_force_it() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let refused = runnerctl(&socket, &["pause", "halyard/ledger"]);
+    assert!(!refused.status.success());
+    let error = stderr(&refused);
+    assert!(
+        error.contains("job 9001 on runnerd-5f2a-jvm-1-k3j9"),
+        "{error}"
+    );
+    assert!(
+        error.contains("runnerctl pause --force halyard/ledger"),
+        "{error}"
+    );
+
+    let forced = runnerctl(&socket, &["pause", "--force", "halyard/ledger"]);
+    assert!(forced.status.success(), "{}", stderr(&forced));
+    assert!(
+        stdout(&forced).contains("stopped job 9001 on runnerd-5f2a-jvm-1-k3j9"),
+        "{}",
+        stdout(&forced)
+    );
+}
+
+#[test]
+fn reseed_listens_before_asking_and_waits_for_its_own_profile() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fake = serve(&socket);
+    let output = runnerctl(&socket, &["reseed", "jvm"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let text = stdout(&output);
+    assert!(
+        text.contains("jvm: slot 1 changed 2.1G\njvm: reseeded"),
+        "{text}"
+    );
+    assert!(!text.contains("node"), "{text}");
+    assert_eq!(
+        fake.lock().unwrap().requests,
+        ["GET /v1/events", "POST /v1/profiles/jvm/reseed"]
+    );
+}
+
+#[test]
+fn a_config_over_the_budget_fails_the_check_with_the_daemons_reason() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fake = serve(&socket);
+    let file = dir.0.join("runnerd.toml");
+    std::fs::write(&file, "[host]\nslice = \"runnerd.slice\"\n").unwrap();
+    let output = runnerctl(&socket, &["config", "check", file.to_str().unwrap()]);
+    assert!(!output.status.success());
+    assert!(
+        stdout(&output).contains(
+            "runnerd.toml: memory caps sum to 20G, more than runnerd.slice's MemoryMax of 16G"
+        ),
+        "{}",
+        stdout(&output)
+    );
+    assert_eq!(
+        fake.lock().unwrap().checked,
+        ["[host]\nslice = \"runnerd.slice\"\n"]
+    );
+}
+
+#[test]
+fn doctor_prints_each_check_as_runnerd_does_and_fails_when_one_fails() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let output = runnerctl(&socket, &["doctor"]);
+    assert!(!output.status.success());
+    assert_eq!(
+        stdout(&output),
+        "ok    Docker: 29.1.0\nFAIL  sysbox: sysbox-runc is not a Docker runtime\n      fix: install sysbox\n"
+    );
+}
+
+#[test]
+fn web_prints_the_login_url_the_daemon_wrote_next_to_its_socket() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let missing = runnerctl(&socket, &["web", "--no-open"]);
+    assert!(!missing.status.success());
+    assert!(
+        stderr(&missing).contains("runnerd is not running, or was started with --web off"),
+        "{}",
+        stderr(&missing)
+    );
+    let url = "http://127.0.0.1:7477/login?code=0f3a";
+    std::fs::write(dir.0.join("runnerd.web"), format!("{url}\n")).unwrap();
+    let output = runnerctl(&socket, &["web", "--no-open"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), format!("{url}\n"));
 }
