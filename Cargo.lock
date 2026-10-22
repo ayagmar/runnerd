@@ -1010,7 +1010,17 @@ dependencies = [
 name = "runnerctl"
 version = "0.0.1"
 dependencies = [
+ "axum",
  "clap",
+ "futures-util",
+ "http-body-util",
+ "hyper",
+ "hyper-util",
+ "runnerd-core",
+ "serde",
+ "serde_json",
+ "serde_urlencoded",
+ "tokio",
 ]
 
 [[package]]

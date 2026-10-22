@@ -26,3 +26,4 @@ with a line pointing to the record that replaces it.
 | [0018](0018-job-identity-and-logs-from-inside-the-runner.md) | Job identity and logs from inside the runner container |
 | [0019](0019-control-commands-through-the-engine.md) | Control commands go through the engine; a reload keeps running jobs |
 | [0020](0020-dashboard-is-an-api-client-on-loopback.md) | The dashboard is an API client, on loopback behind a one-time login |
+| [0021](0021-clients-speak-http-over-the-socket-with-hyper.md) | Clients speak HTTP over the socket with hyper |

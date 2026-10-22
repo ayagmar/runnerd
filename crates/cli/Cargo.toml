@@ -9,6 +9,19 @@ repository.workspace = true
 
 [dependencies]
 clap.workspace = true
+http-body-util.workspace = true
+hyper = { workspace = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, features = ["tokio"] }
+runnerd-core.workspace = true
+serde.workspace = true
+serde_json.workspace = true
+serde_urlencoded.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
+
+[dev-dependencies]
+axum.workspace = true
+futures-util.workspace = true
+tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [lints]
 workspace = true
