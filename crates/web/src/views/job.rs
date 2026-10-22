@@ -5,7 +5,7 @@
 use maud::{Markup, html};
 use runnerd_core::api::{Job, Sample, SampleSeries, Status, Step};
 
-use super::{badge, page, waited_and_ran};
+use super::{Durations, badge, durations, page};
 use crate::chart::{Base, Series, TimeChart, nice_top, ratio};
 use crate::daemon::{Daemon, Error};
 use crate::format;
@@ -81,7 +81,7 @@ pub(crate) fn render(view: &JobView) -> Markup {
 /// The title, outcome and where the job came from.
 pub(crate) fn head(view: &JobView) -> Markup {
     let summary = &view.job.summary;
-    let (waited, ran) = waited_and_ran(summary, view.now);
+    let Durations { waited, ran } = durations(summary, view.now);
     html! {
         header #job-head .job-head {
             p.crumbs {

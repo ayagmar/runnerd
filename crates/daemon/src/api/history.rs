@@ -106,7 +106,7 @@ pub(super) async fn stats(
 
 pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> Response {
     match state.handle.store.cache_sizes_now().await {
-        Ok((measured_at, sizes)) => {
+        Ok(measured) => {
             let volumes = state
                 .handle
                 .caches
@@ -114,15 +114,12 @@ pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> R
                 .iter()
                 .cloned()
                 .map(|mut volume| {
-                    volume.bytes = sizes
-                        .iter()
-                        .find(|(name, _)| *name == volume.name)
-                        .map_or(0, |(_, bytes)| *bytes);
+                    volume.bytes = measured.bytes.get(&volume.name).copied().unwrap_or(0);
                     volume
                 })
                 .collect();
             Json(Caches {
-                measured_at,
+                measured_at: measured.at,
                 volumes,
             })
             .into_response()

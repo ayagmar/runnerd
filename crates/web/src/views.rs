@@ -167,9 +167,14 @@ pub(crate) fn profile_class(status: &Status, profile: &str) -> String {
     }
 }
 
-/// What a job's outcome is called and its CSS class.
-pub(crate) fn outcome(job: &JobSummary) -> (&'static str, &'static str) {
-    match (job.state, job.conclusion.as_deref()) {
+/// What a job's outcome is called, and its CSS class.
+struct Outcome {
+    label: &'static str,
+    class: &'static str,
+}
+
+fn outcome(job: &JobSummary) -> Outcome {
+    let (label, class) = match (job.state, job.conclusion.as_deref()) {
         (JobState::Queued, _) => ("queued", "queued"),
         (JobState::Running, _) => ("running", "running"),
         (JobState::Lost, _) => ("lost", "failure"),
@@ -180,12 +185,13 @@ pub(crate) fn outcome(job: &JobSummary) -> (&'static str, &'static str) {
         (JobState::Completed, Some("cancelled")) => ("cancelled", "neutral"),
         (JobState::Completed, Some("skipped")) => ("skipped", "neutral"),
         (JobState::Completed, _) => ("completed", "neutral"),
-    }
+    };
+    Outcome { label, class }
 }
 
 /// A job's outcome as a badge.
 pub(crate) fn badge(job: &JobSummary) -> Markup {
-    let (label, class) = outcome(job);
+    let Outcome { label, class } = outcome(job);
     html! { span class=(format!("badge {class}")) { (label) } }
 }
 
@@ -194,8 +200,14 @@ pub(crate) fn time_ago(at: u64, now: u64) -> Markup {
     html! { time datetime=(format::rfc3339(at)) title=(format::timestamp(at)) { (format::ago(at, now)) } }
 }
 
-/// Seconds a job waited for a runner, and ran.
-pub(crate) fn waited_and_ran(job: &JobSummary, now: u64) -> (Option<u64>, Option<u64>) {
+/// Seconds a job waited for a runner, and ran; none for a job that has not started.
+pub(crate) struct Durations {
+    pub(crate) waited: Option<u64>,
+    pub(crate) ran: Option<u64>,
+}
+
+/// How long a job waited and ran.
+pub(crate) fn durations(job: &JobSummary, now: u64) -> Durations {
     let timeline = &job.timeline;
     let waited = timeline
         .started_at
@@ -203,7 +215,7 @@ pub(crate) fn waited_and_ran(job: &JobSummary, now: u64) -> (Option<u64>, Option
     let ran = timeline
         .started_at
         .map(|started| timeline.finished_at.unwrap_or(now).saturating_sub(started));
-    (waited, ran)
+    Durations { waited, ran }
 }
 
 /// The path of a repository's row, for the ids live updates use: `halyard/ledger` → `halyard-ledger`.

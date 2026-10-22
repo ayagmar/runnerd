@@ -441,13 +441,16 @@ pub(super) fn stats(
 pub(super) fn latest_cache_sizes(db: &Connection) -> rusqlite::Result<super::Measured> {
     let at: Option<u64> = db.query_row("SELECT max(at) FROM cache_sizes", [], |row| row.get(0))?;
     let Some(at) = at else {
-        return Ok((None, Vec::new()));
+        return Ok(super::Measured::default());
     };
-    let sizes = db
+    let bytes = db
         .prepare_cached("SELECT name, bytes FROM cache_sizes WHERE at = ?1 ORDER BY name")?
         .query_map([at], |row| Ok((row.get(0)?, row.get(1)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok((Some(secs(at)), sizes))
+    Ok(super::Measured {
+        at: Some(secs(at)),
+        bytes,
+    })
 }
 
 pub(super) fn cache_history(db: &Connection, since: u64) -> rusqlite::Result<Vec<api::CacheSize>> {

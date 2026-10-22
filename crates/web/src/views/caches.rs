@@ -35,8 +35,14 @@ impl CachesView {
     }
 }
 
-fn kind(volume: &CacheVolume) -> (String, Option<&str>) {
-    match &volume.kind {
+/// What a volume is called, and the profile it belongs to; none for a shared one.
+struct Kind<'volume> {
+    label: String,
+    profile: Option<&'volume str>,
+}
+
+fn kind(volume: &CacheVolume) -> Kind<'_> {
+    let (label, profile) = match &volume.kind {
         CacheKind::Snapshot { profile } => (format!("{profile} snapshot"), Some(profile)),
         CacheKind::Slot { profile, slot } => {
             (format!("{profile} slot {slot} layer"), Some(profile))
@@ -44,6 +50,10 @@ fn kind(volume: &CacheVolume) -> (String, Option<&str>) {
         CacheKind::Pnpm => ("pnpm store, shared".to_owned(), None),
         CacheKind::Maven => ("Maven repository, shared".to_owned(), None),
         CacheKind::Mirror => ("Docker Hub mirror".to_owned(), None),
+    };
+    Kind {
+        label,
+        profile: profile.map(String::as_str),
     }
 }
 
@@ -91,7 +101,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
         }
         ul #volumes .volume-grid {
             @for volume in &view.caches.volumes {
-                @let (label, profile) = kind(volume);
+                @let Kind { label, profile } = kind(volume);
                 @let class = profile.map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
                 @let points: Vec<(u64, u64)> = view.history.sizes.iter().filter(|size| size.name == volume.name).map(|size| (size.at, size.bytes)).collect();
                 @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes);
