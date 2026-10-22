@@ -445,7 +445,13 @@ async fn doctor(client: &Client, json: bool) -> Result<ExitCode, Error> {
             let status = std::process::Command::new("runnerd")
                 .arg("doctor")
                 .status()
-                .map_err(|error| Error::Local(format!("cannot run runnerd doctor: {error}")))?;
+                .map_err(|error| {
+                    Error::Local(if error.kind() == std::io::ErrorKind::NotFound {
+                        "runnerd is not on PATH, so its checks cannot run here either".to_owned()
+                    } else {
+                        format!("cannot run runnerd doctor: {error}")
+                    })
+                })?;
             return Ok(exit(status.success()));
         }
         Err(error) => return Err(error.into()),
