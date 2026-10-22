@@ -2,7 +2,7 @@
 
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development: the daemon schedules runners, records every job and serves a JSON API, and `runnerctl` reads it from a terminal; the web dashboard comes next.
+It is in early development: the daemon schedules runners, records every job, serves a JSON API and a web dashboard, and `runnerctl` reads and controls it from a terminal.
 
 ## Install
 
