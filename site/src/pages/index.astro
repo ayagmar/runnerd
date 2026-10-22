@@ -1,0 +1,1414 @@
+---
+import '../styles/theme.css';
+import mark from '../assets/mark.svg?raw';
+
+const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
+const docs = `${base}install/`;
+const repo = 'https://github.com/ayagmar/runnerd';
+const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
+
+// examples/runnerd.toml, in GiB: two trellis runners, two glowly runners and the Docker Hub mirror in ci.slice.
+const example = { max: 33, trellis: { memory: 9, slots: 2 }, glowly: { memory: 7, slots: 2 }, mirror: 0.5 };
+const blocks = [
+  ...Array.from({ length: example.trellis.slots }, () => ({ kind: 'trellis', size: example.trellis.memory })),
+  ...Array.from({ length: example.glowly.slots }, () => ({ kind: 'glowly', size: example.glowly.memory })),
+  { kind: 'mirror', size: example.mirror },
+];
+const used = blocks.reduce((sum, block) => sum + block.size, 0);
+
+// What `runnerd doctor` prints for each check, copied from crates/daemon/src/doctor.rs and a real run.
+const checks = [
+  {
+    name: 'Docker',
+    what: 'Docker answers on its unix socket.',
+    ok: 'ok    Docker: reachable, Docker 29.9.2',
+    fail: `FAIL  Docker: unreachable: <error>
+      fix: start Docker and let your user reach its socket:
+           sudo systemctl enable --now docker
+           sudo usermod -aG docker "$USER"   (then log in again)
+           runnerd reaches Docker only through a unix:// socket: unset DOCKER_HOST or point it at one`,
+  },
+  {
+    name: 'cgroups',
+    what: 'cgroup v2 with the systemd driver, so runners can live in a systemd slice.',
+    ok: 'ok    cgroups: cgroup v2 with the systemd driver',
+    fail: `FAIL  cgroups: cgroup v2 with the cgroupfs driver; runnerd places runners in a systemd slice, which needs cgroup v2 with the systemd driver
+      fix: boot with cgroup v2 (the default on current distributions), and remove any "native.cgroupdriver=cgroupfs" from /etc/docker/daemon.json`,
+  },
+  {
+    name: 'sysbox',
+    what: 'Docker has the sysbox-runc runtime and its services run. The fix depends on the distribution; this one is Arch.',
+    ok: "ok    sysbox: Docker has the sysbox-runc runtime and sysbox's services run",
+    fail: `FAIL  sysbox: Docker has no sysbox-runc runtime, which isolation = "sysbox" needs
+      fix: install the AUR package sysbox-ce-bin, for example: paru -S sysbox-ce-bin
+           sudo systemctl enable --now sysbox
+           add to /etc/docker/daemon.json (Arch kernels are not on sysbox's allow-list):
+           {"runtimes": {"sysbox-runc": {"path": "/usr/bin/sysbox-runc", "runtimeArgs": ["--no-kernel-check"]}}}
+           sudo systemctl restart docker   (stops running containers)`,
+  },
+  {
+    name: 'slice',
+    what: 'The slice your config names has a unit file with a MemoryMax.',
+    ok: 'ok    slice: ci.slice (/etc/systemd/system/ci.slice): MemoryMax=33G, CPU quota infinity',
+    fail: `FAIL  slice: demo.slice has no unit file with a MemoryMax, so nothing holds runners to the budget
+      fix: create /etc/systemd/system/demo.slice with
+           [Slice]
+           MemoryMax=32.5G
+           then: sudo systemctl daemon-reload`,
+  },
+  {
+    name: 'config',
+    what: 'Every runner your config allows fits in that MemoryMax.',
+    ok: 'ok    config: fits in ci.slice',
+    fail: `FAIL  config: slots × memory over all profiles plus the mirror is 34.5G, the slice ci.slice's MemoryMax is 33G
+      fix: change runnerd.toml or the slice's limits`,
+  },
+  {
+    name: 'gh',
+    what: 'The GitHub CLI is logged in with the repo scope, which registering runners needs.',
+    ok: 'ok    gh: logged in to github.com with the repo scope',
+    fail: `FAIL  gh: the token has scopes ["gist", "read:org"] but not repo, which runner registration needs
+      fix: gh auth refresh --hostname github.com --scopes repo`,
+  },
+];
+
+const today = [
+  ['runnerd check-config', 'the budget sum above, against the slice in systemd or a size you pass.'],
+  ['runnerd doctor', 'the host checks above, each failure with its fix.'],
+  ['The runner image', 'the GitHub Actions runner with its own Docker Engine, one stage per profile, started with a just-in-time config.'],
+  ['Isolation backends', 'sysbox by default; privileged Docker-in-Docker only with allow_unsafe.'],
+  ['Releases', 'x86_64 and aarch64 Linux builds with SHA-256 checksums and build provenance attestations.'],
+];
+const next = [
+  ['The scheduler', 'starts a runner for each queued job, from one pool shared by every configured repository.'],
+  ['Warm caches', 'a read-only snapshot per profile with a writable layer per slot, a shared pnpm store, a Maven repository and a Docker Hub mirror.'],
+  ['The daemon API', 'JSON and server-sent events on a Unix socket, with runnerctl as its client.'],
+  ['Job history', 'a timeline, metrics and logs for every job.'],
+  ['The dashboard', 'served by the daemon on a loopback port.'],
+];
+---
+
+<!doctype html>
+<html lang="en" data-theme="dark">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <title>runnerd: GitHub Actions runners on your own Linux machine</title>
+    <meta
+      name="description"
+      content="runnerd runs GitHub Actions jobs on a Linux machine you already have: a fresh container per job, Docker inside it without --privileged, every runner inside one memory budget."
+    />
+    <link rel="icon" href={`${base}favicon.svg`} type="image/svg+xml" />
+    <script is:inline>
+      // Same key as Starlight's theme picker, so the landing page and the docs agree.
+      const stored = localStorage.getItem('starlight-theme');
+      const theme = stored || (matchMedia('(prefers-color-scheme: light)').matches ? 'light' : 'dark');
+      document.documentElement.dataset.theme = theme === 'light' ? 'light' : 'dark';
+      document.documentElement.classList.add('js');
+    </script>
+  </head>
+  <body>
+    <a class="skip" href="#main">Skip to content</a>
+    <header class="nav wrap">
+      <a class="wordmark" href={base}><span class="mark" set:html={mark} />runnerd</a>
+      <nav aria-label="Main">
+        <a href={docs}>Docs</a>
+        <a href="#install">Install</a>
+        <a href={repo}>GitHub</a>
+        <button class="theme" type="button" aria-label="Switch to light theme" data-theme-toggle>
+          <span aria-hidden="true">Light</span>
+        </button>
+      </nav>
+    </header>
+
+    <main id="main">
+      <section class="hero wrap" aria-labelledby="title">
+        <h1 id="title">CI runners that fit the machine</h1>
+        <div class="hero-copy">
+          <p class="lead">
+            runnerd runs your GitHub Actions jobs on a Linux machine you already have. Every job gets a fresh
+            container with its own Docker, and every runner stays inside one systemd memory budget.
+          </p>
+          <div class="hero-side">
+            <p class="status">
+              Version 0.0.x is early. It checks your host and your budget and builds the runner image; the
+              scheduler that starts runners is being written now.
+            </p>
+            <div class="actions">
+              <a class="button" href="#install">Install</a>
+              <a class="text-link" href={docs}>Read the docs</a>
+            </div>
+          </div>
+        </div>
+
+        <figure class="budget budget-hero" data-ui>
+          <div
+            class="bar"
+            role="img"
+            aria-label={`Memory budget of ci.slice: two trellis runners at 9G, two glowly runners at 7G and a 512M Docker Hub mirror, ${used}G of ${example.max}G.`}
+          >
+            <div class="slice" style="--share: 1"></div>
+            <div class="blocks">
+              {
+                blocks.map((block, i) => (
+                  <div class={`block ${block.kind}`} style={`--size: ${block.size}; --i: ${i}`}>
+                    {block.kind !== 'mirror' && (
+                      <>
+                        <span class="size">{block.size}G</span>
+                        <span class="name">{block.kind}</span>
+                      </>
+                    )}
+                  </div>
+                ))
+              }
+              <div class="free" style={`--size: ${example.max - used}`}></div>
+            </div>
+          </div>
+          <figcaption>
+            <span>ci.slice, MemoryMax=33G</span>
+            <span>Two trellis runners, two glowly runners, and a 512M sliver for the Docker Hub mirror: 32.5G.</span>
+          </figcaption>
+        </figure>
+      </section>
+
+      <section class="calc wrap" id="budget" aria-labelledby="budget-title">
+        <div class="calc-text">
+          <h2 id="budget-title">Check the budget before a job runs</h2>
+          <p>
+            Give each runner profile a memory cap and a number of slots. runnerd adds up slots × memory over every
+            profile, plus the Docker Hub mirror, and refuses a config that does not fit the slice's
+            <code>MemoryMax</code>. systemd holds the slice to that limit, so runners cannot take memory the rest of
+            the machine needs.
+          </p>
+          <form class="controls" data-calc hidden>
+            <fieldset>
+              <legend>The slice</legend>
+              <label>
+                <span>MemoryMax</span>
+                <input type="range" name="max" min="8" max="64" step="1" value={example.max} />
+                <output data-for="max">{example.max}G</output>
+              </label>
+            </fieldset>
+            <fieldset class="trellis">
+              <legend>trellis profile</legend>
+              <label>
+                <span>memory</span>
+                <input type="range" name="trellis-memory" min="1" max="16" step="0.5" value={example.trellis.memory} />
+                <output data-for="trellis-memory">{example.trellis.memory}G</output>
+              </label>
+              <label>
+                <span>slots</span>
+                <input type="range" name="trellis-slots" min="1" max="6" step="1" value={example.trellis.slots} />
+                <output data-for="trellis-slots">{example.trellis.slots}</output>
+              </label>
+            </fieldset>
+            <fieldset class="glowly">
+              <legend>glowly profile</legend>
+              <label>
+                <span>memory</span>
+                <input type="range" name="glowly-memory" min="1" max="16" step="0.5" value={example.glowly.memory} />
+                <output data-for="glowly-memory">{example.glowly.memory}G</output>
+              </label>
+              <label>
+                <span>slots</span>
+                <input type="range" name="glowly-slots" min="1" max="6" step="1" value={example.glowly.slots} />
+                <output data-for="glowly-slots">{example.glowly.slots}</output>
+              </label>
+            </fieldset>
+            <label class="toggle">
+              <input type="checkbox" name="mirror" checked />
+              <span>Docker Hub mirror, 512M</span>
+            </label>
+          </form>
+        </div>
+
+        <div class="calc-result" data-ui>
+          <div class="bar bar-small" aria-hidden="true" data-calc-bar>
+            <div class="slice" style="--share: 1"></div>
+            <div class="blocks">
+              {blocks.map((block) => <div class={`block ${block.kind}`} style={`--size: ${block.size}`} />)}
+              <div class="free" style={`--size: ${example.max - used}`}></div>
+            </div>
+          </div>
+          <pre class="terminal" aria-live="polite"><code><span class="prompt">$ runnerd check-config runnerd.toml --memory-max <span data-out="max">33G</span></span>
+<span data-out="result" class="ok">runnerd.toml: valid, memory caps sum to 32.5G</span></code></pre>
+        </div>
+      </section>
+
+      <section class="jobs" aria-labelledby="jobs-title">
+        <div class="wrap board">
+          <div class="tile tile-head">
+            <h2 id="jobs-title">Every job starts from nothing</h2>
+          </div>
+          <div class="tile tile-jit">
+            <code class="macro" aria-hidden="true">--jitconfig</code>
+            <h3>One runner, one job</h3>
+            <p>
+              Each runner starts from a just-in-time config, takes one job and unregisters. Its container goes with
+              it, so nothing a job leaves behind reaches the next one.
+            </p>
+          </div>
+          <div class="tile tile-sysbox">
+            <code class="macro" aria-hidden="true">sysbox-runc</code>
+            <h3>Docker inside, no --privileged</h3>
+            <p>
+              Sysbox gives every runner container its own Docker Engine, so <code>docker build</code> and
+              Testcontainers work while the container stays unprivileged.
+            </p>
+          </div>
+          <div class="tile tile-unsafe">
+            <code class="macro" aria-hidden="true">allow_unsafe</code>
+            <h3>Privileged only when you say so</h3>
+            <p>
+              <code>isolation = "unsafe-dind"</code> runs privileged containers, which a job can use to take over the
+              host. runnerd refuses it unless <code>[host]</code> also sets <code>allow_unsafe = true</code>.
+            </p>
+          </div>
+          <div class="tile tile-profile">
+            <code class="macro" aria-hidden="true">image_stage</code>
+            <h3>A profile per kind of build</h3>
+            <p>
+              The runner image has one Dockerfile stage per profile on a shared base. A Gradle and Android repository
+              and a pnpm and Playwright repository each get the tools they need, and their own caps.
+            </p>
+          </div>
+          <div class="tile tile-host">
+            <code class="macro" aria-hidden="true">cgroup v2</code>
+            <h3>On machines you already have</h3>
+            <p>
+              A laptop, a VM or a home server running Linux. runnerd never provisions machines, and it serves
+              repositories on GitHub.
+            </p>
+          </div>
+        </div>
+      </section>
+
+      <section class="doctor" id="doctor" aria-labelledby="doctor-title">
+        <div class="wrap doctor-grid">
+          <div class="doctor-text">
+            <h2 id="doctor-title">runnerd doctor names the fix</h2>
+            <p>
+              It checks a new machine in the order you would set it up, and every failure comes with the command
+              that fixes it. Pick a check to see both of its answers.
+            </p>
+            <div class="check-tabs" role="tablist" aria-label="doctor checks" data-tabs hidden>
+              {
+                checks.map((check, i) => (
+                  <button
+                    type="button"
+                    role="tab"
+                    id={`tab-${check.name}`}
+                    aria-controls={`panel-${check.name}`}
+                    aria-selected={i === 3 ? 'true' : 'false'}
+                    tabindex={i === 3 ? 0 : -1}
+                  >
+                    {check.name}
+                  </button>
+                ))
+              }
+            </div>
+          </div>
+          <div class="check-panels" data-ui>
+            {
+              checks.map((check, i) => (
+                <div
+                  class="check-panel"
+                  role="tabpanel"
+                  id={`panel-${check.name}`}
+                  aria-labelledby={`tab-${check.name}`}
+                  data-active={i === 3 ? '' : undefined}
+                >
+                  <h3>{check.name}</h3>
+                  <p>{check.what}</p>
+                  <pre class="terminal"><code><span class="ok">{check.ok}</span></code></pre>
+                  <pre class="terminal"><code><span class="fail">{check.fail}</span></code></pre>
+                </div>
+              ))
+            }
+          </div>
+        </div>
+      </section>
+
+      <section class="roadmap wrap" aria-labelledby="roadmap-title">
+        <h2 id="roadmap-title">What works today, and what comes next</h2>
+        <div class="sheet">
+          <div class="column today">
+            <h3>In 0.0.x</h3>
+            <ul>
+              {
+                today.map(([name, text]) => (
+                  <li>
+                    <strong>{name}</strong>: {text}
+                  </li>
+                ))
+              }
+            </ul>
+          </div>
+          <div class="column next">
+            <h3>Being built</h3>
+            <ul>
+              {
+                next.map(([name, text]) => (
+                  <li>
+                    <strong>{name}</strong>: {text}
+                  </li>
+                ))
+              }
+            </ul>
+          </div>
+        </div>
+      </section>
+
+      <section class="install wrap" id="install" aria-labelledby="install-title">
+        <div class="install-tile">
+          <h2 id="install-title">Install in one line</h2>
+          <p>
+            The script downloads <code>runnerd</code> and <code>runnerctl</code> from the latest release, checks their
+            SHA-256, copies them to <code>~/.local/bin</code> and runs <code>runnerd doctor</code>. It never uses sudo.
+          </p>
+          <div class="command">
+            <pre><code>{install}</code></pre>
+            <button class="copy" type="button" data-copy={install} hidden>Copy</button>
+          </div>
+          <p class="install-links">
+            <a href={docs}>Install guide and requirements</a>
+            <a href={`${docs}#verify-a-release`}>Verify a release</a>
+          </p>
+        </div>
+      </section>
+    </main>
+
+    <footer class="footer wrap">
+      <div class="mark-large" aria-hidden="true">
+        {['r', 'u', 'n', 'n', 'e', 'r', 'd'].map((letter, i) => <span style={`--i: ${i}`}>{letter}</span>)}
+      </div>
+      <div class="footer-row">
+        <nav aria-label="Footer">
+          <a href={docs}>Install</a>
+          <a href={`${base}configuration/`}>Configuration</a>
+          <a href={repo}>Source</a>
+          <a href={`${repo}/releases`}>Releases</a>
+        </nav>
+        <p>runnerd is MIT licensed. Linux hosts and GitHub repositories only, for now.</p>
+      </div>
+    </footer>
+
+    <script>
+      import { setup } from '../scripts/landing';
+      setup();
+    </script>
+  </body>
+</html>
+
+<style is:global>
+  *,
+  *::before,
+  *::after {
+    box-sizing: border-box;
+  }
+
+  html {
+    background: var(--bg);
+    color: var(--ink);
+    color-scheme: dark;
+    -webkit-text-size-adjust: 100%;
+  }
+
+  html[data-theme='light'] {
+    color-scheme: light;
+  }
+
+  body {
+    margin: 0;
+    font-family: var(--font-text);
+    font-size: clamp(1.0625rem, 1rem + 0.25vw, 1.1875rem);
+    line-height: 1.55;
+    overflow-x: clip;
+  }
+
+  :root {
+    --gutter: clamp(1rem, 3.2vw, 3rem);
+    --gap: 8px;
+    --step-small: 0.875rem;
+    --step-lead: clamp(1.25rem, 1.1rem + 0.7vw, 1.625rem);
+    --step-head: clamp(2rem, 1.3rem + 3.2vw, 4rem);
+    --step-display: clamp(2.75rem, 0.9rem + 7vw, 8.5rem);
+    --section: clamp(6rem, 4rem + 8vw, 12rem);
+    --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  }
+
+  .wrap {
+    width: 100%;
+    max-width: 1600px;
+    margin-inline: auto;
+    padding-inline: var(--gutter);
+  }
+
+  h1,
+  h2,
+  h3 {
+    font-family: var(--font-display);
+    font-weight: 700;
+    margin: 0;
+    text-wrap: balance;
+  }
+
+  h2 {
+    font-size: var(--step-head);
+    line-height: 1;
+    letter-spacing: -0.035em;
+  }
+
+  h3 {
+    font-size: 1.25rem;
+    line-height: 1.2;
+    letter-spacing: -0.01em;
+  }
+
+  p {
+    margin: 0;
+    max-width: 62ch;
+  }
+
+  a {
+    color: inherit;
+    text-underline-offset: 0.18em;
+  }
+
+  code,
+  pre {
+    font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
+  }
+
+  p code,
+  li code,
+  label code {
+    font-size: 0.88em;
+    background: var(--surface);
+    padding: 0.08em 0.3em;
+  }
+
+  .skip {
+    position: absolute;
+    left: var(--gutter);
+    top: -4rem;
+    background: var(--accent);
+    color: var(--accent-ink);
+    padding: 0.75rem 1rem;
+    font-family: var(--font-display);
+    z-index: 10;
+  }
+
+  .skip:focus {
+    top: 0.5rem;
+  }
+
+  /* Navigation: wordmark, three links, the theme switch. */
+  .nav {
+    display: flex;
+    align-items: center;
+    justify-content: space-between;
+    gap: 1rem;
+    min-height: 4.5rem;
+    font-family: var(--font-display);
+  }
+
+  .wordmark {
+    display: inline-flex;
+    align-items: center;
+    gap: 0.6rem;
+    min-height: 44px;
+    font-weight: 700;
+    font-size: 1.25rem;
+    letter-spacing: -0.03em;
+    text-decoration: none;
+  }
+
+  .mark svg {
+    display: block;
+    width: 1.75rem;
+    height: 1.75rem;
+  }
+
+  .nav nav {
+    display: flex;
+    align-items: center;
+    gap: clamp(0.25rem, 1.5vw, 1.75rem);
+  }
+
+  .nav nav a,
+  .theme {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    padding-inline: 0.5rem;
+    font-size: 1rem;
+    font-weight: 500;
+    text-decoration: none;
+  }
+
+  .nav nav a:hover {
+    text-decoration: underline;
+  }
+
+  .theme {
+    font-family: inherit;
+    color: inherit;
+    background: var(--surface);
+    border: 0;
+    cursor: pointer;
+    padding-inline: 0.85rem;
+  }
+
+  .theme:hover {
+    background: var(--surface-2);
+  }
+
+  html:not(.js) .theme {
+    display: none;
+  }
+
+  /* Hero: the title, then the budget bar as the one large shape. */
+  .hero {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    gap: clamp(2rem, 4.5vh, 3.5rem) clamp(1.5rem, 4vw, 4rem);
+    align-items: end;
+    padding-top: clamp(2rem, 6vh, 5rem);
+  }
+
+  .hero .budget {
+    grid-column: 1 / -1;
+  }
+
+  .hero h1 {
+    font-size: var(--step-display);
+    line-height: 0.92;
+    letter-spacing: -0.045em;
+    max-width: 12.5ch;
+  }
+
+  .hero-copy {
+    display: grid;
+    gap: 1.5rem;
+    padding-bottom: 0.4rem;
+  }
+
+  .lead {
+    font-size: clamp(1.1875rem, 1rem + 0.55vw, 1.4375rem);
+    line-height: 1.45;
+    max-width: 40ch;
+  }
+
+  .hero-side {
+    display: grid;
+    gap: 1.5rem;
+  }
+
+  .status {
+    color: var(--muted);
+    font-size: 1rem;
+    max-width: 44ch;
+  }
+
+  .actions {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: center;
+    gap: 0.75rem 1.75rem;
+    font-family: var(--font-display);
+  }
+
+  .button {
+    display: inline-flex;
+    align-items: center;
+    min-height: 52px;
+    padding: 0 1.75rem;
+    background: var(--accent);
+    color: var(--accent-ink);
+    font-weight: 700;
+    font-size: 1.0625rem;
+    text-decoration: none;
+    transition: transform 160ms var(--ease), background-color 160ms;
+  }
+
+  .button:hover {
+    transform: translateY(-2px);
+  }
+
+  .button:active {
+    transform: translateY(1px);
+  }
+
+  .text-link {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+    font-weight: 600;
+  }
+
+  /* The budget bar: the slice is the ground, each runner slot a block sized by its memory cap. */
+  .bar {
+    position: relative;
+    height: clamp(9rem, 32vh, 22rem);
+  }
+
+  .bar .slice {
+    position: absolute;
+    inset: 0 auto 0 0;
+    width: calc(var(--share) * 100%);
+    background: var(--surface);
+    transition: width 300ms var(--ease);
+  }
+
+  .bar .blocks {
+    position: relative;
+    display: flex;
+    gap: var(--gap);
+    height: 100%;
+  }
+
+  .block,
+  .free {
+    flex: var(--size) 1 0;
+    min-width: 0;
+  }
+
+  .block {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    padding: clamp(0.5rem, 1.4vw, 1.25rem);
+    color: var(--block-ink);
+    font-family: var(--font-display);
+    overflow: hidden;
+    transition: flex-grow 300ms var(--ease), background-color 200ms;
+  }
+
+  .block.trellis {
+    background: var(--mint);
+  }
+
+  .block.glowly {
+    background: var(--pink);
+  }
+
+  .block.mirror {
+    background: var(--ink);
+    flex-basis: 3px;
+  }
+
+  .block .size {
+    font-size: clamp(1.75rem, 0.6rem + 4.6vw, 5.5rem);
+    font-weight: 700;
+    letter-spacing: -0.05em;
+    line-height: 0.9;
+  }
+
+  .block .name {
+    font-size: clamp(0.8125rem, 0.7rem + 0.4vw, 1.0625rem);
+    font-weight: 600;
+    margin-top: 0.4rem;
+  }
+
+  .budget {
+    margin: 0;
+  }
+
+  .budget figcaption {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.25rem 2rem;
+    padding-top: 0.85rem;
+    font-family: var(--font-display);
+    font-size: var(--step-small);
+    color: var(--muted);
+  }
+
+  .budget figcaption span:first-child {
+    color: var(--ink);
+    font-weight: 600;
+  }
+
+  /* The calculator. */
+  .calc {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: clamp(2rem, 5vw, 6rem);
+    padding-top: var(--section);
+    align-items: start;
+  }
+
+  .calc-text {
+    display: grid;
+    gap: 1.5rem;
+  }
+
+  .controls {
+    display: grid;
+    gap: 1.25rem;
+    margin-top: 0.5rem;
+    font-family: var(--font-display);
+  }
+
+  .controls fieldset {
+    min-width: 0;
+    margin: 0;
+    padding: 1rem 1.25rem 0.5rem;
+    border: 0;
+    background: var(--surface);
+  }
+
+  .controls fieldset.trellis {
+    box-shadow: inset 6px 0 0 var(--mint);
+  }
+
+  .controls fieldset.glowly {
+    box-shadow: inset 6px 0 0 var(--pink);
+  }
+
+  .controls legend {
+    padding: 0;
+    font-weight: 700;
+    font-size: 1rem;
+  }
+
+  .controls label {
+    display: grid;
+    grid-template-columns: 6rem minmax(0, 1fr) 3.5rem;
+    align-items: center;
+    gap: 0.75rem;
+    min-height: 48px;
+    font-size: 1rem;
+  }
+
+  .controls output {
+    text-align: right;
+    font-weight: 700;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .controls input[type='range'] {
+    width: 100%;
+    height: 44px;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .controls .toggle {
+    grid-template-columns: auto 1fr;
+    padding-inline: 1.25rem;
+    background: var(--surface);
+    cursor: pointer;
+  }
+
+  .controls .toggle input {
+    width: 1.375rem;
+    height: 1.375rem;
+    margin: 0;
+    accent-color: var(--accent);
+  }
+
+  .calc-result {
+    display: grid;
+    gap: var(--gap);
+    position: sticky;
+    top: 1.5rem;
+  }
+
+  .bar-small {
+    height: clamp(6rem, 18vh, 11rem);
+  }
+
+  .bar-small .block {
+    padding: 0;
+  }
+
+  .terminal {
+    margin: 0;
+    padding: clamp(1rem, 2vw, 1.5rem);
+    background: var(--surface);
+    color: var(--ink);
+    font-size: clamp(0.8125rem, 0.75rem + 0.2vw, 0.9375rem);
+    line-height: 1.6;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .terminal .prompt {
+    color: var(--muted);
+  }
+
+  .terminal [data-out='result'].error {
+    background: var(--pink);
+    color: var(--block-ink);
+  }
+
+  /* Every job starts from nothing: a board of filled tiles, each with one real token cropped by its edges. */
+  .jobs {
+    padding-top: var(--section);
+  }
+
+  .board {
+    display: grid;
+    grid-template-columns: repeat(12, minmax(0, 1fr));
+    grid-auto-rows: minmax(104px, auto);
+    gap: var(--gap);
+  }
+
+  .tile {
+    position: relative;
+    overflow: hidden;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 0.5rem;
+    padding: clamp(1.25rem, 2vw, 2rem);
+    background: var(--surface);
+    color: var(--ink);
+  }
+
+  .tile p {
+    font-size: 1rem;
+    max-width: 46ch;
+    position: relative;
+  }
+
+  .tile h3 {
+    position: relative;
+  }
+
+  .tile .macro {
+    position: absolute;
+    top: clamp(1.25rem, 2vw, 2rem);
+    left: clamp(1.25rem, 2vw, 2rem);
+    font-size: clamp(2.25rem, 1rem + 4.5vw, 6rem);
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 1;
+    white-space: nowrap;
+    color: inherit;
+  }
+
+  /* Three rows of two tiles, each row split differently, all three tracks tall, so the board has no holes. */
+  .tile-head,
+  .tile-jit,
+  .tile-sysbox,
+  .tile-unsafe,
+  .tile-profile,
+  .tile-host {
+    grid-row: span 3;
+  }
+
+  .tile-head {
+    grid-column: span 5;
+    justify-content: flex-start;
+    background: var(--ink);
+    color: var(--bg);
+  }
+
+  .tile-head h2 {
+    max-width: 10ch;
+  }
+
+  .tile-jit {
+    grid-column: span 7;
+    background: var(--mint);
+    color: var(--block-ink);
+  }
+
+  .tile-sysbox {
+    grid-column: span 7;
+    background: var(--pink);
+    color: var(--block-ink);
+  }
+
+  .tile-jit p code,
+  .tile-sysbox p code {
+    background: rgb(0 0 0 / 0.07);
+  }
+
+  .tile-unsafe {
+    grid-column: span 5;
+  }
+
+  .tile-profile,
+  .tile-host {
+    grid-column: span 6;
+  }
+
+  .tile-unsafe .macro,
+  .tile-profile .macro,
+  .tile-host .macro {
+    font-size: clamp(2rem, 1rem + 2.6vw, 3.75rem);
+  }
+
+  /* doctor: a list of checks and one frame that shows the selected check's two answers. */
+  .doctor {
+    margin-top: var(--section);
+    padding-block: clamp(4rem, 3rem + 5vw, 8rem);
+    background: var(--ink);
+    color: var(--bg);
+  }
+
+  .doctor-grid {
+    display: grid;
+    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
+    gap: clamp(2rem, 5vw, 6rem);
+    align-items: start;
+  }
+
+  .doctor-text {
+    display: grid;
+    gap: 1.5rem;
+  }
+
+  .doctor h2 {
+    max-width: 11ch;
+  }
+
+  .check-tabs {
+    display: flex;
+    flex-direction: column;
+    align-items: flex-start;
+    margin-top: 0.5rem;
+  }
+
+  .check-tabs [role='tab'] {
+    min-height: 48px;
+    padding: 0.1rem 0;
+    background: none;
+    border: 0;
+    color: inherit;
+    font-family: var(--font-display);
+    font-size: clamp(1.75rem, 1rem + 2.2vw, 2.75rem);
+    font-weight: 700;
+    letter-spacing: -0.03em;
+    line-height: 1.1;
+    cursor: pointer;
+    opacity: 0.55;
+    transition: opacity 200ms, transform 200ms var(--ease);
+  }
+
+  .check-tabs [role='tab']:hover {
+    opacity: 0.8;
+  }
+
+  .check-tabs [role='tab'][aria-selected='true'] {
+    opacity: 1;
+    transform: translateX(0.75rem);
+  }
+
+  .check-tabs [role='tab'][aria-selected='true']::before {
+    content: '';
+    display: inline-block;
+    width: 0.5em;
+    height: 0.5em;
+    margin-right: 0.3em;
+    background: var(--mint);
+    vertical-align: 0.1em;
+  }
+
+  .check-panels {
+    display: grid;
+    gap: 2.5rem;
+  }
+
+  .check-panel {
+    display: grid;
+    gap: var(--gap);
+    align-content: start;
+  }
+
+  .check-panel h3 {
+    font-size: 1.5rem;
+  }
+
+  .check-panel p {
+    margin-bottom: 0.75rem;
+  }
+
+  .doctor .terminal:first-of-type {
+    background: var(--mint);
+    color: var(--block-ink);
+  }
+
+  .doctor .terminal:last-of-type {
+    background: var(--pink);
+    color: var(--block-ink);
+  }
+
+  /* With the script, one panel shows at a time in one place. */
+  .js .check-panels {
+    display: grid;
+    grid-template-areas: 'panel';
+  }
+
+  .js .check-panel {
+    grid-area: panel;
+    visibility: hidden;
+    opacity: 0;
+    transition: opacity 240ms;
+  }
+
+  .js .check-panel[data-active] {
+    visibility: visible;
+    opacity: 1;
+  }
+
+  .js .check-panel h3 {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+  }
+
+  /* Today and next: one sheet in two columns, a mint square for what ships, a pink one for what is coming. */
+  .roadmap {
+    padding-top: var(--section);
+    display: grid;
+    gap: clamp(2rem, 4vw, 3.5rem);
+  }
+
+  .roadmap h2 {
+    max-width: 16ch;
+  }
+
+  .sheet {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: var(--gap);
+  }
+
+  .column {
+    padding: clamp(1.5rem, 3vw, 3rem);
+    background: var(--surface);
+  }
+
+  .column h3 {
+    font-size: clamp(1.5rem, 1.2rem + 1vw, 2rem);
+    letter-spacing: -0.03em;
+    margin-bottom: 1.5rem;
+  }
+
+  .column ul {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    gap: 1.1rem;
+  }
+
+  .column li {
+    position: relative;
+    padding-left: 1.75rem;
+    max-width: 60ch;
+  }
+
+  .column li::before {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 0.42em;
+    width: 0.8rem;
+    height: 0.8rem;
+  }
+
+  .today li::before {
+    background: var(--mint);
+  }
+
+  .next li::before {
+    background: var(--pink);
+  }
+
+  .column strong {
+    font-family: var(--font-display);
+    font-weight: 700;
+  }
+
+  /* Install: the accent tile. */
+  .install {
+    padding-top: var(--section);
+  }
+
+  .install-tile {
+    display: grid;
+    gap: 1.5rem;
+    padding: clamp(1.75rem, 5vw, 5rem);
+    background: var(--mint);
+    color: var(--block-ink);
+  }
+
+  .install-tile p code {
+    background: rgb(0 0 0 / 0.07);
+  }
+
+  .command {
+    display: flex;
+    align-items: stretch;
+    gap: var(--gap);
+    max-width: 100%;
+  }
+
+  .command pre {
+    flex: 1;
+    min-width: 0;
+    margin: 0;
+    padding: 1rem 1.25rem;
+    background: var(--block-ink);
+    color: #f2f3f2;
+    font-size: clamp(0.8125rem, 0.75rem + 0.25vw, 1rem);
+    line-height: 1.5;
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+
+  .copy {
+    min-width: 5.5rem;
+    min-height: 48px;
+    border: 0;
+    background: #1f6b3a;
+    color: #ffffff;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: 1rem;
+    cursor: pointer;
+    transition: transform 160ms var(--ease);
+  }
+
+  .copy:active {
+    transform: translateY(1px);
+  }
+
+  .install-links {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 2rem;
+    font-family: var(--font-display);
+    font-weight: 600;
+  }
+
+  .install-links a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .install-tile :focus-visible {
+    outline-color: var(--block-ink);
+  }
+
+  /* Footer: the name built from blocks, one per letter, like runner slots in the slice. */
+  .footer {
+    padding-top: var(--section);
+    padding-bottom: 2.5rem;
+    display: grid;
+    gap: 2.5rem;
+  }
+
+  .mark-large {
+    display: flex;
+    align-items: flex-end;
+    gap: var(--gap);
+    height: clamp(9rem, 30svh, 20rem);
+  }
+
+  .mark-large span {
+    flex: 1;
+    display: flex;
+    align-items: flex-end;
+    justify-content: center;
+    height: calc(100% - var(--i) * 6%);
+    padding-bottom: 0.08em;
+    font-family: var(--font-display);
+    font-weight: 700;
+    font-size: clamp(3rem, 1rem + 9vw, 12rem);
+    line-height: 0.8;
+    letter-spacing: -0.04em;
+    color: var(--block-ink);
+    background: var(--mint);
+  }
+
+  .mark-large span:nth-child(n + 5) {
+    background: var(--pink);
+  }
+
+  .footer-row {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: center;
+    gap: 1rem 2rem;
+    font-family: var(--font-display);
+    font-size: 1rem;
+  }
+
+  .footer-row nav {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0 1.5rem;
+  }
+
+  .footer-row nav a {
+    display: inline-flex;
+    align-items: center;
+    min-height: 44px;
+  }
+
+  .footer-row p {
+    color: var(--muted);
+  }
+
+  /* Entrances, only with the script, so content never hides without it. */
+  .js [data-reveal] {
+    opacity: 0;
+    transform: translateY(24px);
+    transition: opacity 600ms var(--ease), transform 600ms var(--ease);
+    transition-delay: calc(var(--d, 0) * 80ms);
+  }
+
+  .js [data-reveal].in {
+    opacity: 1;
+    transform: none;
+  }
+
+  .js .budget-hero .block,
+  .js .budget-hero .slice {
+    animation: grow 900ms var(--ease) both;
+    animation-delay: calc(200ms + var(--i, 0) * 90ms);
+  }
+
+  @keyframes grow {
+    from {
+      transform: scaleY(0);
+      transform-origin: bottom;
+    }
+    to {
+      transform: scaleY(1);
+      transform-origin: bottom;
+    }
+  }
+
+  @media (prefers-reduced-motion: reduce) {
+    *,
+    *::before,
+    *::after {
+      animation-duration: 1ms !important;
+      animation-delay: 0ms !important;
+      transition-duration: 1ms !important;
+      transition-delay: 0ms !important;
+    }
+
+  }
+
+  /* Phone and narrow tablet: one column, the bar and the board recomposed. */
+  @media (max-width: 860px) {
+    .hero,
+    .calc,
+    .doctor-grid,
+    .sheet {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
+    .hero h1 {
+      font-size: clamp(2.6rem, 0.4rem + 10.4vw, 6rem);
+    }
+
+    .calc-result {
+      position: static;
+    }
+
+    /* On a phone the result sits above the sliders, so it stays in view while you drag them. */
+    .calc-text {
+      display: contents;
+    }
+
+    .calc-result {
+      order: 1;
+    }
+
+    .controls {
+      order: 2;
+      margin-top: 0;
+    }
+
+    .tile p {
+      max-width: none;
+    }
+
+    .board {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      gap: 6px;
+    }
+
+    .tile,
+    .tile-head,
+    .tile-jit,
+    .tile-sysbox,
+    .tile-unsafe,
+    .tile-profile,
+    .tile-host {
+      grid-column: span 2;
+      grid-row: auto;
+      min-height: 15rem;
+    }
+
+    .tile-head {
+      min-height: 10rem;
+    }
+
+    .check-tabs {
+      flex-direction: row;
+      flex-wrap: wrap;
+      gap: 6px;
+    }
+
+    .check-tabs [role='tab'] {
+      font-size: 1.125rem;
+      padding: 0 1rem;
+      background: color-mix(in srgb, var(--bg) 12%, transparent);
+      opacity: 1;
+    }
+
+    .check-tabs [role='tab'][aria-selected='true'] {
+      transform: none;
+      background: var(--mint);
+      color: var(--block-ink);
+    }
+
+    .check-tabs [role='tab'][aria-selected='true']::before {
+      display: none;
+    }
+  }
+
+  @media (max-width: 480px) {
+    .nav nav a[href='#install'] {
+      display: none;
+    }
+
+    .bar {
+      height: 11rem;
+    }
+
+    .block {
+      padding: 0.5rem 0.4rem;
+    }
+
+    .command {
+      flex-direction: column;
+    }
+
+    .mark-large {
+      height: 9rem;
+    }
+
+    .mark-large span {
+      font-size: 2.5rem;
+    }
+  }
+</style>

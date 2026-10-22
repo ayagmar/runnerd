@@ -1,0 +1,153 @@
+/* Shared by the landing page and the Starlight docs: fonts, colour roles, and Starlight's variables mapped onto them. */
+@import '@fontsource-variable/libre-franklin/wght.css';
+@import '@fontsource-variable/source-serif-4/wght.css';
+@import '@fontsource-variable/source-serif-4/wght-italic.css';
+
+:root {
+  --font-display: 'Libre Franklin Variable', 'Helvetica Neue', Arial, sans-serif;
+  --font-text: 'Source Serif 4 Variable', Georgia, 'Times New Roman', serif;
+
+  /* Two profiles in the example config, two colours: mint is trellis, pink is glowly. */
+  --mint: #c3edce;
+  --pink: #f8c7c9;
+  --block-ink: #0a0a0a;
+
+  --sl-font: var(--font-display);
+}
+
+/* Dark is Starlight's default theme. */
+:root {
+  --bg: #0d0f0e;
+  --surface: #1a1d1b;
+  --surface-2: #262a28;
+  --ink: #f2f3f2;
+  --muted: #a9b0ac;
+  --accent: #8fe0a6;
+  --accent-ink: #0a0a0a;
+
+  --sl-color-black: var(--bg);
+  --sl-color-gray-6: var(--surface);
+  --sl-color-gray-5: var(--surface-2);
+  --sl-color-gray-4: #4c524e;
+  --sl-color-gray-3: #8d9490;
+  --sl-color-gray-2: #cdd2cf;
+  --sl-color-gray-1: #eceeed;
+  --sl-color-white: var(--ink);
+  --sl-color-accent-low: #163d25;
+  --sl-color-accent: var(--accent);
+  --sl-color-accent-high: var(--mint);
+  --sl-color-text: var(--sl-color-gray-1);
+  --sl-color-text-invert: var(--accent-ink);
+  --sl-color-bg-nav: var(--bg);
+  --sl-color-bg-sidebar: var(--bg);
+  --sl-color-hairline: var(--surface);
+  --sl-color-hairline-light: var(--surface-2);
+}
+
+:root[data-theme='light'] {
+  --bg: #f8f8f8;
+  --surface: #ececec;
+  --surface-2: #dedede;
+  --ink: #0a0a0a;
+  --muted: #555555;
+  --accent: #1f6b3a;
+  --accent-ink: #ffffff;
+
+  --sl-color-black: var(--bg);
+  --sl-color-gray-7: #f2f2f2;
+  --sl-color-gray-6: var(--surface);
+  --sl-color-gray-5: var(--surface-2);
+  --sl-color-gray-4: #8c8c8c;
+  --sl-color-gray-3: #555555;
+  --sl-color-gray-2: #262626;
+  --sl-color-gray-1: #141414;
+  --sl-color-white: var(--ink);
+  --sl-color-accent-low: var(--mint);
+  --sl-color-accent: var(--accent);
+  --sl-color-accent-high: #134526;
+  --sl-color-text: var(--sl-color-gray-1);
+  --sl-color-text-accent: var(--accent);
+  --sl-color-text-invert: var(--accent-ink);
+  --sl-color-bg-nav: var(--bg);
+  --sl-color-bg-sidebar: var(--bg);
+  --sl-color-hairline: var(--surface);
+  --sl-color-hairline-light: var(--surface-2);
+}
+
+::selection {
+  background: var(--mint);
+  color: var(--block-ink);
+}
+
+/* Starlight docs. */
+.sl-markdown-content {
+  font-family: var(--font-text);
+  font-size: 1.0625rem;
+  line-height: 1.6;
+}
+
+.sl-markdown-content :is(h1, h2, h3, h4, h5, h6),
+h1#_top {
+  font-family: var(--font-display);
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+h1#_top {
+  letter-spacing: -0.035em;
+}
+
+.sl-markdown-content a {
+  color: var(--accent);
+  text-underline-offset: 0.18em;
+}
+
+.site-title {
+  font-weight: 700;
+  letter-spacing: -0.02em;
+}
+
+.site-title img {
+  height: 1.75rem;
+  width: auto;
+}
+
+.sidebar-content a[aria-current='page'] {
+  background: var(--mint);
+  color: var(--block-ink);
+}
+
+:focus-visible {
+  outline: 3px solid var(--accent);
+  outline-offset: 2px;
+}
+
+/* Starlight's phone header and menus: 44px tap targets. */
+@media (max-width: 72rem) {
+  :root {
+    --sl-menu-button-size: 2.75rem;
+  }
+
+  .site-title,
+  site-search > button[data-open-modal],
+  .social-icons a,
+  starlight-theme-select label,
+  .sidebar-content a,
+  .sidebar-content summary,
+  mobile-starlight-toc summary,
+  mobile-starlight-toc .dropdown a {
+    min-height: 44px;
+    align-items: center;
+  }
+
+  site-search > button[data-open-modal],
+  .social-icons a {
+    min-width: 44px;
+    justify-content: center;
+  }
+
+  .sidebar-content a,
+  mobile-starlight-toc .dropdown a {
+    display: flex;
+  }
+}
