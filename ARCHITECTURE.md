@@ -78,6 +78,7 @@ nothing until Docker has listed them.
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
 - `scheduler::plan` does no I/O and reads no clock.
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order.
-- A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored before it is broadcast, so
-  its ID is a position a client can resume from with `Last-Event-ID`.
+- A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored in the same transaction as
+  the change it announces and broadcast only after it commits, so its ID is a position a client can resume from
+  with `Last-Event-ID`.
 - The engine does not start a runner for a queued job one of its runners holds, whatever GitHub's queue says.

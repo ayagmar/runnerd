@@ -176,3 +176,30 @@ async fn a_job_counts_its_usage_from_the_last_sample_before_it_started() {
     assert_eq!(metrics.cpu_time, Some(2500));
     assert_eq!(metrics.network_received, Some(11_000_000));
 }
+
+#[tokio::test]
+async fn a_change_whose_event_cannot_be_stored_is_not_made_or_announced() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    let mut events = store.subscribe();
+    let fault = Connection::open(&path).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
+        )
+        .unwrap();
+    store.queued("o/r", &queued(1));
+    store.flush().await;
+    assert_eq!(store.job(1).await.unwrap(), None);
+    assert!(events.try_recv().is_err());
+
+    // Once events can be stored again, the same change goes through with its event.
+    fault.execute_batch("DROP TRIGGER no_events").unwrap();
+    store.queued("o/r", &queued(1));
+    store.flush().await;
+    assert!(store.job(1).await.unwrap().is_some());
+    let stored = store.events_after(0, 10).await.unwrap();
+    assert_eq!(stored.len(), 1);
+    assert_eq!(events.try_recv().unwrap().id, stored[0].id);
+}
