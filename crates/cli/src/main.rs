@@ -9,3 +9,4 @@ fn main() {
     Cli::parse();
 }
 // ci measurement
+fn  badly_formatted( ) {}
