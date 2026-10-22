@@ -154,6 +154,8 @@ struct DockerState {
     containers: Vec<Container>,
     /// Every `list` fails, as when the Engine does not answer.
     fail_lists: bool,
+    /// How many `remove`s fail next, as when the Engine is busy.
+    fail_removes: u32,
     /// What the Docker Hub mirror's log says.
     mirror_log: String,
     /// What the log capture prints in a container, by the position it is started at.
@@ -221,6 +223,13 @@ impl DockerApi for FakeDocker {
     async fn remove(&self, container: &str) -> Result<(), docker::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("remove {container}"));
+        if state.fail_removes > 0 {
+            state.fail_removes -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
         state
             .containers
             .retain(|candidate| candidate.id != container && candidate.name != container);
@@ -966,6 +975,28 @@ async fn the_runner_of_a_cancelled_run_that_does_not_exit_is_removed_after_a_whi
     tokio::time::advance(super::CANCEL_GRACE).await;
     engine.tick(Shutdown::No).await;
     assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+}
+
+#[tokio::test]
+async fn the_runner_of_a_cancelled_run_is_removed_on_a_later_tick_when_docker_fails_once() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    engine.pause("o/r", true).await.unwrap();
+    tokio::time::pause();
+    tokio::time::advance(super::CANCEL_GRACE).await;
+    docker.0.lock().unwrap().fail_removes = 1;
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1).as_deref(), Some("o/r"));
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None);
+    assert_eq!(docker.0.lock().unwrap().containers.len(), 0);
 }
 
 #[tokio::test]

@@ -1742,7 +1742,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         Ok(api::Paused { stopped })
     }
 
-    /// Removes the runners of cancelled runs that did not exit within `CANCEL_GRACE`.
+    /// Removes the runners of cancelled runs that did not exit within `CANCEL_GRACE`, every tick until they are gone.
     async fn kill_cancelled(&mut self) {
         let now = tokio::time::Instant::now();
         let running: BTreeSet<String> = self
@@ -1764,7 +1764,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 "{name} did not exit {}s after its run was cancelled",
                 CANCEL_GRACE.as_secs()
             );
-            self.cancelling.remove(&name);
+            // The deadline stays until the runner is gone, so a failed removal is tried again next tick.
             self.stop(&slot, true).await;
         }
     }
