@@ -25,7 +25,7 @@ jobs:
     runs-on: ubuntu-24.04
     permissions:
       contents: read
-      pull-requests: read
+      pull-requests: read # paths-filter lists the pull request's files through the API
     outputs:
       rust: ${{ steps.pick.outputs.rust }}
       deny: ${{ steps.pick.outputs.deny }}
@@ -173,8 +173,8 @@ jobs:
       group: pages
       cancel-in-progress: false
     permissions:
-      pages: write
-      id-token: write
+      pages: write # publish the site
+      id-token: write # deploy-pages proves the run's identity with an OIDC token
     environment:
       name: github-pages
       url: ${{ steps.deployment.outputs.page_url }}
@@ -226,7 +226,7 @@ jobs:
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:
-      actions: read
+      actions: read # read this run's job timings
     steps:
       - name: Job timings
         continue-on-error: true
