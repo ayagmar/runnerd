@@ -44,13 +44,21 @@ pub fn host_name() -> std::io::Result<String> {
     })
 }
 
-/// `<host>-<id>`: the host name in lower case, letters, digits and dashes, at most 20 characters, then the first 8
-/// hex digits of the machine ID. The ID's fixed length keeps one machine's prefix from starting another's names.
+/// `<host>-<id>`: the host name in lower case, letters, digits and dashes, at most 20 characters, then 8 hex digits
+/// derived from the machine ID. The ID's fixed length keeps one machine's prefix from starting another's names. It
+/// is a hash, not the start of the machine ID, which machine-id(5) asks applications not to expose.
 fn host_id(hostname: &str, machine_id: &str) -> Option<String> {
-    let id: String = machine_id.trim().chars().take(8).collect();
-    if id.len() < 8 || !id.chars().all(|c| c.is_ascii_hexdigit()) {
+    let machine_id = machine_id.trim();
+    if machine_id.len() != 32 || !machine_id.chars().all(|c| c.is_ascii_hexdigit()) {
         return None;
     }
+    // FNV-1a: stable across Rust releases, unlike std's hasher, so a new build recognizes the runners of the old.
+    let hash = format!("runnerd:{}", machine_id.to_ascii_lowercase())
+        .bytes()
+        .fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+            (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
+        });
+    let id = format!("{:08x}", hash >> 32);
     let name: String = hostname
         .trim()
         .chars()
@@ -65,7 +73,7 @@ fn host_id(hostname: &str, machine_id: &str) -> Option<String> {
         .collect();
     let name = name.trim_matches('-');
     let name = if name.is_empty() { "host" } else { name };
-    Some(format!("{name}-{}", id.to_ascii_lowercase()))
+    Some(format!("{name}-{id}"))
 }
 
 /// How the daemon is asked to stop.

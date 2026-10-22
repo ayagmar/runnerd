@@ -17,11 +17,15 @@ fn no_machines_runner_prefix_starts_another_machines_runner_names() {
 }
 
 #[test]
-fn the_host_part_is_short_and_safe_in_runner_and_container_names() {
+fn the_host_part_is_short_safe_and_hides_the_machine_id() {
+    let id = host_id("ci", ID_A).unwrap();
+    let id = id.trim_start_matches("ci-");
+    assert_eq!(id.len(), 8);
+    assert!(!ID_A.contains(id), "the machine ID shows in {id}");
     assert_eq!(
         host_id("My.Very_Long-Hostname.example.org\n", ID_A).unwrap(),
-        "my-very-long-hostnam-0123abcd"
+        format!("my-very-long-hostnam-{id}")
     );
-    assert_eq!(host_id("", ID_A).unwrap(), "host-0123abcd");
+    assert_eq!(host_id("", ID_A).unwrap(), format!("host-{id}"));
     assert_eq!(host_id("ci", "not-an-id"), None);
 }
