@@ -870,7 +870,7 @@ async fn an_adopted_job_that_runs_long_after_a_restart_is_not_lost() {
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     tokio::time::pause();
-    tokio::time::advance(super::LOST_AFTER + Duration::from_secs(60)).await;
+    tokio::time::advance(super::history::LOST_AFTER + Duration::from_secs(60)).await;
     engine.tick(Shutdown::No).await;
     handle.store.flush().await;
     let job = handle.store.job(1).await.unwrap().unwrap();
@@ -1022,7 +1022,7 @@ async fn the_runner_of_a_cancelled_run_that_does_not_exit_is_removed_after_a_whi
     engine.tick(Shutdown::No).await;
     assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
     tokio::time::pause();
-    tokio::time::advance(super::CANCEL_GRACE).await;
+    tokio::time::advance(super::control::CANCEL_GRACE).await;
     engine.tick(Shutdown::No).await;
     assert_eq!(removed(&docker.calls()), ["remove container-1"]);
 }
@@ -1038,7 +1038,7 @@ async fn the_runner_of_a_cancelled_run_is_removed_on_a_later_tick_when_docker_fa
     engine.tick(Shutdown::No).await;
     engine.pause("o/r", true).await.unwrap();
     tokio::time::pause();
-    tokio::time::advance(super::CANCEL_GRACE).await;
+    tokio::time::advance(super::control::CANCEL_GRACE).await;
     docker.0.lock().unwrap().fail_removes = 1;
     engine.tick(Shutdown::No).await;
     engine.publish();

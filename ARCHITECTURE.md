@@ -37,6 +37,11 @@ client → transport → principal → handler → core
 4. The engine ([`crates/core/src/scheduler/engine.rs`](crates/core/src/scheduler/engine.rs)) owns all slot state.
    It publishes `api::Status` after every tick and takes commands only through `Control`: a command that needs slot
    state is a `Command` on a channel the engine answers between ticks, so it sees the same state a tick does.
+   `engine.rs` holds `Engine`'s state, its construction and its loop; each submodule of
+   [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
+   and planning), `runners` (a slot's runner from start to removal), `caches` (reseeds, the mirror, the shared
+   caches), `history` (what the store records), `control` (`Control` and the commands) and `status` (what it
+   publishes).
 
 A new transport (SSH, Tailscale) produces a `Principal` and reuses the handlers.
 
