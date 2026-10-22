@@ -48,7 +48,7 @@ runnerd doctor runnerd.toml
 docker build --target jvm -t runnerd-runner:jvm image
 ```
 
-`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it.
+`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it. Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
 
 Documentation: <https://ayagmar.github.io/runnerd/>
 

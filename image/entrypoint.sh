@@ -31,9 +31,4 @@ jitconfig=$(< "$jitconfig_file")
 rm -f "$jitconfig_file"
 export HOME=/home/runner USER=runner LOGNAME=runner
 cd "$HOME"
-as_runner=(setpriv --reuid=runner --regid=runner --init-groups --)
-# This SDK command-line tools release ignores `sdkmanager --licenses`; installing platform-tools records the
-# license, after which Android builds may download the platform and build tools they need.
-[ -d "$ANDROID_HOME/platform-tools" ] \
-    || { yes || true; } | "${as_runner[@]}" "$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager" --install platform-tools > /dev/null
-exec "${as_runner[@]}" ./run.sh --jitconfig "$jitconfig"
+exec setpriv --reuid=runner --regid=runner --init-groups -- ./run.sh --jitconfig "$jitconfig"

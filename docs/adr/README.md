@@ -28,3 +28,4 @@ with a line pointing to the record that replaces it.
 | [0020](0020-dashboard-is-an-api-client-on-loopback.md) | The dashboard is an API client, on loopback behind a one-time login |
 | [0021](0021-clients-speak-http-over-the-socket-with-hyper.md) | Clients speak HTTP over the socket with hyper |
 | [0022](0022-terminal-ui-is-ratatui-in-runnerctl.md) | The terminal UI is ratatui in runnerctl, behind a feature |
+| [0023](0023-runner-image-pinned-to-a-snapshot-date.md) | Runner image pinned to an Ubuntu snapshot date |
