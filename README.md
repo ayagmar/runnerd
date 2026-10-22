@@ -45,7 +45,7 @@ runnerd doctor runnerd.toml
 [`image/`](image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base. A profile's `image_stage` picks the stage:
 
 ```sh
-docker build --target trellis -t runnerd-runner:trellis image
+docker build --target jvm -t runnerd-runner:jvm image
 ```
 
 `runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it.
@@ -152,7 +152,7 @@ and [ARCHITECTURE.md](ARCHITECTURE.md) where the code lives.
 The tests that start real containers are ignored by default. They need Docker with sysbox and the images:
 
 ```sh
-docker build --target trellis -t runnerd-runner:trellis image
+docker build --target jvm -t runnerd-runner:jvm image
 docker build --target base -t runnerd-runner:base image
 cargo test -p runnerd-core --test docker_smoke --test cache_reseed -- --ignored
 ```

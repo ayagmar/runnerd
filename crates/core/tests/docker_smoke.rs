@@ -1,5 +1,5 @@
 //! Starts a runner container on the local Docker Engine and runs a container inside it. Needs the isolation
-//! backend installed and the runner image built (`docker build --target trellis -t runnerd-runner:trellis image`):
+//! backend installed and the runner image built (`docker build --target jvm -t runnerd-runner:jvm image`):
 //!
 //! ```sh
 //! cargo test -p runnerd-core --test docker_smoke -- --ignored --nocapture
@@ -103,7 +103,7 @@ async fn with_runner(
     .map_err(|e| e.to_string())?;
     let spec = RunnerSpec {
         name: name.clone(),
-        image: std::env::var("RUNNERD_TEST_IMAGE").unwrap_or("runnerd-runner:trellis".to_owned()),
+        image: std::env::var("RUNNERD_TEST_IMAGE").unwrap_or("runnerd-runner:jvm".to_owned()),
         profile: "smoke".to_owned(),
         // Docker's default slice: outside the runners' budget, and it exists already, so the test leaves no unit.
         slice: "system.slice".to_owned(),
