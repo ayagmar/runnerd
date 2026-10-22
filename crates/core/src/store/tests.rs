@@ -2,8 +2,8 @@
 
 use rusqlite::Connection;
 
-use super::{LogPosition, MIGRATIONS, Store, StoreError};
-use crate::api::{JobQuery, JobState};
+use super::{LogPosition, MIGRATIONS, RunnerRecord, Store, StoreError};
+use crate::api::{JobQuery, JobState, StatsQuery};
 use crate::github::QueuedJob;
 use crate::testdir::TestDir;
 
@@ -92,4 +92,42 @@ async fn jobs_list_newest_first_by_repository_in_pages() {
     let second = page(first.next).await.unwrap();
     let ids: Vec<u64> = second.jobs.iter().map(|job| job.id).collect();
     assert_eq!((ids, second.next), (vec![1], None));
+}
+
+fn runner(name: &str, started_at: u64) -> RunnerRecord {
+    RunnerRecord {
+        name: name.to_owned(),
+        repository: "o/r".to_owned(),
+        profile: "app".to_owned(),
+        slot: 1,
+        container: format!("{name}-container"),
+        started_at,
+    }
+}
+
+#[tokio::test]
+async fn stats_count_a_lost_job_without_a_conclusion_as_failed() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.queued("o/r", &queued(1));
+    store.runner_started(runner("r1", 1_000_100));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.lost(1, 1_000_300);
+    store.flush().await;
+    let stats = store
+        .stats(
+            StatsQuery {
+                since: Some(0),
+                ..StatsQuery::default()
+            },
+            2_000,
+        )
+        .await
+        .unwrap();
+    let counts: Vec<(u64, u64, u64, u64)> = stats
+        .rows
+        .iter()
+        .map(|row| (row.jobs, row.succeeded, row.failed, row.cancelled))
+        .collect();
+    assert_eq!(counts, [(1, 0, 1, 0)]);
 }

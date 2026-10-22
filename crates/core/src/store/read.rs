@@ -366,9 +366,9 @@ pub(super) fn stats(
     let rows = db
         .prepare_cached(
             "SELECT j.queued_at / ?1 * ?1, j.repository, count(*), \
-             sum(j.conclusion = 'success'), \
-             sum(j.state = 'lost' OR j.conclusion IN ('failure', 'timed_out')), \
-             sum(j.conclusion = 'cancelled'), \
+             count(*) FILTER (WHERE j.conclusion = 'success'), \
+             count(*) FILTER (WHERE j.state = 'lost' OR j.conclusion IN ('failure', 'timed_out')), \
+             count(*) FILTER (WHERE j.conclusion = 'cancelled'), \
              sum(max(coalesce(j.started_at, j.queued_at) - j.queued_at, 0)) / 1000, \
              sum(max(coalesce(j.finished_at, j.started_at, 0) - coalesce(j.started_at, 0), 0)) / 1000, \
              sum(coalesce(j.cpu_time, 0)), max(coalesce(j.memory_peak, 0)), \
