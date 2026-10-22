@@ -774,6 +774,11 @@ fn finished(id: u64, ago: u64) -> JobSummary {
     job
 }
 
+/// The rows of `screen` that contain `text`.
+fn rows_with<'screen>(screen: &'screen str, text: &str) -> Vec<&'screen str> {
+    screen.lines().filter(|row| row.contains(text)).collect()
+}
+
 #[test]
 fn how_long_ago_a_job_finished_reads_in_full_at_every_width() {
     let mut app = app();
@@ -800,6 +805,35 @@ fn how_long_ago_a_job_finished_reads_in_full_at_every_width() {
         assert!(
             history.contains("17m 31s ago"),
             "the age reads in full at {width}: {history}"
+        );
+    }
+}
+
+#[test]
+fn every_slot_card_title_keeps_its_slot_number_and_a_rule() {
+    let mut app = app();
+    app.live.status.profiles[1] = profile("node", 2, 7 << 30);
+    for width in [96, 104, 120, 136] {
+        let overview = screen(&app, width, 40, false);
+        for card in [
+            "jvm · slot 1",
+            "jvm · slot 2",
+            "node · slot 1",
+            "node · slot 2",
+        ] {
+            assert!(
+                overview.contains(&format!("{card} ─")) || overview.contains(&format!("{card} ━")),
+                "{card} then its rule at {width}: {overview}"
+            );
+        }
+        // The size reads the same on every card.
+        let sizes = rows_with(&overview, " · slot ")
+            .iter()
+            .map(|row| row.matches("CPUs").count())
+            .sum::<usize>();
+        assert!(
+            sizes == 0 || sizes == 4,
+            "every card or none shows its CPUs at {width}: {overview}"
         );
     }
 }

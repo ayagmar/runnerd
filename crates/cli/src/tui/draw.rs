@@ -538,17 +538,34 @@ fn slot_cards(
     let slots: Vec<_> = app.slots().collect();
     let rows =
         Layout::vertical(vec![Constraint::Length(7); slots.len().div_ceil(columns)]).split(rest);
-    for (position, (index, profile, slot)) in slots.into_iter().enumerate() {
-        let row = rows[position / columns];
-        let cells = Layout::horizontal(vec![
+    let cells = |row| {
+        Layout::horizontal(vec![
             Constraint::Ratio(
                 1,
                 u32::try_from(columns).unwrap_or(1)
             );
             columns
         ])
-        .split(row);
-        let cell = cells[position % columns];
+        .split(row)
+    };
+    // Every title keeps at least a cell of its rule: the size drops its CPUs, then itself, alike on every card,
+    // before a name is cut. Left for the name: the width less the corners, the rule's cell, ` ■ ` and a space.
+    let name_width = usize::from(cells(rest).iter().map(|cell| cell.width).min().unwrap_or(0))
+        .saturating_sub(2 + 1 + 3 + 1);
+    let longest = slots
+        .iter()
+        .map(|(_, profile, slot)| card_title(profile, slot).chars().count())
+        .max()
+        .unwrap_or(0);
+    let detail = (0..2)
+        .find(|&detail| {
+            slots.iter().all(|(_, profile, _)| {
+                longest + card_sizes(profile)[detail].chars().count() <= name_width
+            })
+        })
+        .unwrap_or(2);
+    for (position, (index, profile, slot)) in slots.into_iter().enumerate() {
+        let cell = cells(rows[position / columns])[position % columns];
         let style = theme.profile(Some(index));
         let focused = app.pane == Pane::Slots && position == app.slot;
         let block = Block::bordered()
@@ -561,22 +578,35 @@ fn slot_cards(
             .title(Line::from(vec![
                 Span::styled(" ■ ", style),
                 Span::styled(
-                    format!("{} · slot {} ", profile.name, slot.slot),
+                    format!(
+                        "{} ",
+                        fit(&card_title(profile, slot), name_width).trim_end()
+                    ),
                     if focused { selected() } else { bold() },
                 ),
             ]))
             .title_top(
-                Line::styled(
-                    format!(" {} · {} CPUs ", bytes(profile.memory), profile.cpus),
-                    theme.dim(),
-                )
-                .right_aligned(),
+                Line::styled(card_sizes(profile)[detail].clone(), theme.dim()).right_aligned(),
             );
         let inner = block.inner(cell);
         frame.render_widget(block, cell);
         let lines = card(app, profile, slot, usize::from(inner.width), now, theme);
         frame.render_widget(Paragraph::new(lines), inner);
     }
+}
+
+/// A slot card's name in its title, such as `jvm · slot 1`.
+fn card_title(profile: &ProfileStatus, slot: &SlotStatus) -> String {
+    format!("{} · slot {}", profile.name, slot.slot)
+}
+
+/// A slot card's size in its title, from the fullest to none.
+fn card_sizes(profile: &ProfileStatus) -> [String; 3] {
+    [
+        format!(" {} · {} CPUs ", bytes(profile.memory), profile.cpus),
+        format!(" {} ", bytes(profile.memory)),
+        String::new(),
+    ]
 }
 
 /// What a slot card shows: its job with step, time, memory and CPU; its runner waiting for a job; or nothing.
