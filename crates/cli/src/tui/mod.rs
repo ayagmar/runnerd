@@ -224,13 +224,13 @@ impl Requests {
                     );
                 });
             }
-            Effect::History(query) => {
+            Effect::History { generation, query } => {
                 tokio::spawn(async move {
-                    answer(
-                        &send,
-                        client.get_query::<JobPage>("/v1/jobs", &query).await,
-                        Msg::History,
-                    );
+                    let page = client
+                        .get_query::<JobPage>("/v1/jobs", &query)
+                        .await
+                        .map_err(|error| error.to_string());
+                    let _ = send.send(Msg::History { generation, page });
                 });
             }
             Effect::Pause { repository, force } => {

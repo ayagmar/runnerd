@@ -36,7 +36,11 @@ pub(crate) enum Msg {
     Reconnected,
     Job(Job),
     Samples(SampleSeries),
-    History(JobPage),
+    /// The answer to the history request of this generation.
+    History {
+        generation: u64,
+        page: Result<JobPage, String>,
+    },
     LogLine {
         job: u64,
         text: String,
@@ -61,7 +65,11 @@ pub(crate) enum Effect {
     /// Stop following the open job's log.
     CloseJob,
     RefreshJob(u64),
-    History(JobQuery),
+    /// Read a history page; the answer carries the generation, so a later request's answer wins.
+    History {
+        generation: u64,
+        query: JobQuery,
+    },
     Pause {
         repository: String,
         force: bool,
@@ -126,9 +134,25 @@ pub(crate) struct History {
     pub(crate) previous: Vec<Option<u64>>,
     pub(crate) before: Option<u64>,
     pub(crate) selected: usize,
+    /// The last request's generation; answers to earlier ones are ignored.
+    generation: u64,
 }
 
 impl History {
+    /// Asks for the page the filters and `before` name. With `fresh`, the rows shown are from other filters or
+    /// another page, so they go until the answer comes, and with them their continuation for `]`.
+    fn request(&mut self, fresh: bool) -> Effect {
+        self.generation += 1;
+        if fresh {
+            self.page = None;
+            self.selected = 0;
+        }
+        Effect::History {
+            generation: self.generation,
+            query: self.query(),
+        }
+    }
+
     fn query(&self) -> JobQuery {
         JobQuery {
             repository: self.repository.clone(),
@@ -225,10 +249,18 @@ impl App {
                     }
                 }
             }
-            Msg::History(page) => {
-                self.history.selected =
-                    self.history.selected.min(page.jobs.len().saturating_sub(1));
-                self.history.page = Some(page);
+            Msg::History { generation, page } => {
+                if generation != self.history.generation {
+                    return Vec::new();
+                }
+                match page {
+                    Ok(page) => {
+                        self.history.selected =
+                            self.history.selected.min(page.jobs.len().saturating_sub(1));
+                        self.history.page = Some(page);
+                    }
+                    Err(error) => self.flash(error, true),
+                }
             }
             Msg::LogLine { job, text } => {
                 if let Some(open) = &mut self.job
@@ -274,7 +306,7 @@ impl App {
             Event::JobFinished { job } => {
                 self.series.remove(&job.id);
                 if self.view == View::History && self.history.before.is_none() {
-                    effects.push(Effect::History(self.history.query()));
+                    effects.push(self.history.request(false));
                 }
             }
             Event::CacheReseeded {
@@ -412,15 +444,13 @@ impl App {
                 if let Some(next) = self.history.page.as_ref().and_then(|page| page.next) {
                     self.history.previous.push(self.history.before);
                     self.history.before = Some(next);
-                    self.history.selected = 0;
-                    return vec![Effect::History(self.history.query())];
+                    return vec![self.history.request(true)];
                 }
             }
             KeyCode::Char('[') => {
                 if let Some(before) = self.history.previous.pop() {
                     self.history.before = before;
-                    self.history.selected = 0;
-                    return vec![Effect::History(self.history.query())];
+                    return vec![self.history.request(true)];
                 }
             }
             _ => {}
@@ -435,7 +465,7 @@ impl App {
             effects.push(Effect::CloseJob);
         }
         if view == View::History && self.view != View::History {
-            effects.push(Effect::History(self.history.query()));
+            effects.push(self.history.request(false));
         }
         self.view = view;
         effects
@@ -444,8 +474,7 @@ impl App {
     fn first_page(&mut self) -> Vec<Effect> {
         self.history.previous.clear();
         self.history.before = None;
-        self.history.selected = 0;
-        vec![Effect::History(self.history.query())]
+        vec![self.history.request(true)]
     }
 
     /// Opens a job; its record, samples and log arrive as messages.

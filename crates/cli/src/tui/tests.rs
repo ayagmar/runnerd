@@ -339,11 +339,12 @@ fn every_pane_fits_a_terminal_of_80_by_24() {
         assert!(job.contains(expected), "{expected}: {job}");
     }
 
-    app.update(key(KeyCode::Char('2')));
-    app.update(Msg::History(runnerd_core::api::JobPage {
-        jobs: vec![summary(42, JobState::Running)],
-        next: None,
-    }));
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(
+        generation,
+        vec![summary(42, JobState::Running)],
+        None,
+    ));
     let history = screen(&app, 80, 24, true);
     assert!(
         history.contains("OUTCOME") && history.contains("RUNNING"),
@@ -483,23 +484,39 @@ async fn a_dropped_event_stream_shows_reconnecting_and_resumes_after_the_last_ev
     assert_eq!(seen.last(), Some(&Some("7".to_owned())));
 }
 
-/// The history page the effects ask for.
+/// The history request among the effects: its generation and query.
+fn history_request(effects: &[Effect]) -> (u64, runnerd_core::api::JobQuery) {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::History { generation, query } => Some((*generation, query.clone())),
+            _ => None,
+        })
+        .unwrap_or_else(|| panic!("expected a history request, not {effects:?}"))
+}
+
 fn history_query(effects: &[Effect]) -> runnerd_core::api::JobQuery {
-    match effects {
-        [Effect::History(query)] => query.clone(),
-        other => panic!("expected a history request, not {other:?}"),
+    history_request(effects).1
+}
+
+/// The daemon's answer to a history request.
+fn history_page(generation: u64, jobs: Vec<JobSummary>, next: Option<u64>) -> Msg {
+    Msg::History {
+        generation,
+        page: Ok(runnerd_core::api::JobPage { jobs, next }),
     }
 }
 
 #[test]
 fn the_history_filters_ask_for_the_first_page_again() {
     let mut app = app();
-    let first = history_query(&app.update(key(KeyCode::Char('2'))));
+    let (generation, first) = history_request(&app.update(key(KeyCode::Char('2'))));
     assert_eq!((first.conclusion, first.before), (None, None));
-    app.update(Msg::History(runnerd_core::api::JobPage {
-        jobs: vec![summary(42, JobState::Completed)],
-        next: Some(42),
-    }));
+    app.update(history_page(
+        generation,
+        vec![summary(42, JobState::Completed)],
+        Some(42),
+    ));
     let next = history_query(&app.update(key(KeyCode::Char(']'))));
     assert_eq!(next.before, Some(42));
     let failed = history_query(&app.update(key(KeyCode::Char('c'))));
@@ -572,4 +589,37 @@ fn an_open_job_keeps_only_its_newest_samples() {
     assert_eq!(samples.len(), 300);
     assert_eq!(samples.iter().last().map(|sample| sample.at), Some(5999));
     assert_eq!(samples.iter().next().map(|sample| sample.at), Some(5700));
+}
+
+#[test]
+fn a_late_answer_to_an_earlier_history_filter_is_ignored() {
+    let mut app = app();
+    let (first, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(
+        first,
+        vec![summary(40, JobState::Completed)],
+        Some(40),
+    ));
+    let (failures, _) = history_request(&app.update(key(KeyCode::Char('c'))));
+    // The rows and their continuation belong to the old filter: no next page while the new one loads.
+    assert_eq!(app.update(key(KeyCode::Char(']'))), Vec::new());
+    let (successes, query) = history_request(&app.update(key(KeyCode::Char('c'))));
+    assert_eq!(query.conclusion.as_deref(), Some("success"));
+
+    // The answers come back in the other order.
+    let mut succeeded = summary(43, JobState::Completed);
+    succeeded.conclusion = Some("success".to_owned());
+    let mut failed = summary(44, JobState::Completed);
+    failed.conclusion = Some("failure".to_owned());
+    app.update(history_page(successes, vec![succeeded], None));
+    app.update(history_page(failures, vec![failed], Some(44)));
+
+    let page = app.history.page.as_ref().unwrap();
+    assert_eq!(page.jobs.iter().map(|job| job.id).collect::<Vec<_>>(), [43]);
+    let history = screen(&app, 120, 40, false);
+    assert!(history.contains("outcome success"), "{history}");
+    assert!(
+        history.contains("SUCCESS") && !history.contains("FAILURE"),
+        "{history}"
+    );
 }
