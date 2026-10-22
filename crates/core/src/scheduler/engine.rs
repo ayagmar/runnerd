@@ -318,9 +318,38 @@ impl Engine {
         info!("stopped");
     }
 
+    /// Takes over the seed containers a previous daemon left: a running one counts as its profile's reseed, so no
+    /// runner of the profile starts while it rewrites the snapshot and the slots' layers.
+    async fn recover_reseeds(&mut self) {
+        let containers = match self.docker.list("runnerd.seed").await {
+            Ok(containers) => containers,
+            Err(error) => {
+                warn!("cannot list seed containers left by an earlier run: {error}");
+                return;
+            }
+        };
+        for container in containers {
+            let Some(profile) = container.labels.get("runnerd.profile").cloned() else {
+                continue;
+            };
+            // Only this daemon's own names: tests seed under other prefixes on the same Engine.
+            if container.name != self.names.seed(&profile) || !self.slots.contains_key(&profile) {
+                continue;
+            }
+            info!("{profile}: waiting for the reseed an earlier run started");
+            let docker = self.docker.clone();
+            let id = container.id.clone();
+            self.reseeds.insert(
+                profile,
+                tokio::spawn(async move { cache::finish_reseed(&docker, &id).await }),
+            );
+        }
+    }
+
     /// Adopts runner containers a previous daemon left running, and removes the ones that stopped. Their
     /// registrations, and any of this host's runners without a container, go at the first poll.
     async fn recover(&mut self) {
+        self.recover_reseeds().await;
         let containers = match self.docker.list("runnerd.job").await {
             Ok(containers) => containers,
             Err(error) => {

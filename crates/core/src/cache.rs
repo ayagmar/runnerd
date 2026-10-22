@@ -256,9 +256,15 @@ pub async fn reseed(docker: &Docker, reseed: &Reseed<'_>) -> Result<String, Erro
         _ => {}
     }
     let id = docker.start(&spec, reseed.isolation).await?;
+    finish_reseed(docker, &id).await
+}
+
+/// Waits for a seed container to exit, removes it, and returns its output. Also takes over a seed container an
+/// earlier daemon left running: stopping it between its `rm` and `mv` would lose that snapshot layer.
+pub async fn finish_reseed(docker: &Docker, container: &str) -> Result<String, Error> {
     let result = async {
-        let code = docker.wait(&id).await?;
-        let output = docker.logs(&id).await?;
+        let code = docker.wait(container).await?;
+        let output = docker.logs(container).await?;
         if code == 0 {
             Ok(output)
         } else {
@@ -269,7 +275,7 @@ pub async fn reseed(docker: &Docker, reseed: &Reseed<'_>) -> Result<String, Erro
         }
     }
     .await;
-    let removed = docker.remove(&id).await;
+    let removed = docker.remove(container).await;
     let output = result?;
     removed?;
     Ok(output)
