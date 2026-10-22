@@ -42,16 +42,15 @@ fn check_config(path: &std::path::Path, memory_max: Option<ByteSize>) -> ExitCod
             Err(error) => return fail(&error),
         },
     };
-    match config.validate(memory_max) {
-        Ok(warnings) => {
+    let checked = config
+        .validate(memory_max)
+        .and_then(|warnings| Ok((warnings, config.memory_caps()?)));
+    match checked {
+        Ok((warnings, total)) => {
             for warning in warnings {
                 eprintln!("warning: {warning}");
             }
-            println!(
-                "{}: valid, memory caps sum to {}",
-                path.display(),
-                config.memory_caps()
-            );
+            println!("{}: valid, memory caps sum to {total}", path.display());
             ExitCode::SUCCESS
         }
         Err(error) => fail(&error),

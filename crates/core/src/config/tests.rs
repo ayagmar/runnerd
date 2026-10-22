@@ -143,6 +143,27 @@ fn config_with_a_zero_limit_names_the_field() {
 }
 
 #[test]
+fn config_rejects_a_size_beyond_u64() {
+    let text = MINIMAL.replace("memory = \"4G\"", "memory = \"16777216T\"");
+    let error = Config::parse(&text).unwrap_err().to_string();
+    assert!(error.contains("too large"), "{error}");
+}
+
+#[test]
+fn config_whose_caps_overflow_is_refused() {
+    // 2 × 2^63 bytes does not fit in u64; a saturating sum would pass against the largest slice.
+    let text = MINIMAL
+        .replace("memory = \"4G\"", "memory = \"8388608T\"")
+        .replace("slots = 1", "slots = 2");
+    let error = Config::parse(&text)
+        .unwrap()
+        .validate(Some(ByteSize(u64::MAX)))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("too large"), "{error}");
+}
+
+#[test]
 fn config_rejects_a_size_without_unit() {
     let text = MINIMAL.replace("memory = \"4G\"", "memory = \"4\"");
     let error = Config::parse(&text).unwrap_err().to_string();

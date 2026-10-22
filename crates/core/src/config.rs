@@ -107,6 +107,8 @@ pub enum ConfigError {
     UnsafeNotAllowed,
     #[error("{field} is 0, which Docker reads as no limit; set it above 0")]
     ZeroLimit { field: String },
+    #[error("slots × memory over all profiles plus the mirror is too large to add up")]
+    BudgetOverflow,
     #[error(
         "slots × memory over all profiles plus the mirror is {total}, \
          the slice {slice}'s MemoryMax is {memory_max}"
@@ -150,18 +152,22 @@ impl Config {
     }
 
     /// The memory every runner and the mirror may use at once.
-    pub fn memory_caps(&self) -> ByteSize {
-        let runners = self
-            .profiles
-            .values()
-            .map(|p| p.memory.0.saturating_mul(u64::from(p.slots)))
-            .fold(0u64, u64::saturating_add);
+    pub fn memory_caps(&self) -> Result<ByteSize, ConfigError> {
         let mirror = if self.caches.mirror.enabled {
             self.caches.mirror.memory.0
         } else {
             0
         };
-        ByteSize(runners.saturating_add(mirror))
+        self.profiles
+            .values()
+            .try_fold(mirror, |total, p| {
+                p.memory
+                    .0
+                    .checked_mul(u64::from(p.slots))?
+                    .checked_add(total)
+            })
+            .map(ByteSize)
+            .ok_or(ConfigError::BudgetOverflow)
     }
 
     /// Checks the config against the slice's `MemoryMax` (`None` when the slice is unlimited).
@@ -207,7 +213,7 @@ impl Config {
                 });
             }
         }
-        let total = self.memory_caps();
+        let total = self.memory_caps()?;
         match memory_max {
             Some(memory_max) if total > memory_max => Err(ConfigError::OverBudget {
                 total,
@@ -278,7 +284,12 @@ impl FromStr for ByteSize {
             return Err(invalid());
         }
         let number: f64 = number.parse().map_err(|_| invalid())?;
-        Ok(ByteSize((number * *factor as f64).round() as u64))
+        let bytes = (number * *factor as f64).round();
+        // `u64::MAX as f64` is 2^64, the first value out of range.
+        if bytes >= u64::MAX as f64 {
+            return Err(format!("size {s:?} is too large"));
+        }
+        Ok(ByteSize(bytes as u64))
     }
 }
 
