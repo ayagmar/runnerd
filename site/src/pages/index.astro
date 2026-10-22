@@ -73,12 +73,12 @@ halyard/storefront  node     active       1  self-hosted,linux,x64,node`;
 const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792706088; pause with force to cancel it
 \`runnerctl pause --force halyard/ledger\` cancels its runs and removes their runners`;
 
-// The clients, each a slot: filled once it is on main, with a link to it; free until it ships with real output.
+// The clients, each a slot: filled once released, with a link to it; free until it ships with real output.
 // The TUI's slot takes its frames when plan 014 lands.
 const clientsDoc = `${base}clients/`;
 const clients = [
-  { name: 'runnerctl', state: 'On main', href: `${clientsDoc}#runnerctl` },
-  { name: 'Web dashboard', state: 'On main', href: `${clientsDoc}#dashboard` },
+  { name: 'runnerctl', state: 'In 0.0.2', href: `${clientsDoc}#runnerctl` },
+  { name: 'Web dashboard', state: 'In 0.0.2', href: `${clientsDoc}#dashboard` },
   { name: 'TUI', state: 'Coming' },
   { name: 'Desktop app', state: 'Coming' },
 ];
@@ -133,7 +133,7 @@ const clients = [
             <a class="button" href="#install">Install</a>
             <a class="text-link" href={docs}>Read the docs</a>
           </div>
-          <p class="status">Early: 0.0.1 schedules runners. Main adds a CLI and a web dashboard.</p>
+          <p class="status">Early: 0.0.2 schedules runners and ships a CLI and a web dashboard.</p>
         </div>
 
         <figure class="budget budget-hero">
@@ -297,7 +297,7 @@ $ runnerd check-config runnerd.toml</span>
         <h2 id="roadmap-title">Two slots still free</h2>
         <ul class="strip">
           <li class="shipped">
-            <strong>runnerd 0.0.1</strong>
+            <strong>runnerd 0.0.2</strong>
             <span>Released</span>
           </li>
           {
@@ -319,9 +319,9 @@ $ runnerd check-config runnerd.toml</span>
           }
         </ul>
         <p class="shipped-list">
-          0.0.1 is <code>runnerd serve</code>, <code>stop</code>, <code>check-config</code> and <code>doctor</code>, a JSON API on a
-          Unix socket, the runner image, and x86_64 and aarch64 builds. Main adds job history, metrics and live events,
-          forced pause, reseed and cache cleaning, <code>runnerctl</code> and the dashboard, for the next release.
+          0.0.2 is <code>runnerd serve</code>, <code>stop</code>, <code>check-config</code> and <code>doctor</code>; job
+          history, metrics, logs and live events, forced pause, reseed and cache cleaning on a JSON API over a Unix socket;
+          <code>runnerctl</code> and the web dashboard; the runner image; x86_64 and aarch64 builds.
         </p>
       </section>
 
@@ -985,7 +985,7 @@ $ runnerd check-config runnerd.toml</span>
     color: var(--block-ink);
   }
 
-  /* What ships and what is coming, drawn as the slice: 0.0.1 is the one filled block, each client a free slot.
+  /* What ships and what is coming, drawn as the slice: each released part is a filled block, each coming client a free slot.
      A client's slot gets its real output or screenshot once it ships. */
   .roadmap {
     padding-top: var(--section);
