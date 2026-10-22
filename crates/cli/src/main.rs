@@ -564,19 +564,9 @@ async fn watch(client: &Client, json: bool, paint: human::Paint) -> Result<(), E
             }
         }
     }
-    let mut state = watch::State::read(client).await?;
-    let mut tick = tokio::time::interval(Duration::from_secs(1));
-    loop {
-        if !output::redraw(&watch::frame(&state, now(), paint)) {
-            return Ok(());
-        }
-        tokio::select! {
-            envelope = events.next() => {
-                if let Some(id) = state.apply(&envelope?) {
-                    state.refresh(client.get(&format!("/v1/jobs/{id}")).await?);
-                }
-            }
-            _ = tick.tick() => {}
-        }
-    }
+    watch::run(client, events, |frame| {
+        output::redraw(&watch::frame(frame, now(), paint))
+    })
+    .await?;
+    Ok(())
 }

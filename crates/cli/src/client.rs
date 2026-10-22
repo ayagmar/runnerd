@@ -392,8 +392,9 @@ impl SseParser {
 }
 
 /// `GET /v1/events`, read event by event. When the daemon closes the stream (it does for a client too far behind),
-/// the connection breaks or the stream stays silent, it reconnects, resuming after the last durable event read. `next` is cancel-safe:
-/// dropped while waiting, it loses no event.
+/// the connection breaks or the stream stays silent, it reconnects, resuming after the last durable event read.
+/// Dropping a pending `next` loses no event but restarts the idle timeout, so a caller that also waits on something
+/// else (a redraw tick) keeps one `next` pending across it, as `watch::run` does.
 #[derive(Debug)]
 pub(crate) struct Events {
     client: Client,

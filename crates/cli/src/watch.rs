@@ -1,15 +1,16 @@
 //! `runnerctl watch`: the daemon's state kept current from `/v1/events`. A snapshot (status, queued and running
 //! jobs, the last finished ones) read after the stream is open, then each event applied to it. Draws nothing
-//! itself: `frame` turns the state into text for `output::redraw`.
+//! itself: `run` hands the state to a drawing function, and `frame` turns it into text for `output::redraw`.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use runnerd_core::api::{
     Event, EventEnvelope, HostSample, Job, JobQuery, JobState, JobSummary, Sample, Status, Step,
 };
 
-use crate::client::{Client, ClientError};
+use crate::client::{Client, ClientError, Events};
 use crate::human::{self, Paint, Table, Tone, bytes, cores, duration};
 
 /// Finished jobs kept on screen.
@@ -155,6 +156,40 @@ impl State {
                 .is_some_and(|runner| runner.profile == profile && runner.slot == slot)
         })
     }
+}
+
+/// Reads the snapshot, then draws the state after every event and every second, until `draw` returns false or the
+/// stream fails for good. `events` must be open already.
+pub(crate) async fn run(
+    client: &Client,
+    events: Events,
+    mut draw: impl FnMut(&State) -> bool,
+) -> Result<(), ClientError> {
+    let mut state = State::read(client).await?;
+    let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // One read stays pending across redraws: dropping it at every tick would restart the stream's idle timeout, and
+    // a stalled stream would never be reconnected.
+    let mut next = Box::pin(next_event(events));
+    loop {
+        if !draw(&state) {
+            return Ok(());
+        }
+        tokio::select! {
+            (events, envelope) = &mut next => {
+                next = Box::pin(next_event(events));
+                if let Some(id) = state.apply(&envelope?) {
+                    state.refresh(client.get(&format!("/v1/jobs/{id}")).await?);
+                }
+            }
+            _ = tick.tick() => {}
+        }
+    }
+}
+
+/// The next event, handing the stream back for the read after it.
+async fn next_event(mut events: Events) -> (Events, Result<EventEnvelope, ClientError>) {
+    let envelope = events.next().await;
+    (events, envelope)
 }
 
 /// The step a job is in: the one in progress, else the last one completed.
@@ -321,8 +356,21 @@ mod tests {
 
     use std::collections::BTreeMap;
 
-    use super::{State, frame};
+    use std::convert::Infallible;
+    use std::sync::Arc;
+    use std::sync::atomic::{AtomicU32, Ordering};
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::{Body, Bytes};
+    use axum::extract::State as Shared;
+    use axum::routing::get;
+    use futures_util::{StreamExt, stream};
+    use runnerd_core::api::{EventQuery, JobPage};
+
+    use super::{State, frame, run};
     use crate::human::Paint;
+    use crate::testing::Fake;
 
     fn summary(state: JobState) -> JobSummary {
         JobSummary {
@@ -511,5 +559,61 @@ mod tests {
             })),
             None
         );
+    }
+
+    /// The first event stream sends its headers and then nothing; the next sends a budget of 7 bytes in use.
+    async fn stalling_then_live(Shared(streams): Shared<Arc<AtomicU32>>) -> Body {
+        if streams.fetch_add(1, Ordering::Relaxed) == 0 {
+            return Body::from_stream(stream::pending::<Result<Bytes, Infallible>>());
+        }
+        let envelope = EventEnvelope {
+            id: Some(1),
+            at: 1030,
+            event: Event::BudgetChanged {
+                budget: Budget {
+                    slice: "runnerd.slice".to_owned(),
+                    memory_max: None,
+                    memory_in_use: 7,
+                },
+            },
+        };
+        let data = format!(
+            "event: budget.changed\nid: 1\ndata: {}\n\n",
+            serde_json::to_string(&envelope).unwrap()
+        );
+        Body::from_stream(
+            stream::iter([Ok::<_, Infallible>(Bytes::from(data))]).chain(stream::pending()),
+        )
+    }
+
+    #[tokio::test]
+    async fn a_stalled_event_stream_is_reconnected_while_the_screen_keeps_redrawing() {
+        let streams = Arc::new(AtomicU32::new(0));
+        let fake = Fake::serve(
+            Router::new()
+                .route("/v1/status", get(|| async { axum::Json(state().status) }))
+                .route(
+                    "/v1/jobs",
+                    get(|| async {
+                        axum::Json(JobPage {
+                            jobs: Vec::new(),
+                            next: None,
+                        })
+                    }),
+                )
+                .route("/v1/events", get(stalling_then_live))
+                .with_state(streams.clone()),
+        );
+        // Silent for longer than the one-second redraw, which must not keep restarting the wait.
+        let client = fake.client(Duration::from_secs(5), Duration::from_millis(1500));
+        let events = client.events(EventQuery::default(), None).await.unwrap();
+        let watched = run(&client, events, |state| {
+            state.status.budget.memory_in_use != 7
+        });
+        tokio::time::timeout(Duration::from_secs(8), watched)
+            .await
+            .expect("watch should reconnect the stalled stream")
+            .unwrap();
+        assert_eq!(streams.load(Ordering::Relaxed), 2);
     }
 }
