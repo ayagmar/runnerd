@@ -1,5 +1,6 @@
-//! `/jobs/{id}`: one job's phases, its steps on a shared time axis, its CPU and memory over time against the
-//! profile's limits as configured now, and its log, live while it runs.
+//! `/jobs/{id}`: one job's phases, its steps on a shared time axis, its CPU and memory over time against the caps
+//! its container ran with (or, for records without them, the profile's limits as configured now), and its log, live
+//! while it runs.
 
 use maud::{Markup, html};
 use runnerd_core::api::{Job, Sample, SampleSeries, Status, Step};
@@ -18,8 +19,8 @@ pub(crate) struct JobView {
     pub(crate) now: u64,
     pub(crate) job: Job,
     pub(crate) samples: SampleSeries,
-    /// The memory and CPUs the job's profile has in the config now, while it is configured. The API does not keep
-    /// the caps the job's container had, which a reload since may have changed.
+    /// The memory and CPUs the job's profile has in the config now, while it is configured: what the charts show for
+    /// records without their container's caps, which a reload since may have changed.
     pub(crate) limits: Option<(u64, u32)>,
     /// The number of the first line in `log`.
     pub(crate) log_from: u64,
@@ -238,7 +239,8 @@ pub(crate) fn steps(view: &JobView) -> Markup {
     }
 }
 
-/// CPU and memory over the job's life, against its profile's limits as configured now, with the totals.
+/// CPU and memory over the job's life, against its container's caps or else its profile's limits as configured now,
+/// with the totals.
 pub(crate) fn metrics(view: &JobView) -> Markup {
     let summary = &view.job.summary;
     let metrics = &summary.metrics;
@@ -255,8 +257,13 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
     let gap = view.samples.interval.max(1) * 3;
     let memory_peak = samples.iter().map(|s| s.memory).max().unwrap_or(0);
     let cpu_peak = samples.iter().map(|s| s.cpu).max().unwrap_or(0);
-    let memory_limit = view.limits.map(|(memory, _)| memory);
-    let cpu_limit = view.limits.map(|(_, cpus)| u64::from(cpus) * 1000);
+    let LimitLines {
+        memory: memory_line,
+        cpu: cpu_line,
+        configured_now,
+    } = limit_lines(view);
+    let memory_limit = memory_line.as_ref().map(|(limit, _)| *limit);
+    let cpu_limit = cpu_line.as_ref().map(|(limit, _)| *limit);
     let profile = summary
         .runner
         .as_ref()
@@ -272,7 +279,7 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
             points: samples.iter().map(|s| (s.at, s.memory)).collect(),
             area: true,
         }],
-        limit: memory_limit.map(|limit| (limit, format!("{profile} now {}", format::bytes(limit)))),
+        limit: memory_line,
         value: format::bytes,
         time,
         gap,
@@ -287,12 +294,7 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
             points: samples.iter().map(|s| (s.at, s.cpu)).collect(),
             area: true,
         }],
-        limit: cpu_limit.map(|limit| {
-            (
-                limit,
-                format!("{profile} now {} CPUs", format::cores(limit)),
-            )
-        }),
+        limit: cpu_line,
         value: |millicores| format!("{} cores", format::cores(millicores)),
         time,
         gap,
@@ -305,8 +307,8 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
                 h2 #metrics-title { "Resources" }
                 p.muted {
                     "Sampled every " (view.samples.interval) " s; a peak between samples does not show."
-                    @if view.limits.is_some() {
-                        " The dashed lines are " (profile) "'s limits in the config now, which may not be the ones the job ran with."
+                    @if configured_now {
+                        " This record lacks its container's caps: the dashed lines are " (profile) "'s limits in the config now, which may not be the ones the job ran with."
                     }
                 }
             }
@@ -334,6 +336,44 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
                 div { dt { "From the mirror" } dd { (format::bytes(metrics.mirror_bytes)) } }
             }
         }
+    }
+}
+
+/// The dashed memory and CPU lines of the job's charts, with their labels.
+struct LimitLines {
+    memory: Option<(u64, String)>,
+    cpu: Option<(u64, String)>,
+    /// Some line is the profile's limit in the config now, the record lacking its container's cap.
+    configured_now: bool,
+}
+
+/// The caps the job's container ran with, or for a record without them, its profile's limits in the config now.
+fn limit_lines(view: &JobView) -> LimitLines {
+    let runner = view.job.summary.runner.as_ref();
+    let profile = runner.map_or("profile", |runner| runner.profile.as_str());
+    let memory_cap = runner.and_then(|runner| runner.memory_cap);
+    let cpu_cap = runner.and_then(|runner| runner.cpu_cap);
+    let memory = match memory_cap {
+        Some(cap) => Some((cap, format!("slot cap {}", format::bytes(cap)))),
+        None => view
+            .limits
+            .map(|(memory, _)| (memory, format!("{profile} now {}", format::bytes(memory)))),
+    };
+    let cpu = match cpu_cap {
+        Some(cap) => Some((cap, format!("{} CPUs", format::cores(cap)))),
+        None => view.limits.map(|(_, cpus)| {
+            let millicores = u64::from(cpus) * 1000;
+            (
+                millicores,
+                format!("{profile} now {} CPUs", format::cores(millicores)),
+            )
+        }),
+    };
+    LimitLines {
+        configured_now: (memory_cap.is_none() && memory.is_some())
+            || (cpu_cap.is_none() && cpu.is_some()),
+        memory,
+        cpu,
     }
 }
 
