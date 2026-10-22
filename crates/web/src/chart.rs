@@ -139,11 +139,23 @@ fn paths(points: &[(u64, u64)], chart: &TimeChart, top: u64) -> (String, String)
     (line, area)
 }
 
-/// A rounded-up top for the y axis: 1, 2 or 5 times a power of ten, or of 1024 for sizes.
+/// The powers a chart's y axis rounds to.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Base {
+    /// Powers of 1024, for sizes.
+    Binary,
+    /// Powers of ten.
+    Decimal,
+}
+
+/// A rounded-up top for the y axis: 1, 2 or 5 times a power of `base`.
 /// The top leaves a tenth of headroom, so a limit at the maximum is not drawn on the edge.
-pub(crate) fn nice_top(max: u64, binary: bool) -> u64 {
+pub(crate) fn nice_top(max: u64, base: Base) -> u64 {
     let max = (max + max / 10).max(1);
-    let base: u64 = if binary { 1024 } else { 10 };
+    let base: u64 = match base {
+        Base::Binary => 1024,
+        Base::Decimal => 10,
+    };
     let mut unit = 1u64;
     while unit.saturating_mul(base) <= max {
         unit = unit.saturating_mul(base);
@@ -257,7 +269,7 @@ pub(crate) fn stacked_bars(
             .map(|bar| bar.parts.iter().sum::<u64>())
             .max()
             .unwrap_or(0),
-        false,
+        Base::Decimal,
     );
     #[allow(
         clippy::cast_precision_loss,

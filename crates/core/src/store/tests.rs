@@ -1,13 +1,14 @@
 //! The history database: migrations, the log cap, and job listing.
 
+use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
 
 use rusqlite::Connection;
 
 use super::{
-    LOG_BACKLOG, LogPosition, MIGRATIONS, MirrorPosition, RunnerRecord, SampleRecord, Store,
-    StoreError,
+    LOG_BACKLOG, LogPosition, MIGRATIONS, Measured, MirrorPosition, RunnerRecord, SampleRecord,
+    Store, StoreError,
 };
 use crate::api::{JobQuery, JobState, StatsQuery};
 use crate::github::QueuedJob;
@@ -122,6 +123,31 @@ async fn jobs_list_newest_first_by_repository_in_pages() {
     let second = page(first.next).await.unwrap();
     let ids: Vec<u64> = second.jobs.iter().map(|job| job.id).collect();
     assert_eq!((ids, second.next), (vec![1], None));
+}
+
+#[tokio::test]
+async fn cache_sizes_now_are_the_last_measurement_of_each_volume() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    assert_eq!(store.cache_sizes_now().await.unwrap(), Measured::default());
+    let sizes = |pnpm: u64, maven: u64| {
+        vec![
+            ("runnerd-pnpm".to_owned(), pnpm),
+            ("runnerd-maven".to_owned(), maven),
+        ]
+    };
+    store.cache_sizes(1_000, sizes(10, 20));
+    store.cache_sizes(61_000, sizes(30, 40));
+    store.flush().await;
+    let measured = store.cache_sizes_now().await.unwrap();
+    assert_eq!(measured.at, Some(61));
+    assert_eq!(
+        measured.bytes,
+        BTreeMap::from([
+            ("runnerd-maven".to_owned(), 40),
+            ("runnerd-pnpm".to_owned(), 30),
+        ])
+    );
 }
 
 fn runner(name: &str, started_at: u64) -> RunnerRecord {

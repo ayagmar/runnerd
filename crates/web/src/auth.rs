@@ -19,7 +19,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use serde::Deserialize;
 use tracing::warn;
 
-use crate::views;
+use crate::views::{self, SignedOut};
 
 /// Where the daemon serving its API on `socket` keeps the dashboard's login URL: `runnerd.sock` → `runnerd.web`.
 /// `runnerctl web` reads it.
@@ -154,7 +154,11 @@ pub(crate) struct Login {
 /// `GET /login?code=…`: a valid code sets the session cookie and goes to the overview.
 pub(crate) async fn login(State(auth): State<Arc<Auth>>, Query(login): Query<Login>) -> Response {
     if !auth.redeem(&login.code) {
-        return (StatusCode::UNAUTHORIZED, views::signed_out(true)).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            views::signed_out(SignedOut::CodeUsed),
+        )
+            .into_response();
     }
     let cookie = format!(
         "{}={}; Path=/; HttpOnly; SameSite=Strict",
@@ -175,7 +179,11 @@ pub(crate) async fn require_session(
         return next.run(request).await;
     }
     if !auth.has_session(request.headers()) {
-        return (StatusCode::UNAUTHORIZED, views::signed_out(false)).into_response();
+        return (
+            StatusCode::UNAUTHORIZED,
+            views::signed_out(SignedOut::NoSession),
+        )
+            .into_response();
     }
     let safe = matches!(*request.method(), Method::GET | Method::HEAD);
     if !safe && !auth.same_origin(request.headers()) {

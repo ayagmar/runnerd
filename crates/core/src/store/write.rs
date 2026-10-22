@@ -25,9 +25,9 @@ pub(super) fn run(
     }
 }
 
-struct Writer<'a> {
+struct Writer<'events> {
     db: Connection,
-    events: &'a broadcast::Sender<Arc<EventEnvelope>>,
+    events: &'events broadcast::Sender<Arc<EventEnvelope>>,
 }
 
 /// The events a change announces once it commits.

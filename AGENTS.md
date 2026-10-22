@@ -51,6 +51,19 @@ add an ADR in the same change.
 output module, docs on every public item of `runnerd-core`. An `#[allow]` needs `reason = "..."`. Prefer fixing the
 code; if a lint fights the code style everywhere, allow it in `Cargo.toml` with a comment saying why.
 
+## Style
+
+These follow [Google's Rust style guide](https://google.github.io/styleguide/rustguide.html) where clippy can't check
+it.
+
+- A `bool` parameter whose meaning a literal call site doesn't show becomes a two-variant enum named for what it
+  means there: `next_pane(pane, Direction::Forward)`, not `next_pane(pane, true)`.
+- No tuples in `pub` or `pub(crate)` signatures, except newtypes: return a struct with named fields, so two fields
+  of the same type can't be swapped.
+- A test `assert!` on a bare boolean gets a message naming the expected state, such as
+  `assert!(!paused, "o/app stays running")`. Fix the ones you touch.
+- A struct's lifetime is named for what it borrows, such as `Usage<'app>`; `'a` is fine on functions.
+
 ## Tests
 
 - Test through public behaviour, named in domain terms (see `crates/core/src/scheduler/engine/tests.rs`).

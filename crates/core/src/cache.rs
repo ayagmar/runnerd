@@ -248,17 +248,17 @@ pub fn volumes(names: &Names, config: &config::Config) -> Vec<api::CacheVolume> 
 
 /// What `reseed` runs on: the profile's image and limits, its slots and the isolation backend.
 #[derive(Debug)]
-pub struct Reseed<'a> {
+pub struct Reseed<'profile> {
     /// Where the profile's volumes are.
-    pub names: &'a Names,
+    pub names: &'profile Names,
     /// The profile to reseed.
-    pub profile: &'a str,
+    pub profile: &'profile str,
     /// The profile's runner image, which holds the seed script.
-    pub image: &'a str,
+    pub image: &'profile str,
     /// How many slots the profile has; each slot's layer changes are dropped.
     pub slots: usize,
     /// The systemd slice the seed container runs in.
-    pub slice: &'a str,
+    pub slice: &'profile str,
     /// The profile's CPUs.
     pub cpus: u32,
     /// The profile's memory.
@@ -266,7 +266,7 @@ pub struct Reseed<'a> {
     /// Slot 1's layers must have changed at least this much (`caches.reseed_at`).
     pub min_changes: ByteSize,
     /// How the seed container is isolated, as runners are.
-    pub isolation: &'a dyn Isolation,
+    pub isolation: &'profile dyn Isolation,
 }
 
 /// Makes slot 1's layers the profile's new snapshot and drops every slot's own layer changes (`image/seed.sh`),

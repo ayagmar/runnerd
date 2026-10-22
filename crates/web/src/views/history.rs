@@ -5,8 +5,8 @@ use maud::{Markup, html};
 use runnerd_core::api::{Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsRow, Status};
 use serde::{Deserialize, Serialize};
 
-use super::{Page, badge, page, profile_class, time_ago, waited_and_ran};
-use crate::chart::{Bar, Series, TimeChart, nice_top, stacked_bars};
+use super::{Durations, Page, badge, durations, page, profile_class, time_ago};
+use crate::chart::{Bar, Base, Series, TimeChart, nice_top, stacked_bars};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -224,7 +224,7 @@ fn trends(history: &History) -> Markup {
             .map(|point| point.1)
             .max()
             .unwrap_or(0),
-        false,
+        Base::Decimal,
     );
     let times = per_day(
         "Average run time and wait per day",
@@ -268,7 +268,7 @@ fn trends(history: &History) -> Markup {
                 }
                 div.chart-card {
                     h3 { "Memory peak" }
-                    (memory.render(nice_top(peak, true)))
+                    (memory.render(nice_top(peak, Base::Binary)))
                     p.muted { "The highest sampled peak of a job that day" }
                 }
             }
@@ -349,7 +349,7 @@ fn jobs(history: &History) -> Markup {
                         }
                         tbody {
                             @for job in &history.page.jobs {
-                                @let (waited, ran) = waited_and_ran(job, now);
+                                @let Durations { waited, ran } = durations(job, now);
                                 @let class = job.runner.as_ref().map_or("p-none".to_owned(), |runner| profile_class(&history.status, &runner.profile));
                                 tr class=(class) {
                                     th scope="row" {

@@ -5,8 +5,8 @@
 use maud::{Markup, html};
 use runnerd_core::api::{Job, Sample, SampleSeries, Status, Step};
 
-use super::{badge, page, waited_and_ran};
-use crate::chart::{Series, TimeChart, nice_top, ratio};
+use super::{Durations, badge, durations, page};
+use crate::chart::{Base, Series, TimeChart, nice_top, ratio};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -81,7 +81,7 @@ pub(crate) fn render(view: &JobView) -> Markup {
 /// The title, outcome and where the job came from.
 pub(crate) fn head(view: &JobView) -> Markup {
     let summary = &view.job.summary;
-    let (waited, ran) = waited_and_ran(summary, view.now);
+    let Durations { waited, ran } = durations(summary, view.now);
     html! {
         header #job-head .job-head {
             p.crumbs {
@@ -318,11 +318,11 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
                 div.charts {
                     div.chart-card {
                         h3 { "Memory" span.reading { "sampled peak " (format::bytes(memory_peak)) } }
-                        (memory.render(nice_top(memory_peak.max(memory_limit.unwrap_or(0)), true)))
+                        (memory.render(nice_top(memory_peak.max(memory_limit.unwrap_or(0)), Base::Binary)))
                     }
                     div.chart-card {
                         h3 { "CPU" span.reading { "sampled peak " (format::cores(cpu_peak)) " cores" } }
-                        (cpu.render(nice_top(cpu_peak.max(cpu_limit.unwrap_or(0)), false)))
+                        (cpu.render(nice_top(cpu_peak.max(cpu_limit.unwrap_or(0)), Base::Decimal)))
                     }
                 }
             }

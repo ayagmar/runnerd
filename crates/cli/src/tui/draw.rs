@@ -14,7 +14,7 @@ use ratatui::widgets::{
 };
 use runnerd_core::api::{Job, JobSummary, ProfileStatus, Sample, SlotStatus, Step};
 
-use super::app::{App, Connection, JobView, Pane, View};
+use super::app::{App, Connection, JobView, Outcome, Pane, View};
 use crate::human::{self, Tone, bytes, cores, duration};
 use crate::watch;
 
@@ -158,7 +158,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Span::styled(message.clone(), theme.wait()),
         ])
     } else if let Some(flash) = &app.flash {
-        let style = if flash.failed {
+        let style = if flash.outcome == Outcome::Failed {
             theme.tone(Tone::Bad)
         } else {
             theme.memory()
@@ -398,14 +398,14 @@ fn fit(text: &str, width: usize) -> String {
 }
 
 /// What a slot's job shows: memory and CPU now, their caps and their recent samples.
-struct Usage<'a> {
-    samples: Vec<&'a Sample>,
+struct Usage<'app> {
+    samples: Vec<&'app Sample>,
     memory_cap: u64,
     cpu_cap: u64,
 }
 
 impl Usage<'_> {
-    fn of<'a>(app: &'a App, profile: &ProfileStatus, job: &Job) -> Usage<'a> {
+    fn of<'app>(app: &'app App, profile: &ProfileStatus, job: &Job) -> Usage<'app> {
         let runner = job.summary.runner.as_ref();
         Usage {
             samples: app
@@ -675,8 +675,8 @@ fn slice(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 
 /// A filled chart of the newest values that fit, scaled to `limit` (or to the values' peak when there is none),
 /// with the last value in its title and the peak under it.
-struct Chart<'a> {
-    title: &'a str,
+struct Chart {
+    title: &'static str,
     limit_label: String,
     values: Vec<u64>,
     limit: u64,
@@ -684,7 +684,7 @@ struct Chart<'a> {
     style: Style,
 }
 
-impl Chart<'_> {
+impl Chart {
     fn render(&self, frame: &mut Frame<'_>, area: Rect, theme: Theme) {
         let unit = self.unit;
         let peak = self.values.iter().copied().max();

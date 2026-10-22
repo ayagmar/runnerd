@@ -3,6 +3,7 @@
 //! messages to a writer thread, so the engine never waits on the disk; reads run on Tokio's blocking pool. It
 //! decides nothing about scheduling and stores no secret: no token, no JIT config, no runner `_diag` log.
 
+use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
 use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
@@ -97,8 +98,14 @@ pub struct SampleRecord {
     pub network_sent: u64,
 }
 
-/// Volume sizes by name, and when they were measured (seconds); no time before the first measurement.
-pub type Measured = (Option<u64>, Vec<(String, u64)>);
+/// The last measurement of the cache volumes.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Measured {
+    /// When it was taken (seconds); none before the first measurement.
+    pub at: Option<u64>,
+    /// Each volume's size in bytes, by name.
+    pub bytes: BTreeMap<String, u64>,
+}
 
 /// A job the history has not closed, as the engine needs it after a restart.
 #[derive(Debug, Clone, PartialEq, Eq)]
