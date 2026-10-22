@@ -474,8 +474,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
-        self.recover_history().await;
         self.recover_reseeds(seeds);
+        // Runner containers still running once recovery is done.
+        let mut running = BTreeSet::new();
         for container in containers {
             // Runner containers on this Engine are this machine's whatever their name, which older builds or
             // another machine ID may have chosen: a running one is adopted when its labels name a free slot.
@@ -510,6 +511,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                         index.map_or(0, |index| index + 1)
                     );
                     *slot = Some(occupant.clone());
+                    running.insert(occupant.runner_name.clone());
                     let slot = SlotRef {
                         profile,
                         index: index.unwrap_or(0),
@@ -517,6 +519,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     self.observe(&slot, &occupant).await;
                 }
                 _ if !ours && container.running => {
+                    running.insert(container.name.clone());
                     warn!(
                         "leaving {}: a runner container not named by this machine, for no free slot",
                         container.name
@@ -530,24 +533,27 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
+        self.recover_history(&running).await;
         Ok(())
     }
 
-    /// Reads what the history left open: queued jobs to watch, and jobs whose runner is gone to close. Jobs of
-    /// runners adopted later are found again by their log capture.
-    async fn recover_history(&mut self) {
+    /// Reads what the history left open: queued jobs to watch, and jobs to close. A job whose runner's container
+    /// is not `running` lost it while no daemon watched: its runner is recorded removed now, unless it was before.
+    async fn recover_history(&mut self, running: &BTreeSet<String>) {
         match self.store.open_jobs().await {
             Ok(open) => {
                 for job in open {
-                    match job.state {
-                        api::JobState::Queued => {
-                            self.queued_jobs.insert(job.id, job.repository);
-                        }
-                        _ => {
-                            self.closing
-                                .insert(job.id, (job.repository, SystemTime::now()));
-                        }
+                    if job.state == api::JobState::Queued {
+                        self.queued_jobs.insert(job.id, job.repository);
+                        continue;
                     }
+                    if let Some(runner) = &job.runner
+                        && !running.contains(runner)
+                    {
+                        self.store.runner_removed(runner, time::now_ms());
+                    }
+                    self.closing
+                        .insert(job.id, (job.repository, SystemTime::now()));
                 }
             }
             Err(error) => warn!("cannot read the job history: {error}"),

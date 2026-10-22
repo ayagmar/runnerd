@@ -740,3 +740,38 @@ async fn a_job_whose_container_vanished_closes_once_github_reports_it() {
     let job = until_state(&handle, 1, JobState::Completed).await;
     assert_eq!(job.summary.conclusion.as_deref(), Some("failure"));
 }
+
+/// Runs job 1 on a runner in slot 1 until the history has it running, then stops that daemon.
+async fn run_until_restart(github: &FakeGithub, docker: &FakeDocker, dir: &TestDir) {
+    running_runner(github, docker, "@@job 1 1\n");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    let (mut engine, handle) = engine_in(github, docker, dir);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+}
+
+#[tokio::test]
+async fn a_job_whose_container_vanished_while_the_daemon_was_down_closes_after_the_restart() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    run_until_restart(&github, &docker, &dir).await;
+    docker.0.lock().unwrap().containers.clear();
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "completed", Some("success")));
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let job = until_state(&handle, 1, JobState::Completed).await;
+    assert!(job.summary.timeline.cleaned_at.is_some());
+}
