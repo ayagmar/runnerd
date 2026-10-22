@@ -87,9 +87,9 @@ ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/runnerd-job-started.sh \
 
 ENTRYPOINT ["dind", "runnerd-runner"]
 
-FROM base AS trellis
+FROM base AS jvm
 
-FROM base AS glowly
+FROM base AS node
 
 # pipx (diff-cover) and the system libraries of Playwright's Chromium headless shell on Ubuntu 24.04 (`playwright
 # install-deps --dry-run chromium-headless-shell`, Playwright 1.64), so ci.yml installs only the browser on these

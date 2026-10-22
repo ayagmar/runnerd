@@ -10,9 +10,9 @@ use crate::docker::{RunnerSpec, create_body};
 
 fn host_config(isolation: Isolation) -> HostConfig {
     let spec = RunnerSpec {
-        name: "runnerd-trellis-1".to_owned(),
-        image: "runnerd-runner:trellis".to_owned(),
-        profile: "trellis".to_owned(),
+        name: "runnerd-jvm-1".to_owned(),
+        image: "runnerd-runner:jvm".to_owned(),
+        profile: "jvm".to_owned(),
         slice: "ci.slice".to_owned(),
         cpus: 8,
         memory: "9G".parse().unwrap(),

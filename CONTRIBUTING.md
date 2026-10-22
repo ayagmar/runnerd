@@ -11,7 +11,7 @@ starts only the jobs those paths can affect:
 |---|---|
 | `rust`: fmt, clippy (also core without `host`, tests included), tests, `cargo doc`, the client boundary check, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
-| `image`: builds the `trellis` and `glowly` stages, pushes nothing | `image/**` |
+| `image`: builds the `jvm` and `node` stages, pushes nothing | `image/**` |
 | `site-build`: Astro build | `site/**` |
 | `lint`: shellcheck, actionlint, zizmor | `.github/**`, any `*.sh` |
 | `text`: typos, `taplo fmt --check` | any file |
