@@ -170,6 +170,8 @@ enum Write {
     MirrorBytes {
         bytes: Vec<(String, u64)>,
         until: MirrorPosition,
+        /// Whether the count committed.
+        done: oneshot::Sender<bool>,
     },
     CacheSizes {
         at: u64,
@@ -335,9 +337,12 @@ impl Store {
         self.send(Write::HostSample(sample));
     }
 
-    /// Adds bytes the mirror served to runners, counted from its log up to `until`.
-    pub fn mirror_bytes(&self, bytes: Vec<(String, u64)>, until: MirrorPosition) {
-        self.send(Write::MirrorBytes { bytes, until });
+    /// Adds bytes the mirror served to runners, counted from its log up to `until`, and says whether that was
+    /// stored: if not, the caller counts the same lines again.
+    pub async fn mirror_bytes(&self, bytes: Vec<(String, u64)>, until: MirrorPosition) -> bool {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::MirrorBytes { bytes, until, done });
+        committed.await.unwrap_or(false)
     }
 
     /// Records volume sizes measured at `at` (ms).

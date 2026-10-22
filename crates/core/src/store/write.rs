@@ -102,7 +102,9 @@ impl Writer<'_> {
                     Ok(())
                 });
             }
-            Write::MirrorBytes { bytes, until } => self.mirror_bytes(&bytes, until),
+            Write::MirrorBytes { bytes, until, done } => {
+                let _ = done.send(self.mirror_bytes(&bytes, until));
+            }
             Write::CacheSizes { at, sizes } => {
                 for (name, bytes) in sizes {
                     logged(
@@ -146,8 +148,12 @@ impl Writer<'_> {
     }
 
     /// Makes a change and stores the durable events it announces in one transaction, then sends them, with their
-    /// IDs, to every subscriber. On any error nothing is kept or sent.
-    fn change(&self, what: &str, change: impl FnOnce(&mut Announced) -> rusqlite::Result<()>) {
+    /// IDs, to every subscriber. On any error nothing is kept or sent. Returns whether it committed.
+    fn change(
+        &self,
+        what: &str,
+        change: impl FnOnce(&mut Announced) -> rusqlite::Result<()>,
+    ) -> bool {
         let result = (|| {
             // Immediate, so a busy database is waited for: a deferred transaction that read first fails at once.
             let transaction = Transaction::new_unchecked(&self.db, TransactionBehavior::Immediate)?;
@@ -160,10 +166,14 @@ impl Writer<'_> {
             transaction.commit()?;
             Ok(envelopes)
         })();
-        for envelope in logged(what, result).unwrap_or_default() {
+        let Some(envelopes) = logged(what, result) else {
+            return false;
+        };
+        for envelope in envelopes {
             // No subscriber is not an error.
             let _ = self.events.send(Arc::new(envelope));
         }
+        true
     }
 
     /// Stores an event if it is durable, giving it its ID.
@@ -503,7 +513,7 @@ impl Writer<'_> {
 
     /// Counts a batch of the mirror's log and where it ends, together: counting part of it, or counting it without
     /// moving past it, would count it again after a restart.
-    fn mirror_bytes(&self, bytes: &[(String, u64)], until: MirrorPosition) {
+    fn mirror_bytes(&self, bytes: &[(String, u64)], until: MirrorPosition) -> bool {
         self.change("count mirror bytes", |_| {
             for (runner, bytes) in bytes {
                 self.db.execute(
@@ -516,7 +526,7 @@ impl Writer<'_> {
                 [until.at, until.seen],
             )?;
             Ok(())
-        });
+        })
     }
 
     fn prune(&self, now: u64, history: &crate::config::History) {

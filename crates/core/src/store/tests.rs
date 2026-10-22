@@ -228,7 +228,11 @@ async fn mirror_bytes_and_the_log_position_are_counted_together_or_not_at_all() 
              BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
         )
         .unwrap();
-    store.mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], until);
+    assert!(
+        !store
+            .mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], until)
+            .await
+    );
     store.flush().await;
     let counted = |db: &Connection| -> Vec<u64> {
         db.prepare("SELECT mirror_bytes FROM runners ORDER BY name")
@@ -246,7 +250,11 @@ async fn mirror_bytes_and_the_log_position_are_counted_together_or_not_at_all() 
 
     // Read again from the same position, the batch counts once.
     fault.execute_batch("DROP TRIGGER no_b").unwrap();
-    store.mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], until);
+    assert!(
+        store
+            .mirror_bytes(vec![("a".to_owned(), 10), ("b".to_owned(), 20)], until)
+            .await
+    );
     store.flush().await;
     assert_eq!(counted(&fault), [10, 20]);
     assert_eq!(store.mirror_log_until().await.unwrap(), until);

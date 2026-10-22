@@ -807,10 +807,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             }
         };
         let (bytes, until) = self.leases.attribute(&log, self.mirror_until);
-        if until != self.mirror_until {
+        // Past these lines only once they are stored: if not, the next count reads them again.
+        if until != self.mirror_until && self.store.mirror_bytes(bytes, until).await {
             self.mirror_until = until;
             self.leases.forget_before(until.at / 1_000_000);
-            self.store.mirror_bytes(bytes, until);
         }
     }
 

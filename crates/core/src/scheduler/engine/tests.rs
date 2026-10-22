@@ -147,6 +147,8 @@ struct DockerState {
     containers: Vec<Container>,
     /// Every `list` fails, as when the Engine does not answer.
     fail_lists: bool,
+    /// What the Docker Hub mirror's log says.
+    mirror_log: String,
     /// What the log capture prints in a container, by the position it is started at.
     captures: HashMap<(String, String), String>,
     /// The capture commands run: container, page, offset.
@@ -247,7 +249,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn logs_since(&self, _container: &str, _since: u64) -> Result<String, docker::Error> {
-        Ok(String::new())
+        Ok(self.0.lock().unwrap().mirror_log.clone())
     }
 
     async fn exec(
@@ -317,8 +319,17 @@ fn engine_in(
     docker: &FakeDocker,
     dir: &TestDir,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    engine_with(github, docker, dir, CONFIG)
+}
+
+fn engine_with(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    config: &str,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
     Engine::new(
-        Config::parse(CONFIG).unwrap(),
+        Config::parse(config).unwrap(),
         github.clone(),
         docker.clone(),
         Setup {
@@ -790,4 +801,39 @@ async fn an_adopted_job_that_runs_long_after_a_restart_is_not_lost() {
     handle.store.flush().await;
     let job = handle.store.job(1).await.unwrap().unwrap();
     assert_eq!(job.summary.state, JobState::Running);
+}
+
+#[tokio::test]
+async fn mirror_bytes_the_history_failed_to_store_are_counted_on_the_next_tick() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_runner(&github, &docker, "@@job 1 1\n");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    docker.0.lock().unwrap().mirror_log = "2026-10-22T19:27:25.869343464Z 172.18.0.3 - - \
+        [22/Oct/2026:19:27:25 +0000] \"GET /v2/library/alpine/blobs/sha256:aa HTTP/1.1\" 200 577 \"\" \"docker/29.9.2\"\n"
+        .to_owned();
+    let dir = TestDir::new("mirror");
+    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    // Another process holds the history's runner rows: the count fails.
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_bytes BEFORE UPDATE OF mirror_bytes ON runners \
+             BEGIN SELECT RAISE(ABORT, 'busy'); END;",
+        )
+        .unwrap();
+    engine.tick(Shutdown::No).await;
+    fault.execute_batch("DROP TRIGGER no_bytes").unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let job = handle.store.job(1).await.unwrap().unwrap();
+    assert_eq!(job.summary.metrics.mirror_bytes, 577);
 }
