@@ -1,6 +1,7 @@
 ---
 // A frame of `runnerctl tui` as terminal text: its cells, captured from a pseudo-terminal, as runs of text in the
-// TUI's colours. The frame stays a dark terminal in both themes, since the TUI's pastels are drawn for one.
+// TUI's colours. The frame stays a dark terminal in both themes, since the TUI's pastels are drawn for one. A frame
+// wider than its box scrolls, and a cue under it says so.
 interface Props {
   name: string;
   label: string;
@@ -34,4 +35,17 @@ const cls = (c: string) =>
     tabindex="0">{lines.map((line, i) => (
     <Fragment>{line.map((run) => (typeof run === 'string' ? run : <span class={cls(run[1])}>{run[0]}</span>))}{i < lines.length - 1 && '\n'}</Fragment>
   ))}</pre>
+  <p class="tui-cue" hidden>Scroll to inspect →</p>
 </div>
+
+<script>
+  const frames = document.querySelectorAll<HTMLElement>('.tui-frame');
+  const observer = new ResizeObserver(() => {
+    for (const frame of frames) {
+      const pre = frame.querySelector('.tui');
+      const cue = frame.querySelector<HTMLElement>('.tui-cue');
+      if (pre && cue) cue.hidden = pre.scrollWidth <= pre.clientWidth;
+    }
+  });
+  for (const frame of frames) observer.observe(frame);
+</script>
