@@ -383,16 +383,16 @@ impl Engine {
     }
 
     /// Adopts the runner and seed containers a previous daemon left running, and removes the runners that
-    /// stopped. Their registrations, and any of this host's runners without a container, go at the first poll.
+    /// stopped, or that run under this machine's names for no free slot. Their registrations, and any of this host's runners without a container, go at the first poll.
     /// Changes nothing unless Docker lists both kinds, so it can be tried again.
     async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
         self.recover_reseeds(seeds);
         for container in containers {
-            if !container.name.starts_with(&self.runner_prefix) {
-                continue;
-            }
+            // Runner containers on this Engine are this machine's whatever their name, which older builds or
+            // another machine ID may have chosen: a running one is adopted when its labels name a free slot.
+            let ours = container.name.starts_with(&self.runner_prefix);
             let label = |name: &str| container.labels.get(name).cloned().unwrap_or_default();
             let profile = label("runnerd.profile");
             let index = label("runnerd.slot")
@@ -422,6 +422,12 @@ impl Engine {
                         index.map_or(0, |index| index + 1)
                     );
                     *slot = Some(occupant);
+                }
+                _ if !ours && container.running => {
+                    warn!(
+                        "leaving {}: a runner container not named by this machine, for no free slot",
+                        container.name
+                    );
                 }
                 _ => {
                     info!("removing {}, left by an earlier run", container.name);
@@ -587,9 +593,6 @@ impl Engine {
                 }
             };
             for runner in runners {
-                if !runner.name.starts_with(&self.runner_prefix) {
-                    continue;
-                }
                 let held = self
                     .slots
                     .values_mut()
@@ -598,6 +601,8 @@ impl Engine {
                     .find(|occupant| occupant.runner_id == runner.id);
                 match held {
                     Some(occupant) => occupant.busy = runner.busy,
+                    // Only this machine's names: other machines serve the same repositories.
+                    None if !runner.name.starts_with(&self.runner_prefix) => {}
                     None => match self.github.delete_runner(&repository, runner.id).await {
                         Ok(Deleted::Deleted) => {
                             info!(
