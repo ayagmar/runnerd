@@ -5,14 +5,19 @@ description: Start the runnerd daemon, how it schedules runners and keeps caches
 
 ## Build the runner image
 
-runnerd runs the image `runnerd-runner:<image_stage>`. In a checkout of the repository, `image/Dockerfile` has a `base` stage; give each profile a stage on it, then build the ones your profiles use:
+runnerd runs the image `runnerd-runner:<image_stage>`. In a checkout of the repository, `image/Dockerfile` has a `base` stage. Append a stage on it for each profile's `image_stage`; for the [example config](../configuration/), `jvm` and `node`:
 
 ```dockerfile
 FROM base AS jvm
+
+FROM base AS node
 ```
+
+Then build both:
 
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
+docker build --target node -t runnerd-runner:node image
 ```
 
 ## Start and stop the daemon
