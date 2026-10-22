@@ -499,8 +499,9 @@ fn web(client: &Client, no_open: bool) -> Result<ExitCode, Error> {
 
 /// Prints the log from line `from`. Following, it reads until the daemon ends the response, which it does once the
 /// job's record is final; if the response ended for another reason (a daemon restart), it asks again from the next
-/// line.
+/// line. A response cut short after the job became final is read once more, for the lines it missed.
 async fn logs(client: &Client, id: u64, follow: bool, mut from: u64) -> Result<(), Error> {
+    let mut last_read = false;
     loop {
         let mut lines = client
             .logs(
@@ -523,14 +524,18 @@ async fn logs(client: &Client, id: u64, follow: bool, mut from: u64) -> Result<(
                 Err(error) => break Err(error),
             }
         };
-        if !follow {
+        if !follow || last_read {
             return ended.map_err(Error::from);
         }
         let job: Job = client.get(&format!("/v1/jobs/{id}")).await?;
         if job.summary.state.is_final() {
-            return Ok(());
+            if ended.is_ok() {
+                return Ok(());
+            }
+            last_read = true;
+        } else {
+            tokio::time::sleep(Duration::from_secs(1)).await;
         }
-        tokio::time::sleep(Duration::from_secs(1)).await;
     }
 }
 

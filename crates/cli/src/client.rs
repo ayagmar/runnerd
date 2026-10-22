@@ -17,8 +17,9 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
 
-/// How long a request may take to answer, and a plain response to arrive in full.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+/// How long a request may take to answer, and a plain response to arrive in full. A forced pause cancels runs on
+/// GitHub and removes containers before it answers.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
 
 /// How long a stream may stay silent. The daemon sends a keep-alive comment on the event stream every 15 s.
 const STREAM_IDLE: Duration = Duration::from_secs(45);
