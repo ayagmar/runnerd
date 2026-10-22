@@ -491,7 +491,7 @@ impl Fixtures {
                 .collect(),
         };
         let status = Status {
-            version: "0.0.1".to_owned(),
+            version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
             budget: Budget {
                 slice: "ci.slice".to_owned(),
