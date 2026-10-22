@@ -56,25 +56,8 @@ const steps = [
   { container: 'new', label: 'new container', title: 'Next job', text: 'Nothing left over but warm caches.' },
 ];
 
-// What 0.0.1 ships, and the clients that will fill the rest of the page as they land.
-const shipped = [
-  'runnerd serve',
-  'runnerd stop',
-  'runnerd check-config',
-  'runnerd doctor',
-  'JSON API on a Unix socket',
-  'the runner image',
-  'x86_64 and aarch64 releases',
-];
-const clients = [
-  { name: 'runnerctl', text: 'Status, jobs, logs, pause and resume from a shell. Today it has no commands yet:' },
-  { name: 'Web dashboard', text: "The budget, every slot and each job's timeline, live, on a loopback port." },
-  { name: 'TUI', text: 'runnerctl tui: the same live view in a terminal.' },
-  { name: 'Desktop app', text: 'The same views in a native app, with an always-on summary.' },
-];
-const runnerctlHelp = `Command-line client for the runnerd daemon
-
-Usage: runnerctl`;
+// The clients, each a free slot until it ships with real output to show.
+const clients = ['runnerctl', 'Web dashboard', 'TUI', 'Desktop app'];
 ---
 
 <!doctype html>
@@ -264,25 +247,25 @@ $ runnerd check-config runnerd.toml</span>
 
       <section class="roadmap wrap" aria-labelledby="roadmap-title">
         <h2 id="roadmap-title">Four slots still free</h2>
-        <ul class="free-slots">
+        <ul class="strip">
           <li class="shipped">
-            <h3>runnerd 0.0.1</h3>
-            <ul>{shipped.map((item) => <li>{item}</li>)}</ul>
-            <p>Next in the daemon: job history, metrics and live events.</p>
+            <strong>runnerd 0.0.1</strong>
+            <span>Ships today</span>
           </li>
           {
             clients.map((client) => (
-              <li class="client">
-                <h3>{client.name}</h3>
-                <p class="coming">Coming</p>
-                <p>{client.text}</p>
-                {client.name === 'runnerctl' && (
-                  <pre class="terminal"><code><span class="prompt">$ runnerctl --help</span>{`\n${runnerctlHelp}`}</code></pre>
-                )}
+              <li>
+                <strong>{client}</strong>
+                <span>Coming</span>
               </li>
             ))
           }
         </ul>
+        <p class="shipped-list">
+          0.0.1 is <code>runnerd serve</code>, <code>stop</code>, <code>check-config</code> and <code>doctor</code>,
+          a JSON API on a Unix socket, the runner image, and x86_64 and aarch64 releases. Next in the daemon: job
+          history, metrics and live events.
+        </p>
       </section>
 
       <section class="install wrap" id="install" aria-labelledby="install-title">
@@ -897,67 +880,60 @@ $ runnerd check-config runnerd.toml</span>
     color: var(--block-ink);
   }
 
-  /* What ships and what is coming, drawn as the slice: 0.0.1 is the one filled block, each client a free slot. */
+  /* What ships and what is coming, drawn as the slice: 0.0.1 is the one filled block, each client a free slot.
+     A client's slot gets its real output or screenshot once it ships. */
   .roadmap {
     padding-top: var(--section);
     display: grid;
-    gap: clamp(2rem, 4vw, 3.5rem);
+    gap: clamp(1.5rem, 3vw, 2.5rem);
   }
 
-  .free-slots {
+  .strip {
     list-style: none;
     margin: 0;
     padding: var(--gap);
     display: grid;
     grid-template-columns: minmax(0, 9fr) repeat(4, minmax(0, 7fr));
     gap: var(--gap);
-    min-height: clamp(22rem, 48vh, 32rem);
     background: var(--surface);
+    font-family: var(--font-display);
   }
 
-  .free-slots > li {
+  .strip li {
     display: flex;
     flex-direction: column;
-    gap: 0.75rem;
+    justify-content: flex-end;
+    gap: 0.2rem;
     min-width: 0;
-    padding: clamp(1rem, 1.6vw, 1.5rem);
+    min-height: 6.5rem;
+    padding: 0.85rem 1rem;
     background: var(--bg);
   }
 
-  .free-slots h3 {
-    font-size: clamp(1.375rem, 1rem + 0.8vw, 1.875rem);
-    line-height: 1;
-    letter-spacing: -0.04em;
+  .strip strong {
+    font-size: clamp(1.125rem, 0.95rem + 0.6vw, 1.5rem);
+    line-height: 1.1;
+    letter-spacing: -0.03em;
   }
 
-  .free-slots p {
-    font-size: 1rem;
+  .strip span {
+    color: var(--muted);
+    font-size: 0.9375rem;
+    font-weight: 600;
   }
 
-  .free-slots .shipped {
+  .strip .shipped {
     background: var(--mint);
     color: var(--block-ink);
   }
 
-  .shipped ul {
-    list-style: none;
-    margin: 0;
-    padding: 0;
-    display: grid;
-    gap: 0.35rem;
-    font-family: var(--font-display);
+  .strip .shipped span {
+    color: inherit;
+  }
+
+  .shipped-list {
     font-size: 1rem;
-    font-weight: 600;
-  }
-
-  .free-slots .coming {
     color: var(--muted);
-    font-family: var(--font-display);
-    font-weight: 600;
-  }
-
-  .free-slots .terminal {
-    font-size: 0.8125rem;
   }
 
   /* Install: the accent tile. */
@@ -1143,13 +1119,16 @@ $ runnerd check-config runnerd.toml</span>
       grid-template-columns: minmax(0, 1fr);
     }
 
-    .free-slots {
+    .strip {
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      min-height: 0;
     }
 
-    .free-slots .shipped {
+    .strip .shipped {
       grid-column: 1 / -1;
+    }
+
+    .strip li {
+      min-height: 4.5rem;
     }
 
     .hero h1 {
@@ -1196,10 +1175,6 @@ $ runnerd check-config runnerd.toml</span>
   }
 
   @media (max-width: 480px) {
-    .free-slots {
-      grid-template-columns: minmax(0, 1fr);
-    }
-
     .nav nav a[href='#install'] {
       display: none;
     }

@@ -107,7 +107,7 @@ function themeToggle() {
 /** The slot steps and the free slots arrive one after another as they scroll in; nothing else on the page fades. */
 function entrances() {
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const groups = document.querySelectorAll<HTMLElement>('.slot-steps, .free-slots');
+  const groups = document.querySelectorAll<HTMLElement>('.slot-steps, .strip');
   const observer = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
