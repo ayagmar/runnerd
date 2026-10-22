@@ -8,13 +8,12 @@ use std::collections::HashMap;
 use std::convert::Infallible;
 use std::time::Duration;
 
-use axum::extract::{Path, Query, State};
+use axum::extract::{Path, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use datastar::prelude::{ElementPatchMode, PatchElements};
 use futures_util::{Stream, StreamExt, stream};
 use maud::Markup;
 use runnerd_core::api::{Event, EventQuery, Job};
-use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
@@ -168,22 +167,14 @@ async fn run_overview(app: &App, patches: &Patches) -> Result<(), Error> {
     }
 }
 
-#[derive(Debug, Deserialize)]
-pub(crate) struct JobLive {
-    /// The number of log lines the page shows already.
-    #[serde(default)]
-    from: u64,
-}
-
-/// `GET /live/jobs/{id}?from=…`.
+/// `GET /live/jobs/{id}`.
 pub(crate) async fn job(
     State(app): State<App>,
     Path(id): Path<u64>,
-    Query(live): Query<JobLive>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let (patches, receiver) = mpsc::channel(64);
     tokio::spawn(async move {
-        if let Err(error) = run_job(&app, &patches, id, live.from).await {
+        if let Err(error) = run_job(&app, &patches, id).await {
             debug!("job stream ended: {error}");
             notice(&patches, &error).await;
         }
@@ -215,7 +206,7 @@ async fn append_lines(patches: &Patches, first: u64, lines: &[String]) -> bool {
     patches.send(append).await.is_ok() && patches.send(trim).await.is_ok()
 }
 
-async fn run_job(app: &App, patches: &Patches, id: u64, from: u64) -> Result<(), Error> {
+async fn run_job(app: &App, patches: &Patches, id: u64) -> Result<(), Error> {
     let events = app
         .daemon
         .events(&EventQuery {
@@ -226,14 +217,11 @@ async fn run_job(app: &App, patches: &Patches, id: u64, from: u64) -> Result<(),
     let mut events = Box::pin(events);
     let mut stopping = app.stopping.clone();
     let mut data = JobView::load(&app.daemon, id, crate::now()).await?;
-    // Lines stored between the page's render and this stream's start.
-    let missed = app
-        .daemon
-        .text(&format!("/v1/jobs/{id}/logs?from={from}"))
-        .await?;
-    let missed: Vec<String> = missed.lines().map(str::to_owned).collect();
-    let mut next_line = from + missed.len() as u64;
-    if !append_lines(patches, from, &missed).await {
+    // The log's tail as it is now, in place of what the page has: whatever it got from the page's render or from
+    // an earlier connection this one retries, each line shows once.
+    let mut next_line = data.log_from + data.log.len() as u64;
+    let tail = PatchElements::new(job::log_lines(&data).into_string()).write_as_axum_sse_event();
+    if patches.send(tail).await.is_err() {
         return Ok(());
     }
     let mut sent = Sent::default();

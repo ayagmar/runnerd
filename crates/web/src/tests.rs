@@ -417,10 +417,7 @@ async fn a_running_jobs_stream_appends_new_log_lines_and_updates_its_charts() {
     let cookie = dashboard.sign_in().await;
     let lines = dashboard.fake.fixtures.lock().unwrap().logs[&LEDGER_RUNNING].len() as u64;
     let mut stream = dashboard
-        .stream(
-            &cookie,
-            &format!("/live/jobs/{LEDGER_RUNNING}?from={lines}"),
-        )
+        .stream(&cookie, &format!("/live/jobs/{LEDGER_RUNNING}"))
         .await;
     read_until(&mut stream, |text| text.contains(r#"id="metrics""#)).await;
     let at = NOW + 2;
@@ -609,6 +606,42 @@ async fn a_job_left_open_on_a_noisy_log_keeps_only_its_last_lines() {
     assert_eq!(
         shown.0.last().map(|line| line.1.as_str()),
         Some("noisy line 1199")
+    );
+}
+
+#[tokio::test]
+async fn a_job_stream_that_reconnects_shows_each_log_line_once() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let (page, url) = dashboard.job_page(&cookie).await;
+    let mut shown = ShownLog::of_page(&page);
+    let mut first = dashboard.stream(&cookie, &url).await;
+    read_until(&mut first, |text| text.contains(r#"id="metrics""#)).await;
+    for n in 0..5 {
+        dashboard.log(&format!("before the drop {n}"));
+    }
+    shown.apply(&read_until(&mut first, |text| text.contains("before the drop 4")).await);
+    drop(first);
+    // Datastar retries the URL the page named.
+    dashboard.log("while away");
+    let mut second = dashboard.stream(&cookie, &url).await;
+    shown.apply(&read_until(&mut second, |text| text.contains(r#"id="metrics""#)).await);
+    let texts: Vec<&str> = shown.0.iter().map(|line| line.1.as_str()).collect();
+    for n in 0..5 {
+        let text = format!("before the drop {n}");
+        assert_eq!(
+            texts.iter().filter(|shown| **shown == text).count(),
+            1,
+            "{texts:?}"
+        );
+    }
+    assert_eq!(texts.last(), Some(&"while away"));
+    let mut numbers: Vec<Option<u64>> = shown.0.iter().map(|line| line.0).collect();
+    numbers.dedup();
+    assert_eq!(
+        numbers.len(),
+        shown.0.len(),
+        "each line has its own number: {texts:?}"
     );
 }
 

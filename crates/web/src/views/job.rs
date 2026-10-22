@@ -66,13 +66,7 @@ pub(crate) fn limits(status: &Status, job: &Job) -> Option<(u64, u32)> {
 /// The whole page.
 pub(crate) fn render(view: &JobView) -> Markup {
     let summary = &view.job.summary;
-    let live = (!summary.state.is_final()).then(|| {
-        format!(
-            "/live/jobs/{}?from={}",
-            summary.id,
-            view.log_from + view.log.len() as u64
-        )
-    });
+    let live = (!summary.state.is_final()).then(|| format!("/live/jobs/{}", summary.id));
     let main = html! {
         (head(view))
         (timeline(view))
@@ -362,9 +356,16 @@ pub(crate) fn log(view: &JobView) -> Markup {
             @if view.log.is_empty() && summary.log.lines > 0 {
                 p.muted { "The log's lines are past " code { "history.logs" } " and were deleted." }
             }
-            ol #log-lines .log-lines tabindex="0" aria-label="Log lines" {
-                @for (number, line) in (view.log_from + 1..).zip(&view.log) { (log_line(number, line)) }
-            }
+            (log_lines(view))
+        }
+    }
+}
+
+/// The log's last lines, which the live stream replaces whenever it connects and appends to after.
+pub(crate) fn log_lines(view: &JobView) -> Markup {
+    html! {
+        ol #log-lines .log-lines tabindex="0" aria-label="Log lines" {
+            @for (number, line) in (view.log_from + 1..).zip(&view.log) { (log_line(number, line)) }
         }
     }
 }
