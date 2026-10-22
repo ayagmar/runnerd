@@ -185,15 +185,41 @@ pub enum Command {
         /// The answer.
         reply: oneshot::Sender<Result<(), ControlError>>,
     },
-    /// Run with a new, validated config.
-    Reload {
+    /// Write a new, validated config to its file and run with it, with no tick in between.
+    ReplaceConfig {
         /// The config.
         config: Box<Config>,
         /// The `MemoryMax` of the slice it names.
         memory_max: Option<u64>,
-        /// Answered once the engine runs with it.
-        reply: oneshot::Sender<()>,
+        /// Writes the file.
+        commit: Commit,
+        /// Answered once the engine runs with it: with a warning from the commit, or why it did not commit.
+        reply: oneshot::Sender<Result<Option<String>, ControlError>>,
     },
+}
+
+/// What makes a new config durable, run by the engine before it runs with the config: `Ok` once the config is in
+/// place, with a warning if it may not survive a crash; `Err` with nothing changed.
+pub struct Commit(Box<dyn FnOnce() -> Result<Option<String>, String> + Send>);
+
+impl Commit {
+    /// A commit that runs `write`, off the engine's thread.
+    pub fn new(write: impl FnOnce() -> Result<Option<String>, String> + Send + 'static) -> Commit {
+        Commit(Box::new(write))
+    }
+
+    /// Runs it.
+    pub async fn run(self) -> Result<Option<String>, String> {
+        tokio::task::spawn_blocking(self.0)
+            .await
+            .unwrap_or_else(|join_error| Err(join_error.to_string()))
+    }
+}
+
+impl std::fmt::Debug for Commit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Commit")
+    }
 }
 
 /// The engine's end of `Control`'s commands.
@@ -317,19 +343,22 @@ impl Control {
         .await?
     }
 
-    /// Runs with a validated config from now on. Running jobs keep running: removed profiles and slots go as
-    /// their runners finish.
-    pub async fn reload(
+    /// Runs `commit` to write a validated config, and if it commits, runs with the config from then on, before the
+    /// next tick. If it does not, nothing changes and the answer is `Failed`. Running jobs keep running: removed
+    /// profiles and slots go as their runners finish.
+    pub async fn replace_config(
         &self,
         config: Config,
         memory_max: Option<u64>,
-    ) -> Result<(), ControlError> {
-        self.send(|reply| Command::Reload {
+        commit: Commit,
+    ) -> Result<Option<String>, ControlError> {
+        self.send(|reply| Command::ReplaceConfig {
             config: Box::new(config),
             memory_max,
+            commit,
             reply,
         })
-        .await
+        .await?
     }
 }
 
@@ -1738,13 +1767,20 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             Command::CleanCache { name, reply } => {
                 let _ = reply.send(self.clean_cache(&name).await);
             }
-            Command::Reload {
+            Command::ReplaceConfig {
                 config,
                 memory_max,
+                commit,
                 reply,
             } => {
-                self.reload(*config, memory_max);
-                let _ = reply.send(());
+                let answer = match commit.run().await {
+                    Ok(warning) => {
+                        self.reload(*config, memory_max);
+                        Ok(warning)
+                    }
+                    Err(message) => Err(ControlError::Failed(message)),
+                };
+                let _ = reply.send(answer);
             }
         }
     }

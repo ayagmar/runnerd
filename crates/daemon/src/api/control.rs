@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery};
 use runnerd_core::config::Config;
-use runnerd_core::scheduler::engine::ControlError;
+use runnerd_core::scheduler::engine::{Commit, ControlError};
 use tracing::info;
 
 use super::{AppState, Authenticated, MemoryMax, error};
@@ -110,8 +110,8 @@ pub(super) async fn check_config(
     }
 }
 
-/// Validates the new config, has the engine run with it and writes it in place of the file. A config that is
-/// invalid, or that the engine cannot take, leaves the file and the engine as they were.
+/// Validates the new config; the engine writes it in place of the file and runs with it. A config that is invalid,
+/// or whose file cannot be written, leaves the file and the engine as they were.
 pub(super) async fn replace_config(
     Authenticated(principal): Authenticated,
     State(state): State<AppState>,
@@ -132,32 +132,28 @@ pub(super) async fn replace_config(
             .warnings
             .push("history.database takes effect when runnerd restarts".to_owned());
     }
-    // The engine first: if it cannot take the config, the file stays as it was.
-    if let Err(control_error) = state
+    // The engine writes the file between its ticks and runs with the config before the next: nothing runs under a
+    // config whose file was not written, and nothing changes if it was not.
+    let (path, written) = (file.path.clone(), text.clone());
+    let commit = Commit::new(move || {
+        write_atomically(&path, &written)
+            .map(|()| None)
+            .map_err(|io_error| format!("cannot write {}: {io_error}", path.display()))
+    });
+    match state
         .handle
         .control
-        .reload(config, checked.memory_max)
+        .replace_config(config, checked.memory_max, commit)
         .await
     {
-        return refused(&control_error);
-    }
-    if let Err(io_error) = write_atomically(&file.path, &text) {
-        // Back to the config the file still holds.
-        if let Ok((Some(old), old_checked)) = check(state.memory_max, file.text.clone()).await {
-            let _ = state
-                .handle
-                .control
-                .reload(old, old_checked.memory_max)
-                .await;
+        Ok(warning) => {
+            checked.warnings.extend(warning);
+            file.text = text;
+            info!("{} replaced by {principal:?}", file.path.display());
+            Json(checked).into_response()
         }
-        return error(
-            StatusCode::INTERNAL_SERVER_ERROR,
-            &format!("cannot write {}: {io_error}", file.path.display()),
-        );
+        Err(control_error) => refused(&control_error),
     }
-    file.text = text;
-    info!("{} replaced by {principal:?}", file.path.display());
-    Json(checked).into_response()
 }
 
 /// Replaces the file `path` points to, through a symlink if it is one, with `text`: a temporary file in the same

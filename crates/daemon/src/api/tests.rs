@@ -80,9 +80,17 @@ async fn fake_engine(
             Command::CleanCache { reply, .. } => {
                 let _ = reply.send(Ok(()));
             }
-            Command::Reload { config, reply, .. } => {
-                let _ = reloads.send(*config);
-                let _ = reply.send(());
+            Command::ReplaceConfig {
+                config,
+                commit,
+                reply,
+                ..
+            } => {
+                let answer = commit.run().await;
+                if answer.is_ok() {
+                    let _ = reloads.send(*config);
+                }
+                let _ = reply.send(answer.map_err(ControlError::Failed));
             }
         }
     }
@@ -401,6 +409,43 @@ async fn a_config_the_engine_cannot_take_leaves_the_file_unchanged() {
         .unwrap();
     assert_eq!(response.status(), StatusCode::SERVICE_UNAVAILABLE);
     assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), before);
+    let shown: ConfigFile = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .get("http://runnerd/v1/config")
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert_eq!(shown.text, EXAMPLE);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_config_whose_file_cannot_be_written_is_refused_and_not_run() {
+    let dir = tempdir::Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let set_mode = |mode| {
+        std::fs::set_permissions(&dir.0, std::os::unix::fs::PermissionsExt::from_mode(mode))
+            .unwrap();
+    };
+    // No new file can be created next to the config.
+    set_mode(0o500);
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(EXAMPLE.replacen("slots = 2", "slots = 1", 1))
+        .send()
+        .await
+        .unwrap();
+    set_mode(0o700);
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), EXAMPLE);
+    assert!(daemon.reloads.try_recv().is_err());
     let shown: ConfigFile = serde_json::from_slice(
         &body(
             daemon

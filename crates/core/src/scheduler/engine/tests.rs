@@ -9,7 +9,7 @@ use std::time::Duration;
 use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
-use super::{ControlError, Engine, Handle, HostIdentity, Setup, Shutdown};
+use super::{Command, Commit, ControlError, Engine, Handle, HostIdentity, Setup, Shutdown};
 use crate::api::{self, JobState};
 use crate::cache::Names;
 use crate::config::Config;
@@ -1383,4 +1383,99 @@ async fn after_a_restart_a_runner_and_the_mirror_count_at_the_caps_they_run_with
     github.0.lock().unwrap().queued = vec![small_job(3)];
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+/// `CONFIG` with `o/r` replaced by `o/x`, whose runners take jobs labelled `other`.
+fn other_repository() -> Config {
+    Config::parse(&CONFIG.replace("name = \"o/r\"", "name = \"o/x\"").replace(
+        "labels = [\"self-hosted\", \"app\"]",
+        "labels = [\"self-hosted\", \"other\"]",
+    ))
+    .unwrap()
+}
+
+fn failing_commit() -> Commit {
+    Commit::new(|| Err("cannot write runnerd.toml: read-only file system".to_owned()))
+}
+
+#[tokio::test]
+async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repository_stays_paused()
+ {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.pause("o/r", false).await.unwrap();
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(other_repository()),
+            memory_max: None,
+            commit: failing_commit(),
+            reply,
+        })
+        .await;
+    assert!(matches!(
+        answer.await.unwrap(),
+        Err(ControlError::Failed(_))
+    ));
+    assert!(handle.control.is_paused("o/r"));
+    assert_eq!(engine.config.repositories[0].name, "o/r");
+}
+
+/// Waits until the engine polled GitHub's queue `count` times.
+async fn until_polled(github: &FakeGithub, count: usize) {
+    for _ in 0..500 {
+        let polls = github
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("queued "))
+            .count();
+        if polls >= count {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the engine polled fewer than {count} times");
+}
+
+#[tokio::test]
+async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    github.0.lock().unwrap().queued = vec![QueuedJob {
+        labels: vec!["self-hosted".to_owned(), "other".to_owned()],
+        ..job(3)
+    }];
+    let (engine, handle, _dir) = engine(&github, &docker);
+    let run = tokio::spawn(engine.run());
+    until_polled(&github, 1).await;
+    let refused = handle
+        .control
+        .replace_config(other_repository(), None, failing_commit())
+        .await;
+    assert!(matches!(refused, Err(ControlError::Failed(_))));
+    // The command is followed by a tick: it runs under the old config and starts nothing for `o/x`.
+    until_polled(&github, 2).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+
+    let committed = handle
+        .control
+        .replace_config(
+            other_repository(),
+            None,
+            Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
+        )
+        .await;
+    assert_eq!(
+        committed,
+        Ok(Some("syncing the directory failed".to_owned()))
+    );
+    // Answered once it runs with the config: the status shows `o/x` already.
+    assert_eq!(handle.status.borrow().repositories[0].name, "o/x");
+    handle.control.shutdown(true);
+    tokio::time::timeout(Duration::from_secs(5), run)
+        .await
+        .unwrap()
+        .unwrap();
 }
