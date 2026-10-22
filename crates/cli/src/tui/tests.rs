@@ -32,6 +32,8 @@ use runnerd_core::api::{
     Timeline,
 };
 
+use unicode_width::UnicodeWidthStr;
+
 use super::app::{App, Connection, Effect, Msg, View};
 use super::draw::{Theme, draw};
 use super::feed;
@@ -164,8 +166,12 @@ fn screen(app: &App, width: u16, height: u16, colour: bool) -> String {
     let buffer = terminal.backend().buffer();
     let mut text = String::new();
     for y in 0..height {
-        for x in 0..width {
-            text.push_str(buffer[(x, y)].symbol());
+        let mut x = 0;
+        while x < width {
+            // A wide character covers the cell after it, which ratatui leaves blank.
+            let symbol = buffer[(x, y)].symbol();
+            text.push_str(symbol);
+            x += u16::try_from(symbol.width()).unwrap().max(1);
         }
         text.push('\n');
     }
@@ -908,6 +914,63 @@ fn text_that_does_not_fit_ends_in_an_ellipsis_and_leaves_its_neighbour_a_space()
     assert!(
         history.contains(" feat/checkout… "),
         "the branch ends in an ellipsis: {history}"
+    );
+}
+
+#[test]
+fn wide_characters_are_fitted_by_the_cells_they_take() {
+    let wide = "界".repeat(20);
+    let mut app = app();
+    app.live.status.profiles[1] = profile("ビルド", 2, 7 << 30);
+    running_job(&mut app);
+    app.live.running.get_mut(&42).unwrap().summary.branch = Some(wide.clone());
+
+    for width in [96, 120, 136] {
+        let overview = screen(&app, width, 40, false);
+        for card in ["ビルド · slot 1", "ビルド · slot 2"] {
+            assert!(
+                overview.contains(&format!("{card} ─")),
+                "{card} then its rule at {width}: {overview}"
+            );
+        }
+    }
+
+    app.update(key(KeyCode::Enter));
+    let whole = [
+        format!("branch {wide}"),
+        "run 4001".to_owned(),
+        "slot jvm".to_owned(),
+        "1".to_owned(),
+        "capped at 9.0G and 8.00 cores".to_owned(),
+        "waited 9s".to_owned(),
+        "ran 1m 31s".to_owned(),
+    ];
+    for width in [80, 104, 120] {
+        let job = screen(&app, width, 24, false);
+        let header = rows_with(&job, "slot jvm · 1")[0].trim_end();
+        assert!(
+            header.ends_with("ran 1m 31s"),
+            "the run time stays at {width}: {header}"
+        );
+        for detail in header.split(" · ") {
+            assert!(
+                whole.iter().any(|whole| whole == detail),
+                "{detail:?} is whole at {width}: {header}"
+            );
+        }
+    }
+
+    let mut job = finished(7, 60);
+    job.repository.clone_from(&wide);
+    job.branch = Some(wide.clone());
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(generation, vec![job], None));
+    let history = screen(&app, 120, 24, false);
+    let row = rows_with(&history, "SUCCESS")[0];
+    assert_eq!(
+        row.matches("界…").count(),
+        2,
+        "the repository and the branch end in an ellipsis: {history}"
     );
 }
 

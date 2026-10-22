@@ -15,6 +15,7 @@ use ratatui::widgets::{
 use runnerd_core::api::{
     Job, JobSummary, ProfileStatus, RepositoryStatus, Sample, SlotStatus, Step,
 };
+use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
 
 use super::app::{App, Connection, JobView, Outcome, Pane, View};
 use crate::human::{self, Tone, bytes, cores, duration};
@@ -387,15 +388,26 @@ fn spark(values: impl DoubleEndedIterator<Item = u64>, max: u64, width: usize) -
     bars.into_iter().collect()
 }
 
-/// `text` cut or padded to `width` characters, ending in `…` when cut.
+/// `text` cut or padded to `width` terminal cells, ending in `…` when cut.
 fn fit(text: &str, width: usize) -> String {
-    if text.chars().count() <= width {
-        return format!("{text:<width$}");
-    }
-    let mut cut: String = text.chars().take(width.saturating_sub(1)).collect();
-    if width > 0 {
+    let mut cut = String::new();
+    let mut used = 0;
+    if text.width() <= width {
+        cut.push_str(text);
+        used = text.width();
+    } else if width > 0 {
+        for character in text.chars() {
+            let cells = character.width().unwrap_or(0);
+            if used + cells + 1 > width {
+                break;
+            }
+            cut.push(character);
+            used += cells;
+        }
         cut.push('…');
+        used += 1;
     }
+    cut.extend(std::iter::repeat_n(' ', width.saturating_sub(used)));
     cut
 }
 
@@ -558,14 +570,14 @@ fn slot_cards(
         .saturating_sub(2 + 1 + 3 + 1);
     let longest = slots
         .iter()
-        .map(|(_, profile, slot)| card_title(profile, slot).chars().count())
+        .map(|(_, profile, slot)| card_title(profile, slot).width())
         .max()
         .unwrap_or(0);
     let detail = (0..2)
         .find(|&detail| {
-            slots.iter().all(|(_, profile, _)| {
-                longest + card_sizes(profile)[detail].chars().count() <= name_width
-            })
+            slots
+                .iter()
+                .all(|(_, profile, _)| longest + card_sizes(profile)[detail].width() <= name_width)
         })
         .unwrap_or(2);
     for (position, (index, profile, slot)) in slots.into_iter().enumerate() {
@@ -646,7 +658,7 @@ fn card(
                         format!("{count} "),
                         theme.cpu().add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(fit(&name, width.saturating_sub(count.chars().count() + 1))),
+                    Span::raw(fit(&name, width.saturating_sub(count.width() + 1))),
                 ]),
                 Line::from(vec![
                     Span::raw(format!("{ran:<8}")),
@@ -799,7 +811,7 @@ fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         spans
     };
     let with_profile = repositories.iter().all(|repository| {
-        let name_width = repository.name.chars().count();
+        let name_width = repository.name.width();
         Line::from(spans(repository, Some(&repository.profile), name_width)).width() <= width
     });
     let lines: Vec<Line<'_>> = repositories
@@ -854,12 +866,12 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     // The times are as wide as the widest of them; the job's name takes what is left.
     let ran_width = rows
         .iter()
-        .map(|(_, ran, _)| ran.chars().count())
+        .map(|(_, ran, _)| ran.width())
         .max()
         .unwrap_or(0);
     let ago_width = rows
         .iter()
-        .map(|(_, _, ago)| ago.chars().count())
+        .map(|(_, _, ago)| ago.width())
         .max()
         .unwrap_or(0);
     let name_width = width
@@ -920,7 +932,7 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
     let finished = jobs
         .jobs
         .iter()
-        .map(|job| finished_ago(job, now).chars().count())
+        .map(|job| finished_ago(job, now).width())
         .chain(["FINISHED".len()])
         .max()
         .unwrap_or(0);
@@ -1095,7 +1107,7 @@ fn fit_details(mut details: Vec<(u8, String)>, width: usize) -> String {
             .map(|(_, detail)| detail.as_str())
             .collect::<Vec<_>>()
             .join(" · ");
-        if line.chars().count() <= width {
+        if line.width() <= width {
             return line;
         }
         let Some(least) = details
@@ -1211,7 +1223,7 @@ fn steps(frame: &mut Frame<'_>, area: Rect, job: &Job, now: u64, theme: Theme) {
     let name_width = job
         .steps
         .iter()
-        .map(|step| step.name.chars().count())
+        .map(|step| step.name.width())
         .max()
         .unwrap_or(0)
         .min(usize::from(rest.width) / 3)
