@@ -16,10 +16,13 @@ pub struct Host {
     pub slice: Option<Result<Slice, String>>,
     /// The scopes of `gh`'s token for github.com.
     pub gh_scopes: Result<Vec<String>, String>,
-    /// Whether `sysbox-mgr` and `sysbox-fs` run: Docker keeps the runtime registered without them.
-    pub sysbox_services: bool,
+    /// Whether each of `SYSBOX_SERVICES` runs: Docker keeps the runtime registered without them.
+    pub sysbox_services: [(&'static str, bool); 2],
     pub kvm: bool,
 }
+
+/// The services sysbox-runc needs; `sysbox.service` starts both.
+pub const SYSBOX_SERVICES: [&str; 2] = ["sysbox-mgr", "sysbox-fs"];
 
 pub struct DockerFacts {
     pub version: String,
@@ -82,10 +85,14 @@ impl Host {
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
             gh_scopes: read_gh_scopes(),
-            sysbox_services: Command::new("systemctl")
-                .args(["is-active", "--quiet", "sysbox-mgr", "sysbox-fs"])
-                .status()
-                .is_ok_and(|status| status.success()),
+            // One unit per call: `systemctl is-active` with several units succeeds when any one runs.
+            sysbox_services: SYSBOX_SERVICES.map(|unit| {
+                let active = Command::new("systemctl")
+                    .args(["is-active", "--quiet", unit])
+                    .status()
+                    .is_ok_and(|status| status.success());
+                (unit, active)
+            }),
             kvm: Path::new("/dev/kvm").exists(),
         }
     }
@@ -237,13 +244,22 @@ pub fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             "Docker has no sysbox-runc runtime, which isolation = \"sysbox\" needs".to_owned(),
             &sysbox_fix(&host.os_release),
         ),
-        Some(_) if !host.sysbox_services => fail(
-            "sysbox",
-            "Docker has the sysbox-runc runtime, but sysbox-mgr or sysbox-fs does not run, so runner \
-             containers fail to start"
-                .to_owned(),
-            "sudo systemctl enable --now sysbox",
-        ),
+        Some(_) if host.sysbox_services.iter().any(|(_, active)| !active) => {
+            let stopped: Vec<_> = host
+                .sysbox_services
+                .iter()
+                .filter(|(_, active)| !active)
+                .map(|(unit, _)| *unit)
+                .collect();
+            fail(
+                "sysbox",
+                format!(
+                    "Docker has the sysbox-runc runtime, but not running: {}; runner containers fail to start",
+                    stopped.join(", ")
+                ),
+                "sudo systemctl enable --now sysbox",
+            )
+        }
         Some(_) => pass(
             "sysbox",
             "Docker has the sysbox-runc runtime and sysbox's services run".to_owned(),

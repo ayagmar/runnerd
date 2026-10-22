@@ -1,6 +1,6 @@
 use runnerd_core::config::{ByteSize, Config};
 
-use super::{Check, DockerFacts, Host, Slice, Status, checks};
+use super::{Check, DockerFacts, Host, SYSBOX_SERVICES, Slice, Status, checks};
 
 const ARCH: &str = "NAME=\"Arch Linux\"\nID=arch\n";
 
@@ -41,7 +41,7 @@ fn ready_host(os_release: &str) -> Host {
             "repo".to_owned(),
             "workflow".to_owned(),
         ]),
-        sysbox_services: true,
+        sysbox_services: SYSBOX_SERVICES.map(|unit| (unit, true)),
         kvm: true,
     }
 }
@@ -101,21 +101,24 @@ fn missing_sysbox_fails_with_the_package_for_the_distribution() {
 }
 
 #[test]
-fn sysbox_with_stopped_services_fails_with_the_command_to_start_them() {
+fn sysbox_needs_both_of_its_services() {
     let config = config("sysbox");
-    let mut host = ready_host(ARCH);
-    host.sysbox_services = false;
-    let checks = checks(&host, Some(&config));
-    assert_eq!(failed(&checks), ["sysbox"]);
-    let sysbox = checks.iter().find(|check| check.name == "sysbox").unwrap();
-    assert!(
-        sysbox
-            .fix
-            .as_deref()
-            .unwrap()
-            .contains("systemctl enable --now sysbox"),
-        "{sysbox}"
-    );
+    for stopped in SYSBOX_SERVICES {
+        let mut host = ready_host(ARCH);
+        host.sysbox_services = SYSBOX_SERVICES.map(|unit| (unit, unit != stopped));
+        let checks = checks(&host, Some(&config));
+        assert_eq!(failed(&checks), ["sysbox"], "{stopped} stopped");
+        let sysbox = checks.iter().find(|check| check.name == "sysbox").unwrap();
+        assert!(sysbox.detail.contains(stopped), "{sysbox}");
+        assert!(
+            sysbox
+                .fix
+                .as_deref()
+                .unwrap()
+                .contains("systemctl enable --now sysbox"),
+            "{sysbox}"
+        );
+    }
 }
 
 #[test]
