@@ -1,13 +1,16 @@
 //! The scheduling loop: polls GitHub, applies `plan`'s decisions with GitHub and Docker, removes each runner's
 //! container when its job ends, keeps the mirror up while any runner runs, reseeds idle profiles and recovers
-//! runners and containers a previous daemon left. It owns slot state; it never serves the API (it publishes
-//! `api::Status` and takes commands through `Control`) and never logs the token or a JIT config.
+//! runners and containers a previous daemon left. It also feeds the job history: queued jobs, the job each runner
+//! took (from `observe::capture`), steps from GitHub, mirror bytes, cache sizes and slot and budget changes. It
+//! owns slot state; it never serves the API (it publishes `api::Status` and takes commands through `Control`) and
+//! never logs the token or a JIT config.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
-use tokio::sync::{Notify, watch};
+use futures_util::StreamExt;
+use tokio::sync::{Notify, mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -18,6 +21,21 @@ use crate::config::{ByteSize, Config};
 use crate::docker::{self, Docker, DockerApi, RunnerSpec, is_not_found};
 use crate::github::{self, Deleted, Github, GithubApi, QueuedJob};
 use crate::isolation::{self, Isolation};
+use crate::observe::capture::{self, Captured, Parser};
+use crate::observe::metrics::{self, Paths, Sampler, Tracked};
+use crate::observe::mirror::Leases;
+use crate::store::{LogPosition, RunnerRecord, Store};
+use crate::time;
+
+/// How long the history waits for GitHub to report a job completed after its container is gone, before it records
+/// the job as lost. GitHub fails a job whose runner vanished after about 10 minutes.
+const LOST_AFTER: Duration = Duration::from_mins(15);
+
+/// How long `release` waits for a runner's log capture to end once its container stopped.
+const CAPTURE_DRAIN: Duration = Duration::from_secs(10);
+
+/// How often the history drops what it no longer keeps.
+const PRUNE_EVERY: Duration = Duration::from_secs(3600);
 
 /// The image a profile's runners run.
 pub fn image(stage: &str) -> String {
@@ -176,6 +194,25 @@ pub struct Handle {
     pub status: watch::Receiver<api::Status>,
     /// Pause, resume and shutdown requests.
     pub control: Arc<Control>,
+    /// The job history.
+    pub store: Store,
+    /// Every cache volume of the config, with size 0: the API fills in the sizes it measured.
+    pub caches: Vec<api::CacheVolume>,
+}
+
+/// Where the engine runs, besides its config and its GitHub and Docker clients.
+#[derive(Debug)]
+pub struct Setup {
+    /// The names of what runnerd creates in Docker.
+    pub names: Names,
+    /// This machine, which names its runners, so a restarted daemon recognizes them.
+    pub identity: HostIdentity,
+    /// The slice's `MemoryMax`.
+    pub memory_max: Option<u64>,
+    /// The job history.
+    pub store: Store,
+    /// Where the cgroup and proc file systems are.
+    pub paths: Paths,
 }
 
 /// A slot's runner and its container.
@@ -187,18 +224,29 @@ struct Occupant {
     container: String,
     busy: bool,
     started_at: SystemTime,
+    /// The job it took, once its log capture found it.
+    job: Option<u64>,
 }
 
 #[derive(Debug)]
 struct RepositoryState {
     queued: Vec<QueuedJob>,
+    /// Whether the last poll of its queued jobs succeeded.
+    listed: bool,
     held_until: Option<SystemTime>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
 }
 
-/// The shared caches `trim_shared` emptied, with their sizes.
-type Emptied = Vec<(String, ByteSize)>;
+/// A runner's log capture found its job.
+#[derive(Debug)]
+struct Found {
+    runner: String,
+    job: u64,
+}
+
+/// What `trim_shared` measured, and the shared caches it emptied with their sizes.
+type Trimmed = (BTreeMap<String, u64>, Vec<(String, ByteSize)>);
 
 /// The scheduler with its side effects, on the real GitHub and Docker unless a test passes fakes.
 #[derive(Debug)]
@@ -219,13 +267,28 @@ pub struct Engine<G = Github, D = Docker> {
     /// Whether a job ended since the shared caches were last checked.
     trim_due: bool,
     /// The running check of the shared caches: Docker takes many seconds to measure volumes.
-    trim: Option<JoinHandle<Result<Emptied, docker::Error>>>,
+    trim: Option<JoinHandle<Result<Trimmed, docker::Error>>>,
     mirror_up: bool,
     rate_limit_logged: bool,
     /// Runners without a container that GitHub still holds busy, already logged.
     busy_orphans: BTreeSet<u64>,
     status: watch::Sender<api::Status>,
     control: Arc<Control>,
+    store: Store,
+    paths: Paths,
+    /// The containers the sampler reads.
+    tracked: watch::Sender<Vec<Tracked>>,
+    found: (mpsc::UnboundedSender<Found>, mpsc::UnboundedReceiver<Found>),
+    captures: BTreeMap<String, JoinHandle<()>>,
+    /// Who held which address, for the mirror's log.
+    leases: Leases,
+    /// The Docker timestamp (ms) of the last mirror log line counted.
+    mirror_until: u64,
+    /// Jobs recorded queued and not yet taken or closed, with their repository.
+    queued_jobs: BTreeMap<u64, String>,
+    /// Jobs whose runner is gone, waiting for GitHub to report them completed: repository, and since when.
+    closing: BTreeMap<u64, (String, SystemTime)>,
+    last_prune: Option<SystemTime>,
 }
 
 /// Where the next backoff of a repository whose runners keep failing ends.
@@ -249,14 +312,14 @@ fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
 impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     /// An engine for a validated config. `identity` names this machine's runners, so a restarted daemon recognizes
     /// them; `memory_max` is the slice's.
-    pub fn new(
-        config: Config,
-        github: G,
-        docker: D,
-        names: Names,
-        identity: HostIdentity,
-        memory_max: Option<u64>,
-    ) -> (Engine<G, D>, Handle) {
+    pub fn new(config: Config, github: G, docker: D, setup: Setup) -> (Engine<G, D>, Handle) {
+        let Setup {
+            names,
+            identity,
+            memory_max,
+            store,
+            paths,
+        } = setup;
         let slots = config
             .profiles
             .iter()
@@ -270,6 +333,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     repository.name.clone(),
                     RepositoryState {
                         queued: Vec::new(),
+                        listed: false,
                         held_until: None,
                         failures: 0,
                     },
@@ -294,6 +358,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             profiles: Vec::new(),
             repositories: Vec::new(),
         });
+        let caches = cache::volumes(&names, &config);
         let mut engine = Engine {
             config,
             github,
@@ -307,7 +372,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             repositories,
             reseeds: BTreeMap::new(),
             reseed_due: BTreeSet::new(),
-            trim_due: false,
+            // So the caches are measured once at start.
+            trim_due: true,
             trim: None,
             // Unknown: an earlier run may have left it up, so the first idle tick stops it.
             mirror_up: true,
@@ -315,6 +381,16 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             busy_orphans: BTreeSet::new(),
             status,
             control: control.clone(),
+            store: store.clone(),
+            paths,
+            tracked: watch::channel(Vec::new()).0,
+            found: mpsc::unbounded_channel(),
+            captures: BTreeMap::new(),
+            leases: Leases::default(),
+            mirror_until: 0,
+            queued_jobs: BTreeMap::new(),
+            closing: BTreeMap::new(),
+            last_prune: None,
         };
         engine.publish();
         (
@@ -322,12 +398,19 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             Handle {
                 status: receiver,
                 control,
+                store,
+                caches,
             },
         )
     }
 
     /// Runs until a shutdown request is carried out.
     pub async fn run(mut self) {
+        tokio::spawn(metrics::run(
+            Sampler::new(self.paths.clone(), &self.config.host.slice),
+            self.tracked.subscribe(),
+            self.store.clone(),
+        ));
         // Until Docker answers: scheduling without knowing the containers already running would start a second
         // runner on a slot's volume and delete the running one's registration.
         while let Err(error) = self.recover().await {
@@ -391,6 +474,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
+        self.recover_history().await;
         self.recover_reseeds(seeds);
         for container in containers {
             // Runner containers on this Engine are this machine's whatever their name, which older builds or
@@ -409,6 +493,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 container: container.id.clone(),
                 busy: true,
                 started_at: SystemTime::now(),
+                job: None,
             };
             let known_repository = self.repositories.contains_key(&occupant.repository);
             let free = index.and_then(|index| {
@@ -424,7 +509,12 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                         occupant.runner_name,
                         index.map_or(0, |index| index + 1)
                     );
-                    *slot = Some(occupant);
+                    *slot = Some(occupant.clone());
+                    let slot = SlotRef {
+                        profile,
+                        index: index.unwrap_or(0),
+                    };
+                    self.observe(&slot, &occupant).await;
                 }
                 _ if !ours && container.running => {
                     warn!(
@@ -443,6 +533,104 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         Ok(())
     }
 
+    /// Reads what the history left open: queued jobs to watch, and jobs whose runner is gone to close. Jobs of
+    /// runners adopted later are found again by their log capture.
+    async fn recover_history(&mut self) {
+        match self.store.open_jobs().await {
+            Ok(open) => {
+                for job in open {
+                    match job.state {
+                        api::JobState::Queued => {
+                            self.queued_jobs.insert(job.id, job.repository);
+                        }
+                        _ => {
+                            self.closing
+                                .insert(job.id, (job.repository, SystemTime::now()));
+                        }
+                    }
+                }
+            }
+            Err(error) => warn!("cannot read the job history: {error}"),
+        }
+        match self.store.mirror_log_until().await {
+            Ok(until) => self.mirror_until = until,
+            Err(error) => warn!("cannot read the job history: {error}"),
+        }
+    }
+
+    /// Starts watching a runner's container: records it, samples it, leases its address for the mirror's log, and
+    /// captures its job and log.
+    async fn observe(&mut self, slot: &SlotRef, occupant: &Occupant) {
+        let state = match self.docker.inspect(&occupant.container).await {
+            Ok(state) => state,
+            Err(error) => {
+                warn!("cannot inspect {}: {error}", occupant.runner_name);
+                return;
+            }
+        };
+        let started_at = state
+            .started_at
+            .unwrap_or_else(|| time::ms(occupant.started_at));
+        self.store.runner_started(RunnerRecord {
+            name: occupant.runner_name.clone(),
+            repository: occupant.repository.clone(),
+            profile: slot.profile.clone(),
+            slot: slot.index + 1,
+            container: occupant.container.clone(),
+            started_at,
+        });
+        if let Some(pid) = state.pid {
+            self.tracked.send_modify(|tracked| {
+                tracked.push(Tracked {
+                    runner: occupant.runner_name.clone(),
+                    container: occupant.container.clone(),
+                    pid,
+                });
+            });
+        }
+        if let Some(address) = &state.address {
+            self.leases
+                .start(address, &occupant.runner_name, started_at);
+        }
+        // An adopted runner may have stored part of its log before the restart.
+        let position = match self.store.runner_job(&occupant.runner_name).await {
+            Ok(Some(job)) => self
+                .store
+                .log_position(job)
+                .await
+                .unwrap_or(LogPosition { page: 1, offset: 0 }),
+            _ => LogPosition { page: 1, offset: 0 },
+        };
+        let task = tokio::spawn(capture_job(
+            self.docker.clone(),
+            self.store.clone(),
+            occupant.runner_name.clone(),
+            occupant.container.clone(),
+            position,
+            self.config.history.log_max.0,
+            self.found.0.clone(),
+        ));
+        if let Some(old) = self.captures.insert(occupant.runner_name.clone(), task) {
+            old.abort();
+        }
+    }
+
+    /// Notes the jobs runners took since the last call.
+    fn take_found(&mut self) {
+        while let Ok(found) = self.found.1.try_recv() {
+            self.queued_jobs.remove(&found.job);
+            if let Some(occupant) = self
+                .slots
+                .values_mut()
+                .flatten()
+                .flatten()
+                .find(|occupant| occupant.runner_name == found.runner)
+            {
+                occupant.job = Some(found.job);
+            }
+        }
+    }
+
     async fn tick(&mut self, mode: Shutdown) {
         self.collect_reseeds().await;
         self.collect_trim().await;
@@ -453,7 +641,14 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         self.poll_runners().await;
         if mode == Shutdown::No {
             self.poll_queued().await;
+        } else {
+            for state in self.repositories.values_mut() {
+                state.listed = false;
+            }
         }
+        self.take_found();
+        self.follow_jobs().await;
+        self.count_mirror_bytes().await;
         let decisions = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Force => self
@@ -469,6 +664,130 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         self.idle_caches(mode).await;
+        self.prune();
+    }
+
+    /// Records the queued jobs the repositories' runners may run, and closes those that left the queue for another
+    /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
+    /// runners completed.
+    async fn follow_jobs(&mut self) {
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
+        for repository in &self.config.repositories {
+            let Some(state) = self.repositories.get(&repository.name) else {
+                continue;
+            };
+            if !state.listed {
+                continue;
+            }
+            for job in &state.queued {
+                if super::matches(job, &repository.labels) && !taken.contains(&job.id) {
+                    self.store.queued(&repository.name, job);
+                    self.queued_jobs
+                        .entry(job.id)
+                        .or_insert_with(|| repository.name.clone());
+                }
+            }
+        }
+        let left: Vec<(u64, String)> = self
+            .queued_jobs
+            .iter()
+            .filter(|(id, repository)| {
+                !taken.contains(*id)
+                    && self.repositories.get(*repository).is_some_and(|state| {
+                        state.listed && !state.queued.iter().any(|job| job.id == **id)
+                    })
+            })
+            .map(|(id, repository)| (*id, repository.clone()))
+            .collect();
+        for (id, repository) in left {
+            match self.github.job(&repository, id).await {
+                // Still queued: the listing lags.
+                Ok(details) if details.status == "queued" || details.status == "waiting" => {}
+                // One of this machine's runners: its log capture reports it. If it never did by the time the job
+                // completed, the history knows no more of it than of another machine's job.
+                Ok(details)
+                    if details.status != "completed"
+                        && details
+                            .runner_name
+                            .as_ref()
+                            .is_some_and(|name| name.starts_with(&self.runner_prefix)) => {}
+                Ok(details) => {
+                    self.queued_jobs.remove(&id);
+                    self.store.elsewhere(details);
+                }
+                Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
+            }
+        }
+        let running: Vec<(String, u64)> = self
+            .occupied()
+            .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
+            .collect();
+        for (repository, id) in running {
+            match self.github.job(&repository, id).await {
+                Ok(details) => self.store.details(details),
+                Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
+            }
+        }
+        let closing: Vec<(u64, String, SystemTime)> = self
+            .closing
+            .iter()
+            .map(|(id, (repository, since))| (*id, repository.clone(), *since))
+            .collect();
+        for (id, repository, since) in closing {
+            match self.github.job(&repository, id).await {
+                Ok(details) if details.status == "completed" => {
+                    self.closing.remove(&id);
+                    self.store.details(details);
+                }
+                Ok(_) | Err(_) if since.elapsed().is_ok_and(|waited| waited >= LOST_AFTER) => {
+                    warn!("{repository}: job {id} lost: GitHub did not report it completed");
+                    self.closing.remove(&id);
+                    self.store.lost(id, time::ms(since));
+                }
+                Ok(details) => self.store.details(details),
+                Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
+            }
+        }
+    }
+
+    /// Counts what the mirror served each runner since the last count.
+    async fn count_mirror_bytes(&mut self) {
+        if !self.config.caches.mirror.enabled || !self.mirror_up {
+            return;
+        }
+        let log = match self
+            .docker
+            .logs_since(&self.names.mirror(), self.mirror_until / 1000)
+            .await
+        {
+            Ok(log) => log,
+            Err(error) if is_not_found(&error) => return,
+            Err(error) => {
+                warn!("cannot read the mirror's log: {error}");
+                return;
+            }
+        };
+        let (bytes, until) = self.leases.attribute(&log, self.mirror_until);
+        if until > self.mirror_until {
+            self.mirror_until = until;
+            self.leases.forget_before(until);
+            self.store.mirror_bytes(bytes, until);
+        }
+    }
+
+    fn prune(&mut self) {
+        let now = SystemTime::now();
+        if self.last_prune.is_some_and(|last| {
+            now.duration_since(last)
+                .is_ok_and(|since| since < PRUNE_EVERY)
+        }) {
+            return;
+        }
+        self.last_prune = Some(now);
+        self.store.prune(time::ms(now), &self.config.history);
     }
 
     fn occupied(&self) -> impl Iterator<Item = (SlotRef, &Occupant)> {
@@ -554,9 +873,11 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
 
     async fn poll_queued(&mut self) {
         for repository in &self.config.repositories {
+            let mut listed = false;
             let queued = match self.github.queued_jobs(&repository.name).await {
                 Ok(queued) => {
                     self.rate_limit_logged = false;
+                    listed = true;
                     queued
                 }
                 Err(github::Error::RateLimited { until }) => {
@@ -579,6 +900,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             };
             if let Some(state) = self.repositories.get_mut(&repository.name) {
                 state.queued = queued;
+                state.listed = listed;
             }
         }
     }
@@ -667,6 +989,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         } else {
             None
         };
+        // The capture ends with the container; its last lines must be stored before the job's record closes.
+        self.end_capture(&occupant.runner_name).await;
+        self.count_mirror_bytes().await;
         match self.docker.remove(&occupant.container).await {
             Err(error) if !is_not_found(&error) => {
                 warn!("cannot remove {}: {error}", occupant.runner_name);
@@ -683,6 +1008,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             Ok(_) => {}
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }
+        self.forget(occupant);
         if let Some(state) = self.repositories.get_mut(&occupant.repository) {
             match took_job {
                 Some(true) => {
@@ -712,6 +1038,40 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         self.trim_due = true;
     }
 
+    /// Waits for a runner's log capture to end, which it does once the container stopped; stops it after
+    /// `CAPTURE_DRAIN`.
+    async fn end_capture(&mut self, runner: &str) {
+        self.take_found();
+        if let Some(mut task) = self.captures.remove(runner)
+            && tokio::time::timeout(CAPTURE_DRAIN, &mut task)
+                .await
+                .is_err()
+        {
+            task.abort();
+        }
+        self.take_found();
+    }
+
+    /// Records a runner's removal and stops watching it; its job, if it took one, closes once GitHub reports it
+    /// completed.
+    fn forget(&mut self, occupant: &Occupant) {
+        let now = SystemTime::now();
+        self.store
+            .runner_removed(&occupant.runner_name, time::ms(now));
+        self.tracked.send_modify(|tracked| {
+            tracked.retain(|container| container.runner != occupant.runner_name);
+        });
+        self.leases.end(&occupant.runner_name, time::ms(now));
+        let job = self
+            .occupied()
+            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
+            .and_then(|(_, candidate)| candidate.job)
+            .or(occupant.job);
+        if let Some(job) = job {
+            self.closing.insert(job, (occupant.repository.clone(), now));
+        }
+    }
+
     /// Removes an idle runner, or with `force` a busy one and its job.
     async fn stop(&mut self, slot: &SlotRef, force: bool) {
         let Some(occupant) = self
@@ -731,6 +1091,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 warn!("cannot remove {}: {error}", occupant.runner_name);
                 return;
             }
+            self.end_capture(&occupant.runner_name).await;
+            self.forget(&occupant);
             match self
                 .github
                 .delete_runner(&occupant.repository, occupant.runner_id)
@@ -857,20 +1219,23 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     "{repository}: started {name} in {} slot {number}",
                     slot.profile
                 );
+                let occupant = Occupant {
+                    repository: repository.to_owned(),
+                    runner_name: name,
+                    runner_id: runner.id,
+                    container,
+                    busy: false,
+                    started_at: now,
+                    job: None,
+                };
                 if let Some(entry) = self
                     .slots
                     .get_mut(&slot.profile)
                     .and_then(|slots| slots.get_mut(slot.index))
                 {
-                    *entry = Some(Occupant {
-                        repository: repository.to_owned(),
-                        runner_name: name,
-                        runner_id: runner.id,
-                        container,
-                        busy: false,
-                        started_at: now,
-                    });
+                    *entry = Some(occupant.clone());
                 }
+                self.observe(slot, &occupant).await;
             }
             Err(error) => {
                 warn!("{repository}: cannot start {name}: {error}");
@@ -962,7 +1327,15 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             return;
         };
         match task.await {
-            Ok(Ok(emptied)) => {
+            Ok(Ok((sizes, emptied))) => {
+                let ours = self.names.network();
+                self.store.cache_sizes(
+                    time::now_ms(),
+                    sizes
+                        .into_iter()
+                        .filter(|(name, _)| name.starts_with(&format!("{ours}-")))
+                        .collect(),
+                );
                 for (name, size) in emptied {
                     info!("emptied {name}, which had grown to {size}");
                 }
@@ -983,11 +1356,25 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             let Some(task) = self.reseeds.remove(&name) else {
                 continue;
             };
-            match task.await {
-                Ok(Ok(output)) => info!("{name}: {}", output.trim().replace('\n', "; ")),
-                Ok(Err(error)) => warn!("{name}: reseeding failed: {error}"),
-                Err(error) => warn!("{name}: reseeding stopped: {error}"),
-            }
+            let (output, error) = match task.await {
+                Ok(Ok(output)) => {
+                    info!("{name}: {}", output.trim().replace('\n', "; "));
+                    (output, None)
+                }
+                Ok(Err(error)) => {
+                    warn!("{name}: reseeding failed: {error}");
+                    (String::new(), Some(error.to_string()))
+                }
+                Err(error) => {
+                    warn!("{name}: reseeding stopped: {error}");
+                    (String::new(), Some(error.to_string()))
+                }
+            };
+            self.store.event(api::Event::CacheReseeded {
+                profile: name,
+                output: output.trim().to_owned(),
+                error,
+            });
         }
     }
 
@@ -1036,6 +1423,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     .count(),
             })
             .collect();
+        let previous = self.status.borrow().clone();
         let status = api::Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: mode != Shutdown::No,
@@ -1047,7 +1435,78 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             profiles,
             repositories,
         };
+        self.announce_changes(&previous, &status);
         self.status.send_replace(status);
+    }
+
+    /// Announces the slots and the budget that changed between two statuses.
+    fn announce_changes(&self, previous: &api::Status, status: &api::Status) {
+        for profile in &status.profiles {
+            let before = previous
+                .profiles
+                .iter()
+                .find(|candidate| candidate.name == profile.name);
+            for slot in &profile.slots {
+                let unchanged = before
+                    .and_then(|before| before.slots.iter().find(|old| old.slot == slot.slot))
+                    .is_some_and(|old| old == slot);
+                if !unchanged {
+                    self.store.event(api::Event::SlotChanged {
+                        profile: profile.name.clone(),
+                        slot: slot.clone(),
+                    });
+                }
+            }
+        }
+        if previous.budget != status.budget {
+            self.store.event(api::Event::BudgetChanged {
+                budget: status.budget.clone(),
+            });
+        }
+    }
+}
+
+/// Runs a runner's log capture until its container stops: reports the job it took, and stores the job's log.
+async fn capture_job<D: DockerApi>(
+    docker: Arc<D>,
+    store: Store,
+    runner: String,
+    container: String,
+    position: LogPosition,
+    max_bytes: u64,
+    found: mpsc::UnboundedSender<Found>,
+) {
+    let mut output = match docker.exec(&container, capture::command(position)).await {
+        Ok(output) => output,
+        Err(error) => {
+            warn!("{runner}: cannot capture its job and log: {error}");
+            return;
+        }
+    };
+    let mut parser = Parser::default();
+    let mut job = None;
+    while let Some(chunk) = output.next().await {
+        // An error: the container stopped.
+        let Ok(chunk) = chunk else { break };
+        for captured in parser.feed(&chunk) {
+            match captured {
+                Captured::Job { id, run_id } => {
+                    if job.is_none() {
+                        job = Some(id);
+                        store.claimed(id, run_id, &runner, time::now_ms());
+                        let _ = found.send(Found {
+                            runner: runner.clone(),
+                            job: id,
+                        });
+                    }
+                }
+                Captured::Lines { lines, position } => {
+                    if let Some(job) = job {
+                        store.log(job, lines, position, max_bytes);
+                    }
+                }
+            }
+        }
     }
 }
 

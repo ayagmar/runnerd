@@ -18,6 +18,7 @@ fn job(id: u64, labels: &[&str]) -> QueuedJob {
         run_id: id,
         name: format!("job {id}"),
         labels: labels.iter().map(|label| (*label).to_owned()).collect(),
+        ..QueuedJob::default()
     }
 }
 

@@ -82,12 +82,16 @@ async fn queued_jobs_come_from_queued_and_started_runs() {
                 run_id: 10,
                 name: "smoke".to_owned(),
                 labels: vec!["self-hosted".to_owned(), "sandbox".to_owned()],
+                run_attempt: 1,
+                ..QueuedJob::default()
             },
             QueuedJob {
                 id: 3,
                 run_id: 20,
                 name: "b".to_owned(),
                 labels: vec!["self-hosted".to_owned()],
+                run_attempt: 1,
+                ..QueuedJob::default()
             },
         ]
     );

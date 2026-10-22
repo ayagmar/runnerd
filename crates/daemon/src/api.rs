@@ -1,6 +1,7 @@
 //! Serves `runnerd_core::api` on the local Unix socket. Owns routing, the socket file and authentication: every
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
-//! no scheduling state of its own and never returns secrets.
+//! no scheduling state of its own and never returns secrets. History reads are in `history`, the event stream in
+//! `events`.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -17,7 +18,11 @@ use axum::{Json, Router};
 use runnerd_core::api::{ErrorResponse, Principal, ShutdownRequest, Status};
 use runnerd_core::scheduler::engine::Handle;
 use tokio::net::UnixListener;
+use tokio::sync::watch;
 use tracing::info;
+
+mod events;
+mod history;
 
 /// The socket's default path: `$XDG_RUNTIME_DIR/runnerd.sock`.
 pub(crate) fn default_socket() -> Option<PathBuf> {
@@ -43,6 +48,8 @@ struct AppState {
     handle: Handle,
     /// The user the daemon runs as: the only one the socket admits.
     owner: u32,
+    /// Set when the server stops, so streams that would never end do.
+    stopping: watch::Receiver<bool>,
 }
 
 /// The authenticated sender of a request.
@@ -77,14 +84,27 @@ fn error(status: StatusCode, message: &str) -> Response {
 }
 
 /// The API's routes, for a daemon running as `owner`.
-fn router(handle: Handle, owner: u32) -> Router {
+fn router(handle: Handle, owner: u32, stopping: watch::Receiver<bool>) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/repositories/{owner}/{name}/pause", post(pause))
         .route("/v1/repositories/{owner}/{name}/resume", post(resume))
         .route("/v1/shutdown", post(shutdown))
+        .route("/v1/jobs", get(history::jobs))
+        .route("/v1/jobs/{id}", get(history::job))
+        .route("/v1/jobs/{id}/samples", get(history::samples))
+        .route("/v1/jobs/{id}/logs", get(history::logs))
+        .route("/v1/host/samples", get(history::host_samples))
+        .route("/v1/stats", get(history::stats))
+        .route("/v1/caches", get(history::caches))
+        .route("/v1/caches/history", get(history::cache_history))
+        .route("/v1/events", get(events::events))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "no such endpoint") })
-        .with_state(AppState { handle, owner })
+        .with_state(AppState {
+            handle,
+            owner,
+            stopping,
+        })
 }
 
 async fn status(_: Authenticated, State(state): State<AppState>) -> Json<Status> {
@@ -169,9 +189,15 @@ async fn serve_for(
     owner: u32,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
-    let app = router(handle, owner).into_make_service_with_connect_info::<Peer>();
+    let (stopping, stopping_receiver) = watch::channel(false);
+    let app =
+        router(handle, owner, stopping_receiver).into_make_service_with_connect_info::<Peer>();
     axum::serve(listener, app)
-        .with_graceful_shutdown(stop)
+        .with_graceful_shutdown(async move {
+            stop.await;
+            // Ends the event and log streams, which the graceful shutdown would otherwise wait for.
+            let _ = stopping.send(true);
+        })
         .await
 }
 

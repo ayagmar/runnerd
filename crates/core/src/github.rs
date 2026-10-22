@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::docker::JitConfig;
+use crate::time;
 
 /// The public API's address.
 pub const API_URL: &str = "https://api.github.com";
@@ -105,7 +106,7 @@ fn secs(time: SystemTime) -> u64 {
 }
 
 /// A job waiting for a runner.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct QueuedJob {
     /// The job's ID; IDs grow with time.
     pub id: u64,
@@ -115,6 +116,75 @@ pub struct QueuedJob {
     pub name: String,
     /// The workflow's `runs-on` labels.
     pub labels: Vec<String>,
+    /// When GitHub queued it, in milliseconds since the epoch; 0 if GitHub's answer did not say.
+    pub created_at: u64,
+    /// 1 for the run's first attempt.
+    pub run_attempt: u32,
+    /// The workflow's name.
+    pub workflow: Option<String>,
+    /// The branch the run is for.
+    pub branch: Option<String>,
+    /// The job's page on GitHub.
+    pub url: Option<String>,
+}
+
+/// A job as `GET /repos/{owner}/{repo}/actions/jobs/{id}` describes it: its progress and steps.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct JobDetails {
+    /// The job's ID.
+    pub id: u64,
+    /// The workflow run it belongs to.
+    pub run_id: u64,
+    /// 1 for the run's first attempt.
+    #[serde(default = "first_attempt")]
+    pub run_attempt: u32,
+    /// The job's name in the workflow.
+    pub name: String,
+    /// The workflow's name.
+    pub workflow_name: Option<String>,
+    /// The branch the run is for.
+    pub head_branch: Option<String>,
+    /// The job's page on GitHub.
+    pub html_url: Option<String>,
+    /// The workflow's `runs-on` labels.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// When GitHub queued it.
+    pub created_at: Option<String>,
+    /// `queued`, `in_progress`, `completed`, `waiting`, ….
+    pub status: String,
+    /// Once completed: `success`, `failure`, `cancelled`, ….
+    pub conclusion: Option<String>,
+    /// When the runner started it.
+    pub started_at: Option<String>,
+    /// When it completed.
+    pub completed_at: Option<String>,
+    /// The runner that took it, if one did.
+    pub runner_name: Option<String>,
+    /// Its steps so far.
+    #[serde(default)]
+    pub steps: Vec<JobStep>,
+}
+
+fn first_attempt() -> u32 {
+    1
+}
+
+/// A step of `JobDetails`.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct JobStep {
+    /// GitHub's step number.
+    pub number: u32,
+    /// The name GitHub shows.
+    pub name: String,
+    /// `pending`, `queued`, `in_progress` or `completed`.
+    pub status: String,
+    /// Once completed: `success`, `failure`, `skipped`, ….
+    pub conclusion: Option<String>,
+    /// When it started.
+    pub started_at: Option<String>,
+    /// When it completed.
+    pub completed_at: Option<String>,
 }
 
 /// A runner registered on a repository.
@@ -163,6 +233,12 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         id: u64,
     ) -> impl Future<Output = Result<Deleted, Error>> + Send;
+    /// One job's progress and steps.
+    fn job(
+        &self,
+        repository: &str,
+        id: u64,
+    ) -> impl Future<Output = Result<JobDetails, Error>> + Send;
 }
 
 /// A GitHub API client for one token. Requests on one URL are conditional on its last `ETag`, so an unchanged
@@ -206,6 +282,11 @@ struct Job {
     name: String,
     status: String,
     labels: Vec<String>,
+    created_at: Option<String>,
+    run_attempt: Option<u32>,
+    workflow_name: Option<String>,
+    head_branch: Option<String>,
+    html_url: Option<String>,
 }
 
 #[derive(Deserialize)]
@@ -384,6 +465,15 @@ impl GithubApi for Github {
                             run_id: job.run_id,
                             name: job.name,
                             labels: job.labels,
+                            created_at: job
+                                .created_at
+                                .as_deref()
+                                .and_then(time::parse_ms)
+                                .unwrap_or(0),
+                            run_attempt: job.run_attempt.unwrap_or(1),
+                            workflow: job.workflow_name,
+                            branch: job.head_branch,
+                            url: job.html_url,
                         }),
                 );
             }
@@ -433,6 +523,11 @@ impl GithubApi for Github {
             StatusCode::UNPROCESSABLE_ENTITY => Ok(Deleted::Busy),
             _ => expect_success(Method::DELETE, &path, response).map(|_| Deleted::Deleted),
         }
+    }
+
+    async fn job(&self, repository: &str, id: u64) -> Result<JobDetails, Error> {
+        self.get(&format!("/repos/{repository}/actions/jobs/{id}"))
+            .await
     }
 }
 
