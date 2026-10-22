@@ -1,0 +1,35 @@
+# The owner's setup: two repositories with two runners each, inside ci.slice (MemoryMax=33G).
+# 2 × 9G + 2 × 7G + 512M for the mirror = 32.5G.
+
+[host]
+slice = "ci.slice"
+isolation = "sysbox"
+
+[caches]
+mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+# Gradle, Android, Quarkus and Testcontainers PostgreSQL; a busy runner peaked at 6.8G without page cache.
+[profiles.trellis]
+image_stage = "trellis"
+cpus = 8
+memory = "9G"
+slots = 2
+
+# Maven, pnpm, Next.js image builds, Testcontainers, Playwright, Flutter; a busy runner peaked at 6.0G.
+[profiles.glowly]
+image_stage = "glowly"
+cpus = 8
+memory = "7G"
+slots = 2
+
+[[repositories]]
+name = "ayagmar/trellis"
+profile = "trellis"
+labels = ["self-hosted", "linux", "x64", "trellis"]
+
+[[repositories]]
+name = "ayagmar/glowly"
+profile = "glowly"
+labels = ["self-hosted", "linux", "x64", "glowly"]
