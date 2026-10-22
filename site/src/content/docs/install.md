@@ -3,7 +3,7 @@ title: Install
 description: Install runnerd and runnerctl on a Linux host and check that the host can run runners.
 ---
 
-runnerd is early: version 0.0.x checks the host and the config, and does not start runners yet. Releases are built for Linux on x86_64 and aarch64.
+runnerd is in early development: the daemon schedules runners and serves a small JSON API; job history, metrics, the CLI client and the web dashboard come next. Releases are early 0.0.x builds for Linux on x86_64 and aarch64.
 
 ## What the host needs
 
@@ -72,4 +72,4 @@ FAIL  slice: demo.slice has no unit file with a MemoryMax, so nothing holds runn
            then: sudo systemctl daemon-reload
 ```
 
-`doctor` exits non-zero while any check fails. Next, write a [config](../configuration/).
+`doctor` exits non-zero while any check fails. Next, write a [config](../configuration/), then [run the daemon](../running/).

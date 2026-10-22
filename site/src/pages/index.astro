@@ -73,18 +73,19 @@ const checks = [
 ];
 
 const today = [
-  ['runnerd check-config', 'the budget sum above, against the slice in systemd or a size you pass.'],
-  ['runnerd doctor', 'the host checks above, each failure with its fix.'],
-  ['The runner image', 'the GitHub Actions runner with its own Docker Engine, one stage per profile, started with a just-in-time config.'],
-  ['Isolation backends', 'sysbox by default; privileged Docker-in-Docker only with allow_unsafe.'],
+  ['The scheduler', 'runnerd serve polls GitHub for queued jobs and starts a just-in-time runner for each one, from one pool shared by every configured repository, while the slice has room.'],
+  ['Warm caches', 'a read-only snapshot per profile with a writable layer per slot, a shared pnpm store and Maven repository, and a Docker Hub mirror.'],
+  ['The daemon API', 'JSON on a Unix socket only your user can open: status, pause and resume a repository, shut down.'],
+  ['runnerd check-config and doctor', 'the budget sum and the host checks above.'],
+  ['The runner image', 'the GitHub Actions runner with its own Docker Engine, one stage per profile.'],
+  ['Isolation', 'sysbox by default; privileged Docker-in-Docker only with allow_unsafe.'],
   ['Releases', 'x86_64 and aarch64 Linux builds with SHA-256 checksums and build provenance attestations.'],
 ];
 const next = [
-  ['The scheduler', 'starts a runner for each queued job, from one pool shared by every configured repository.'],
-  ['Warm caches', 'a read-only snapshot per profile with a writable layer per slot, a shared pnpm store, a Maven repository and a Docker Hub mirror.'],
-  ['The daemon API', 'JSON and server-sent events on a Unix socket, with runnerctl as its client.'],
-  ['Job history', 'a timeline, metrics and logs for every job.'],
-  ['The dashboard', 'served by the daemon on a loopback port.'],
+  ['Job history', 'a timeline, timings, metrics and logs for every job.'],
+  ['Live events', 'server-sent events from the daemon as runners start and jobs finish.'],
+  ['runnerctl', 'the command-line client for the daemon API.'],
+  ['The dashboard', 'a web view served by the daemon on a loopback port.'],
 ];
 ---
 
@@ -131,8 +132,8 @@ const next = [
           </p>
           <div class="hero-side">
             <p class="status">
-              Version 0.0.x is early. It checks your host and your budget and builds the runner image; the
-              scheduler that starts runners is being written now.
+              It is in early development: the daemon schedules runners and serves a small JSON API; job history,
+              metrics, the CLI client and the web dashboard come next.
             </p>
             <div class="actions">
               <a class="button" href="#install">Install</a>
@@ -238,14 +239,14 @@ const next = [
       <section class="jobs" aria-labelledby="jobs-title">
         <div class="wrap board">
           <div class="tile tile-head">
-            <h2 id="jobs-title">Every job starts from nothing</h2>
+            <h2 id="jobs-title">A fresh container for every job</h2>
           </div>
           <div class="tile tile-jit">
             <code class="macro" aria-hidden="true">--jitconfig</code>
             <h3>One runner, one job</h3>
             <p>
-              Each runner starts from a just-in-time config, takes one job and unregisters. Its container goes with
-              it, so nothing a job leaves behind reaches the next one.
+              Each runner starts from a just-in-time config, takes one job and unregisters, and runnerd removes its
+              container. The next job gets a new one; only the slot's caches carry over.
             </p>
           </div>
           <div class="tile tile-sysbox">
@@ -333,7 +334,7 @@ const next = [
         <h2 id="roadmap-title">What works today, and what comes next</h2>
         <div class="sheet">
           <div class="column today">
-            <h3>In 0.0.x</h3>
+            <h3>In 0.0.x today</h3>
             <ul>
               {
                 today.map(([name, text]) => (
@@ -370,8 +371,13 @@ const next = [
             <pre><code>{install}</code></pre>
             <button class="copy" type="button" data-copy={install} hidden>Copy</button>
           </div>
+          <p>
+            Then build the image stages your profiles use and start the daemon with
+            <code>runnerd serve --config runnerd.toml</code>.
+          </p>
           <p class="install-links">
             <a href={docs}>Install guide and requirements</a>
+            <a href={`${base}running/`}>Running the daemon</a>
             <a href={`${docs}#verify-a-release`}>Verify a release</a>
           </p>
         </div>
@@ -386,6 +392,7 @@ const next = [
         <nav aria-label="Footer">
           <a href={docs}>Install</a>
           <a href={`${base}configuration/`}>Configuration</a>
+          <a href={`${base}running/`}>Running</a>
           <a href={repo}>Source</a>
           <a href={`${repo}/releases`}>Releases</a>
         </nav>
@@ -847,7 +854,7 @@ const next = [
     color: var(--block-ink);
   }
 
-  /* Every job starts from nothing: a board of filled tiles, each with one real token cropped by its edges. */
+  /* A fresh container for every job: a board of filled tiles, each with one real token cropped by its edges. */
   .jobs {
     padding-top: var(--section);
   }

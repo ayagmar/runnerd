@@ -20,6 +20,8 @@ isolation = "sysbox"
 mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
 pnpm = { max_size = "5G" }
 maven = { max_size = "5G" }
+# Slot 1's layers become a profile's snapshot once they changed this much and the profile is idle.
+reseed_at = "2G"
 
 [profiles.trellis]
 image_stage = "trellis"

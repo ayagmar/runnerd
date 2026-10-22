@@ -12,7 +12,7 @@ export default defineConfig({
       customCss: ['./src/styles/theme.css'],
       expressiveCode: { defaultProps: { wrap: true } },
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/ayagmar/runnerd' }],
-      sidebar: [{ label: 'Start here', items: ['install', 'configuration'] }],
+      sidebar: [{ label: 'Start here', items: ['install', 'configuration', 'running'] }],
     }),
   ],
 });
