@@ -23,6 +23,9 @@ pub struct Config {
     pub profiles: BTreeMap<String, Profile>,
     /// The repositories to serve.
     pub repositories: Vec<Repository>,
+    /// What is kept of past jobs.
+    #[serde(default)]
+    pub history: History,
 }
 
 /// `[host]`: where runner containers run and how they are isolated.
@@ -122,6 +125,37 @@ pub struct Repository {
     pub profile: String,
     /// The labels its runners register with; a job runs on them when every label it asks for is one of these.
     pub labels: Vec<String>,
+}
+
+/// `[history]`: the job history database and how long it keeps what. Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct History {
+    /// The SQLite database; default `$XDG_STATE_HOME/runnerd/runnerd.db`.
+    pub database: Option<PathBuf>,
+    /// How long CPU and memory samples are kept; a job's totals and peaks stay. Default 7 days.
+    #[serde(deserialize_with = "duration")]
+    pub samples: Duration,
+    /// How long a finished job's log is kept. Default 30 days.
+    #[serde(deserialize_with = "duration")]
+    pub logs: Duration,
+    /// How long events are kept for clients resuming with `Last-Event-ID`. Default 30 days.
+    #[serde(deserialize_with = "duration")]
+    pub events: Duration,
+    /// The most log stored per job; later lines are dropped. Default 50M.
+    pub log_max: ByteSize,
+}
+
+impl Default for History {
+    fn default() -> History {
+        History {
+            database: None,
+            samples: Duration::from_hours(7 * 24),
+            logs: Duration::from_hours(30 * 24),
+            events: Duration::from_hours(30 * 24),
+            log_max: ByteSize(50 << 20),
+        }
+    }
 }
 
 /// Why a config cannot be used.

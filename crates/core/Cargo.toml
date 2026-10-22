@@ -15,6 +15,7 @@ host = [
   "dep:bollard",
   "dep:futures-util",
   "dep:reqwest",
+  "dep:rusqlite",
   "dep:rustls",
   "dep:serde_json",
   "dep:tar",
@@ -26,6 +27,7 @@ host = [
 bollard = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 reqwest = { workspace = true, optional = true }
+rusqlite = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
@@ -38,7 +40,7 @@ tracing = { workspace = true, optional = true }
 [dev-dependencies]
 axum.workspace = true
 log.workspace = true
-tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "time"] }
+tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 
 # They start real containers through the host modules.
 [[test]]

@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
 
+use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::{
     ContainerCreateBody, HostConfig, Mount, NetworkCreateRequest, SystemInfo, VolumeCreateRequest,
 };
@@ -13,6 +14,7 @@ use bollard::query_parameters::{
     ListContainersOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
     RemoveVolumeOptionsBuilder, UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
+use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
 
 use crate::config::ByteSize;
@@ -74,7 +76,16 @@ pub struct RunnerState {
     pub privileged: bool,
     /// The runtime Docker runs it with, such as `sysbox-runc`.
     pub runtime: Option<String>,
+    /// Its main process on the host, while it runs.
+    pub pid: Option<u32>,
+    /// Its address on its first network.
+    pub address: Option<String>,
+    /// When it started, in milliseconds since the epoch.
+    pub started_at: Option<u64>,
 }
+
+/// What a command run in a container prints on stdout, as it prints it.
+pub type Output = BoxStream<'static, Result<Vec<u8>, Error>>;
 
 /// The create-container request for a runner container under an isolation backend.
 pub fn create_body(spec: &RunnerSpec, isolation: &dyn Isolation) -> ContainerCreateBody {
@@ -154,6 +165,20 @@ pub trait DockerApi: Send + Sync {
     fn wait(&self, container: &str) -> impl Future<Output = Result<i64, Error>> + Send;
     /// A container's output so far, stdout and stderr interleaved.
     fn logs(&self, container: &str) -> impl Future<Output = Result<String, Error>> + Send;
+    /// A container's output since `since` (seconds since the epoch), each line prefixed with Docker's RFC 3339
+    /// timestamp and a space.
+    fn logs_since(
+        &self,
+        container: &str,
+        since: u64,
+    ) -> impl Future<Output = Result<String, Error>> + Send;
+    /// Runs a command as root in a running container; its stdout streams until it exits or the container stops.
+    /// Its stderr is dropped.
+    fn exec(
+        &self,
+        container: &str,
+        command: Vec<String>,
+    ) -> impl Future<Output = Result<Output, Error>> + Send;
     /// Pulls an image unless it is present.
     fn ensure_image(&self, image: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// Creates a bridge network unless it exists.
@@ -218,11 +243,25 @@ impl DockerApi for Docker {
         let response = self.api.inspect_container(container, None).await?;
         let state = response.state.unwrap_or_default();
         let host_config = response.host_config.unwrap_or_default();
+        let address = response
+            .network_settings
+            .and_then(|settings| settings.networks)
+            .and_then(|networks| {
+                networks
+                    .into_values()
+                    .find_map(|network| network.ip_address.filter(|address| !address.is_empty()))
+            });
         Ok(RunnerState {
             running: state.running.unwrap_or(false),
             exit_code: state.exit_code,
             privileged: host_config.privileged.unwrap_or(false),
             runtime: host_config.runtime,
+            pid: state
+                .pid
+                .and_then(|pid| u32::try_from(pid).ok())
+                .filter(|pid| *pid > 0),
+            address,
+            started_at: state.started_at.as_deref().and_then(crate::time::parse_ms),
         })
     }
 
@@ -286,6 +325,43 @@ impl DockerApi for Docker {
             .try_collect()
             .await?;
         Ok(chunks.iter().map(ToString::to_string).collect())
+    }
+
+    async fn logs_since(&self, container: &str, since: u64) -> Result<String, Error> {
+        let options = LogsOptionsBuilder::new()
+            .stdout(true)
+            .stderr(true)
+            .timestamps(true)
+            .since(i32::try_from(since).unwrap_or(i32::MAX))
+            .build();
+        let chunks: Vec<_> = self
+            .api
+            .logs(container, Some(options))
+            .try_collect()
+            .await?;
+        Ok(chunks.iter().map(ToString::to_string).collect())
+    }
+
+    async fn exec(&self, container: &str, command: Vec<String>) -> Result<Output, Error> {
+        let options = CreateExecOptions {
+            cmd: Some(command),
+            user: Some("root".to_owned()),
+            attach_stdout: Some(true),
+            attach_stderr: Some(true),
+            ..Default::default()
+        };
+        let exec = self.api.create_exec(container, options).await?;
+        match self.api.start_exec(&exec.id, None).await? {
+            StartExecResults::Attached { output, .. } => Ok(output
+                .try_filter_map(|output| {
+                    std::future::ready(Ok(match output {
+                        bollard::container::LogOutput::StdOut { message } => Some(message.to_vec()),
+                        _ => None,
+                    }))
+                })
+                .boxed()),
+            StartExecResults::Detached => Ok(futures_util::stream::empty().boxed()),
+        }
     }
 
     async fn ensure_image(&self, image: &str) -> Result<(), Error> {

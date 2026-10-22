@@ -1,18 +1,23 @@
 //! Runner names, and the engine against fake GitHub and Docker: polling order, restart recovery, a Docker that
-//! does not answer, and which runners it deletes.
+//! does not answer, which runners it deletes, and the job history it keeps across restarts.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use bollard::models::ContainerCreateBody;
+use futures_util::StreamExt;
 
-use super::{Engine, Handle, HostIdentity, Shutdown};
+use super::{Engine, Handle, HostIdentity, Setup, Shutdown};
+use crate::api::{self, JobState};
 use crate::cache::Names;
 use crate::config::Config;
 use crate::docker::{self, Container, DockerApi, JitConfig, RunnerSpec, RunnerState};
-use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
+use crate::github::{self, Deleted, GithubApi, JobDetails, JobStep, QueuedJob, Runner};
 use crate::isolation::Isolation;
+use crate::observe::metrics::Paths;
+use crate::store::Store;
+use crate::testdir::TestDir;
 
 const ID_A: &str = "0123abcdef0123456789abcdef012345\n";
 const ID_B: &str = "fedc9876543210fedcba9876543210fe\n";
@@ -59,6 +64,8 @@ struct GithubState {
     runners: Vec<Runner>,
     /// GitHub gives this queued job to this runner right after the first poll that sees them.
     assign: Option<(u64, u64)>,
+    /// What `GET /actions/jobs/{id}` answers.
+    jobs: HashMap<u64, JobDetails>,
     calls: Vec<String>,
 }
 
@@ -123,6 +130,15 @@ impl GithubApi for FakeGithub {
         state.runners.retain(|runner| runner.id != id);
         Ok(Deleted::Deleted)
     }
+
+    async fn job(&self, _repository: &str, id: u64) -> Result<JobDetails, github::Error> {
+        let state = self.0.lock().unwrap();
+        state
+            .jobs
+            .get(&id)
+            .cloned()
+            .ok_or(github::Error::Token(format!("no job {id}")))
+    }
 }
 
 /// What the fake Docker Engine runs and what it was asked.
@@ -131,6 +147,12 @@ struct DockerState {
     containers: Vec<Container>,
     /// Every `list` fails, as when the Engine does not answer.
     fail_lists: bool,
+    /// What the Docker Hub mirror's log says.
+    mirror_log: String,
+    /// What the log capture prints in a container, by the position it is started at.
+    captures: HashMap<(String, String), String>,
+    /// The capture commands run: container, page, offset.
+    captured: Vec<(String, String, String)>,
     calls: Vec<String>,
 }
 
@@ -181,6 +203,9 @@ impl DockerApi for FakeDocker {
             exit_code: None,
             privileged: false,
             runtime: None,
+            pid: Some(4242),
+            address: Some("172.18.0.3".to_owned()),
+            started_at: Some(1_000),
         })
     }
 
@@ -220,7 +245,29 @@ impl DockerApi for FakeDocker {
     }
 
     async fn logs(&self, _container: &str) -> Result<String, docker::Error> {
-        Ok(String::new())
+        Ok("Running job: build".to_owned())
+    }
+
+    async fn logs_since(&self, _container: &str, _since: u64) -> Result<String, docker::Error> {
+        Ok(self.0.lock().unwrap().mirror_log.clone())
+    }
+
+    async fn exec(
+        &self,
+        container: &str,
+        command: Vec<String>,
+    ) -> Result<docker::Output, docker::Error> {
+        let mut state = self.0.lock().unwrap();
+        let (page, offset) = (command[4].clone(), command[5].clone());
+        state
+            .captured
+            .push((container.to_owned(), page.clone(), offset.clone()));
+        let output = state
+            .captures
+            .get(&(page, offset))
+            .cloned()
+            .unwrap_or_default();
+        Ok(futures_util::stream::iter([Ok(output.into_bytes())]).boxed())
     }
 
     async fn ensure_image(&self, _image: &str) -> Result<(), docker::Error> {
@@ -266,15 +313,45 @@ profile = "app"
 labels = ["self-hosted", "app"]
 "#;
 
-fn engine(github: &FakeGithub, docker: &FakeDocker) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+/// An engine on the fakes, with its history in `dir`.
+fn engine_in(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    engine_with(github, docker, dir, CONFIG)
+}
+
+fn engine_with(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    config: &str,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
     Engine::new(
-        Config::parse(CONFIG).unwrap(),
+        Config::parse(config).unwrap(),
         github.clone(),
         docker.clone(),
-        Names::new("runnerd"),
-        identity("ci", ID_A),
-        None,
+        Setup {
+            names: Names::new("runnerd"),
+            identity: identity("ci", ID_A),
+            memory_max: None,
+            store: Store::open(&dir.0.join("history.db")).unwrap(),
+            paths: Paths {
+                cgroup: dir.0.join("cgroup"),
+                proc: dir.0.join("proc"),
+            },
+        },
     )
+}
+
+fn engine(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+) -> (Engine<FakeGithub, FakeDocker>, Handle, TestDir) {
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_in(github, docker, &dir);
+    (engine, handle, dir)
 }
 
 fn job(id: u64) -> QueuedJob {
@@ -283,6 +360,7 @@ fn job(id: u64) -> QueuedJob {
         run_id: 1,
         name: "build".to_owned(),
         labels: vec!["self-hosted".to_owned(), "app".to_owned()],
+        ..QueuedJob::default()
     }
 }
 
@@ -334,7 +412,7 @@ async fn a_runner_that_takes_its_job_between_polls_gets_no_twin() {
         )];
         state.assign = Some((1, 7));
     }
-    let (mut engine, _handle) = engine(&github, &docker);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
@@ -367,7 +445,7 @@ async fn a_restart_adopts_running_runners_and_reseeds_and_removes_stopped_runner
             true,
         )];
     }
-    let (mut engine, handle) = engine(&github, &docker);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
     engine.publish();
     {
@@ -390,7 +468,7 @@ async fn nothing_is_scheduled_while_docker_cannot_list_containers() {
     let docker = FakeDocker::default();
     docker.0.lock().unwrap().fail_lists = true;
     github.0.lock().unwrap().queued = vec![job(1)];
-    let (engine, handle) = engine(&github, &docker);
+    let (engine, handle, _dir) = engine(&github, &docker);
     let run = tokio::spawn(engine.run());
     for _ in 0..100 {
         if !docker.calls().is_empty() {
@@ -420,7 +498,7 @@ async fn only_this_machines_runners_without_a_container_are_deleted() {
         runner(3, &identity("ci", ID_B).runner_name("app", 1, 1), false),
         runner(4, "my-laptop", false),
     ];
-    let (mut engine, _handle) = engine(&github, &docker);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     let deleted: Vec<String> = github
@@ -429,4 +507,333 @@ async fn only_this_machines_runners_without_a_container_are_deleted() {
         .filter(|call| call.starts_with("delete "))
         .collect();
     assert_eq!(deleted, ["delete 2"]);
+}
+
+fn details(id: u64, status: &str, conclusion: Option<&str>) -> JobDetails {
+    let step = |number: u32, name: &str| JobStep {
+        number,
+        name: name.to_owned(),
+        status: "completed".to_owned(),
+        conclusion: Some("success".to_owned()),
+        started_at: Some("2026-10-22T19:27:25Z".to_owned()),
+        completed_at: Some("2026-10-22T19:27:27Z".to_owned()),
+    };
+    JobDetails {
+        id,
+        run_id: 1,
+        run_attempt: 1,
+        name: "build".to_owned(),
+        workflow_name: Some("ci".to_owned()),
+        head_branch: Some("main".to_owned()),
+        html_url: None,
+        labels: vec!["self-hosted".to_owned(), "app".to_owned()],
+        created_at: Some("2026-10-22T19:27:05Z".to_owned()),
+        status: status.to_owned(),
+        conclusion: conclusion.map(str::to_owned),
+        started_at: Some("2026-10-22T19:27:24Z".to_owned()),
+        completed_at: (status == "completed").then(|| "2026-10-22T19:28:30Z".to_owned()),
+        runner_name: Some(identity("ci", ID_A).runner_name("app", 1, 1)),
+        steps: vec![step(1, "Set up job"), step(2, "Run make")],
+    }
+}
+
+/// A running runner container in slot 1 whose log capture, started at page 1 offset 0, prints `output`.
+fn running_runner(github: &FakeGithub, docker: &FakeDocker, output: &str) {
+    let mut state = docker.0.lock().unwrap();
+    state.containers = vec![runner_container(1, 7, true)];
+    state
+        .captures
+        .insert(("1".to_owned(), "0".to_owned()), output.to_owned());
+    github.0.lock().unwrap().runners = vec![runner(
+        7,
+        &identity("ci", ID_A).runner_name("app", 1, 1),
+        true,
+    )];
+}
+
+/// Waits until the history shows the job in `state`.
+async fn until_state(handle: &Handle, job: u64, state: JobState) -> api::Job {
+    for _ in 0..200 {
+        handle.store.flush().await;
+        if let Some(found) = handle.store.job(job).await.unwrap()
+            && found.summary.state == state
+        {
+            return found;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("job {job} never got to {state:?}");
+}
+
+#[tokio::test]
+async fn a_job_github_still_lists_queued_after_its_runner_took_it_gets_no_twin() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    // GitHub reports the runner busy, but its listing of queued jobs still has the job it took.
+    running_runner(&github, &docker, "@@job 1 1\n");
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.jobs.insert(1, details(1, "in_progress", None));
+    }
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
+async fn a_job_whose_capture_never_reported_it_leaves_the_queue_once_github_completes_it() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    // The capture prints nothing, as when the runner's `_diag` layout changed.
+    running_runner(&github, &docker, "");
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.jobs.insert(1, details(1, "in_progress", None));
+    }
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    github.0.lock().unwrap().queued.clear();
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    assert_eq!(
+        handle.store.job(1).await.unwrap().unwrap().summary.state,
+        JobState::Queued
+    );
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "completed", Some("success")));
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 1, JobState::Elsewhere).await;
+}
+
+#[tokio::test]
+async fn a_finished_job_keeps_its_timeline_steps_and_log_across_a_restart() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_runner(&github, &docker, "@@job 1 1\n@@page 1 0 6\nhello\n");
+    docker.0.lock().unwrap().captures.insert(
+        ("1".to_owned(), "6".to_owned()),
+        "@@job 1 1\n@@page 1 6 6\nworld\n@@end 1\n".to_owned(),
+    );
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    let dir = TestDir::new("restart");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    let mut events = handle.store.subscribe();
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    drop((engine, handle));
+
+    // The daemon restarts mid-job: the capture resumes after the stored line, then the job ends.
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    for _ in 0..100 {
+        handle.store.flush().await;
+        if handle
+            .store
+            .job(1)
+            .await
+            .unwrap()
+            .unwrap()
+            .summary
+            .log
+            .lines
+            == 2
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "completed", Some("success")));
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    let job = until_state(&handle, 1, JobState::Completed).await;
+    drop((engine, handle));
+
+    let store = Store::open(&dir.0.join("history.db")).unwrap();
+    assert_eq!(store.job(1).await.unwrap().unwrap(), job);
+    assert_eq!(job.summary.conclusion.as_deref(), Some("success"));
+    let timeline = &job.summary.timeline;
+    assert_eq!(timeline.started_at, Some(1_792_697_244));
+    assert_eq!(timeline.finished_at, Some(1_792_697_310));
+    assert!(timeline.cleaned_at.is_some());
+    let steps: Vec<(&str, Option<u64>)> = job
+        .steps
+        .iter()
+        .map(|step| (step.name.as_str(), step.completed_at))
+        .collect();
+    assert_eq!(
+        steps,
+        [
+            ("Set up job", Some(1_792_697_247)),
+            ("Run make", Some(1_792_697_247))
+        ]
+    );
+    let log: Vec<String> = store
+        .log_lines(1, 0, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|(_, text)| text)
+        .collect();
+    assert_eq!(log, ["hello", "world"]);
+    let mut kinds = Vec::new();
+    while let Ok(event) = events.try_recv() {
+        if event.id.is_some() && event.event.job() == Some(1) {
+            kinds.push(event.event.kind());
+        }
+    }
+    assert_eq!(kinds, ["job.started", "job.step", "job.step"]);
+    let stored: Vec<&str> = store
+        .events_after(0, 100)
+        .await
+        .unwrap()
+        .iter()
+        .filter(|event| event.event.job() == Some(1))
+        .map(|event| event.event.kind())
+        .collect();
+    assert_eq!(
+        stored,
+        ["job.started", "job.step", "job.step", "job.finished"]
+    );
+}
+
+#[tokio::test]
+async fn a_job_whose_container_vanished_closes_once_github_reports_it() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_runner(&github, &docker, "@@job 1 1\n");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    // Someone removes the container mid-job.
+    docker.0.lock().unwrap().containers.clear();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    handle.store.flush().await;
+    let job = handle.store.job(1).await.unwrap().unwrap();
+    assert_eq!(job.summary.state, JobState::Running);
+    assert!(job.summary.timeline.cleaned_at.is_some());
+    assert_eq!(handle.status.borrow().profiles[0].slots[0].runner, None);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "completed", Some("failure")));
+    engine.tick(Shutdown::No).await;
+    let job = until_state(&handle, 1, JobState::Completed).await;
+    assert_eq!(job.summary.conclusion.as_deref(), Some("failure"));
+}
+
+/// Runs job 1 on a runner in slot 1 until the history has it running, then stops that daemon.
+async fn run_until_restart(github: &FakeGithub, docker: &FakeDocker, dir: &TestDir) {
+    running_runner(github, docker, "@@job 1 1\n");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    let (mut engine, handle) = engine_in(github, docker, dir);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+}
+
+#[tokio::test]
+async fn a_job_whose_container_vanished_while_the_daemon_was_down_closes_after_the_restart() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    run_until_restart(&github, &docker, &dir).await;
+    docker.0.lock().unwrap().containers.clear();
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "completed", Some("success")));
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let job = until_state(&handle, 1, JobState::Completed).await;
+    assert!(job.summary.timeline.cleaned_at.is_some());
+}
+
+#[tokio::test]
+async fn an_adopted_job_that_runs_long_after_a_restart_is_not_lost() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    run_until_restart(&github, &docker, &dir).await;
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    tokio::time::pause();
+    tokio::time::advance(super::LOST_AFTER + Duration::from_secs(60)).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let job = handle.store.job(1).await.unwrap().unwrap();
+    assert_eq!(job.summary.state, JobState::Running);
+}
+
+#[tokio::test]
+async fn mirror_bytes_the_history_failed_to_store_are_counted_on_the_next_tick() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_runner(&github, &docker, "@@job 1 1\n");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "in_progress", None));
+    docker.0.lock().unwrap().mirror_log = "2026-10-22T19:27:25.869343464Z 172.18.0.3 - - \
+        [22/Oct/2026:19:27:25 +0000] \"GET /v2/library/alpine/blobs/sha256:aa HTTP/1.1\" 200 577 \"\" \"docker/29.9.2\"\n"
+        .to_owned();
+    let dir = TestDir::new("mirror");
+    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    // Another process holds the history's runner rows: the count fails.
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_bytes BEFORE UPDATE OF mirror_bytes ON runners \
+             BEGIN SELECT RAISE(ABORT, 'busy'); END;",
+        )
+        .unwrap();
+    engine.tick(Shutdown::No).await;
+    fault.execute_batch("DROP TRIGGER no_bytes").unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let job = handle.store.job(1).await.unwrap().unwrap();
+    assert_eq!(job.summary.metrics.mirror_bytes, 577);
 }

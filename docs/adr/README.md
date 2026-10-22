@@ -22,3 +22,5 @@ with a line pointing to the record that replaces it.
 | [0014](0014-host-feature-for-daemon-only-code.md) | Daemon-only code behind core's `host` feature |
 | [0015](0015-engine-behind-github-and-docker-traits.md) | The engine calls GitHub and Docker through traits |
 | [0016](0016-strict-lints.md) | Strict lints, every exception with a reason |
+| [0017](0017-job-history-in-sqlite.md) | Job history in SQLite, written by one thread |
+| [0018](0018-job-identity-and-logs-from-inside-the-runner.md) | Job identity and logs from inside the runner container |

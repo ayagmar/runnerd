@@ -9,6 +9,7 @@ use bollard::models::{
     ContainerCreateBody, EndpointSettings, HostConfig, Mount, MountType, NetworkingConfig,
 };
 
+use crate::api;
 use crate::config::{self, ByteSize};
 use crate::docker::{DockerApi, Error, RunnerSpec, is_not_found};
 use crate::isolation::Isolation;
@@ -177,13 +178,13 @@ pub async fn mirror_down(docker: &impl DockerApi, names: &Names) -> Result<(), E
     }
 }
 
-/// Empties the shared caches that outgrew their limit; call only while no runner runs. Returns what it emptied
-/// and how large it was.
+/// Empties the shared caches that outgrew their limit; call only while no runner runs. Returns every volume's size
+/// as measured before, and what it emptied with how large it was.
 pub async fn trim_shared(
     docker: &impl DockerApi,
     names: &Names,
     caches: &config::Caches,
-) -> Result<Vec<(String, ByteSize)>, Error> {
+) -> Result<(BTreeMap<String, u64>, Vec<(String, ByteSize)>), Error> {
     let sizes = docker.volume_sizes().await?;
     let mut emptied = Vec::new();
     for (name, limit) in [
@@ -197,7 +198,52 @@ pub async fn trim_shared(
             emptied.push((name, ByteSize(size)));
         }
     }
-    Ok(emptied)
+    Ok((sizes, emptied))
+}
+
+/// Every cache volume the config's profiles use, what it holds and its limit, with size 0.
+pub fn volumes(names: &Names, config: &config::Config) -> Vec<api::CacheVolume> {
+    let volume = |name: String, kind: api::CacheKind, limit: Option<u64>| api::CacheVolume {
+        name,
+        kind,
+        bytes: 0,
+        limit,
+    };
+    let mut volumes = Vec::new();
+    for (profile, settings) in &config.profiles {
+        volumes.push(volume(
+            names.base(profile),
+            api::CacheKind::Snapshot {
+                profile: profile.clone(),
+            },
+            None,
+        ));
+        for slot in 1..=settings.slots as usize {
+            volumes.push(volume(
+                names.slot(profile, slot),
+                api::CacheKind::Slot {
+                    profile: profile.clone(),
+                    slot,
+                },
+                None,
+            ));
+        }
+    }
+    volumes.push(volume(
+        names.pnpm(),
+        api::CacheKind::Pnpm,
+        Some(config.caches.pnpm.max_size.0),
+    ));
+    volumes.push(volume(
+        names.maven(),
+        api::CacheKind::Maven,
+        Some(config.caches.maven.max_size.0),
+    ));
+    if config.caches.mirror.enabled {
+        volumes.push(volume(names.mirror(), api::CacheKind::Mirror, None));
+    }
+    volumes.sort_by(|a, b| a.name.cmp(&b.name));
+    volumes
 }
 
 /// What `reseed` runs on: the profile's image and limits, its slots and the isolation backend.

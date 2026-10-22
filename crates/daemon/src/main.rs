@@ -9,7 +9,9 @@ use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, slice_memory_max};
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
-use runnerd_core::scheduler::engine::{Engine, HostIdentity};
+use runnerd_core::observe::metrics::Paths;
+use runnerd_core::scheduler::engine::{Engine, HostIdentity, Setup};
+use runnerd_core::store::Store;
 use tracing::{info, warn};
 
 mod api;
@@ -142,6 +144,14 @@ fn default_config() -> Option<PathBuf> {
     Some(dir.join("runnerd/runnerd.toml"))
 }
 
+/// `$XDG_STATE_HOME/runnerd/runnerd.db`, or `~/.local/state/runnerd/runnerd.db`.
+fn default_database() -> Option<PathBuf> {
+    let dir = std::env::var_os("XDG_STATE_HOME")
+        .map(PathBuf::from)
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".local/state")))?;
+    Some(dir.join("runnerd/runnerd.db"))
+}
+
 fn socket_or_default(socket: Option<PathBuf>) -> Result<PathBuf, ExitCode> {
     socket
         .or_else(api::default_socket)
@@ -168,15 +178,32 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
     let docker = Docker::connect().map_err(|error| fail(&error))?;
     docker.info().await.map_err(|error| fail(&error))?;
     let identity = HostIdentity::read().map_err(|error| fail(&error))?;
+    let database = config
+        .history
+        .database
+        .clone()
+        .or_else(default_database)
+        .ok_or_else(|| fail(&"neither XDG_STATE_HOME nor HOME is set; set history.database"))?;
+    let store = Store::open(&database).map_err(|error| {
+        fail(&format_args!(
+            "cannot open the job history {}: {error}",
+            database.display()
+        ))
+    })?;
+    info!("job history in {}", database.display());
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
     let (engine, handle) = Engine::new(
         config,
         github,
         docker,
-        Names::new("runnerd"),
-        identity,
-        memory_max.map(|max| max.0),
+        Setup {
+            names: Names::new("runnerd"),
+            identity,
+            memory_max: memory_max.map(|max| max.0),
+            store: store.clone(),
+            paths: Paths::default(),
+        },
     );
     let control = handle.control.clone();
     tokio::spawn(async move {
@@ -203,6 +230,7 @@ async fn serve(config: Option<PathBuf>, socket: Option<PathBuf>) -> Result<ExitC
     }));
     let engine_done = engine.await;
     let _ = stopped.send(());
+    store.flush().await;
     let server_done = server.await;
     let _ = std::fs::remove_file(&socket);
     engine_done.map_err(|error| fail(&error))?;

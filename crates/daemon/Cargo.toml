@@ -10,6 +10,7 @@ repository.workspace = true
 [dependencies]
 axum.workspace = true
 clap.workspace = true
+futures-util.workspace = true
 reqwest.workspace = true
 runnerd-core = { workspace = true, features = ["host"] }
 serde_json.workspace = true
