@@ -1,0 +1,132 @@
+---
+title: Dashboard and CLI
+description: Open runnerd's web dashboard and drive the daemon from runnerctl.
+---
+
+import Shot from '../../components/Shot.astro';
+
+Both ship from 0.0.2 and talk to the daemon only. The output and screenshots here come from the dashboard's demo daemon, whose made-up machine is the [example config](../configuration/).
+
+## Dashboard
+
+`runnerd serve` serves it on `127.0.0.1:7477`; `--web <address>` picks another loopback address, `--web off` serves none. Each browser logs in once, through a one-time URL the daemon keeps in `$XDG_RUNTIME_DIR/runnerd.web`:
+
+```sh
+runnerctl web
+# without runnerctl
+xdg-open "$(cat "$XDG_RUNTIME_DIR/runnerd.web")"
+```
+
+Pages update as things happen. Memory and CPU are sampled every 2 s, so a shorter peak does not show.
+
+### Overview
+
+<Shot
+  name="overview"
+  alt="The overview: 23.5G of 33G reserved in ci.slice, jvm slot 1 running halyard/ledger's build, node slot 1 running halyard/storefront's playwright job, jvm slot 2 free, node slot 2 with a runner waiting."
+  sizes="(min-width: 72rem) 45rem, 100vw"
+/>
+
+The budget as blocks, each slot filled to its job's last sample. Every slot with its job, step, memory and CPU. Below: the slice over the last half hour, pause and resume per repository, the latest jobs.
+
+### A job
+
+<Shot
+  name="job"
+  alt="halyard/ledger's build job, running: waited 4s for a runner, 5s to start, then nine steps on one time axis, the seventh, integration tests, running."
+  sizes="(min-width: 72rem) 45rem, 100vw"
+/>
+
+Its phases, its steps on one time axis, then CPU and memory against the profile's limits, and the log.
+
+### History
+
+<Shot
+  name="history"
+  alt="History over the last 30 days: 861 jobs, 90% succeeded, 9m 07s average run, 18s average wait, charts of jobs per day, run and wait times and memory peaks."
+  sizes="(min-width: 72rem) 45rem, 100vw"
+/>
+
+Jobs per day, run and wait times and memory peaks over 30 days, then every job, filtered by repository and outcome.
+
+### Caches and Config
+
+| Page | Shows |
+|---|---|
+| Caches | each volume, its bound and its size over 30 days; reseed a snapshot or empty a cache |
+| Config | `runnerd.toml` in an editor that checks it against `MemoryMax` as you type, saves and reloads only when it fits; the doctor's checks |
+
+## runnerctl
+
+It talks to the socket (`--socket` picks another), prints aligned text, coloured on a terminal unless `NO_COLOR` is set, and with `--json` prints the API's response unchanged. Sizes of 10 or more round to whole units, so the demo's 23.5G reads 24G.
+
+```console wrap=false
+$ runnerctl status
+runnerd 0.0.2  24G of 33G reserved in ci.slice
+
+PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
+jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792708105    7m 9s
+jvm         2  free
+node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792708223  5m 11s
+node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792708520     14s
+
+REPOSITORY          PROFILE  STATE   QUEUED  LABELS
+halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
+halyard/storefront  node     active       1  self-hosted,linux,x64,node
+```
+
+| Command | What it shows or does |
+|---|---|
+| `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queues |
+| `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
+| `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
+| `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final |
+| `runnerctl watch` | slots, running jobs with their current step and last sample, queued and finished jobs, redrawn as events arrive; one line per event when not on a terminal, one JSON event per line with `--json` |
+| `runnerctl pause <repo> [--force]`, `resume <repo>` | the repository gets no new runners; refused while it runs a job, unless `--force` cancels the job's run and removes its runner |
+| `runnerctl reseed <profile>` | makes slot 1's layers the profile's snapshot once its slots are free, and waits for it (`--no-wait`) |
+| `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
+| `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
+| `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
+| `runnerctl web` | opens the dashboard with the one-time login URL (`--no-open` prints it) |
+
+### Jobs and watch
+
+```console wrap=false
+$ runnerctl jobs --repo halyard/ledger --limit 4
+JOB           REPOSITORY      WORKFLOW / NAME  BRANCH            RESULT   WAITED     RAN  MEM PEAK  QUEUED
+120055991700  halyard/ledger  CI / build       main              running      9s   7m 4s      6.6G  7m 13s ago
+120055991600  halyard/ledger  CI / build       main              success      9s  11m 5s      6.6G  30m 13s ago
+120055991526  halyard/ledger  CI / build       feat/checkout-v2  success     27s  11m 5s      6.6G  1h 52m ago
+120055991489  halyard/ledger  CI / build       main              failure     11s  11m 5s      6.6G  2h 31m ago
+memory peaks are sampled every few seconds; spikes shorter than that do not show
+older jobs: --before 120055991489
+```
+
+One frame of `runnerctl watch`:
+
+```console wrap=false
+runnerd 0.0.2  24G of 33G reserved  ci.slice uses 5.18 cores, 11G
+
+SLOT    JOB                                      STEP                                         RAN   CPU   MEM
+jvm 1   halyard/ledger CI / build                Integration tests (Testcontainers) (7/9)   7m 7s  2.01  4.4G
+jvm 2   free
+node 1  halyard/storefront E2E / playwright      Playwright e2e (6/8)                      5m 10s  2.01  2.8G
+node 2  waiting for a job of halyard/storefront
+
+Finished
+  success  halyard/ledger      CI / build        11m 5s  19m 2s ago
+  success  halyard/storefront  E2E / playwright  8m 57s  1h 1m ago
+  success  halyard/ledger      CI / build        11m 5s  1h 40m ago
+  failure  halyard/ledger      CI / build        11m 5s  2h 20m ago
+  success  halyard/storefront  E2E / playwright  8m 57s  3h 5m ago
+
+CPU and MEM are the last sample, taken every few seconds. Ctrl-C quits.
+```
+
+### A pause while a job runs
+
+```console
+$ runnerctl pause halyard/ledger
+error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105; pause with force to cancel it
+`runnerctl pause --force halyard/ledger` cancels its runs and removes their runners
+```

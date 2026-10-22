@@ -1,6 +1,7 @@
 ---
 import '../styles/theme.css';
 import mark from '../assets/mark.svg?raw';
+import Shot from '../components/Shot.astro';
 
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 const docs = `${base}install/`;
@@ -56,8 +57,31 @@ const steps = [
   { container: 'new', label: 'new container', title: 'Next job', text: 'Nothing left over but warm caches.' },
 ];
 
-// The clients, each a free slot until it ships with real output to show.
-const clients = ['runnerctl', 'Web dashboard', 'TUI', 'Desktop app'];
+// Real output of runnerctl from main, against the web dashboard's demo daemon (crates/web/examples/demo),
+// whose made-up machine is this setup.
+const status = `runnerd 0.0.2  24G of 33G reserved in ci.slice
+
+PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
+jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792708105    7m 9s
+jvm         2  free
+node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792708223  5m 11s
+node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792708520     14s
+
+REPOSITORY          PROFILE  STATE   QUEUED  LABELS
+halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
+halyard/storefront  node     active       1  self-hosted,linux,x64,node`;
+const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105; pause with force to cancel it
+\`runnerctl pause --force halyard/ledger\` cancels its runs and removes their runners`;
+
+// The clients, each a slot: filled once released, with a link to it; free until it ships with real output.
+// The TUI's slot takes its frames when plan 014 lands.
+const clientsDoc = `${base}clients/`;
+const clients = [
+  { name: 'runnerctl', state: 'In 0.0.2', href: `${clientsDoc}#runnerctl` },
+  { name: 'Web dashboard', state: 'In 0.0.2', href: `${clientsDoc}#dashboard` },
+  { name: 'TUI', state: 'Coming' },
+  { name: 'Desktop app', state: 'Coming' },
+];
 ---
 
 <!doctype html>
@@ -109,7 +133,7 @@ const clients = ['runnerctl', 'Web dashboard', 'TUI', 'Desktop app'];
             <a class="button" href="#install">Install</a>
             <a class="text-link" href={docs}>Read the docs</a>
           </div>
-          <p class="status">Early: 0.0.x schedules runners today; the clients are coming.</p>
+          <p class="status">Early: 0.0.2 schedules runners and ships a CLI and a web dashboard.</p>
         </div>
 
         <figure class="budget budget-hero">
@@ -141,6 +165,33 @@ const clients = ['runnerctl', 'Web dashboard', 'TUI', 'Desktop app'];
             <span>2 × jvm at 9G, 2 × node at 7G, 512M mirror: {used}G</span>
           </figcaption>
         </figure>
+      </section>
+
+      <section class="live wrap" id="live" aria-labelledby="live-title">
+        <div class="live-head">
+          <h2 id="live-title">The same bar, live</h2>
+          <p>The dashboard fills each slot to its job's sampled memory. <code>runnerctl web</code> opens it.</p>
+        </div>
+        <figure class="live-shot">
+          <Shot
+            name="overview"
+            alt="The runnerd dashboard's overview: 23.5G of 33G reserved in ci.slice; jvm slot 1 runs halyard/ledger's build at step 6 of 9, node slot 1 runs halyard/storefront's playwright job, jvm slot 2 is free and node slot 2 has a runner waiting."
+            sizes="(min-width: 1600px) 1504px, calc(100vw - 2 * clamp(1rem, 3.2vw, 3rem))"
+          />
+        </figure>
+        <div class="live-cli">
+          <figure class="live-status">
+            <pre class="terminal table" tabindex="0" aria-label="runnerctl status output"><code><span class="prompt">$ runnerctl status</span>
+{status}</code></pre>
+            <figcaption>The dashboard's demo daemon. runnerctl rounds 23.5G to 24G.</figcaption>
+          </figure>
+          <div class="live-pause">
+            <h3>A pause asks first</h3>
+            <pre class="terminal transcript"><code><span class="prompt">$ runnerctl pause halyard/ledger</span>
+<span class="fail">{pauseRefused}</span></code></pre>
+            <a class="text-link" href={clientsDoc}>Dashboard and CLI</a>
+          </div>
+        </div>
       </section>
 
       <section class="calc wrap" id="budget" aria-labelledby="budget-title">
@@ -246,25 +297,32 @@ $ runnerd check-config runnerd.toml</span>
       </section>
 
       <section class="roadmap wrap" aria-labelledby="roadmap-title">
-        <h2 id="roadmap-title">Four slots still free</h2>
+        <h2 id="roadmap-title">Two slots still free</h2>
         <ul class="strip">
           <li class="shipped">
-            <strong>runnerd 0.0.1</strong>
-            <span>Ships today</span>
+            <strong>runnerd 0.0.2</strong>
+            <span>Released</span>
           </li>
           {
-            clients.map((client) => (
-              <li>
-                <strong>{client}</strong>
-                <span>Coming</span>
-              </li>
-            ))
+            clients.map((client) =>
+              client.href ? (
+                <li class="shipped">
+                  <a href={client.href}>
+                    <strong>{client.name}</strong>
+                    <span>{client.state}</span>
+                  </a>
+                </li>
+              ) : (
+                <li>
+                  <strong>{client.name}</strong>
+                  <span>{client.state}</span>
+                </li>
+              ),
+            )
           }
         </ul>
         <p class="shipped-list">
-          0.0.1 is <code>runnerd serve</code>, <code>stop</code>, <code>check-config</code> and <code>doctor</code>,
-          a JSON API on a Unix socket, the runner image, and x86_64 and aarch64 releases. Next in the daemon: job
-          history, metrics and live events.
+          History, metrics, live events and controls on a JSON API, with the CLI and the dashboard.
         </p>
       </section>
 
@@ -639,6 +697,66 @@ $ runnerd check-config runnerd.toml</span>
     font-weight: 600;
   }
 
+  /* The clients, live: the dashboard's screenshot under the hero's bar, then runnerctl's real output. */
+  .live {
+    padding-top: var(--section);
+    display: grid;
+    gap: clamp(1.5rem, 3vw, 2.5rem);
+  }
+
+  .live-head {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    align-items: end;
+    gap: 1rem 3rem;
+  }
+
+  .live-head p {
+    max-width: 44ch;
+  }
+
+  .live-shot {
+    margin: 0;
+  }
+
+  .live-cli {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    gap: clamp(1.5rem, 4vw, 4rem);
+    align-items: start;
+  }
+
+  .live-status {
+    display: grid;
+    gap: 0.6rem;
+    margin: 0;
+  }
+
+  .live-status figcaption {
+    font-family: var(--font-display);
+    font-size: var(--step-small);
+    color: var(--muted);
+  }
+
+  .live-pause {
+    display: grid;
+    gap: 1rem;
+    justify-items: start;
+  }
+
+  .live-pause pre {
+    width: 100%;
+  }
+
+  /* Column output keeps its columns: it scrolls in its box rather than wrap. */
+  .terminal.table {
+    white-space: pre;
+    overflow-wrap: normal;
+    overflow-x: auto;
+    font-size: 0.8125rem;
+  }
+
   /* The calculator. */
   .calc {
     display: grid;
@@ -880,7 +998,7 @@ $ runnerd check-config runnerd.toml</span>
     color: var(--block-ink);
   }
 
-  /* What ships and what is coming, drawn as the slice: 0.0.1 is the one filled block, each client a free slot.
+  /* What ships and what is coming, drawn as the slice: each released part is a filled block, each coming client a free slot.
      A client's slot gets its real output or screenshot once it ships. */
   .roadmap {
     padding-top: var(--section);
@@ -931,7 +1049,35 @@ $ runnerd check-config runnerd.toml</span>
     color: inherit;
   }
 
+  .strip li:has(> a) {
+    padding: 0;
+  }
+
+  .strip a {
+    flex: 1;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    gap: 0.2rem;
+    padding: 0.85rem 1rem;
+    text-decoration: none;
+  }
+
+  .strip a:hover strong {
+    text-decoration: underline;
+  }
+
+  .strip a span::after {
+    content: ' →' / '';
+  }
+
+  .strip a:focus-visible {
+    outline-color: var(--block-ink);
+    outline-offset: -5px;
+  }
+
   .shipped-list {
+    max-width: 88ch;
     font-size: 1rem;
     color: var(--muted);
   }
@@ -1115,7 +1261,8 @@ $ runnerd check-config runnerd.toml</span>
   @media (max-width: 860px) {
     .hero,
     .calc,
-    .check-runs {
+    .check-runs,
+    .live-cli {
       grid-template-columns: minmax(0, 1fr);
     }
 
