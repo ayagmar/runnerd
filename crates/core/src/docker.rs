@@ -115,8 +115,10 @@ impl Docker {
             if let Some(jit_config) = &spec.jit_config {
                 let options = UploadToContainerOptionsBuilder::new().path("/").build();
                 let tar = jit_config_tar(jit_config)?;
+                // As a stream: bollard traces a full body's bytes, but a stream only as "(stream)".
+                let tar = futures_util::stream::once(std::future::ready(tar.into()));
                 self.api
-                    .upload_to_container(&id, Some(options), bollard::body_full(tar.into()))
+                    .upload_to_container(&id, Some(options), bollard::body_stream(tar))
                     .await?;
             }
             self.api.start_container(&id, None).await
