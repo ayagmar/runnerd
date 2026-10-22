@@ -139,21 +139,48 @@ pub(super) fn metrics(db: &Connection, job: u64) -> rusqlite::Result<api::JobMet
     Ok(metrics)
 }
 
+/// Gauges (memory, CPU peak) over the samples in `[from, to]`. Counters (CPU time, network) from the last sample
+/// before `from`, or from zero at the container's start, to the last sample in the window: a counter's first sample
+/// in the window already holds what the job used before it.
 fn window_metrics(
     db: &Connection,
     runner: &str,
     from: u64,
     to: u64,
 ) -> rusqlite::Result<api::JobMetrics> {
+    let before = db
+        .query_row(
+            "SELECT at, cpu_usage, network_received, network_sent FROM samples WHERE runner = ?1 AND at < ?2 \
+             ORDER BY at DESC LIMIT 1",
+            params![runner, from],
+            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+        )
+        .optional()?;
+    let baseline: (u64, u64, u64, u64) = if let Some(before) = before {
+        before
+    } else {
+        let started: Option<u64> = db
+            .query_row(
+                "SELECT started_at FROM runners WHERE name = ?1",
+                [runner],
+                |row| row.get(0),
+            )
+            .optional()?;
+        (started.unwrap_or(from), 0, 0, 0)
+    };
+    let (since, usage_before, received_before, sent_before) = baseline;
     let to = i64::try_from(to).unwrap_or(i64::MAX);
     db.query_row(
-        "SELECT max(memory), CAST(avg(memory) AS INTEGER), max(cpu), max(cpu_usage) - min(cpu_usage), \
-         max(at) - min(at), max(network_received) - min(network_received), max(network_sent) - min(network_sent) \
-         FROM samples WHERE runner = ?1 AND at >= ?2 AND at <= ?3",
+        "SELECT max(memory), CAST(avg(memory) AS INTEGER), max(cpu), max(cpu_usage), max(at), \
+         max(network_received), max(network_sent) FROM samples WHERE runner = ?1 AND at >= ?2 AND at <= ?3",
         params![runner, from, to],
         |row| {
-            let usage: Option<u64> = row.get(3)?;
-            let wall: Option<u64> = row.get(4)?;
+            let usage = row
+                .get::<_, Option<u64>>(3)?
+                .map(|usage| usage.saturating_sub(usage_before));
+            let wall = row
+                .get::<_, Option<u64>>(4)?
+                .map(|last| last.saturating_sub(since));
             Ok(api::JobMetrics {
                 memory_peak: row.get(0)?,
                 memory_average: row.get(1)?,
@@ -162,8 +189,12 @@ fn window_metrics(
                 cpu_time: usage.map(|usage| usage / 1000),
                 // CPU microseconds per wall millisecond are millicores.
                 cpu_average: usage.zip(wall).map(|(usage, wall)| usage.checked_div(wall).unwrap_or(0)),
-                network_received: row.get(5)?,
-                network_sent: row.get(6)?,
+                network_received: row
+                    .get::<_, Option<u64>>(5)?
+                    .map(|received| received.saturating_sub(received_before)),
+                network_sent: row
+                    .get::<_, Option<u64>>(6)?
+                    .map(|sent| sent.saturating_sub(sent_before)),
                 mirror_bytes: 0,
             })
         },

@@ -2,7 +2,7 @@
 
 use rusqlite::Connection;
 
-use super::{LogPosition, MIGRATIONS, RunnerRecord, Store, StoreError};
+use super::{LogPosition, MIGRATIONS, RunnerRecord, SampleRecord, Store, StoreError};
 use crate::api::{JobQuery, JobState, StatsQuery};
 use crate::github::QueuedJob;
 use crate::testdir::TestDir;
@@ -130,4 +130,49 @@ async fn stats_count_a_lost_job_without_a_conclusion_as_failed() {
         .map(|row| (row.jobs, row.succeeded, row.failed, row.cancelled))
         .collect();
     assert_eq!(counts, [(1, 0, 1, 0)]);
+}
+
+fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord {
+    SampleRecord {
+        runner: runner.to_owned(),
+        at,
+        cpu: 0,
+        cpu_usage,
+        memory: 1000,
+        network_received: received,
+        network_sent: received / 10,
+    }
+}
+
+/// Runs job 1 on runner `r1` from 1 000 200 to 1 000 400 ms with `samples`, and returns its metrics.
+async fn metrics_of(samples: Vec<SampleRecord>) -> crate::api::JobMetrics {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.queued("o/r", &queued(1));
+    store.runner_started(runner("r1", 1_000_100));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.samples(samples);
+    store.lost(1, 1_000_400);
+    store.flush().await;
+    store.job(1).await.unwrap().unwrap().summary.metrics
+}
+
+#[tokio::test]
+async fn a_job_with_one_sample_counts_its_container_usage_from_zero() {
+    let metrics = metrics_of(vec![sample("r1", 1_000_300, 2_500_000, 10_000_000)]).await;
+    assert_eq!(metrics.cpu_time, Some(2500));
+    assert_eq!(metrics.network_received, Some(10_000_000));
+    assert_eq!(metrics.network_sent, Some(1_000_000));
+}
+
+#[tokio::test]
+async fn a_job_counts_its_usage_from_the_last_sample_before_it_started() {
+    let metrics = metrics_of(vec![
+        sample("r1", 1_000_150, 1_000_000, 1_000),
+        sample("r1", 1_000_250, 2_000_000, 5_000_000),
+        sample("r1", 1_000_350, 3_500_000, 11_001_000),
+    ])
+    .await;
+    assert_eq!(metrics.cpu_time, Some(2500));
+    assert_eq!(metrics.network_received, Some(11_000_000));
 }
