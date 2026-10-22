@@ -195,7 +195,7 @@ halyard/storefront  node     paused       2  self-hosted,linux,x64,node
 | `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queues |
 | `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
 | `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
-| `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final |
+| `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |
 | `runnerctl watch` | slots, running jobs with their current step and last sample, queued and finished jobs, redrawn as events arrive; one line per event when not on a terminal, one JSON event per line with `--json` |
 | `runnerctl tui` | the full-screen dashboard below |
 | `runnerctl pause <repo> [--force]`, `resume <repo>` | the repository gets no new runners; refused while it runs a job, naming the job, unless `--force` cancels the job's run and removes its runner; and back |

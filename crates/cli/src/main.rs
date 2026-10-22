@@ -527,8 +527,9 @@ fn web(client: &Client, no_open: bool) -> Result<ExitCode, Error> {
 
 /// Hands the log from line `from` to `line`, until it returns false. Following, it reads until the daemon ends the
 /// response, which it does once the job's record is final; if the response ended for another reason (a daemon
-/// restart), it asks again from the next line. A response cut short after the job became final is read once more,
-/// for the lines it missed.
+/// restart), it asks again from the next line. While the daemon is away it keeps asking every second, so a restart
+/// of any length loses no line and repeats none; only the first request fails when the daemon is not there. A
+/// response cut short after the job became final is read once more, for the lines it missed.
 async fn logs(
     client: &Client,
     id: u64,
@@ -536,17 +537,23 @@ async fn logs(
     mut from: u64,
     mut line: impl FnMut(String) -> bool,
 ) -> Result<(), Error> {
+    const AGAIN: Duration = Duration::from_secs(1);
     let mut last_read = false;
+    let mut answered = false;
     loop {
-        let mut lines = client
-            .logs(
-                id,
-                &LogQuery {
-                    from: Some(from),
-                    follow,
-                },
-            )
-            .await?;
+        let query = LogQuery {
+            from: Some(from),
+            follow,
+        };
+        let mut lines = match client.logs(id, &query).await {
+            Ok(lines) => lines,
+            Err(error) if follow && answered && is_outage(&error) => {
+                tokio::time::sleep(AGAIN).await;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
+        answered = true;
         let ended = loop {
             match lines.next().await {
                 Ok(Some(text)) => {
@@ -562,16 +569,31 @@ async fn logs(
         if !follow || last_read {
             return ended.map_err(Error::from);
         }
-        let job: Job = client.get(&format!("/v1/jobs/{id}")).await?;
+        let job: Job = match client.get(&format!("/v1/jobs/{id}")).await {
+            Ok(job) => job,
+            Err(error) if is_outage(&error) => {
+                tokio::time::sleep(AGAIN).await;
+                continue;
+            }
+            Err(error) => return Err(error.into()),
+        };
         if job.summary.state.is_final() {
             if ended.is_ok() {
                 return Ok(());
             }
             last_read = true;
         } else {
-            tokio::time::sleep(Duration::from_secs(1)).await;
+            tokio::time::sleep(AGAIN).await;
         }
     }
+}
+
+/// Whether the daemon is away, as while it restarts, rather than refusing.
+fn is_outage(error: &ClientError) -> bool {
+    matches!(
+        error,
+        ClientError::NotRunning(_) | ClientError::Transport(_) | ClientError::Timeout(_)
+    )
 }
 
 async fn watch(client: &Client, json: bool, paint: human::Paint) -> Result<(), Error> {
@@ -596,4 +618,140 @@ async fn watch(client: &Client, json: bool, paint: human::Paint) -> Result<(), E
     })
     .await?;
     Ok(())
+}
+
+#[cfg(test)]
+mod tests {
+    #![allow(clippy::unwrap_used, reason = "tests fail by panicking")]
+
+    use std::convert::Infallible;
+    use std::sync::{Arc, Mutex};
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::{Body, Bytes};
+    use axum::extract::{RawQuery, State};
+    use axum::routing::get;
+    use futures_util::{StreamExt, stream};
+    use runnerd_core::api::{Job, JobMetrics, JobState, JobSummary, LogSummary, Timeline};
+    use tokio::sync::Notify;
+
+    use crate::logs;
+    use crate::testing::Fake;
+
+    fn job(state: JobState) -> Job {
+        Job {
+            summary: JobSummary {
+                id: 9001,
+                repository: "halyard/ledger".to_owned(),
+                run_id: 77,
+                run_attempt: 1,
+                workflow: None,
+                name: "test".to_owned(),
+                branch: None,
+                url: None,
+                labels: Vec::new(),
+                state,
+                conclusion: state.is_final().then(|| "success".to_owned()),
+                runner: None,
+                timeline: Timeline::default(),
+                metrics: JobMetrics::default(),
+                log: LogSummary::default(),
+            },
+            steps: Vec::new(),
+        }
+    }
+
+    /// What the daemon was asked for, across its restart.
+    #[derive(Default)]
+    struct Asked {
+        log_queries: Mutex<Vec<String>>,
+        /// Told when the first log response is under way; it ends once `stopped` is told.
+        serving: Notify,
+        stopped: Notify,
+    }
+
+    #[tokio::test]
+    async fn a_followed_log_carries_on_after_the_daemon_was_down_for_a_while() {
+        let asked = Arc::new(Asked::default());
+        // Before the outage: two lines, then the response ends with the daemon, still running its job.
+        let before = Router::new()
+            .route(
+                "/v1/jobs/9001/logs",
+                get(
+                    |State(asked): State<Arc<Asked>>, RawQuery(query): RawQuery| async move {
+                        asked
+                            .log_queries
+                            .lock()
+                            .unwrap()
+                            .push(query.unwrap_or_default());
+                        asked.serving.notify_one();
+                        let end = async move { asked.stopped.notified().await };
+                        Body::from_stream(
+                            stream::iter([Ok::<_, Infallible>(Bytes::from("a\nb\n"))])
+                                .chain(stream::once(end).filter_map(|()| async { None })),
+                        )
+                    },
+                ),
+            )
+            .with_state(asked.clone());
+        // After it: the job has finished, and its last line is there.
+        let after = Router::new()
+            .route(
+                "/v1/jobs/9001/logs",
+                get(
+                    |State(asked): State<Arc<Asked>>, RawQuery(query): RawQuery| async move {
+                        asked
+                            .log_queries
+                            .lock()
+                            .unwrap()
+                            .push(query.unwrap_or_default());
+                        "c\n"
+                    },
+                ),
+            )
+            .route(
+                "/v1/jobs/9001",
+                get(|| async { axum::Json(job(JobState::Completed)) }),
+            )
+            .with_state(asked.clone());
+
+        let mut fake = Fake::serve(before);
+        let client = fake.client(Duration::from_secs(5), Duration::from_secs(5));
+        let lines = Arc::new(Mutex::new(Vec::new()));
+        let printed = lines.clone();
+        let reader = tokio::spawn(async move {
+            logs(&client, 9001, true, 0, |line| {
+                printed.lock().unwrap().push(line);
+                true
+            })
+            .await
+        });
+        asked.serving.notified().await;
+        fake.stop().await;
+        // The response ends now, so the reader asks about the job while nothing listens.
+        asked.stopped.notify_one();
+        tokio::time::sleep(Duration::from_millis(1500)).await;
+        fake.serve_again(after);
+
+        let read = tokio::time::timeout(Duration::from_secs(10), reader)
+            .await
+            .expect("the reader should finish once the daemon is back")
+            .unwrap();
+        assert!(
+            read.is_ok(),
+            "{:?}",
+            read.err().map(|error| error.to_string())
+        );
+        assert_eq!(*lines.lock().unwrap(), ["a", "b", "c"]);
+        let queries = asked.log_queries.lock().unwrap();
+        assert_eq!(
+            queries.first().map(String::as_str),
+            Some("from=0&follow=true")
+        );
+        assert_eq!(
+            queries.last().map(String::as_str),
+            Some("from=2&follow=true")
+        );
+    }
 }
