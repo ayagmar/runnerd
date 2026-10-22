@@ -13,6 +13,8 @@ fn spec() -> RunnerSpec {
         memory: "9G".parse().unwrap(),
         env: Vec::new(),
         mounts: Vec::new(),
+        network: None,
+        labels: Default::default(),
         entrypoint: None,
         jit_config: Some(JitConfig(SECRET.to_owned())),
     }
