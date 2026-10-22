@@ -189,3 +189,91 @@ h1#_top {
     justify-content: center;
   }
 }
+
+/* JetBrains Mono 2.304 (OFL, public/fonts/JetBrainsMono-OFL.txt, credited where frames show), cut to ASCII and the frames' glyphs: one font for every cell, so
+   box drawing and blocks keep the columns whatever monospace the reader has. */
+@font-face {
+  font-family: 'runnerd tui';
+  src: url('../assets/fonts/jetbrains-mono-tui-regular.woff2') format('woff2');
+  font-weight: 400;
+}
+
+@font-face {
+  font-family: 'runnerd tui';
+  src: url('../assets/fonts/jetbrains-mono-tui-bold.woff2') format('woff2');
+  font-weight: 700;
+}
+
+/* runnerctl tui frames: a dark terminal in both themes, in the TUI's palette mapped onto the site's colours. Each
+   frame shrinks to fit its box down to a readable size, then scrolls. A cell is 0.6em, plus up to half a pixel where
+   the browser rounds advances to whole pixels. */
+.tui-frame {
+  container-type: inline-size;
+  padding: 8px;
+  background: var(--surface);
+}
+
+.tui {
+  --term-bg: #0b0d0c;
+  --term-ink: #e6e8e7;
+  margin: 0;
+  padding: 0.75rem;
+  overflow-x: auto;
+  background: var(--term-bg);
+  color: var(--term-ink);
+  font-family: 'runnerd tui', monospace;
+  font-size: clamp(0.6875rem, ((100cqi - 1.5rem) / var(--cols) - 0.5px) / 0.6, 1rem);
+  line-height: 1.32;
+  white-space: pre;
+  border: 0;
+  border-radius: 0;
+}
+
+.tui-cue {
+  margin: 0;
+  padding: 0.4rem 0.25rem 0;
+  font-family: var(--font-display);
+  font-size: 0.8125rem;
+  color: var(--muted);
+}
+
+.tui span {
+  color: var(--c, inherit);
+}
+
+.tui .t-b {
+  font-weight: 700;
+}
+
+.tui .t-dim {
+  --c: #8d9490;
+}
+
+.tui .t-p0 {
+  --c: var(--mint);
+}
+
+.tui .t-p1 {
+  --c: var(--pink);
+}
+
+.tui .t-mem {
+  --c: #8fe0a6;
+}
+
+.tui .t-cpu {
+  --c: #b9b6ff;
+}
+
+.tui .t-wait {
+  --c: #ffd479;
+}
+
+.tui .t-bad {
+  --c: #ff8a8a;
+}
+
+.tui .t-rv {
+  background: var(--c, var(--term-ink));
+  color: var(--term-bg);
+}
