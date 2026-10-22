@@ -2,21 +2,16 @@
 //! runner runs, and counts what the mirror served each runner. Reseeds and cache checks run as background tasks
 //! the tick collects; it must not start or stop runners.
 
-use std::collections::BTreeMap;
-
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use super::{Engine, Shutdown, image};
 use crate::api;
-use crate::cache;
+use crate::cache::{self, Emptied, Trimmed};
 use crate::config::ByteSize;
 use crate::docker::{DockerApi, is_not_found};
 use crate::github::GithubApi;
 use crate::time;
-
-/// What `trim_shared` measured, and the shared caches it emptied with their sizes.
-pub(super) type Trimmed = (BTreeMap<String, u64>, Vec<(String, ByteSize)>);
 
 impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     /// Counts what the mirror served each runner since the last count.
@@ -132,7 +127,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             return;
         };
         match task.await {
-            Ok(Ok((sizes, emptied))) => {
+            Ok(Ok(Trimmed { sizes, emptied })) => {
                 let ours = self.names.network();
                 self.store.cache_sizes(
                     time::now_ms(),
@@ -141,7 +136,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                         .filter(|(name, _)| name.starts_with(&format!("{ours}-")))
                         .collect(),
                 );
-                for (name, size) in emptied {
+                for Emptied { name, size } in emptied {
                     info!("emptied {name}, which had grown to {size}");
                 }
             }

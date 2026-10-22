@@ -13,6 +13,7 @@ use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
 use crate::docker::JitConfig;
+use crate::sync::lock;
 use crate::time;
 
 /// The public API's address.
@@ -254,6 +255,7 @@ pub struct Github {
     http: reqwest::Client,
     base: String,
     token_source: TokenSource,
+    // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
     token: Mutex<Option<Token>>,
     etags: Mutex<HashMap<String, (HeaderValue, Vec<u8>)>>,
     blocked_until: Mutex<Option<SystemTime>>,
@@ -607,13 +609,6 @@ fn rate_limited_until(
         return Some(now + Duration::from_secs(seconds));
     }
     None
-}
-
-fn lock<T>(mutex: &Mutex<T>) -> std::sync::MutexGuard<'_, T> {
-    // A panic while holding one of these locks leaves plain data behind, still usable.
-    mutex
-        .lock()
-        .unwrap_or_else(std::sync::PoisonError::into_inner)
 }
 
 #[cfg(test)]

@@ -9,7 +9,9 @@ use std::time::Duration;
 use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
-use super::{Command, Commit, ControlError, Engine, Handle, HostIdentity, Setup, Shutdown};
+use super::{
+    Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, Setup, Shutdown,
+};
 use crate::api::{self, JobState};
 use crate::cache::Names;
 use crate::config::Config;
@@ -561,7 +563,7 @@ async fn nothing_is_scheduled_while_docker_cannot_list_containers() {
     assert_eq!(docker.calls(), ["list runnerd.seed"]);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(github.calls(), Vec::<String>::new());
-    handle.control.shutdown(false);
+    handle.control.shutdown(RunningJobs::Keep);
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .unwrap()
@@ -985,7 +987,7 @@ async fn a_pause_is_refused_while_the_repository_runs_a_job_and_forced_cancels_o
     until_state(&handle, 2, JobState::Running).await;
     engine.tick(Shutdown::No).await;
 
-    let Err(ControlError::Busy { jobs, .. }) = engine.pause("o/r", false).await else {
+    let Err(ControlError::Busy { jobs, .. }) = engine.pause("o/r", RunningJobs::Keep).await else {
         panic!("a pause while o/r runs a job went through");
     };
     assert_eq!(
@@ -994,7 +996,7 @@ async fn a_pause_is_refused_while_the_repository_runs_a_job_and_forced_cancels_o
     );
     assert!(!handle.control.is_paused("o/r"));
 
-    let paused = engine.pause("o/r", true).await.unwrap();
+    let paused = engine.pause("o/r", RunningJobs::Kill).await.unwrap();
     assert_eq!(
         paused.stopped.iter().map(|job| job.job).collect::<Vec<_>>(),
         [Some(1)]
@@ -1026,7 +1028,7 @@ async fn the_runner_of_a_cancelled_run_that_does_not_exit_is_removed_after_a_whi
     engine.recover().await.unwrap();
     until_state(&handle, 1, JobState::Running).await;
     engine.tick(Shutdown::No).await;
-    engine.pause("o/r", true).await.unwrap();
+    engine.pause("o/r", RunningJobs::Kill).await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
     tokio::time::pause();
@@ -1044,7 +1046,7 @@ async fn the_runner_of_a_cancelled_run_is_removed_on_a_later_tick_when_docker_fa
     engine.recover().await.unwrap();
     until_state(&handle, 1, JobState::Running).await;
     engine.tick(Shutdown::No).await;
-    engine.pause("o/r", true).await.unwrap();
+    engine.pause("o/r", RunningJobs::Kill).await.unwrap();
     tokio::time::pause();
     tokio::time::advance(super::control::CANCEL_GRACE).await;
     docker.0.lock().unwrap().fail_removes = 1;
@@ -1107,7 +1109,7 @@ async fn killing_the_runner_of_a_cancelled_run_trims_the_shared_caches_and_resee
     engine.tick(Shutdown::No).await;
 
     // Its run is cancelled, but the runner does not exit and is killed.
-    engine.pause("o/r", true).await.unwrap();
+    engine.pause("o/r", RunningJobs::Kill).await.unwrap();
     tokio::time::pause();
     tokio::time::advance(super::control::CANCEL_GRACE).await;
     engine.tick(Shutdown::No).await;
@@ -1583,7 +1585,7 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
     let docker = FakeDocker::default();
     let (mut engine, handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
-    engine.pause("o/r", false).await.unwrap();
+    engine.pause("o/r", RunningJobs::Keep).await.unwrap();
     let (reply, answer) = tokio::sync::oneshot::channel();
     engine
         .command(Command::ReplaceConfig {
@@ -1651,7 +1653,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
     );
     // Answered once it runs with the config: the status shows `o/x` already.
     assert_eq!(handle.status.borrow().repositories[0].name, "o/x");
-    handle.control.shutdown(true);
+    handle.control.shutdown(RunningJobs::Kill);
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .unwrap()

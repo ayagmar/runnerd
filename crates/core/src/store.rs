@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
-use std::sync::{Arc, Mutex, MutexGuard, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
@@ -16,6 +16,7 @@ use tracing::warn;
 use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
+use crate::sync::lock;
 
 mod read;
 mod write;
@@ -189,7 +190,7 @@ enum Write {
     },
     CacheSizes {
         at: u64,
-        sizes: Vec<(String, u64)>,
+        sizes: BTreeMap<String, u64>,
     },
     Event(Event),
     Prune {
@@ -359,8 +360,8 @@ impl Store {
         committed.await.unwrap_or(false)
     }
 
-    /// Records volume sizes measured at `at` (ms).
-    pub fn cache_sizes(&self, at: u64, sizes: Vec<(String, u64)>) {
+    /// Records volume sizes in bytes, by name, measured at `at` (ms).
+    pub fn cache_sizes(&self, at: u64, sizes: BTreeMap<String, u64>) {
         self.send(Write::CacheSizes { at, sizes });
     }
 
@@ -395,6 +396,7 @@ impl Store {
         query: impl FnOnce(&Connection) -> rusqlite::Result<T> + Send + 'static,
     ) -> Result<T, StoreError> {
         let reader = self.reader.clone();
+        // A panic during a read leaves the connection usable: reads change nothing.
         Ok(tokio::task::spawn_blocking(move || query(&lock(&reader))).await??)
     }
 
@@ -503,11 +505,6 @@ fn migrate(db: &mut Connection) -> Result<(), StoreError> {
         transaction.commit()?;
     }
     Ok(())
-}
-
-fn lock(connection: &Mutex<Connection>) -> MutexGuard<'_, Connection> {
-    // A panic during a read leaves the connection usable: reads change nothing.
-    connection.lock().unwrap_or_else(PoisonError::into_inner)
 }
 
 /// Logs a failed write; the writer goes on with the next one.

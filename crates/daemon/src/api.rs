@@ -18,7 +18,7 @@ use axum::serve::IncomingStream;
 use axum::{Json, Router};
 use runnerd_core::api::{ErrorResponse, Principal, ShutdownRequest, Status};
 use runnerd_core::config::ByteSize;
-use runnerd_core::scheduler::engine::Handle;
+use runnerd_core::scheduler::engine::{Handle, RunningJobs};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 use tracing::info;
@@ -187,7 +187,11 @@ async fn shutdown(
         "shutdown (force: {}) requested by {principal:?}",
         request.force
     );
-    state.handle.control.shutdown(request.force);
+    state.handle.control.shutdown(if request.force {
+        RunningJobs::Kill
+    } else {
+        RunningJobs::Keep
+    });
     StatusCode::ACCEPTED
 }
 

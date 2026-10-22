@@ -6,13 +6,14 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Arc, Mutex, PoisonError};
+use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
 use tokio::sync::watch;
 
 use crate::api;
 use crate::store::{SampleRecord, Store};
+use crate::sync::lock;
 use crate::time;
 
 /// How often running containers are sampled.
@@ -235,10 +236,9 @@ pub async fn run(state: Sampler, tracked: watch::Receiver<Vec<Tracked>>, store: 
         let state = state.clone();
         // Reading cgroup files is quick but blocking.
         let Ok((samples, host)) = tokio::task::spawn_blocking(move || {
-            state
-                .lock()
-                .unwrap_or_else(PoisonError::into_inner)
-                .sample(&containers, time::now_ms())
+            // A panic midway through a sample leaves the counters of the last or of this one, either of which the
+            // next sample measures from.
+            lock(&state).sample(&containers, time::now_ms())
         })
         .await
         else {

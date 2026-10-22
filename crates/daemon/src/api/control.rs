@@ -12,7 +12,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery};
 use runnerd_core::config::Config;
-use runnerd_core::scheduler::engine::{Commit, ControlError};
+use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs};
 use tracing::info;
 
 use super::{AppState, Authenticated, MemoryMax, SyncDir, error};
@@ -49,7 +49,12 @@ pub(super) async fn pause(
         "{repository}: pause (force: {}) requested by {principal:?}",
         query.force
     );
-    match state.handle.control.pause(&repository, query.force).await {
+    let jobs = if query.force {
+        RunningJobs::Kill
+    } else {
+        RunningJobs::Keep
+    };
+    match state.handle.control.pause(&repository, jobs).await {
         Ok(paused) => Json(paused).into_response(),
         Err(control_error) => refused(&control_error),
     }
