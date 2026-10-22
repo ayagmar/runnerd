@@ -45,7 +45,8 @@ impl Isolation for UnsafeDind {
     }
 
     fn configure(&self, host_config: &mut HostConfig) {
-        host_config.runtime = None;
+        // Named, not left to the Engine's default runtime, which may be sysbox-runc.
+        host_config.runtime = Some("runc".to_owned());
         host_config.privileged = Some(true);
     }
 }

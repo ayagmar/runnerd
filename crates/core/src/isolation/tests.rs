@@ -29,6 +29,7 @@ fn sysbox_runs_unprivileged_under_sysbox_runc() {
 #[test]
 fn unsafe_dind_runs_privileged_and_says_so() {
     let host_config = host_config(Isolation::UnsafeDind);
+    assert_eq!(host_config.runtime.as_deref(), Some("runc"));
     assert_eq!(host_config.privileged, Some(true));
     assert!(backend(Isolation::UnsafeDind).is_unsafe());
     assert!(!backend(Isolation::Sysbox).is_unsafe());
