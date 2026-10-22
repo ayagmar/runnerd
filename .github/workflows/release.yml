@@ -8,6 +8,7 @@
 # - expressions passed to run: blocks through env, so zizmor finds no template injection;
 # - Linux only: no Windows or container steps, no PR runs;
 # - install.sh is published with the release's tag as its default version.
+# - a release tag without a suffix fails unless its commit is on main.
 # To pick up a newer dist, regenerate into a scratch copy and carry its changes over by hand.
 
 name: release
@@ -34,6 +35,13 @@ jobs:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           persist-credentials: false
+          fetch-depth: 0 # the main check below needs main's history
+      # A release (a tag without a suffix) must be a commit on main; pre-releases may come from any commit.
+      - name: Check the release commit is on main
+        if: ${{ !contains(github.ref_name, '-') }}
+        run: |
+          git merge-base --is-ancestor HEAD origin/main \
+            || { echo "::error::$TAG is not on main; tag a commit from main"; exit 1; }
       - run: .github/scripts/install-dist.sh
       - id: plan
         run: |
