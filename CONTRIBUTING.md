@@ -18,8 +18,9 @@ starts only the jobs those paths can affect:
 
 A change to `ci.yml` itself runs all of them. Pushes to `main` run every job and then deploy the site. A weekly
 schedule runs `deny`, so new advisories show up without a dependency change. Draft pull requests run only `changes`;
-marking one ready for review starts a full run. A new push to a pull request cancels its older run; runs on `main` are
-never cancelled.
+marking one ready for review starts a full run. Editing a pull request (its title, body or base branch) also starts a
+run, so a new base is compared again. A newer run of a pull request cancels its older one; runs on `main` are never
+cancelled.
 
 `gate` is the only required check. It passes when every job it needs passed or was skipped, and fails otherwise. It
 always fails on a draft, so a draft's run can't satisfy it once the pull request is marked ready. It also writes the

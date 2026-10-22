@@ -2,7 +2,8 @@ name: ci
 
 on:
   pull_request:
-    types: [opened, synchronize, reopened, ready_for_review]
+    # edited covers a base branch change, which changes the files the changes job compares.
+    types: [opened, synchronize, reopened, ready_for_review, edited]
   push:
     branches: [main]
   schedule:
