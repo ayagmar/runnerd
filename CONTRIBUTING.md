@@ -1,7 +1,6 @@
 # Contributing
 
-The checks to run before sending a change are in the README, under "Building". Shell scripts also go through
-`shellcheck`, and workflow changes through `actionlint` and `zizmor`.
+The checks to run before sending a change, and the rules for where code goes, are in [AGENTS.md](AGENTS.md).
 
 ## CI
 
@@ -10,11 +9,12 @@ starts only the jobs those paths can affect:
 
 | Job | Runs on a pull request that changes |
 |---|---|
-| `rust`: fmt, clippy, tests | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml` |
+| `rust`: fmt, clippy (also core without `host`), tests, `cargo doc`, the client boundary check, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `trellis` and `glowly` stages, pushes nothing | `image/**` |
 | `site-build`: Astro build | `site/**` |
 | `lint`: shellcheck, actionlint, zizmor | `.github/**`, any `*.sh` |
+| `text`: typos, `taplo fmt --check` | any file |
 
 A change to `ci.yml` itself runs all of them. Pushes to `main` run every job and then deploy the site. A weekly
 schedule runs `deny`, so new advisories show up without a dependency change. Draft pull requests run only `changes`;
