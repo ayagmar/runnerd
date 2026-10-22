@@ -1,5 +1,6 @@
 //! The TUI through its reducer and `TestBackend` frames: a job moving through its slot, steps and the latest jobs;
-//! every pane at 80×24; no colour with `NO_COLOR`; a refused pause forced only on `y`; the history's filters; and,
+//! every pane at 80×24; text at 80 to 136 columns that drops whole fields or ends in `…` rather than being cut
+//! mid-word; no colour with `NO_COLOR`; a refused pause forced only on `y`; the history's filters; and,
 //! against a fake daemon, an event stream that drops, shows "reconnecting" and resumes after the last event ID.
 
 #![allow(
@@ -867,6 +868,47 @@ fn the_open_job_header_drops_whole_details_to_fit() {
             );
         }
     }
+}
+
+#[test]
+fn text_that_does_not_fit_ends_in_an_ellipsis_and_leaves_its_neighbour_a_space() {
+    let mut app = app();
+    running_job(&mut app);
+    let running = app.live.running.get_mut(&42).unwrap();
+    running.summary.timeline.started_at = Some(NOW - (16 * 60 + 40));
+    running.steps[1].name = "Integration tests (Testcontainers)".to_owned();
+    app.live.status.profiles[1] = profile("node", 2, 7 << 30);
+    app.live.status.repositories[1].queued_jobs = 1;
+    app.live.recent = vec![finished(7, 60)];
+
+    let small = screen(&app, 80, 24, false);
+    let storefront = rows_with(&small, "halyard/storefront")[0];
+    assert!(
+        storefront.contains("1 queued "),
+        "a space before the latest jobs: {small}"
+    );
+    let slot = rows_with(&small, "jvm 1  ")[0];
+    assert!(
+        slot.contains("… 16m 40s "),
+        "a space before the run time: {small}"
+    );
+
+    let wide = screen(&app, 136, 40, false);
+    let step = rows_with(&wide, "2/3 Integration tests")[0];
+    assert!(
+        step.contains("(Testcont…"),
+        "the step's name ends in an ellipsis: {wide}"
+    );
+
+    let mut feature = finished(7, 60);
+    feature.branch = Some("feat/checkout-flow".to_owned());
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(generation, vec![feature], None));
+    let history = screen(&app, 120, 24, false);
+    assert!(
+        history.contains(" feat/checkout… "),
+        "the branch ends in an ellipsis: {history}"
+    );
 }
 
 /// A daemon whose first event stream sends only a live sample and ends; the stream the client opens again at

@@ -12,7 +12,9 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState,
 };
-use runnerd_core::api::{Job, JobSummary, ProfileStatus, Sample, SlotStatus, Step};
+use runnerd_core::api::{
+    Job, JobSummary, ProfileStatus, RepositoryStatus, Sample, SlotStatus, Step,
+};
 
 use super::app::{App, Connection, JobView, Outcome, Pane, View};
 use crate::human::{self, Tone, bytes, cores, duration};
@@ -483,7 +485,9 @@ fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: The
                     let memory = usage.last().map_or_else(String::new, |s| bytes(s.memory));
                     let cpu = usage.last().map_or_else(String::new, |s| cores(s.cpu));
                     // Fixed columns at the right; the job's name takes what is left.
-                    let job_width = width.saturating_sub(11 + 22 + 8 + 13 + 11).max(10);
+                    let job_width = width
+                        .saturating_sub(11 + 7 + 16 + 9 + 7 + 6 + 6 + 6)
+                        .max(10);
                     spans.extend([
                         Span::raw(fit(
                             &format!("{} {}", human::title(&job.summary), job.summary.repository),
@@ -491,7 +495,7 @@ fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: The
                         )),
                         Span::styled(format!(" {count:>5} "), theme.cpu()),
                         Span::raw(fit(&name, 16)),
-                        Span::raw(format!("{ran:>7} ")),
+                        Span::raw(format!(" {ran:>7} ")),
                         Span::raw(format!("{memory:>6} ")),
                         Span::styled(usage.memory(6), theme.memory()),
                         Span::raw(format!("{cpu:>5} ")),
@@ -635,14 +639,14 @@ fn card(
                 .map_or_else(|| "–".to_owned(), |s| cores(s.cpu));
             let half = width.saturating_sub(1) / 2;
             vec![
-                Line::styled(job.summary.repository.clone(), theme.dim()),
-                Line::styled(human::title(&job.summary), bold()),
+                Line::styled(fit(&job.summary.repository, width), theme.dim()),
+                Line::styled(fit(&human::title(&job.summary), width), bold()),
                 Line::from(vec![
                     Span::styled(
                         format!("{count} "),
                         theme.cpu().add_modifier(Modifier::BOLD),
                     ),
-                    Span::raw(name),
+                    Span::raw(fit(&name, width.saturating_sub(count.chars().count() + 1))),
                 ]),
                 Line::from(vec![
                     Span::raw(format!("{ran:<8}")),
@@ -660,7 +664,10 @@ fn card(
         }
         (None, Some(runner)) => vec![
             Line::styled(
-                format!("Runner for {} waiting for its job", runner.repository),
+                fit(
+                    &format!("Runner for {} waiting for its job", runner.repository),
+                    width,
+                ),
                 theme.dim(),
             ),
             Line::styled(
@@ -767,25 +774,41 @@ fn list_block(title: &str, focused: bool, theme: Theme) -> Block<'_> {
 
 fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let focused = app.pane == Pane::Repositories;
-    let lines: Vec<Line<'_>> = app
-        .live
-        .status
-        .repositories
+    let repositories = &app.live.status.repositories;
+    // A cell stays free before the latest jobs: the profile, which the square's colour also shows, goes from every
+    // line first, then a name is cut.
+    let width = usize::from(area.width).saturating_sub(1);
+    let spans = |repository: &RepositoryStatus, profile: Option<&str>, name_width: usize| {
+        let mut spans = vec![
+            Span::styled("■ ", theme.profile(app.profile_index(&repository.profile))),
+            Span::styled(
+                fit(&repository.name, name_width).trim_end().to_owned(),
+                bold(),
+            ),
+        ];
+        if let Some(profile) = profile {
+            spans.push(Span::styled(format!("  {profile}"), theme.dim()));
+        }
+        spans.push(Span::raw(format!("  {} queued", repository.queued_jobs)));
+        if repository.paused {
+            spans.push(Span::styled(
+                "  paused",
+                theme.wait().add_modifier(Modifier::BOLD),
+            ));
+        }
+        spans
+    };
+    let with_profile = repositories.iter().all(|repository| {
+        let name_width = repository.name.chars().count();
+        Line::from(spans(repository, Some(&repository.profile), name_width)).width() <= width
+    });
+    let lines: Vec<Line<'_>> = repositories
         .iter()
         .enumerate()
         .map(|(position, repository)| {
-            let mut spans = vec![
-                Span::styled("■ ", theme.profile(app.profile_index(&repository.profile))),
-                Span::styled(repository.name.clone(), bold()),
-                Span::styled(format!("  {}", repository.profile), theme.dim()),
-                Span::raw(format!("  {} queued", repository.queued_jobs)),
-            ];
-            if repository.paused {
-                spans.push(Span::styled(
-                    "  paused",
-                    theme.wait().add_modifier(Modifier::BOLD),
-                ));
-            }
+            let profile = with_profile.then_some(repository.profile.as_str());
+            let others = Line::from(spans(repository, profile, 0)).width();
+            let spans = spans(repository, profile, width.saturating_sub(others));
             let line = Line::from(spans);
             if focused && position == app.repository {
                 line.style(selected())
@@ -894,14 +917,38 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         return;
     }
     let wide = area.width >= 110;
+    let finished = jobs
+        .jobs
+        .iter()
+        .map(|job| finished_ago(job, now).chars().count())
+        .chain(["FINISHED".len()])
+        .max()
+        .unwrap_or(0);
+    let mut columns = vec![("OUTCOME", 9), ("REPOSITORY", 0), ("JOB", 0)];
+    if wide {
+        columns.push(("BRANCH", 14));
+    }
+    columns.extend([("WAITED", 7), ("RAN", 8), ("MEM", 6)]);
+    if wide {
+        columns.push(("CPU", 5));
+    }
+    columns.push(("FINISHED", finished));
+    // The repository and the job share what the other columns and the spaces between them leave.
+    let fixed: usize = columns.iter().map(|(_, width)| width + 1).sum::<usize>() - 1;
+    let shared = usize::from(table_area.width).saturating_sub(fixed);
+    let repository_width = shared / 2;
+    let job_width = shared - repository_width;
     let rows = jobs.jobs.iter().map(|job| {
         let mut cells = vec![
             Cell::from(badge(job, theme)),
-            Cell::from(job.repository.clone()),
-            Cell::from(human::title(job)),
+            Cell::from(fit(&job.repository, repository_width)),
+            Cell::from(fit(&human::title(job), job_width)),
         ];
         if wide {
-            cells.push(Cell::from(job.branch.clone().unwrap_or_default()));
+            cells.push(Cell::from(fit(
+                job.branch.as_deref().unwrap_or_default(),
+                14,
+            )));
         }
         cells.extend([
             Cell::from(human::waited(job, now).map_or_else(String::new, duration)),
@@ -919,37 +966,15 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         )));
         Row::new(cells)
     });
-    let mut header = vec!["OUTCOME", "REPOSITORY", "JOB"];
-    let mut widths = vec![
-        Constraint::Length(9),
-        Constraint::Fill(1),
-        Constraint::Fill(1),
-    ];
-    if wide {
-        header.push("BRANCH");
-        widths.push(Constraint::Length(14));
-    }
-    header.extend(["WAITED", "RAN", "MEM"]);
-    widths.extend([
-        Constraint::Length(7),
-        Constraint::Length(8),
-        Constraint::Length(6),
-    ]);
-    if wide {
-        header.push("CPU");
-        widths.push(Constraint::Length(5));
-    }
-    header.push("FINISHED");
-    let finished = jobs
-        .jobs
+    let header: Vec<_> = columns.iter().map(|(name, _)| *name).collect();
+    let widths: Vec<_> = columns
         .iter()
-        .map(|job| finished_ago(job, now).chars().count())
-        .chain(["FINISHED".len()])
-        .max()
-        .unwrap_or(0);
-    widths.push(Constraint::Length(
-        u16::try_from(finished).unwrap_or(u16::MAX),
-    ));
+        .map(|(name, width)| match *name {
+            "REPOSITORY" => Constraint::Length(u16::try_from(repository_width).unwrap_or(0)),
+            "JOB" => Constraint::Fill(1),
+            _ => Constraint::Length(u16::try_from(*width).unwrap_or(u16::MAX)),
+        })
+        .collect();
     let table = Table::new(rows, widths)
         .header(Row::new(header).style(theme.dim()))
         .row_highlight_style(selected());
