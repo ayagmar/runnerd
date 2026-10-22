@@ -807,6 +807,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     }
 
     fn plan(&self) -> Vec<Decision> {
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
         let repositories: Vec<Repository> = self
             .config
             .repositories
@@ -819,7 +823,14 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     labels: repository.labels.clone(),
                     paused: self.control.is_paused(&repository.name),
                     held_until: state.held_until,
-                    queued: state.queued.clone(),
+                    // GitHub lists a job queued for a few seconds after a runner took it: without this, a tick in
+                    // between starts a second runner for it.
+                    queued: state
+                        .queued
+                        .iter()
+                        .filter(|job| !taken.contains(&job.id))
+                        .cloned()
+                        .collect(),
                 }
             })
             .collect();

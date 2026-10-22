@@ -555,6 +555,24 @@ async fn until_state(handle: &Handle, job: u64, state: JobState) -> api::Job {
 }
 
 #[tokio::test]
+async fn a_job_github_still_lists_queued_after_its_runner_took_it_gets_no_twin() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    // GitHub reports the runner busy, but its listing of queued jobs still has the job it took.
+    running_runner(&github, &docker, "@@job 1 1\n");
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.jobs.insert(1, details(1, "in_progress", None));
+    }
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
 async fn a_job_whose_capture_never_reported_it_leaves_the_queue_once_github_completes_it() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
