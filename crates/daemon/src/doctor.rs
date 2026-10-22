@@ -40,6 +40,8 @@ pub struct Slice {
 pub enum Status {
     Pass,
     Fail,
+    /// Works, but unsafe.
+    Warn,
     /// Not checked, because a check it depends on failed or no config was given.
     Skip,
     Info,
@@ -58,6 +60,7 @@ impl fmt::Display for Check {
         let status = match self.status {
             Status::Pass => "ok",
             Status::Fail => "FAIL",
+            Status::Warn => "WARN",
             Status::Skip => "skip",
             Status::Info => "info",
         };
@@ -204,34 +207,46 @@ pub fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     let isolation = config.map_or(Isolation::Sysbox, |config| config.host.isolation);
-    checks.push(match docker {
-        None => skip("sysbox", "needs Docker"),
-        Some(docker)
-            if docker.runtimes.iter().any(|r| r == "sysbox-runc") && !host.sysbox_services =>
-        {
-            fail(
-                "sysbox",
-                "Docker has the sysbox-runc runtime, but sysbox-mgr or sysbox-fs does not run, so runner \
-                 containers fail to start"
-                    .to_owned(),
-                "sudo systemctl enable --now sysbox",
-            )
-        }
-        Some(docker) if docker.runtimes.iter().any(|r| r == "sysbox-runc") => pass(
-            "sysbox",
-            "Docker has the sysbox-runc runtime and sysbox's services run".to_owned(),
-        ),
-        Some(_) if isolation == Isolation::UnsafeDind => Check {
-            name: "sysbox",
+    checks.push(match isolation {
+        Isolation::Sysbox => Check {
+            name: "isolation",
             status: Status::Info,
-            detail: "not installed; the config uses unsafe-dind, which runs runners privileged"
+            detail: format!(
+                "sysbox: runners run unprivileged{}",
+                if config.is_none() {
+                    " (the default)"
+                } else {
+                    ""
+                }
+            ),
+            fix: None,
+        },
+        Isolation::UnsafeDind => Check {
+            name: "isolation",
+            status: Status::Warn,
+            detail: "unsafe-dind: runners run privileged, so a job can take over the host"
                 .to_owned(),
             fix: None,
         },
-        Some(_) => fail(
+    });
+    checks.push(match docker {
+        None => skip("sysbox", "needs Docker"),
+        Some(_) if isolation == Isolation::UnsafeDind => skip("sysbox", "unsafe-dind does not use it"),
+        Some(docker) if !docker.runtimes.iter().any(|r| r == "sysbox-runc") => fail(
             "sysbox",
             "Docker has no sysbox-runc runtime, which isolation = \"sysbox\" needs".to_owned(),
             &sysbox_fix(&host.os_release),
+        ),
+        Some(_) if !host.sysbox_services => fail(
+            "sysbox",
+            "Docker has the sysbox-runc runtime, but sysbox-mgr or sysbox-fs does not run, so runner \
+             containers fail to start"
+                .to_owned(),
+            "sudo systemctl enable --now sysbox",
+        ),
+        Some(_) => pass(
+            "sysbox",
+            "Docker has the sysbox-runc runtime and sysbox's services run".to_owned(),
         ),
     });
     checks.extend(slice_checks(host, config));

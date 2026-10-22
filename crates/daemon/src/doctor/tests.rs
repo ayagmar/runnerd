@@ -70,7 +70,14 @@ fn a_ready_host_passes_every_check() {
     assert_eq!(
         names,
         [
-            "Docker", "cgroups", "sysbox", "slice", "config", "gh", "/dev/kvm"
+            "Docker",
+            "cgroups",
+            "isolation",
+            "sysbox",
+            "slice",
+            "config",
+            "gh",
+            "/dev/kvm"
         ]
     );
 }
@@ -112,10 +119,18 @@ fn sysbox_with_stopped_services_fails_with_the_command_to_start_them() {
 }
 
 #[test]
-fn unsafe_dind_does_not_need_sysbox() {
+fn unsafe_dind_needs_no_sysbox_and_is_flagged_whether_sysbox_is_installed_or_not() {
     let config = config("unsafe-dind");
-    let checks = checks(&without_sysbox(ready_host(ARCH)), Some(&config));
-    assert_eq!(failed(&checks), Vec::<&str>::new());
+    for host in [ready_host(ARCH), without_sysbox(ready_host(ARCH))] {
+        let checks = checks(&host, Some(&config));
+        assert_eq!(failed(&checks), Vec::<&str>::new());
+        let isolation = checks
+            .iter()
+            .find(|check| check.name == "isolation")
+            .unwrap();
+        assert_eq!(isolation.status, Status::Warn);
+        assert!(isolation.detail.contains("privileged"), "{isolation}");
+    }
 }
 
 #[test]
