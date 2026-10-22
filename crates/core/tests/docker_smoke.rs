@@ -14,7 +14,7 @@ use bollard::exec::{StartExecOptions, StartExecResults};
 use bollard::models::{ExecConfig, Mount, MountType, VolumeCreateRequest};
 use futures_util::StreamExt;
 use runnerd_core::config::Isolation;
-use runnerd_core::docker::{Docker, RunnerSpec};
+use runnerd_core::docker::{Docker, JIT_CONFIG_PATH, JitConfig, RunnerSpec};
 use runnerd_core::isolation::backend;
 
 #[tokio::test]
@@ -49,8 +49,9 @@ async fn runner_container_runs_containers_of_its_own() {
             typ: Some(MountType::VOLUME),
             ..Default::default()
         }],
-        // The container's Docker Engine alone: the runner needs a just-in-time config from GitHub.
+        // The container's Docker Engine alone, so the JIT config stays where `start` put it.
         entrypoint: Some(vec!["dind".to_owned(), "dockerd".to_owned()]),
+        jit_config: Some(JitConfig("smoke-test-jit-config".to_owned())),
     };
     let docker = Docker::connect().unwrap();
 
@@ -73,6 +74,11 @@ async fn runner_container_runs_containers_of_its_own() {
             ready,
             "the container's Docker Engine did not start within 60s"
         );
+
+        let (code, output) = exec(&api, &name, &["stat", "-c", "%a %U", JIT_CONFIG_PATH]).await?;
+        assert_eq!((code, output.trim()), (0, "400 root"), "{JIT_CONFIG_PATH}");
+        let (_, output) = exec(&api, &name, &["cat", JIT_CONFIG_PATH]).await?;
+        assert_eq!(output, "smoke-test-jit-config");
 
         let (code, output) = exec(&api, &name, &["docker", "run", "--rm", "hello-world"]).await?;
         assert_eq!(code, 0, "docker run hello-world failed:\n{output}");

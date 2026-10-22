@@ -4,7 +4,10 @@
 # job and exits, and runnerd removes the container.
 set -euo pipefail
 
-: "${RUNNER_JITCONFIG:?RUNNER_JITCONFIG is not set: runnerd passes the runner its just-in-time config}"
+# runnerd puts the runner's just-in-time config here before it starts the container: never in its environment, which
+# Docker stores and clients may log.
+jitconfig_file=/run/runnerd/jitconfig
+[ -f "$jitconfig_file" ] || { echo "$jitconfig_file is missing: runnerd starts runner containers" >&2; exit 1; }
 # shellcheck source=SCRIPTDIR/layers.sh
 . /usr/local/lib/runnerd-layers.sh
 
@@ -33,10 +36,10 @@ docker info > /dev/null || { cat /var/log/dockerd.log; exit 1; }
 # Whatever the slot's last job left in its Docker Engine, if that job's container was stopped before its cleanup.
 runnerd-job-cleanup
 
-# The config registers this runner for one job, after which GitHub removes the runner. Jobs do not inherit it in
-# their environment.
-jitconfig=$RUNNER_JITCONFIG
-unset RUNNER_JITCONFIG
+# The config registers this runner for one job, after which GitHub removes the runner. It is read once, and the
+# file goes before any job runs.
+jitconfig=$(< "$jitconfig_file")
+rm -f "$jitconfig_file"
 export HOME=/home/runner USER=runner LOGNAME=runner
 cd "$HOME"
 as_runner=(setpriv --reuid=runner --regid=runner --init-groups --)

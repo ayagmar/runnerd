@@ -15,6 +15,7 @@ fn host_config(isolation: Isolation) -> HostConfig {
         env: Vec::new(),
         mounts: Vec::new(),
         entrypoint: None,
+        jit_config: None,
     };
     create_body(&spec, backend(isolation)).host_config.unwrap()
 }

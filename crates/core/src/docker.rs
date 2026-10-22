@@ -1,9 +1,12 @@
 //! Runner containers through the Docker Engine API.
 
 use std::collections::HashMap;
+use std::fmt;
 
 use bollard::models::{ContainerCreateBody, HostConfig, Mount, SystemInfo};
-use bollard::query_parameters::{CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder};
+use bollard::query_parameters::{
+    CreateContainerOptionsBuilder, RemoveContainerOptionsBuilder, UploadToContainerOptionsBuilder,
+};
 
 use crate::config::ByteSize;
 use crate::isolation::Isolation;
@@ -24,6 +27,22 @@ pub struct RunnerSpec {
     pub mounts: Vec<Mount>,
     /// Replaces the image's entrypoint; `None` runs the runner.
     pub entrypoint: Option<Vec<String>>,
+    /// The runner's just-in-time config, which the entrypoint reads from `JIT_CONFIG_PATH`.
+    pub jit_config: Option<JitConfig>,
+}
+
+/// Where `start` puts the just-in-time config in the container: a root-only file, never the create request,
+/// which Docker stores and clients may log.
+pub const JIT_CONFIG_PATH: &str = "/run/runnerd/jitconfig";
+
+/// A runner's just-in-time config from GitHub: credentials, never printed.
+#[derive(Clone)]
+pub struct JitConfig(pub String);
+
+impl fmt::Debug for JitConfig {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("JitConfig(<redacted>)")
+    }
 }
 
 /// What `inspect` reports about a runner container.
@@ -94,7 +113,17 @@ impl Docker {
             .create_container(Some(options), create_body(spec, isolation))
             .await?
             .id;
-        if let Err(error) = self.api.start_container(&id, None).await {
+        let started = async {
+            if let Some(jit_config) = &spec.jit_config {
+                let options = UploadToContainerOptionsBuilder::new().path("/").build();
+                let tar = jit_config_tar(jit_config)?;
+                self.api
+                    .upload_to_container(&id, Some(options), bollard::body_full(tar.into()))
+                    .await?;
+            }
+            self.api.start_container(&id, None).await
+        };
+        if let Err(error) = started.await {
             // Best effort: the start error is the one worth reporting.
             let _ = self.remove(&id).await;
             return Err(error);
@@ -120,3 +149,26 @@ impl Docker {
         self.api.remove_container(container, Some(options)).await
     }
 }
+
+/// A tar archive, to extract at `/`, holding the config as a root-only file at `JIT_CONFIG_PATH`.
+fn jit_config_tar(jit_config: &JitConfig) -> std::io::Result<Vec<u8>> {
+    let mut tar = tar::Builder::new(Vec::new());
+    let path = JIT_CONFIG_PATH.trim_start_matches('/');
+    let mut dir = tar::Header::new_gnu();
+    dir.set_entry_type(tar::EntryType::Directory);
+    dir.set_mode(0o700);
+    dir.set_size(0);
+    tar.append_data(
+        &mut dir,
+        path.rsplit_once('/').map_or("", |(dir, _)| dir),
+        std::io::empty(),
+    )?;
+    let mut file = tar::Header::new_gnu();
+    file.set_mode(0o400);
+    file.set_size(jit_config.0.len() as u64);
+    tar.append_data(&mut file, path, jit_config.0.as_bytes())?;
+    tar.into_inner()
+}
+
+#[cfg(test)]
+mod tests;
