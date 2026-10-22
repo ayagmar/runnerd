@@ -16,60 +16,22 @@ const blocks = [
 ];
 const used = blocks.reduce((sum, block) => sum + block.size, 0);
 
-// What `runnerd doctor` prints for each check, copied from crates/daemon/src/doctor.rs and a real run.
-const checks = [
-  {
-    name: 'Docker',
-    what: 'Docker answers on its unix socket.',
-    ok: 'ok    Docker: reachable, Docker 29.9.2',
-    fail: `FAIL  Docker: unreachable: <error>
-      fix: start Docker and let your user reach its socket:
-           sudo systemctl enable --now docker
-           sudo usermod -aG docker "$USER"   (then log in again)
-           runnerd reaches Docker only through a unix:// socket: unset DOCKER_HOST or point it at one`,
-  },
-  {
-    name: 'cgroups',
-    what: 'cgroup v2 with the systemd driver, so runners can live in a systemd slice.',
-    ok: 'ok    cgroups: cgroup v2 with the systemd driver',
-    fail: `FAIL  cgroups: cgroup v2 with the cgroupfs driver; runnerd places runners in a systemd slice, which needs cgroup v2 with the systemd driver
-      fix: boot with cgroup v2 (the default on current distributions), and remove any "native.cgroupdriver=cgroupfs" from /etc/docker/daemon.json`,
-  },
-  {
-    name: 'sysbox',
-    what: 'Docker has the sysbox-runc runtime and its services run. The fix depends on the distribution; this one is Arch.',
-    ok: "ok    sysbox: Docker has the sysbox-runc runtime and sysbox's services run",
-    fail: `FAIL  sysbox: Docker has no sysbox-runc runtime, which isolation = "sysbox" needs
-      fix: install the AUR package sysbox-ce-bin, for example: paru -S sysbox-ce-bin
-           sudo systemctl enable --now sysbox
-           add to /etc/docker/daemon.json (Arch kernels are not on sysbox's allow-list):
-           {"runtimes": {"sysbox-runc": {"path": "/usr/bin/sysbox-runc", "runtimeArgs": ["--no-kernel-check"]}}}
-           sudo systemctl restart docker   (stops running containers)`,
-  },
-  {
-    name: 'slice',
-    what: 'The slice your config names has a unit file with a MemoryMax.',
-    ok: 'ok    slice: ci.slice (/etc/systemd/system/ci.slice): MemoryMax=33G, CPU quota infinity',
-    fail: `FAIL  slice: demo.slice has no unit file with a MemoryMax, so nothing holds runners to the budget
+// A real `runnerd doctor` run on a host whose slice has no unit file yet; the format is crates/daemon/src/doctor.rs.
+const doctorOk = [
+  'ok    Docker: reachable, Docker 29.9.2',
+  'ok    cgroups: cgroup v2 with the systemd driver',
+  'info  isolation: sysbox: runners run unprivileged',
+  "ok    sysbox: Docker has the sysbox-runc runtime and sysbox's services run",
+];
+const doctorFail = `FAIL  slice: demo.slice has no unit file with a MemoryMax, so nothing holds runners to the budget
       fix: create /etc/systemd/system/demo.slice with
            [Slice]
            MemoryMax=32.5G
-           then: sudo systemctl daemon-reload`,
-  },
-  {
-    name: 'config',
-    what: 'Every runner your config allows fits in that MemoryMax.',
-    ok: 'ok    config: fits in ci.slice',
-    fail: `FAIL  config: slots × memory over all profiles plus the mirror is 34.5G, the slice ci.slice's MemoryMax is 33G
-      fix: change runnerd.toml or the slice's limits`,
-  },
-  {
-    name: 'gh',
-    what: 'The GitHub CLI is logged in with the repo scope, which registering runners needs.',
-    ok: 'ok    gh: logged in to github.com with the repo scope',
-    fail: `FAIL  gh: the token has scopes ["gist", "read:org"] but not repo, which runner registration needs
-      fix: gh auth refresh --hostname github.com --scopes repo`,
-  },
+           then: sudo systemctl daemon-reload`;
+const doctorRest = [
+  'ok    config: valid, with warnings: the slice demo.slice has no MemoryMax, so nothing holds runners to their 32.5G of caps; install a unit file for it',
+  'ok    gh: logged in to github.com with the repo scope',
+  'info  /dev/kvm: present, for a future Kata Containers backend',
 ];
 
 // One slot over two jobs: the container is new each time, the slot's cache layer is kept.
@@ -304,50 +266,17 @@ const next = [
         </div>
       </section>
 
-      <section class="doctor" id="doctor" aria-labelledby="doctor-title">
-        <div class="wrap doctor-grid">
-          <div class="doctor-text">
-            <h2 id="doctor-title">runnerd doctor names the fix</h2>
-            <p>
-              It checks a new machine in the order you would set it up, and every failure comes with the command
-              that fixes it. Pick a check to see both of its answers.
-            </p>
-            <div class="check-tabs" role="tablist" aria-label="doctor checks" data-tabs hidden>
-              {
-                checks.map((check, i) => (
-                  <button
-                    type="button"
-                    role="tab"
-                    id={`tab-${check.name}`}
-                    aria-controls={`panel-${check.name}`}
-                    aria-selected={i === 3 ? 'true' : 'false'}
-                    tabindex={i === 3 ? 0 : -1}
-                  >
-                    {check.name}
-                  </button>
-                ))
-              }
-            </div>
-          </div>
-          <div class="check-panels" data-ui>
-            {
-              checks.map((check, i) => (
-                <div
-                  class="check-panel"
-                  role="tabpanel"
-                  id={`panel-${check.name}`}
-                  aria-labelledby={`tab-${check.name}`}
-                  data-active={i === 3 ? '' : undefined}
-                >
-                  <h3>{check.name}</h3>
-                  <p>{check.what}</p>
-                  <pre class="terminal"><code><span class="ok">{check.ok}</span></code></pre>
-                  <pre class="terminal"><code><span class="fail">{check.fail}</span></code></pre>
-                </div>
-              ))
-            }
-          </div>
+      <section class="doctor wrap" id="doctor" aria-labelledby="doctor-title">
+        <div class="doctor-text">
+          <h2 id="doctor-title">runnerd doctor names the fix</h2>
+          <p>
+            It checks Docker, cgroups, sysbox, the slice, your config and the GitHub CLI in the order a new machine
+            needs them, and every failure says how to fix it. This host is ready except for its slice.
+          </p>
         </div>
+        <pre class="terminal transcript" data-ui><code><span class="prompt">$ runnerd doctor runnerd.toml</span>
+{doctorOk.join('\n')}
+<span class="fail">{doctorFail}</span>{doctorRest.join('\n')}</code></pre>
       </section>
 
       <section class="roadmap wrap" aria-labelledby="roadmap-title">
@@ -970,15 +899,9 @@ const next = [
     align-content: start;
   }
 
-  /* doctor: a list of checks and one frame that shows the selected check's two answers. */
+  /* doctor: one real run, the failure and its fix marked in pink. */
   .doctor {
-    margin-top: var(--section);
-    padding-block: clamp(4rem, 3rem + 5vw, 8rem);
-    background: var(--ink);
-    color: var(--bg);
-  }
-
-  .doctor-grid {
+    padding-top: var(--section);
     display: grid;
     grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
     gap: clamp(2rem, 5vw, 6rem);
@@ -994,101 +917,12 @@ const next = [
     max-width: 11ch;
   }
 
-  .check-tabs {
-    display: flex;
-    flex-direction: column;
-    align-items: flex-start;
-    margin-top: 0.5rem;
-  }
-
-  .check-tabs [role='tab'] {
-    min-height: 48px;
-    padding: 0.1rem 0;
-    background: none;
-    border: 0;
-    color: inherit;
-    font-family: var(--font-display);
-    font-size: clamp(1.75rem, 1rem + 2.2vw, 2.75rem);
-    font-weight: 700;
-    letter-spacing: -0.03em;
-    line-height: 1.1;
-    cursor: pointer;
-    opacity: 0.55;
-    transition: opacity 200ms, transform 200ms var(--ease);
-  }
-
-  .check-tabs [role='tab']:hover {
-    opacity: 0.8;
-  }
-
-  .check-tabs [role='tab'][aria-selected='true'] {
-    opacity: 1;
-    transform: translateX(0.75rem);
-  }
-
-  .check-tabs [role='tab'][aria-selected='true']::before {
-    content: '';
-    display: inline-block;
-    width: 0.5em;
-    height: 0.5em;
-    margin-right: 0.3em;
-    background: var(--mint);
-    vertical-align: 0.1em;
-  }
-
-  .check-panels {
-    display: grid;
-    gap: 2.5rem;
-  }
-
-  .check-panel {
-    display: grid;
-    gap: var(--gap);
-    align-content: start;
-  }
-
-  .check-panel h3 {
-    font-size: 1.5rem;
-  }
-
-  .check-panel p {
-    margin-bottom: 0.75rem;
-  }
-
-  .doctor .terminal:first-of-type {
-    background: var(--mint);
-    color: var(--block-ink);
-  }
-
-  .doctor .terminal:last-of-type {
+  .transcript .fail {
+    display: block;
+    margin-inline: calc(-1 * clamp(1rem, 2vw, 1.5rem));
+    padding-inline: clamp(1rem, 2vw, 1.5rem);
     background: var(--pink);
     color: var(--block-ink);
-  }
-
-  /* With the script, one panel shows at a time in one place. */
-  .js .check-panels {
-    display: grid;
-    grid-template-areas: 'panel';
-  }
-
-  .js .check-panel {
-    grid-area: panel;
-    visibility: hidden;
-    opacity: 0;
-    transition: opacity 240ms;
-  }
-
-  .js .check-panel[data-active] {
-    visibility: visible;
-    opacity: 1;
-  }
-
-  .js .check-panel h3 {
-    position: absolute;
-    width: 1px;
-    height: 1px;
-    overflow: hidden;
-    clip-path: inset(50%);
   }
 
   /* Today and next: one sheet in two columns, a mint square for what ships, a pink one for what is coming. */
@@ -1334,7 +1168,7 @@ const next = [
   @media (max-width: 860px) {
     .hero,
     .calc,
-    .doctor-grid,
+    .doctor,
     .sheet {
       grid-template-columns: minmax(0, 1fr);
     }
@@ -1375,28 +1209,6 @@ const next = [
       height: 12rem;
     }
 
-    .check-tabs {
-      flex-direction: row;
-      flex-wrap: wrap;
-      gap: 6px;
-    }
-
-    .check-tabs [role='tab'] {
-      font-size: 1.125rem;
-      padding: 0 1rem;
-      background: color-mix(in srgb, var(--bg) 12%, transparent);
-      opacity: 1;
-    }
-
-    .check-tabs [role='tab'][aria-selected='true'] {
-      transform: none;
-      background: var(--mint);
-      color: var(--block-ink);
-    }
-
-    .check-tabs [role='tab'][aria-selected='true']::before {
-      display: none;
-    }
   }
 
   @media (max-width: 480px) {

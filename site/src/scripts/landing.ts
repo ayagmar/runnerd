@@ -1,4 +1,4 @@
-// The landing page's behaviour: the budget calculator, the doctor checks, the copy button, the theme switch and
+// The landing page's behaviour: the budget calculator, the copy button, the theme switch and
 // the section entrances. Everything here is an enhancement; without it the page shows the example config.
 
 const GIB = 1024 ** 3;
@@ -73,39 +73,6 @@ function calculator() {
   render();
 }
 
-function doctorTabs() {
-  const list = document.querySelector<HTMLElement>('[data-tabs]');
-  if (!list) return;
-  list.hidden = false;
-  const tabs = [...list.querySelectorAll<HTMLButtonElement>('[role="tab"]')];
-
-  const select = (tab: HTMLButtonElement, focus = false) => {
-    for (const other of tabs) {
-      const selected = other === tab;
-      other.setAttribute('aria-selected', String(selected));
-      other.tabIndex = selected ? 0 : -1;
-      document.getElementById(other.getAttribute('aria-controls')!)!.toggleAttribute('data-active', selected);
-    }
-    if (focus) tab.focus();
-  };
-
-  const finePointer = matchMedia('(hover: hover) and (pointer: fine)');
-  tabs.forEach((tab, i) => {
-    tab.addEventListener('click', () => select(tab));
-    tab.addEventListener('pointerenter', () => finePointer.matches && select(tab));
-    tab.addEventListener('keydown', (event) => {
-      const step = { ArrowDown: 1, ArrowRight: 1, ArrowUp: -1, ArrowLeft: -1 }[event.key];
-      if (step) {
-        event.preventDefault();
-        select(tabs[(i + step + tabs.length) % tabs.length], true);
-      } else if (event.key === 'Home' || event.key === 'End') {
-        event.preventDefault();
-        select(tabs[event.key === 'Home' ? 0 : tabs.length - 1], true);
-      }
-    });
-  });
-}
-
 function copyButton() {
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
     if (!navigator.clipboard) continue;
@@ -162,7 +129,6 @@ function entrances() {
 
 export function setup() {
   calculator();
-  doctorTabs();
   copyButton();
   themeToggle();
   entrances();
