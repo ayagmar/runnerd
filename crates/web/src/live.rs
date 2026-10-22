@@ -20,7 +20,7 @@ use tracing::debug;
 use crate::App;
 use crate::daemon::Error;
 use crate::views::job::{self, JobView};
-use crate::views::{self, overview};
+use crate::views::{self, Tone, overview};
 
 /// How long to collect events before rendering: a burst (a slot and the budget change together) renders once.
 const SETTLE: Duration = Duration::from_millis(250);
@@ -54,7 +54,7 @@ impl Sent {
 }
 
 async fn notice(patches: &Patches, error: &Error) {
-    let event = PatchElements::new(views::notice(&error.to_string(), true).into_string())
+    let event = PatchElements::new(views::notice(&error.to_string(), Tone::Failed).into_string())
         .write_as_axum_sse_event();
     let _ = patches.send(event).await;
 }

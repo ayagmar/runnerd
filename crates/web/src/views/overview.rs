@@ -10,7 +10,7 @@ use runnerd_core::api::{
 };
 
 use super::{Page, badge, page, profile_class, slug, time_ago};
-use crate::chart::{Series, TimeChart, nice_top, sparkline};
+use crate::chart::{Base, Series, TimeChart, nice_top, sparkline};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -413,7 +413,10 @@ pub(crate) fn host(overview: &Overview) -> Markup {
         time: relative_clock,
         gap,
     };
-    let memory_top = nice_top(memory_peak.max(status.budget.memory_max.unwrap_or(0)), true);
+    let memory_top = nice_top(
+        memory_peak.max(status.budget.memory_max.unwrap_or(0)),
+        Base::Binary,
+    );
     let cpu_chart = TimeChart {
         title: format!("CPU of {} over the last 30 minutes", status.budget.slice),
         start,
@@ -429,7 +432,7 @@ pub(crate) fn host(overview: &Overview) -> Markup {
         time: relative_clock,
         gap,
     };
-    let cpu_top = nice_top(cpu_peak.max(cpus * 1000), false);
+    let cpu_top = nice_top(cpu_peak.max(cpus * 1000), Base::Decimal);
     html! {
         section #host .host aria-labelledby="host-title" {
             div.section-head {

@@ -14,7 +14,7 @@ use serde::Deserialize;
 use crate::App;
 use crate::daemon::{Body, Reply};
 use crate::views::config::{self, Outcome};
-use crate::views::{self, overview};
+use crate::views::{self, Tone, overview};
 
 fn html(markup: &[Markup]) -> Response {
     Html(
@@ -27,7 +27,7 @@ fn html(markup: &[Markup]) -> Response {
 }
 
 fn refused(message: &str) -> Response {
-    html(&[views::notice(message, true)])
+    html(&[views::notice(message, Tone::Failed)])
 }
 
 /// Sends a request without a body; a failure to reach the daemon is a refusal too.
@@ -35,7 +35,7 @@ async fn send(app: &App, path: &str) -> Result<Reply, Markup> {
     app.daemon
         .request(Method::POST, path, None)
         .await
-        .map_err(|error| views::notice(&error.to_string(), true))
+        .map_err(|error| views::notice(&error.to_string(), Tone::Failed))
 }
 
 /// The repository's row as the daemon reports it now.
@@ -44,7 +44,7 @@ async fn row(app: &App, repository: &str) -> Result<Markup, Markup> {
         .daemon
         .get("/v1/status")
         .await
-        .map_err(|error| views::notice(&error.to_string(), true))?;
+        .map_err(|error| views::notice(&error.to_string(), Tone::Failed))?;
     status
         .repositories
         .iter()
@@ -53,7 +53,7 @@ async fn row(app: &App, repository: &str) -> Result<Markup, Markup> {
         .ok_or_else(|| {
             views::notice(
                 &format!("{repository} is not a configured repository"),
-                true,
+                Tone::Failed,
             )
         })
 }
@@ -110,7 +110,7 @@ pub(crate) async fn pause(
             row,
             views::notice(
                 &format!("Paused {repository}; stopped {}", names.join(", ")),
-                false,
+                Tone::Done,
             ),
         ])
     }
@@ -139,7 +139,7 @@ pub(crate) async fn reseed(State(app): State<App>, Path(profile): Path<String>) 
             &format!(
                 "Reseeding {profile}'s snapshot from slot 1; the overview shows when it is done"
             ),
-            false,
+            Tone::Done,
         )]),
         Ok(reply) => refused(&reply.message()),
         Err(notice) => html(&[notice]),
@@ -151,7 +151,7 @@ pub(crate) async fn clean(State(app): State<App>, Path(volume): Path<String>) ->
     match send(&app, &format!("/v1/caches/{volume}/clean")).await {
         Ok(reply) if reply.status.is_success() => html(&[views::notice(
             &format!("Emptied {volume}; its size shows at the next measurement"),
-            false,
+            Tone::Done,
         )]),
         Ok(reply) => refused(&reply.message()),
         Err(notice) => html(&[notice]),

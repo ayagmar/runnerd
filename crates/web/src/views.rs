@@ -87,11 +87,20 @@ pub(crate) fn page(title: &str, active: Option<Page>, live: Option<&str>, main: 
     }
 }
 
+/// Why a request gets the signed-out page.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum SignedOut {
+    /// It came without the session cookie.
+    NoSession,
+    /// It brought a login code that was used already or never issued.
+    CodeUsed,
+}
+
 /// The page every request without the session cookie gets.
-pub(crate) fn signed_out(bad_code: bool) -> Markup {
+pub(crate) fn signed_out(reason: SignedOut) -> Markup {
     let main = html! {
         section.signed-out {
-            h1 { @if bad_code { "That link was used already" } @else { "Open the dashboard from your terminal" } }
+            h1 { @if reason == SignedOut::CodeUsed { "That link was used already" } @else { "Open the dashboard from your terminal" } }
             p { "Run " code { "runnerctl web" } " on this machine. It opens a one-time link that signs this browser in." }
             p.muted { "Each link works once. The daemon writes a fresh one to " code { "$XDG_RUNTIME_DIR/runnerd.web" } " after every use." }
         }
@@ -111,11 +120,18 @@ pub(crate) fn error_page(title: &str, message: &str) -> Markup {
     page(title, None, None, &main)
 }
 
+/// Whether a notice reports something done or something that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Tone {
+    Done,
+    Failed,
+}
+
 /// A notice for `#notice`, such as why a pause failed. It goes away by itself.
-pub(crate) fn notice(message: &str, failed: bool) -> Markup {
+pub(crate) fn notice(message: &str, tone: Tone) -> Markup {
     html! {
         div #notice role="status" aria-live="polite" {
-            p class=(if failed { "toast failed" } else { "toast" }) data-init="setTimeout(() => el.remove(), 8000)" { (message) }
+            p class=(if tone == Tone::Failed { "toast failed" } else { "toast" }) data-init="setTimeout(() => el.remove(), 8000)" { (message) }
         }
     }
 }

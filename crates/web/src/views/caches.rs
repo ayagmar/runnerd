@@ -4,7 +4,7 @@ use maud::{Markup, html};
 use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Status};
 
 use super::{Page, page, profile_class, time_ago};
-use crate::chart::{Series, TimeChart, nice_top, ratio};
+use crate::chart::{Base, Series, TimeChart, nice_top, ratio};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -122,7 +122,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                             value: format::bytes,
                             time: format::short_date,
                             gap: u64::MAX,
-                        }.render(nice_top(peak.max(volume.limit.unwrap_or(0)), true)))
+                        }.render(nice_top(peak.max(volume.limit.unwrap_or(0)), Base::Binary)))
                     } @else {
                         p.muted { "One measurement so far." }
                     }

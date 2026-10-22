@@ -6,7 +6,7 @@ use runnerd_core::api::{Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, 
 use serde::{Deserialize, Serialize};
 
 use super::{Page, badge, page, profile_class, time_ago, waited_and_ran};
-use crate::chart::{Bar, Series, TimeChart, nice_top, stacked_bars};
+use crate::chart::{Bar, Base, Series, TimeChart, nice_top, stacked_bars};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -224,7 +224,7 @@ fn trends(history: &History) -> Markup {
             .map(|point| point.1)
             .max()
             .unwrap_or(0),
-        false,
+        Base::Decimal,
     );
     let times = per_day(
         "Average run time and wait per day",
@@ -268,7 +268,7 @@ fn trends(history: &History) -> Markup {
                 }
                 div.chart-card {
                     h3 { "Memory peak" }
-                    (memory.render(nice_top(peak, true)))
+                    (memory.render(nice_top(peak, Base::Binary)))
                     p.muted { "The highest sampled peak of a job that day" }
                 }
             }

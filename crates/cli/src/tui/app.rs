@@ -114,7 +114,30 @@ pub(crate) enum Connection {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct Flash {
     pub(crate) text: String,
-    pub(crate) failed: bool,
+    pub(crate) outcome: Outcome,
+}
+
+/// Whether a flash reports something done or something that failed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Outcome {
+    Done,
+    Failed,
+}
+
+/// What a history request does with the rows shown until its answer comes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Rows {
+    /// They are the same page, refreshed.
+    Keep,
+    /// They are from other filters or another page.
+    Clear,
+}
+
+/// Which way tab moves between the overview's panes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Direction {
+    Forward,
+    Backward,
 }
 
 /// The open job.
@@ -143,11 +166,11 @@ pub(crate) struct History {
 }
 
 impl History {
-    /// Asks for the page the filters and `before` name. With `fresh`, the rows shown are from other filters or
-    /// another page, so they go until the answer comes, and with them their continuation for `]`.
-    fn request(&mut self, fresh: bool) -> Effect {
+    /// Asks for the page the filters and `before` name. With [`Rows::Clear`], the rows shown go until the answer
+    /// comes, and with them their continuation for `]`.
+    fn request(&mut self, rows: Rows) -> Effect {
         self.generation += 1;
-        if fresh {
+        if rows == Rows::Clear {
             self.page = None;
             self.selected = 0;
         }
@@ -274,7 +297,7 @@ impl App {
                             self.history.selected.min(page.jobs.len().saturating_sub(1));
                         self.history.page = Some(page);
                     }
-                    Err(error) => self.flash(error, true),
+                    Err(error) => self.flash(error, Outcome::Failed),
                 }
             }
             Msg::LogLine { job, text } => {
@@ -288,8 +311,8 @@ impl App {
                 }
             }
             Msg::Status(status) => self.live.status = status,
-            Msg::Done(text) => self.flash(text, false),
-            Msg::Failed(text) => self.flash(text, true),
+            Msg::Done(text) => self.flash(text, Outcome::Done),
+            Msg::Failed(text) => self.flash(text, Outcome::Failed),
             Msg::Busy {
                 repository,
                 message,
@@ -298,8 +321,8 @@ impl App {
         Vec::new()
     }
 
-    fn flash(&mut self, text: String, failed: bool) {
-        self.flash = Some(Flash { text, failed });
+    fn flash(&mut self, text: String, outcome: Outcome) {
+        self.flash = Some(Flash { text, outcome });
     }
 
     fn event(&mut self, envelope: &EventEnvelope) -> Vec<Effect> {
@@ -321,7 +344,7 @@ impl App {
             Event::JobFinished { job } => {
                 self.series.remove(&job.id);
                 if self.view == View::History && self.history.before.is_none() {
-                    effects.push(self.history.request(false));
+                    effects.push(self.history.request(Rows::Keep));
                 }
             }
             Event::CacheReseeded {
@@ -334,7 +357,12 @@ impl App {
                     None if output.trim().is_empty() => format!("{profile}: reseeded"),
                     None => format!("{profile}: {}", last_line(output)),
                 };
-                self.flash(text, error.is_some());
+                let outcome = if error.is_some() {
+                    Outcome::Failed
+                } else {
+                    Outcome::Done
+                };
+                self.flash(text, outcome);
             }
             _ => {}
         }
@@ -395,8 +423,8 @@ impl App {
             KeyCode::Char('1' | 'o') => return self.show(View::Overview),
             KeyCode::Char('2' | 'h') => return self.show(View::History),
             KeyCode::Esc if self.view == View::Job => return self.show(self.back),
-            KeyCode::Tab => self.pane = next_pane(self.pane, true),
-            KeyCode::BackTab => self.pane = next_pane(self.pane, false),
+            KeyCode::Tab => self.pane = next_pane(self.pane, Direction::Forward),
+            KeyCode::BackTab => self.pane = next_pane(self.pane, Direction::Backward),
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::PageDown => self.step(10),
@@ -464,13 +492,13 @@ impl App {
                 if let Some(next) = self.history.page.as_ref().and_then(|page| page.next) {
                     self.history.previous.push(self.history.before);
                     self.history.before = Some(next);
-                    return vec![self.history.request(true)];
+                    return vec![self.history.request(Rows::Clear)];
                 }
             }
             KeyCode::Char('[') => {
                 if let Some(before) = self.history.previous.pop() {
                     self.history.before = before;
-                    return vec![self.history.request(true)];
+                    return vec![self.history.request(Rows::Clear)];
                 }
             }
             _ => {}
@@ -485,7 +513,7 @@ impl App {
             effects.push(Effect::CloseJob);
         }
         if view == View::History && self.view != View::History {
-            effects.push(self.history.request(false));
+            effects.push(self.history.request(Rows::Keep));
         }
         self.view = view;
         effects
@@ -494,7 +522,7 @@ impl App {
     fn first_page(&mut self) -> Vec<Effect> {
         self.history.previous.clear();
         self.history.before = None;
-        vec![self.history.request(true)]
+        vec![self.history.request(Rows::Clear)]
     }
 
     /// Opens a job; its record, samples and log arrive as messages.
@@ -663,11 +691,17 @@ fn push<T>(queue: &mut VecDeque<T>, item: T, keep: usize) {
     }
 }
 
-fn next_pane(pane: Pane, forward: bool) -> Pane {
-    match (pane, forward) {
-        (Pane::Slots, true) | (Pane::Latest, false) => Pane::Repositories,
-        (Pane::Repositories, true) | (Pane::Slots, false) => Pane::Latest,
-        (Pane::Latest, true) | (Pane::Repositories, false) => Pane::Slots,
+fn next_pane(pane: Pane, direction: Direction) -> Pane {
+    match (pane, direction) {
+        (Pane::Slots, Direction::Forward) | (Pane::Latest, Direction::Backward) => {
+            Pane::Repositories
+        }
+        (Pane::Repositories, Direction::Forward) | (Pane::Slots, Direction::Backward) => {
+            Pane::Latest
+        }
+        (Pane::Latest, Direction::Forward) | (Pane::Repositories, Direction::Backward) => {
+            Pane::Slots
+        }
     }
 }
 

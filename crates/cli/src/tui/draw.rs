@@ -14,7 +14,7 @@ use ratatui::widgets::{
 };
 use runnerd_core::api::{Job, JobSummary, ProfileStatus, Sample, SlotStatus, Step};
 
-use super::app::{App, Connection, JobView, Pane, View};
+use super::app::{App, Connection, JobView, Outcome, Pane, View};
 use crate::human::{self, Tone, bytes, cores, duration};
 use crate::watch;
 
@@ -158,7 +158,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Span::styled(message.clone(), theme.wait()),
         ])
     } else if let Some(flash) = &app.flash {
-        let style = if flash.failed {
+        let style = if flash.outcome == Outcome::Failed {
             theme.tone(Tone::Bad)
         } else {
             theme.memory()
