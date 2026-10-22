@@ -15,6 +15,8 @@ use serde::Serialize;
 mod client;
 mod human;
 mod output;
+#[cfg(test)]
+mod testing;
 mod watch;
 
 use client::{Client, ClientError};

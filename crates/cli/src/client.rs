@@ -17,12 +17,24 @@ use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
 
-/// How long a request may take to answer, and a plain response to arrive in full. A forced pause cancels runs on
-/// GitHub and removes containers before it answers.
-const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+/// How long the client waits for the daemon.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Timeouts {
+    /// For a request to be answered, and a plain response to arrive in full; for a log that is not followed, for
+    /// each part of its body. A forced pause cancels runs on GitHub and removes containers before it answers.
+    pub(crate) request: Duration,
+    /// For the event stream to send something. The daemon sends a keep-alive comment every 15 s.
+    pub(crate) idle: Duration,
+}
 
-/// How long a stream may stay silent. The daemon sends a keep-alive comment on the event stream every 15 s.
-const STREAM_IDLE: Duration = Duration::from_secs(45);
+impl Default for Timeouts {
+    fn default() -> Timeouts {
+        Timeouts {
+            request: Duration::from_secs(30),
+            idle: Duration::from_secs(45),
+        }
+    }
+}
 
 /// How long to wait before reconnecting a stream the daemon closed.
 const RECONNECT_DELAY: Duration = Duration::from_millis(500);
@@ -39,8 +51,8 @@ pub(crate) enum ClientError {
         /// The daemon's `ErrorResponse.message`, or the body when it sent none.
         message: String,
     },
-    /// The daemon did not answer in time.
-    Timeout,
+    /// The daemon did not answer within this long.
+    Timeout(Duration),
     /// The connection or the HTTP exchange failed.
     Transport(String),
     /// The response is not the API type it should be.
@@ -57,11 +69,9 @@ impl fmt::Display for ClientError {
                 socket.display()
             ),
             ClientError::Api { status, message } => write!(f, "{message} ({status})"),
-            ClientError::Timeout => write!(
-                f,
-                "runnerd did not answer within {}s",
-                REQUEST_TIMEOUT.as_secs()
-            ),
+            ClientError::Timeout(after) => {
+                write!(f, "runnerd did not answer within {}s", after.as_secs())
+            }
             ClientError::Transport(error) => write!(f, "cannot talk to runnerd: {error}"),
             ClientError::Decode(error) => write!(f, "runnerd sent an unexpected answer: {error}"),
         }
@@ -78,11 +88,31 @@ fn transport(error: impl fmt::Display) -> ClientError {
 #[derive(Debug, Clone)]
 pub(crate) struct Client {
     socket: PathBuf,
+    timeouts: Timeouts,
 }
 
 impl Client {
     pub(crate) fn new(socket: PathBuf) -> Client {
-        Client { socket }
+        Client {
+            socket,
+            timeouts: Timeouts::default(),
+        }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn with_timeouts(self, timeouts: Timeouts) -> Client {
+        Client { timeouts, ..self }
+    }
+
+    /// Waits for `future` at most the request timeout.
+    async fn in_time<T>(
+        &self,
+        future: impl Future<Output = Result<T, ClientError>>,
+    ) -> Result<T, ClientError> {
+        let after = self.timeouts.request;
+        tokio::time::timeout(after, future)
+            .await
+            .map_err(|_| ClientError::Timeout(after))?
     }
 
     pub(crate) fn socket(&self) -> &Path {
@@ -141,7 +171,7 @@ impl Client {
         path: &str,
         body: Option<(Vec<u8>, &'static str)>,
     ) -> Result<Bytes, ClientError> {
-        tokio::time::timeout(REQUEST_TIMEOUT, async {
+        self.in_time(async {
             let response = self.send(method, path, body, None).await?;
             let bytes = response
                 .into_body()
@@ -152,7 +182,6 @@ impl Client {
             Ok(bytes)
         })
         .await
-        .map_err(|_| ClientError::Timeout)?
     }
 
     /// Sends one request and returns the response once its headers arrived; an error status becomes
@@ -210,14 +239,16 @@ impl Client {
         })
     }
 
-    /// `GET /v1/jobs/{id}/logs`: the job's log, as lines.
+    /// `GET /v1/jobs/{id}/logs`: the job's log, as lines. Unless followed, each part of the body must come within the
+    /// request timeout.
     pub(crate) async fn logs(&self, id: u64, query: &LogQuery) -> Result<Lines, ClientError> {
         let path = with_query(&format!("/v1/jobs/{id}/logs"), query)?;
-        let response =
-            tokio::time::timeout(REQUEST_TIMEOUT, self.send(Method::GET, &path, None, None))
-                .await
-                .map_err(|_| ClientError::Timeout)??;
-        Ok(Lines::new(response.into_body(), None))
+        let response = self
+            .in_time(self.send(Method::GET, &path, None, None))
+            .await?;
+        // A followed log may stay quiet as long as its job does; a finished one comes at once.
+        let idle = (!query.follow).then_some(self.timeouts.request);
+        Ok(Lines::new(response.into_body(), idle))
     }
 
     /// `GET /v1/events`: the event stream, resumed after `last_id` when given.
@@ -304,7 +335,7 @@ impl Lines {
             let frame = match self.idle {
                 Some(idle) => tokio::time::timeout(idle, self.body.frame())
                     .await
-                    .map_err(|_| ClientError::Timeout)?,
+                    .map_err(|_| ClientError::Timeout(idle))?,
                 None => self.body.frame().await,
             };
             match frame {
@@ -376,14 +407,12 @@ pub(crate) struct Events {
 impl Events {
     async fn connect(&mut self) -> Result<(), ClientError> {
         let path = with_query("/v1/events", &self.query)?;
-        let response = tokio::time::timeout(
-            REQUEST_TIMEOUT,
-            self.client.send(Method::GET, &path, None, self.last_id),
-        )
-        .await
-        .map_err(|_| ClientError::Timeout)??;
+        let response = self
+            .client
+            .in_time(self.client.send(Method::GET, &path, None, self.last_id))
+            .await?;
         self.lines = Some((
-            Lines::new(response.into_body(), Some(STREAM_IDLE)),
+            Lines::new(response.into_body(), Some(self.client.timeouts.idle)),
             SseParser::default(),
         ));
         Ok(())
@@ -403,7 +432,7 @@ impl Events {
             };
             let line = match lines.next().await {
                 Ok(line) => line,
-                Err(ClientError::Timeout) => None,
+                Err(ClientError::Timeout(_)) => None,
                 Err(error) => return Err(error),
             };
             let Some(line) = line else {
@@ -427,7 +456,37 @@ impl Events {
 
 #[cfg(test)]
 mod tests {
-    use super::{RawEvent, SseParser};
+    use std::convert::Infallible;
+    use std::time::Duration;
+
+    use axum::Router;
+    use axum::body::{Body, Bytes};
+    use axum::routing::get;
+    use futures_util::stream;
+    use runnerd_core::api::LogQuery;
+
+    use super::{ClientError, RawEvent, SseParser};
+    use crate::testing::Fake;
+
+    /// A 200 response whose body never comes.
+    fn stalled() -> Body {
+        Body::from_stream(stream::pending::<Result<Bytes, Infallible>>())
+    }
+
+    #[tokio::test]
+    async fn a_log_that_is_not_followed_fails_when_its_body_stalls() {
+        let fake =
+            Fake::serve(Router::new().route("/v1/jobs/{id}/logs", get(|| async { stalled() })));
+        let client = fake.client(Duration::from_millis(300), Duration::from_secs(60));
+        let read = async {
+            let mut lines = client.logs(1, &LogQuery::default()).await?;
+            lines.next().await
+        };
+        let read = tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("the read should fail, not hang");
+        assert!(matches!(read, Err(ClientError::Timeout(_))), "{read:?}");
+    }
 
     fn parse(text: &str) -> Vec<RawEvent> {
         let mut parser = SseParser::default();

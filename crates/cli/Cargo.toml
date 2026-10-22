@@ -20,6 +20,7 @@ tokio = { workspace = true, features = ["macros", "net", "rt", "time"] }
 
 [dev-dependencies]
 axum.workspace = true
+futures-util.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 
 [lints]
