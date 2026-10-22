@@ -109,7 +109,8 @@ pub(crate) struct Flash {
 #[derive(Debug)]
 pub(crate) struct JobView {
     pub(crate) job: Job,
-    pub(crate) samples: Vec<Sample>,
+    /// Its newest samples, oldest first; as many as the overview keeps per job.
+    pub(crate) samples: VecDeque<Sample>,
     pub(crate) log: VecDeque<String>,
     /// Lines scrolled up from the end; 0 follows the log.
     pub(crate) scroll: usize,
@@ -218,7 +219,10 @@ impl App {
                 if let Some(open) = &mut self.job
                     && open.job.summary.id == series.job
                 {
-                    open.samples = series.samples;
+                    open.samples.clear();
+                    for sample in series.samples {
+                        push(&mut open.samples, sample, JOB_SAMPLES);
+                    }
                 }
             }
             Msg::History(page) => {
@@ -301,7 +305,9 @@ impl App {
             Event::JobStep { job, step } if *job == id => {
                 watch::update_step(&mut open.job.steps, step);
             }
-            Event::JobSample { job, sample } if *job == id => open.samples.push(sample.clone()),
+            Event::JobSample { job, sample } if *job == id => {
+                push(&mut open.samples, sample.clone(), JOB_SAMPLES);
+            }
             _ => {}
         }
         effects
@@ -465,11 +471,7 @@ impl App {
             .unwrap_or_default();
         self.job = Some(JobView {
             job: Job { summary, steps },
-            samples: self
-                .series
-                .get(&id)
-                .map(|series| series.iter().cloned().collect())
-                .unwrap_or_default(),
+            samples: self.series.get(&id).cloned().unwrap_or_default(),
             log: VecDeque::new(),
             scroll: 0,
         });

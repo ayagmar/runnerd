@@ -537,3 +537,39 @@ fn opening_a_job_from_the_latest_jobs_follows_only_its_log() {
     assert!(job.contains("exit code 1"), "{job}");
     assert!(!job.contains("another job's line"), "{job}");
 }
+
+fn sample(at: u64) -> Sample {
+    Sample {
+        at,
+        cpu: 1000,
+        memory: at,
+        network_received: 0,
+        network_sent: 0,
+    }
+}
+
+#[test]
+fn an_open_job_keeps_only_its_newest_samples() {
+    let mut app = app();
+    running_job(&mut app);
+    app.update(key(KeyCode::Enter));
+    // A job that has run for hours: far more samples than the overview keeps.
+    app.update(Msg::Samples(runnerd_core::api::SampleSeries {
+        job: 42,
+        interval: 2,
+        samples: (0..5000).map(sample).collect(),
+    }));
+    for at in 5000..6000 {
+        app.update(event(
+            None,
+            Event::JobSample {
+                job: 42,
+                sample: sample(at),
+            },
+        ));
+    }
+    let samples = &app.job.as_ref().unwrap().samples;
+    assert_eq!(samples.len(), 300);
+    assert_eq!(samples.iter().last().map(|sample| sample.at), Some(5999));
+    assert_eq!(samples.iter().next().map(|sample| sample.at), Some(5700));
+}

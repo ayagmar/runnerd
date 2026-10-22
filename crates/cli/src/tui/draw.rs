@@ -1261,7 +1261,7 @@ fn job_spark(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, theme
     let [sparks, metrics] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
     let (memory_cap, cpu_cap) = caps(app, &open.job.summary);
     let width = usize::from(area.width / 2).saturating_sub(16);
-    let last = open.samples.last();
+    let last = open.samples.back();
     frame.render_widget(
         Line::from(vec![
             Span::styled("mem ", theme.dim()),
