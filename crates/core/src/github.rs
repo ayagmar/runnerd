@@ -218,6 +218,7 @@ impl Github {
     /// The repository's jobs waiting for a runner, in queued runs and in runs that started some of their jobs.
     pub async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, Error> {
         let mut jobs = Vec::new();
+        let mut listed = Vec::new();
         for status in ["queued", "in_progress"] {
             let runs: Runs = self
                 .get(&format!(
@@ -225,12 +226,9 @@ impl Github {
                 ))
                 .await?;
             for run in runs.workflow_runs {
-                let run_jobs: Jobs = self
-                    .get(&format!(
-                        "/repos/{repository}/actions/runs/{}/jobs?filter=latest&per_page=100",
-                        run.id
-                    ))
-                    .await?;
+                let path = jobs_path(repository, run.id);
+                let run_jobs: Jobs = self.get(&path).await?;
+                listed.push(path);
                 jobs.extend(
                     run_jobs
                         .jobs
@@ -245,6 +243,11 @@ impl Github {
                 );
             }
         }
+        // The cached answers of runs that ended: nothing asks for them again.
+        let runs_prefix = format!("/repos/{repository}/actions/runs/");
+        lock(&self.etags).retain(|path, _| {
+            !(path.starts_with(&runs_prefix) && path.contains("/jobs?")) || listed.contains(path)
+        });
         jobs.sort_by_key(|job| job.id);
         jobs.dedup_by_key(|job| job.id);
         Ok(jobs)
@@ -387,6 +390,10 @@ impl Github {
             .clone()
             .ok_or_else(|| Error::Token("the token source returned nothing".to_owned()))
     }
+}
+
+fn jobs_path(repository: &str, run: u64) -> String {
+    format!("/repos/{repository}/actions/runs/{run}/jobs?filter=latest&per_page=100")
 }
 
 struct Response {

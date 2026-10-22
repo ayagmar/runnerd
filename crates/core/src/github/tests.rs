@@ -270,3 +270,43 @@ async fn the_token_never_shows_in_debug_output_or_errors() {
         assert!(!text.contains(TOKEN), "{text}");
     }
 }
+
+#[tokio::test]
+async fn a_run_that_left_the_queue_is_no_longer_cached() {
+    let polls = Arc::new(Mutex::new(0));
+    let counter = polls.clone();
+    let (url, seen) = fake_github(move |request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs?status=queued&per_page=100" => {
+            let mut polls = counter.lock().unwrap();
+            *polls += 1;
+            // Listed on the first and third poll, gone on the second.
+            if *polls == 2 {
+                json(r#"{"workflow_runs":[]}"#)
+            } else {
+                json(r#"{"workflow_runs":[{"id":10}]}"#)
+            }
+        }
+        "/repos/o/r/actions/runs?status=in_progress&per_page=100" => {
+            json(r#"{"workflow_runs":[]}"#)
+        }
+        _ => (
+            [("etag", "\"jobs\"")],
+            json(r#"{"jobs":[{"id":1,"run_id":10,"name":"a","status":"queued","labels":[]}]}"#),
+        )
+            .into_response(),
+    })
+    .await;
+    let github = client(&url);
+    for _ in 0..3 {
+        github.queued_jobs("o/r").await.unwrap();
+    }
+    let jobs_requests: Vec<Seen> = seen
+        .lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.uri.contains("/jobs?"))
+        .cloned()
+        .collect();
+    assert_eq!(jobs_requests.len(), 2);
+    assert!(!jobs_requests[1].headers.contains_key("if-none-match"));
+}
