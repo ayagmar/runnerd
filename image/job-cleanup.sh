@@ -7,9 +7,9 @@ set -uo pipefail
 . /usr/local/lib/runnerd-layers.sh
 
 # For the job log: everything the container received during the job, the mirror's share included.
-if [ -f /home/runner/.runnerd-job-rx ]; then
-    rx=$(($(cat /sys/class/net/eth0/statistics/rx_bytes) - $(cat /home/runner/.runnerd-job-rx)))
-    echo "runnerd: this job received $((rx / 1048576)) MiB"
+start=$(cat /home/runner/.runnerd-job-rx 2> /dev/null) now=$(rx_bytes)
+if [ -n "$start" ] && [ -n "$now" ]; then
+    echo "runnerd: this job received $(((now - start) / 1048576)) MiB"
 fi
 
 # Containers, volumes and networks the job started (Testcontainers, services, `docker compose up`).

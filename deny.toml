@@ -8,8 +8,9 @@ unsound = "all"
 yanked = "deny"
 
 [licenses]
-# Permissive licenses that allow distributing runnerd under MIT.
-allow = ["MIT", "Apache-2.0", "Unicode-3.0"]
+# Permissive licenses that allow distributing runnerd under MIT. ISC, BSD-3-Clause: rustls, ring, webpki, subtle,
+# matchit; CDLA-Permissive-2.0: the Mozilla root certificates in webpki-root-certs.
+allow = ["MIT", "Apache-2.0", "Unicode-3.0", "ISC", "BSD-3-Clause", "CDLA-Permissive-2.0"]
 confidence-threshold = 0.93
 
 [bans]

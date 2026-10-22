@@ -110,6 +110,8 @@ async fn with_runner(
             typ: Some(MountType::VOLUME),
             ..Default::default()
         }],
+        network: None,
+        labels: Default::default(),
         // The container's Docker Engine alone, so the JIT config stays where `start` put it.
         entrypoint: Some(vec!["dind".to_owned(), "dockerd".to_owned()]),
         jit_config: Some(JitConfig(JIT_CONFIG.to_owned())),

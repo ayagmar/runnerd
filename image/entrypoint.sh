@@ -11,18 +11,7 @@ jitconfig_file=/run/runnerd/jitconfig
 # shellcheck source=SCRIPTDIR/layers.sh
 . /usr/local/lib/runnerd-layers.sh
 
-# /state is this slot's volume: the Docker Engine's data (daemon.json) and the slot's changes to each layer.
-for layer in "${LAYERS[@]}"; do
-    name=${layer%%:*} path=${layer#*:}
-    [ "$(size_gb "/state/$name")" -le "$LAYER_BUDGET_GB" ] || rm -rf "/state/$name"
-    lower=$path
-    [ ! -d "/base/$name" ] || lower=/base/$name:$lower
-    mkdir -p "/state/$name/upper" "/state/$name/work"
-    chown runner:runner "/state/$name/upper"
-    # Full copies on copy-up and no index, so an upper never depends on the snapshot it was made against.
-    mount -t overlay overlay \
-        -o "lowerdir=$lower,upperdir=/state/$name/upper,workdir=/state/$name/work,index=off,metacopy=off" "$path"
-done
+mount_layers
 # pnpm processes sharing the store must share their lock directory (Dockerfile).
 install -d -o runner -g runner -m 700 "$XDG_RUNTIME_DIR"
 
