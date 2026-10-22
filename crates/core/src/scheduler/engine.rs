@@ -854,7 +854,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             slot: slot.index + 1,
             container: occupant.container.clone(),
             started_at,
-            memory_cap: Some(occupant.memory).filter(|memory| *memory > 0),
+            memory_cap: state.memory,
             cpu_cap: state.cpus,
         });
         if let Some(pid) = state.pid {
