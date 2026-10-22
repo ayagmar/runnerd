@@ -492,13 +492,22 @@ impl Engine {
         plan(&repositories, &profiles, free_memory, SystemTime::now())
     }
 
+    /// Memory caps of the runners, the seed containers (which run with their profile's limits) and the mirror.
     fn memory_in_use(&self) -> u64 {
         let mirror = &self.config.caches.mirror;
         let mirror = if mirror.enabled { mirror.memory.0 } else { 0 };
-        self.occupied()
-            .map(|(slot, _)| self.config.profiles[&slot.profile].memory.0)
-            .sum::<u64>()
-            + mirror
+        let profile_memory = |name: &String| {
+            self.config
+                .profiles
+                .get(name)
+                .map_or(0, |profile| profile.memory.0)
+        };
+        let runners: u64 = self
+            .occupied()
+            .map(|(slot, _)| profile_memory(&slot.profile))
+            .sum();
+        let reseeds: u64 = self.reseeds.keys().map(profile_memory).sum();
+        runners + reseeds + mirror
     }
 
     async fn poll_queued(&mut self) {

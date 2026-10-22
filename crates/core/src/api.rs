@@ -29,7 +29,7 @@ pub struct Budget {
     pub slice: String,
     /// The slice's `MemoryMax`; `None` when it is unlimited.
     pub memory_max: Option<u64>,
-    /// Memory caps of the running containers, the mirror's included.
+    /// Memory caps of the running containers: runners, seed containers and the mirror.
     pub memory_in_use: u64,
 }
 
