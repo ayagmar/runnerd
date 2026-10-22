@@ -4,6 +4,26 @@ runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh contain
 
 It is in early development. Today it checks its config and the host; it does not start runners yet.
 
+## Install
+
+Releases are early 0.0.x builds for Linux on x86_64 and aarch64. The installer downloads `runnerd` and `runnerctl` from the latest release, checks their SHA-256 against the release's checksum files, copies them to `~/.local/bin` and runs `runnerd doctor`:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh
+```
+
+Pass `--prefix DIR` to install into `DIR/bin` instead, or `--version v0.0.1` for a specific release:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd
+```
+
+It never uses sudo and installs nothing else. Each release archive has a GitHub build provenance attestation; to check one you downloaded yourself:
+
+```sh
+gh attestation verify runnerd-x86_64-unknown-linux-musl.tar.xz -R ayagmar/runnerd
+```
+
 ## Requirements
 
 - Linux with cgroup v2, and Docker using the systemd cgroup driver.
