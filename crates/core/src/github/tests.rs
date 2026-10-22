@@ -234,6 +234,38 @@ async fn deleting_a_runner_tells_gone_and_busy_apart() {
 }
 
 #[tokio::test]
+async fn cancelling_a_run_that_already_completed_is_not_an_error() {
+    let (url, seen) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs/10/cancel" => StatusCode::ACCEPTED.into_response(),
+        "/repos/o/r/actions/runs/20/cancel" => (
+            StatusCode::CONFLICT,
+            r#"{"message":"Cannot cancel a workflow run that is completed."}"#,
+        )
+            .into_response(),
+        _ => (
+            StatusCode::FORBIDDEN,
+            r#"{"message":"Resource not accessible"}"#,
+        )
+            .into_response(),
+    })
+    .await;
+    let github = client(&url);
+    github.cancel_run("o/r", 10).await.unwrap();
+    github.cancel_run("o/r", 20).await.unwrap();
+    let error = github.cancel_run("o/r", 30).await.unwrap_err();
+    assert!(
+        error.to_string().contains("Resource not accessible"),
+        "{error}"
+    );
+    assert!(
+        seen.lock()
+            .unwrap()
+            .iter()
+            .all(|seen| seen.method == Method::POST)
+    );
+}
+
+#[tokio::test]
 async fn a_jit_config_registers_the_runner_with_the_repository_labels() {
     let (url, seen) = fake_github(|request| {
         assert_eq!(request.method, Method::POST);

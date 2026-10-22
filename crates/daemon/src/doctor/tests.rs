@@ -55,11 +55,11 @@ fn without_sysbox(mut host: Host) -> Host {
     host
 }
 
-fn failed(checks: &[Check]) -> Vec<&'static str> {
+fn failed(checks: &[Check]) -> Vec<&str> {
     checks
         .iter()
         .filter(|check| check.status == Status::Fail)
-        .map(|check| check.name)
+        .map(|check| check.name.as_str())
         .collect()
 }
 
@@ -68,7 +68,7 @@ fn a_ready_host_passes_every_check() {
     let config = config("sysbox");
     let checks = checks(&ready_host(ARCH), Some(&config));
     assert_eq!(failed(&checks), Vec::<&str>::new());
-    let names: Vec<_> = checks.iter().map(|check| check.name).collect();
+    let names: Vec<_> = checks.iter().map(|check| check.name.as_str()).collect();
     assert_eq!(
         names,
         [
@@ -173,7 +173,7 @@ fn unreachable_docker_skips_what_depends_on_it() {
     let skipped: Vec<_> = checks
         .iter()
         .filter(|check| check.status == Status::Skip)
-        .map(|check| check.name)
+        .map(|check| check.name.as_str())
         .collect();
     assert_eq!(skipped, ["cgroups", "sysbox", "slice", "config"]);
 }

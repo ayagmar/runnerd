@@ -27,9 +27,13 @@ client → transport → principal → handler → core
 2. The transport ([`crates/daemon/src/api.rs`](crates/daemon/src/api.rs)) reads the peer's credentials and turns
    them into an `api::Principal` in one extractor, `Authenticated`. Only the user the daemon runs as gets through.
 3. Handlers take that principal, read `Handle::status` or the job store (`Handle::store`), or call `Control`
-   (pause, resume, shutdown). `GET /v1/events` streams the store's events as server-sent events.
+   (pause, resume, reseed, cache clean, reload, shutdown). `GET /v1/events` streams the store's events as server-sent
+   events. The config routes ([`crates/daemon/src/api/control.rs`](crates/daemon/src/api/control.rs)) validate a
+   new config and hand the engine the parsed config with a `Commit` that writes the file; the engine runs the
+   commit between ticks and runs with the config before its next tick, only if the file was written.
 4. The engine ([`crates/core/src/scheduler/engine.rs`](crates/core/src/scheduler/engine.rs)) owns all slot state.
-   It publishes `api::Status` after every tick and takes commands only through `Control`.
+   It publishes `api::Status` after every tick and takes commands only through `Control`: a command that needs slot
+   state is a `Command` on a channel the engine answers between ticks, so it sees the same state a tick does.
 
 A new transport (SSH, Tailscale) produces a `Principal` and reuses the handlers.
 
@@ -82,3 +86,10 @@ nothing until Docker has listed them.
   the change it announces and broadcast only after it commits, so its ID is a position a client can resume from
   with `Last-Event-ID`.
 - The engine does not start a runner for a queued job one of its runners holds, whatever GitHub's queue says.
+- A reload never stops a running job: slots a new config removes go once their runners finish, and a profile starts
+  no runner while it runs as many as its configured `slots` (`scheduler::Slot::Closed`).
+- A forced pause cancels runs only of jobs this daemon's runners hold, and only of the paused repository.
+- The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
+  renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
+- After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the
+  config, which a reload may have lowered since they started.

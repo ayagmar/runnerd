@@ -105,8 +105,14 @@ bytes, CPU millicores.
 | Request | Response |
 |---|---|
 | `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs, the memory budget |
-| `POST /v1/repositories/{owner}/{name}/pause` | `204`; the repository gets no new runners, running jobs finish |
+| `POST /v1/repositories/{owner}/{name}/pause?force=` | the repository gets no new runners; `409` naming the job while it runs one, unless `force=true`, which cancels the job's run |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
+| `POST /v1/profiles/{name}/reseed` | `202`; the profile starts no runner until its slots are free and slot 1 became its snapshot; `409` while it reseeds |
+| `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache; `409` naming the jobs that use it |
+| `GET /v1/config` | the config file's path and text |
+| `POST /v1/config/check` with TOML | what `runnerd check-config` says about it |
+| `PUT /v1/config` with TOML | checks it, writes it in place of the file and runs with it; if it is invalid (`422`), cannot be written (`500`) or runnerd is stopping (`503`), the file and what runs stay as they were |
+| `GET /v1/doctor` | what `runnerd doctor` checks, for the config runnerd runs with |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
 | `GET /v1/jobs?repository=&state=&conclusion=&since=&until=&before=&limit=` | a page of jobs, newest first; `next` is the `before` of the next page |
 | `GET /v1/jobs/{id}` | a job with its timeline, steps, metrics and log size |
@@ -116,6 +122,15 @@ bytes, CPU millicores.
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`): counts, queue and run time, CPU, memory, mirror bytes |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
 | `GET /v1/events?job=&logs=` | server-sent events: `job.queued`, `job.started`, `job.step`, `job.finished`, `slot.changed`, `budget.changed`, `cache.reseeded`, and live `job.sample`, `host.sample` and (with `logs=true`) `log.line` |
+
+A forced pause cancels the run of each of the repository's running jobs (GitHub cancels runs, not single jobs, so
+the run's other jobs are cancelled too) and lets the runner report it cancelled, which takes under a minute; a runner
+still running 90 s later is removed. Its runner registration is deleted once GitHub lets go of it.
+
+A new config takes effect without a restart, and running jobs keep running. A removed profile, or slots past a lowered
+`slots`, stay until their runners finish, and no runner starts in a profile while it runs as many as its `slots`.
+A runner still waiting for a job of a removed repository, or of one moved to another profile, is removed.
+Runners started afterwards get the new limits, image and labels. `history.database` changes only at the next start.
 
 Every event but the live ones has an ID; send the last one seen as `Last-Event-ID` and the stream resumes after it,
 across daemon restarts. Live events are not stored: a client that missed some reads the job's samples or log.

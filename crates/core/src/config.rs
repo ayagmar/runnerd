@@ -11,6 +11,8 @@ use std::time::Duration;
 
 use serde::{Deserialize, Deserializer, de};
 
+use crate::api;
+
 /// A parsed `runnerd.toml`. `validate` checks it against the host's budget.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -102,7 +104,7 @@ pub struct CacheLimit {
 }
 
 /// An image stage with its limits; every job of the profile gets one container with these limits.
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Clone, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Profile {
     /// The stage of `image/Dockerfile`; runners run the image `runnerd-runner:<image_stage>`.
@@ -255,6 +257,48 @@ impl Config {
     /// Parses a config from TOML text.
     pub fn parse(text: &str) -> Result<Config, ConfigError> {
         Ok(toml::from_str(text)?)
+    }
+
+    /// Parses `text` and validates it against the `MemoryMax` that `memory_max` reads for the slice it names:
+    /// what `runnerd check-config` prints and `POST /v1/config/check` answers. Returns the config if it is valid.
+    pub fn check(
+        text: &str,
+        memory_max: impl FnOnce(&str) -> std::io::Result<Option<ByteSize>>,
+    ) -> (Option<Config>, api::ConfigCheck) {
+        let invalid = |message: String, memory_caps: Option<ByteSize>, max: Option<ByteSize>| {
+            api::ConfigCheck {
+                valid: false,
+                message,
+                warnings: Vec::new(),
+                memory_caps: memory_caps.map(|caps| caps.0),
+                memory_max: max.map(|max| max.0),
+            }
+        };
+        let config = match Config::parse(text) {
+            Ok(config) => config,
+            Err(error) => return (None, invalid(error.to_string(), None, None)),
+        };
+        let caps = config.memory_caps().ok();
+        let max = match memory_max(&config.host.slice) {
+            Ok(max) => max,
+            Err(error) => return (None, invalid(error.to_string(), caps, None)),
+        };
+        match config
+            .validate(max)
+            .and_then(|warnings| Ok((warnings, config.memory_caps()?)))
+        {
+            Ok((warnings, total)) => {
+                let check = api::ConfigCheck {
+                    valid: true,
+                    message: format!("valid, memory caps sum to {total}"),
+                    warnings: warnings.iter().map(ToString::to_string).collect(),
+                    memory_caps: Some(total.0),
+                    memory_max: max.map(|max| max.0),
+                };
+                (Some(config), check)
+            }
+            Err(error) => (None, invalid(error.to_string(), caps, max)),
+        }
     }
 
     /// The memory every runner and the mirror may use at once.

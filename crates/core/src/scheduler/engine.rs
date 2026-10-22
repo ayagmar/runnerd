@@ -10,7 +10,7 @@ use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
-use tokio::sync::{Notify, mpsc, watch};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
@@ -18,7 +18,7 @@ use super::{Decision, Profile, Repository, RunnerSlot, Slot, SlotRef, plan};
 use crate::api;
 use crate::cache::{self, Names, runner_mounts};
 use crate::config::{ByteSize, Config};
-use crate::docker::{self, Docker, DockerApi, RunnerSpec, is_not_found};
+use crate::docker::{self, Docker, DockerApi, RunnerSpec, RunnerState, is_not_found};
 use crate::github::{self, Deleted, Github, GithubApi, QueuedJob};
 use crate::isolation::{self, Isolation};
 use crate::observe::capture::{self, Captured, Parser};
@@ -33,6 +33,10 @@ const LOST_AFTER: Duration = Duration::from_mins(15);
 
 /// How long `release` waits for a runner's log capture to end once its container stopped.
 const CAPTURE_DRAIN: Duration = Duration::from_secs(10);
+
+/// How long the runner of a run a forced pause cancelled gets to report its job cancelled and exit, before it is
+/// removed: GitHub completes a cancelled run only once its runner reports it, which took 40s in a test.
+const CANCEL_GRACE: Duration = Duration::from_secs(90);
 
 /// How often the history drops what it no longer keeps.
 const PRUNE_EVERY: Duration = Duration::from_secs(3600);
@@ -127,24 +131,130 @@ pub enum Shutdown {
     Force,
 }
 
+/// Why the engine refused or failed a command from the API.
+#[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
+pub enum ControlError {
+    /// No such repository, profile or cache.
+    #[error("{0}")]
+    NotFound(String),
+    /// Runners use what the command would change.
+    #[error("{message}")]
+    Busy {
+        /// Names the runners and their jobs.
+        message: String,
+        /// The runners in the way.
+        jobs: Vec<api::RunningJob>,
+    },
+    /// The command conflicts with one already in progress.
+    #[error("{0}")]
+    Conflict(String),
+    /// The command cannot apply to this target.
+    #[error("{0}")]
+    Invalid(String),
+    /// Docker or GitHub failed.
+    #[error("{0}")]
+    Failed(String),
+    /// The engine stopped.
+    #[error("runnerd is stopping")]
+    Stopped,
+}
+
+/// A command the engine carries out between ticks, with where its answer goes.
+#[derive(Debug)]
+pub enum Command {
+    /// Pause a repository; with `force`, cancel its running jobs.
+    Pause {
+        /// `owner/name`.
+        repository: String,
+        /// Cancel running jobs instead of refusing.
+        force: bool,
+        /// The answer.
+        reply: oneshot::Sender<Result<api::Paused, ControlError>>,
+    },
+    /// Make slot 1's layers the profile's snapshot once its slots are free.
+    Reseed {
+        /// The profile.
+        profile: String,
+        /// The answer.
+        reply: oneshot::Sender<Result<(), ControlError>>,
+    },
+    /// Remove a slot's volume or a shared cache's, unless a runner uses it.
+    CleanCache {
+        /// The volume.
+        name: String,
+        /// The answer.
+        reply: oneshot::Sender<Result<(), ControlError>>,
+    },
+    /// Write a new, validated config to its file and run with it, with no tick in between.
+    ReplaceConfig {
+        /// The config.
+        config: Box<Config>,
+        /// The `MemoryMax` of the slice it names.
+        memory_max: Option<u64>,
+        /// Writes the file.
+        commit: Commit,
+        /// Answered once the engine runs with it: with a warning from the commit, or why it did not commit.
+        reply: oneshot::Sender<Result<Option<String>, ControlError>>,
+    },
+}
+
+/// What makes a new config durable, run by the engine before it runs with the config: `Ok` once the config is in
+/// place, with a warning if it may not survive a crash; `Err` with nothing changed.
+pub struct Commit(Box<dyn FnOnce() -> Result<Option<String>, String> + Send>);
+
+impl Commit {
+    /// A commit that runs `write`, off the engine's thread.
+    pub fn new(write: impl FnOnce() -> Result<Option<String>, String> + Send + 'static) -> Commit {
+        Commit(Box::new(write))
+    }
+
+    /// Runs it.
+    pub async fn run(self) -> Result<Option<String>, String> {
+        tokio::task::spawn_blocking(self.0)
+            .await
+            .unwrap_or_else(|join_error| Err(join_error.to_string()))
+    }
+}
+
+impl std::fmt::Debug for Commit {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str("Commit")
+    }
+}
+
+/// The engine's end of `Control`'s commands.
+#[derive(Debug)]
+pub struct Commands(mpsc::UnboundedReceiver<Command>);
+
+impl Commands {
+    /// The next command; `None` once `Control` is gone.
+    pub async fn recv(&mut self) -> Option<Command> {
+        self.0.recv().await
+    }
+}
+
 /// Commands from the API and signals to the loop.
 #[derive(Debug)]
 pub struct Control {
-    repositories: BTreeSet<String>,
+    repositories: Mutex<BTreeSet<String>>,
     paused: Mutex<BTreeSet<String>>,
     shutdown: Mutex<Shutdown>,
     wake: Notify,
+    commands: mpsc::UnboundedSender<Command>,
 }
 
 impl Control {
-    /// Controls for the configured repositories.
-    pub fn new(repositories: impl IntoIterator<Item = String>) -> Control {
-        Control {
-            repositories: repositories.into_iter().collect(),
+    /// Controls for the configured repositories, and the commands they send the engine.
+    pub fn new(repositories: impl IntoIterator<Item = String>) -> (Control, Commands) {
+        let (commands, receiver) = mpsc::unbounded_channel();
+        let control = Control {
+            repositories: Mutex::new(repositories.into_iter().collect()),
             paused: Mutex::new(BTreeSet::new()),
             shutdown: Mutex::new(Shutdown::No),
             wake: Notify::new(),
-        }
+            commands,
+        };
+        (control, Commands(receiver))
     }
 
     /// Whether a shutdown was requested, and how.
@@ -152,9 +262,9 @@ impl Control {
         *lock(&self.shutdown)
     }
 
-    /// Pauses or resumes a repository; `false` if it is not configured.
+    /// Pauses or resumes a repository whatever it runs; `false` if it is not configured.
     pub fn set_paused(&self, repository: &str, paused: bool) -> bool {
-        if !self.repositories.contains(repository) {
+        if !lock(&self.repositories).contains(repository) {
             return false;
         }
         let mut set = lock(&self.paused);
@@ -166,6 +276,12 @@ impl Control {
         drop(set);
         self.wake.notify_one();
         true
+    }
+
+    /// Replaces the configured repositories; the removed ones are no longer paused.
+    fn set_repositories(&self, repositories: BTreeSet<String>) {
+        lock(&self.paused).retain(|repository| repositories.contains(repository));
+        *lock(&self.repositories) = repositories;
     }
 
     /// Asks the loop to stop; a forced request overrides a graceful one, never the other way.
@@ -185,6 +301,65 @@ impl Control {
     pub fn is_paused(&self, repository: &str) -> bool {
         lock(&self.paused).contains(repository)
     }
+
+    async fn send<T>(
+        &self,
+        command: impl FnOnce(oneshot::Sender<T>) -> Command,
+    ) -> Result<T, ControlError> {
+        let (reply, answer) = oneshot::channel();
+        self.commands
+            .send(command(reply))
+            .map_err(|_| ControlError::Stopped)?;
+        answer.await.map_err(|_| ControlError::Stopped)
+    }
+
+    /// Pauses a repository. Without `force`, refuses while it runs a job; with it, cancels the runs of its running
+    /// jobs on GitHub, whose runners are removed once they report it or `CANCEL_GRACE` later, and removes its other
+    /// runners at once.
+    pub async fn pause(&self, repository: &str, force: bool) -> Result<api::Paused, ControlError> {
+        self.send(|reply| Command::Pause {
+            repository: repository.to_owned(),
+            force,
+            reply,
+        })
+        .await?
+    }
+
+    /// Reseeds a profile as soon as its slots are free; none of them starts a runner until then.
+    pub async fn reseed(&self, profile: &str) -> Result<(), ControlError> {
+        self.send(|reply| Command::Reseed {
+            profile: profile.to_owned(),
+            reply,
+        })
+        .await?
+    }
+
+    /// Removes a slot's volume or a shared cache's, unless a runner uses it.
+    pub async fn clean_cache(&self, name: &str) -> Result<(), ControlError> {
+        self.send(|reply| Command::CleanCache {
+            name: name.to_owned(),
+            reply,
+        })
+        .await?
+    }
+
+    /// Runs `commit` to write a validated config, and if it commits, runs with the config from then on, before the
+    /// next tick. If it does not, nothing changes and the answer is `Failed`. Running jobs keep running: removed
+    /// profiles and slots go as their runners finish.
+    pub async fn replace_config(
+        &self,
+        config: Config,
+        memory_max: Option<u64>,
+        commit: Commit,
+    ) -> Result<Option<String>, ControlError> {
+        self.send(|reply| Command::ReplaceConfig {
+            config: Box::new(config),
+            memory_max,
+            commit,
+            reply,
+        })
+        .await?
+    }
 }
 
 /// What the API needs from a running engine.
@@ -196,8 +371,9 @@ pub struct Handle {
     pub control: Arc<Control>,
     /// The job history.
     pub store: Store,
-    /// Every cache volume of the config, with size 0: the API fills in the sizes it measured.
-    pub caches: Vec<api::CacheVolume>,
+    /// Every cache volume of the config, with size 0: the API fills in the sizes it measured. Replaced when the
+    /// config is.
+    pub caches: watch::Receiver<Vec<api::CacheVolume>>,
 }
 
 /// Where the engine runs, besides its config and its GitHub and Docker clients.
@@ -224,11 +400,31 @@ struct Occupant {
     container: String,
     busy: bool,
     started_at: SystemTime,
+    /// Its container's memory cap, which a reload does not change.
+    memory: u64,
     /// The job it took, once its log capture found it.
     job: Option<u64>,
 }
 
-#[derive(Debug)]
+impl Occupant {
+    fn running_job(&self) -> api::RunningJob {
+        api::RunningJob {
+            repository: self.repository.clone(),
+            runner: self.runner_name.clone(),
+            job: self.job,
+        }
+    }
+}
+
+/// `jobs` for people to read: `job 1 on runner-a, runner-b`.
+fn list(jobs: &[api::RunningJob]) -> String {
+    jobs.iter()
+        .map(ToString::to_string)
+        .collect::<Vec<_>>()
+        .join(", ")
+}
+
+#[derive(Debug, Default)]
 struct RepositoryState {
     queued: Vec<QueuedJob>,
     /// Whether the last poll of its queued jobs succeeded.
@@ -282,6 +478,14 @@ pub struct Engine<G = Github, D = Docker> {
     slots: BTreeMap<String, Vec<Option<Occupant>>>,
     repositories: BTreeMap<String, RepositoryState>,
     reseeds: BTreeMap<String, JoinHandle<Result<String, docker::Error>>>,
+    /// The memory cap each running reseed's container started with, which a reload does not change.
+    reseed_memory: BTreeMap<String, u64>,
+    /// Profiles the API asked to reseed: they start nothing until their slots are free and the reseed ran.
+    reseed_requested: BTreeSet<String>,
+    /// Repositories a reload removed, polled until none of this machine's runners is registered on them.
+    draining: BTreeSet<String>,
+    /// Profiles a reload removed, kept while their runners or reseed still run.
+    retired: BTreeMap<String, crate::config::Profile>,
     /// Profiles whose slot 1 ran a job since their last reseed check.
     reseed_due: BTreeSet<String>,
     /// Whether a job ended since the shared caches were last checked.
@@ -289,11 +493,15 @@ pub struct Engine<G = Github, D = Docker> {
     /// The running check of the shared caches: Docker takes many seconds to measure volumes.
     trim: Option<JoinHandle<Result<Trimmed, docker::Error>>>,
     mirror_up: bool,
+    /// The memory cap the running mirror started with.
+    mirror_memory: u64,
     rate_limit_logged: bool,
     /// Runners without a container that GitHub still holds busy, already logged.
     busy_orphans: BTreeSet<u64>,
     status: watch::Sender<api::Status>,
     control: Arc<Control>,
+    commands: Commands,
+    caches: watch::Sender<Vec<api::CacheVolume>>,
     store: Store,
     paths: Paths,
     /// The containers the sampler reads.
@@ -306,6 +514,8 @@ pub struct Engine<G = Github, D = Docker> {
     mirror_until: MirrorPosition,
     /// Jobs recorded queued and not yet taken or closed, with their repository.
     queued_jobs: BTreeMap<u64, String>,
+    /// Runners of runs a forced pause cancelled, with when they are removed if they still run.
+    cancelling: BTreeMap<String, tokio::time::Instant>,
     /// Jobs whose runner is gone, waiting for GitHub to report them completed.
     closing: BTreeMap<u64, Closing>,
     last_prune: Option<SystemTime>,
@@ -348,24 +558,15 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         let repositories = config
             .repositories
             .iter()
-            .map(|repository| {
-                (
-                    repository.name.clone(),
-                    RepositoryState {
-                        queued: Vec::new(),
-                        listed: false,
-                        held_until: None,
-                        failures: 0,
-                    },
-                )
-            })
+            .map(|repository| (repository.name.clone(), RepositoryState::default()))
             .collect();
-        let control = Arc::new(Control::new(
+        let (control, commands) = Control::new(
             config
                 .repositories
                 .iter()
                 .map(|repository| repository.name.clone()),
-        ));
+        );
+        let control = Arc::new(control);
         let isolation = isolation::backend(config.host.isolation);
         let (status, receiver) = watch::channel(api::Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),
@@ -378,7 +579,13 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             profiles: Vec::new(),
             repositories: Vec::new(),
         });
-        let caches = cache::volumes(&names, &config);
+        let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
+        // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
+        let mirror_memory = if config.caches.mirror.enabled {
+            config.caches.mirror.memory.0
+        } else {
+            0
+        };
         let mut engine = Engine {
             config,
             github,
@@ -391,16 +598,23 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             slots,
             repositories,
             reseeds: BTreeMap::new(),
+            reseed_memory: BTreeMap::new(),
+            reseed_requested: BTreeSet::new(),
+            retired: BTreeMap::new(),
+            draining: BTreeSet::new(),
             reseed_due: BTreeSet::new(),
             // So the caches are measured once at start.
             trim_due: true,
             trim: None,
             // Unknown: an earlier run may have left it up, so the first idle tick stops it.
             mirror_up: true,
+            mirror_memory,
             rate_limit_logged: false,
             busy_orphans: BTreeSet::new(),
             status,
             control: control.clone(),
+            commands,
+            caches,
             store: store.clone(),
             paths,
             tracked: watch::channel(Vec::new()).0,
@@ -409,6 +623,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             leases: Leases::default(),
             mirror_until: MirrorPosition::default(),
             queued_jobs: BTreeMap::new(),
+            cancelling: BTreeMap::new(),
             closing: BTreeMap::new(),
             last_prune: None,
         };
@@ -419,7 +634,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 status: receiver,
                 control,
                 store,
-                caches,
+                caches: caches_receiver,
             },
         )
     }
@@ -459,6 +674,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             tokio::select! {
                 () = tokio::time::sleep(interval) => {}
                 () = self.control.wake.notified() => {}
+                Some(command) = self.commands.recv() => {
+                    self.command(command).await;
+                    self.publish();
+                }
             }
         }
         if let Err(error) = cache::mirror_down(&*self.docker, &self.names).await {
@@ -469,7 +688,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
 
     /// Takes over the seed containers a previous daemon left: a running one counts as its profile's reseed, so no
     /// runner of the profile starts while it rewrites the snapshot and the slots' layers.
-    fn recover_reseeds(&mut self, containers: Vec<docker::Container>) {
+    async fn recover_reseeds(&mut self, containers: Vec<docker::Container>) {
         for container in containers {
             let Some(profile) = container.labels.get("runnerd.profile").cloned() else {
                 continue;
@@ -481,10 +700,28 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             info!("{profile}: waiting for the reseed an earlier run started");
             let docker = self.docker.clone();
             let id = container.id.clone();
+            let memory = self.running_cap(&container.id, &profile).await;
+            self.reseed_memory.insert(profile.clone(), memory);
             self.reseeds.insert(
                 profile,
                 tokio::spawn(async move { cache::finish_reseed(&*docker, &id).await }),
             );
+        }
+    }
+
+    /// The memory cap a container left by an earlier daemon runs with, which a reload since may have changed in the
+    /// config; the profile's configured cap only when Docker cannot tell.
+    async fn running_cap(&self, container: &str, profile: &str) -> u64 {
+        match self.docker.inspect(container).await {
+            Ok(RunnerState {
+                memory: Some(memory),
+                ..
+            }) => memory,
+            _ => self
+                .config
+                .profiles
+                .get(profile)
+                .map_or(0, |settings| settings.memory.0),
         }
     }
 
@@ -494,7 +731,17 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
-        self.recover_reseeds(seeds);
+        self.recover_reseeds(seeds).await;
+        // A reload may have lowered the configured cap since the mirror started.
+        match self.docker.inspect(&self.names.mirror()).await {
+            Ok(state) if state.running => {
+                self.mirror_memory = state.memory.unwrap_or(self.mirror_memory);
+            }
+            Ok(_) => self.mirror_memory = 0,
+            Err(error) if is_not_found(&error) => self.mirror_memory = 0,
+            // Unknown: the configured cap.
+            Err(_) => {}
+        }
         // Runner containers still running once recovery is done.
         let mut running = BTreeSet::new();
         for container in containers {
@@ -514,6 +761,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 container: container.id.clone(),
                 busy: true,
                 started_at: SystemTime::now(),
+                memory: self.running_cap(&container.id, &profile).await,
                 // Its capture reports it again; until then, or if it cannot, the history knows it.
                 job: self.store.runner_job(&container.name).await.ok().flatten(),
             };
@@ -663,6 +911,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         self.collect_reseeds().await;
         self.collect_trim().await;
         self.collect_finished().await;
+        self.kill_cancelled().await;
         // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
         // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
         // order sees the job queued and its runner busy, and starts a second runner for it.
@@ -875,10 +1124,18 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .profiles
             .iter()
             .map(|(name, profile)| {
-                let slots = self.slots[name]
+                let slots = &self.slots[name];
+                // A reload may have left fewer slots than runners: free slots count only up to the configured number.
+                let mut free = (profile.slots as usize)
+                    .saturating_sub(slots.iter().filter(|slot| slot.is_some()).count());
+                let slots = slots
                     .iter()
                     .map(|slot| match slot {
-                        None => Slot::Free,
+                        None if free > 0 => {
+                            free -= 1;
+                            Slot::Free
+                        }
+                        None => Slot::Closed,
                         Some(occupant) => Slot::Runner(RunnerSlot {
                             repository: occupant.repository.clone(),
                             busy: occupant.busy,
@@ -888,7 +1145,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     .collect();
                 let profile = Profile {
                     memory: profile.memory.0,
-                    reseeding: self.reseeds.contains_key(name),
+                    reseeding: self.is_reseeding(name),
                     slots,
                 };
                 (name.clone(), profile)
@@ -897,25 +1154,36 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         let free_memory = self
             .memory_max
             .map(|max| max.saturating_sub(self.memory_in_use()));
-        plan(&repositories, &profiles, free_memory, SystemTime::now())
+        let mut decisions = plan(&repositories, &profiles, free_memory, SystemTime::now());
+        // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
+        decisions.extend(
+            self.occupied()
+                .filter(|(slot, occupant)| {
+                    !occupant.busy
+                        && occupant.job.is_none()
+                        && !self.config.repositories.iter().any(|repository| {
+                            repository.name == occupant.repository
+                                && repository.profile == slot.profile
+                        })
+                })
+                .map(|(slot, _)| Decision::Stop { slot }),
+        );
+        decisions
     }
 
     /// Memory caps of the runners, the seed containers (which run with their profile's limits) and the mirror.
     fn memory_in_use(&self) -> u64 {
+        // The configured mirror is reserved for; a running one keeps the cap it started with until it stops.
         let mirror = &self.config.caches.mirror;
-        let mirror = if mirror.enabled { mirror.memory.0 } else { 0 };
-        let profile_memory = |name: &String| {
-            self.config
-                .profiles
-                .get(name)
-                .map_or(0, |profile| profile.memory.0)
+        let configured = if mirror.enabled { mirror.memory.0 } else { 0 };
+        let running = if self.mirror_up {
+            self.mirror_memory
+        } else {
+            0
         };
-        let runners: u64 = self
-            .occupied()
-            .map(|(slot, _)| profile_memory(&slot.profile))
-            .sum();
-        let reseeds: u64 = self.reseeds.keys().map(profile_memory).sum();
-        runners + reseeds + mirror
+        let runners: u64 = self.occupied().map(|(_, occupant)| occupant.memory).sum();
+        let reseeds: u64 = self.reseed_memory.values().sum();
+        runners + reseeds + configured.max(running)
     }
 
     async fn poll_queued(&mut self) {
@@ -954,8 +1222,15 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
 
     /// Updates each runner's busy flag and deletes this host's runners that no slot holds.
     async fn poll_runners(&mut self) {
-        let names: Vec<String> = self.repositories.keys().cloned().collect();
+        let names: Vec<String> = self
+            .repositories
+            .keys()
+            .chain(&self.draining)
+            .cloned()
+            .collect();
         for repository in names {
+            // Whether this machine still has a runner registered on it.
+            let mut left = false;
             let runners = match self.github.runners(&repository).await {
                 Ok(runners) => runners,
                 Err(github::Error::RateLimited { .. }) => continue,
@@ -972,7 +1247,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     .flatten()
                     .find(|occupant| occupant.runner_id == runner.id);
                 match held {
-                    Some(occupant) => occupant.busy = runner.busy,
+                    Some(occupant) => {
+                        occupant.busy = runner.busy;
+                        left = true;
+                    }
                     // Only this machine's names: other machines serve the same repositories.
                     None if !runner.name.starts_with(&self.runner_prefix) => {}
                     None => match self.github.delete_runner(&repository, runner.id).await {
@@ -984,6 +1262,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                         }
                         Ok(Deleted::NotFound) => {}
                         Ok(Deleted::Busy) => {
+                            left = true;
                             if self.busy_orphans.insert(runner.id) {
                                 warn!(
                                     "{repository}: {} has no container, but GitHub says it runs a job; \
@@ -992,9 +1271,15 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                                 );
                             }
                         }
-                        Err(error) => warn!("{repository}: cannot delete {}: {error}", runner.name),
+                        Err(error) => {
+                            left = true;
+                            warn!("{repository}: cannot delete {}: {error}", runner.name);
+                        }
                     },
                 }
+            }
+            if !left {
+                self.draining.remove(&repository);
             }
         }
     }
@@ -1083,6 +1368,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             self.reseed_due.insert(slot.profile.clone());
         }
         self.trim_due = true;
+        self.drop_closed_slots();
     }
 
     /// Waits for a runner's log capture to end, which it does once the container stopped; stops it after
@@ -1160,6 +1446,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             {
                 *entry = None;
             }
+            self.drop_closed_slots();
             return;
         }
         match self
@@ -1228,7 +1515,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             match cache::mirror_up(&*self.docker, &self.names, mirror, &self.config.host.slice)
                 .await
             {
-                Ok(()) => self.mirror_up = true,
+                Ok(()) => {
+                    self.mirror_up = true;
+                    self.mirror_memory = mirror.memory.0;
+                }
                 // Runners pull from Docker Hub directly when the mirror does not answer.
                 Err(error) => warn!("cannot start the mirror: {error}"),
             }
@@ -1273,6 +1563,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     container,
                     busy: false,
                     started_at: now,
+                    memory: profile.memory.0,
                     job: None,
                 };
                 if let Some(entry) = self
@@ -1300,7 +1591,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         if mode == Shutdown::No {
             let due: Vec<String> = self
                 .reseed_due
-                .iter()
+                .union(&self.reseed_requested)
                 .filter(|name| {
                     self.slots
                         .get(*name)
@@ -1310,7 +1601,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 .collect();
             for name in due {
                 self.reseed_due.remove(&name);
-                self.spawn_reseed(name);
+                let requested = self.reseed_requested.remove(&name);
+                self.spawn_reseed(name, requested);
             }
         }
         if self.occupied().next().is_some() {
@@ -1333,8 +1625,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Rebuilds a profile's snapshot in the background; its slots start nothing until it is done.
-    fn spawn_reseed(&mut self, name: String) {
+    /// Rebuilds a profile's snapshot in the background; its slots start nothing until it is done. A `requested`
+    /// reseed runs however little slot 1 changed.
+    fn spawn_reseed(&mut self, name: String, requested: bool) {
         let Some(profile) = self.config.profiles.get(&name) else {
             return;
         };
@@ -1343,7 +1636,11 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         let image = image(&profile.image_stage);
         let slice = self.config.host.slice.clone();
         let (slots, cpus, memory) = (profile.slots as usize, profile.cpus, profile.memory);
-        let min_changes = self.config.caches.reseed_at;
+        let min_changes = if requested {
+            ByteSize(0)
+        } else {
+            self.config.caches.reseed_at
+        };
         let isolation = self.isolation;
         let profile_name = name.clone();
         let task = tokio::spawn(async move {
@@ -1363,6 +1660,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             )
             .await
         });
+        self.reseed_memory.insert(name.clone(), memory.0);
         self.reseeds.insert(name, task);
     }
 
@@ -1400,6 +1698,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .map(|(name, _)| name.clone())
             .collect();
         for name in finished {
+            self.reseed_memory.remove(&name);
             let Some(task) = self.reseeds.remove(&name) else {
                 continue;
             };
@@ -1423,6 +1722,303 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 error,
             });
         }
+        self.drop_closed_slots();
+    }
+
+    /// Whether a profile's snapshot is being rebuilt, or will be once its slots are free.
+    fn is_reseeding(&self, profile: &str) -> bool {
+        self.reseeds.contains_key(profile) || self.reseed_requested.contains(profile)
+    }
+
+    /// Drops the free slots past each profile's configured number, and the profiles a reload removed once nothing
+    /// runs in them.
+    fn drop_closed_slots(&mut self) {
+        for (name, slots) in &mut self.slots {
+            let count = self
+                .config
+                .profiles
+                .get(name)
+                .map_or(0, |profile| profile.slots as usize);
+            while slots.len() > count && slots.last().is_some_and(Option::is_none) {
+                slots.pop();
+            }
+        }
+        let profiles = &self.config.profiles;
+        self.slots
+            .retain(|name, slots| !slots.is_empty() || profiles.contains_key(name));
+        let (slots, reseeds) = (&self.slots, &self.reseeds);
+        self.retired
+            .retain(|name, _| slots.contains_key(name) || reseeds.contains_key(name));
+    }
+
+    /// Carries out a command from the API.
+    async fn command(&mut self, command: Command) {
+        match command {
+            Command::Pause {
+                repository,
+                force,
+                reply,
+            } => {
+                let _ = reply.send(self.pause(&repository, force).await);
+            }
+            Command::Reseed { profile, reply } => {
+                let _ = reply.send(self.request_reseed(&profile));
+            }
+            Command::CleanCache { name, reply } => {
+                let _ = reply.send(self.clean_cache(&name).await);
+            }
+            Command::ReplaceConfig {
+                config,
+                memory_max,
+                commit,
+                reply,
+            } => {
+                let answer = match commit.run().await {
+                    Ok(warning) => {
+                        self.reload(*config, memory_max);
+                        Ok(warning)
+                    }
+                    Err(message) => Err(ControlError::Failed(message)),
+                };
+                let _ = reply.send(answer);
+            }
+        }
+    }
+
+    /// Pauses a repository. A runner that holds a job, or that GitHub reports busy, refuses it unless `force`;
+    /// with `force`, the runs of the repository's jobs are cancelled, and its runners removed once they exit or
+    /// `CANCEL_GRACE` later; a runner whose run cannot be cancelled is removed at once.
+    async fn pause(&mut self, repository: &str, force: bool) -> Result<api::Paused, ControlError> {
+        if !self.repositories.contains_key(repository) {
+            return Err(ControlError::NotFound(format!(
+                "{repository} is not a configured repository"
+            )));
+        }
+        self.take_found();
+        let runners: Vec<(SlotRef, Occupant)> = self
+            .occupied()
+            .filter(|(_, occupant)| occupant.repository == repository)
+            .map(|(slot, occupant)| (slot, occupant.clone()))
+            .collect();
+        let jobs: Vec<api::RunningJob> = runners
+            .iter()
+            .filter(|(_, occupant)| occupant.busy || occupant.job.is_some())
+            .map(|(_, occupant)| occupant.running_job())
+            .collect();
+        if !force && !jobs.is_empty() {
+            return Err(ControlError::Busy {
+                message: format!(
+                    "{repository} runs {}; pause with force to cancel it",
+                    list(&jobs)
+                ),
+                jobs,
+            });
+        }
+        self.control.set_paused(repository, true);
+        info!("{repository}: paused");
+        let mut stopped = Vec::new();
+        if !force {
+            return Ok(api::Paused { stopped });
+        }
+        for (slot, occupant) in runners {
+            let cancelled = if let Some(job) = occupant.job {
+                self.cancel(repository, job).await
+            } else {
+                if occupant.busy {
+                    warn!(
+                        "{repository}: {} runs a job its log has not named yet; GitHub fails it once the runner is gone",
+                        occupant.runner_name
+                    );
+                }
+                false
+            };
+            if cancelled {
+                // `collect_finished` removes it once it exits, `kill_cancelled` if it does not.
+                self.cancelling.insert(
+                    occupant.runner_name.clone(),
+                    tokio::time::Instant::now() + CANCEL_GRACE,
+                );
+            } else {
+                self.stop(&slot, true).await;
+                if self
+                    .occupied()
+                    .any(|(_, candidate)| candidate.runner_name == occupant.runner_name)
+                {
+                    continue;
+                }
+            }
+            stopped.push(occupant.running_job());
+        }
+        Ok(api::Paused { stopped })
+    }
+
+    /// Removes the runners of cancelled runs that did not exit within `CANCEL_GRACE`, every tick until they are gone.
+    async fn kill_cancelled(&mut self) {
+        let now = tokio::time::Instant::now();
+        let running: BTreeSet<String> = self
+            .occupied()
+            .map(|(_, occupant)| occupant.runner_name.clone())
+            .collect();
+        self.cancelling.retain(|name, _| running.contains(name));
+        let overdue: Vec<(SlotRef, String)> = self
+            .occupied()
+            .filter(|(_, occupant)| {
+                self.cancelling
+                    .get(&occupant.runner_name)
+                    .is_some_and(|deadline| *deadline <= now)
+            })
+            .map(|(slot, occupant)| (slot, occupant.runner_name.clone()))
+            .collect();
+        for (slot, name) in overdue {
+            warn!(
+                "{name} did not exit {}s after its run was cancelled",
+                CANCEL_GRACE.as_secs()
+            );
+            // The deadline stays until the runner is gone, so a failed removal is tried again next tick.
+            self.stop(&slot, true).await;
+        }
+    }
+
+    /// Cancels the run of a job; whether GitHub accepted it.
+    async fn cancel(&self, repository: &str, job: u64) -> bool {
+        let run = match self.github.job(repository, job).await {
+            Ok(details) => details.run_id,
+            Err(error) => {
+                warn!("{repository}: cannot read job {job} to cancel its run: {error}");
+                return false;
+            }
+        };
+        match self.github.cancel_run(repository, run).await {
+            Ok(()) => {
+                info!("{repository}: cancelled run {run} of job {job}");
+                true
+            }
+            Err(error) => {
+                warn!("{repository}: cannot cancel run {run}: {error}");
+                false
+            }
+        }
+    }
+
+    /// Asks for a profile's reseed: none of its slots starts a runner until they are free and it ran.
+    fn request_reseed(&mut self, profile: &str) -> Result<(), ControlError> {
+        if !self.config.profiles.contains_key(profile) {
+            return Err(ControlError::NotFound(format!(
+                "{profile} is not a configured profile"
+            )));
+        }
+        if self.is_reseeding(profile) {
+            return Err(ControlError::Conflict(format!(
+                "{profile} is reseeding already"
+            )));
+        }
+        info!("{profile}: reseeding once its slots are free");
+        self.reseed_requested.insert(profile.to_owned());
+        Ok(())
+    }
+
+    /// Removes a slot's volume or a shared cache's, unless a runner or a reseed uses it. Snapshots are rebuilt by
+    /// reseeding instead: slot layers sit on top of them.
+    async fn clean_cache(&mut self, name: &str) -> Result<(), ControlError> {
+        let Some(volume) = cache::volumes(&self.names, &self.config)
+            .into_iter()
+            .find(|volume| volume.name == name)
+        else {
+            return Err(ControlError::NotFound(format!(
+                "{name} is not a cache volume of this config"
+            )));
+        };
+        let users: Vec<api::RunningJob> = match &volume.kind {
+            api::CacheKind::Snapshot { profile } => {
+                return Err(ControlError::Invalid(format!(
+                    "{name} is {profile}'s snapshot, which every slot's layers sit on; reseed {profile} to rebuild it"
+                )));
+            }
+            api::CacheKind::Slot { profile, slot } => {
+                if self.reseeds.contains_key(profile) {
+                    return Err(ControlError::Conflict(format!(
+                        "{profile} is reseeding, which writes {name}"
+                    )));
+                }
+                self.occupied()
+                    .filter(|(at, _)| at.profile == *profile && at.index + 1 == *slot)
+                    .map(|(_, occupant)| occupant.running_job())
+                    .collect()
+            }
+            api::CacheKind::Pnpm | api::CacheKind::Maven | api::CacheKind::Mirror => self
+                .occupied()
+                .map(|(_, occupant)| occupant.running_job())
+                .collect(),
+        };
+        if !users.is_empty() {
+            return Err(ControlError::Busy {
+                message: format!("{name} is in use by {}", list(&users)),
+                jobs: users,
+            });
+        }
+        if volume.kind == api::CacheKind::Mirror && self.mirror_up {
+            cache::mirror_down(&*self.docker, &self.names)
+                .await
+                .map_err(|error| {
+                    ControlError::Failed(format!("cannot stop the mirror: {error}"))
+                })?;
+            self.mirror_up = false;
+        }
+        self.docker
+            .remove_volume(name)
+            .await
+            .map_err(|error| ControlError::Failed(format!("cannot remove {name}: {error}")))?;
+        info!("removed {name}");
+        // Measured again once idle.
+        self.trim_due = true;
+        Ok(())
+    }
+
+    /// Runs with a new, validated config. Running jobs keep running: a removed profile, or slots past a lowered
+    /// number, stay until their runners finish, and no runner starts in a profile while it has as many as its
+    /// slots. Runners started from now on get the new settings.
+    fn reload(&mut self, config: Config, memory_max: Option<u64>) {
+        let mut old = std::mem::replace(&mut self.config, config);
+        for (name, profile) in &self.config.profiles {
+            let slots = self.slots.entry(name.clone()).or_default();
+            if slots.len() < profile.slots as usize {
+                slots.resize(profile.slots as usize, None);
+            }
+            self.retired.remove(name);
+        }
+        for (name, profile) in std::mem::take(&mut old.profiles) {
+            if !self.config.profiles.contains_key(&name) {
+                self.retired.insert(name, profile);
+            }
+        }
+        self.drop_closed_slots();
+        let names: BTreeSet<String> = self
+            .config
+            .repositories
+            .iter()
+            .map(|repository| repository.name.clone())
+            .collect();
+        let removed: Vec<String> = self
+            .repositories
+            .keys()
+            .filter(|name| !names.contains(*name))
+            .cloned()
+            .collect();
+        self.draining.extend(removed);
+        self.draining.retain(|name| !names.contains(name));
+        self.repositories.retain(|name, _| names.contains(name));
+        for name in &names {
+            self.repositories.entry(name.clone()).or_default();
+        }
+        self.control.set_repositories(names);
+        let profiles = &self.config.profiles;
+        self.reseed_requested
+            .retain(|name| profiles.contains_key(name));
+        self.isolation = isolation::backend(self.config.host.isolation);
+        self.memory_max = memory_max;
+        self.caches
+            .send_replace(cache::volumes(&self.names, &self.config));
+        info!("reloaded the config");
     }
 
     fn publish(&mut self) {
@@ -1431,15 +2027,28 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .config
             .profiles
             .iter()
+            .chain(&self.retired)
             .map(|(name, profile)| api::ProfileStatus {
                 name: name.clone(),
                 image: image(&profile.image_stage),
                 cpus: profile.cpus,
                 memory: profile.memory.0,
-                reseeding: self.reseeds.contains_key(name),
-                slots: self.slots[name]
-                    .iter()
+                reseeding: self.is_reseeding(name),
+                slots: self
+                    .slots
+                    .get(name)
+                    .into_iter()
+                    .flatten()
                     .enumerate()
+                    // Slots a reload removed show while their runner runs.
+                    .filter(|(index, slot)| {
+                        slot.is_some()
+                            || self
+                                .config
+                                .profiles
+                                .get(name)
+                                .is_some_and(|profile| *index < profile.slots as usize)
+                    })
                     .map(|(index, slot)| api::SlotStatus {
                         slot: index + 1,
                         runner: slot.as_ref().map(|occupant| api::RunnerStatus {

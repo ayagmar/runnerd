@@ -6,7 +6,14 @@
 //! | Route | Body |
 //! |---|---|
 //! | `GET /v1/status` | [`Status`] |
-//! | `POST /v1/repositories/{owner}/{name}/pause`, `…/resume` | none, 204 |
+//! | `POST /v1/repositories/{owner}/{name}/pause?`[`PauseQuery`] | [`Paused`]; 409 [`Busy`] while it runs a job |
+//! | `POST /v1/repositories/{owner}/{name}/resume` | none, 204 |
+//! | `POST /v1/profiles/{name}/reseed` | none, 202; 409 while it reseeds; `cache.reseeded` when done |
+//! | `POST /v1/caches/{name}/clean` | none, 204; 409 [`Busy`] while a runner uses it |
+//! | `GET /v1/config` | [`ConfigFile`] |
+//! | `POST /v1/config/check` | TOML in, [`ConfigCheck`] |
+//! | `PUT /v1/config` | TOML in, [`ConfigCheck`]; 422 [`ConfigCheck`] when invalid |
+//! | `GET /v1/doctor` | [`Doctor`] |
 //! | `POST /v1/shutdown` | [`ShutdownRequest`] in, 202 |
 //! | `GET /v1/jobs?`[`JobQuery`] | [`JobPage`] |
 //! | `GET /v1/jobs/{id}` | [`Job`] |
@@ -22,9 +29,13 @@
 
 use serde::{Deserialize, Serialize};
 
+mod control;
 mod events;
 mod jobs;
 
+pub use control::{
+    Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, RunningJob,
+};
 pub use events::{Event, EventEnvelope, EventQuery};
 pub use jobs::{
     Bucket, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, HostSample,

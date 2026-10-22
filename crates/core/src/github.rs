@@ -239,6 +239,13 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         id: u64,
     ) -> impl Future<Output = Result<JobDetails, Error>> + Send;
+    /// Cancels a workflow run, and so every job in it: GitHub cancels runs, not single jobs. A run that already
+    /// completed is left as it is.
+    fn cancel_run(
+        &self,
+        repository: &str,
+        run: u64,
+    ) -> impl Future<Output = Result<(), Error>> + Send;
 }
 
 /// A GitHub API client for one token. Requests on one URL are conditional on its last `ETag`, so an unchanged
@@ -528,6 +535,16 @@ impl GithubApi for Github {
     async fn job(&self, repository: &str, id: u64) -> Result<JobDetails, Error> {
         self.get(&format!("/repos/{repository}/actions/jobs/{id}"))
             .await
+    }
+
+    async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), Error> {
+        let path = format!("/repos/{repository}/actions/runs/{run}/cancel");
+        let response = self.send(Method::POST, &path, None).await?;
+        // 409: the run completed already.
+        if response.status == StatusCode::CONFLICT {
+            return Ok(());
+        }
+        expect_success(Method::POST, &path, response).map(|_| ())
     }
 }
 

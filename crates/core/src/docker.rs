@@ -82,6 +82,8 @@ pub struct RunnerState {
     pub address: Option<String>,
     /// When it started, in milliseconds since the epoch.
     pub started_at: Option<u64>,
+    /// Its memory cap in bytes; `None` when it has none.
+    pub memory: Option<u64>,
 }
 
 /// What a command run in a container prints on stdout, as it prints it.
@@ -262,6 +264,10 @@ impl DockerApi for Docker {
                 .filter(|pid| *pid > 0),
             address,
             started_at: state.started_at.as_deref().and_then(crate::time::parse_ms),
+            memory: host_config
+                .memory
+                .and_then(|memory| u64::try_from(memory).ok())
+                .filter(|memory| *memory > 0),
         })
     }
 
