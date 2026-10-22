@@ -105,6 +105,8 @@ pub enum ConfigError {
          set allow_unsafe = true under [host] to use it anyway"
     )]
     UnsafeNotAllowed,
+    #[error("{field} is 0, which Docker reads as no limit; set it above 0")]
+    ZeroLimit { field: String },
     #[error(
         "slots × memory over all profiles plus the mirror is {total}, \
          the slice {slice}'s MemoryMax is {memory_max}"
@@ -166,6 +168,30 @@ impl Config {
     pub fn validate(&self, memory_max: Option<ByteSize>) -> Result<Vec<Warning>, ConfigError> {
         if self.host.isolation == Isolation::UnsafeDind && !self.host.allow_unsafe {
             return Err(ConfigError::UnsafeNotAllowed);
+        }
+        let zero_limits = self.profiles.iter().flat_map(|(name, p)| {
+            [
+                (p.memory.0 == 0, format!("profiles.{name}.memory")),
+                (p.cpus == 0, format!("profiles.{name}.cpus")),
+                (p.slots == 0, format!("profiles.{name}.slots")),
+            ]
+        });
+        let mirror = &self.caches.mirror;
+        let mirror_zero_limits = [
+            (
+                mirror.enabled && mirror.memory.0 == 0,
+                "caches.mirror.memory".to_owned(),
+            ),
+            (
+                mirror.enabled && mirror.cpus == 0,
+                "caches.mirror.cpus".to_owned(),
+            ),
+        ];
+        if let Some((_, field)) = zero_limits
+            .chain(mirror_zero_limits)
+            .find(|(zero, _)| *zero)
+        {
+            return Err(ConfigError::ZeroLimit { field });
         }
         for repository in &self.repositories {
             if !self.profiles.contains_key(&repository.profile) {

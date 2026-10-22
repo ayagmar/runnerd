@@ -112,6 +112,37 @@ fn config_rejects_unknown_fields_in_every_table() {
 }
 
 #[test]
+fn config_with_a_zero_limit_names_the_field() {
+    let mirror_enabled = MINIMAL.replace("enabled = false", "enabled = true");
+    for (field, text) in [
+        (
+            "profiles.app.memory",
+            MINIMAL.replace("memory = \"4G\"", "memory = \"0G\""),
+        ),
+        ("profiles.app.cpus", MINIMAL.replace("cpus = 4", "cpus = 0")),
+        (
+            "profiles.app.slots",
+            MINIMAL.replace("slots = 1", "slots = 0"),
+        ),
+        (
+            "caches.mirror.memory",
+            mirror_enabled.replace("memory = \"512M\"", "memory = \"0M\""),
+        ),
+        (
+            "caches.mirror.cpus",
+            mirror_enabled.replace("cpus = 1,", "cpus = 0,"),
+        ),
+    ] {
+        let error = Config::parse(&text)
+            .unwrap()
+            .validate(size("33G"))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains(field), "{field}: {error}");
+    }
+}
+
+#[test]
 fn config_rejects_a_size_without_unit() {
     let text = MINIMAL.replace("memory = \"4G\"", "memory = \"4\"");
     let error = Config::parse(&text).unwrap_err().to_string();
