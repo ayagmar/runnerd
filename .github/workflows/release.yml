@@ -95,11 +95,15 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
-  # The checksum file over every archive, the source tarball, and install.sh.
+  # The checksum file over every archive, the source tarball, and install.sh; attests those three files.
   build-global-artifacts:
     name: build (global)
     needs: [plan, build-local-artifacts]
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # attest signs with the run's OIDC identity
+      attestations: write # attest stores the attestation
     env:
       TAG: ${{ github.ref_name }}
       BUILD_MANIFEST_NAME: target/distrib/global-dist-manifest.json
@@ -126,6 +130,12 @@ jobs:
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
           cp dist-manifest.json "$BUILD_MANIFEST_NAME"
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-path: |
+            target/distrib/install.sh
+            target/distrib/sha256.sum
+            target/distrib/source.tar.gz
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: artifacts-build-global

@@ -18,9 +18,12 @@ Pass `--prefix DIR` to install into `DIR/bin` instead, or `--version v0.0.1` for
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd
 ```
 
-It never uses sudo and installs nothing else. Each release archive has a GitHub build provenance attestation; to check one you downloaded yourself:
+It never uses sudo and installs nothing else. Every release archive, `install.sh` and `sha256.sum` has a GitHub build provenance attestation. To check `install.sh` before running it, or an archive you downloaded yourself:
 
 ```sh
+curl -fsSLO https://github.com/ayagmar/runnerd/releases/latest/download/install.sh
+gh attestation verify install.sh -R ayagmar/runnerd
+sh install.sh
 gh attestation verify runnerd-x86_64-unknown-linux-musl.tar.xz -R ayagmar/runnerd
 ```
 

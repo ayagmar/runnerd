@@ -50,11 +50,11 @@ cache.
 
 ## Releases
 
-`.github/workflows/release.yml` runs when a tag like `v0.0.1` or `v0.0.1-rc.1` is pushed; a suffix makes a
-pre-release. It builds `runnerd` and `runnerctl` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with
-[dist](https://github.com/axodotdev/cargo-dist), attests every archive, and creates the release with the archives, a
-`.sha256` per archive, `sha256.sum`, and `install.sh` set to install that tag. The tag must match the workspace
-version in `Cargo.toml`.
+`.github/workflows/release.yml` runs when a tag like `v0.0.1` or `v0.0.1-rc.1` is pushed; a suffix makes a pre-release.
+It builds `runnerd` and `runnerctl` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with
+[dist](https://github.com/axodotdev/cargo-dist), attests every archive plus `install.sh`, `sha256.sum` and the source
+tarball, and creates the release with the archives, a `.sha256` per archive, `sha256.sum`, and `install.sh` set to
+install that tag. The tag must match the workspace version in `Cargo.toml`.
 
 The workflow started as dist's generated one and was edited (its header lists how), so `Cargo.toml` sets
 `allow-dirty = ["ci"]`. It is not a pull request check; `lint` still runs actionlint and zizmor on it.
