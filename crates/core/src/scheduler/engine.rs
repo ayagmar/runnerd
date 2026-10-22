@@ -293,7 +293,18 @@ impl Engine {
 
     /// Runs until a shutdown request is carried out.
     pub async fn run(mut self) {
-        self.recover().await;
+        // Until Docker answers: scheduling without knowing the containers already running would start a second
+        // runner on a slot's volume and delete the running one's registration.
+        while let Err(error) = self.recover().await {
+            warn!("cannot list the containers an earlier run left; trying again in 5s: {error}");
+            if self.control.mode() != Shutdown::No {
+                return;
+            }
+            tokio::select! {
+                () = tokio::time::sleep(Duration::from_secs(5)) => {}
+                () = self.control.wake.notified() => {}
+            }
+        }
         loop {
             let mode = self.control.mode();
             self.tick(mode).await;
@@ -320,14 +331,7 @@ impl Engine {
 
     /// Takes over the seed containers a previous daemon left: a running one counts as its profile's reseed, so no
     /// runner of the profile starts while it rewrites the snapshot and the slots' layers.
-    async fn recover_reseeds(&mut self) {
-        let containers = match self.docker.list("runnerd.seed").await {
-            Ok(containers) => containers,
-            Err(error) => {
-                warn!("cannot list seed containers left by an earlier run: {error}");
-                return;
-            }
-        };
+    fn recover_reseeds(&mut self, containers: Vec<docker::Container>) {
         for container in containers {
             let Some(profile) = container.labels.get("runnerd.profile").cloned() else {
                 continue;
@@ -346,17 +350,13 @@ impl Engine {
         }
     }
 
-    /// Adopts runner containers a previous daemon left running, and removes the ones that stopped. Their
-    /// registrations, and any of this host's runners without a container, go at the first poll.
-    async fn recover(&mut self) {
-        self.recover_reseeds().await;
-        let containers = match self.docker.list("runnerd.job").await {
-            Ok(containers) => containers,
-            Err(error) => {
-                warn!("cannot list runner containers left by an earlier run: {error}");
-                return;
-            }
-        };
+    /// Adopts the runner and seed containers a previous daemon left running, and removes the runners that
+    /// stopped. Their registrations, and any of this host's runners without a container, go at the first poll.
+    /// Changes nothing unless Docker lists both kinds, so it can be tried again.
+    async fn recover(&mut self) -> Result<(), docker::Error> {
+        let seeds = self.docker.list("runnerd.seed").await?;
+        let containers = self.docker.list("runnerd.job").await?;
+        self.recover_reseeds(seeds);
         for container in containers {
             if !container.name.starts_with(&self.runner_prefix) {
                 continue;
@@ -399,6 +399,7 @@ impl Engine {
                 }
             }
         }
+        Ok(())
     }
 
     async fn tick(&mut self, mode: Shutdown) {
