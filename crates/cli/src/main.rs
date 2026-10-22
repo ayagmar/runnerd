@@ -8,3 +8,4 @@ struct Cli {}
 fn main() {
     Cli::parse();
 }
+// ci measurement
