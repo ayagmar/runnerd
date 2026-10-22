@@ -1,7 +1,8 @@
 //! The TUI through its reducer and `TestBackend` frames: a job moving through its slot, steps and the latest jobs;
 //! every pane at 80×24; text at 80 to 136 columns that drops whole fields or ends in `…` rather than being cut
-//! mid-word; no colour with `NO_COLOR`; a refused pause forced only on `y`; the history's filters; and,
-//! against a fake daemon, an event stream that drops, shows "reconnecting" and resumes after the last event ID.
+//! mid-word; no colour with `NO_COLOR`; a refused pause forced only on `y`; repositories changed elsewhere; the
+//! history's filters; and, against a fake daemon, an event stream that drops, shows "reconnecting" and resumes
+//! after the last event ID.
 
 #![allow(
     clippy::unwrap_used,
@@ -412,6 +413,39 @@ fn a_refused_pause_is_forced_only_after_y() {
             force: true
         }]
     );
+}
+
+#[test]
+fn repositories_paused_added_or_removed_elsewhere_show_without_reading_the_status() {
+    let mut app = app();
+    let mut storefront = repository("halyard/storefront", "node");
+    storefront.paused = true;
+    storefront.queued_jobs = 3;
+    app.update(event(
+        Some(1),
+        Event::RepositoryChanged {
+            repository: storefront,
+        },
+    ));
+    app.update(event(
+        Some(2),
+        Event::RepositoryChanged {
+            repository: repository("halyard/docs", "node"),
+        },
+    ));
+    app.update(event(
+        Some(3),
+        Event::RepositoryRemoved {
+            repository: "halyard/ledger".to_owned(),
+        },
+    ));
+    let shown = screen(&app, 120, 40, false);
+    assert!(
+        shown.contains("halyard/storefront  node  3 queued  paused"),
+        "{shown}"
+    );
+    assert!(shown.contains("halyard/docs  node  0 queued"), "{shown}");
+    assert!(!shown.contains("halyard/ledger"), "{shown}");
 }
 
 /// Records each event stream request's `Last-Event-ID`. The first stream sends event 7 and ends; the second

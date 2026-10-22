@@ -351,7 +351,6 @@ impl Requests {
             Effect::Pause { repository, force } => {
                 tokio::spawn(async move {
                     let msg = pause(&client, &repository, force).await;
-                    status(&client, &send).await;
                     let _ = send.send(msg);
                 });
             }
@@ -364,7 +363,6 @@ impl Requests {
                             .map_err(|error| error.to_string()),
                         Err(error) => Err(error.to_string()),
                     };
-                    status(&client, &send).await;
                     let _ = send.send(match resumed {
                         Ok(_) => Msg::Done(format!("{repository} resumed")),
                         Err(error) => Msg::Failed(error),
@@ -403,7 +401,7 @@ fn answer<T>(send: &UnboundedSender<Msg>, answer: Result<T, ClientError>, msg: f
     });
 }
 
-/// Repositories' paused flags come with the status only, so it is read again after a pause or resume.
+/// A profile's reseeding flag comes with the status only, so it is read again after a reseed request.
 async fn status(client: &Client, send: &UnboundedSender<Msg>) {
     answer(send, client.get::<Status>("/v1/status").await, Msg::Status);
 }
