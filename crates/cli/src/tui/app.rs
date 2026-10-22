@@ -82,6 +82,8 @@ pub(crate) enum Effect {
     Reseed {
         profile: String,
     },
+    /// Give the terminal back and stop, as Ctrl-Z does in a shell.
+    Suspend,
     Quit,
 }
 
@@ -362,8 +364,13 @@ impl App {
         if key.kind == KeyEventKind::Release {
             return Vec::new();
         }
-        if key.modifiers.contains(KeyModifiers::CONTROL) && key.code == KeyCode::Char('c') {
-            return vec![Effect::Quit];
+        if key.modifiers.contains(KeyModifiers::CONTROL) {
+            // Raw mode turns off the terminal's own signals for these keys.
+            match key.code {
+                KeyCode::Char('c') => return vec![Effect::Quit],
+                KeyCode::Char('z') => return vec![Effect::Suspend],
+                _ => {}
+            }
         }
         self.flash = None;
         if let Some((repository, _)) = self.confirm.take() {

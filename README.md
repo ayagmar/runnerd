@@ -232,9 +232,11 @@ block glyphs. At 80×24 the slots become one line each and the charts drop out f
 | `c` `s` `]` `[` | history: cycle the outcome and repository filters, next and previous page |
 | `G` `g` | follow the log, or go to its start |
 | `?` `q` | all keys; quit |
+| `ctrl-z` | suspend; `fg` brings it back, redrawn |
 
-When the daemon goes away the header says `reconnecting`, and the event stream resumes after the last event it read
-once the daemon is back. Build without it with `cargo build -p runnerctl --no-default-features`.
+SIGINT, SIGTERM and SIGHUP quit and SIGTSTP suspends, each after giving the terminal back. When the daemon goes
+away the header says `reconnecting`. Once it is back, the event stream resumes after the last event read, or the
+state is read again if none was; an open job's log carries on from its next line. Build without it with `cargo build -p runnerctl --no-default-features`.
 
 From the bash `ci` tool:
 

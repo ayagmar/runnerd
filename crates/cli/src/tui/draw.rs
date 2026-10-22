@@ -182,7 +182,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 }
 
 fn help(frame: &mut Frame<'_>, area: Rect) {
-    const KEYS: [(&str, &str); 16] = [
+    const KEYS: [(&str, &str); 17] = [
         ("1 o", "overview"),
         ("2 h", "history"),
         ("tab", "next pane of the overview"),
@@ -198,6 +198,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
         ("s", "history: cycle the repository filter"),
         ("] [", "history: next and previous page"),
         ("?", "this help; any key closes it"),
+        ("ctrl-z", "suspend; the shell's fg brings it back"),
         ("q ctrl-c", "quit"),
     ];
     let width = area.width.min(60);

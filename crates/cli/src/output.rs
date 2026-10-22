@@ -64,3 +64,14 @@ pub(crate) fn full_screen() -> std::io::Result<ratatui::DefaultTerminal> {
 pub(crate) fn restore() -> std::io::Result<()> {
     ratatui::try_restore()
 }
+
+/// Takes the terminal again after [`restore`], as when continued after Ctrl-Z. The new terminal has drawn nothing
+/// yet, so its first frame draws every cell; unlike `Terminal::clear`, it does not ask the terminal where its
+/// cursor is, an answer some terminals are slow to give.
+#[cfg(feature = "tui")]
+pub(crate) fn resume() -> std::io::Result<ratatui::DefaultTerminal> {
+    use ratatui::crossterm::terminal::{EnterAlternateScreen, enable_raw_mode};
+    enable_raw_mode()?;
+    ratatui::crossterm::execute!(std::io::stdout(), EnterAlternateScreen)?;
+    ratatui::Terminal::new(ratatui::backend::CrosstermBackend::new(std::io::stdout()))
+}

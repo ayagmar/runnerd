@@ -1451,6 +1451,7 @@ dependencies = [
  "hyper-util",
  "ratatui",
  "runnerd-core",
+ "rustix",
  "serde",
  "serde_json",
  "serde_urlencoded",

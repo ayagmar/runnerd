@@ -1,7 +1,8 @@
 //! `runnerctl tui`: a full-screen dashboard of the daemon, for hosts reached over SSH. A pure API client like the
 //! rest of `runnerctl`: a snapshot from `/v1/*`, then `/v1/events`. This module runs the loop: it feeds keys, events
 //! and answers to `app`'s reducer, makes the requests the reducer asks for, and draws with `draw` after each batch
-//! and every second. It decides nothing itself.
+//! and every second. It decides nothing itself. Whatever ends or stops it (`q`, SIGINT, SIGTERM, SIGHUP, Ctrl-Z,
+//! SIGTSTP) gives the terminal back first; SIGCONT takes it again.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -12,6 +13,7 @@ use runnerd_core::api::{
     EventQuery, HostSampleQuery, HostSamples, Job, JobPage, PauseQuery, Paused, SampleSeries,
     Status,
 };
+use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
 
@@ -50,6 +52,8 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
     }
     let mut app = App::new(live, host.samples, series);
 
+    // Before raw mode, so that no signal can end the process with the terminal raw.
+    let mut signals = Signals::new().map_err(|error| local(&error))?;
     let (send, mut receive) = mpsc::unbounded_channel();
     let feed = tokio::spawn(feed(client.clone(), events, send.clone(), RETRY));
     let keys = Keys::spawn(send.clone());
@@ -74,27 +78,46 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
         if let Err(error) = terminal.draw(|frame| draw::draw(frame, &app, now(), theme)) {
             break Err(local(&error));
         }
-        let msg = tokio::select! {
-            msg = receive.recv() => msg,
+        let mut msg = tokio::select! {
+            msg = receive.recv() => match msg {
+                Some(msg) => msg,
+                None => break Ok(()),
+            },
+            received = signals.next() => {
+                let taken = match received {
+                    Received::Quit => break Ok(()),
+                    Received::Suspend => suspend(&mut terminal),
+                    Received::Continue => resume(&mut terminal),
+                };
+                if let Err(error) = taken {
+                    break Err(local(&error));
+                }
+                continue;
+            },
             _ = tick.tick() => continue,
         };
-        let Some(mut msg) = msg else {
-            break Ok(());
-        };
         // Everything already waiting is applied before the next frame.
-        let quit = loop {
-            if app
-                .update(msg)
-                .into_iter()
-                .any(|effect| !requests.make(effect))
-            {
-                break true;
+        let mut quit = false;
+        let mut failed = None;
+        loop {
+            for effect in app.update(msg) {
+                match effect {
+                    Effect::Quit => quit = true,
+                    Effect::Suspend => failed = suspend(&mut terminal).err().or(failed),
+                    effect => requests.make(effect),
+                }
+            }
+            if quit || failed.is_some() {
+                break;
             }
             match receive.try_recv() {
                 Ok(next) => msg = next,
-                Err(_) => break false,
+                Err(_) => break,
             }
-        };
+        }
+        if let Some(error) = failed {
+            break Err(local(&error));
+        }
         if quit {
             break Ok(());
         }
@@ -108,6 +131,60 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
 
 fn local(error: &std::io::Error) -> Error {
     Error::Local(format!("terminal: {error}"))
+}
+
+/// What a signal asks of the TUI.
+enum Received {
+    Quit,
+    Suspend,
+    Continue,
+}
+
+/// The signals the TUI answers. Registered, they no longer end or stop the process by themselves, so the terminal
+/// is given back first.
+struct Signals {
+    interrupt: Stream,
+    terminate: Stream,
+    hangup: Stream,
+    stop: Stream,
+    resume: Stream,
+}
+
+impl Signals {
+    fn new() -> std::io::Result<Signals> {
+        Ok(Signals {
+            interrupt: signal(SignalKind::interrupt())?,
+            terminate: signal(SignalKind::terminate())?,
+            hangup: signal(SignalKind::hangup())?,
+            stop: signal(SignalKind::from_raw(rustix::process::Signal::TSTP.as_raw()))?,
+            resume: signal(SignalKind::from_raw(rustix::process::Signal::CONT.as_raw()))?,
+        })
+    }
+
+    /// The next signal; cancel-safe.
+    async fn next(&mut self) -> Received {
+        tokio::select! {
+            _ = self.interrupt.recv() => Received::Quit,
+            _ = self.terminate.recv() => Received::Quit,
+            _ = self.hangup.recv() => Received::Quit,
+            _ = self.stop.recv() => Received::Suspend,
+            _ = self.resume.recv() => Received::Continue,
+        }
+    }
+}
+
+/// Gives the terminal back and stops, as Ctrl-Z does in a shell; once continued, takes the terminal again.
+fn suspend(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
+    output::restore()?;
+    // The process group, as the terminal's own Ctrl-Z would; SIGSTOP, because SIGTSTP now comes back here.
+    rustix::process::kill_current_process_group(rustix::process::Signal::STOP)?;
+    resume(terminal)
+}
+
+/// Takes the terminal again and draws all of it at the next frame, since the shell or another program drew over it.
+fn resume(terminal: &mut ratatui::DefaultTerminal) -> std::io::Result<()> {
+    *terminal = output::resume()?;
+    Ok(())
 }
 
 /// Reads events into the loop. When the stream fails for good (the daemon stopped), it says so and tries again
@@ -220,12 +297,13 @@ struct Requests {
 }
 
 impl Requests {
-    /// Starts the request; false to quit.
-    fn make(&mut self, effect: Effect) -> bool {
+    /// Starts the request.
+    fn make(&mut self, effect: Effect) {
         let client = self.client.clone();
         let send = self.send.clone();
         match effect {
-            Effect::Quit => return false,
+            // The loop's own, since they act on the terminal.
+            Effect::Quit | Effect::Suspend => {}
             Effect::OpenJob(id) => {
                 self.close_log();
                 self.log = Some(tokio::spawn(open_job(client, send, id)));
@@ -287,7 +365,6 @@ impl Requests {
                 });
             }
         }
-        true
     }
 
     fn close_log(&mut self) {
