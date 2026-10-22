@@ -11,16 +11,24 @@ const description =
 const url = new URL(base, Astro.site).href;
 const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
 
-// examples/runnerd.toml, in GiB: two trellis runners, two glowly runners and the Docker Hub mirror in ci.slice.
-const example = { max: 33, trellis: { memory: 9, slots: 2 }, glowly: { memory: 7, slots: 2 }, mirror: 0.5 };
+// A made-up setup, the same on every page: halyard/ledger on the jvm profile, halyard/storefront on node,
+// and the Docker Hub mirror, in GiB, inside ci.slice.
+const example = {
+  max: 33,
+  profiles: [
+    { kind: 'jvm', repo: 'halyard/ledger', memory: 9, slots: 2 },
+    { kind: 'node', repo: 'halyard/storefront', memory: 7, slots: 2 },
+  ],
+  mirror: 0.5,
+};
 const blocks = [
-  ...Array.from({ length: example.trellis.slots }, () => ({ kind: 'trellis', size: example.trellis.memory })),
-  ...Array.from({ length: example.glowly.slots }, () => ({ kind: 'glowly', size: example.glowly.memory })),
-  { kind: 'mirror', size: example.mirror },
+  ...example.profiles.flatMap((p) => Array.from({ length: p.slots }, () => ({ kind: p.kind, repo: p.repo, size: p.memory }))),
+  { kind: 'mirror', repo: '', size: example.mirror },
 ];
 const used = blocks.reduce((sum, block) => sum + block.size, 0);
 
-// A real `runnerd doctor` run on a host whose slice has no unit file yet; the format is crates/daemon/src/doctor.rs.
+// Real output of runnerd 0.0.1 from main, run against that setup. The doctor run's config names demo.slice,
+// which has no unit file yet.
 const doctorOk = [
   'ok    Docker: reachable, Docker 29.9.2',
   'ok    cgroups: cgroup v2 with the systemd driver',
@@ -37,50 +45,36 @@ const doctorRest = [
   'ok    gh: logged in to github.com with the repo scope',
   'info  /dev/kvm: present, for a future Kata Containers backend',
 ];
+const unsafe =
+  'error: isolation "unsafe-dind" runs runner containers privileged, so a job can take over the host; set allow_unsafe = true under [host] to use it anyway';
 
-// One slot over two jobs: the container is new each time, the slot's cache layer is kept.
+// One jvm slot over two jobs: the container is new each time, the slot's layer stays.
 const steps = [
-  {
-    container: 'new',
-    label: 'new container',
-    title: 'Runner starts',
-    text: "runnerd registers a just-in-time runner and starts a new container in a free slot, over the slot's cache layer.",
-  },
-  {
-    container: 'job',
-    label: 'job',
-    title: 'Job runs',
-    text: "The runner takes one queued job. Its Docker builds and Testcontainers run in the container's own Docker Engine.",
-  },
-  {
-    container: 'gone',
-    label: 'removed',
-    title: 'Container removed',
-    text: 'The runner unregisters, the container exits and runnerd removes it. The layer keeps its Docker images, ~/.cache and the tool cache.',
-  },
-  {
-    container: 'new',
-    label: 'new container',
-    title: 'Next job',
-    text: 'The next job gets a new container over the same layer: warm caches, nothing else left from the last job.',
-  },
+  { container: 'new', label: 'new container', title: 'Runner starts', text: 'A just-in-time runner, over the slot layer.' },
+  { container: 'job', label: 'job', title: 'Job runs', text: 'Its own Docker Engine, unprivileged.' },
+  { container: 'gone', label: 'removed', title: 'Container removed', text: 'The layer keeps images and ~/.cache.' },
+  { container: 'new', label: 'new container', title: 'Next job', text: 'Nothing left over but warm caches.' },
 ];
 
-const today = [
-  ['The scheduler', 'runnerd serve polls GitHub for queued jobs and starts a just-in-time runner for each one, from one pool shared by every configured repository, while the slice has room.'],
-  ['Warm caches', 'a read-only snapshot per profile with a writable layer per slot, a shared pnpm store and Maven repository, and a Docker Hub mirror.'],
-  ['The daemon API', 'JSON on a Unix socket only your user can open: status, pause and resume a repository, shut down.'],
-  ['runnerd check-config and doctor', 'the budget sum and the host checks above.'],
-  ['The runner image', 'the GitHub Actions runner with its own Docker Engine, one stage per profile.'],
-  ['Isolation', 'sysbox by default; privileged Docker-in-Docker only with allow_unsafe.'],
-  ['Releases', 'x86_64 and aarch64 Linux builds with SHA-256 checksums and build provenance attestations.'],
+// What 0.0.1 ships, and the clients that will fill the rest of the page as they land.
+const shipped = [
+  'runnerd serve',
+  'runnerd stop',
+  'runnerd check-config',
+  'runnerd doctor',
+  'JSON API on a Unix socket',
+  'the runner image',
+  'x86_64 and aarch64 releases',
 ];
-const next = [
-  ['Job history', 'a timeline, timings, metrics and logs for every job.'],
-  ['Live events', 'server-sent events from the daemon as runners start and jobs finish.'],
-  ['runnerctl', 'the command-line client for the daemon API.'],
-  ['The dashboard', 'a web view served by the daemon on a loopback port.'],
+const clients = [
+  { name: 'runnerctl', text: 'Status, jobs, logs, pause and resume from a shell. Today it has no commands yet:' },
+  { name: 'Web dashboard', text: "The budget, every slot and each job's timeline, live, on a loopback port." },
+  { name: 'TUI', text: 'runnerctl tui: the same live view in a terminal.' },
+  { name: 'Desktop app', text: 'The same views in a native app, with an always-on summary.' },
 ];
+const runnerctlHelp = `Command-line client for the runnerd daemon
+
+Usage: runnerctl`;
 ---
 
 <!doctype html>
@@ -122,29 +116,24 @@ const next = [
 
     <main id="main">
       <section class="hero wrap" aria-labelledby="title">
-        <h1 id="title">CI runners that fit the machine</h1>
+        <h1 id="title">CI runners that <br />fit the machine</h1>
         <div class="hero-copy">
           <p class="lead">
-            runnerd runs your GitHub Actions jobs on a Linux machine you already have. Every job gets a fresh
-            container with its own Docker, and every runner stays inside one systemd memory budget.
+            GitHub Actions jobs on a Linux machine you already have. A fresh container per job, every runner inside
+            one memory budget.
           </p>
-          <div class="hero-side">
-            <p class="status">
-              It is in early development: the daemon schedules runners and serves a small JSON API; job history,
-              metrics, the CLI client and the web dashboard come next.
-            </p>
-            <div class="actions">
-              <a class="button" href="#install">Install</a>
-              <a class="text-link" href={docs}>Read the docs</a>
-            </div>
+          <div class="actions">
+            <a class="button" href="#install">Install</a>
+            <a class="text-link" href={docs}>Read the docs</a>
           </div>
+          <p class="status">Early: 0.0.x schedules runners today; the clients are coming.</p>
         </div>
 
-        <figure class="budget budget-hero" data-ui>
+        <figure class="budget budget-hero">
           <div
             class="bar"
             role="img"
-            aria-label={`Memory budget of ci.slice: two trellis runners at 9G, two glowly runners at 7G and a 512M Docker Hub mirror, ${used}G of ${example.max}G.`}
+            aria-label={`Memory budget of ci.slice: two jvm runners at 9G for halyard/ledger, two node runners at 7G for halyard/storefront and a 512M Docker Hub mirror, ${used}G of ${example.max}G.`}
           >
             <div class="slice" style="--share: 1"></div>
             <div class="blocks">
@@ -155,6 +144,7 @@ const next = [
                       <>
                         <span class="size">{block.size}G</span>
                         <span class="name">{block.kind}</span>
+                        <span class="repo">{block.repo}</span>
                       </>
                     )}
                   </div>
@@ -165,63 +155,61 @@ const next = [
           </div>
           <figcaption>
             <span>ci.slice, MemoryMax=33G</span>
-            <span>Two trellis runners, two glowly runners, and a 512M sliver for the Docker Hub mirror: 32.5G.</span>
+            <span>2 × jvm at 9G, 2 × node at 7G, 512M mirror: {used}G</span>
           </figcaption>
         </figure>
       </section>
 
       <section class="calc wrap" id="budget" aria-labelledby="budget-title">
         <div class="calc-text">
-          <h2 id="budget-title">Check the budget before a job runs</h2>
-          <p>
-            Give each runner profile a memory cap and a number of slots. runnerd adds up slots × memory over every
-            profile, plus the Docker Hub mirror, and refuses a config that does not fit the slice's
-            <code>MemoryMax</code>. systemd holds the slice to that limit, so runners cannot take memory the rest of
-            the machine needs.
-          </p>
-          <form class="controls" data-calc hidden>
-            <fieldset>
-              <legend>The slice</legend>
+          <h2 id="budget-title">It adds up before it runs</h2>
+          <p>Slots × memory, plus the mirror, must fit the slice. Drag a value.</p>
+          <form class="config" data-calc hidden>
+            <fieldset class="jvm">
+              <legend>[profiles.jvm]</legend>
               <label>
-                <span>MemoryMax</span>
+                <span>memory =</span>
+                <input type="range" name="jvm-memory" min="1" max="16" step="0.5" value="9" />
+                <output data-for="jvm-memory">"9G"</output>
+              </label>
+              <label>
+                <span>slots =</span>
+                <input type="range" name="jvm-slots" min="1" max="6" step="1" value="2" />
+                <output data-for="jvm-slots">2</output>
+              </label>
+            </fieldset>
+            <fieldset class="node">
+              <legend>[profiles.node]</legend>
+              <label>
+                <span>memory =</span>
+                <input type="range" name="node-memory" min="1" max="16" step="0.5" value="7" />
+                <output data-for="node-memory">"7G"</output>
+              </label>
+              <label>
+                <span>slots =</span>
+                <input type="range" name="node-slots" min="1" max="6" step="1" value="2" />
+                <output data-for="node-slots">2</output>
+              </label>
+            </fieldset>
+            <fieldset>
+              <legend>[caches]</legend>
+              <label class="toggle">
+                <input type="checkbox" name="mirror" checked />
+                <span>mirror, 512M</span>
+              </label>
+            </fieldset>
+            <fieldset>
+              <legend>ci.slice</legend>
+              <label>
+                <span>MemoryMax=</span>
                 <input type="range" name="max" min="8" max="64" step="1" value={example.max} />
                 <output data-for="max">{example.max}G</output>
               </label>
             </fieldset>
-            <fieldset class="trellis">
-              <legend>trellis profile</legend>
-              <label>
-                <span>memory</span>
-                <input type="range" name="trellis-memory" min="1" max="16" step="0.5" value={example.trellis.memory} />
-                <output data-for="trellis-memory">{example.trellis.memory}G</output>
-              </label>
-              <label>
-                <span>slots</span>
-                <input type="range" name="trellis-slots" min="1" max="6" step="1" value={example.trellis.slots} />
-                <output data-for="trellis-slots">{example.trellis.slots}</output>
-              </label>
-            </fieldset>
-            <fieldset class="glowly">
-              <legend>glowly profile</legend>
-              <label>
-                <span>memory</span>
-                <input type="range" name="glowly-memory" min="1" max="16" step="0.5" value={example.glowly.memory} />
-                <output data-for="glowly-memory">{example.glowly.memory}G</output>
-              </label>
-              <label>
-                <span>slots</span>
-                <input type="range" name="glowly-slots" min="1" max="6" step="1" value={example.glowly.slots} />
-                <output data-for="glowly-slots">{example.glowly.slots}</output>
-              </label>
-            </fieldset>
-            <label class="toggle">
-              <input type="checkbox" name="mirror" checked />
-              <span>Docker Hub mirror, 512M</span>
-            </label>
           </form>
         </div>
 
-        <div class="calc-result" data-ui>
+        <div class="calc-result">
           <div class="bar bar-small" aria-hidden="true" data-calc-bar>
             <div class="slice" style="--share: 1"></div>
             <div class="blocks">
@@ -235,20 +223,14 @@ const next = [
       </section>
 
       <section class="slots wrap" aria-labelledby="slots-title">
-        <div class="slots-head">
-          <h2 id="slots-title">A fresh container for every job</h2>
-          <p>
-            A slot is one concurrent job of a profile. Its container lives for one job; its cache layer stays, so the
-            next job starts new but warm. Here is one trellis slot over two jobs.
-          </p>
-        </div>
+        <h2 id="slots-title">One slot, two jobs</h2>
         <ol class="slot-steps">
           {
             steps.map((step) => (
               <li>
                 <div class={`slot ${step.container}`} aria-hidden="true">
                   <div class="slot-container">{step.label}</div>
-                  <div class="slot-layer">slot layer</div>
+                  <div class="slot-layer">jvm slot layer</div>
                 </div>
                 <h3>{step.title}</h3>
                 <p>{step.text}</p>
@@ -256,86 +238,57 @@ const next = [
             ))
           }
         </ol>
-        <div class="isolation">
-          <div>
-            <h3>Docker inside, no --privileged</h3>
-            <p>
-              Sysbox gives every runner container its own Docker Engine, so <code>docker build</code> and
-              Testcontainers work while the container stays unprivileged.
-            </p>
-          </div>
-          <div>
-            <h3>Privileged only when you say so</h3>
-            <p>
-              <code>isolation = "unsafe-dind"</code> runs privileged containers, which a job can use to take over the
-              host. runnerd refuses it unless <code>[host]</code> also sets <code>allow_unsafe = true</code>.
-            </p>
-          </div>
-        </div>
       </section>
 
-      <section class="doctor wrap" id="doctor" aria-labelledby="doctor-title">
-        <div class="doctor-text">
-          <h2 id="doctor-title">runnerd doctor names the fix</h2>
-          <p>
-            It checks Docker, cgroups, sysbox, the slice, your config and the GitHub CLI in the order a new machine
-            needs them, and every failure says how to fix it. This host is ready except for its slice.
-          </p>
-        </div>
-        <pre class="terminal transcript" data-ui><code><span class="prompt">$ runnerd doctor runnerd.toml</span>
+      <section class="checks wrap" id="doctor" aria-labelledby="doctor-title">
+        <h2 id="doctor-title">Every failure names its fix</h2>
+        <div class="check-runs">
+          <pre class="terminal transcript"><code><span class="prompt">$ runnerd doctor runnerd.toml</span>
 {doctorOk.join('\n')}
 <span class="fail">{doctorFail}</span>{doctorRest.join('\n')}</code></pre>
+          <div class="unsafe">
+            <h3>Privileged only when you say so</h3>
+            <pre class="terminal transcript"><code><span class="prompt"># [host] isolation = "unsafe-dind"
+$ runnerd check-config runnerd.toml</span>
+<span class="fail">{unsafe}</span></code></pre>
+          </div>
+        </div>
       </section>
 
       <section class="roadmap wrap" aria-labelledby="roadmap-title">
-        <h2 id="roadmap-title">What works today, and what comes next</h2>
-        <div class="sheet">
-          <div class="column today">
-            <h3>In 0.0.x today</h3>
-            <ul>
-              {
-                today.map(([name, text]) => (
-                  <li>
-                    <strong>{name}</strong>: {text}
-                  </li>
-                ))
-              }
-            </ul>
-          </div>
-          <div class="column next">
-            <h3>Being built</h3>
-            <ul>
-              {
-                next.map(([name, text]) => (
-                  <li>
-                    <strong>{name}</strong>: {text}
-                  </li>
-                ))
-              }
-            </ul>
-          </div>
-        </div>
+        <h2 id="roadmap-title">Four slots still free</h2>
+        <ul class="free-slots">
+          <li class="shipped">
+            <h3>runnerd 0.0.1</h3>
+            <ul>{shipped.map((item) => <li>{item}</li>)}</ul>
+            <p>Next in the daemon: job history, metrics and live events.</p>
+          </li>
+          {
+            clients.map((client) => (
+              <li class="client">
+                <h3>{client.name}</h3>
+                <p class="coming">Coming</p>
+                <p>{client.text}</p>
+                {client.name === 'runnerctl' && (
+                  <pre class="terminal"><code><span class="prompt">$ runnerctl --help</span>{`\n${runnerctlHelp}`}</code></pre>
+                )}
+              </li>
+            ))
+          }
+        </ul>
       </section>
 
       <section class="install wrap" id="install" aria-labelledby="install-title">
         <div class="install-tile">
           <h2 id="install-title">Install in one line</h2>
-          <p>
-            The script downloads <code>runnerd</code> and <code>runnerctl</code> from the latest release, checks their
-            SHA-256, copies them to <code>~/.local/bin</code> and runs <code>runnerd doctor</code>. It never uses sudo.
-          </p>
           <div class="command">
             <pre><code>{install}</code></pre>
             <button class="copy" type="button" data-copy={install} hidden>Copy</button>
           </div>
-          <p>
-            Then, from a checkout of the repository, build the image stages your profiles use and start the daemon
-            with
-            <code>runnerd serve --config runnerd.toml</code>.
-          </p>
+          <p>Checks SHA-256, installs to <code>~/.local/bin</code>, runs <code>runnerd doctor</code>. No sudo.</p>
           <p class="install-links">
-            <a href={docs}>Install guide and requirements</a>
-            <a href={`${base}running/`}>Running the daemon</a>
+            <a href={docs}>Requirements</a>
+            <a href={`${base}running/`}>Build the image and serve</a>
             <a href={`${docs}#verify-a-release`}>Verify a release</a>
           </p>
         </div>
@@ -354,7 +307,7 @@ const next = [
           <a href={repo}>Source</a>
           <a href={`${repo}/releases`}>Releases</a>
         </nav>
-        <p>runnerd is MIT licensed. Linux hosts and GitHub repositories only, for now.</p>
+        <p>MIT licensed. Linux hosts and GitHub repositories, for now.</p>
       </div>
     </footer>
 
@@ -397,7 +350,7 @@ const next = [
     --step-small: 0.875rem;
     --step-lead: clamp(1.25rem, 1.1rem + 0.7vw, 1.625rem);
     --step-head: clamp(2rem, 1.3rem + 3.2vw, 4rem);
-    --step-display: clamp(2.75rem, 0.9rem + 7vw, 8.5rem);
+    --step-display: clamp(2.6rem, 0.9rem + 5.4vw, 6.5rem);
     --section: clamp(6rem, 4rem + 8vw, 12rem);
     --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
   }
@@ -550,7 +503,6 @@ const next = [
     font-size: var(--step-display);
     line-height: 0.92;
     letter-spacing: -0.045em;
-    max-width: 12.5ch;
   }
 
   .hero-copy {
@@ -562,18 +514,13 @@ const next = [
   .lead {
     font-size: clamp(1.1875rem, 1rem + 0.55vw, 1.4375rem);
     line-height: 1.45;
-    max-width: 40ch;
-  }
-
-  .hero-side {
-    display: grid;
-    gap: 1.5rem;
+    max-width: 36ch;
   }
 
   .status {
     color: var(--muted);
+    font-family: var(--font-display);
     font-size: 1rem;
-    max-width: 44ch;
   }
 
   .actions {
@@ -615,7 +562,7 @@ const next = [
   /* The budget bar: the slice is the ground, each runner slot a block sized by its memory cap. */
   .bar {
     position: relative;
-    height: clamp(9rem, 32vh, 22rem);
+    height: clamp(11rem, 44vh, 30rem);
   }
 
   .bar .slice {
@@ -651,11 +598,11 @@ const next = [
     transition: flex-grow 300ms var(--ease), background-color 200ms;
   }
 
-  .block.trellis {
+  .block.jvm {
     background: var(--mint);
   }
 
-  .block.glowly {
+  .block.node {
     background: var(--pink);
   }
 
@@ -675,6 +622,11 @@ const next = [
     font-size: clamp(0.8125rem, 0.7rem + 0.4vw, 1.0625rem);
     font-weight: 600;
     margin-top: 0.4rem;
+  }
+
+  .block .repo {
+    font-size: 0.9375rem;
+    font-weight: 500;
   }
 
   .budget {
@@ -711,51 +663,59 @@ const next = [
     gap: 1.5rem;
   }
 
-  .controls {
+  /* The calculator's controls are the config itself: the profile tables, the mirror, the slice's limit. */
+  .config {
     display: grid;
-    gap: 1.25rem;
+    gap: var(--gap);
     margin-top: 0.5rem;
-    font-family: var(--font-display);
   }
 
-  .controls fieldset {
+  .config fieldset {
     min-width: 0;
     margin: 0;
-    padding: 1rem 1.25rem 0.5rem;
+    padding: 0.85rem 1.25rem 0.35rem;
     border: 0;
     background: var(--surface);
   }
 
-  .controls fieldset.trellis {
+  .config fieldset.jvm {
     box-shadow: inset 6px 0 0 var(--mint);
   }
 
-  .controls fieldset.glowly {
+  .config fieldset.node {
     box-shadow: inset 6px 0 0 var(--pink);
   }
 
-  .controls legend {
-    padding: 0;
-    font-weight: 700;
-    font-size: 1rem;
+  .config legend,
+  .config label span,
+  .config output {
+    font-family: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
+    font-size: 0.9375rem;
   }
 
-  .controls label {
+  .config legend {
+    padding: 0;
+    float: left;
+    width: 100%;
+    font-weight: 700;
+  }
+
+  .config label {
+    clear: both;
     display: grid;
-    grid-template-columns: 6rem minmax(0, 1fr) 3.5rem;
+    grid-template-columns: 7rem minmax(0, 1fr) 3.75rem;
     align-items: center;
     gap: 0.75rem;
     min-height: 48px;
-    font-size: 1rem;
   }
 
-  .controls output {
+  .config output {
     text-align: right;
     font-weight: 700;
     font-variant-numeric: tabular-nums;
   }
 
-  .controls input[type='range'] {
+  .config input[type='range'] {
     width: 100%;
     height: 44px;
     margin: 0;
@@ -763,14 +723,12 @@ const next = [
     cursor: pointer;
   }
 
-  .controls .toggle {
+  .config .toggle {
     grid-template-columns: auto 1fr;
-    padding-inline: 1.25rem;
-    background: var(--surface);
     cursor: pointer;
   }
 
-  .controls .toggle input {
+  .config .toggle input {
     width: 1.375rem;
     height: 1.375rem;
     margin: 0;
@@ -785,7 +743,7 @@ const next = [
   }
 
   .bar-small {
-    height: clamp(6rem, 18vh, 11rem);
+    height: clamp(8rem, 34vh, 20rem);
   }
 
   .bar-small .block {
@@ -819,14 +777,7 @@ const next = [
     gap: clamp(2rem, 4vw, 3.5rem);
   }
 
-  .slots-head {
-    display: grid;
-    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
-    gap: clamp(1.5rem, 4vw, 4rem);
-    align-items: end;
-  }
-
-  .slots-head h2 {
+  .slots h2 {
     max-width: 12ch;
   }
 
@@ -895,35 +846,27 @@ const next = [
     font-size: 1rem;
   }
 
-  .isolation {
-    display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
-    gap: clamp(1.5rem, 4vw, 4rem);
-    padding-top: clamp(1rem, 2vw, 2rem);
-  }
-
-  .isolation > div {
-    display: grid;
-    gap: 0.6rem;
-    align-content: start;
-  }
-
-  /* doctor: one real run, the failure and its fix marked in pink. */
-  .doctor {
+  /* doctor and the unsafe refusal: real runs, each failure marked in pink. */
+  .checks {
     padding-top: var(--section);
     display: grid;
-    grid-template-columns: minmax(0, 5fr) minmax(0, 7fr);
-    gap: clamp(2rem, 5vw, 6rem);
+    gap: clamp(2rem, 4vw, 3.5rem);
+  }
+
+  .checks h2 {
+    max-width: 13ch;
+  }
+
+  .check-runs {
+    display: grid;
+    grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+    gap: clamp(2rem, 4vw, 4rem);
     align-items: start;
   }
 
-  .doctor-text {
+  .unsafe {
     display: grid;
-    gap: 1.5rem;
-  }
-
-  .doctor h2 {
-    max-width: 11ch;
+    gap: 1rem;
   }
 
   .transcript .fail {
@@ -934,68 +877,67 @@ const next = [
     color: var(--block-ink);
   }
 
-  /* Today and next: one sheet in two columns, a mint square for what ships, a pink one for what is coming. */
+  /* What ships and what is coming, drawn as the slice: 0.0.1 is the one filled block, each client a free slot. */
   .roadmap {
     padding-top: var(--section);
     display: grid;
     gap: clamp(2rem, 4vw, 3.5rem);
   }
 
-  .roadmap h2 {
-    max-width: 16ch;
-  }
-
-  .sheet {
+  .free-slots {
+    list-style: none;
+    margin: 0;
+    padding: var(--gap);
     display: grid;
-    grid-template-columns: repeat(2, minmax(0, 1fr));
+    grid-template-columns: minmax(0, 9fr) repeat(4, minmax(0, 7fr));
     gap: var(--gap);
-  }
-
-  .column {
-    padding: clamp(1.5rem, 3vw, 3rem);
+    min-height: clamp(22rem, 48vh, 32rem);
     background: var(--surface);
   }
 
-  .column h3 {
-    font-size: clamp(1.5rem, 1.2rem + 1vw, 2rem);
-    letter-spacing: -0.03em;
-    margin-bottom: 1.5rem;
+  .free-slots > li {
+    display: flex;
+    flex-direction: column;
+    gap: 0.75rem;
+    min-width: 0;
+    padding: clamp(1rem, 1.6vw, 1.5rem);
+    background: var(--bg);
   }
 
-  .column ul {
+  .free-slots h3 {
+    font-size: clamp(1.375rem, 1rem + 0.8vw, 1.875rem);
+    line-height: 1;
+    letter-spacing: -0.04em;
+  }
+
+  .free-slots p {
+    font-size: 1rem;
+  }
+
+  .free-slots .shipped {
+    background: var(--mint);
+    color: var(--block-ink);
+  }
+
+  .shipped ul {
     list-style: none;
     margin: 0;
     padding: 0;
     display: grid;
-    gap: 1.1rem;
-  }
-
-  .column li {
-    position: relative;
-    padding-left: 1.75rem;
-    max-width: 60ch;
-  }
-
-  .column li::before {
-    content: '';
-    position: absolute;
-    left: 0;
-    top: 0.42em;
-    width: 0.8rem;
-    height: 0.8rem;
-  }
-
-  .today li::before {
-    background: var(--mint);
-  }
-
-  .next li::before {
-    background: var(--pink);
-  }
-
-  .column strong {
+    gap: 0.35rem;
     font-family: var(--font-display);
-    font-weight: 700;
+    font-size: 1rem;
+    font-weight: 600;
+  }
+
+  .free-slots .coming {
+    color: var(--muted);
+    font-family: var(--font-display);
+    font-weight: 600;
+  }
+
+  .free-slots .terminal {
+    font-size: 0.8125rem;
   }
 
   /* Install: the accent tile. */
@@ -1173,17 +1115,25 @@ const next = [
 
   }
 
-  /* Phone and narrow tablet: one column, the bar and the board recomposed. */
+  /* Phone and narrow tablet: one column, the free slots two across. */
   @media (max-width: 860px) {
     .hero,
     .calc,
-    .doctor,
-    .sheet {
+    .check-runs {
       grid-template-columns: minmax(0, 1fr);
     }
 
+    .free-slots {
+      grid-template-columns: repeat(2, minmax(0, 1fr));
+      min-height: 0;
+    }
+
+    .free-slots .shipped {
+      grid-column: 1 / -1;
+    }
+
     .hero h1 {
-      font-size: clamp(2.6rem, 0.4rem + 10.4vw, 6rem);
+      font-size: clamp(2.25rem, 0.4rem + 9.4vw, 6rem);
     }
 
     .calc-result {
@@ -1199,14 +1149,13 @@ const next = [
       order: 1;
     }
 
-    .controls {
+    .config {
       order: 2;
       margin-top: 0;
     }
 
-    .slots-head,
-    .isolation {
-      grid-template-columns: minmax(0, 1fr);
+    .bar-small {
+      height: 7rem;
     }
 
     .slot-steps {
@@ -1220,7 +1169,17 @@ const next = [
 
   }
 
+  @media (max-width: 1100px) {
+    .block .repo {
+      display: none;
+    }
+  }
+
   @media (max-width: 480px) {
+    .free-slots {
+      grid-template-columns: minmax(0, 1fr);
+    }
+
     .nav nav a[href='#install'] {
       display: none;
     }
