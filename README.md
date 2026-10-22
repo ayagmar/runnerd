@@ -129,6 +129,7 @@ still running 90 s later is removed. Its runner registration is deleted once Git
 
 A new config takes effect without a restart, and running jobs keep running. A removed profile, or slots past a lowered
 `slots`, stay until their runners finish, and no runner starts in a profile while it runs as many as its `slots`.
+A runner still waiting for a job of a removed repository, or of one moved to another profile, is removed.
 Runners started afterwards get the new limits, image and labels. `history.database` changes only at the next start.
 
 Every event but the live ones has an ID; send the last one seen as `Last-Event-ID` and the stream resumes after it,

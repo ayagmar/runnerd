@@ -453,6 +453,8 @@ pub struct Engine<G = Github, D = Docker> {
     reseed_memory: BTreeMap<String, u64>,
     /// Profiles the API asked to reseed: they start nothing until their slots are free and the reseed ran.
     reseed_requested: BTreeSet<String>,
+    /// Repositories a reload removed, polled until none of this machine's runners is registered on them.
+    draining: BTreeSet<String>,
     /// Profiles a reload removed, kept while their runners or reseed still run.
     retired: BTreeMap<String, crate::config::Profile>,
     /// Profiles whose slot 1 ran a job since their last reseed check.
@@ -570,6 +572,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             reseed_memory: BTreeMap::new(),
             reseed_requested: BTreeSet::new(),
             retired: BTreeMap::new(),
+            draining: BTreeSet::new(),
             reseed_due: BTreeSet::new(),
             // So the caches are measured once at start.
             trim_due: true,
@@ -1104,7 +1107,21 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         let free_memory = self
             .memory_max
             .map(|max| max.saturating_sub(self.memory_in_use()));
-        plan(&repositories, &profiles, free_memory, SystemTime::now())
+        let mut decisions = plan(&repositories, &profiles, free_memory, SystemTime::now());
+        // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
+        decisions.extend(
+            self.occupied()
+                .filter(|(slot, occupant)| {
+                    !occupant.busy
+                        && occupant.job.is_none()
+                        && !self.config.repositories.iter().any(|repository| {
+                            repository.name == occupant.repository
+                                && repository.profile == slot.profile
+                        })
+                })
+                .map(|(slot, _)| Decision::Stop { slot }),
+        );
+        decisions
     }
 
     /// Memory caps of the runners, the seed containers (which run with their profile's limits) and the mirror.
@@ -1158,8 +1175,15 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
 
     /// Updates each runner's busy flag and deletes this host's runners that no slot holds.
     async fn poll_runners(&mut self) {
-        let names: Vec<String> = self.repositories.keys().cloned().collect();
+        let names: Vec<String> = self
+            .repositories
+            .keys()
+            .chain(&self.draining)
+            .cloned()
+            .collect();
         for repository in names {
+            // Whether this machine still has a runner registered on it.
+            let mut left = false;
             let runners = match self.github.runners(&repository).await {
                 Ok(runners) => runners,
                 Err(github::Error::RateLimited { .. }) => continue,
@@ -1176,7 +1200,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     .flatten()
                     .find(|occupant| occupant.runner_id == runner.id);
                 match held {
-                    Some(occupant) => occupant.busy = runner.busy,
+                    Some(occupant) => {
+                        occupant.busy = runner.busy;
+                        left = true;
+                    }
                     // Only this machine's names: other machines serve the same repositories.
                     None if !runner.name.starts_with(&self.runner_prefix) => {}
                     None => match self.github.delete_runner(&repository, runner.id).await {
@@ -1188,6 +1215,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                         }
                         Ok(Deleted::NotFound) => {}
                         Ok(Deleted::Busy) => {
+                            left = true;
                             if self.busy_orphans.insert(runner.id) {
                                 warn!(
                                     "{repository}: {} has no container, but GitHub says it runs a job; \
@@ -1196,9 +1224,15 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                                 );
                             }
                         }
-                        Err(error) => warn!("{repository}: cannot delete {}: {error}", runner.name),
+                        Err(error) => {
+                            left = true;
+                            warn!("{repository}: cannot delete {}: {error}", runner.name);
+                        }
                     },
                 }
+            }
+            if !left {
+                self.draining.remove(&repository);
             }
         }
     }
@@ -1910,6 +1944,14 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .iter()
             .map(|repository| repository.name.clone())
             .collect();
+        let removed: Vec<String> = self
+            .repositories
+            .keys()
+            .filter(|name| !names.contains(*name))
+            .cloned()
+            .collect();
+        self.draining.extend(removed);
+        self.draining.retain(|name| !names.contains(name));
         self.repositories.retain(|name, _| names.contains(name));
         for name in &names {
             self.repositories.entry(name.clone()).or_default();

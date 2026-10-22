@@ -65,6 +65,10 @@ struct GithubState {
     runners: Vec<Runner>,
     /// GitHub gives this queued job to this runner right after the first poll that sees them.
     assign: Option<(u64, u64)>,
+    /// The repository a runner is registered on, where a test says; others show under every repository.
+    registered_on: HashMap<u64, String>,
+    /// How many deletes GitHub refuses next because the runner is busy.
+    busy_deletes: u32,
     /// What `GET /actions/jobs/{id}` answers.
     jobs: HashMap<u64, JobDetails>,
     calls: Vec<String>,
@@ -102,7 +106,17 @@ impl GithubApi for FakeGithub {
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("runners {repository}"));
-        let runners = state.runners.clone();
+        let runners = state
+            .runners
+            .iter()
+            .filter(|runner| {
+                state
+                    .registered_on
+                    .get(&runner.id)
+                    .is_none_or(|on| on == repository)
+            })
+            .cloned()
+            .collect();
         FakeGithub::polled(&mut state);
         Ok(runners)
     }
@@ -128,6 +142,10 @@ impl GithubApi for FakeGithub {
     async fn delete_runner(&self, _repository: &str, id: u64) -> Result<Deleted, github::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("delete {id}"));
+        if state.busy_deletes > 0 {
+            state.busy_deletes -= 1;
+            return Ok(Deleted::Busy);
+        }
         state.runners.retain(|runner| runner.id != id);
         Ok(Deleted::Deleted)
     }
@@ -1217,4 +1235,59 @@ async fn a_running_mirror_keeps_its_memory_when_a_reload_lowers_it() {
     github.0.lock().unwrap().queued = vec![small_job(3)];
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+/// An idle runner of `o/r` in slot 1 of `app`: registered, not busy, no job.
+fn idle_runner(github: &FakeGithub, docker: &FakeDocker) {
+    docker.0.lock().unwrap().containers = vec![runner_container(1, 7, true)];
+    let mut state = github.0.lock().unwrap();
+    state.runners = vec![runner(
+        7,
+        &identity("ci", ID_A).runner_name("app", 1, 1),
+        false,
+    )];
+    state.registered_on.insert(7, "o/r".to_owned());
+}
+
+#[tokio::test]
+async fn a_reload_removes_the_idle_runners_of_a_repository_it_removed_or_moved() {
+    let other_repository = CONFIG.replace("name = \"o/r\"", "name = \"o/x\"");
+    let other_profile = CONFIG
+        .replace("[profiles.app]", "[profiles.big]")
+        .replace("profile = \"app\"", "profile = \"big\"");
+    for config in [other_repository, other_profile] {
+        let github = FakeGithub::default();
+        let docker = FakeDocker::default();
+        idle_runner(&github, &docker);
+        let (mut engine, _handle, _dir) = engine(&github, &docker);
+        engine.recover().await.unwrap();
+        engine.tick(Shutdown::No).await;
+        engine.reload(Config::parse(&config).unwrap(), None);
+        engine.tick(Shutdown::No).await;
+        assert_eq!(removed(&docker.calls()), ["remove container-1"], "{config}");
+        assert!(github.0.lock().unwrap().runners.is_empty(), "{config}");
+    }
+}
+
+#[tokio::test]
+async fn the_runner_of_a_removed_repository_github_held_busy_is_deleted_once_it_lets_go() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    idle_runner(&github, &docker);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.reload(
+        Config::parse(&CONFIG.replace("name = \"o/r\"", "name = \"o/x\"")).unwrap(),
+        None,
+    );
+    // GitHub gives it a job just as it is retired, and still holds it when its container exits.
+    github.0.lock().unwrap().busy_deletes = 2;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    // Its container is removed; GitHub still holds the registration, which the same tick's poll deletes.
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+    assert_eq!(github.0.lock().unwrap().runners.len(), 0);
 }
