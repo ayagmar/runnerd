@@ -146,7 +146,7 @@ pub enum Image {
     /// `image_stage`: a stage of `image/Dockerfile` built on this host as `runnerd-runner:<stage>`.
     Stage(String),
     /// `image`: a reference runnerd pulls when Docker lacks it, such as
-    /// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.6`.
+    /// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.7`.
     Pulled(String),
 }
 

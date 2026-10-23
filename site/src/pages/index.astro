@@ -32,7 +32,7 @@ const blocks = [
 ];
 const used = blocks.reduce((sum, block) => sum + block.size, 0);
 
-// runnerd doctor's output as 0.0.6 prints it for that setup, the lines as doctor.rs formats them: the config names
+// runnerd doctor's output as 0.0.7 prints it for that setup, the lines as doctor.rs formats them: the config names
 // demo.slice, which has no unit file yet, and the jvm and node images, not pulled yet.
 const doctorOk = [
   'ok    Docker: reachable, Docker 29.9.2',
@@ -47,8 +47,8 @@ const doctorFail = `FAIL  slice: demo.slice has no unit file with a MemoryMax, s
            then: sudo systemctl daemon-reload`;
 const doctorRest = [
   'ok    config: valid, with warnings: the slice demo.slice has no MemoryMax, so nothing holds runners to their 32.5G of caps; install a unit file for it',
-  'ok    image: ghcr.io/ayagmar/runnerd-runner:jvm-0.0.6: not pulled yet; runnerd pulls it before the first runner',
-  'ok    image: ghcr.io/ayagmar/runnerd-runner:node-0.0.6: not pulled yet; runnerd pulls it before the first runner',
+  'ok    image: ghcr.io/ayagmar/runnerd-runner:jvm-0.0.7: not pulled yet; runnerd pulls it before the first runner',
+  'ok    image: ghcr.io/ayagmar/runnerd-runner:node-0.0.7: not pulled yet; runnerd pulls it before the first runner',
   'info  records: the records of failed jobs take 0B of [records] max_total = 20G',
   'ok    gh: logged in to github.com with the repo scope',
   'info  /dev/kvm: present, for a future Kata Containers backend',
@@ -147,7 +147,7 @@ const clients = [
           <figcaption class="prompt-line"><code>$ runnerctl tui</code></figcaption>
           <Tui
             name="overview"
-            label="runnerctl tui's overview at 136 by 28: the budget bar with jvm slot 1 at 4.43G and node slot 1 at 2.82G used, node slot 2's idle runner and the mirror, four slot cards, the slice's memory and CPU charts, the repositories and the latest jobs."
+            label="runnerctl tui's overview at 136 by 28: the budget bar with jvm slot 1 at 4.16G and node slot 1 at 2.65G used, node slot 2's idle runner and the mirror, four slot cards, the slice's memory and CPU charts, the repositories and the latest jobs."
           />
         </figure>
         <div class="live-pause">
@@ -262,7 +262,7 @@ $ runnerd check-config runnerd.toml</span>
         <h2 id="roadmap-title">One slot still free</h2>
         <ul class="strip">
           <li class="shipped">
-            <strong>runnerd 0.0.6</strong>
+            <strong>runnerd 0.0.7</strong>
             <span>Released</span>
           </li>
           {
