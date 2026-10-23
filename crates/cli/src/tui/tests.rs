@@ -82,6 +82,7 @@ fn app() -> App {
                 mirror_memory: 0,
                 seed_memory: Vec::new(),
                 shell_memory: Vec::new(),
+                cpu: None,
             },
             profiles: vec![profile("jvm", 2, 9 << 30), profile("node", 1, 7 << 30)],
             repositories: vec![
@@ -889,6 +890,7 @@ async fn dropping_then_back(
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
+                    cpu: None,
                 },
             },
         };

@@ -282,6 +282,9 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
             .map(|max| format!(" of {}", bytes(max)))
             .unwrap_or_default(),
     );
+    if let Some(cpu) = budget.cpu {
+        let _ = write!(out, "; {}", cpu.line());
+    }
     if let Some(host) = &state.host {
         let _ = write!(
             out,
@@ -487,6 +490,7 @@ mod tests {
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
+                    cpu: None,
                 },
                 profiles: vec![ProfileStatus {
                     name: "jvm".to_owned(),
@@ -715,6 +719,7 @@ mod tests {
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
+                    cpu: None,
                 },
             },
         };

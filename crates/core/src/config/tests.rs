@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{ByteSize, Config, Image, Warning, parse_age, parse_memory_max};
+use super::{ByteSize, Config, Image, Warning, parse_age, parse_memory_max, parse_slice_cpus};
 
 const MINIMAL: &str = r#"
 [host]
@@ -378,4 +378,71 @@ fn an_age_reads_in_seconds_to_weeks_and_names_its_units_when_it_does_not() {
             "{wrong:?}"
         );
     }
+}
+
+#[test]
+fn cpu_admission_is_off_unless_an_overcommit_above_0_is_set() {
+    assert_eq!(Config::parse(MINIMAL).unwrap().host.cpu_overcommit, None);
+    let with = |factor: &str| {
+        MINIMAL.replace(
+            "isolation = \"sysbox\"",
+            &format!("isolation = \"sysbox\"\ncpu_overcommit = {factor}"),
+        )
+    };
+    let config = Config::parse(&with("1.5")).unwrap();
+    assert_eq!(config.host.cpu_overcommit, Some(1.5));
+    assert!(config.validate(Some(size("10G"))).is_ok());
+    for factor in ["0", "-1.0", "17", "nan"] {
+        let error = Config::parse(&with(factor))
+            .unwrap()
+            .validate(Some(size("10G")))
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("host.cpu_overcommit"), "{factor}: {error}");
+    }
+}
+
+#[test]
+fn a_slices_cpus_are_its_cpu_set_or_the_hosts_less_under_a_lower_quota() {
+    let show = |effective: &str, allowed: &str, quota: &str| {
+        format!("EffectiveCPUs={effective}\nAllowedCPUs={allowed}\nCPUQuotaPerSecUSec={quota}\n")
+    };
+    assert_eq!(
+        parse_slice_cpus(&show("", "", "infinity"), 32),
+        Some(32_000)
+    );
+    assert_eq!(
+        parse_slice_cpus(&show("0-11,16", "", "infinity"), 32),
+        Some(13_000)
+    );
+    assert_eq!(
+        parse_slice_cpus(&show("", "0-3", "infinity"), 32),
+        Some(4000)
+    );
+    // A 250% quota: two and a half CPUs' time each second.
+    assert_eq!(
+        parse_slice_cpus(&show("0-31", "", "2.500000s"), 32),
+        Some(2500)
+    );
+    assert_eq!(parse_slice_cpus(&show("", "", "800ms"), 32), Some(800));
+    assert_eq!(parse_slice_cpus(&show("0-3", "", "8s"), 32), Some(4000));
+    // As systemctl prints disjoint ranges, and a 6400% and a 10000% quota.
+    assert_eq!(
+        parse_slice_cpus(&show("0-3 8-11", "", "infinity"), 32),
+        Some(8000)
+    );
+    assert_eq!(
+        parse_slice_cpus(&show("", "0 2 4-5", "infinity"), 32),
+        Some(4000)
+    );
+    assert_eq!(
+        parse_slice_cpus(&show("", "", "1min 4s"), 128),
+        Some(64_000)
+    );
+    assert_eq!(
+        parse_slice_cpus(&show("", "", "1min 40s"), 128),
+        Some(100_000)
+    );
+    assert_eq!(parse_slice_cpus(&show("zero", "", "infinity"), 32), None);
+    assert_eq!(parse_slice_cpus(&show("", "", "4 parsecs"), 32), None);
 }

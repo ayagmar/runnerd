@@ -43,7 +43,7 @@ mod jobs;
 mod records;
 mod sizing;
 
-pub use admission::{Admission, AdmissionPolicy, Basis, JobPeak};
+pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, RunningJob,
 };
@@ -119,6 +119,38 @@ pub struct Budget {
     /// The shells' part of `memory_in_use`, one per shell open in a record, by job.
     #[serde(default)]
     pub shell_memory: Vec<ShellMemory>,
+    /// The CPU budget, under `[host] cpu_overcommit`. Absent without one, and from a daemon before CPU admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<CpuBudget>,
+}
+
+/// The CPU budget runners share, in millicores.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuBudget {
+    /// The CPUs the slice may use: its `AllowedCPUs` or the host's, less under a lower `CPUQuota`.
+    pub cpus: u64,
+    /// Those times `cpu_overcommit`: what the runners' reservations must fit.
+    pub budget: u64,
+    /// What the runners reserve: each its predicted average CPU under measured admission, else its `cpus`.
+    pub in_use: u64,
+    /// Whether a queued job waits for CPU that memory and a slot have room for.
+    pub held: bool,
+}
+
+impl CpuBudget {
+    /// The budget's line as clients show it beside memory, such as `CPU 4.5 of 32 CPUs reserved` or, while a job
+    /// waits for it, `CPU 30 of 32 CPUs reserved; a job waits for CPU`.
+    pub fn line(&self) -> String {
+        let mut line = format!(
+            "CPU {} of {} CPUs reserved",
+            cores(self.in_use),
+            cores(self.budget)
+        );
+        if self.held {
+            line.push_str("; a job waits for CPU");
+        }
+        line
+    }
 }
 
 impl Budget {

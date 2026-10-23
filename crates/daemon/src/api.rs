@@ -51,6 +51,9 @@ impl Connected<IncomingStream<'_, UnixListener>> for Peer {
 /// Reads a slice's `MemoryMax`: systemd's (`config::slice_memory_max`), or a test's.
 pub(crate) type MemoryMax = fn(&str) -> io::Result<Option<ByteSize>>;
 
+/// Reads a slice's CPUs in millicores: systemd's (`config::slice_cpus`), or a test's.
+pub(crate) type SliceCpus = fn(&str) -> io::Result<u64>;
+
 /// Flushes a directory's entries to disk: `control::sync_dir`, or a test's.
 pub(crate) type SyncDir = fn(&Path) -> io::Result<()>;
 
@@ -62,6 +65,8 @@ pub(crate) struct ConfigSource {
     /// As the daemon read it.
     pub text: String,
     pub memory_max: MemoryMax,
+    /// Read when a new config sets `cpu_overcommit`.
+    pub cpus: SliceCpus,
     pub sync_dir: SyncDir,
 }
 
@@ -80,6 +85,7 @@ struct AppState {
     stopping: watch::Receiver<bool>,
     config: Arc<Mutex<ConfigText>>,
     memory_max: MemoryMax,
+    cpus: SliceCpus,
     sync_dir: SyncDir,
 }
 
@@ -164,6 +170,7 @@ fn router(
                 text: config.text,
             })),
             memory_max: config.memory_max,
+            cpus: config.cpus,
             sync_dir: config.sync_dir,
         })
 }

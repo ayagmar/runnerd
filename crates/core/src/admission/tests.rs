@@ -61,6 +61,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         memory_cap: Some(if profile == "jvm" { 9 * G } else { 7 * G }),
         memory_peak: peak,
         cpu_peak: 3000,
+        cpu_average: Some(1000),
         queued_at: queued,
         started_at: Some(queued),
         finished_at: Some(queued + minutes * MINUTE),
@@ -465,8 +466,15 @@ fn bursts() -> Vec<Ran> {
 fn measured_admission_runs_more_bursts_at_once_without_the_peaks_crossing_memory_max() {
     let jobs = bursts();
     let slots = BTreeMap::from([("node".to_owned(), 8)]);
-    let caps = simulate(&config(), Some(33 * G), &jobs, Policy::Caps, &slots);
-    let measured = simulate(&config(), Some(33 * G), &jobs, Policy::Measured, &slots);
+    let caps = simulate(&config(), Some(33 * G), None, &jobs, Policy::Caps, &slots);
+    let measured = simulate(
+        &config(),
+        Some(33 * G),
+        None,
+        &jobs,
+        Policy::Measured,
+        &slots,
+    );
     // At 7G caps the 32.5G budget holds 4 of a burst; the other 4 wait. Predicted at 2.5G, all 8 run.
     assert_eq!((caps.most_running, measured.most_running), (4, 8));
     assert!(
@@ -496,7 +504,14 @@ fn the_high_water_mark_holds_back_what_the_predictions_have_room_for() {
         .collect();
     jobs.extend((0..30).map(|_| run("halyard/storefront", "build", "node", NOW, 60, 3 * G)));
     let slots = BTreeMap::from([("node".to_owned(), 30)]);
-    let measured = simulate(&config(), Some(33 * G), &jobs, Policy::Measured, &slots);
+    let measured = simulate(
+        &config(),
+        Some(33 * G),
+        None,
+        &jobs,
+        Policy::Measured,
+        &slots,
+    );
     assert!(measured.held_back > 0, "{measured:?}");
     // The budget is 32.5G: high water is 90% of it; one more 3G peak may cross it, never two.
     assert!(
@@ -550,6 +565,7 @@ fn a_runner_starts_reserving_the_largest_prediction_among_the_waiting_jobs_of_it
     let replay = simulate(
         &config,
         Some(8 * G + 512 * M),
+        None,
         &jobs,
         Policy::Measured,
         &slots,
@@ -642,6 +658,7 @@ fn burst_after_young_history(peak: u64) -> Replay {
     simulate(
         &config(),
         Some(20 * G + 512 * M),
+        None,
         &jobs,
         Policy::Measured,
         &slots,
@@ -659,6 +676,7 @@ fn a_replayed_burst_of_copies_of_a_young_job_starts_one_by_its_own_runs_and_the_
     let replay = simulate(
         &config(),
         Some(20 * G + 512 * M),
+        None,
         &jobs,
         Policy::Measured,
         &slots,
@@ -687,4 +705,87 @@ fn a_replayed_copy_past_its_own_runs_makes_the_running_copies_reserve_its_peak()
     assert_eq!(replay.under_predicted, 1);
     assert_eq!(replay.most_running, 5);
     assert_eq!(replay.wait.max, 60);
+}
+
+/// A `build` run of halyard/storefront that used `average` millicores over its run, peaking at all 8 CPUs.
+fn build_using(average: u64) -> Ran {
+    Ran {
+        cpu_peak: 8000,
+        cpu_average: Some(average),
+        ..build(2 * G)
+    }
+}
+
+#[test]
+fn a_job_reserves_the_cpu_it_used_over_its_runs_not_its_peak() {
+    let mut predictor = predictor();
+    for i in 0..20 {
+        predictor.learn(&build_using(1000 + i * 50), "node", 7 * G, NOW);
+    }
+    // p95 of 1000 … 1950 millicores is 1900; its runs peaked at all 8 CPUs.
+    let prediction = predictor.predict_cpu(&key("build"), "node", 8000);
+    assert_eq!(
+        prediction.basis,
+        Basis::Job {
+            runs: 20,
+            peak: JobPeak::P95
+        }
+    );
+    assert_eq!(prediction.cpu, 1900);
+}
+
+#[test]
+fn a_job_never_seen_reserves_its_profiles_busiest_average_and_without_history_its_cpus() {
+    let mut predictor = predictor();
+    assert_eq!(
+        predictor.predict_cpu(&key("e2e"), "node", 8000).cpu,
+        8000,
+        "no runs at all: the profile's cpus"
+    );
+    for i in 0..10 {
+        predictor.learn(&build_using(500 + i * 100), "node", 7 * G, NOW);
+    }
+    let e2e = predictor.predict_cpu(&key("e2e"), "node", 8000);
+    assert_eq!(e2e.basis, Basis::ProfileMax { runs: 10 });
+    // The busiest build used 1.4 CPUs.
+    assert_eq!(e2e.cpu, 1400);
+}
+
+#[test]
+fn a_cpu_budget_holds_back_jobs_that_memory_has_room_for() {
+    let mut jobs: Vec<Ran> = (0..10)
+        .map(|i| Ran {
+            queued_at: NOW + i * 10 * MINUTE,
+            started_at: Some(NOW + i * 10 * MINUTE),
+            finished_at: Some(NOW + i * 10 * MINUTE + 5 * MINUTE),
+            ..build_using(3000)
+        })
+        .collect();
+    // Four builds at once, each using 3 CPUs over its run.
+    let burst = NOW + 200 * MINUTE;
+    jobs.extend((0..4).map(|_| Ran {
+        queued_at: burst,
+        started_at: Some(burst),
+        finished_at: Some(burst + 5 * MINUTE),
+        ..build_using(3000)
+    }));
+    let slots = BTreeMap::from([("node".to_owned(), 4)]);
+    let replay = |cpu_budget| {
+        simulate(
+            &config(),
+            Some(33 * G),
+            cpu_budget,
+            &jobs,
+            Policy::Measured,
+            &slots,
+        )
+    };
+    let unbounded = replay(None);
+    let bounded = replay(Some(8000));
+    assert_eq!(unbounded.most_running, 4);
+    // 2 × 3 CPUs fit 8; a third waits.
+    assert_eq!(bounded.most_running, 2);
+    assert!(bounded.cpu_held > 0, "the CPU budget held a job back");
+    assert_eq!(bounded.worst_cpu, 6000);
+    assert_eq!(bounded.never_started, 0);
 }

@@ -104,6 +104,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .collect(),
             shell_memory: self.shell_budget(),
+            cpu: self
+                .cpus
+                .zip(self.cpu_budget())
+                .map(|(cpus, budget)| api::CpuBudget {
+                    cpus,
+                    budget,
+                    in_use: self.cpu_in_use(),
+                    held: self.repositories.values().any(|state| state.cpu_held),
+                }),
         }
     }
 

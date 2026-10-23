@@ -40,6 +40,8 @@ pub struct Ran {
     pub memory_peak: u64,
     /// Its sampled CPU peak, millicores.
     pub cpu_peak: u64,
+    /// Its CPU time over its run time, millicores; `None` when not recorded.
+    pub cpu_average: Option<u64>,
     /// When it was queued.
     pub queued_at: u64,
     /// When it started; `None` for a job lost before.

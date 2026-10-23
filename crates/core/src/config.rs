@@ -53,7 +53,14 @@ pub struct Host {
     /// What a runner must fit in before it starts. Default `caps`.
     #[serde(default)]
     pub admission: Admission,
+    /// Set, a runner also starts only when its predicted CPU fits the slice's CPUs times this; absent, CPU is not
+    /// admitted.
+    #[serde(default)]
+    pub cpu_overcommit: Option<f64>,
 }
+
+/// The largest `cpu_overcommit` the config check takes.
+pub const MAX_CPU_OVERCOMMIT: f64 = 16.0;
 
 /// `admission` under `[host]`: what a new runner must fit in the slice's `MemoryMax` beside the running ones.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
@@ -344,6 +351,14 @@ pub enum ConfigError {
         /// The setting, such as `profiles.app.cpus`.
         field: String,
     },
+    /// `cpu_overcommit` is not a number above 0 and at most `MAX_CPU_OVERCOMMIT`.
+    #[error(
+        "host.cpu_overcommit is {value}; set it above 0 and at most {MAX_CPU_OVERCOMMIT}, such as 1.0"
+    )]
+    CpuOvercommit {
+        /// The value set.
+        value: f64,
+    },
     /// The caps add up past `u64::MAX` bytes.
     #[error("slots × memory over all profiles plus the mirror is too large to add up")]
     BudgetOverflow,
@@ -546,6 +561,13 @@ impl Config {
         {
             return Err(ConfigError::ZeroLimit { field });
         }
+        if let Some(value) = self
+            .host
+            .cpu_overcommit
+            .filter(|value| !(*value > 0.0 && *value <= MAX_CPU_OVERCOMMIT))
+        {
+            return Err(ConfigError::CpuOvercommit { value });
+        }
         for repository in &self.repositories {
             if !self.profiles.contains_key(&repository.profile) {
                 return Err(ConfigError::UnknownProfile {
@@ -657,6 +679,115 @@ pub fn slice_memory_max(slice: &str) -> std::io::Result<Option<ByteSize>> {
             "systemctl show {slice}: unexpected MemoryMax {value:?}"
         ))
     })
+}
+
+/// The CPU budget, in millicores, of `millicores` of CPUs overcommitted `overcommit` times.
+pub fn cpu_budget(millicores: u64, overcommit: f64) -> u64 {
+    #[expect(
+        clippy::cast_precision_loss,
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a host's millicores are far below 2^52, and the config check holds the factor above 0 and at \
+                  most 16"
+    )]
+    let budget = (millicores as f64 * overcommit.max(0.0)).round() as u64;
+    budget
+}
+
+/// Reads the CPUs a slice's processes may use from systemd, in millicores: its `EffectiveCPUs` (or `AllowedCPUs`,
+/// else the host's CPUs), less when its `CPUQuota` is lower.
+pub fn slice_cpus(slice: &str) -> std::io::Result<u64> {
+    let output = Command::new("systemctl")
+        .args([
+            "show",
+            slice,
+            "--property=EffectiveCPUs",
+            "--property=AllowedCPUs",
+            "--property=CPUQuotaPerSecUSec",
+        ])
+        .output()?;
+    if !output.status.success() {
+        return Err(std::io::Error::other(format!(
+            "systemctl show {slice} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        )));
+    }
+    let host = std::thread::available_parallelism().map_or(1, std::num::NonZero::get) as u64;
+    parse_slice_cpus(&String::from_utf8_lossy(&output.stdout), host).ok_or_else(|| {
+        std::io::Error::other(format!(
+            "systemctl show {slice}: unexpected CPU properties {:?}",
+            String::from_utf8_lossy(&output.stdout).trim()
+        ))
+    })
+}
+
+/// The CPUs, in millicores, that `systemctl show`'s `EffectiveCPUs`, `AllowedCPUs` and `CPUQuotaPerSecUSec` lines
+/// leave a slice on a host with `host` CPUs; `None` when a value does not parse.
+pub fn parse_slice_cpus(properties: &str, host: u64) -> Option<u64> {
+    let value = |name: &str| {
+        properties.lines().find_map(|line| {
+            line.strip_prefix(name)
+                .and_then(|rest| rest.strip_prefix('='))
+                .map(str::trim)
+        })
+    };
+    let set = [value("EffectiveCPUs"), value("AllowedCPUs")]
+        .into_iter()
+        .flatten()
+        .find(|cpus| !cpus.is_empty());
+    let cpus = match set {
+        Some(set) => cpu_count(set)?,
+        None => host,
+    };
+    let quota = match value("CPUQuotaPerSecUSec") {
+        None | Some("" | "infinity") => u64::MAX,
+        Some(quota) => quota_millicores(quota)?,
+    };
+    Some(cpus.saturating_mul(1000).min(quota))
+}
+
+/// How many CPUs a set names, as systemd prints it (`0-3 8-11`) or as it is written (`0-3,8,10-11`).
+fn cpu_count(set: &str) -> Option<u64> {
+    set.split([',', ' '])
+        .filter(|range| !range.is_empty())
+        .try_fold(0u64, |count, range| {
+            let (first, last) = range.split_once('-').unwrap_or((range, range));
+            let (first, last): (u64, u64) = (first.parse().ok()?, last.parse().ok()?);
+            Some(count + last.checked_sub(first)? + 1)
+        })
+}
+
+/// A `CPUQuotaPerSecUSec` as systemd prints a timespan, such as `800ms`, `2.500000s` or `1min 4s`, as the
+/// millicores it allows: a second of CPU time each second is 1000.
+fn quota_millicores(quota: &str) -> Option<u64> {
+    // Each unit's length in milliseconds, as systemd's `format_timespan` names them.
+    const UNITS: [(&str, f64); 10] = [
+        ("y", 31_557_600_000.0),
+        ("M", 2_629_800_000.0),
+        ("w", 604_800_000.0),
+        ("d", 86_400_000.0),
+        ("h", 3_600_000.0),
+        ("min", 60_000.0),
+        ("s", 1000.0),
+        ("ms", 1.0),
+        ("us", 0.001),
+        ("µs", 0.001),
+    ];
+    let millicores = quota.split_whitespace().try_fold(0.0, |total, part| {
+        let at = part.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
+        let (number, unit) = part.split_at(at);
+        let per_unit = UNITS
+            .iter()
+            .find_map(|(name, per_unit)| (*name == unit).then_some(*per_unit))?;
+        Some(total + number.parse::<f64>().ok()? * per_unit)
+    })?;
+    #[allow(
+        clippy::cast_possible_truncation,
+        clippy::cast_sign_loss,
+        reason = "a quota is a few thousand millicores per CPU, checked finite and not negative first"
+    )]
+    (!quota.trim().is_empty() && millicores.is_finite() && millicores >= 0.0)
+        .then(|| millicores.round() as u64)
 }
 
 /// Parses a `MemoryMax` value as `systemctl show` prints it: bytes, or `infinity`.

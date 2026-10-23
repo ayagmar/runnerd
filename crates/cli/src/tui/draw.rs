@@ -337,6 +337,9 @@ fn budget_note(app: &App) -> String {
     if let Some(by) = budget.admission_note() {
         let _ = write!(note, " {by}");
     }
+    if let Some(cpu) = budget.cpu {
+        let _ = write!(note, " · {}", cpu.line());
+    }
     if let Some(host) = &app.live.host {
         let _ = write!(note, " · {} in use, sampled", bytes(host.memory));
     }

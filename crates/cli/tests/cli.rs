@@ -63,6 +63,12 @@ fn status() -> Status {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            cpu: Some(runnerd_core::api::CpuBudget {
+                cpus: 32_000,
+                budget: 32_000,
+                in_use: 4500,
+                held: true,
+            }),
         },
         profiles: vec![ProfileStatus {
             name: "jvm".to_owned(),
@@ -568,6 +574,10 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
     assert!(!text.contains('\x1b'), "{text:?}");
     assert!(
         text.contains("6G of 16G reserved in runnerd.slice"),
+        "{text}"
+    );
+    assert!(
+        text.contains("CPU 4.5 of 32 CPUs reserved; a job waits for CPU"),
         "{text}"
     );
     let slots: Vec<&str> = text

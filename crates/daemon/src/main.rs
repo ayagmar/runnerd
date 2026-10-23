@@ -7,7 +7,7 @@ use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use runnerd_core::cache::Names;
-use runnerd_core::config::{ByteSize, Config, parse_age, slice_memory_max};
+use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory_max};
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
@@ -70,7 +70,8 @@ enum Command {
         /// when it exists].
         config: Option<PathBuf>,
     },
-    /// Replay the job history through admission by caps and by measured peaks, and print what each would have done.
+    /// Replay the job history through admission by caps, by measured peaks and with a CPU budget, and print what each
+    /// would have done.
     ///
     /// Reads the history database read-only; changes nothing.
     Simulate {
@@ -87,6 +88,13 @@ enum Command {
         /// holds of the profile alone at its cap].
         #[arg(long, value_parser = simulate::slots)]
         slots: Vec<(String, u32)>,
+        /// Replay against this many CPUs (such as 32 or 7.5) instead of reading the slice's from systemd.
+        #[arg(long, value_parser = simulate::cpus)]
+        cpus: Option<u64>,
+        /// Replay a CPU budget of the slice's CPUs times this; repeat it to compare factors [default: the config's
+        /// `cpu_overcommit`, else 1].
+        #[arg(long, value_parser = simulate::overcommit)]
+        cpu_overcommit: Vec<f64>,
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
@@ -134,8 +142,19 @@ fn main() -> ExitCode {
             memory_max,
             since,
             slots,
+            cpus,
+            cpu_overcommit,
         }) => config_or_default(config).and_then(|path| {
-            run_simulation(&path, memory_max, since, &slots.into_iter().collect())
+            run_simulation(
+                &path,
+                Limits {
+                    memory_max,
+                    cpus,
+                    cpu_overcommit,
+                },
+                since,
+                &slots.into_iter().collect(),
+            )
         }),
         Some(Command::Serve {
             config,
@@ -200,14 +219,36 @@ fn check_config(path: &Path, memory_max: Option<ByteSize>) -> ExitCode {
     ExitCode::SUCCESS
 }
 
+/// What `runnerd simulate` replays against, where given instead of read from the slice and the config.
+struct Limits {
+    memory_max: Option<ByteSize>,
+    /// Millicores.
+    cpus: Option<u64>,
+    cpu_overcommit: Vec<f64>,
+}
+
 fn run_simulation(
     path: &Path,
-    memory_max: Option<ByteSize>,
+    limits: Limits,
     since: Duration,
     slots: &std::collections::BTreeMap<String, u32>,
 ) -> Result<ExitCode, ExitCode> {
     let config = Config::load(path).map_err(|error| fail(&error))?;
-    let memory_max = match memory_max {
+    let cpus = match limits.cpus {
+        Some(cpus) => cpus,
+        None => slice_cpus(&config.host.slice).map_err(|error| {
+            fail(&format_args!(
+                "cannot read {}'s CPUs: {error}; pass --cpus",
+                config.host.slice
+            ))
+        })?,
+    };
+    let overcommit = if limits.cpu_overcommit.is_empty() {
+        vec![config.host.cpu_overcommit.unwrap_or(1.0)]
+    } else {
+        limits.cpu_overcommit
+    };
+    let memory_max = match limits.memory_max {
         Some(max) => Some(max),
         None => slice_memory_max(&config.host.slice).map_err(|error| {
             fail(&format_args!(
@@ -240,6 +281,10 @@ fn run_simulation(
     output::line(simulate::report(
         &config,
         memory_max.map(|max| max.0),
+        &simulate::Cpus {
+            millicores: cpus,
+            overcommit: &overcommit,
+        },
         &history.jobs,
         slots,
     ));
@@ -381,6 +426,12 @@ async fn serve(
         .map_err(|error| fail(&format_args!("cannot read {}: {error}", path.display())))?;
     let config = Config::parse(&text).map_err(|error| fail(&error))?;
     let memory_max = slice_memory_max(&config.host.slice).map_err(|error| fail(&error))?;
+    // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs.
+    let cpus = if config.host.cpu_overcommit.is_some() {
+        Some(slice_cpus(&config.host.slice).map_err(|error| fail(&error))?)
+    } else {
+        None
+    };
     for warning in config.validate(memory_max).map_err(|error| fail(&error))? {
         warn!("{warning}");
     }
@@ -409,6 +460,7 @@ async fn serve(
             names: Names::new("runnerd"),
             identity,
             memory_max: memory_max.map(|max| max.0),
+            cpus,
             store: store.clone(),
             announced,
             paused,
@@ -439,6 +491,7 @@ async fn serve(
         path,
         text,
         memory_max: slice_memory_max,
+        cpus: slice_cpus,
         sync_dir: api::sync_dir,
     };
     let server = tokio::spawn(api::serve(listener, handle, config, async {

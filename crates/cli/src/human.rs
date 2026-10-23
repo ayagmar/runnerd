@@ -266,7 +266,7 @@ fn budget_line(status: &Status) -> String {
     let by = budget
         .admission_note()
         .map_or_else(String::new, |note| format!(" {note}"));
-    match budget.memory_max {
+    let mut line = match budget.memory_max {
         Some(max) => format!(
             "{} of {} reserved in {}{by}",
             bytes(budget.memory_in_use),
@@ -278,7 +278,11 @@ fn budget_line(status: &Status) -> String {
             bytes(budget.memory_in_use),
             budget.slice
         ),
+    };
+    if let Some(cpu) = budget.cpu {
+        let _ = write!(line, "; {}", cpu.line());
     }
+    line
 }
 
 /// `runnerctl status`.
@@ -902,11 +906,15 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
         ),
         Event::ProfileRemoved { profile } => format!("{profile} removed"),
         Event::BudgetChanged { budget } => format!(
-            "{} reserved{}",
+            "{} reserved{}{}",
             bytes(budget.memory_in_use),
             budget
                 .memory_max
                 .map(|max| format!(" of {}", bytes(max)))
+                .unwrap_or_default(),
+            budget
+                .cpu
+                .map(|cpu| format!("; {}", cpu.line()))
                 .unwrap_or_default()
         ),
         Event::RepositoryChanged { repository } => format!(
