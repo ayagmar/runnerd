@@ -1548,3 +1548,13 @@ async fn a_stream_reopened_at_once_with_no_event_to_resume_after_reads_the_state
     );
     assert_eq!(*streams.lock().unwrap(), [None, None]);
 }
+
+#[test]
+fn the_help_shows_every_key_in_an_80_by_24_terminal() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('?')));
+    let shown = screen(&app, 80, 24, false);
+    for expected in ["overview", "write the advice", "this help", "suspend"] {
+        assert!(shown.contains(expected), "{expected}: {shown}");
+    }
+}
