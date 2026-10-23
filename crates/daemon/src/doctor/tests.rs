@@ -50,6 +50,7 @@ fn ready_host(os_release: &str) -> Host {
                 (published(stage), Ok(found))
             })
             .into(),
+        records: Some(Ok(0)),
         os_release: os_release.to_owned(),
         slice: Some(Ok(Slice {
             unit_file: Some("/etc/systemd/system/runnerd.slice".to_owned()),
@@ -98,6 +99,7 @@ fn a_ready_host_passes_every_check() {
             "config",
             "image",
             "image",
+            "records",
             "gh",
             "/dev/kvm"
         ]
@@ -306,5 +308,27 @@ fn an_amd64_only_image_fails_on_an_arm64_docker_with_the_local_build() {
     assert!(
         jvm.fix.as_deref().unwrap().contains("docker build"),
         "{jvm}"
+    );
+}
+
+#[test]
+fn records_near_their_size_limit_warn_with_how_to_free_them() {
+    let config = config("sysbox");
+    let max_total = config.records.max_total.0;
+    let mut host = ready_host(ARCH);
+    let records = |host: &Host| {
+        checks(host, Some(&config))
+            .into_iter()
+            .find(|check| check.name == "records")
+            .unwrap()
+    };
+    host.records = Some(Ok(max_total / 2));
+    assert_eq!(records(&host).status, Status::Info);
+    host.records = Some(Ok(max_total / 10 * 9));
+    let warned = records(&host);
+    assert_eq!(warned.status, Status::Warn);
+    assert!(
+        warned.fix.unwrap().contains("runnerctl records rm"),
+        "the fix says how to free them"
     );
 }
