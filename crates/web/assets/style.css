@@ -478,6 +478,12 @@ html {
   gap: 0 0.35rem;
 }
 
+/* Room for the widest figure (` · 1023.99M in use`), so a live figure gaining a digit never moves where the readout
+   wraps, and with it the page below. */
+.readout .muted {
+  min-width: 8.5em;
+}
+
 /* The lines share one grid cell: the readout keeps the height of the longest, whichever is shown. */
 .lens {
   display: grid;
