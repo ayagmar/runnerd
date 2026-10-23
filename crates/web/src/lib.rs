@@ -136,6 +136,8 @@ fn router(daemon: Daemon, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
             "/v1/repositories/{owner}/{name}/resume",
             post(actions::resume),
         )
+        .route("/v1/repositories/pause", post(actions::pause_all))
+        .route("/v1/repositories/resume", post(actions::resume_all))
         .route("/v1/profiles/{name}/reseed", post(actions::reseed))
         .route("/v1/caches/{name}/clean", post(actions::clean))
         .route("/assets/{name}", get(assets::serve))

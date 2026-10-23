@@ -53,6 +53,8 @@ pub struct Fixtures {
     pub config: String,
     /// The requests to the control endpoints, such as `POST /v1/profiles/jvm/reseed`.
     pub controls: Vec<String>,
+    /// Whether the job history fails to record a pause or resume of every repository, as the daemon's 500.
+    pub unrecorded: bool,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -568,6 +570,7 @@ impl Fixtures {
             cache_history,
             config: include_str!("../../../../examples/runnerd.toml").to_owned(),
             controls: Vec::new(),
+            unrecorded: false,
         }
     }
 
@@ -716,6 +719,70 @@ fn set_paused(fake: &Fake, repository: &str, paused: bool) -> Response {
     }
 }
 
+/// `POST /v1/repositories/pause` and `/resume`: every repository or, while any runs a job and without force, none.
+fn set_all_paused(fake: &Fake, paused: bool, force: bool) -> Response {
+    let fixtures = fake.fixtures.lock().unwrap();
+    let names: Vec<String> = fixtures
+        .status
+        .repositories
+        .iter()
+        .map(|repository| repository.name.clone())
+        .collect();
+    let running: Vec<RunningJob> = names
+        .iter()
+        .flat_map(|name| running_jobs(&fixtures, name))
+        .collect();
+    let unrecorded = fixtures.unrecorded;
+    drop(fixtures);
+    let (verb, done, undone) = if paused {
+        ("pause", "paused", "resumes it")
+    } else {
+        ("resume", "resumed", "pauses it again")
+    };
+    fake.fixtures
+        .lock()
+        .unwrap()
+        .controls
+        .push(format!("{verb} all force={force}"));
+    if paused && !running.is_empty() && !force {
+        let runs: Vec<String> = running
+            .iter()
+            .map(|job| format!("{} runs {job}", job.repository))
+            .collect();
+        let message = format!("{}; pause with force to cancel them", runs.join("; "));
+        return (
+            StatusCode::CONFLICT,
+            Json(Busy {
+                message,
+                jobs: running,
+            }),
+        )
+            .into_response();
+    }
+    for name in &names {
+        set_paused(fake, name, paused);
+    }
+    if unrecorded {
+        return (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            Json(ErrorResponse {
+                message: format!(
+                    "every repository is {done} until runnerd restarts, but the job history cannot record it, so a restart {undone}"
+                ),
+            }),
+        )
+            .into_response();
+    }
+    if paused {
+        Json(Paused {
+            stopped: if force { running } else { Vec::new() },
+        })
+        .into_response()
+    } else {
+        StatusCode::NO_CONTENT.into_response()
+    }
+}
+
 fn router(fake: Fake) -> Router {
     Router::new()
         .route(
@@ -731,6 +798,16 @@ fn router(fake: Fake) -> Router {
                     pause(&fake, &format!("{owner}/{name}"), query.force)
                 },
             ),
+        )
+        .route(
+            "/v1/repositories/pause",
+            post(|State(fake): State<Fake>, Query(query): Query<PauseQuery>| async move {
+                set_all_paused(&fake, true, query.force)
+            }),
+        )
+        .route(
+            "/v1/repositories/resume",
+            post(|State(fake): State<Fake>| async move { set_all_paused(&fake, false, false) }),
         )
         .route(
             "/v1/repositories/{owner}/{name}/resume",

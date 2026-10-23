@@ -1158,3 +1158,179 @@ async fn reseed_and_empty_from_the_caches_page_reach_the_daemon() {
         ["reseed jvm", "clean runnerd-pnpm"]
     );
 }
+
+#[tokio::test]
+async fn the_overview_offers_pause_all_until_every_repository_is_paused_then_resume_all() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let pause_all = "@post('/v1/repositories/pause')";
+    let resume_all = "@post('/v1/repositories/resume')";
+    let none = dashboard.page(&cookie, "/").await.body;
+    assert!(
+        none.contains(pause_all) && !none.contains(resume_all),
+        "nothing paused offers only pause all"
+    );
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
+    let some = dashboard.page(&cookie, "/").await.body;
+    assert!(
+        some.contains(pause_all) && some.contains(resume_all),
+        "one of two paused offers both"
+    );
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[1].paused = true;
+    let all = dashboard.page(&cookie, "/").await.body;
+    assert!(
+        !all.contains(pause_all) && all.contains(resume_all),
+        "everything paused offers only resume all"
+    );
+    let resumed = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/v1/repositories/resume",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        resumed.body.contains(r#"id="repositories""#) && resumed.body.contains(pause_all),
+        "resume all returns the rows, offering pause all again: {}",
+        resumed.body
+    );
+    let fixtures = dashboard.fake.fixtures.lock().unwrap();
+    assert!(
+        fixtures
+            .status
+            .repositories
+            .iter()
+            .all(|repository| !repository.paused),
+        "every repository runs again"
+    );
+    assert_eq!(fixtures.controls, ["resume all force=false"]);
+}
+
+#[tokio::test]
+async fn a_single_repository_has_only_its_own_pause() {
+    let dashboard = Dashboard::start().await;
+    dashboard
+        .fake
+        .fixtures
+        .lock()
+        .unwrap()
+        .status
+        .repositories
+        .truncate(1);
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    assert!(
+        !overview.contains("@post('/v1/repositories/pause')"),
+        "no pause all beside the one pause"
+    );
+}
+
+#[tokio::test]
+async fn pausing_every_repository_while_jobs_run_asks_first_naming_them_and_cancels_only_when_told()
+{
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let storefront_running = dashboard
+        .fake
+        .fixtures
+        .lock()
+        .unwrap()
+        .jobs
+        .iter()
+        .find(|job| {
+            job.summary.state == runnerd_core::api::JobState::Running
+                && job.summary.repository == "halyard/storefront"
+        })
+        .unwrap()
+        .summary
+        .id;
+    let asked = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/v1/repositories/pause",
+            &serde_json::json!({}),
+        )
+        .await;
+    for job in [LEDGER_RUNNING, storefront_running] {
+        assert!(
+            asked.body.contains(&job.to_string()),
+            "the question names job {job}: {}",
+            asked.body
+        );
+    }
+    assert!(
+        asked
+            .body
+            .contains("@post('/v1/repositories/pause?force=true')")
+            && !asked.body.contains("pause with force"),
+        "the question offers the forced pause of every repository: {}",
+        asked.body
+    );
+    assert!(
+        !dashboard
+            .fake
+            .fixtures
+            .lock()
+            .unwrap()
+            .status
+            .repositories
+            .iter()
+            .any(|repository| repository.paused),
+        "a refused pause pauses none"
+    );
+    let forced = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/v1/repositories/pause?force=true",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        forced.body.contains(r#"id="repositories""#)
+            && forced.body.contains("@post('/v1/repositories/resume')")
+            && forced.body.contains("stopped job"),
+        "{}",
+        forced.body
+    );
+    let fixtures = dashboard.fake.fixtures.lock().unwrap();
+    assert!(
+        fixtures
+            .status
+            .repositories
+            .iter()
+            .all(|repository| repository.paused),
+        "every repository is paused"
+    );
+    assert_eq!(
+        fixtures.controls,
+        ["pause all force=false", "pause all force=true"]
+    );
+}
+
+#[tokio::test]
+async fn resuming_every_repository_when_the_history_cannot_record_it_says_so() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    dashboard.fake.fixtures.lock().unwrap().unrecorded = true;
+    let reply = dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/v1/repositories/resume",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(
+        reply.body.contains(r#"id="notice""#)
+            && reply.body.contains("toast failed")
+            && reply
+                .body
+                .contains("cannot record it, so a restart pauses it again"),
+        "{}",
+        reply.body
+    );
+}

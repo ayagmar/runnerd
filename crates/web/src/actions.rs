@@ -1,14 +1,14 @@
-//! The dashboard's writes: pause and resume (forced or not), reseed, empty a cache, check and save the config. Each
-//! passes the request on to the daemon's API and answers with HTML Datastar patches in: the region as it is now, or
-//! a notice saying what the daemon refused and why. Datastar applies only 200 responses, so a refusal is a 200 with
-//! the notice. Nothing here decides what is allowed; the daemon does.
+//! The dashboard's writes: pause (forced or not) and resume of one repository or every one, reseed, empty a cache,
+//! check and save the config. Each passes the request on to the daemon's API and answers with HTML Datastar patches
+//! in: the region as it is now, or a notice saying what the daemon refused and why. Datastar applies only 200
+//! responses, so a refusal is a 200 with the notice. Nothing here decides what is allowed; the daemon does.
 
 use axum::Json;
 use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use maud::Markup;
-use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, Status};
+use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, RunningJob, Status};
 use serde::Deserialize;
 
 use crate::App;
@@ -58,6 +58,66 @@ async fn row(app: &App, repository: &str) -> Result<Markup, Markup> {
         })
 }
 
+/// Every repository's row as the daemon reports it now.
+async fn rows(app: &App) -> Result<Markup, Markup> {
+    let status: Status = app
+        .daemon
+        .get("/v1/status")
+        .await
+        .map_err(|error| views::notice(&error.to_string(), Tone::Failed))?;
+    Ok(overview::repositories(&status))
+}
+
+/// The question a pause refused with 409 asks: the jobs it waits for, by repository, and whether to cancel them
+/// with `force`. The daemon's message tells a CLI user how to force it; the question asks instead.
+fn ask_to_force(reply: &Reply, force: &str, label: &str) -> Response {
+    let message = match serde_json::from_slice::<Busy>(&reply.body) {
+        Ok(busy) if !busy.jobs.is_empty() => {
+            let mut repositories: Vec<(&str, Vec<String>)> = Vec::new();
+            for job in &busy.jobs {
+                match repositories
+                    .iter_mut()
+                    .find(|(repository, _)| *repository == job.repository)
+                {
+                    Some((_, jobs)) => jobs.push(job.to_string()),
+                    None => repositories.push((&job.repository, vec![job.to_string()])),
+                }
+            }
+            let runs: Vec<String> = repositories
+                .iter()
+                .map(|(repository, jobs)| format!("{repository} runs {}", jobs.join(", ")))
+                .collect();
+            let them = if busy.jobs.len() == 1 { "it" } else { "them" };
+            format!("{}. Pausing now cancels {them} on GitHub.", runs.join("; "))
+        }
+        _ => reply.message(),
+    };
+    html(&[views::question(
+        &message,
+        &format!("@post('{force}')"),
+        label,
+    )])
+}
+
+/// The page after a pause: `region` and, if it cancelled runs, which.
+fn paused(reply: &Reply, region: Markup, what: &str) -> Response {
+    let stopped: Vec<RunningJob> = serde_json::from_slice::<Paused>(&reply.body)
+        .map(|paused| paused.stopped)
+        .unwrap_or_default();
+    if stopped.is_empty() {
+        html(&[region])
+    } else {
+        let names: Vec<String> = stopped.iter().map(ToString::to_string).collect();
+        html(&[
+            region,
+            views::notice(
+                &format!("Paused {what}; stopped {}", names.join(", ")),
+                Tone::Done,
+            ),
+        ])
+    }
+}
+
 /// `POST /v1/repositories/{owner}/{name}/pause?force=`. A pause the daemon refuses because a job runs asks
 /// whether to cancel the job.
 pub(crate) async fn pause(
@@ -75,44 +135,58 @@ pub(crate) async fn pause(
         Err(notice) => return html(&[notice]),
     };
     if reply.status == StatusCode::CONFLICT && !query.force {
-        // The daemon's message tells a CLI user how to force it; the question asks instead.
-        let message = match serde_json::from_slice::<Busy>(&reply.body) {
-            Ok(busy) if !busy.jobs.is_empty() => {
-                let jobs: Vec<String> = busy.jobs.iter().map(ToString::to_string).collect();
-                format!(
-                    "{repository} runs {}. Pausing now cancels it on GitHub.",
-                    jobs.join(", ")
-                )
-            }
-            _ => reply.message(),
-        };
-        return html(&[views::question(
-            &message,
-            &format!("@post('/v1/repositories/{repository}/pause?force=true')"),
+        return ask_to_force(
+            &reply,
+            &format!("/v1/repositories/{repository}/pause?force=true"),
             "Cancel and pause",
-        )]);
+        );
     }
     if !reply.status.is_success() {
         return refused(&reply.message());
     }
-    let stopped = serde_json::from_slice::<Paused>(&reply.body)
-        .map(|paused| paused.stopped)
-        .unwrap_or_default();
-    let row = match row(&app, &repository).await {
-        Ok(row) => row,
+    match row(&app, &repository).await {
+        Ok(row) => paused(&reply, row, &repository),
+        Err(notice) => html(&[notice]),
+    }
+}
+
+/// `POST /v1/repositories/pause?force=`: pauses every repository, or, while any runs a job, none and asks whether to
+/// cancel the jobs.
+pub(crate) async fn pause_all(State(app): State<App>, Query(query): Query<PauseQuery>) -> Response {
+    let path = if query.force {
+        "/v1/repositories/pause?force=true"
+    } else {
+        "/v1/repositories/pause"
+    };
+    let reply = match send(&app, path).await {
+        Ok(reply) => reply,
         Err(notice) => return html(&[notice]),
     };
-    if stopped.is_empty() {
-        html(&[row])
-    } else {
-        let names: Vec<String> = stopped.iter().map(ToString::to_string).collect();
-        html(&[
-            row,
-            views::notice(
-                &format!("Paused {repository}; stopped {}", names.join(", ")),
-                Tone::Done,
-            ),
-        ])
+    if reply.status == StatusCode::CONFLICT && !query.force {
+        return ask_to_force(
+            &reply,
+            "/v1/repositories/pause?force=true",
+            "Cancel and pause all",
+        );
+    }
+    if !reply.status.is_success() {
+        return refused(&reply.message());
+    }
+    match rows(&app).await {
+        Ok(rows) => paused(&reply, rows, "every repository"),
+        Err(notice) => html(&[notice]),
+    }
+}
+
+/// `POST /v1/repositories/resume`.
+pub(crate) async fn resume_all(State(app): State<App>) -> Response {
+    match send(&app, "/v1/repositories/resume").await {
+        Ok(reply) if reply.status.is_success() => match rows(&app).await {
+            Ok(rows) => html(&[rows]),
+            Err(notice) => html(&[notice]),
+        },
+        Ok(reply) => refused(&reply.message()),
+        Err(notice) => html(&[notice]),
     }
 }
 
