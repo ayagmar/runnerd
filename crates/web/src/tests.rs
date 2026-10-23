@@ -498,11 +498,41 @@ async fn a_job_whose_samples_were_deleted_still_shows_its_memory_peak() {
 #[tokio::test]
 async fn a_step_marks_its_own_stretch_of_the_memory_and_cpu_charts() {
     let dashboard = Dashboard::start().await;
+    // The first step loses its samples, so it gets no band and the bands are not one per step.
+    let (start, end, from, to) = {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap()
+            .clone();
+        let first = &job.steps[0];
+        let (gone_from, gone_to) = (first.started_at.unwrap(), first.completed_at.unwrap());
+        let samples = fixtures.samples.get_mut(&LEDGER_RUNNING).unwrap();
+        samples.retain(|sample| !(gone_from..=gone_to).contains(&sample.at));
+        let unit_tests = job
+            .steps
+            .iter()
+            .find(|step| step.name == "Unit tests")
+            .unwrap();
+        (
+            samples.first().unwrap().at,
+            samples.last().unwrap().at,
+            unit_tests.started_at.unwrap(),
+            unit_tests.completed_at.unwrap(),
+        )
+    };
     let cookie = dashboard.sign_in().await;
     let job = dashboard
         .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
         .await
         .body;
+    assert!(
+        !job[..job.find(r#"<span class="step-name">Set up job"#).unwrap()]
+            .ends_with(r#"data-class:linked="$_step == 1">"#),
+        "the step without samples is not selectable"
+    );
     let name = job.find(r#"<span class="step-name">Unit tests"#).unwrap();
     let focus = r#"data-on:focus="$_step = "#;
     let enter = job[..name].rfind(focus).unwrap() + focus.len();
@@ -513,12 +543,17 @@ async fn a_step_marks_its_own_stretch_of_the_memory_and_cpu_charts() {
         .parse()
         .unwrap();
     assert_eq!(number, 6, "Unit tests is the sixth step");
-    let bands = job
-        .match_indices(&format!(r#"data-class:on="$_step == {number}""#))
-        .count();
+    #[allow(clippy::cast_precision_loss, reason = "test times are far below 2^52")]
+    let share = |at: u64| (at - start) as f64 / (end - start) as f64 * 100.0;
+    let left = share(from);
+    let stretch = format!(
+        r#"data-class:on="$_step == {number}" style="--left: {left:.2}%; --width: {:.2}%""#,
+        share(to) - left
+    );
     assert_eq!(
-        bands, 2,
-        "the step has a band on the memory and on the CPU chart"
+        job.matches(&stretch).count(),
+        2,
+        "the step's band on the memory and on the CPU chart spans its own start and end"
     );
 }
 
