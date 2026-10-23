@@ -102,10 +102,23 @@ pub struct Caches {
     /// layers become the profile's new snapshot.
     #[serde(default = "default_reseed_at")]
     pub reseed_at: ByteSize,
+    /// A reseed that would make a profile's snapshot larger than this starts it over from slot 1's changes alone,
+    /// or from the image when those are larger too.
+    #[serde(default = "default_snapshot_max")]
+    pub snapshot_max: ByteSize,
 }
 
 fn default_reseed_at() -> ByteSize {
     ByteSize(2 << 30)
+}
+
+/// Above the 8.7G a profile running Flutter and Android builds needs: its Flutter SDK, NDK and Gradle caches.
+fn default_snapshot_max() -> ByteSize {
+    ByteSize(10 << 30)
+}
+
+fn default_mirror_max_size() -> ByteSize {
+    ByteSize(10 << 30)
 }
 
 /// The Docker Hub pull-through mirror shared by all runners.
@@ -121,6 +134,9 @@ pub struct Mirror {
     /// How long content not pulled again is kept.
     #[serde(deserialize_with = "duration")]
     pub ttl: Duration,
+    /// Its storage is emptied above this size when no job runs.
+    #[serde(default = "default_mirror_max_size")]
+    pub max_size: ByteSize,
 }
 
 /// A size limit on a shared cache.
@@ -130,6 +146,10 @@ pub struct CacheLimit {
     /// The cache is emptied above this size when no job runs.
     pub max_size: ByteSize,
 }
+
+/// Where runnerd's release workflow publishes the runner images, one tag per stage and version, such as
+/// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.7`.
+pub const PUBLISHED_RUNNER: &str = "ghcr.io/ayagmar/runnerd-runner";
 
 /// A runner image with its limits; every job of the profile gets one container with these limits.
 #[derive(Debug, Clone, Deserialize)]

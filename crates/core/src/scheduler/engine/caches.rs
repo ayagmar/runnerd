@@ -1,6 +1,6 @@
-//! Cache upkeep: reseeds idle profiles, stops the mirror and empties the shared caches over their limit when no
-//! runner runs, and counts what the mirror served each runner. Reseeds and cache checks run as background tasks
-//! the tick collects; it must not start or stop runners.
+//! Cache upkeep: reseeds idle profiles, stops the mirror and empties the shared caches and the mirror's storage
+//! over their limit when no runner runs, and counts what the mirror served each runner. Reseeds and cache checks
+//! run as background tasks the tick collects; it must not start or stop runners.
 
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
@@ -85,8 +85,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let docker = self.docker.clone();
             let names = self.names.clone();
             let caches = self.config.caches.clone();
+            let mirror = if self.mirror_up {
+                cache::Mirror::Up
+            } else {
+                cache::Mirror::Down
+            };
             self.trim = Some(tokio::spawn(async move {
-                cache::trim_shared(&*docker, &names, &caches).await
+                cache::trim_shared(&*docker, &names, &caches, mirror).await
             }));
         }
     }
@@ -107,6 +112,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         } else {
             self.config.caches.reseed_at
         };
+        let max_size = self.config.caches.snapshot_max;
         let isolation = self.isolation;
         let profile_name = name.clone();
         let task = tokio::spawn(async move {
@@ -121,6 +127,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     cpus,
                     memory,
                     min_changes,
+                    max_size,
                     isolation,
                 },
             )

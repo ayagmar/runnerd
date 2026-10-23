@@ -33,7 +33,7 @@ pub use self::control::{
     Command, Commands, Commit, Control, ControlError, RunningJobs, RunningSlots, Shutdown, Target,
 };
 use self::history::{Closing, Found};
-use self::images::ImageState;
+use self::images::Images;
 pub use self::records::RecordSelection;
 use super::SlotRef;
 use crate::admission::Key;
@@ -245,8 +245,8 @@ pub struct Engine<G = Github, D = Docker> {
     slots: BTreeMap<String, Vec<Option<Occupant>>>,
     repositories: BTreeMap<String, RepositoryState>,
     reseeds: BTreeMap<String, JoinHandle<Result<String, docker::Error>>>,
-    /// The pulled images of the config's profiles, by reference.
-    images: BTreeMap<String, ImageState>,
+    /// The pulled images of the config's profiles, and the removal of those no profile runs.
+    images: Images,
     /// The memory cap each running reseed's container started with, which a reload does not change.
     reseed_memory: BTreeMap<String, u64>,
     /// Profiles the API asked to reseed: they start nothing until their slots are free and the reseed ran.
@@ -367,7 +367,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slots,
             repositories,
             reseeds: BTreeMap::new(),
-            images: BTreeMap::new(),
+            images: Images::new(),
             reseed_memory: BTreeMap::new(),
             reseed_requested: BTreeSet::new(),
             retired: BTreeMap::new(),

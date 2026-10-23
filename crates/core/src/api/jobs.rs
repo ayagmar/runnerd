@@ -354,7 +354,7 @@ pub struct CacheVolume {
     pub kind: CacheKind,
     /// Its size at `measured_at`.
     pub bytes: u64,
-    /// The size above which runnerd empties it, if it has one.
+    /// The size above which runnerd empties it, or for a snapshot starts it over at its next reseed, if it has one.
     pub limit: Option<u64>,
 }
 

@@ -58,9 +58,9 @@ A slot is one concurrent job of a profile. Each job gets a new container, but th
 |---|---|
 | the slot's Docker images, `~/.cache`, tool cache, Android SDK | per slot, between jobs |
 | cargo's credentials and config, Gradle's `gradle.properties` in `~/.cache` | never: no later job or record shell sees them, even from an older snapshot |
-| the profile's snapshot | replaced by slot 1's changes once they reach `reseed_at` (`[caches]`, default `2G`) and the profile is idle |
+| the profile's snapshot | replaced by slot 1's changes once they reach `reseed_at` (`[caches]`, default `2G`) and the profile is idle; above `snapshot_max` (default `10G`) it starts over from slot 1's changes alone |
 | pnpm store, Maven repository | shared by all slots, emptied above `max_size` when no job runs |
-| Docker Hub mirror | runs while any runner does |
+| Docker Hub mirror | runs while any runner does; its storage is emptied above `mirror.max_size` (default `10G`) when no job runs |
 
 ## Records of failed jobs
 

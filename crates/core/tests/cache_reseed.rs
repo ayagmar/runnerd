@@ -131,7 +131,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     }
 
     let image = image();
-    let reseed = |min_changes: &str| Reseed {
+    let reseed = |min_changes: &str, max_size: &str| Reseed {
         names,
         profile: PROFILE,
         image: &image,
@@ -144,15 +144,18 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
         min_changes: min_changes
             .parse()
             .unwrap_or(runnerd_core::config::ByteSize(0)),
+        max_size: max_size
+            .parse()
+            .unwrap_or(runnerd_core::config::ByteSize(0)),
         isolation: &Sysbox,
     };
-    let output = cache::reseed(docker, &reseed("1T"))
+    let output = cache::reseed(docker, &reseed("1T", "1T"))
         .await
         .map_err(|e| e.to_string())?;
     if !output.contains("not seeded") {
         return Err(format!("seeded below the threshold:\n{output}"));
     }
-    let output = cache::reseed(docker, &reseed("0K"))
+    let output = cache::reseed(docker, &reseed("0K", "1T"))
         .await
         .map_err(|e| e.to_string())?;
     println!("{output}");
@@ -193,7 +196,116 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
         ));
     }
 
-    old_snapshot(docker, names, &reseed("1T")).await
+    old_snapshot(docker, names, &reseed("1T", "1T")).await?;
+    capped_snapshot(docker, names, &reseed("0K", "3M")).await
+}
+
+/// A snapshot that would outgrow its limit starts over from slot 1's changes alone, which drops what only the old
+/// snapshot held; when slot 1's changes outgrow it too, from the image alone.
+async fn capped_snapshot(
+    docker: &Docker,
+    names: &Names,
+    capped: &Reseed<'_>,
+) -> Result<(), String> {
+    let write = |file: &str, megabytes: u32| {
+        format!(
+            "setpriv --reuid=runner --regid=runner --init-groups -- \
+             head -c {megabytes}M /dev/zero > /home/runner/.cache/{file}"
+        )
+    };
+    let (code, output) = run(
+        docker,
+        names,
+        1,
+        Snapshot::Writable,
+        "",
+        "mkdir -p /base/cache && head -c 2M /dev/zero > /base/cache/superseded",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "planting a large snapshot exited {code}:\n{output}"
+        ));
+    }
+    let (code, output) = run_in_slot(docker, names, 1, &write("current", 2)).await?;
+    if code != 0 {
+        return Err(format!("the job in slot 1 exited {code}:\n{output}"));
+    }
+    let output = cache::reseed(docker, capped)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("{output}");
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        2,
+        "test -f /base/cache/current && test ! -e /base/cache/superseded \
+         && test ! -e /base/cache/runnerd-test",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "the snapshot over its limit did not start over from slot 1's changes (exit {code}):\n{output}"
+        ));
+    }
+
+    let (code, output) = run_in_slot(docker, names, 1, &write("huge", 4)).await?;
+    if code != 0 {
+        return Err(format!("the job in slot 1 exited {code}:\n{output}"));
+    }
+    let output = cache::reseed(docker, capped)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("{output}");
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        2,
+        "test ! -e /base/cache && test ! -e /home/runner/.cache/huge",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "slot 1's changes over the limit did not start the snapshot over from the image (exit {code}):\n{output}"
+        ));
+    }
+
+    // Slot 1 has no changes to a layer, slot 2 has some to the snapshot's: starting over drops both.
+    let (code, output) = run(
+        docker,
+        names,
+        2,
+        Snapshot::Writable,
+        "",
+        "mkdir -p /base/cache && head -c 4M /dev/zero > /base/cache/superseded",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "planting a large snapshot exited {code}:\n{output}"
+        ));
+    }
+    let (code, output) = run_in_slot(docker, names, 2, &write("slot-2", 1)).await?;
+    if code != 0 {
+        return Err(format!("the job in slot 2 exited {code}:\n{output}"));
+    }
+    let output = cache::reseed(docker, capped)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("{output}");
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        2,
+        "test ! -e /base/cache && test ! -e /home/runner/.cache/slot-2",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "slot 2 kept changes to a snapshot layer that started over (exit {code}):\n{output}"
+        ));
+    }
+    Ok(())
 }
 
 /// After an upgrade: a snapshot seeded before the image dropped credentials still holds one, and stays, as the

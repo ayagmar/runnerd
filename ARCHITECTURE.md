@@ -77,7 +77,8 @@ client → transport → principal → handler → core
    ([ADR 0026](docs/adr/0026-commands-answered-while-a-tick-waits-for-github.md)).
    `engine.rs` holds `Engine`'s state, its construction and its loop; each submodule of
    [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
-   and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images),
+   and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images and removing the published runner images none runs,
+   [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
    `caches` (reseeds, the mirror, the shared caches), `records` (records of failed jobs and the shells in them),
    `history` (what the store records), `admission` (what a new runner reserves), `control` (`Control` and the
    commands) and `status` (what it publishes).
@@ -114,7 +115,8 @@ queued → slot → container → removed
    runner's `_diag/pages`, CPU and memory from the container's cgroup every 2 s (`observe::metrics`), and the
    mirror's bytes from its access log (`observe::mirror`). The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`).
-6. When a profile is idle after its slot 1 ran a job, `cache::reseed` makes slot 1's layers the profile's snapshot.
+6. When a profile is idle after its slot 1 ran a job, `cache::reseed` makes slot 1's layers the profile's snapshot,
+   which starts over above `[caches] snapshot_max` ([ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md)).
 
 On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`) and schedules
 nothing until Docker has listed them.
