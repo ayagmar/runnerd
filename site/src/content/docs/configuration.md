@@ -137,31 +137,32 @@ slots = 8       # how many run at once; 8 × 7G may exceed MemoryMax
 ```
 
 - A job is predicted from its own runs (repository, workflow and job name): with `[sizing] min_jobs` of them, their p95 peak plus `[sizing] margin`, rounded up to 256M.
-- With fewer, the larger of its profile's p95 and its own largest peak, each plus the margin. With too few runs of the profile as well, the cap.
-- A run that peaked within 5% of its cap, or in which the kernel killed a process for memory, puts its job back on its cap for 7 days.
-- A runner may take any of its repository's queued jobs, so it reserves the largest of their predictions.
-- Nothing starts while the slice uses 90% of `MemoryMax` or more. Without a sample of the slice from the last few seconds, runners reserve their caps.
+- With fewer, the larger of its profile's p95 and its own largest peak, plus the margin. A job with no runs yet gets its profile's largest peak plus the margin, since a new workflow may be the heaviest. With too few runs of the profile as well, the cap.
+- A run that peaked within 5% of its cap, or in which the kernel killed a process for memory, puts its job back on its cap for 7 days, cancelled runs included. A run that went past what it reserved has its job reserve its largest peak for 7 days.
+- A runner may take any of its repository's queued jobs, so it reserves the largest of their predictions, and more if a heavier job queues while it waits. Once its job is known, it reserves that job's prediction.
+- A running runner counts at the larger of what it reserved and what it last used, so a job past its prediction leaves less for the next starts.
+- Nothing starts while the slice uses 90% of `MemoryMax` or more. Without a sample of the slice from the last few seconds, runners reserve their caps. Switching back to `admission = "caps"` counts every running runner at its cap.
 - The check asks only that one runner of each profile, with the mirror, fits `MemoryMax`, and that the slice has one.
 
-The caps still stop a container that goes over them. What measured admission trades for the shorter waits is that several jobs going over their predictions at once can fill the slice, which the kernel then answers by reclaiming page cache and killing a process inside it. Each job's record says how its runner was admitted (`runnerctl job <id>`, the dashboard's job page).
+The caps still stop a container that goes over them. What measured admission trades for the shorter waits is that several jobs going over their predictions at once can fill the slice, which the kernel then answers by reclaiming page cache and killing a process inside it, a runner's before the mirror's. Each job's record says what its runner reserved and why (`runnerctl job <id>`, the dashboard's job page).
 
 Try it on your own history before turning it on. `runnerd simulate` replays the last 30 days through both policies, each job queued when it was and running as long as it ran, and changes nothing:
 
 ```text
 $ runnerd simulate --memory-max 33G --slots node=8
 1555 finished jobs replayed against a MemoryMax of 33G, each queued when it was and running as long as it ran.
-PEAKS is every running job's peak added up at the busiest moment, with the mirror: more than the slice ever held.
+PEAKS is every running job's peak added up at the busiest moment, with the mirror: more than the slice ever held, but a lower bound on what the daemon could overlap. The replay holds each running job at its peak, where the daemon admits against what jobs use while they warm up, and it leaves out start latency, seeds, shells and cancelled jobs.
 
 POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD
 caps      jvm 2, node 2                 0s    20m56s    55m35s     3m21s       4   21.45G       0     0
 caps*     jvm 3, node 8                 0s    13m34s    31m55s     1m41s       4   21.85G       0     0
-measured  jvm 3, node 8                 0s    10m18s    28m38s     1m07s       9   26.78G       2     0
+measured  jvm 3, node 8                 0s    10m37s    28m38s     1m09s       9   26.78G       2     0
 
 * more slots than the caps fit in MemoryMax, which the config check refuses with admission = "caps".
 UNDER: jobs that peaked above what admission reserved for them. HELD: times the high-water mark held back a job the predictions had room for.
 ```
 
-Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--days` sets the window. A `PEAKS` over `MemoryMax` is marked `!`.
+Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--days` sets the window. A `PEAKS` over `MemoryMax` is marked `!`. A `PEAKS` well under `MemoryMax` is what the replay shows, not a promise: leave the daemon room for what it does not model.
 
 ## The budget check
 

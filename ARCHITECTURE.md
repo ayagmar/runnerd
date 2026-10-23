@@ -137,11 +137,13 @@ nothing until Docker has listed them.
   ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)).
 - What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`. Under
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
-  with the mirror, to `MemoryMax`. Under `admission = "measured"` a runner reserves its predicted peak, at most its
-  cap; the config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing starts while
-  the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample, after a run of
-  its job at its cap or killed for memory, or when a restart adopted it
-  ([ADR 0033](docs/adr/0033-measured-admission.md)). Each runner's record keeps how it was admitted.
+  with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under
+  `admission = "measured"` a runner reserves its predicted peak, at most its cap, and counts at the larger of that
+  and its last sampled memory; the reservation follows its repository's queue until its job is known, then that
+  job's prediction. The config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing
+  starts while the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample,
+  after a run of its job at its cap or killed for memory, or when a restart adopted it
+  ([ADR 0033](docs/adr/0033-measured-admission.md)). Each runner's record keeps what it reserves and why.
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the
