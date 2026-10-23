@@ -1,29 +1,33 @@
-# 0034. Desktop app: a tray client and the installable dashboard, not a GUI toolkit yet
+# 0034. Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit
 
 Status: **Proposed** (2026-10-23). If accepted, it supersedes [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md).
 
 ## Context
 
 ADR 0004 picked GPUI for the desktop app before anything was built. The owner asked whether GPUI is the best choice
-before plan 008 starts. What the app has to respect, from ARCHITECTURE.md and the gate:
+before plan 008 starts, and runnerd is for every Linux user, not one desktop: GNOME, KDE, XFCE, Cinnamon, wlroots
+compositors, bare X11 window managers, and home servers and VMs with no desktop at all. What any answer has to respect,
+from ARCHITECTURE.md and the gate:
 
-- It is a client ([0020](0020-dashboard-is-an-api-client-on-loopback.md), [0030](0030-one-socket-client-in-core.md)):
-  `runnerd_core::client` over the socket, no `bollard`, `reqwest` or core's `host`. `check-boundaries.sh` runs
-  `cargo tree` on the host target.
+- A desktop app is a client ([0020](0020-dashboard-is-an-api-client-on-loopback.md),
+  [0030](0030-one-socket-client-in-core.md)): `runnerd_core::client` over the socket, no `bollard`, `reqwest` or
+  core's `host`. `check-boundaries.sh` runs `cargo tree` on the host target.
 - `cargo deny check` fails on any unmaintained or unsound advisory, on licenses outside the allow list, and on any
   git source ([0009](0009-newest-stable-and-locked-dependencies.md), `deny.toml`).
 - Releases are cargo-dist archives for `x86_64-` and `aarch64-unknown-linux-musl`, static, no installers.
-- Linux first ([0011](0011-linux-and-github-only-for-v1.md)). The owner runs niri with the Noctalia shell, which
-  provides the StatusNotifierItem watcher (tray) and the notification daemon; the default browser is Helium
-  (Chromium).
+- Linux first ([0011](0011-linux-and-github-only-for-v1.md)).
 - The dashboard (axum, maud, Datastar) already shows every view plan 008 lists: overview, live jobs, history, logs,
-  caches, the config editor, sizing advice. The TUI shows most of them in a terminal.
+  caches, the config editor, sizing advice. The TUI shows most of them in a terminal. Both listen only on the
+  machine runnerd runs on.
+- The daemon already announces every finished job as a durable `job.finished` event with an ID a reader can resume
+  from (ARCHITECTURE.md, Invariants).
 
-What a desktop app adds over a browser tab is what a tab can't do: be there when no tab is open (tray status),
-tell the owner when a job fails (a notification, even with the dashboard closed), act in one click (pause, resume,
-open the dashboard, open a shell in a failed job's record), and start with the session.
+What a desktop app would add over a browser tab is what a tab can't do: tell the user when a job fails even with the
+dashboard closed, be there when no tab is open (tray status), act in one click (pause, resume, open the dashboard,
+open a shell in a failed job's record), and start with the session. The first of these matters most and is also the
+one a machine without a desktop needs.
 
-## Options
+## Options for a desktop app
 
 Researched 2026-10-23 from crates.io, the projects' repositories and the RustSec advisory database (local copy of
 that day). Spike numbers are from release builds on the owner's machine (32 cores, Rust 1.99,
@@ -57,29 +61,84 @@ Sources: crates.io pages of [gpui](https://crates.io/crates/gpui), [gpui-pre](ht
 [Chrome's installability criteria](https://developer.chrome.com/blog/update-install-criteria),
 [Firefox web apps, Windows only](https://www.omgubuntu.co.uk/2025/09/firefox-143-release-key-changes).
 
+## Where each piece works
+
+What each environment offers out of the box, from the sources below. "Tray" is the StatusNotifierItem protocol
+(ksni, libappindicator and Tauri's `tray-icon` all speak it); "notifications" is the freedesktop notification
+service on the session bus.
+
+| Environment | Tray (SNI host) | Desktop notifications | Installed dashboard: Chromium-based / Firefox | Native window: GPUI (Vulkan or GL) / Tauri 2 (WebKitGTK) | Daemon webhook (ntfy and others) |
+|---|---|---|---|---|---|
+| GNOME, stock (Fedora Workstation, Debian) | no: needs the AppIndicator extension, which GNOME declined to ship ([gnome-shell#1014](https://gitlab.gnome.org/GNOME/gnome-shell/issues/1014)); Debian's `gnome-core` and Fedora's default install leave it out | yes, GNOME Shell | yes / no | yes / yes | yes |
+| Ubuntu GNOME | yes: `gnome-shell-extension-appindicator` is in Ubuntu's desktop seed ([noble](https://git.launchpad.net/~ubuntu-core-dev/ubuntu-seeds/+git/ubuntu/tree/desktop-minimal?h=noble)) | yes | yes / no | yes / yes | yes |
+| KDE Plasma | yes: the protocol is KDE's ([spec](https://www.freedesktop.org/wiki/Specifications/StatusNotifierItem/)) | yes | yes / no | yes / yes | yes |
+| XFCE | yes, since 4.16: the panel's Status Tray plugin ([Xfce docs](https://docs.xfce.org/panel-plugins/xfce4-statusnotifier-plugin/start)) | yes, `xfce4-notifyd` | yes / no | yes / yes | yes |
+| Cinnamon | yes: `xapp-sn-watcher` ([xapps#89](https://github.com/linuxmint/xapps/pull/89)) | yes | yes / no | yes / yes | yes |
+| wlroots compositors, niri, Hyprland with waybar or a shell | if the bar has a tray: waybar's `tray` module is SNI ([source](https://github.com/Alexays/Waybar/tree/master/src/modules/sni)), still marked beta; Noctalia has one | only with a daemon the user runs: mako, dunst, swaync, the shell's own | yes / no | yes / yes | yes |
+| X11 window managers without a bar (i3 without one, Openbox, …) | no | only with a daemon such as dunst | yes / no | yes / yes | yes |
+| Headless: home servers, VMs | no | no | no: the dashboard is loopback-only, so only through an SSH tunnel (not tried) | no | yes |
+
+Sources for the other columns: [the notification spec](https://specifications.freedesktop.org/notification-spec/latest/);
+[Chrome's installability criteria](https://developer.chrome.com/blog/update-install-criteria) (install from the menu
+with a manifest alone; `http://127.0.0.1` is a secure context); Firefox shipped web apps only on Windows, in
+[143](https://www.omgubuntu.co.uk/2025/09/firefox-143-release-key-changes), and this ADR found no Linux release as
+of 158 (2026-10-13). GPUI renders through wgpu's Vulkan or GLES backends and falls back to llvmpipe on the CPU
+([Zed on Linux](https://zed.dev/docs/linux), [zed#66030](https://github.com/zed-industries/zed/issues/66030));
+WebKitGTK is packaged by every distribution above, and Tauri's Linux issues include
+[#9304](https://github.com/tauri-apps/tauri/issues/9304) (NVIDIA). ntfy has
+[Android and iOS apps](https://docs.ntfy.sh/subscribe/phone/).
+
+The only piece that works in every row is a notification the daemon sends over the network. The installed dashboard
+works on every desktop with a Chromium-based browser. The tray works on most desktops but not on stock GNOME, the
+most common one, nor on bare window managers. A native window works on every desktop but adds the least.
+
+## Option: failure notifications sent by the daemon
+
+The daemon posts to URLs the config names when a job fails (and, if the user asks, when one is lost or a runner
+cannot start). It already reads the durable `job.finished` events, so a notifier is another reader of the store's
+events, off the engine's loop, that remembers the last event it delivered and retries, so a restart neither drops nor
+repeats a failure. It lives in the daemon, which already builds `reqwest` for GitHub; clients stay as they are.
+
+- **A generic webhook**: a JSON body with the job, repository, workflow, conclusion, the record if one was kept, and
+  a link to the run on GitHub. Anything that takes JSON can read it.
+- **ntfy through it**: ntfy turns a JSON body into a notification with its
+  [message templates](https://docs.ntfy.sh/publish/#message-templating) (`X-Template`), or takes plain text with
+  `Title`, `Priority` and `Tags` headers. Self-hosted ntfy or ntfy.sh reaches phones and every desktop with the ntfy
+  app or a browser tab. Gotify, Apprise, Discord and Slack take a JSON body too; a `format` per URL covers the ones
+  whose bodies differ, added when someone needs one.
+- The URL and any token in a header are secrets: they get the same handling as the GitHub token (no log line,
+  `Debug` output or error shows them). It is opt-in, since job and repository names leave the machine.
+
+Cost: a `[notify]` section in the config, the notifier and its tests with a fake HTTP endpoint. No new dependency;
+nothing changes on the client side.
+
+
 ## Recommendation
 
-No GUI toolkit for v1. The desktop app is two small pieces:
+No GUI toolkit. In order of how many users each serves:
 
-1. **A tray client**, `crates/desktop`, with ksni (StatusNotifierItem) and notify-rust, both over zbus. It follows
-   `/v1/events` through `runnerd_core::client` and the reducer `runnerctl watch` uses, shows running jobs and the
-   budget in the tray, offers pause and resume, "open dashboard" (the login URL from `runnerd.web`, through
-   `xdg-open`) and, on a failed job, a notification with "open record". It autostarts with an XDG autostart entry or a
-   systemd user unit.
+1. **Failure notifications from the daemon**: a generic webhook, with ntfy through it. It is the only piece that works
+   on every row of the matrix, headless servers and phones included, and it needs no client at all.
 2. **The dashboard as an installable app**: a web app manifest and icons in `crates/web`, so Chromium-based browsers
-   install it as a window of its own. `http://127.0.0.1` is a secure context, and Chrome installs from the menu with
-   a manifest alone.
+   install it as a window of its own on every desktop. Firefox users keep a tab. A few files, no dependency.
+3. **An optional tray client**, `crates/desktop`, with ksni and notify-rust over zbus: running jobs and the budget,
+   pause and resume, "open dashboard" (the login URL from `runnerd.web`, through `xdg-open`), and desktop
+   notifications of failures for users without a webhook. It follows `/v1/events` through `runnerd_core::client` and
+   the reducer `runnerctl watch` uses. It degrades: with no StatusNotifierItem host it only sends notifications, with
+   no notification service it logs once and waits, and it never blocks or changes the daemon.
 
 Why:
 
-- It reuses everything: the dashboard keeps being the one set of views, and the tray reuses the client and reducer
-  the TUI already tests. Every toolkit option rewrites all the views in a second UI that has to track the API.
-- It is what a tab can't do. A native window with the same views adds little over the installed dashboard.
-- It fits the release as is: likely a static musl binary for cargo-dist; GPUI, Tauri and the others need glibc,
-  system GPU or WebKit libraries, and an AppImage, deb or Flatpak next to cargo-dist.
-- It is small: 4.4 MiB and 83 crates against GPUI's 26 MiB, 441 crates and six git sources.
-- Its `cargo deny` failures are a week old and temporary (zbus 6 came out on 2026-10-16), and one license line
-  (`Unlicense`). GPUI's and Tauri's are structural.
+- Portability: the order follows the matrix. A tray first would leave out stock GNOME, bare window managers and every
+  server; a native window would leave out every server and add the least on desktops.
+- Reuse: the dashboard stays the one set of views, and the tray reuses the client and reducer the TUI already tests.
+  Every toolkit option rewrites all the views in a second UI that has to track the API.
+- Release fit: the notifier ships inside `runnerd`, the manifest inside `runnerd-web`; the tray is likely a static
+  musl binary for cargo-dist. GPUI, Tauri and the others need glibc, GPU or WebKit libraries, and an AppImage, deb or
+  Flatpak next to cargo-dist.
+- Size: the tray spike is 4.4 MiB and 83 crates against GPUI's 26 MiB, 441 crates and six git sources. Its
+  `cargo deny` failures are a week old and temporary (zbus 6 came out on 2026-10-16), plus one license line
+  (`Unlicense`); GPUI's and Tauri's are structural.
 
 Between the toolkits, if a native window is wanted later: GPUI renders well on niri and has AccessKit and
 notifications, but means a git pin and three new licenses in `deny.toml`; Tauri 2 reuses the dashboard but sits on
@@ -88,27 +147,27 @@ not like the dashboard.
 
 ## What would change it
 
-- The owner wants views or interactions the dashboard can't offer in a browser window: then a toolkit, GPUI first.
+- Users want views or interactions the dashboard can't offer in a browser window: then a toolkit, GPUI first.
 - GPUI publishes `gpui_platform` and its other crates to crates.io with tagged releases: the git-pin cost goes.
 - Tauri ships a stable CEF runtime or moves Linux to GTK 4: the deny failures go and it becomes the cheap way to a
   native window around the dashboard.
+- Firefox ships web apps on Linux: the installed dashboard covers every desktop.
 - ksni or notify-rust don't move to zbus 6 within a few weeks: talk D-Bus directly with zbus 6 for the two
   interfaces, or ignore the two advisories with a reason until they do.
-- A target desktop has no StatusNotifierItem host (GNOME without the AppIndicator extension): notifications still
-  work, the tray doesn't.
+- GNOME ships a tray: the tray covers every desktop and could move up the list.
 
 ## Consequences
 
-- Plan 008 is rewritten: the tray client, the manifest, autostart. No GPUI spike, no `deny.toml` git source.
-- `crates/desktop` is a client like the others; `check-boundaries.sh` covers it unchanged.
-- `deny.toml` gains `Unlicense` (ksni), with a comment.
-- The release gains one Linux binary, built like `runnerctl` if the musl build works; that is the first thing to try.
-- Firefox can't install the dashboard as an app on Linux (Firefox 143 added web apps on Windows only); there it stays a
-  tab, and the tray's "open dashboard" opens it.
+- Plan 008 is rewritten as three pieces, in the order above. No GPUI spike, no `deny.toml` git source.
+- The daemon gains an outgoing HTTP path other than GitHub's; its URLs are handled as secrets.
+- `crates/desktop`, if built, is a client like the others; `check-boundaries.sh` covers it unchanged, and
+  `deny.toml` gains `Unlicense` (ksni), with a comment.
+- The release gains at most one Linux binary, the tray, built like `runnerctl` if the musl build works.
+- On a server, a failure reaches the user only through a webhook; without one they see it in the dashboard or TUI.
 
 ## Questions for the owner
 
-- Is a tray and notifications what you want from "the desktop app", or do you want a native window with the views?
-  If the window, GPUI or Tauri is the next choice, and the table above is the comparison.
-- A separate binary (`runnerd-desktop`, autostarted with the session) or a `runnerctl tray` subcommand behind a
-  feature, as the TUI is?
+- Which events notify: failed jobs only, or also lost jobs, runners that could not start, and the daemon stopping?
+- Which formats ship first: the generic JSON and ntfy, or also Discord or Slack bodies?
+- The tray: a separate binary (`runnerd-desktop`, autostarted with the session) or a `runnerctl tray` subcommand
+  behind a feature, as the TUI is? And in the first release with the other two, or later?
