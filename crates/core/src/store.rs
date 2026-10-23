@@ -18,6 +18,7 @@ use tracing::warn;
 use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
+use crate::sizing;
 use crate::sync::lock;
 
 mod prune;
@@ -563,6 +564,11 @@ impl Store {
         self.read(move |db| read::stats(db, &query, now)).await
     }
 
+    /// What sizing reads: the finished jobs queued at or after `since` (ms) and the runners since.
+    pub async fn sizing(&self, since: u64) -> Result<sizing::History, StoreError> {
+        self.read(move |db| read::sizing(db, since)).await
+    }
+
     /// The last measurement of every volume, with its time (seconds), by name.
     pub async fn cache_sizes_now(&self) -> Result<Measured, StoreError> {
         self.read(read::latest_cache_sizes).await
@@ -593,6 +599,26 @@ impl Store {
     pub async fn mirror_log_until(&self) -> Result<MirrorPosition, StoreError> {
         self.read(read::mirror_log_until).await
     }
+}
+
+/// What sizing reads from the database at `path`, opened read-only and not migrated, as `runnerd doctor` reads it
+/// while no daemon runs; `None` when there is no database yet.
+pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, StoreError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
+    db.busy_timeout(Duration::from_secs(5))?;
+    let found: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let supported = u32::try_from(MIGRATIONS.len()).unwrap_or(u32::MAX);
+    if found > supported {
+        return Err(StoreError::Newer { found, supported });
+    }
+    // Version 2 added the runners' caps sizing reads; a database before it has no job of a runner with one.
+    if found < 2 {
+        return Ok(Some(sizing::History::default()));
+    }
+    Ok(Some(read::sizing(&db, since)?))
 }
 
 /// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error.

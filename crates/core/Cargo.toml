@@ -55,6 +55,7 @@ tar = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, optional = true, features = ["macros", "rt", "sync", "time"] }
 toml.workspace = true
+toml_edit.workspace = true
 tracing = { workspace = true, optional = true }
 
 [dev-dependencies]

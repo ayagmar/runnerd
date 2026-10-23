@@ -659,3 +659,55 @@ async fn a_repository_event_that_does_not_read_fails_the_startup_read() {
         "an incomplete list would keep a removed repository in resuming clients"
     );
 }
+
+#[tokio::test]
+async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    for (id, name) in [(1, "r1"), (2, "r2")] {
+        store.queued("o/r", &queued(id));
+        store.runner_started(runner(name, 1_000_100));
+        store.claimed(id, 10, name, 1_000_200);
+    }
+    let memory = |runner: &str, at, memory| SampleRecord {
+        memory,
+        ..sample(runner, at, 0, 0)
+    };
+    store.samples(vec![
+        memory("r1", 1_000_250, 1 << 30),
+        memory("r1", 1_000_300, 3 << 30),
+        memory("r2", 1_000_300, 2 << 30),
+    ]);
+    store.lost(1, 1_000_400);
+    store.details(crate::github::JobDetails {
+        id: 2,
+        run_id: 10,
+        run_attempt: 1,
+        name: "job 2".to_owned(),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some("cancelled".to_owned()),
+        started_at: None,
+        completed_at: None,
+        runner_name: Some("r2".to_owned()),
+        steps: Vec::new(),
+    });
+    store.runner_removed("r2", 1_000_500);
+    store.flush().await;
+    let history = store.sizing(0).await.unwrap();
+    let peaks: Vec<_> = history
+        .jobs
+        .iter()
+        .map(|job| (job.name.as_str(), job.memory_peak, job.memory_cap))
+        .collect();
+    assert_eq!(peaks, [("job 1", 3 << 30, Some(4 << 30))]);
+    assert_eq!(history.runners.len(), 2, "both runners held a slot");
+    // `runnerd doctor` reads the same without a daemon.
+    assert_eq!(super::sizing_at(&path, 0).unwrap(), Some(history));
+    assert_eq!(super::sizing_at(&dir.0.join("none.db"), 0).unwrap(), None);
+}

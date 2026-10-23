@@ -282,3 +282,44 @@ fn example_config_pulls_published_images_no_older_than_this_release() {
         );
     }
 }
+
+#[test]
+fn a_resized_profile_keeps_the_rest_of_the_file_as_written() {
+    let text = MINIMAL.replace(
+        "memory = \"4G\"\nslots = 1",
+        "memory = \"4G\" # peaked at 3.1G\nslots = 1",
+    );
+    let resized = super::resize_profile(
+        &format!("# the app's runners\n{text}"),
+        "app",
+        crate::api::Resize {
+            memory: 2560 << 20,
+            slots: 3,
+        },
+    )
+    .unwrap();
+    assert!(resized.starts_with("# the app's runners\n"), "{resized}");
+    assert!(
+        resized.contains("memory = \"2.5G\" # peaked at 3.1G\nslots = 3\n"),
+        "{resized}"
+    );
+    let profile = &Config::parse(&resized).unwrap().profiles["app"];
+    assert_eq!((profile.memory, profile.slots), (size("2.5G"), 3));
+}
+
+#[test]
+fn resizing_a_profile_the_config_lacks_names_it() {
+    let error = super::resize_profile(
+        MINIMAL,
+        "jvm",
+        crate::api::Resize {
+            memory: 1 << 30,
+            slots: 1,
+        },
+    )
+    .unwrap_err();
+    assert_eq!(
+        error.to_string(),
+        "the config has no profile \"jvm\" under [profiles]"
+    );
+}
