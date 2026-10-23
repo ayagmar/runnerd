@@ -23,13 +23,19 @@ pub enum AdmissionPolicy {
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum Basis {
-    /// The job's own runs, at least `[sizing] min_jobs` of them: their p95 peak plus the margin.
+    /// The job's own runs, plus the margin: with `[sizing] min_jobs` of them, their p95 peak; with fewer, their
+    /// largest, once `admission::OWN_RUNS` of them succeeded, its profile has `min_jobs` runs and no other copy of
+    /// the job is queued or running.
     Job {
         /// How many.
         runs: u64,
+        /// Which of their peaks. Absent on the wire for the p95, so a reader without the field reads it as the
+        /// basis it always was.
+        #[serde(default, skip_serializing_if = "JobPeak::is_p95")]
+        peak: JobPeak,
     },
-    /// Too few runs of the job but enough of its profile: the larger of the profile's p95 peak and the job's own
-    /// largest, plus the margin.
+    /// Too few runs of the job for `Job` but enough of its profile: the larger of the profile's p95 peak and the
+    /// job's own largest, plus the margin.
     Profile {
         /// How many runs of the profile.
         runs: u64,
@@ -54,6 +60,27 @@ pub enum Basis {
     },
     /// The cap: measured admission had no recent sample of the slice's memory to check.
     Unmeasured,
+}
+
+/// Which of a job's own peaks `Basis::Job` goes by.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum JobPeak {
+    /// Their p95.
+    #[default]
+    P95,
+    /// Their largest: fewer than `[sizing] min_jobs` runs.
+    Largest,
+}
+
+impl JobPeak {
+    #[expect(
+        clippy::trivially_copy_pass_by_ref,
+        reason = "serde's skip_serializing_if passes a reference"
+    )]
+    fn is_p95(&self) -> bool {
+        *self == JobPeak::P95
+    }
 }
 
 /// How a job's runner was admitted.
@@ -81,8 +108,19 @@ impl Admission {
         let size = |bytes: u64| ByteSize(bytes).to_string();
         let reserved = size(self.reserved);
         let why = match self.basis {
-            Basis::Job { runs } => {
+            Basis::Job {
+                runs,
+                peak: JobPeak::P95,
+            } => {
                 format!("reserved {reserved}, the p95 peak of {runs} runs of its job + the margin")
+            }
+            Basis::Job {
+                runs,
+                peak: JobPeak::Largest,
+            } => {
+                format!(
+                    "reserved {reserved}, the largest peak of {runs} runs of its job + the margin"
+                )
             }
             Basis::Profile { runs } => format!(
                 "reserved {reserved}, from {runs} runs of its profile: its job had too few of its own"
@@ -120,3 +158,7 @@ impl Admission {
         line
     }
 }
+
+// The wire format is JSON, which only the host and client features read.
+#[cfg(all(test, any(feature = "host", feature = "client")))]
+mod tests;
