@@ -46,14 +46,14 @@ while kill -0 "$runner" 2> /dev/null; do
     status=0
     wait "$runner" || status=$?
 done
-# Nothing of the runner's may write after the scrub: what it left running gets 2 s to end, then TERM, then KILL,
-# within docker stop's 10 s.
-for signal in TERM KILL ''; do
+# Nothing of the runner's may write after the scrub: what it left running (a Gradle daemon) gets TERM, then 2 s to
+# end, then KILL, within docker stop's 10 s.
+if pkill -TERM -u runner 2> /dev/null; then
     for _ in $(seq 10); do
         pgrep -u runner > /dev/null || break
         sleep 0.2
     done
-    if [ -z "$signal" ] || ! pkill "-$signal" -u runner 2> /dev/null; then break; fi
-done
+    pkill -KILL -u runner 2> /dev/null || true
+fi
 runnerd-scrub
 exit "$status"
