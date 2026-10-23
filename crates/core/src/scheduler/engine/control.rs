@@ -632,6 +632,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 "{profile} is reseeding already"
             )));
         }
+        // A shell mounts the snapshot a reseed replaces, and may stay open for hours.
+        if self.shell_profiles().contains(profile) {
+            return Err(ControlError::Conflict(format!(
+                "a shell is open in a record of {profile}, which mounts its snapshot; reseed it once the shell exits"
+            )));
+        }
         info!("{profile}: reseeding once its slots are free");
         self.reseed_requested.insert(profile.to_owned());
         Ok(())

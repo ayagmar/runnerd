@@ -242,6 +242,10 @@ async fn records_past_max_age_and_those_removed_by_hand_go_unless_a_shell_is_ope
             .collect()
     };
     assert_eq!(jobs(&handle), [11, 12], "the record past 7 days went");
+    // The idle tick trimmed the shared caches, which a shell waits for.
+    while engine.trim.as_ref().is_some_and(|trim| !trim.is_finished()) {
+        tokio::task::yield_now().await;
+    }
 
     engine.open_shell(12, SIZE).await.unwrap();
     let refused = engine.remove_records(&RecordSelection::Job(12)).await;
@@ -475,6 +479,11 @@ async fn shells_get_containers_of_their_own_read_only_caches_and_close_after_eig
         refused.to_string().contains("a shell"),
         "a shared cache a shell mounts stays: {refused}"
     );
+    let refused = engine.request_reseed("app").unwrap_err();
+    assert!(
+        matches!(refused, ControlError::Conflict(_)),
+        "a reseed waits for the shell, and says so: {refused}"
+    );
 
     tokio::time::advance(Duration::from_hours(8) + Duration::from_secs(1)).await;
     engine.tick(Shutdown::No).await;
@@ -516,11 +525,28 @@ async fn a_daemon_that_stopped_mid_record_leaves_the_history_consistent() {
     engine.recover().await.unwrap();
 
     let skipped = note(&handle, 1).await.unwrap().skipped.unwrap();
-    assert!(skipped.contains("runnerd stopped"), "{skipped}");
+    assert!(skipped.contains("runnerd was not running"), "{skipped}");
     let made = note(&handle, 9).await.unwrap();
     assert_eq!(made.bytes, Some(1 << 30), "the record found is noted");
     assert!(
         docker.calls().contains(&"remove container-1".to_owned()),
         "the stopped runner goes"
     );
+}
+
+#[tokio::test]
+async fn no_shell_opens_while_the_shared_caches_it_mounts_are_trimmed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60)];
+    let dir = TestDir::new("shell-trim");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+
+    engine.trim = Some(tokio::spawn(std::future::pending()));
+    let refused = engine.open_shell(10, SIZE).await.unwrap_err();
+    assert!(
+        matches!(refused, ControlError::Conflict(_)),
+        "a shell waits for the trim: {refused}"
+    );
+    assert!(engine.records.shells.is_empty(), "no shell is open");
 }

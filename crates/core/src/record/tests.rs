@@ -5,7 +5,7 @@ use std::path::Path;
 use std::process::Command;
 use std::time::Duration;
 
-use super::{banner, expired, failed, make_room, secrets_left};
+use super::{banner, expired, failed, listed, make_room, secrets_left};
 use crate::api::{self, RecordRemoval};
 use crate::config::{ByteSize, Records};
 use crate::testdir::TestDir;
@@ -221,6 +221,16 @@ fn a_record_keeps_no_secret_of_the_runner_or_the_job() {
         config.contains("url = https://github.com/o/app"),
         "{config}"
     );
+}
+
+#[test]
+fn a_refused_record_names_the_first_paths_and_counts_the_rest() {
+    let paths: Vec<String> = (1..=7).map(|n| format!("/tmp/{n}")).collect();
+    assert_eq!(
+        listed(&paths),
+        "/tmp/1, /tmp/2, /tmp/3, /tmp/4, /tmp/5 and 2 more"
+    );
+    assert_eq!(listed(&paths[..2]), "/tmp/1, /tmp/2");
 }
 
 #[test]

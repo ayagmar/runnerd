@@ -96,6 +96,21 @@ pub fn secrets_left<'path>(changed: impl IntoIterator<Item = &'path str>) -> Vec
         .collect()
 }
 
+/// The first few of `paths`, and how many more there are: a container without the scrub may have changed thousands.
+pub fn listed(paths: &[String]) -> String {
+    const SHOWN: usize = 5;
+    let mut text = paths
+        .iter()
+        .take(SHOWN)
+        .map(String::as_str)
+        .collect::<Vec<_>>()
+        .join(", ");
+    if paths.len() > SHOWN {
+        write!(text, " and {} more", paths.len() - SHOWN).ok();
+    }
+    text
+}
+
 /// Which records go, and why, before a new record of `incoming` bytes is made; or why it is not made. Records in
 /// `open` have a shell open and stay. `free` is the disk Docker has left, when known. Expired records go too.
 pub fn make_room(

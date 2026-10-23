@@ -214,7 +214,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Notes that a stopped runner container an earlier daemon left was not kept, if its profile keeps failed jobs'
-    /// runners, its job failed and no record of it was made: the daemon stopped while it made one.
+    /// runners, its job failed and no record of it was made: no daemon ran when it stopped, or one stopped while it
+    /// made the record.
     pub(super) async fn note_lost_record(&self, profile: &str, job: Option<u64>, container: &str) {
         let Some(job) = job else {
             return;
@@ -229,7 +230,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         {
             self.store.record_skipped(
                 job,
-                "runnerd stopped while it was keeping the runner".to_owned(),
+                "runnerd was not running when the runner stopped, or stopped while keeping it"
+                    .to_owned(),
             );
         }
     }
@@ -618,6 +620,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 record.profile
             )));
         }
+        // A trim removes the shared caches' volumes, which a shell mounts.
+        if self.trim.as_ref().is_some_and(|trim| !trim.is_finished()) {
+            return Err(ControlError::Conflict(
+                "the shared caches, which a shell mounts, are being trimmed; open it once the trim is done"
+                    .to_owned(),
+            ));
+        }
         if let Some(max) = self.memory_max {
             let in_use = self.memory_in_use();
             if in_use.saturating_add(memory) > max {
@@ -796,7 +805,7 @@ async fn check(docker: &impl DockerApi, container: &str) -> Result<Checked, Stri
     if !secrets.is_empty() {
         return Err(format!(
             "its runner left files a record must not keep ({}); a runner image of this release deletes them",
-            secrets.join(", ")
+            record::listed(&secrets)
         ));
     }
     let incoming = docker
