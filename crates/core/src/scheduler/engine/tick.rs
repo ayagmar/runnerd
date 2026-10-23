@@ -11,7 +11,8 @@ use futures_util::StreamExt;
 use tracing::{info, warn};
 
 use super::admission::Admitting;
-use super::{Engine, RunningJobs, Shutdown};
+use super::{Engine, Occupant, RunningJobs, Shutdown};
+use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::scheduler::{Decision, Profile, Repository, RunnerSlot, Slot, plan};
@@ -218,15 +219,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         (decisions, admitting)
     }
 
-    /// What the runners reserve (their caps, or under measured admission their predicted peaks), and the memory
+    /// What the runners take (`takes`), and the memory
     /// caps of the seed containers (which run with their profile's limits), the shells and the mirror.
     pub(super) fn memory_in_use(&self) -> u64 {
         let runners: u64 = self
             .occupied()
-            .map(|(_, occupant)| occupant.reserved())
+            .map(|(_, occupant)| self.takes(occupant))
             .sum();
         let reseeds: u64 = self.reseed_memory.values().sum();
         runners + reseeds + self.shell_memory() + self.mirror_memory_in_use()
+    }
+
+    /// What a runner takes of the budget.
+    pub(super) fn takes(&self, occupant: &Occupant) -> u64 {
+        match self.config.host.admission {
+            // Whatever it reserved under measured admission before a reload.
+            Admission::Caps => occupant.memory,
+            // What it uses when that is more: a job past its prediction, or one in a burst of starts.
+            Admission::Measured => occupant
+                .reserved()
+                .max(self.store.latest_memory(&occupant.runner_name).unwrap_or(0)),
+        }
     }
 
     /// The mirror's part of `memory_in_use`.

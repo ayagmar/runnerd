@@ -175,7 +175,7 @@ struct Occupant {
 }
 
 impl Occupant {
-    /// What it takes of the budget.
+    /// What it reserves of the budget under measured admission: its cap if a restart adopted it.
     fn reserved(&self) -> u64 {
         self.admission
             .map_or(self.memory, |admission| admission.reserved)

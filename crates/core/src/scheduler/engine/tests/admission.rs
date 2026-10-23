@@ -190,3 +190,78 @@ async fn a_jobs_record_says_how_its_runner_was_admitted() {
         })
     );
 }
+
+/// A sample of each runner the engine registered, using `memory`.
+fn runners_use(github: &FakeGithub, store: &Store, memory: u64) {
+    let samples = registered(&github.calls())
+        .iter()
+        .map(|call| SampleRecord {
+            runner: call.trim_start_matches("register ").to_owned(),
+            at: time::now_ms(),
+            cpu: 0,
+            cpu_usage: 0,
+            memory,
+            network_received: 0,
+            network_sent: 0,
+            oom_kills: 0,
+        })
+        .collect();
+    store.samples(samples);
+}
+
+#[tokio::test]
+async fn a_runner_using_more_than_it_reserved_counts_at_what_it_uses() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    // Both reserved 1.25G and use 4G: the 10G slice has 2G left, under the 9G mark.
+    runners_use(&github, &handle.store, 4 * G);
+    slice_at(&handle.store, 8 * G);
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        3,
+        "one more 1.25G runner fits in the 2G left, not two"
+    );
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.memory_in_use,
+        8 * G + 1280 * M
+    );
+}
+
+#[tokio::test]
+async fn back_under_caps_every_runner_counts_at_its_cap_whatever_it_reserved() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2, "2 × 1.25G reserved");
+    // Back to caps with 3 × 3G, which fits the 10G slice; the two running containers keep their 4G caps.
+    let caps = CONFIG
+        .replace("slots = 2", "slots = 3")
+        .replace("memory = \"4G\"", "memory = \"3G\"");
+    engine.reload(Config::parse(&caps).unwrap(), Some(10 * G));
+    github.0.lock().unwrap().queued = (1..=3).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "8G of caps run: a 3G runner does not fit"
+    );
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 8 * G);
+}

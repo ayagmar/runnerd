@@ -100,8 +100,9 @@ pub struct Budget {
     pub slice: String,
     /// The slice's `MemoryMax`; `None` when it is unlimited.
     pub memory_max: Option<u64>,
-    /// Memory the running containers reserve: the runners' caps, or under measured admission their predicted
-    /// peaks, and the caps of the seed containers, shells and the mirror.
+    /// Memory the running containers reserve: the runners' caps, or under measured admission the larger of each
+    /// runner's predicted peak and its last sampled memory, and the caps of the seed containers, shells and the
+    /// mirror.
     pub memory_in_use: u64,
     /// What a new runner must fit in beside them.
     #[serde(default)]
