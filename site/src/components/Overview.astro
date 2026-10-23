@@ -1,0 +1,553 @@
+---
+// The web dashboard's overview as HTML, replaying its demo daemon: the budget's blocks and the slot cards, linked,
+// with a play button and a scrubber. The build renders second 0, so without the script it is the screenshot it
+// replaced. Behaviour and data live in scripts/overview.ts; the look mirrors crates/web/assets/style.css.
+import { at, barLabel, block, card, readout, rest, steps, LOOP, MOMENTS } from '../scripts/overview';
+
+const state = at(0);
+const { mirror, free } = rest();
+const open = 'jvm-1';
+---
+
+<div class="dash" data-overview>
+  <p class="figures" data-readout set:html={readout(state)} />
+  <div class="dash-bar" role="img" aria-label={barLabel(state)} data-bar>
+    {
+      state.slots.map((slot) => {
+        const b = block(slot);
+        return (
+          <div
+            class={b.className}
+            style={`--size: ${slot.profile.memory / 1024 ** 3}; --fill: ${b.fill}`}
+            data-block={slot.key}
+            set:html={b.html}
+          />
+        );
+      })
+    }
+    <div class="block other" style={`--size: ${mirror}`}></div>
+    <div class="free" style={`--size: ${free}`}></div>
+  </div>
+
+  <ul class="slot-grid">
+    {
+      state.slots.map((slot) => (
+        <li class={`card ${slot.profile.tone} ${slot.state}`} data-card={slot.key}>
+          <button
+            type="button"
+            class="slot-head"
+            data-pick
+            aria-expanded={slot.state === 'busy' ? String(slot.key === open) : undefined}
+            aria-controls={`steps-${slot.key}`}
+          >
+            <span class="slot-name">{slot.profile.name} {slot.number}</span>
+            <span class="slot-caps">{slot.profile.memory / 1024 ** 3}G · {slot.profile.cpus} CPUs</span>
+          </button>
+          <div data-body set:html={card(slot)} />
+          <div class="steps" id={`steps-${slot.key}`} data-steps set:html={slot.key === open ? steps(slot) : ''} />
+        </li>
+      ))
+    }
+  </ul>
+
+  <div class="dash-controls" data-controls hidden>
+    <button type="button" class="dash-play" data-play aria-label="Pause the replay">
+      <svg class="pause" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2h3v12H4zM9 2h3v12H9z"></path></svg>
+      <svg class="play" viewBox="0 0 16 16" aria-hidden="true"><path d="M4 2l10 6-10 6z"></path></svg>
+    </button>
+    <input type="range" min="0" max={LOOP - 1} step="1" value="0" list="replay-moments" data-scrub aria-label="Replay time" />
+    <datalist id="replay-moments">{MOMENTS.map((t) => <option value={t} />)}</datalist>
+    <output data-clock>0:00</output>
+  </div>
+</div>
+
+<script>
+  import { mount } from '../scripts/overview';
+  for (const root of document.querySelectorAll<HTMLElement>('[data-overview]')) mount(root);
+</script>
+
+<style is:global>
+  /* The dashboard's tokens on top of the page's: the same mint, pink, ink and surfaces. */
+  .dash {
+    --p0: var(--mint);
+    --p1: var(--pink);
+    --line: #3a3f3c;
+    --memory: #8fe0a6;
+    --cpu: #b7a6ff;
+    --running-bg: #2c2550;
+    --running-ink: #d9d0ff;
+    display: grid;
+    grid-template-columns: minmax(0, 1fr);
+    gap: 0.75rem;
+    padding: clamp(0.75rem, 2vw, 1.75rem);
+    background: var(--bg);
+    box-shadow: inset 0 0 0 1px var(--surface-2);
+    font-family: var(--font-display);
+    font-size: 1rem;
+    line-height: 1.4;
+  }
+
+  :root[data-theme='light'] .dash {
+    --line: #c9c9c9;
+    --memory: #1f6b3a;
+    --cpu: #5b3fc4;
+    --running-bg: #e3dcff;
+    --running-ink: #3a2590;
+  }
+
+  .dash p {
+    margin: 0;
+  }
+
+  .dash .muted {
+    color: var(--muted);
+  }
+
+  .dash .visually-hidden {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip-path: inset(50%);
+    white-space: nowrap;
+  }
+
+  /* The readout: the slice's total, or what the block or card under the pointer or focus holds. */
+  .dash .figures {
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 0 0.35rem;
+    min-height: 2.8rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dash .figures code {
+    font-size: 0.9em;
+  }
+
+  .dash .big {
+    font-size: 2rem;
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 1;
+  }
+
+  /* The budget: as the dashboard draws it, each slot a block you can point at. */
+  .dash-bar {
+    display: flex;
+    gap: var(--gap);
+    height: clamp(8rem, 24vh, 13rem);
+    background: var(--surface);
+  }
+
+  .dash-bar .block,
+  .dash-bar .free {
+    position: relative;
+    flex: var(--size) 1 0;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    justify-content: flex-end;
+    align-items: stretch;
+    padding: clamp(0.45rem, 1vw, 0.9rem);
+    overflow: hidden;
+    container-type: inline-size;
+    text-align: left;
+    transition: background-color 300ms var(--ease), box-shadow 300ms var(--ease), opacity 200ms;
+  }
+
+  .dash-bar .block {
+    border: 0;
+    margin: 0;
+    font: inherit;
+    color: var(--block-ink);
+    background: var(--profile);
+  }
+
+  .dash-bar [data-block] {
+    cursor: pointer;
+  }
+
+  .dash .p0 {
+    --profile: var(--p0);
+  }
+
+  .dash .p1 {
+    --profile: var(--p1);
+  }
+
+  .dash-bar .block.idle {
+    background: transparent;
+    color: var(--ink);
+    box-shadow: inset 0 0 0 2px var(--profile);
+  }
+
+  /* A runner waiting for its job: the block, paler. Dark ink, which keeps 4.5:1 on the mix in both themes. */
+  .dash-bar .block.starting {
+    background: color-mix(in srgb, var(--profile) 55%, var(--bg));
+  }
+
+  .dash-bar .block.other {
+    --profile: var(--ink);
+    flex-basis: 3px;
+    padding: 0;
+  }
+
+  .dash-bar .fill {
+    position: absolute;
+    inset: auto 0 0 0;
+    height: calc(var(--fill) * 100%);
+    background: color-mix(in srgb, var(--block-ink) 14%, transparent);
+    border-top: 2px solid color-mix(in srgb, var(--block-ink) 55%, transparent);
+    transition: height 600ms var(--ease);
+  }
+
+  .dash-bar .block:not(.busy) .fill {
+    height: 0;
+    border-top-color: transparent;
+  }
+
+  .dash-bar .block > span:not(.fill) {
+    position: relative;
+    white-space: nowrap;
+    overflow: hidden;
+    text-overflow: ellipsis;
+  }
+
+  .dash-bar .block .size {
+    font-size: clamp(1.1rem, 0.6rem + 2.4vw, 2.75rem);
+    font-weight: 700;
+    letter-spacing: -0.04em;
+    line-height: 0.95;
+  }
+
+  .dash-bar .block .name {
+    font-size: 0.875rem;
+    font-weight: 600;
+    margin-top: 0.3rem;
+  }
+
+  /* A narrow block keeps its size as long as it fits, and drops its name first. */
+  @container (max-width: 4.5rem) {
+    .dash-bar .block .name {
+      display: none;
+    }
+  }
+
+  @container (max-width: 2rem) {
+    .dash-bar .block .size {
+      display: none;
+    }
+  }
+
+  /* Slots. */
+  .dash .slot-grid {
+    list-style: none;
+    margin: 0;
+    padding: 0;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 15rem), 1fr));
+    gap: var(--gap);
+    align-items: start;
+  }
+
+  .dash .card {
+    position: relative;
+    display: grid;
+    align-content: start;
+    gap: 0.5rem;
+    min-height: 11rem;
+    padding: 1rem;
+    border-top: 6px solid var(--profile);
+    background: var(--surface);
+    transition: opacity 150ms var(--ease);
+  }
+
+  .dash .card [data-body] {
+    display: grid;
+    gap: 0.5rem;
+    min-width: 0;
+  }
+
+  .dash .card :is([data-body], [data-steps]):empty {
+    display: none;
+  }
+
+  /* An idle slot's card is drawn like its block: an outline in the profile's colour, nothing in it. */
+  .dash .card.idle {
+    background: transparent;
+    border-top: 0;
+    padding-top: calc(1rem + 6px);
+    box-shadow: inset 0 0 0 2px var(--profile);
+  }
+
+  .dash .card.starting {
+    background: color-mix(in srgb, var(--profile) 18%, var(--surface));
+  }
+
+  /* The card's heading is its button; it stretches over the card, so the whole card opens the steps. */
+  .dash .slot-head {
+    display: flex;
+    align-items: baseline;
+    gap: 0.5rem;
+    margin: 0;
+    padding: 0;
+    border: 0;
+    background: none;
+    color: inherit;
+    font: inherit;
+    font-size: 0.875rem;
+    text-align: left;
+    cursor: pointer;
+  }
+
+  .dash .slot-head::after {
+    content: '';
+    position: absolute;
+    inset: 0;
+  }
+
+  .dash .slot-head:focus-visible {
+    outline: none;
+  }
+
+  .dash .card:has(.slot-head:focus-visible) {
+    outline: 3px solid var(--accent);
+    outline-offset: 2px;
+  }
+
+  .dash .slot-name {
+    font-size: 0.9375rem;
+    font-weight: 700;
+  }
+
+  .dash .slot-caps {
+    margin-left: auto;
+    color: var(--muted);
+    white-space: nowrap;
+  }
+
+  .dash .slot-idle {
+    color: var(--muted);
+  }
+
+  .dash .slot-title {
+    display: flex;
+    align-items: flex-end;
+    justify-content: space-between;
+    gap: 1rem;
+  }
+
+  .dash .slot-job {
+    display: grid;
+    min-width: 0;
+  }
+
+  .dash .card .repo {
+    color: var(--muted);
+    font-size: 0.875rem;
+  }
+
+  .dash .elapsed {
+    color: var(--muted);
+    font-size: 0.9375rem;
+    white-space: nowrap;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dash .job-name {
+    font-size: 1.25rem;
+    font-weight: 700;
+    letter-spacing: -0.02em;
+  }
+
+  .dash .step {
+    font-size: 0.9375rem;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dash .step-count {
+    display: inline-block;
+    padding: 0 0.35rem;
+    background: var(--running-bg);
+    color: var(--running-ink);
+    font-weight: 600;
+    font-size: 0.8125rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dash .slot-figures {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 0.75rem;
+    margin-top: 0.25rem;
+  }
+
+  .dash .slot-figures dd {
+    margin: 0;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dash .sparkline {
+    display: block;
+    width: 100%;
+    height: 2rem;
+    margin-top: 0.25rem;
+  }
+
+  .dash .sparkline .line {
+    fill: none;
+    stroke-width: 2;
+    stroke-linejoin: round;
+  }
+
+  .dash .sparkline .area {
+    stroke: none;
+    opacity: 0.22;
+  }
+
+  .dash .line.memory {
+    stroke: var(--memory);
+  }
+
+  .dash .area.memory {
+    fill: var(--memory);
+  }
+
+  .dash .line.cpu {
+    stroke: var(--cpu);
+  }
+
+  .dash .area.cpu {
+    fill: var(--cpu);
+  }
+
+  /* An open card lists its job's steps, as the job page does: done, running, still to come. */
+  .dash .steps ol {
+    list-style: none;
+    margin: 0.25rem 0 0;
+    padding: 0.5rem 0 0;
+    border-top: 1px solid var(--line);
+    font-size: 0.875rem;
+  }
+
+  .dash .steps li {
+    display: flex;
+    justify-content: space-between;
+    gap: 1rem;
+    padding-block: 0.15rem;
+    font-variant-numeric: tabular-nums;
+  }
+
+  .dash .steps li > span:first-child {
+    min-width: 0;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+  }
+
+  .dash .steps li > span:last-child {
+    white-space: nowrap;
+  }
+
+  .dash .steps .next {
+    color: var(--muted);
+  }
+
+  .dash .steps .now {
+    margin-inline: -0.35rem;
+    padding-inline: 0.35rem;
+    background: var(--running-bg);
+    color: var(--running-ink);
+    font-weight: 600;
+  }
+
+  /* The slot under the pointer or focus, in the bar and the grid at once: the rest step back. */
+  .dash[data-hot] :is([data-block], [data-card]) {
+    opacity: 0.4;
+  }
+
+  .dash[data-hot='jvm-1'] [data-card='jvm-1'],
+  .dash[data-hot='jvm-1'] [data-block='jvm-1'],
+  .dash[data-hot='jvm-2'] [data-card='jvm-2'],
+  .dash[data-hot='jvm-2'] [data-block='jvm-2'],
+  .dash[data-hot='node-1'] [data-card='node-1'],
+  .dash[data-hot='node-1'] [data-block='node-1'],
+  .dash[data-hot='node-2'] [data-card='node-2'],
+  .dash[data-hot='node-2'] [data-block='node-2'] {
+    opacity: 1;
+  }
+
+  /* The replay's controls: play or pause, and the six minutes to scrub. */
+  .dash-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.75rem;
+    margin-top: 0.25rem;
+  }
+
+  .dash-controls[hidden] {
+    display: none;
+  }
+
+  .dash-play {
+    display: grid;
+    place-items: center;
+    width: 44px;
+    height: 44px;
+    flex: none;
+    border: 0;
+    background: var(--surface);
+    color: var(--ink);
+    cursor: pointer;
+  }
+
+  .dash-play:hover {
+    background: var(--surface-2);
+  }
+
+  .dash-play svg {
+    width: 1rem;
+    height: 1rem;
+    fill: currentColor;
+  }
+
+  .dash[data-playing='true'] .play,
+  .dash:not([data-playing='true']) .pause {
+    display: none;
+  }
+
+  .dash-controls input {
+    flex: 1;
+    min-width: 0;
+    height: 44px;
+    margin: 0;
+    accent-color: var(--accent);
+    cursor: pointer;
+  }
+
+  .dash-controls output {
+    min-width: 3.5ch;
+    color: var(--muted);
+    font-variant-numeric: tabular-nums;
+    text-align: right;
+  }
+
+  @media (max-width: 600px) {
+    .dash .card.idle {
+      min-height: 0;
+    }
+
+    .dash-bar {
+      height: 7.5rem;
+    }
+
+    .dash .big {
+      font-size: 1.5rem;
+    }
+  }
+</style>
