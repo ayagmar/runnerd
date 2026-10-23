@@ -1,21 +1,9 @@
 // The landing page's behaviour: the budget calculator, the copy button, the theme switch and the entrances
 // of the slot steps and the free slots. Everything here is an enhancement; without it the page shows the example config.
 
-const GIB = 1024 ** 3;
-const UNITS: [string, number][] = [
-  ['T', 1024 ** 4],
-  ['G', GIB],
-  ['M', 1024 ** 2],
-  ['K', 1024],
-];
+import { size } from './overview';
 
-/** Formats bytes the way runnerd's ByteSize does: the largest unit, two decimals, trailing zeros dropped. */
-function size(bytes: number): string {
-  const unit = UNITS.find(([, factor]) => bytes >= factor);
-  if (!unit) return `${bytes}B`;
-  const number = (bytes / unit[1]).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
-  return `${number}${unit[0]}`;
-}
+const GIB = 1024 ** 3;
 
 function calculator() {
   const form = document.querySelector<HTMLFormElement>('[data-calc]');

@@ -6,7 +6,7 @@ description: Open runnerd's web dashboard and drive the daemon from runnerctl.
 import Shot from '../../components/Shot.astro';
 import Tui from '../../components/Tui.astro';
 
-The dashboard and `runnerctl` ship from 0.0.2, `runnerctl tui` from 0.0.3. They talk to the daemon only. The output and screenshots here come from the dashboard's demo daemon, whose made-up machine is the [example config](../configuration/).
+Output and screenshots here come from the dashboard's demo daemon, whose made-up machine is the [example config](../configuration/).
 
 ## Dashboard
 
@@ -28,7 +28,7 @@ Pages update as things happen. Memory and CPU are sampled every 2 s, so a shorte
   sizes="(min-width: 72rem) 45rem, 100vw"
 />
 
-The budget as blocks, each slot filled to its job's last sample. Every slot with its job, step, memory and CPU. Below: the slice over the last half hour, pause and resume per repository, the latest jobs.
+Below the slots: the slice over the last half hour, pause and resume per repository, the latest jobs.
 
 ### A job
 
@@ -38,7 +38,7 @@ The budget as blocks, each slot filled to its job's last sample. Every slot with
   sizes="(min-width: 72rem) 45rem, 100vw"
 />
 
-Its phases, its steps on one time axis, then CPU and memory against the profile's limits, and the log.
+Below the steps: CPU and memory against the profile's caps, and the log.
 
 ### History
 
@@ -48,7 +48,7 @@ Its phases, its steps on one time axis, then CPU and memory against the profile'
   sizes="(min-width: 72rem) 45rem, 100vw"
 />
 
-Jobs per day, run and wait times and memory peaks over 30 days, then every job, filtered by repository and outcome.
+Below the charts: every job, filtered by repository and outcome.
 
 ### Caches and Config
 
@@ -135,7 +135,7 @@ error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-17927081
 
 ## runnerctl tui
 
-The dashboard for a host reached over SSH: the budget bar, a card per slot, the slice's memory and CPU, the repositories, the latest jobs, the history and each job with its log.
+The dashboard, for a host you reach over SSH.
 
 ```sh
 runnerctl tui
