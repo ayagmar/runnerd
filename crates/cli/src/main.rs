@@ -27,7 +27,7 @@ use output::fail;
 
 /// Command-line client for the runnerd daemon.
 #[derive(Parser)]
-#[command(version)]
+#[command(name = "runnerctl", version)]
 struct Cli {
     /// The daemon's API socket [default: `$XDG_RUNTIME_DIR/runnerd.sock`].
     #[arg(long, global = true)]
