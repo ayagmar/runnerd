@@ -1,8 +1,16 @@
 //! `doctor`'s checks on made-up hosts.
 
+use std::collections::BTreeMap;
+
 use runnerd_core::config::{ByteSize, Config};
 
-use super::{Check, DockerFacts, Host, SYSBOX_SERVICES, Slice, Status, checks};
+use super::{Check, DockerFacts, Host, ImageFound, SYSBOX_SERVICES, Slice, Status, checks};
+
+const VERSION: &str = env!("CARGO_PKG_VERSION");
+
+fn published(stage: &str) -> String {
+    format!("ghcr.io/ayagmar/runnerd-runner:{stage}-{VERSION}")
+}
 
 const ARCH: &str = "NAME=\"Arch Linux\"\nID=arch\n";
 
@@ -32,6 +40,14 @@ fn ready_host(os_release: &str) -> Host {
                 "sysbox-runc".to_owned(),
             ],
         }),
+        images: ["jvm", "node"]
+            .map(|stage| {
+                let found = ImageFound::Present {
+                    version: Some(VERSION.to_owned()),
+                };
+                (published(stage), Ok(found))
+            })
+            .into(),
         os_release: os_release.to_owned(),
         slice: Some(Ok(Slice {
             unit_file: Some("/etc/systemd/system/ci.slice".to_owned()),
@@ -78,6 +94,8 @@ fn a_ready_host_passes_every_check() {
             "sysbox",
             "slice",
             "config",
+            "image",
+            "image",
             "gh",
             "/dev/kvm"
         ]
@@ -175,5 +193,81 @@ fn unreachable_docker_skips_what_depends_on_it() {
         .filter(|check| check.status == Status::Skip)
         .map(|check| check.name.as_str())
         .collect();
-    assert_eq!(skipped, ["cgroups", "sysbox", "slice", "config"]);
+    assert_eq!(skipped, ["cgroups", "sysbox", "slice", "config", "image"]);
+}
+
+fn image_check<'checks>(checks: &'checks [Check], reference: &str) -> &'checks Check {
+    checks
+        .iter()
+        .find(|check| check.name == "image" && check.detail.contains(reference))
+        .unwrap()
+}
+
+#[test]
+fn a_published_image_not_pulled_yet_passes_and_one_the_registry_refuses_fails() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.images = BTreeMap::from([
+        (published("jvm"), Ok(ImageFound::Pullable)),
+        (
+            published("node"),
+            Ok(ImageFound::Missing("manifest unknown".to_owned())),
+        ),
+    ]);
+    let checks = checks(&host, Some(&config));
+    assert_eq!(failed(&checks), ["image"]);
+    assert_eq!(image_check(&checks, &published("jvm")).status, Status::Pass);
+    let node = image_check(&checks, &published("node"));
+    assert!(node.detail.contains("manifest unknown"), "{node}");
+    assert!(
+        node.fix.as_deref().unwrap().contains("docker pull"),
+        "{node}"
+    );
+}
+
+#[test]
+fn a_stage_never_built_fails_with_the_published_image_and_the_build_command() {
+    let text = std::fs::read_to_string(concat!(
+        env!("CARGO_MANIFEST_DIR"),
+        "/../../examples/runnerd.toml"
+    ))
+    .unwrap()
+    .replace(
+        &format!("image = \"{}\"", published("jvm")),
+        "image_stage = \"jvm\"",
+    );
+    let config = Config::parse(&text).unwrap();
+    let mut host = ready_host(ARCH);
+    host.images.insert(
+        "runnerd-runner:jvm".to_owned(),
+        Ok(ImageFound::Missing("not built".to_owned())),
+    );
+    let checks = checks(&host, Some(&config));
+    assert_eq!(failed(&checks), ["image"]);
+    let fix = image_check(&checks, "runnerd-runner:jvm")
+        .fix
+        .clone()
+        .unwrap();
+    assert!(fix.contains(&published("jvm")), "{fix}");
+    assert!(
+        fix.contains("docker build --target jvm -t runnerd-runner:jvm image"),
+        "{fix}"
+    );
+}
+
+#[test]
+fn an_image_built_for_another_release_warns() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.images.insert(
+        published("jvm"),
+        Ok(ImageFound::Present {
+            version: Some("0.0.1".to_owned()),
+        }),
+    );
+    let checks = checks(&host, Some(&config));
+    assert_eq!(failed(&checks), Vec::<&str>::new());
+    let jvm = image_check(&checks, &published("jvm"));
+    assert_eq!(jvm.status, Status::Warn);
+    assert!(jvm.detail.contains("0.0.1"), "{jvm}");
 }

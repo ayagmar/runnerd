@@ -39,9 +39,9 @@ client → transport → principal → handler → core
    state is a `Command` on a channel the engine answers between ticks, so it sees the same state a tick does.
    `engine.rs` holds `Engine`'s state, its construction and its loop; each submodule of
    [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
-   and planning), `runners` (a slot's runner from start to removal), `caches` (reseeds, the mirror, the shared
-   caches), `history` (what the store records), `control` (`Control` and the commands) and `status` (what it
-   publishes).
+   and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images),
+   `caches` (reseeds, the mirror, the shared caches), `history` (what the store records), `control` (`Control` and
+   the commands) and `status` (what it publishes).
 
 A new transport (SSH, Tailscale) produces a `Principal` and reuses the handlers.
 
@@ -55,7 +55,9 @@ queued → slot → container → removed
 
 1. Every `poll_interval` the engine asks GitHub for runners first, then queued jobs (`Engine::tick`; the order
    avoids starting a second runner for a job its runner just took).
-2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget.
+2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget. A profile whose
+   `image` Docker lacks starts nothing until the engine pulled it in the background
+   ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)).
 3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`) and starts its
    container (`DockerApi::start`) under the profile's limits and isolation backend.
 4. The runner takes one job and exits. `Engine::collect_finished` sees the container stopped, removes it and the

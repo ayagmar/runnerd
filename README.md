@@ -101,13 +101,26 @@ running. A config saved from the dashboard or `PUT /v1/config` applies without a
 
 ## Runner image
 
-[`image/`](https://github.com/ayagmar/runnerd/tree/main/image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base. A profile's `image_stage` picks the stage:
+[`image/`](https://github.com/ayagmar/runnerd/tree/main/image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base (`base`, `jvm`, `node`). Each release publishes every stage to `ghcr.io/ayagmar/runnerd-runner:<stage>-<version>` for linux/amd64, with a build provenance attestation. A profile names the image its runners run:
+
+```toml
+[profiles.jvm]
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4"
+```
+
+runnerd pulls the image before the profile's first runner and logs the pull's progress; `runnerd doctor` says whether each image is present or can be pulled. Keep the tag at the daemon's version: the image's scripts and the daemon change together, and doctor warns when they differ. To check where an image came from:
+
+```sh
+gh attestation verify oci://ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4 --repo ayagmar/runnerd
+```
+
+To run your own changes to `image/`, build the stage from a clone and set `image_stage` instead of `image`; runners then run the local image `runnerd-runner:<image_stage>`, which runnerd never pulls:
 
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
 ```
 
-`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it. Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
+Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
 
 Documentation: <https://ayagmar.github.io/runnerd/>
 

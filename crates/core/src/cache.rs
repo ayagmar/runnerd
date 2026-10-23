@@ -163,7 +163,9 @@ pub async fn mirror_up(
         Err(error) => return Err(error),
     }
     docker.ensure_network(&names.network()).await?;
-    docker.ensure_image(MIRROR_IMAGE).await?;
+    if !docker.image_present(MIRROR_IMAGE).await? {
+        docker.pull(MIRROR_IMAGE).await?;
+    }
     docker
         .run(&names.mirror(), mirror_body(names, mirror, slice))
         .await?;

@@ -5,7 +5,7 @@
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use super::{Engine, Shutdown, image};
+use super::{Engine, Shutdown};
 use crate::api;
 use crate::cache::{self, Emptied, Trimmed};
 use crate::config::ByteSize;
@@ -88,7 +88,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         };
         let docker = self.docker.clone();
         let names = self.names.clone();
-        let image = image(&profile.image_stage);
+        let image = profile.image.reference();
         let slice = self.config.host.slice.clone();
         let (slots, cpus, memory) = (profile.slots as usize, profile.cpus, profile.memory);
         let min_changes = if requested {

@@ -1,16 +1,19 @@
 //! `runnerd doctor`: what the host is missing to run runners, each with the fix. It reads the host and changes
 //! nothing; the user runs the fixes. The checks are `api::Check`s, so `GET /v1/doctor` serves the same ones.
 
+use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
 use runnerd_core::api::{Check, CheckStatus as Status};
-use runnerd_core::config::{self, ByteSize, Config, Isolation};
+use runnerd_core::config::{self, ByteSize, Config, Image, Isolation};
 use runnerd_core::docker::Docker;
 
 /// What doctor reads from the host, gathered before any check so the checks can be tested without one.
 pub(crate) struct Host {
     pub docker: Result<DockerFacts, String>,
+    /// What Docker has of each profile's image, by reference; empty without a config or Docker.
+    pub images: BTreeMap<String, Result<ImageFound, String>>,
     /// `/etc/os-release`, empty when missing.
     pub os_release: String,
     /// `None` without a config, which names the slice.
@@ -32,6 +35,20 @@ pub(crate) struct DockerFacts {
     pub runtimes: Vec<String>,
 }
 
+/// A profile's image as Docker has it, or where it could come from.
+pub(crate) enum ImageFound {
+    /// Docker has it; `version` is its `runnerd.version` label, which published images carry.
+    Present { version: Option<String> },
+    /// Docker lacks it and its registry has it: runnerd pulls it before the first runner.
+    Pullable,
+    /// Docker lacks it and cannot get it: never built, or the registry refused, with why.
+    Missing(String),
+}
+
+/// The label of a published image that names the runnerd release it was built for (`.github/workflows/images.yml`).
+/// Not `org.opencontainers.image.version`: every image built on the runner base inherits Ubuntu's.
+const VERSION_LABEL: &str = "runnerd.version";
+
 pub(crate) struct Slice {
     /// The slice's unit file; without one, systemd creates the slice without limits.
     pub unit_file: Option<String>,
@@ -42,8 +59,13 @@ pub(crate) struct Slice {
 
 impl Host {
     pub(crate) fn read(config: Option<&Config>) -> Host {
+        let docker = read_docker();
         Host {
-            docker: read_docker(),
+            images: match (config, &docker) {
+                (Some(config), Ok(_)) => read_images(config),
+                _ => BTreeMap::new(),
+            },
+            docker,
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
             gh_scopes: read_gh_scopes(),
@@ -82,6 +104,54 @@ fn read_docker() -> Result<DockerFacts, String> {
             .unwrap_or_default(),
         runtimes,
     })
+}
+
+fn read_images(config: &Config) -> BTreeMap<String, Result<ImageFound, String>> {
+    let images = images(config);
+    let read = async |docker: &Docker, reference: &str, image: &Image| {
+        let Some(mut labels) = docker.image_labels(reference).await? else {
+            return Ok(match image {
+                Image::Stage(_) => ImageFound::Missing("not built".to_owned()),
+                Image::Pulled(_) => match docker.check_pullable(reference).await {
+                    Ok(()) => ImageFound::Pullable,
+                    Err(error) => ImageFound::Missing(error.to_string()),
+                },
+            });
+        };
+        Ok::<_, runnerd_core::docker::Error>(ImageFound::Present {
+            version: labels.remove(VERSION_LABEL),
+        })
+    };
+    let read_all = || -> Result<_, String> {
+        let runtime = tokio::runtime::Builder::new_current_thread()
+            .enable_all()
+            .build()
+            .map_err(|error| error.to_string())?;
+        let docker = Docker::connect().map_err(|error| error.to_string())?;
+        Ok(runtime.block_on(async {
+            let mut found = BTreeMap::new();
+            for (reference, image) in &images {
+                let result = read(&docker, reference, image).await;
+                found.insert(reference.clone(), result.map_err(|error| error.to_string()));
+            }
+            found
+        }))
+    };
+    read_all().unwrap_or_else(|error| {
+        images
+            .keys()
+            .map(|reference| (reference.clone(), Err(error.clone())))
+            .collect()
+    })
+}
+
+/// The config's distinct images, by reference.
+fn images(config: &Config) -> BTreeMap<String, &Image> {
+    config
+        .profiles
+        .values()
+        .map(|profile| (profile.image.reference(), &profile.image))
+        .collect()
 }
 
 fn read_slice(slice: &str) -> Result<Slice, String> {
@@ -232,6 +302,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     checks.extend(slice_checks(host, config));
+    checks.extend(image_checks(host, config, docker.is_some()));
     checks.push(match &host.gh_scopes {
         Ok(scopes) if scopes.iter().any(|s| s == "repo") => pass(
             "gh",
@@ -332,6 +403,64 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     };
     vec![slice_check, config_check]
 }
+
+/// One check per distinct image of the config's profiles.
+fn image_checks(host: &Host, config: Option<&Config>, docker: bool) -> Vec<Check> {
+    let Some(config) = config else {
+        return vec![skip("image", "no config given, which names the images")];
+    };
+    if !docker {
+        return vec![skip("image", "needs Docker")];
+    }
+    let version = env!("CARGO_PKG_VERSION");
+    images(config)
+        .into_iter()
+        .map(|(reference, image)| match host.images.get(&reference) {
+            None => skip("image", &format!("{reference}: not checked")),
+            Some(Err(error)) => fail(
+                "image",
+                format!("cannot inspect {reference}: {error}"),
+                "check that Docker runs",
+            ),
+            Some(Ok(ImageFound::Present { version: Some(built) })) if built != version => Check {
+                name: "image".to_owned(),
+                status: Status::Warn,
+                detail: format!(
+                    "{reference} is built for runnerd {built}, this is runnerd {version}; its scripts may not \
+                     match the daemon's"
+                ),
+                fix: Some(format!(
+                    "set image to this release's tag, such as {PUBLISHED}:<stage>-{version}"
+                )),
+            },
+            Some(Ok(ImageFound::Present { .. })) => pass("image", format!("{reference}: present")),
+            Some(Ok(ImageFound::Pullable)) => pass(
+                "image",
+                format!("{reference}: not pulled yet; runnerd pulls it before the first runner"),
+            ),
+            Some(Ok(ImageFound::Missing(why))) => match image {
+                Image::Stage(stage) => fail(
+                    "image",
+                    format!("{reference}: {why}"),
+                    &format!(
+                        "use the published image instead of image_stage:\n\
+                         image = \"{PUBLISHED}:{stage}-{version}\"\n\
+                         or build it from a clone of the repository:\n\
+                         docker build --target {stage} -t {reference} image"
+                    ),
+                ),
+                Image::Pulled(_) => fail(
+                    "image",
+                    format!("{reference}: not present, and cannot be pulled: {why}"),
+                    &format!("check the reference, then try: docker pull {reference}"),
+                ),
+            },
+        })
+        .collect()
+}
+
+/// Where the release workflow publishes the runner images.
+const PUBLISHED: &str = "ghcr.io/ayagmar/runnerd-runner";
 
 /// Sysbox ships `.deb` packages only; Arch has it in the AUR; elsewhere it is built from source.
 fn sysbox_fix(os_release: &str) -> String {

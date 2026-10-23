@@ -2,7 +2,7 @@
 //! does not answer, which runners it deletes, the job history it keeps across restarts, and the API's commands:
 //! pause of one repository or all, forced or not and across restarts, reseed, cache clean and reload.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -195,6 +195,12 @@ struct DockerState {
     container_captures: HashMap<String, String>,
     /// The capture commands run: container, page, offset.
     captured: Vec<(String, String, String)>,
+    /// Images Docker does not have; every other image is present.
+    missing_images: BTreeSet<String>,
+    /// Every pull fails, as when the registry does not answer.
+    fail_pulls: bool,
+    /// The image of each runner container started, in order.
+    started_images: Vec<String>,
     calls: Vec<String>,
 }
 
@@ -222,6 +228,7 @@ impl DockerApi for FakeDocker {
     ) -> Result<String, docker::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("start {}", spec.name));
+        state.started_images.push(spec.image.clone());
         state.memory.insert(spec.name.clone(), spec.memory.0);
         state
             .cpus
@@ -350,7 +357,20 @@ impl DockerApi for FakeDocker {
         Ok(futures_util::stream::iter([Ok(output.into_bytes())]).boxed())
     }
 
-    async fn ensure_image(&self, _image: &str) -> Result<(), docker::Error> {
+    async fn image_present(&self, image: &str) -> Result<bool, docker::Error> {
+        Ok(!self.0.lock().unwrap().missing_images.contains(image))
+    }
+
+    async fn pull(&self, image: &str) -> Result<(), docker::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("pull {image}"));
+        if state.fail_pulls {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "registry unreachable".to_owned(),
+            });
+        }
+        state.missing_images.remove(image);
         Ok(())
     }
 
@@ -2033,4 +2053,72 @@ async fn a_pause_undone_before_it_is_published_leaves_clients_where_the_status_i
     }
     assert_eq!(shown, handle.status.borrow().repositories);
     assert!(!shown[0].paused, "o/r shows resumed");
+}
+
+const PUBLISHED: &str = "ghcr.io/ayagmar/runnerd-runner:app-0.0.5";
+
+fn pulled(calls: &[String]) -> Vec<&String> {
+    calls
+        .iter()
+        .filter(|call| call.starts_with("pull "))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_profiles_missing_image_is_pulled_before_its_first_runner_starts() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    docker.0.lock().unwrap().missing_images = BTreeSet::from([PUBLISHED.to_owned()]);
+    let config = CONFIG.replace("image_stage = \"app\"", &format!("image = \"{PUBLISHED}\""));
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+    for _ in 0..100 {
+        if !registered(&github.calls()).is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(pulled(&docker.calls()), [&format!("pull {PUBLISHED}")]);
+    assert_eq!(docker.0.lock().unwrap().started_images, [PUBLISHED]);
+}
+
+#[tokio::test]
+async fn a_failed_pull_starts_no_runner_and_is_not_retried_on_the_next_tick() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.missing_images = BTreeSet::from([PUBLISHED.to_owned()]);
+        state.fail_pulls = true;
+    }
+    let config = CONFIG.replace("image_stage = \"app\"", &format!("image = \"{PUBLISHED}\""));
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_called(&mut engine, &docker, &format!("pull {PUBLISHED}")).await;
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(pulled(&docker.calls()).len(), 1, "{:?}", docker.calls());
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
+async fn an_image_built_from_a_stage_is_never_pulled() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    docker.0.lock().unwrap().missing_images = BTreeSet::from(["runnerd-runner:app".to_owned()]);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(pulled(&docker.calls()), Vec::<&String>::new());
+    assert_eq!(
+        docker.0.lock().unwrap().started_images,
+        ["runnerd-runner:app"]
+    );
 }

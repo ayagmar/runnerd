@@ -20,16 +20,20 @@ logs = "720h"
 events = "720h"
 log_max = "50M"
 
+# Each profile runs one stage of image/Dockerfile. `image` is the stage as the release publishes it, pulled before
+# the first runner; keep its version at the daemon's. `image_stage = "jvm"` runs `runnerd-runner:jvm` instead, built
+# on this host from a clone: docker build --target jvm -t runnerd-runner:jvm image
+
 # Gradle, Android, Quarkus and Testcontainers PostgreSQL; a busy runner peaked at 6.8G without page cache.
 [profiles.jvm]
-image_stage = "jvm"
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4"
 cpus = 8
 memory = "9G"
 slots = 2
 
 # Maven, pnpm, Next.js image builds, Testcontainers, Playwright, Flutter; a busy runner peaked at 6.0G.
 [profiles.node]
-image_stage = "node"
+image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.4"
 cpus = 8
 memory = "7G"
 slots = 2

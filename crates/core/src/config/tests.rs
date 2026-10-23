@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use super::{ByteSize, Config, Warning, parse_memory_max};
+use super::{ByteSize, Config, Image, Warning, parse_memory_max};
 
 const MINIMAL: &str = r#"
 [host]
@@ -184,4 +184,55 @@ fn config_rejects_empty_labels() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("owner/app"), "{error}");
+}
+
+#[test]
+fn profile_runs_a_local_stage_or_a_pulled_reference() {
+    let local = Config::parse(MINIMAL).unwrap();
+    assert_eq!(
+        local.profiles["app"].image.reference(),
+        "runnerd-runner:app"
+    );
+    let text = MINIMAL.replace(
+        "image_stage = \"app\"",
+        "image = \"ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5\"",
+    );
+    let pulled = Config::parse(&text).unwrap();
+    assert_eq!(
+        pulled.profiles["app"].image,
+        Image::Pulled("ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5".to_owned())
+    );
+}
+
+#[test]
+fn profile_needs_exactly_one_image() {
+    for (case, text) in [
+        ("neither", MINIMAL.replace("image_stage = \"app\"\n", "")),
+        (
+            "both",
+            MINIMAL.replace(
+                "image_stage = \"app\"",
+                "image_stage = \"app\"\nimage = \"ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5\"",
+            ),
+        ),
+        (
+            "empty",
+            MINIMAL.replace("image_stage = \"app\"", "image = \"\""),
+        ),
+    ] {
+        let error = Config::parse(&text).unwrap_err().to_string();
+        assert!(error.contains("set image_stage"), "{case}: {error}");
+    }
+}
+
+#[test]
+fn example_config_pulls_this_releases_images() {
+    let version = env!("CARGO_PKG_VERSION");
+    for (name, profile) in example().profiles {
+        assert_eq!(
+            profile.image,
+            Image::Pulled(format!("ghcr.io/ayagmar/runnerd-runner:{name}-{version}")),
+            "examples/runnerd.toml's {name} profile"
+        );
+    }
 }

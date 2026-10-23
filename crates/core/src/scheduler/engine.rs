@@ -1,18 +1,19 @@
-//! The scheduling loop: polls GitHub, applies `plan`'s decisions with GitHub and Docker, removes each runner's
-//! container when its job ends, keeps the mirror up while any runner runs, reseeds idle profiles and recovers
-//! runners and containers a previous daemon left. It also feeds the job history: queued jobs, the job each runner
-//! took (from `observe::capture`), steps from GitHub, mirror bytes, cache sizes and slot and budget changes. It
-//! owns slot state; it never serves the API (it publishes `api::Status` and takes commands through `Control`) and
-//! never logs the token or a JIT config.
+//! The scheduling loop: polls GitHub, pulls the profiles' images, applies `plan`'s decisions with GitHub and
+//! Docker, removes each runner's container when its job ends, keeps the mirror up while any runner runs, reseeds
+//! idle profiles and recovers runners and containers a previous daemon left. It also feeds the job history: queued
+//! jobs, the job each runner took (from `observe::capture`), steps from GitHub, mirror bytes, cache sizes and slot
+//! and budget changes. It owns slot state; it never serves the API (it publishes `api::Status` and takes commands
+//! through `Control`) and never logs the token or a JIT config.
 //!
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
-//! `caches` (reseeds, the mirror and the shared caches), `history` (what the store records), `control` (the API's
-//! commands) and `status` (what it publishes).
+//! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `history` (what
+//! the store records), `control` (the API's commands) and `status` (what it publishes).
 
 mod caches;
 mod control;
 mod history;
+mod images;
 mod recover;
 mod runners;
 mod status;
@@ -30,6 +31,7 @@ pub use self::control::{
     Command, Commands, Commit, Control, ControlError, RunningJobs, Shutdown, Target,
 };
 use self::history::{Closing, Found};
+use self::images::ImageState;
 use super::SlotRef;
 use crate::api;
 use crate::cache::{self, Names, Trimmed};
@@ -40,11 +42,6 @@ use crate::isolation::{self, Isolation};
 use crate::observe::metrics::{self, Paths, Sampler, Tracked};
 use crate::observe::mirror::Leases;
 use crate::store::{MirrorPosition, Store};
-
-/// The image a profile's runners run.
-pub fn image(stage: &str) -> String {
-    format!("runnerd-runner:{stage}")
-}
 
 /// This machine as its runner names carry it: `runnerd-<id>-<host>-<profile>-<slot>-<secs>`. Only `runnerd-<id>-`
 /// identifies the machine, so a changed host name still matches the runners started before the change, and two
@@ -203,6 +200,8 @@ pub struct Engine<G = Github, D = Docker> {
     slots: BTreeMap<String, Vec<Option<Occupant>>>,
     repositories: BTreeMap<String, RepositoryState>,
     reseeds: BTreeMap<String, JoinHandle<Result<String, docker::Error>>>,
+    /// The pulled images of the config's profiles, by reference.
+    images: BTreeMap<String, ImageState>,
     /// The memory cap each running reseed's container started with, which a reload does not change.
     reseed_memory: BTreeMap<String, u64>,
     /// Profiles the API asked to reseed: they start nothing until their slots are free and the reseed ran.
@@ -316,6 +315,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             slots,
             repositories,
             reseeds: BTreeMap::new(),
+            images: BTreeMap::new(),
             reseed_memory: BTreeMap::new(),
             reseed_requested: BTreeSet::new(),
             retired: BTreeMap::new(),
