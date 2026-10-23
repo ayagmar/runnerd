@@ -9,6 +9,7 @@ use std::time::Duration;
 
 use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
+use tokio::task::JoinHandle;
 
 use super::{
     Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, RunningSlots, Setup,
@@ -274,6 +275,8 @@ struct DockerState {
     free: Option<u64>,
     /// The images Docker has, record images among them.
     images: Vec<docker::Image>,
+    /// Images Docker refuses to remove, as when a container was made from them.
+    images_in_use: BTreeSet<String>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
@@ -537,9 +540,26 @@ impl DockerApi for FakeDocker {
             .collect())
     }
 
+    async fn image_tags(&self) -> Result<Vec<String>, docker::Error> {
+        let state = self.0.lock().unwrap();
+        Ok(state
+            .images
+            .iter()
+            .map(|image| image.reference.clone())
+            .collect())
+    }
+
     async fn remove_image(&self, reference: &str) -> Result<(), docker::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("remove image {reference}"));
+        if state.images_in_use.contains(reference) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 409,
+                message: format!(
+                    "unable to remove repository reference \"{reference}\": container is using its referenced image"
+                ),
+            });
+        }
         state.images.retain(|image| image.reference != reference);
         Ok(())
     }
@@ -2847,6 +2867,125 @@ async fn a_requested_reseed_waits_for_the_profiles_image_and_then_runs() {
     docker.0.lock().unwrap().block_pulls = false;
     until_called(&mut engine, &docker, &seed).await;
     assert_eq!(docker.0.lock().unwrap().started_images, [PUBLISHED]);
+}
+
+/// Gives Docker these images, as tags without labels.
+fn has_images(docker: &FakeDocker, tags: &[&str]) {
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .images
+        .extend(tags.iter().map(|tag| docker::Image {
+            reference: (*tag).to_owned(),
+            labels: HashMap::new(),
+            bytes: 3 << 30,
+        }));
+}
+
+fn images_left(docker: &FakeDocker) -> Vec<String> {
+    let mut left: Vec<String> = docker
+        .0
+        .lock()
+        .unwrap()
+        .images
+        .iter()
+        .map(|image| image.reference.clone())
+        .collect();
+    left.sort();
+    left
+}
+
+/// Ticks until the removal of runner images no profile runs has run.
+async fn until_stale_images_removed(engine: &mut Engine<FakeGithub, FakeDocker>) {
+    engine.tick(Shutdown::No).await;
+    for _ in 0..100 {
+        if engine
+            .images
+            .removing
+            .as_ref()
+            .is_some_and(JoinHandle::is_finished)
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("the runner images no profile runs were never removed");
+}
+
+#[tokio::test]
+async fn after_an_upgrade_the_runner_images_no_profile_runs_are_removed_and_no_other_image() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    has_images(
+        &docker,
+        &[
+            PUBLISHED,
+            "ghcr.io/ayagmar/runnerd-runner:app-0.0.4",
+            "runnerd-runner:app",
+            "runnerd-runner:base",
+            "runnerd-runner:shell",
+            "runnerd-record:42",
+            "ci-runner:glowly",
+            "postgres:18-alpine",
+            "localhost:5000/runnerd-runners:app",
+        ],
+    );
+    docker.0.lock().unwrap().images_in_use = BTreeSet::from(["runnerd-runner:shell".to_owned()]);
+    let config = CONFIG.replace("image_stage = \"app\"", &format!("image = \"{PUBLISHED}\""));
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_stale_images_removed(&mut engine).await;
+    assert_eq!(
+        images_left(&docker),
+        [
+            "ci-runner:glowly",
+            PUBLISHED,
+            "localhost:5000/runnerd-runners:app",
+            "postgres:18-alpine",
+            "runnerd-record:42",
+            "runnerd-runner:shell",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_profiles_image_is_kept_however_its_reference_spells_it() {
+    for (reference, listed) in [
+        (
+            "docker.io/acme/runnerd-runner:app",
+            "acme/runnerd-runner:app",
+        ),
+        ("acme/runnerd-runner", "acme/runnerd-runner:latest"),
+        (
+            "ghcr.io/acme/runnerd-runner@sha256:0123456789abcdef0123456789abcdef0123456789abcdef0123456789abcdef",
+            "ghcr.io/acme/runnerd-runner:app-0.0.5",
+        ),
+    ] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        has_images(&docker, &[listed]);
+        let config = CONFIG.replace("image_stage = \"app\"", &format!("image = \"{reference}\""));
+        let dir = TestDir::new("engine");
+        let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+        engine.recover().await.unwrap();
+        until_stale_images_removed(&mut engine).await;
+        assert_eq!(images_left(&docker), [listed], "{reference}");
+    }
+}
+
+#[tokio::test]
+async fn a_reload_onto_another_stage_removes_the_one_the_profile_ran_before() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    has_images(&docker, &["runnerd-runner:app"]);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_stale_images_removed(&mut engine).await;
+    assert_eq!(images_left(&docker), ["runnerd-runner:app"]);
+    has_images(&docker, &["runnerd-runner:app-jdk25"]);
+    let config = CONFIG.replace("image_stage = \"app\"", "image_stage = \"app-jdk25\"");
+    engine.reload(Config::parse(&config).unwrap(), None, None);
+    until_stale_images_removed(&mut engine).await;
+    assert_eq!(images_left(&docker), ["runnerd-runner:app-jdk25"]);
 }
 
 mod admission;

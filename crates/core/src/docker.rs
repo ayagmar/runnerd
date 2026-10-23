@@ -256,6 +256,8 @@ pub trait DockerApi: Send + Sync {
     ) -> impl Future<Output = Result<u64, Error>> + Send;
     /// Every image with the label.
     fn images(&self, label: &str) -> impl Future<Output = Result<Vec<Image>, Error>> + Send;
+    /// Every tag of every image Docker has, such as `runnerd-runner:node`.
+    fn image_tags(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// Removes an image and the layers only it used; one that does not exist is not an error.
     fn remove_image(&self, reference: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// The free disk where Docker keeps its images and containers.
@@ -634,6 +636,18 @@ impl DockerApi for Docker {
             });
         }
         Ok(found)
+    }
+
+    async fn image_tags(&self) -> Result<Vec<String>, Error> {
+        let images = self
+            .api
+            .list_images(Some(ListImagesOptionsBuilder::new().build()))
+            .await?;
+        Ok(images
+            .into_iter()
+            .flat_map(|image| image.repo_tags)
+            .filter(|tag| tag != "<none>:<none>")
+            .collect())
     }
 
     async fn remove_image(&self, reference: &str) -> Result<(), Error> {

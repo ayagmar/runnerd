@@ -83,6 +83,8 @@ runnerd logs the pull's progress, and `runnerd doctor` says whether each image i
 docker build --target jvm -t runnerd-runner:jvm image
 ```
 
+At start, after a reload and after a pull, runnerd removes the images in a `runnerd-runner` repository that no profile names, such as the previous version's after an upgrade ([ADR 0040](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0040-unused-runner-images-removed.md)). It touches no other image, and Docker keeps one a container still uses. Set `image_stage` soon after building a stage no profile names yet.
+
 ### Your own image
 
 When your jobs need system packages the stages lack, build on `base`, or on `android` for Android builds:

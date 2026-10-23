@@ -775,6 +775,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         self.drop_closed_slots();
+        self.images.stale_due = true;
         let names: BTreeSet<String> = self
             .config
             .repositories
