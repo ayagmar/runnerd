@@ -541,6 +541,14 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
         names.contains("mirror 4G") && names.contains("jvm seed 9G"),
         "{shown}"
     );
+
+    // A 512M mirror is a cell or two at common widths: the heading names it.
+    app.live.status.budget.mirror_memory = 512 << 20;
+    let shown = screen(&app, 120, 40, false);
+    let mut lines = shown.lines().skip(1);
+    let (heading, bar) = (lines.next().unwrap(), lines.next().unwrap());
+    assert!(heading.ends_with("· mirror 512M"), "{shown}");
+    assert!(bar.contains("▒ "), "the mirror's block shows: {shown}");
 }
 
 #[test]

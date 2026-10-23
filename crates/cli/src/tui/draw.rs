@@ -310,7 +310,6 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         let _ = write!(note, " · {} in use, sampled", bytes(host.memory));
     }
     let [title, bar, labels] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
-    heading(frame, title, "Budget", note, theme);
 
     let caps: u64 = app.slots().map(|(_, profile, _)| profile.memory).sum();
     let whole = budget.memory_max.unwrap_or(caps).max(caps);
@@ -361,7 +360,7 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         ));
         drawn += width;
     }
-    // The mirror and each seed container, named as the slots are.
+    // The mirror and each seed container, named as the slots are, or in the heading when too narrow for it.
     for Held {
         style,
         label,
@@ -369,20 +368,25 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     } in held(status, theme)
     {
         let width = scale(memory, whole, bar.width)
-            .max(1)
+            .max(2)
             .min(bar.width.saturating_sub(drawn));
-        if width == 0 {
+        if width < 2 {
             break;
         }
-        let mut text = "▒".repeat(usize::from(width - 1));
+        let room = usize::from(width - 1);
+        let mut text = "▒".repeat(room);
         text.push(' ');
         cells.push(Span::styled(text, style));
-        names.push(Span::styled(
-            format!("{} ", fit(&label, usize::from(width - 1))),
-            style,
-        ));
+        let name = if label.width() <= room {
+            label
+        } else {
+            let _ = write!(note, " · {label}");
+            String::new()
+        };
+        names.push(Span::styled(format!("{name:room$} "), style));
         drawn += width;
     }
+    heading(frame, title, "Budget", note, theme);
     let free = bar.width.saturating_sub(drawn);
     cells.push(Span::styled("·".repeat(usize::from(free)), theme.dim()));
     frame.render_widget(Line::from(cells), bar);
