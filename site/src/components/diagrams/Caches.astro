@@ -1,0 +1,56 @@
+---
+// What a runner container sees of the warm caches: its slot's layer over the profile's snapshot over the image, and
+// the caches every slot shares. Volume names follow cache::Names.
+import Diagram from '../Diagram.astro';
+---
+
+<Diagram name="caches" caption="Two slots of the jvm profile. A slot's changes stay in its own volume; slot 1's become the snapshot when the profile is idle.">
+  <svg viewBox="0 0 480 452" role="img" aria-labelledby="caches-title caches-desc">
+    <title id="caches-title">The warm caches of one profile</title>
+    <desc id="caches-desc">
+      Each slot of the jvm profile has its own read-write volume, runnerd-jvm-slot-1 and runnerd-jvm-slot-2, holding
+      its Docker Engine's data and its changes to ~/.cache, the tool cache and the Android SDK. Under both slots is the
+      profile's read-only snapshot, runnerd-jvm-base, and under that the runner image. When the profile is idle and
+      slot 1 changed by reseed_at, slot 1's layers become the snapshot. Every slot of every profile shares the pnpm
+      store, runnerd-pnpm, the Maven repository, runnerd-maven, and the Docker Hub mirror, runnerd-mirror.
+    </desc>
+    <rect class="frame" x="1" y="1" width="226" height="52"></rect>
+    <text class="t" x="16" y="34">jvm 1's container</text>
+    <rect class="frame" x="253" y="1" width="226" height="52"></rect>
+    <text class="t" x="268" y="34">jvm 2's container</text>
+
+    <rect class="jvm" x="0" y="64" width="228" height="76"></rect>
+    <text class="on-block" x="16" y="90">slot 1, read-write</text>
+    <text class="on-block" x="16" y="112">its Docker images,</text>
+    <text class="on-block" x="16" y="132">~/.cache, tool cache</text>
+    <rect class="jvm" x="252" y="64" width="228" height="76"></rect>
+    <text class="on-block" x="268" y="90">slot 2, read-write</text>
+    <text class="on-block" x="268" y="112">its Docker images,</text>
+    <text class="on-block" x="268" y="132">~/.cache, tool cache</text>
+
+    <rect class="box-2" x="0" y="148" width="480" height="52"></rect>
+    <text x="16" y="172">jvm snapshot, read-only</text>
+    <text class="m" x="16" y="192">runnerd-jvm-base</text>
+    <rect class="box" x="0" y="208" width="480" height="52"></rect>
+    <text x="16" y="232">the profile's runner image</text>
+    <text class="m" x="16" y="252">read-only, as pulled</text>
+
+    <text x="268" y="172">reseeded from slot 1</text>
+    <text class="m" x="268" y="192">when the profile is idle</text>
+
+    <text class="t" x="0" y="300">shared by every slot</text>
+    <rect class="box" x="0" y="316" width="152" height="76"></rect>
+    <text x="14" y="340">pnpm store</text>
+    <text class="m" x="14" y="362">emptied above</text>
+    <text class="m" x="14" y="382">max_size</text>
+    <rect class="box" x="164" y="316" width="152" height="76"></rect>
+    <text x="178" y="340">Maven repo</text>
+    <text class="m" x="178" y="362">emptied above</text>
+    <text class="m" x="178" y="382">max_size</text>
+    <rect class="box" x="328" y="316" width="152" height="76"></rect>
+    <text x="342" y="340">Docker Hub</text>
+    <text x="342" y="362">mirror</text>
+    <text class="m" x="342" y="382">while runners run</text>
+    <text class="m" x="0" y="430">runnerd-pnpm, runnerd-maven, runnerd-mirror</text>
+  </svg>
+</Diagram>

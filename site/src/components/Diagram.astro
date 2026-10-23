@@ -1,0 +1,93 @@
+---
+// A diagram drawn by hand as inline SVG: no script, no image request, and the page's fonts and theme colours through
+// the classes below. The SVG inside names itself with <title> and <desc>; the caption says what to read in it. Each
+// diagram is drawn at most 480 units wide, so on a 390px phone its 15-unit text stays above 11px.
+interface Props {
+  name: string;
+  caption: string;
+}
+
+const { name, caption } = Astro.props;
+---
+
+<figure class="diagram" data-name={name}>
+  <slot />
+  <figcaption>{caption}</figcaption>
+</figure>
+
+<style is:global>
+  .diagram {
+    max-width: 36rem;
+    margin-block: 1.5rem;
+  }
+
+  .diagram svg {
+    display: block;
+    width: 100%;
+    height: auto;
+    font-family: var(--font-display);
+    font-size: 15px;
+    fill: var(--ink);
+  }
+
+  .diagram figcaption {
+    margin-top: 0.5rem;
+    font-family: var(--font-display);
+    font-size: 0.875rem;
+    color: var(--muted);
+  }
+
+  .diagram .t {
+    font-size: 17px;
+    font-weight: 700;
+  }
+
+  .diagram .m {
+    fill: var(--muted);
+  }
+
+  .diagram .box {
+    fill: var(--surface);
+  }
+
+  .diagram .box-2 {
+    fill: var(--surface-2);
+  }
+
+  .diagram .ink {
+    fill: var(--ink);
+  }
+
+  .diagram .on-ink {
+    fill: var(--bg);
+  }
+
+  .diagram .jvm {
+    fill: var(--mint);
+  }
+
+  .diagram .node {
+    fill: var(--pink);
+  }
+
+  .diagram .on-block {
+    fill: var(--block-ink);
+  }
+
+  .diagram .frame {
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 1.5;
+    stroke-dasharray: 6 4;
+  }
+
+  .diagram .line {
+    fill: none;
+    stroke: var(--muted);
+    stroke-width: 1.5;
+  }
+
+  .diagram .head {
+    fill: var(--muted);
+  }
+</style>
