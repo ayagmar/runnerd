@@ -34,6 +34,7 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
         paused: false,
         held_until: None,
         queued,
+        runner_memory: None,
     }
 }
 
@@ -60,7 +61,9 @@ fn starts(decisions: &[Decision]) -> Vec<(usize, &str)> {
     decisions
         .iter()
         .filter_map(|decision| match decision {
-            Decision::Start { slot, repository } => Some((slot.index, repository.as_str())),
+            Decision::Start {
+                slot, repository, ..
+            } => Some((slot.index, repository.as_str())),
             Decision::Stop { .. } => None,
         })
         .collect()
@@ -133,6 +136,32 @@ fn the_budget_caps_starts_within_one_plan() {
         now(),
     );
     assert_eq!(starts(&decisions), [(0, "o/a")]);
+}
+
+#[test]
+fn runners_that_reserve_their_predicted_peak_start_more_within_the_same_budget() {
+    // 4G caps fit one in 5G; 2G predictions fit two, and each start says what it reserved.
+    let repositories = [Repository {
+        runner_memory: Some(2 * GIB),
+        ..repository(
+            "o/a",
+            "app",
+            vec![job(1, &["app"]), job(2, &["app"]), job(3, &["app"])],
+        )
+    }];
+    let decisions = plan(
+        &repositories,
+        &profiles(vec![Slot::Free, Slot::Free, Slot::Free]),
+        Some(5 * GIB),
+        now(),
+    );
+    assert_eq!(starts(&decisions), [(0, "o/a"), (1, "o/a")]);
+    assert!(
+        decisions.iter().all(
+            |decision| matches!(decision, Decision::Start { memory, .. } if *memory == 2 * GIB)
+        ),
+        "{decisions:?}"
+    );
 }
 
 #[test]

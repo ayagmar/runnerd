@@ -741,6 +741,7 @@ impl App {
             .unwrap_or_default();
         self.job = Some(JobView {
             job: Job {
+                admission: None,
                 summary,
                 steps,
                 record: None,

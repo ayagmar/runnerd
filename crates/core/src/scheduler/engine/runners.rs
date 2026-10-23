@@ -8,6 +8,7 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::{Engine, Occupant, RunningJobs, unix_secs};
+use crate::api::Admission;
 use crate::cache::{self, runner_mounts};
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
@@ -37,6 +38,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         for (slot, occupant) in occupied {
             let running = match self.docker.inspect(&occupant.container).await {
+                // A kill in the last interval before it stopped, which no sample of its cgroup saw.
+                Ok(state) if state.oom_killed => {
+                    self.store.runner_oom_killed(&occupant.runner_name);
+                    state.running
+                }
                 Ok(state) => state.running,
                 Err(error) if is_not_found(&error) => false,
                 Err(error) => {
@@ -204,10 +210,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    pub(super) async fn start(&mut self, slot: &SlotRef, repository: &str) {
-        let Some(profile) = self.config.profiles.get(&slot.profile) else {
-            return;
-        };
+    /// Starts the registry mirror, when enabled and down, for a runner about to start.
+    async fn start_mirror(&mut self) {
+        let mirror = &self.config.caches.mirror;
+        if mirror.enabled && !self.mirror_up {
+            match cache::mirror_up(&*self.docker, &self.names, mirror, &self.config.host.slice)
+                .await
+            {
+                Ok(()) => {
+                    self.mirror_up = true;
+                    self.mirror_memory = mirror.memory.0;
+                }
+                // Runners pull from Docker Hub directly when the mirror does not answer.
+                Err(error) => warn!("cannot start the mirror: {error}"),
+            }
+        }
+    }
+
+    pub(super) async fn start(&mut self, slot: &SlotRef, repository: &str, admission: Admission) {
         let Some(labels) = self
             .config
             .repositories
@@ -230,19 +250,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             );
             return;
         }
-        let mirror = &self.config.caches.mirror;
-        if mirror.enabled && !self.mirror_up {
-            match cache::mirror_up(&*self.docker, &self.names, mirror, &self.config.host.slice)
-                .await
-            {
-                Ok(()) => {
-                    self.mirror_up = true;
-                    self.mirror_memory = mirror.memory.0;
-                }
-                // Runners pull from Docker Hub directly when the mirror does not answer.
-                Err(error) => warn!("cannot start the mirror: {error}"),
-            }
-        }
+        self.start_mirror().await;
+        let Some(profile) = self.config.profiles.get(&slot.profile) else {
+            return;
+        };
         let (runner, jit_config) = match self.github.jit_config(repository, &name, &labels).await {
             Ok(registered) => registered,
             Err(error) => {
@@ -284,7 +295,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     busy: false,
                     started_at: now,
                     memory: profile.memory.0,
+                    admission: Some(admission),
                     job: None,
+                    key: None,
                 };
                 if let Some(entry) = self
                     .slots

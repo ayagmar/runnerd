@@ -76,6 +76,9 @@ pub struct Job {
     /// Its record, for a failed job of a profile that records failures.
     #[serde(default)]
     pub record: Option<super::RecordNote>,
+    /// How its runner was admitted; `None` for one started before runnerd recorded it.
+    #[serde(default)]
+    pub admission: Option<super::Admission>,
 }
 
 /// The runner a job ran on.

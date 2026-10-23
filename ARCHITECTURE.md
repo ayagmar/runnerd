@@ -32,8 +32,8 @@ flowchart TB
 
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
-| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
-| `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, the Unix-socket API | `runnerd-core` with `host`; hyper for a shell's upgraded connection |
+| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice, admission by measured peaks | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
+| `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API | `runnerd-core` with `host`; hyper for a shell's upgraded connection |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
 
@@ -42,7 +42,8 @@ flowchart TB
 - `api`, `config`: build without `host`. Every client reads these.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `docker`, `github`, `cache`, `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
+- `admission`, `docker`, `github`, `cache`, `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host`
+  only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)).
 
 The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and
@@ -76,7 +77,8 @@ client → transport → principal → handler → core
    [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
    and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images),
    `caches` (reseeds, the mirror, the shared caches), `records` (records of failed jobs and the shells in them),
-   `history` (what the store records), `control` (`Control` and the commands) and `status` (what it publishes).
+   `history` (what the store records), `admission` (what a new runner reserves), `control` (`Control` and the
+   commands) and `status` (what it publishes).
 
 A new transport (SSH, Tailscale) produces a `Principal` and reuses the handlers.
 
@@ -91,7 +93,9 @@ queued → slot → container → removed
 1. Every `poll_interval` the engine asks GitHub for runners first, then queued jobs (`Engine::tick`; the order
    avoids starting a second runner for a job its runner just took), every repository at once, a few requests at a
    time.
-2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget. A profile whose
+2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget: what each
+   runner reserves is its cap, or under `admission = "measured"` its predicted peak (`engine/admission`,
+   [ADR 0033](docs/adr/0033-measured-admission.md)). A profile whose
    `image` Docker lacks starts nothing until the engine pulled it in the background
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)).
 3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`) and starts its
@@ -157,6 +161,16 @@ nothing until Docker has listed them.
 - Sizing advice (`GET /v1/sizing`, `sizing::advise`) is computed from the job history and never written by the
   daemon: a client applies it on request, after a confirmation, through `PUT /v1/config`
   ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)).
+- What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`. Under
+  `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
+  with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under
+  `admission = "measured"` a runner reserves its predicted peak, at most its cap, and counts at the larger of that
+  and its last sampled memory, or at its cap when its own or the slice's sample is older than three intervals; the
+  reservation follows its repository's queue until its job is known, then that job's prediction, and a waiting
+  runner raised past what is free is stopped. The config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing
+  starts while the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample,
+  after a run of its job at its cap or killed for memory, or when a restart adopted it
+  ([ADR 0033](docs/adr/0033-measured-admission.md)). Each runner's record keeps what it reserves and why.
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the

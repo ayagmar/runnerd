@@ -97,6 +97,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             started_at,
             memory_cap: state.memory,
             cpu_cap: state.cpus,
+            admission: occupant.admission,
         });
         if let Some(pid) = state.pid {
             self.tracked.send_modify(|tracked| {

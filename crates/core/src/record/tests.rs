@@ -393,6 +393,7 @@ fn failed_job() -> api::Job {
     }))
     .unwrap();
     api::Job {
+        admission: None,
         summary,
         steps: vec![
             step(1, "Set up job", "success"),

@@ -323,3 +323,45 @@ fn resizing_a_profile_the_config_lacks_names_it() {
         "the config has no profile \"jvm\" under [profiles]"
     );
 }
+
+/// `MINIMAL` under measured admission with `slots` slots.
+fn measured(slots: u32) -> String {
+    MINIMAL
+        .replace(
+            "isolation = \"sysbox\"",
+            "isolation = \"sysbox\"\nadmission = \"measured\"",
+        )
+        .replace("slots = 1", &format!("slots = {slots}"))
+}
+
+#[test]
+fn measured_admission_lets_the_caps_add_up_past_memory_max() {
+    // 8 × 4G = 32G of caps on a 10G slice: one runner fits, the predictions decide how many more.
+    let (config, check) = Config::check(&measured(8), |_| Ok(Some(size("10G"))));
+    assert!(check.valid, "{}", check.message);
+    assert!(check.message.contains("measured"), "{}", check.message);
+    assert_eq!(config.unwrap().host.admission, super::Admission::Measured);
+    // The same caps admitted by caps do not fit.
+    let caps = MINIMAL.replace("slots = 1", "slots = 8");
+    assert!(!Config::check(&caps, |_| Ok(Some(size("10G")))).1.valid);
+}
+
+#[test]
+fn measured_admission_needs_one_runner_of_every_profile_to_fit() {
+    let error = Config::parse(&measured(2))
+        .unwrap()
+        .validate(Some(size("3G")))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("one runner of app"), "{error}");
+}
+
+#[test]
+fn measured_admission_needs_a_memory_max_to_admit_against() {
+    let error = Config::parse(&measured(2))
+        .unwrap()
+        .validate(None)
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("has none"), "{error}");
+}

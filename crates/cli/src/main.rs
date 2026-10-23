@@ -942,6 +942,7 @@ mod tests {
 
     fn job(state: JobState) -> Job {
         Job {
+            admission: None,
             summary: JobSummary {
                 id: 9001,
                 repository: "halyard/ledger".to_owned(),

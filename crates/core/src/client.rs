@@ -667,6 +667,8 @@ mod tests {
             at: 1_700_000_000,
             event: Event::BudgetChanged {
                 budget: Budget {
+                    admission: crate::api::AdmissionPolicy::Caps,
+                    held: false,
                     slice: "runnerd.slice".to_owned(),
                     memory_max: None,
                     memory_in_use: id,

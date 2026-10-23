@@ -5,8 +5,8 @@ use std::collections::BTreeMap;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    HostSample, HostSamples, Job, JobPage, JobQuery, JobState, JobSummary, ProfileStatus,
-    RepositoryStatus, Sample, SampleSeries, SlotStatus, Status,
+    AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery, JobState, JobSummary,
+    ProfileStatus, RepositoryStatus, Sample, SampleSeries, SlotStatus, Status,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -269,8 +269,9 @@ fn slot_view<'overview>(
     }
 }
 
-/// The budget: the slice as the ground, a block per slot sized by its memory cap, filled as high as the job's last
-/// sampled memory; the mirror and each seed container; and what is free. A block opens its job, or its slot's card;
+/// The budget: the slice as the ground, a block per slot sized by its memory cap (under measured admission, a block
+/// per runner sized by what it reserves), filled as high as the job's last sampled memory; the mirror and each seed
+/// container; and what is free. A block opens its job, or its slot's card;
 /// hovering or focusing one says what it holds in the readout above the bar.
 pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     let status = &overview.status;
@@ -278,7 +279,12 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     let reserved: u64 = status
         .profiles
         .iter()
-        .map(|profile| profile.memory * profile.slots.len() as u64)
+        .flat_map(|profile| {
+            profile
+                .slots
+                .iter()
+                .filter_map(|slot| block_memory(status, profile, slot))
+        })
         .sum();
     let held = held(status);
     let held_total: u64 = held.iter().map(|part| part.memory).sum();
@@ -325,7 +331,9 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
             div.bar role="group" aria-label=(label) {
                 @for profile in &status.profiles {
                     @for slot in &profile.slots {
-                        (block(overview, profile, slot, parts))
+                        @if let Some(memory) = block_memory(status, profile, slot) {
+                            (block(overview, profile, slot, memory, parts))
+                        }
                     }
                 }
                 @for part in &held {
@@ -372,6 +380,9 @@ fn readout(
                 p #budget-readout .readout {
                     span.big { (format::bytes(budget.memory_in_use)) }
                     span { " of " (budget.memory_max.map_or("unlimited".to_owned(), format::bytes)) " in " code { (budget.slice) } }
+                    @if let Some(note) = budget.admission_note() {
+                        span.muted { " " (note) }
+                    }
                     @if let Some(used) = used_now {
                         span.muted { " · " (format::bytes(used)) " in use" }
                     }
@@ -461,7 +472,22 @@ fn held(status: &Status) -> Vec<Held> {
     mirror.into_iter().chain(seeds).collect()
 }
 
-fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus, parts: &Parts) -> Markup {
+/// What a slot's block holds of the budget: its cap; under measured admission what its runner reserves, and no
+/// block for a free slot.
+fn block_memory(status: &Status, profile: &ProfileStatus, slot: &SlotStatus) -> Option<u64> {
+    match status.budget.admission {
+        AdmissionPolicy::Caps => Some(profile.memory),
+        AdmissionPolicy::Measured => slot.runner.as_ref().map(|runner| runner.reserved),
+    }
+}
+
+fn block(
+    overview: &Overview,
+    profile: &ProfileStatus,
+    slot: &SlotStatus,
+    memory: u64,
+    parts: &Parts,
+) -> Markup {
     let class = profile_class(&overview.status, &profile.name);
     let view = slot_view(overview, profile, slot);
     #[allow(
@@ -470,7 +496,7 @@ fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus, parts:
     )]
     let fill = view
         .memory
-        .map(|memory| (memory as f64 / profile.memory.max(1) as f64).min(1.0));
+        .map(|used| (used as f64 / memory.max(1) as f64).min(1.0));
     let state = match (&slot.runner, view.job) {
         (None, _) => "idle",
         (Some(_), Some(_)) => "busy",
@@ -487,7 +513,7 @@ fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus, parts:
     let fill_id = format!("fill-{}", view.key);
     html! {
         a class=(format!("block {class} {state}")) href=(href)
-            style=(format!("--size: {:.3}", gib(profile.memory)))
+            style=(format!("--size: {:.3}", gib(memory)))
             aria-describedby=(lens_id(&view.key))
             data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
             data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
@@ -497,7 +523,7 @@ fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus, parts:
                 }))
             }
             // Its name is what it shows, for voice control: the space joins the two as words.
-            span.size { (format::bytes(profile.memory)) }
+            span.size { (format::bytes(memory)) }
             " "
             span.name { (profile.name) " " (slot.slot) }
         }

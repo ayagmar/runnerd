@@ -58,6 +58,8 @@ fn serve(socket: &Path) {
         version: "0.0.1".to_owned(),
         shutting_down: false,
         budget: Budget {
+            admission: runnerd_core::api::AdmissionPolicy::Caps,
+            held: false,
             slice: "runnerd.slice".to_owned(),
             memory_max: None,
             memory_in_use: 0,

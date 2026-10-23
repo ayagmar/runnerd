@@ -36,12 +36,14 @@
 
 use serde::{Deserialize, Serialize};
 
+mod admission;
 mod control;
 mod events;
 mod jobs;
 mod records;
 mod sizing;
 
+pub use admission::{Admission, AdmissionPolicy, Basis};
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, RunningJob,
 };
@@ -98,8 +100,16 @@ pub struct Budget {
     pub slice: String,
     /// The slice's `MemoryMax`; `None` when it is unlimited.
     pub memory_max: Option<u64>,
-    /// Memory caps of the running containers: runners, seed containers, shells and the mirror.
+    /// Memory the running containers reserve: the runners' caps, or under measured admission the larger of each
+    /// runner's predicted peak and its last sampled memory, and the caps of the seed containers, shells and the
+    /// mirror.
     pub memory_in_use: u64,
+    /// What a new runner must fit in beside them.
+    #[serde(default)]
+    pub admission: AdmissionPolicy,
+    /// Under measured admission, whether the slice is at the high-water mark, so no runner starts.
+    #[serde(default)]
+    pub held: bool,
     /// The mirror's part of `memory_in_use`: its cap while it is enabled or still running, else 0.
     #[serde(default)]
     pub mirror_memory: u64,
@@ -109,6 +119,20 @@ pub struct Budget {
     /// The shells' part of `memory_in_use`, one per shell open in a record, by job.
     #[serde(default)]
     pub shell_memory: Vec<ShellMemory>,
+}
+
+impl Budget {
+    /// How runners are admitted, as clients add it to the budget's line: nothing under caps, else `by predicted
+    /// peaks`, and why nothing starts while the slice is at the high-water mark.
+    pub fn admission_note(&self) -> Option<&'static str> {
+        match (self.admission, self.held) {
+            (AdmissionPolicy::Caps, _) => None,
+            (AdmissionPolicy::Measured, false) => Some("by predicted peaks"),
+            (AdmissionPolicy::Measured, true) => Some(
+                "by predicted peaks; the slice is past 90% of its MemoryMax, so no runner starts",
+            ),
+        }
+    }
 }
 
 /// A shell container's memory cap: its record's profile's limit when the shell opened.
@@ -170,6 +194,10 @@ pub struct RunnerStatus {
     pub busy: bool,
     /// Seconds since the Unix epoch.
     pub started_at: u64,
+    /// What it takes of the budget: its cap under caps; under measured admission the larger of its predicted peak
+    /// and its last sampled memory. 0 from a daemon before measured admission.
+    #[serde(default)]
+    pub reserved: u64,
 }
 
 /// A configured repository and its queue.

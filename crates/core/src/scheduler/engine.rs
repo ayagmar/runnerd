@@ -10,6 +10,7 @@
 //! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `history` (what
 //! the store records), `control` (the API's commands) and `status` (what it publishes).
 
+mod admission;
 mod caches;
 mod control;
 mod history;
@@ -35,6 +36,7 @@ use self::history::{Closing, Found};
 use self::images::ImageState;
 pub use self::records::RecordSelection;
 use super::SlotRef;
+use crate::admission::Key;
 use crate::api;
 use crate::cache::{self, Names, Trimmed};
 use crate::config::Config;
@@ -166,11 +168,22 @@ struct Occupant {
     started_at: SystemTime,
     /// Its container's memory cap, which a reload does not change.
     memory: u64,
+    /// How it was admitted, with what it reserved of the budget; `None` for one a restart adopted, which reserves
+    /// its cap.
+    admission: Option<api::Admission>,
     /// The job it took, once its log capture found it.
     job: Option<u64>,
+    /// That job as admission tells jobs apart, once the history had its record.
+    key: Option<Key>,
 }
 
 impl Occupant {
+    /// What it reserves of the budget under measured admission: its cap if a restart adopted it.
+    fn reserved(&self) -> u64 {
+        self.admission
+            .map_or(self.memory, |admission| admission.reserved)
+    }
+
     fn running_job(&self) -> api::RunningJob {
         api::RunningJob {
             repository: self.repository.clone(),
@@ -253,6 +266,8 @@ pub struct Engine<G = Github, D = Docker> {
     last_prune: Option<SystemTime>,
     /// The records of failed jobs and the shells open in them.
     records: records::RecordState,
+    /// Under measured admission, the predictor and the high-water mark.
+    measured: admission::Measured,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -309,11 +324,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         let (records, records_receiver) = records::RecordState::new();
         // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
-        let mirror_memory = if config.caches.mirror.enabled {
-            config.caches.mirror.memory.0
-        } else {
-            0
-        };
+        let mirror = &config.caches.mirror;
+        let mirror_memory = if mirror.enabled { mirror.memory.0 } else { 0 };
         let mut engine = Engine {
             isolation: isolation::backend(config.host.isolation),
             config,
@@ -356,6 +368,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             cancelling: BTreeMap::new(),
             closing: BTreeMap::new(),
             last_prune: None,
+            measured: admission::Measured::default(),
             records,
         };
         engine.publish();
