@@ -107,7 +107,5 @@ case ":$PATH:" in
   *":$bindir:"*) ;;
   *) echo "- add $bindir to your PATH" ;;
 esac
-echo "- fix what runnerd doctor reports above: runners need Docker with the sysbox runtime"
-echo "  (https://github.com/nestybox/sysbox) and a systemd slice whose MemoryMax is their budget"
-echo "- write a runnerd.toml (https://github.com/$repo/blob/main/examples/runnerd.toml) and check it:"
-echo "  runnerd doctor runnerd.toml"
+echo "- write a config and a systemd user unit for the repositories to serve, then follow what it prints:"
+echo "  runnerd init <owner/repo>..."

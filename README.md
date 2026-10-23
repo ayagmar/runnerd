@@ -4,30 +4,58 @@ runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh contain
 
 It is in early development: the daemon schedules runners, records every job, serves a JSON API and a web dashboard, and `runnerctl` reads and controls it from a terminal.
 
-## Install
+## First run
 
-Releases are early 0.0.x builds for Linux on x86_64 and aarch64. The installer downloads `runnerd` and `runnerctl` from the latest release, checks their SHA-256 against the release's checksum files, copies them to `~/.local/bin` and runs `runnerd doctor`:
+On a Linux host with Docker:
 
 ```sh
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh
+runnerd init halyard/ledger halyard/storefront
 ```
 
-Pass `--prefix DIR` to install into `DIR/bin` instead, or `--version v0.0.4` for a specific release (for v0.0.3 and earlier, run that release's own `install.sh`):
+`runnerd init` writes two files and changes nothing else:
+
+- `~/.config/runnerd/runnerd.toml`: the repositories, and one profile sized to three quarters of the host's memory
+  (or the slice's `MemoryMax` if that is smaller) and its CPUs, so `runnerd check-config` passes;
+- `~/.config/systemd/user/runnerd.service`: a user unit running `runnerd serve` with that config.
+
+It then runs `runnerd doctor` and prints what is left as commands. It prints the ones that need root and never runs
+them; on a fresh host they are usually the slice, sized for this host, and Sysbox. Run the commands your `init`
+printed, not a copy from elsewhere.
+
+Then build the runner image (published images are on the way; `init` will use them once they ship) and start the
+service. The image is built for linux/amd64 only today, so on aarch64 runners do not start yet.
 
 ```sh
-curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd
+docker build --target base -t runnerd-runner:base https://github.com/ayagmar/runnerd.git#v0.0.4:image
+systemctl --user daemon-reload
+systemctl --user enable --now runnerd
+runnerctl status
 ```
 
-It never uses sudo and installs nothing else. Every release archive, `install.sh` and `sha256.sum` has a GitHub build provenance attestation. To check `install.sh` before running it, or an archive you downloaded yourself:
+`init` never replaces a file unless given `--force`. `--slice` names another slice, `--config` writes the config
+elsewhere.
+
+## Install
+
+The installer downloads `runnerd` and `runnerctl` for Linux x86_64 or aarch64, checks their SHA-256, copies them to
+`~/.local/bin` and runs `runnerd doctor`. It never uses sudo. To pick the directory or the release:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.4
+```
+
+For v0.0.3 and earlier, run that release's own `install.sh`. Every release archive, `install.sh` and `sha256.sum` has
+a GitHub build provenance attestation:
 
 ```sh
 curl -fsSLO https://github.com/ayagmar/runnerd/releases/latest/download/install.sh
 gh attestation verify install.sh -R ayagmar/runnerd
 sh install.sh
-gh attestation verify runnerd-x86_64-unknown-linux-musl.tar.xz -R ayagmar/runnerd
 ```
 
-From crates.io, the daemon is the crate `runnerd` and `runnerctl` is in `runnerd-cli`, so install both. `cargo install` builds them with Rust 1.99 or later; [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) downloads the same release archives as `install.sh` instead:
+From crates.io the daemon is `runnerd` and `runnerctl` is in `runnerd-cli`. `cargo install` needs Rust 1.99 or later;
+`cargo binstall` downloads the release archives instead:
 
 ```sh
 cargo install --locked runnerd runnerd-cli
@@ -37,15 +65,39 @@ cargo binstall runnerd runnerd-cli
 ## Requirements
 
 - Linux with cgroup v2, and Docker using the systemd cgroup driver.
-- [Sysbox](https://github.com/nestybox/sysbox), so each runner container can run its own Docker Engine without being privileged. Sysbox publishes `.deb` packages; on Arch Linux it is the AUR package `sysbox-ce-bin`; elsewhere, build it from source.
+- [Sysbox](https://github.com/nestybox/sysbox), so each runner container can run its own Docker Engine without being
+  privileged: `.deb` packages, the AUR package `sysbox-ce-bin` on Arch Linux, or a build from source.
 - A systemd slice whose `MemoryMax` is the budget for all runners.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 
-`runnerd doctor` checks each of these and prints the fix for what is missing. Given a config, it also checks the slice the config names and that the config fits in it:
+`runnerd doctor` checks each of these, the slice the config names and that the config fits in it, and prints the fix
+for what is missing. It reads `~/.config/runnerd/runnerd.toml` when it exists; `runnerd doctor <file>` checks another.
+
+## Running it as a service
+
+The unit `runnerd init` writes:
+
+```ini
+[Service]
+Type=exec
+ExecStart="/home/dana/.local/bin/runnerd" serve --config "/home/dana/.config/runnerd/runnerd.toml"
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
+```
 
 ```sh
-runnerd doctor runnerd.toml
+systemctl --user enable --now runnerd   # start now and at login
+loginctl enable-linger "$USER"          # keep it running while you are logged out
+journalctl --user -u runnerd -f         # its log
+systemctl --user restart runnerd        # after editing runnerd.toml by hand
+systemctl --user stop runnerd           # waits for running jobs, up to systemd's stop timeout
 ```
+
+Runner containers live in Docker, not in the unit: when runnerd stops or crashes, the next start adopts the ones still
+running. A config saved from the dashboard or `PUT /v1/config` applies without a restart.
 
 ## Runner image
 
@@ -59,13 +111,9 @@ docker build --target jvm -t runnerd-runner:jvm image
 
 Documentation: <https://ayagmar.github.io/runnerd/>
 
-## Running
+## How it runs
 
-```sh
-runnerd serve --config runnerd.toml
-```
-
-Without `--config`, it reads `$XDG_CONFIG_HOME/runnerd/runnerd.toml`. It reads the `gh` CLI's token at start (and again when GitHub rejects it), then every `poll_interval` (`[host]`, default `15s`) asks GitHub for each repository's queued jobs. A job is served when every label in its `runs-on` is one of its repository's `labels`. For each such job it registers a just-in-time runner on the repository and starts it in a free slot of the repository's profile, if the slice's `MemoryMax` still has room for the profile's `memory`. The runner takes one job, its container exits, and runnerd removes it; a runner that got no job within 5 minutes is removed. Jobs that cannot be served yet wait in GitHub's queue.
+`runnerd serve` reads `$XDG_CONFIG_HOME/runnerd/runnerd.toml`, or the file `--config` names. It reads the `gh` CLI's token at start (and again when GitHub rejects it), then every `poll_interval` (`[host]`, default `15s`) asks GitHub for each repository's queued jobs. A job is served when every label in its `runs-on` is one of its repository's `labels`. For each such job it registers a just-in-time runner on the repository and starts it in a free slot of the repository's profile, if the slice's `MemoryMax` still has room for the profile's `memory`. The runner takes one job, its container exits, and runnerd removes it; a runner that got no job within 5 minutes is removed. Jobs that cannot be served yet wait in GitHub's queue.
 
 A slot is one concurrent job of a profile. Containers are new for every job, but each slot keeps a volume with its Docker Engine's images and its own changes to `~/.cache`, the tool cache and the Android SDK, over the profile's read-only snapshot. When a profile has no job running and its slot 1 changed those by `reseed_at` (`[caches]`, default `2G`), slot 1's changes become the new snapshot. The pnpm store and the Maven repository are shared by all slots and emptied above their `max_size` when no job runs. The Docker Hub mirror runs while any runner does.
 
@@ -249,24 +297,13 @@ SIGINT, SIGTERM and SIGHUP quit and SIGTSTP suspends, each after giving the term
 away the header says `reconnecting`. Once it is back, the event stream resumes after the last event read, or the
 state is read again if none was; an open job's log carries on from its next line. Build without it with `cargo build -p runnerd-cli --no-default-features`.
 
-From the bash `ci` tool:
-
-| `ci` | Now |
-|---|---|
-| `ci up <repo>` | `runnerd serve` (or its systemd unit) once; `runnerctl resume <repo>` for a paused repository |
-| `ci down <repo>` | `runnerctl pause <repo>`, refused while it runs a job |
-| `FORCE=1 ci down <repo>` | `runnerctl pause --force <repo>` |
-| `ci clean <repo>` | `runnerctl caches --clean runnerd-<profile>-slot-<n>`; `--clean runnerd-pnpm` and the other shared caches for `ci clean all` |
-| `ci seed <repo>` | `runnerctl reseed <profile>` |
-| `ci status` | `runnerctl status`, `runnerctl caches`, `runnerctl watch` |
-| `ci autoscale` | nothing: the daemon starts a runner for each queued job |
-
 ## Config
 
-One file, `runnerd.toml`, lists the repositories to serve, the runner profile each one uses, the shared caches and the systemd slice whose limits form the budget. [`examples/runnerd.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/runnerd.toml) is a complete example.
+One file, `runnerd.toml`, lists the repositories to serve, the runner profile each one uses, the shared caches and the systemd slice whose limits form the budget. `runnerd init` writes a starter one; [`examples/runnerd.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/runnerd.toml) has every setting.
 
 ```sh
-runnerd check-config runnerd.toml
+runnerd check-config              # ~/.config/runnerd/runnerd.toml
+runnerd check-config other.toml
 ```
 
 This reads the slice's `MemoryMax` from systemd and fails when `slots × memory` over all profiles, plus the Docker Hub mirror, does not fit in it. A slice without a unit file has no `MemoryMax`; the check passes with a warning, since nothing would hold the runners to their caps. To check against a size without systemd, pass it: `--memory-max 33G`.
@@ -292,8 +329,6 @@ docker build --target jvm -t runnerd-runner:jvm image
 docker build --target base -t runnerd-runner:base image
 cargo test -p runnerd-core --test docker_smoke --test cache_reseed -- --ignored
 ```
-
-[`examples/sandbox.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/sandbox.toml) is the setup for the end-to-end test against the throwaway repository `ayagmar/runnerd-sandbox`.
 
 ## License
 

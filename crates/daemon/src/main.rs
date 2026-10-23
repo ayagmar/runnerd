@@ -1,4 +1,4 @@
-//! `runnerd`: the daemon and its commands (`serve`, `stop`, `doctor`, `check-config`). Wires config, GitHub,
+//! `runnerd`: the daemon and its commands (`init`, `serve`, `stop`, `doctor`, `check-config`). Wires config, GitHub,
 //! Docker and the engine together; scheduling lives in `runnerd_core::scheduler`, the API in `api`.
 
 use std::path::{Path, PathBuf};
@@ -17,7 +17,10 @@ use tracing::{info, warn};
 
 mod api;
 mod doctor;
+mod init;
 mod output;
+#[cfg(test)]
+mod testdir;
 
 use output::fail;
 
@@ -35,16 +38,35 @@ struct Cli {
     reason = "clap prints these comments as --help, where backticks would show"
 )]
 enum Command {
+    /// Write a starter config sized for this host and a systemd user unit, then print the steps left.
+    ///
+    /// Never overwrites a file without --force and never runs anything as root: it prints those steps.
+    Init {
+        /// The repositories to serve, as owner/name.
+        #[arg(required = true)]
+        repositories: Vec<String>,
+        /// The systemd slice runners run in; its MemoryMax is their budget.
+        #[arg(long, default_value = "runnerd.slice")]
+        slice: String,
+        /// Where to write the config [default: $XDG_CONFIG_HOME/runnerd/runnerd.toml].
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Replace the config and the unit if they exist.
+        #[arg(long)]
+        force: bool,
+    },
     /// Validate a config file against the slice's memory budget.
     CheckConfig {
-        path: PathBuf,
+        /// The config file [default: $XDG_CONFIG_HOME/runnerd/runnerd.toml].
+        path: Option<PathBuf>,
         /// Check against this MemoryMax (such as 33G) instead of reading it from systemd.
         #[arg(long)]
         memory_max: Option<ByteSize>,
     },
     /// Check that the host can run runners, and print the fix for what it is missing.
     Doctor {
-        /// Also check this config against the slice it names.
+        /// Also check this config against the slice it names [default: $XDG_CONFIG_HOME/runnerd/runnerd.toml,
+        /// when it exists].
         config: Option<PathBuf>,
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
@@ -74,8 +96,20 @@ enum Command {
 
 fn main() -> ExitCode {
     let result = match Cli::parse().command {
-        Some(Command::CheckConfig { path, memory_max }) => Ok(check_config(&path, memory_max)),
-        Some(Command::Doctor { config }) => Ok(doctor(config.as_deref())),
+        Some(Command::Init {
+            repositories,
+            slice,
+            config,
+            force,
+        }) => init(repositories, slice, config, force),
+        Some(Command::CheckConfig { path, memory_max }) => {
+            config_or_default(path).map(|path| check_config(&path, memory_max))
+        }
+        Some(Command::Doctor { config }) => Ok(doctor(
+            config
+                .or_else(|| default_config().filter(|path| path.exists()))
+                .as_deref(),
+        )),
         Some(Command::Serve {
             config,
             socket,
@@ -87,6 +121,37 @@ fn main() -> ExitCode {
         None => Ok(ExitCode::SUCCESS),
     };
     result.unwrap_or_else(|code| code)
+}
+
+fn init(
+    repositories: Vec<String>,
+    slice: String,
+    config: Option<PathBuf>,
+    force: bool,
+) -> Result<ExitCode, ExitCode> {
+    let config = config_or_default(config)?;
+    let config = std::path::absolute(&config).map_err(|error| {
+        fail(&format_args!(
+            "cannot resolve {}: {error}",
+            config.display()
+        ))
+    })?;
+    let unit = config_dir()
+        .map(|dir| dir.join("systemd/user/runnerd.service"))
+        .ok_or_else(|| fail(&"neither XDG_CONFIG_HOME nor HOME is set"))?;
+    let runnerd = std::env::current_exe().map_err(|error| fail(&error))?;
+    Ok(init::run(&init::Request {
+        repositories,
+        slice,
+        runnerd,
+        config,
+        unit,
+        overwrite: if force {
+            init::Overwrite::Replace
+        } else {
+            init::Overwrite::Refuse
+        },
+    }))
 }
 
 fn check_config(path: &Path, memory_max: Option<ByteSize>) -> ExitCode {
@@ -132,11 +197,21 @@ fn runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
     tokio::runtime::Runtime::new().map_err(|error| fail(&error))
 }
 
-fn default_config() -> Option<PathBuf> {
-    let dir = std::env::var_os("XDG_CONFIG_HOME")
+/// `$XDG_CONFIG_HOME`, or `~/.config`.
+fn config_dir() -> Option<PathBuf> {
+    std::env::var_os("XDG_CONFIG_HOME")
         .map(PathBuf::from)
-        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")))?;
-    Some(dir.join("runnerd/runnerd.toml"))
+        .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".config")))
+}
+
+fn default_config() -> Option<PathBuf> {
+    config_dir().map(|dir| dir.join("runnerd/runnerd.toml"))
+}
+
+fn config_or_default(config: Option<PathBuf>) -> Result<PathBuf, ExitCode> {
+    config
+        .or_else(default_config)
+        .ok_or_else(|| fail(&"neither XDG_CONFIG_HOME nor HOME is set; name the config file"))
 }
 
 /// `$XDG_STATE_HOME/runnerd/runnerd.db`, or `~/.local/state/runnerd/runnerd.db`.
@@ -186,9 +261,7 @@ async fn serve(
         .with_target(false)
         .with_ansi(std::io::IsTerminal::is_terminal(&std::io::stderr()))
         .init();
-    let path = config
-        .or_else(default_config)
-        .ok_or_else(|| fail(&"neither XDG_CONFIG_HOME nor HOME is set; pass --config"))?;
+    let path = config_or_default(config)?;
     let text = std::fs::read_to_string(&path)
         .map_err(|error| fail(&format_args!("cannot read {}: {error}", path.display())))?;
     let config = Config::parse(&text).map_err(|error| fail(&error))?;
