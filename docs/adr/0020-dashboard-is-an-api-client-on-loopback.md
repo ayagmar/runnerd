@@ -1,5 +1,8 @@
 # 0020. The dashboard is an API client, on loopback behind a one-time login
 
+Amended by [0042](0042-dashboard-behind-a-proxy-and-installable.md): writes are also taken from the origins of
+proxies listed in `[web] origins`, and a login through an HTTPS proxy sets a `Secure` cookie.
+
 ## Context
 
 The browser needs HTTP, and the daemon's API is on a Unix socket only its user can open (ADR 0002). A loopback TCP

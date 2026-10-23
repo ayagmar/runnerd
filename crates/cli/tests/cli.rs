@@ -580,6 +580,46 @@ fn the_version_is_reported_under_the_command_name() {
 }
 
 #[test]
+fn the_login_url_goes_through_the_proxy_named_by_base() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    std::fs::write(
+        dir.0.join("runnerd.web"),
+        "http://127.0.0.1:7477/login?code=0123abcd\n",
+    )
+    .unwrap();
+    let output = runnerctl(
+        &socket,
+        &[
+            "web",
+            "--no-open",
+            "--base",
+            "https://Forge.example.ts.net:8443",
+        ],
+    );
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        "https://forge.example.ts.net:8443/login?code=0123abcd\n"
+    );
+    let output = runnerctl(
+        &socket,
+        &[
+            "web",
+            "--no-open",
+            "--base",
+            "https://forge.example.ts.net:8443/",
+        ],
+    );
+    assert!(!output.status.success(), "a base with a path is refused");
+    assert!(
+        stderr(&output).contains("it has a path"),
+        "{}",
+        stderr(&output)
+    );
+}
+
+#[test]
 fn status_json_is_the_api_type_unchanged() {
     let dir = TempDir::new();
     let socket = dir.0.join("runnerd.sock");

@@ -164,6 +164,10 @@ enum Command {
         /// Print the URL instead of opening it.
         #[arg(long)]
         no_open: bool,
+        /// The address of a proxy in front of the dashboard, one of `[web] origins`, to log in through instead,
+        /// such as `https://host.example.ts.net:8443`.
+        #[arg(long, value_name = "ORIGIN")]
+        base: Option<config::Origin>,
     },
 }
 
@@ -431,7 +435,7 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         }
         Command::Config { command } => return config(client, json, command).await,
         Command::Doctor => return doctor(client, json).await,
-        Command::Web { no_open } => return web(client, no_open),
+        Command::Web { no_open, base } => return web(client, no_open, base.as_ref()),
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -827,8 +831,8 @@ async fn doctor(client: &Client, json: bool) -> Result<ExitCode, Error> {
     Ok(exit(passed))
 }
 
-/// Opens the dashboard with the one-time login URL the daemon writes next to its socket.
-fn web(client: &Client, no_open: bool) -> Result<ExitCode, Error> {
+/// Opens the dashboard with the one-time login URL the daemon writes next to its socket, through `base` if given.
+fn web(client: &Client, no_open: bool, base: Option<&config::Origin>) -> Result<ExitCode, Error> {
     let file = client.socket().with_extension("web");
     let url = match std::fs::read_to_string(&file) {
         Ok(text) => text.trim().to_owned(),
@@ -841,6 +845,16 @@ fn web(client: &Client, no_open: bool) -> Result<ExitCode, Error> {
         Err(error) => {
             return Err(Error::Local(format!(
                 "cannot read {}: {error}",
+                file.display()
+            )));
+        }
+    };
+    let url = match (base, url.find("/login?")) {
+        (None, _) => url,
+        (Some(base), Some(login)) => format!("{base}{}", &url[login..]),
+        (Some(_), None) => {
+            return Err(Error::Local(format!(
+                "{} holds no login URL",
                 file.display()
             )));
         }

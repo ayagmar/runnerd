@@ -112,6 +112,7 @@ fn config_rejects_unknown_fields_in_every_table() {
             MINIMAL.replace("profile = \"app\"", "profile = \"app\"\ntypo = 1"),
         ),
         ("records", format!("{MINIMAL}\n[records]\ntypo = 1")),
+        ("web", format!("{MINIMAL}\n[web]\ntypo = 1")),
     ] {
         let error = Config::parse(&with_typo).unwrap_err().to_string();
         assert!(error.contains("unknown field `typo`"), "{table}: {error}");
@@ -192,6 +193,58 @@ fn auto_sizing_is_off_and_bounded_unless_configured() {
             .unwrap_err()
             .to_string();
         assert_eq!(error, format!("profiles.app: {why}"));
+    }
+}
+
+fn origins(list: &str) -> Result<Vec<String>, String> {
+    Config::parse(&format!("{MINIMAL}\n[web]\norigins = [{list}]\n"))
+        .map(|config| config.web.origins.iter().map(ToString::to_string).collect())
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn the_dashboard_takes_writes_from_no_other_origin_unless_configured() {
+    let config = Config::parse(MINIMAL).unwrap();
+    assert!(config.web.origins.is_empty(), "no extra origins by default");
+}
+
+#[test]
+fn an_origin_is_kept_as_the_browser_sends_it() {
+    assert_eq!(
+        origins(
+            r#""https://Host.Example.ts.net:8443", "https://dash.example:443", "http://localhost:8080", "http://[::1]:7477""#
+        ),
+        Ok(vec![
+            "https://host.example.ts.net:8443".to_owned(),
+            "https://dash.example".to_owned(),
+            "http://localhost:8080".to_owned(),
+            "http://[::1]:7477".to_owned(),
+        ])
+    );
+}
+
+#[test]
+fn an_origin_with_a_path_plain_http_or_no_port_number_is_refused() {
+    for (origin, why) in [
+        ("https://host.example.ts.net:8443/", "it has a path"),
+        ("https://host.example/dashboard", "it has a path"),
+        (
+            "http://host.example.ts.net:8443",
+            "http is for a loopback host only",
+        ),
+        ("host.example.ts.net:8443", "it has no scheme"),
+        ("ftp://host.example", "its scheme is not https"),
+        ("https://host.example:http", "its port is not a number"),
+        ("https://host.example:0", "its port is not a number"),
+        ("https://me@host.example", "it names a user"),
+        ("https://", "its host is not a name"),
+    ] {
+        let error = origins(&format!("{origin:?}")).unwrap_err();
+        assert!(error.contains(why), "{origin}: {error}");
+        assert!(
+            error.contains("origins = ["),
+            "{origin} shows the line: {error}"
+        );
     }
 }
 

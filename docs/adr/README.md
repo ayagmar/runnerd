@@ -25,7 +25,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0017](0017-job-history-in-sqlite.md) | Job history in SQLite, written by one thread (amended by 0027, 0028) |
 | [0018](0018-job-identity-and-logs-from-inside-the-runner.md) | Job identity and logs from inside the runner container |
 | [0019](0019-control-commands-through-the-engine.md) | Control commands go through the engine; a reload keeps running jobs (amended by 0026) |
-| [0020](0020-dashboard-is-an-api-client-on-loopback.md) | The dashboard is an API client, on loopback behind a one-time login |
+| [0020](0020-dashboard-is-an-api-client-on-loopback.md) | The dashboard is an API client, on loopback behind a one-time login (amended by 0042) |
 | [0021](0021-clients-speak-http-over-the-socket-with-hyper.md) | Clients speak HTTP over the socket with hyper (in part superseded by 0030) |
 | [0022](0022-terminal-ui-is-ratatui-in-runnerctl.md) | The terminal UI is ratatui in runnerctl, behind a feature |
 | [0023](0023-runner-image-pinned-to-a-snapshot-date.md) | Runner image pinned to an Ubuntu snapshot date |
@@ -39,7 +39,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets |
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check (amended by 0037, 0039) |
 | [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag (amended by 0036) |
-| [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit |
+| [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit (installable dashboard built in 0042) |
 | [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time |
 | [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |
@@ -47,3 +47,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default |
 | [0040](0040-unused-runner-images-removed.md) | Published runner images no profile runs are removed |
 | [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits |
+| [0042](0042-dashboard-behind-a-proxy-and-installable.md) | The dashboard behind a proxy the owner runs, and installable as an app |

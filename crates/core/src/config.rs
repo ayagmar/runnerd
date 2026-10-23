@@ -34,6 +34,9 @@ pub struct Config {
     /// How sizing advice reads the job history.
     #[serde(default)]
     pub sizing: Sizing,
+    /// Who may use the dashboard through another address.
+    #[serde(default)]
+    pub web: Web,
 }
 
 /// `[host]`: where runner containers run and how they are isolated.
@@ -347,6 +350,120 @@ impl Default for Sizing {
             interval: Duration::from_hours(24),
             max_step: 25,
         }
+    }
+}
+
+/// `[web]`: the dashboard behind a reverse proxy, such as `tailscale serve`. Read when the daemon starts.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Web {
+    /// The origins, besides the dashboard's own loopback address, whose pages may write: pause, reseed, save the
+    /// config. Default none.
+    pub origins: Vec<Origin>,
+}
+
+/// An origin as a browser sends it in `Origin`: `https://host[:port]`, or `http://` for a loopback host, in lower
+/// case and without the scheme's default port. Nothing after the port: no path, query or user.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Origin(String);
+
+impl Origin {
+    /// The origin as a browser sends it, such as `https://host.example.ts.net:8443`.
+    pub fn as_str(&self) -> &str {
+        &self.0
+    }
+}
+
+impl FromStr for Origin {
+    type Err = String;
+
+    fn from_str(s: &str) -> Result<Origin, String> {
+        let invalid = |why: &str| {
+            format!(
+                "invalid origin {s:?}: {why}; write the scheme, host and port only, such as \
+                 \"https://host.example.ts.net:8443\""
+            )
+        };
+        let (scheme, rest) = s
+            .split_once("://")
+            .ok_or_else(|| invalid("it has no scheme"))?;
+        let scheme = scheme.to_ascii_lowercase();
+        if rest.contains(['/', '?', '#']) {
+            return Err(invalid("it has a path"));
+        }
+        if rest.contains('@') {
+            return Err(invalid("it names a user"));
+        }
+        let (host, port) = match rest.strip_prefix('[') {
+            Some(v6) => {
+                let (address, after) = v6
+                    .split_once(']')
+                    .ok_or_else(|| invalid("its IPv6 address has no closing ]"))?;
+                let port = match after {
+                    "" => None,
+                    _ => Some(after.strip_prefix(':').ok_or_else(|| invalid("its port"))?),
+                };
+                (format!("[{address}]"), port)
+            }
+            None => match rest.split_once(':') {
+                Some((host, port)) => (host.to_owned(), Some(port)),
+                None => (rest.to_owned(), None),
+            },
+        };
+        let host = host.to_ascii_lowercase();
+        let named = host
+            .chars()
+            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
+        let address = host
+            .strip_prefix('[')
+            .and_then(|host| host.strip_suffix(']'))
+            .and_then(|address| address.parse::<std::net::Ipv6Addr>().ok());
+        if host.is_empty() || !(named || address.is_some()) {
+            return Err(invalid("its host is not a name or an address"));
+        }
+        let port = port
+            .map(|port| {
+                Some(port)
+                    .filter(|port| port.bytes().all(|byte| byte.is_ascii_digit()))
+                    .and_then(|port| port.parse::<u16>().ok())
+                    .filter(|port| *port != 0)
+                    .ok_or_else(|| invalid("its port is not a number from 1 to 65535"))
+            })
+            .transpose()?;
+        let loopback = host == "localhost"
+            || address.is_some_and(|address| address.is_loopback())
+            || host
+                .parse::<std::net::Ipv4Addr>()
+                .is_ok_and(|address| address.is_loopback());
+        let default_port = match scheme.as_str() {
+            "https" => 443,
+            "http" if loopback => 80,
+            "http" => {
+                return Err(invalid(
+                    "http is for a loopback host only, since the session cookie would cross the network in \
+                     the clear; use https",
+                ));
+            }
+            _ => return Err(invalid("its scheme is not https")),
+        };
+        Ok(Origin(match port {
+            Some(port) if port != default_port => format!("{scheme}://{host}:{port}"),
+            _ => format!("{scheme}://{host}"),
+        }))
+    }
+}
+
+impl fmt::Display for Origin {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+
+impl<'de> Deserialize<'de> for Origin {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(de::Error::custom)
     }
 }
 

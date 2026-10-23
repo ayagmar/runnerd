@@ -19,6 +19,7 @@ use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use maud::Markup;
 use runnerd_core::client::{Client, ClientError};
+use runnerd_core::config::Origin;
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -79,28 +80,31 @@ pub async fn listen(flag: &str) -> io::Result<Option<TcpListener>> {
 pub fn spawn(
     listener: TcpListener,
     socket: PathBuf,
+    proxies: Vec<Origin>,
     stop: impl Future + Send + 'static,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let stop = async {
             stop.await;
         };
-        if let Err(error) = serve(listener, &socket, stop).await {
+        if let Err(error) = serve(listener, &socket, &proxies, stop).await {
             warn!("the dashboard stopped: {error}");
         }
     })
 }
 
-/// Serves the dashboard on `listener` for the daemon whose API is on `socket`, until `stop` completes. Writes the
-/// one-time login URL to `login_file(socket)` and removes it when done.
+/// Serves the dashboard on `listener` for the daemon whose API is on `socket`, until `stop` completes. Pages from
+/// `proxies` (`[web] origins`), reverse proxies in front of it, may write too. Writes the one-time login URL to
+/// `login_file(socket)` and removes it when done.
 pub async fn serve(
     listener: TcpListener,
     socket: &Path,
+    proxies: &[Origin],
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let addr = listener.local_addr()?;
     let file = login_file(socket);
-    let auth = auth::Auth::new(addr, file.clone())?;
+    let auth = auth::Auth::new(addr, proxies, file.clone())?;
     info!(
         "serving the dashboard on http://{addr}; `runnerctl web` opens it (login URL in {})",
         file.display()
@@ -174,7 +178,7 @@ async fn security_headers(request: Request, next: Next) -> Response {
         header::CONTENT_SECURITY_POLICY,
         HeaderValue::from_static(
             "default-src 'none'; script-src 'self' 'unsafe-eval'; style-src 'self' 'unsafe-inline'; \
-             img-src 'self' data:; font-src 'self'; connect-src 'self'; form-action 'self'; \
+             img-src 'self' data:; font-src 'self'; connect-src 'self'; manifest-src 'self'; form-action 'self'; \
              base-uri 'none'; frame-ancestors 'none'",
         ),
     );

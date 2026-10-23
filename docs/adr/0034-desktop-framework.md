@@ -1,7 +1,10 @@
 # 0034. Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit
 
 Status: **Accepted** (2026-10-23). Supersedes [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md).
-Building it is deferred until after the 0.0.7 release.
+Building it is deferred until after the 0.0.7 release. The installable dashboard (recommendation 2) was built
+ahead of the notifications, at the owner's request, in [0042](0042-dashboard-behind-a-proxy-and-installable.md)
+(2026-10-23), with a reverse proxy such as `tailscale serve` for other devices; the headless row's "only through an
+SSH tunnel" now also reads "or such a proxy".
 
 ## Context
 

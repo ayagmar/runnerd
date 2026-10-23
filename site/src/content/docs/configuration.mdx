@@ -272,6 +272,17 @@ cpu ×1.5  jvm 3, node 8                 0s     2m08s     4m21s       21s       
 
 Start at `1.0`: the running jobs' averages fill the CPUs, and peaks that land together cost a short slowdown, not a kill. Raise it when jobs wait for CPU the host shows idle; lower it to keep CPU free for the host itself. `--cpus` replays another number of CPUs, and `--cpu-overcommit`, repeated, compares factors.
 
+## The dashboard behind a proxy
+
+`[web] origins` lists addresses of proxies in front of the dashboard, such as `tailscale serve`, whose pages may write: pause, reseed, save the config. [From another device](../clients/#from-another-device) shows the whole setup.
+
+```toml
+[web]
+origins = ["https://forge.tail0b5e.ts.net:8443"]
+```
+
+Each is a scheme, host and port as the browser's address bar shows them, with no path: `https`, or `http` for a loopback host only, since the session cookie would otherwise cross the network in the clear. runnerd reads `[web]` when it starts; restart it after a change.
+
 ## The budget check
 
 <Budget />

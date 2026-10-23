@@ -1,5 +1,5 @@
 //! The files the pages load, compiled into the binary: the stylesheet, the theme switch, the vendored Datastar
-//! bundle, the font and the mark. Nothing is fetched from elsewhere; `assets/README.md` records where each vendored
+//! bundle, the font, the mark, and the web app manifest with its icons, which let a browser install the dashboard. Nothing is fetched from elsewhere; `assets/README.md` records where each vendored
 //! file came from and its SHA-256.
 
 use axum::extract::{Path, Query};
@@ -7,7 +7,7 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use serde::Deserialize;
 
-const FILES: [(&str, &str, &[u8]); 5] = [
+const FILES: [(&str, &str, &[u8]); 9] = [
     (
         "style.css",
         "text/css; charset=utf-8",
@@ -32,6 +32,26 @@ const FILES: [(&str, &str, &[u8]); 5] = [
         "mark.svg",
         "image/svg+xml",
         include_bytes!("../assets/mark.svg"),
+    ),
+    (
+        "manifest.webmanifest",
+        "application/manifest+json",
+        include_bytes!("../assets/manifest.webmanifest"),
+    ),
+    (
+        "icon-192.png",
+        "image/png",
+        include_bytes!("../assets/icon-192.png"),
+    ),
+    (
+        "icon-512.png",
+        "image/png",
+        include_bytes!("../assets/icon-512.png"),
+    ),
+    (
+        "icon-maskable-512.png",
+        "image/png",
+        include_bytes!("../assets/icon-maskable-512.png"),
     ),
 ];
 
