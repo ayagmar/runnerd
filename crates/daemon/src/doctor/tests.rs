@@ -401,3 +401,18 @@ fn a_history_too_short_to_advise_on_is_only_information() {
     assert_eq!(check.status, Status::Info, "{check}");
     assert_eq!(check.fix, None);
 }
+
+#[test]
+fn under_measured_admission_caps_over_memory_max_pass_without_claiming_to_fit() {
+    let mut config = config("sysbox");
+    config.host.admission = runnerd_core::config::Admission::Measured;
+    config.profiles.get_mut("jvm").unwrap().slots = 3;
+    let checks = checks(&ready_host(ARCH), Some(&config));
+    let check = checks.iter().find(|check| check.name == "config").unwrap();
+    assert_eq!(check.status, Status::Pass);
+    assert!(
+        !check.detail.contains("fits in") && check.detail.contains("41.5G"),
+        "says the caps sum past MemoryMax: {}",
+        check.detail
+    );
+}
