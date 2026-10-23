@@ -214,13 +214,13 @@ admission = "measured"
 cpu_overcommit = 1.0
 ```
 
-- The slice's CPUs are its `AllowedCPUs`, or the host's, and fewer when its `CPUQuota` allows less. runnerd reads them from systemd at start.
+- The slice's CPUs are its `AllowedCPUs`, or the host's, and fewer when its `CPUQuota` allows less. runnerd reads them from systemd only while `cpu_overcommit` is set: at start, and again whenever a config that sets it is applied. A config that sets it is refused when they cannot be read.
 - Under `admission = "measured"` a runner reserves its job's average CPU, its CPU time over its run time, predicted from the job history as memory is: with `[sizing] min_jobs` runs of the job, their p95; with fewer, its own largest once 2 succeeded, else the larger of that and its profile's p95; with none, its profile's largest. Without `min_jobs` runs of the profile, its `cpus`. There is no margin: the factor is the margin.
-- Under `admission = "caps"` every runner reserves its profile's `cpus`.
+- Under `admission = "caps"` every runner reserves its profile's `cpus`, and every running one counts at its container's CPU limit, also one admitted by its prediction before a reload.
 - A runner reserves the largest of its repository's queued jobs until it knows its job, then that job's; never more than the whole budget, so one runner can always start.
 - The mirror, seed containers and shells reserve no CPU.
 
-A job that had a slot and memory but not CPU waits. The status line and the dashboard say so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`), the daemon logs it, and the job's record says how long it waited (`runnerctl job <id>`).
+A job that had a slot and memory but not CPU waits. Once it has waited 2 minutes, no younger job starts until it fits, so a stream of light jobs cannot keep a heavy one waiting forever. The status line and the dashboard say so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`), the daemon logs it, and the job's record says how long it waited (`runnerctl job <id>`).
 
 It is off by default. A job's average is far under its peak: the image builds that peak at 6 CPUs average under one, so reserving peaks would leave most of the host idle, and averages admit nearly everything on a host with many CPUs. On one host's history at 32 CPUs, the running jobs' averages never added up past 8 CPUs, even with twice the node slots, so a budget at 1.0 held nothing back. It matters on a small host. The same history replayed against 8 CPUs:
 

@@ -175,7 +175,8 @@ nothing until Docker has listed them.
   predictions learn peaks only from runners sampled that way ([ADR 0037](docs/adr/0037-memory-without-page-cache.md)). Each runner's record keeps what it reserves and why.
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
-  the whole budget. The mirror, seeds and shells reserve none, and no runner is stopped for CPU
+  the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no
+  runner is stopped for CPU, and a job held 2 minutes for CPU stops younger starts until it fits
   ([ADR 0038](docs/adr/0038-cpu-admission.md)).
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.

@@ -17,14 +17,20 @@ at 8 and averages 2.5. A peak lasts seconds.
 `[host] cpu_overcommit = <factor>` turns on a CPU budget: the slice's CPUs times the factor, at most 16. Absent, no
 runner is admitted by CPU.
 
-- The slice's CPUs come from systemd at start (`config::slice_cpus`): `EffectiveCPUs`, else `AllowedCPUs`, else
-  the host's; fewer when `CPUQuotaPerSecUSec` allows less.
+- The slice's CPUs come from systemd (`config::slice_cpus`): `EffectiveCPUs`, else `AllowedCPUs`, else the host's;
+  fewer when `CPUQuotaPerSecUSec` allows less. They are read only while `cpu_overcommit` is set, at start and when
+  a config that sets it is applied, which is refused if they cannot be read: a slice systemd describes oddly never
+  stops a daemon without a CPU budget.
 - Under `admission = "measured"` a runner reserves its job's predicted average CPU (`Predictor::predict_cpu`), by
   the same fallbacks as memory: the job's p95 with `[sizing] min_jobs` runs; with fewer, its own largest once
   `OWN_RUNS` succeeded, else the larger of that and its profile's p95; with none, its profile's largest; without
   `min_jobs` runs of the profile, its `cpus`. No margin and no copies rule: overcommit costs a slowdown, not a kill.
   Runs sampled before 0037 count, since page cache never changed their CPU.
-- Under `admission = "caps"`, or before the history is read, a runner reserves its profile's `cpus`.
+- Under `admission = "caps"`, or before the history is read, a runner reserves its profile's `cpus`. Under caps every
+  running runner counts at its container's CPU limit, also one admitted by its prediction before a reload, as
+  memory does.
+- CPU history is kept apart from memory history: a run whose peak is not learned (sampled before 0037) teaches its
+  job's CPU without making the job known to memory predictions.
 - A runner starts reserving the largest prediction among its repository's queued jobs, then its job's once known.
   Unlike memory, a waiting runner is never raised for a heavier queued job or stopped for one: a wrong guess costs a
   slowdown until the job ends.
@@ -32,7 +38,9 @@ runner is admitted by CPU.
 - The mirror, seed containers and shells reserve no CPU: they are rare, or idle most of the time.
 - `plan` holds a job that had a slot and memory but not CPU (`Decision::HeldForCpu`). The engine logs it, the budget
   says a job waits (`api::CpuBudget`), and the runner that starts next for that repository records how long it waited
-  (`api::CpuAdmission::waited`). Both fields are optional and absent without a CPU budget, so released clients read
+  (`api::CpuAdmission::waited`). Once a held repository has waited `CPU_PRIORITY_AFTER` (2 minutes), `plan` starts
+  no younger job until its own fits: otherwise a stream of lighter jobs takes every CPU that frees up before it.
+  `runnerd simulate` does not model this priority. Both fields are optional and absent without a CPU budget, so released clients read
   the status and records as before.
 
 ### Why the average
@@ -58,5 +66,6 @@ would cut how many run at once. The documented starting value is 1.0.
 
 A host short of CPU can trade a little wait for jobs that keep their speed. On a host with many CPUs it changes
 nothing. The replay keeps each job's run time, so it shows what a CPU budget holds back, not how much sharing the
-CPUs would have slowed the jobs: the evidence for a factor above 1 is the host's own CPU chart. A slice whose CPUs
-change needs a restart to be read again.
+CPUs would have slowed the jobs: the evidence for a factor above 1 is the host's own CPU chart. A heavy job that
+waited 2 minutes holds back every younger start until enough CPU drains, which can idle CPUs for up to the run time
+of what is running.
