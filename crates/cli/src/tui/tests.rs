@@ -1558,3 +1558,18 @@ fn the_help_shows_every_key_in_an_80_by_24_terminal() {
         assert!(shown.contains(expected), "{expected}: {shown}");
     }
 }
+
+#[test]
+fn an_empty_records_view_says_in_full_how_records_are_kept() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('3')));
+    app.update(Msg::Records(records(&[])));
+    let shown: String = screen(&app, 80, 24, false)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        shown.contains("as a record, to open a shell where it failed"),
+        "the hint wraps instead of being cut: {shown}"
+    );
+}

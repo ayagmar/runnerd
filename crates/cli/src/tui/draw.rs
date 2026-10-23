@@ -1139,10 +1139,12 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
     );
     if records.records.is_empty() {
         frame.render_widget(
-            Line::styled(
-                "none kept: set record_failures = true under a profile to keep its failed jobs' runners",
+            Paragraph::new(Line::styled(
+                "none kept: a profile with record_failures = true keeps each failed job's runner as a record, \
+                 to open a shell where it failed",
                 theme.dim(),
-            ),
+            ))
+            .wrap(Wrap { trim: true }),
             table_area,
         );
         return;
