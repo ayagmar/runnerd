@@ -1,15 +1,18 @@
 //! `doctor`'s checks on made-up hosts.
 
 use std::collections::BTreeMap;
+use std::io::Write as _;
+use std::process::{Command, Stdio};
 
 use runnerd_core::api::Sizing;
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::sizing;
 
-use std::io::Write as _;
-use std::process::{Command, Stdio};
-
-use super::{Check, Daemon, DockerFacts, Host, ImageFound, SYSBOX_DAEMONS, Slice, Status, checks};
+use super::{
+    Check, DaemonState, DockerFacts, Host, ImageFound, SYSBOX_DAEMONS, Slice, Status, SysboxDaemon,
+    checks, process_runs,
+};
+use crate::testdir::Dir;
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -31,6 +34,14 @@ fn config(isolation: &str) -> Config {
         &format!("isolation = \"{isolation}\"\nallow_unsafe = true"),
     );
     Config::parse(&text).unwrap()
+}
+
+/// Each of sysbox's daemons in the state `state` gives it.
+fn daemons(state: impl Fn(&str) -> DaemonState) -> [SysboxDaemon; 2] {
+    SYSBOX_DAEMONS.map(|name| SysboxDaemon {
+        name,
+        state: state(name),
+    })
 }
 
 /// A machine with sysbox installed and `runnerd.slice` at 33G, as the example config names it.
@@ -68,7 +79,7 @@ fn ready_host(os_release: &str) -> Host {
             "repo".to_owned(),
             "workflow".to_owned(),
         ]),
-        sysbox_daemons: SYSBOX_DAEMONS.map(|name| (name, Daemon::Unit)),
+        sysbox_daemons: daemons(|_| DaemonState::Unit),
         sysbox_unit: true,
         kvm: true,
     }
@@ -225,13 +236,12 @@ fn sysbox_needs_both_of_its_daemons() {
     let config = config("sysbox");
     for stopped in SYSBOX_DAEMONS {
         let mut host = ready_host(ARCH);
-        host.sysbox_daemons = SYSBOX_DAEMONS.map(|name| {
-            let daemon = if name == stopped {
-                Daemon::Stopped
+        host.sysbox_daemons = daemons(|name| {
+            if name == stopped {
+                DaemonState::Stopped
             } else {
-                Daemon::Unit
-            };
-            (name, daemon)
+                DaemonState::Unit
+            }
         });
         let checks = checks(&host, Some(&config));
         assert_eq!(failed(&checks), ["sysbox"], "{stopped} stopped");
@@ -253,7 +263,7 @@ fn sysbox_needs_both_of_its_daemons() {
 fn a_source_built_sysbox_passes_while_its_daemons_run_without_systemd() {
     let mut host = ready_host("ID=fedora\n");
     host.sysbox_unit = false;
-    host.sysbox_daemons = SYSBOX_DAEMONS.map(|name| (name, Daemon::Process));
+    host.sysbox_daemons = daemons(|_| DaemonState::Process);
     let checks = checks(&host, Some(&config("sysbox")));
     assert_eq!(failed(&checks), Vec::<&str>::new());
     assert_eq!(sysbox(&checks).status, Status::Pass);
@@ -263,13 +273,12 @@ fn a_source_built_sysbox_passes_while_its_daemons_run_without_systemd() {
 fn a_source_built_sysbox_with_a_stopped_daemon_is_started_from_its_clone() {
     let mut host = ready_host("ID=fedora\n");
     host.sysbox_unit = false;
-    host.sysbox_daemons = SYSBOX_DAEMONS.map(|name| {
-        let daemon = if name == "sysbox-fs" {
-            Daemon::Stopped
+    host.sysbox_daemons = daemons(|name| {
+        if name == "sysbox-fs" {
+            DaemonState::Stopped
         } else {
-            Daemon::Process
-        };
-        (name, daemon)
+            DaemonState::Process
+        }
     });
     let checks = checks(&host, Some(&config("sysbox")));
     assert_eq!(failed(&checks), ["sysbox"]);
@@ -278,6 +287,91 @@ fn a_source_built_sysbox_with_a_stopped_daemon_is_started_from_its_clone() {
     assert!(fix.contains("sudo ./scr/sysbox"), "{fix}");
     assert!(!fix.contains("systemctl"), "{fix}");
     assert_pasteable(sysbox);
+}
+
+/// A procfs holding `processes`, each a pid and its `stat`, or no `stat` for one that exited while it was read.
+fn proc_fixture(processes: &[(&str, Option<&str>)]) -> Dir {
+    let dir = Dir::new();
+    for (pid, stat) in processes {
+        let process = dir.0.join(pid);
+        std::fs::create_dir_all(&process).unwrap();
+        if let Some(stat) = stat {
+            std::fs::write(process.join("stat"), stat).unwrap();
+        }
+    }
+    dir
+}
+
+#[test]
+fn a_live_sysbox_daemon_counts_as_running_whatever_its_state() {
+    for state in ["S", "R", "D", "I", "T"] {
+        let stat = format!("4120 (sysbox-mgr) {state} 1 4120 4120 0 -1");
+        let proc = proc_fixture(&[
+            ("1", Some("1 (systemd) S 0 1 1 0 -1")),
+            ("4120", Some(&stat)),
+        ]);
+        assert!(
+            process_runs(&proc.0, "sysbox-mgr"),
+            "state {state} is alive"
+        );
+    }
+}
+
+#[test]
+fn an_exited_sysbox_daemon_does_not_count_as_running() {
+    for state in ["Z", "X", "x"] {
+        let stat = format!("4120 (sysbox-mgr) {state} 1 4120 4120 0 -1");
+        let proc = proc_fixture(&[("4120", Some(&stat))]);
+        assert!(
+            !process_runs(&proc.0, "sysbox-mgr"),
+            "state {state} is not alive"
+        );
+    }
+}
+
+#[test]
+fn a_missing_sysbox_daemon_does_not_count_as_running() {
+    let proc = proc_fixture(&[
+        ("1", Some("1 (systemd) S 0 1 1 0 -1")),
+        ("4121", Some("4121 (sysbox-fs) S 1 4121 4121 0 -1")),
+        ("4122", Some("4122 (my sysbox-mgr) S 1 4122 4122 0 -1")),
+        ("self", Some("4123 (sysbox-mgr) S 1 4123 4123 0 -1")),
+    ]);
+    assert!(
+        !process_runs(&proc.0, "sysbox-mgr"),
+        "no process is sysbox-mgr"
+    );
+    let empty = Dir::new();
+    assert!(
+        !process_runs(&empty.0.join("proc"), "sysbox-mgr"),
+        "no procfs, no process"
+    );
+}
+
+#[test]
+fn a_process_that_exits_while_doctor_reads_is_skipped() {
+    let proc = proc_fixture(&[
+        ("4119", None),
+        ("4120", Some("4120 (sysbox-mgr) S 1 4120 4120 0 -1")),
+    ]);
+    assert!(
+        process_runs(&proc.0, "sysbox-mgr"),
+        "the live one still counts"
+    );
+    let gone = proc_fixture(&[("4119", None)]);
+    assert!(
+        !process_runs(&gone.0, "sysbox-mgr"),
+        "the exited one does not"
+    );
+}
+
+#[test]
+fn a_process_name_is_read_up_to_the_last_parenthesis() {
+    let proc = proc_fixture(&[("4120", Some("4120 (a) b) S 1 4120 4120 0 -1"))]);
+    assert!(
+        process_runs(&proc.0, "a) b"),
+        "the name is everything between the first ( and the last )"
+    );
 }
 
 #[test]

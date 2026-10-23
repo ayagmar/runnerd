@@ -29,7 +29,7 @@ pub(crate) struct Host {
     /// The scopes of `gh`'s token for github.com.
     pub gh_scopes: Result<Vec<String>, String>,
     /// How each of `SYSBOX_DAEMONS` runs: Docker keeps the runtime registered without them.
-    pub sysbox_daemons: [(&'static str, Daemon); 2],
+    pub sysbox_daemons: [SysboxDaemon; 2],
     /// Whether systemd has `sysbox.service`, which Sysbox's packages install and a source build does not.
     pub sysbox_unit: bool,
     pub kvm: bool,
@@ -38,9 +38,16 @@ pub(crate) struct Host {
 /// The daemons sysbox-runc needs; `sysbox.service` starts both, a source build's `scr/sysbox` too.
 pub(crate) const SYSBOX_DAEMONS: [&str; 2] = ["sysbox-mgr", "sysbox-fs"];
 
+/// One of `SYSBOX_DAEMONS` and how it runs.
+#[derive(Clone, Copy)]
+pub(crate) struct SysboxDaemon {
+    pub name: &'static str,
+    pub state: DaemonState,
+}
+
 /// How one of `SYSBOX_DAEMONS` runs.
 #[derive(Clone, Copy, PartialEq, Eq)]
-pub(crate) enum Daemon {
+pub(crate) enum DaemonState {
     /// Its systemd unit is active.
     Unit,
     /// A process runs without its unit, as a source build's `scr/sysbox` starts it.
@@ -94,7 +101,10 @@ impl Host {
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
             gh_scopes: read_gh_scopes(),
-            sysbox_daemons: SYSBOX_DAEMONS.map(|name| (name, read_daemon(name))),
+            sysbox_daemons: SYSBOX_DAEMONS.map(|name| SysboxDaemon {
+                name,
+                state: read_daemon(name),
+            }),
             sysbox_unit: Command::new("systemctl")
                 .args(["show", "sysbox.service", "--property=LoadState", "--value"])
                 .output()
@@ -107,27 +117,46 @@ impl Host {
 }
 
 /// Whether `name` runs as its systemd unit or, as a source build starts it, as a bare process.
-fn read_daemon(name: &str) -> Daemon {
+fn read_daemon(name: &str) -> DaemonState {
     // One unit per call: `systemctl is-active` with several units succeeds when any one runs.
     let unit = Command::new("systemctl")
         .args(["is-active", "--quiet", name])
         .status()
         .is_ok_and(|status| status.success());
     if unit {
-        return Daemon::Unit;
+        return DaemonState::Unit;
     }
-    // Any user may read a process's `comm`, so this sees root's daemons too.
-    let process = std::fs::read_dir("/proc").is_ok_and(|entries| {
-        entries.flatten().any(|entry| {
-            std::fs::read_to_string(entry.path().join("comm"))
-                .is_ok_and(|comm| comm.trim_end() == name)
-        })
-    });
-    if process {
-        Daemon::Process
+    if process_runs(Path::new("/proc"), name) {
+        DaemonState::Process
     } else {
-        Daemon::Stopped
+        DaemonState::Stopped
     }
+}
+
+/// Whether a live process named `name` is in `proc`, a procfs such as `/proc`. Any user may read a process's `stat`,
+/// so this sees root's daemons too. A name is not proof of what runs: it only tells a source build's daemons from
+/// none. Zombies and dead processes do not count, nor do processes that exit while this reads.
+fn process_runs(proc: &Path, name: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let is_pid = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+        // `<pid> (<comm>) <state> ...`; the comm may hold spaces and parentheses, the state follows the last `)`.
+        is_pid
+            && std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| {
+                let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+                    return false;
+                };
+                let state = stat[close + 1..].trim_start().chars().next();
+                open < close
+                    && &stat[open + 1..close] == name
+                    && state.is_some_and(|state| !matches!(state, 'Z' | 'X' | 'x'))
+            })
+    })
 }
 
 /// The advice from the job history at `database`, read-only, while no daemon runs; `None` when it does not exist.
@@ -363,12 +392,17 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             "Docker has no sysbox-runc runtime, which isolation = \"sysbox\" needs".to_owned(),
             &sysbox_fix(&host.os_release, &docker.platform),
         ),
-        Some(_) if host.sysbox_daemons.iter().any(|(_, daemon)| *daemon == Daemon::Stopped) => {
+        Some(_)
+            if host
+                .sysbox_daemons
+                .iter()
+                .any(|daemon| daemon.state == DaemonState::Stopped) =>
+        {
             let stopped: Vec<_> = host
                 .sysbox_daemons
                 .iter()
-                .filter(|(_, daemon)| *daemon == Daemon::Stopped)
-                .map(|(name, _)| *name)
+                .filter(|daemon| daemon.state == DaemonState::Stopped)
+                .map(|daemon| daemon.name)
                 .collect();
             fail(
                 "sysbox",
@@ -386,12 +420,19 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
                 },
             )
         }
-        Some(_) if host.sysbox_daemons.iter().any(|(_, daemon)| *daemon == Daemon::Process) => pass(
+        Some(_)
+            if host
+                .sysbox_daemons
+                .iter()
+                .any(|daemon| daemon.state == DaemonState::Process) =>
+        {
+            pass(
             "sysbox",
             "Docker has the sysbox-runc runtime and sysbox's daemons run without systemd, so start them again \
              after a reboot: sudo ./scr/sysbox in the clone you built it in"
                 .to_owned(),
-        ),
+            )
+        }
         Some(_) => pass(
             "sysbox",
             "Docker has the sysbox-runc runtime and sysbox's services run".to_owned(),
