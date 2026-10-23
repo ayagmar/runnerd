@@ -30,8 +30,8 @@ const blocks = [
 ];
 const used = blocks.reduce((sum, block) => sum + block.size, 0);
 
-// Real output of runnerd 0.0.1 from main, run against that setup. The doctor run's config names demo.slice,
-// which has no unit file yet.
+// runnerd doctor's output as 0.0.5 prints it for that setup, the lines as doctor.rs formats them: the config names
+// demo.slice, which has no unit file yet, and the jvm and node images, not pulled yet.
 const doctorOk = [
   'ok    Docker: reachable, Docker 29.9.2',
   'ok    cgroups: cgroup v2 with the systemd driver',
@@ -45,6 +45,8 @@ const doctorFail = `FAIL  slice: demo.slice has no unit file with a MemoryMax, s
            then: sudo systemctl daemon-reload`;
 const doctorRest = [
   'ok    config: valid, with warnings: the slice demo.slice has no MemoryMax, so nothing holds runners to their 32.5G of caps; install a unit file for it',
+  'ok    image: ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5: not pulled yet; runnerd pulls it before the first runner',
+  'ok    image: ghcr.io/ayagmar/runnerd-runner:node-0.0.5: not pulled yet; runnerd pulls it before the first runner',
   'ok    gh: logged in to github.com with the repo scope',
   'info  /dev/kvm: present, for a future Kata Containers backend',
 ];
@@ -231,7 +233,7 @@ const clients = [
             <pre class="terminal transcript"><code><span class="prompt">$ runnerd doctor runnerd.toml | grep -A4 FAIL</span>
 <span class="fail">{doctorFail}</span></code></pre>
             <details>
-              <summary>The whole run: eight checks</summary>
+              <summary>The whole run: ten checks</summary>
               <pre class="terminal transcript"><code><span class="prompt">$ runnerd doctor runnerd.toml</span>
 {doctorOk.join('\n')}
 <span class="fail">{doctorFail}</span>{doctorRest.join('\n')}</code></pre>

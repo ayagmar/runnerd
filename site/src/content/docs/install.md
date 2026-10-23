@@ -66,7 +66,7 @@ runnerctl status
 | `--config PATH` | write the config elsewhere |
 | `--force` | replace files that exist; without it `init` writes neither |
 
-The profile gets three quarters of the host's memory, or the slice's `MemoryMax` if smaller. [Configuration](../configuration/) says what to change.
+`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory, or the slice's `MemoryMax` if smaller. [Configuration](../configuration/) says what to change.
 
 ## Pick a directory or release
 
