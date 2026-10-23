@@ -601,7 +601,7 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
     }
 }
 
-/// Warns when a profile's jobs need more than its cap; says which caps could be lowered.
+/// Warns when a profile's jobs need more than its cap or than the slice holds; says which caps could be lowered.
 fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
     let sizing = match sizing {
         Ok(sizing) => sizing,
@@ -610,11 +610,17 @@ fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
     let changes: Vec<_> = sizing
         .profiles
         .iter()
-        .filter(|profile| profile.advice.change().is_some())
+        .filter(|profile| {
+            profile.advice.change().is_some()
+                || matches!(profile.advice, Advice::SliceTooSmall { .. })
+        })
         .collect();
-    let raise = changes
-        .iter()
-        .any(|profile| matches!(profile.advice, Advice::Raise { .. }));
+    let raise = changes.iter().any(|profile| {
+        matches!(
+            profile.advice,
+            Advice::Raise { .. } | Advice::SliceTooSmall { .. }
+        )
+    });
     let detail = if changes.is_empty() {
         let too_few = sizing
             .profiles
@@ -627,7 +633,7 @@ fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
             )
         } else {
             format!(
-                "every profile's memory fits its jobs' p99 peak + {}%",
+                "every profile's memory fits its jobs' largest peak + {}%",
                 sizing.margin
             )
         }
@@ -645,7 +651,14 @@ fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
         fix: (!changes.is_empty()).then(|| {
             changes
                 .iter()
-                .map(|profile| format!("runnerctl sizing apply {}", profile.name))
+                .map(|profile| match profile.advice {
+                    Advice::SliceTooSmall { .. } => format!(
+                        "raise MemoryMax in the slice's unit file, sudo systemctl daemon-reload, then: \
+                         runnerctl sizing apply {}",
+                        profile.name
+                    ),
+                    _ => format!("runnerctl sizing apply {}", profile.name),
+                })
                 .collect::<Vec<_>>()
                 .join("\n")
         }),

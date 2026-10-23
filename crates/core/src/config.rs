@@ -267,10 +267,10 @@ impl Default for Records {
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Sizing {
-    /// The percent added to a job's sampled memory peak: a container is sampled every 2 s, so a spike between two
-    /// samples goes unseen. Default 15.
+    /// The percent added to the largest sampled memory peak: a container is sampled every 2 s, so a spike between
+    /// two samples goes unseen. Default 15.
     pub margin: u32,
-    /// The fewest jobs a profile, or a job of a repository's workflow, needs before its percentiles become advice.
+    /// The fewest jobs a profile, or a job of a repository's workflow, needs before its peaks become advice.
     /// Default 10.
     pub min_jobs: u32,
 }

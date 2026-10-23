@@ -69,7 +69,7 @@ pub struct History {
 /// What `advise` sizes against besides the history.
 #[derive(Debug, Clone, Copy)]
 pub struct Window {
-    /// The start asked for, in milliseconds.
+    /// The start asked for, in milliseconds, at most `now`.
     pub since: u64,
     /// Now, in milliseconds.
     pub now: u64,
@@ -78,11 +78,13 @@ pub struct Window {
 }
 
 impl Window {
-    /// The window `GET /v1/sizing` reads: from `since` (seconds), default 30 days before `now` (seconds).
+    /// The window `GET /v1/sizing` reads: from `since` (seconds), default 30 days before `now` (seconds), and
+    /// never after `now`.
     pub fn new(since: Option<u64>, now: u64) -> Window {
         Window {
             since: since
                 .unwrap_or_else(|| now.saturating_sub(30 * 24 * 3600))
+                .min(now)
                 .saturating_mul(1000),
             now: now.saturating_mul(1000),
             sample_interval: SAMPLE_INTERVAL.as_secs(),
@@ -105,7 +107,6 @@ pub fn advise(
         .map_or(window.since, |first| first.max(window.since));
     let span = window.now.saturating_sub(since).max(1);
     let caps = config.memory_caps().map_or(u64::MAX, |caps| caps.0);
-    let slack = memory_max.map(|max| max.saturating_sub(caps));
     let rules = &config.sizing;
     let profiles = config
         .profiles
@@ -141,7 +142,8 @@ pub fn advise(
                 cap: profile.memory.0,
                 slots: profile.slots,
                 share,
-                slack,
+                // What the slice leaves this profile once the other profiles and the mirror took theirs.
+                room: memory_max.map(|max| max.saturating_sub(caps.saturating_sub(share))),
                 margin: rules.margin,
                 min_jobs: rules.min_jobs,
             };
@@ -150,12 +152,11 @@ pub fn advise(
                 .map(|((repository, workflow, job_name), runs)| {
                     let peaks = peaks(&runs);
                     let wait = waits(&runs);
-                    let need = sized.need(&peaks);
                     api::JobSizing {
                         repository: repository.to_owned(),
                         workflow: workflow.map(str::to_owned),
                         name: job_name.to_owned(),
-                        advice: sized.advice(&peaks, need, &wait, busy),
+                        advice: sized.advice(&peaks, &wait, busy),
                         peaks,
                         wait,
                     }
@@ -163,19 +164,12 @@ pub fn advise(
                 .collect();
             let peaks = peaks(&jobs);
             let wait = waits(&jobs);
-            // No job of the profile gets less than it used: the largest need of its jobs, or of all of them.
-            let need = job_sizings
-                .iter()
-                .map(|job| sized.need(&job.peaks))
-                .chain([sized.need(&peaks)])
-                .max()
-                .unwrap_or(0);
             api::ProfileSizing {
                 name: name.clone(),
                 memory: profile.memory.0,
                 cpus: profile.cpus,
                 slots: profile.slots,
-                advice: sized.advice(&peaks, need, &wait, busy),
+                advice: sized.advice(&peaks, &wait, busy),
                 peaks,
                 wait,
                 busy,
@@ -200,41 +194,43 @@ struct Sized {
     slots: u32,
     /// What its slots take of the budget now: `memory × slots`.
     share: u64,
-    /// The budget no profile or mirror takes; `None` for an unlimited slice.
-    slack: Option<u64>,
+    /// The memory its slots may take of the slice; `None` for an unlimited slice.
+    room: Option<u64>,
     margin: u32,
     min_jobs: u32,
 }
 
 impl Sized {
-    /// The memory a set of jobs needs: the p99 peak, or the largest with fewer than `min_jobs`, plus the margin,
-    /// rounded up to `GRANULE`.
+    /// The memory a set of jobs needs: its largest peak plus the margin, rounded up to `GRANULE`. The largest, not
+    /// a percentile: the cap kills a job that goes over it, so a cap below a peak a job reached kills it again.
     fn need(&self, peaks: &Peaks) -> u64 {
-        let basis = if peaks.jobs >= u64::from(self.min_jobs) {
-            peaks.memory.p99
-        } else {
-            peaks.memory.max
-        };
-        let need = basis.saturating_add(basis.saturating_mul(u64::from(self.margin)) / 100);
+        let largest = peaks.memory.max;
+        let need = largest.saturating_add(largest.saturating_mul(u64::from(self.margin)) / 100);
         need.div_ceil(GRANULE).saturating_mul(GRANULE).max(GRANULE)
     }
 
-    fn advice(&self, peaks: &Peaks, need: u64, wait: &Spread, busy: u32) -> Advice {
+    fn advice(&self, peaks: &Peaks, wait: &Spread, busy: u32) -> Advice {
         if peaks.jobs < u64::from(self.min_jobs) {
             return Advice::TooFew { jobs: peaks.jobs };
         }
+        let need = self.need(peaks);
         let fit = |memory: u64| u32::try_from(memory / need).unwrap_or(u32::MAX);
         if need > self.cap {
-            let slots = match self.slack {
-                Some(slack) => fit(self.share.saturating_add(slack)).min(self.slots),
+            let slots = match self.room {
+                Some(room) => fit(room).min(self.slots),
                 None => self.slots,
             };
+            if slots == 0 {
+                return Advice::SliceTooSmall { memory: need };
+            }
             return Advice::Raise {
                 memory: need,
-                slots: slots.max(1),
+                slots,
             };
         }
-        if self.cap - need >= self.cap * WORTH_LOWERING / 100 {
+        // A run at its cap, this one or a smaller one it had then, may have been held back or killed by it: its
+        // peak is a floor, not what it needs, so the cap is never lowered under it.
+        if peaks.at_cap == 0 && self.cap - need >= self.cap * WORTH_LOWERING / 100 {
             let wanted = wait.p95 >= WAITED || busy >= BUSY;
             return Advice::Lower {
                 memory: need,

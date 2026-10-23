@@ -248,3 +248,82 @@ fn each_advised_change_written_into_the_config_still_fits_the_slice() {
         }
     }
 }
+
+#[test]
+fn runs_killed_at_an_older_smaller_cap_keep_the_raised_cap() {
+    // node was 4G and its builds died at it; it is 7G now. Their peaks at the old cap say they need at least that,
+    // not that 4.75G is enough.
+    let jobs = (0..20)
+        .map(|_| Ran {
+            memory_cap: Some(4 * G),
+            ..job("halyard/storefront", "build", "node", 4 * G - 50 * M, 0)
+        })
+        .collect();
+    let sizing = sizing(&History {
+        jobs,
+        runners: Vec::new(),
+    });
+    let node = profile(&sizing, "node");
+    assert_eq!(node.peaks.at_cap, 20);
+    assert!(
+        matches!(node.advice, Advice::Keep { .. }),
+        "the cap stays: {:?}",
+        node.advice
+    );
+    assert_eq!(
+        node.jobs[0].advice.change(),
+        None,
+        "nor is the job's lowered"
+    );
+}
+
+#[test]
+fn the_heaviest_runs_of_a_job_with_hundreds_of_runs_keep_the_cap_they_need() {
+    // 198 builds at 2G and 2 at 6G: the p99 is 2G, but a 2.5G cap would kill the 6G ones each time they recur.
+    let mut jobs = builds(198, 2 * G, 2 * G, 0);
+    jobs.extend(builds(2, 6 * G, 6 * G, 0));
+    let sizing = sizing(&History {
+        jobs,
+        runners: Vec::new(),
+    });
+    let node = profile(&sizing, "node");
+    assert_eq!(node.peaks.memory.p99, 2 * G, "the p99 is shown as it is");
+    // 6G + 15% = 6.9G, rounded up to 7G.
+    assert_eq!(node.advice, Advice::Keep { memory: 7 * G });
+    assert_eq!(node.jobs[0].advice, Advice::Keep { memory: 7 * G });
+}
+
+#[test]
+fn jobs_that_need_more_than_the_slice_holds_for_one_slot_ask_for_a_larger_slice() {
+    // Ledger tests need 10.5G and the slice is 9G: no number of slots fits, so there is nothing to write.
+    let jobs = (0..12)
+        .map(|_| job("halyard/ledger", "test", "jvm", 9 * G, 0))
+        .collect();
+    let sizing = advise(
+        &config(),
+        Some(9 * G),
+        &History {
+            jobs,
+            runners: Vec::new(),
+        },
+        Window::new(None, NOW / 1000),
+    );
+    let jvm = profile(&sizing, "jvm");
+    assert_eq!(jvm.advice, Advice::SliceTooSmall { memory: 10752 * M });
+    assert_eq!(jvm.advice.change(), None);
+    assert!(
+        sizing.advice_line(jvm).contains("MemoryMax"),
+        "the line says the slice has to grow: {}",
+        sizing.advice_line(jvm)
+    );
+}
+
+#[test]
+fn a_start_in_the_future_reads_from_now() {
+    let window = Window::new(Some(u64::MAX / 10), NOW / 1000);
+    assert_eq!(window.since, window.now);
+    assert!(
+        i64::try_from(window.since).is_ok(),
+        "SQLite binds it as an integer"
+    );
+}

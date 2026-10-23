@@ -691,8 +691,8 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
         paint.paint(
             Tone::Dim,
             &format!(
-                "from the last {} of history; peaks are sampled every {} s, so advice adds {}% to them and \
-                 waits for {} jobs",
+                "from the last {} of history; peaks are sampled every {} s, so advice adds {}% to the largest \
+                 and waits for {} jobs",
                 duration(now.saturating_sub(sizing.since)),
                 sizing.sample_interval,
                 sizing.margin,
@@ -738,7 +738,7 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             );
         }
         let tone = match profile.advice {
-            Advice::Raise { .. } => Tone::Bad,
+            Advice::Raise { .. } | Advice::SliceTooSmall { .. } => Tone::Bad,
             Advice::Lower { .. } => Tone::Busy,
             Advice::Keep { .. } => Tone::Good,
             Advice::TooFew { .. } => Tone::Dim,
@@ -771,17 +771,20 @@ fn sizing_jobs(jobs: &[JobSizing], paint: Paint) -> String {
         "P50",
         "P95",
         "P99",
+        "MAX",
         "CPU P99",
         "WAIT P95",
         "NEEDS",
     ])
-    .right(&[2, 3, 4, 5, 6, 7]);
+    .right(&[2, 3, 4, 5, 6, 7, 8]);
     for job in jobs {
         let needs = match job.advice {
             Advice::TooFew { .. } => {
                 cell(format!("max {}", bytes(job.peaks.memory.max)), Tone::Dim)
             }
-            Advice::Raise { memory, .. } => cell(format!("{} > cap", bytes(memory)), Tone::Bad),
+            Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
+                cell(format!("{} > cap", bytes(memory)), Tone::Bad)
+            }
             Advice::Keep { memory } | Advice::Lower { memory, .. } => plain(bytes(memory)),
         };
         table.row(vec![
@@ -791,6 +794,7 @@ fn sizing_jobs(jobs: &[JobSizing], paint: Paint) -> String {
             plain(bytes(job.peaks.memory.p50)),
             plain(bytes(job.peaks.memory.p95)),
             plain(bytes(job.peaks.memory.p99)),
+            plain(bytes(job.peaks.memory.max)),
             plain(cores(job.peaks.cpu.p99)),
             plain(duration(job.wait.p95)),
             needs,

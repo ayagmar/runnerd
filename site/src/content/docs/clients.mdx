@@ -97,7 +97,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl reseed <profile>` | makes slot 1's layers the profile's snapshot once its slots are free, and waits for it (`--no-wait`) |
 | `runnerctl shell <job> [--step 3]` | a shell in a failed job's [record](../running/#records-of-failed-jobs), in its workspace; exiting removes its container |
 | `runnerctl records`, `records rm <job>` | the records of failed jobs with their sizes and limits; removes one, or `--all`, or those `--older-than 2d` |
-| `runnerctl sizing [--since 7d]` | per profile and per job: percentiles of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../configuration/#sizing) |
+| `runnerctl sizing [--since 7d]` | per profile and per job: percentiles and the largest of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../configuration/#sizing) |
 | `runnerctl sizing apply <profile> [--yes]` | writes a profile's advised `memory` and `slots` into the daemon's config after showing the change and asking; the daemon checks it against the budget first |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
@@ -108,26 +108,26 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 
 ```console wrap=false
 $ runnerctl sizing
-from the last 30d 0h of history; peaks are sampled every 2 s, so advice adds 15% to them and waits for 10 jobs
+from the last 30d 0h of history; peaks are sampled every 2 s, so advice adds 15% to the largest and waits for 10 jobs
 
 jvm  9G × 2, 8 CPUs; 400 jobs, slots busy 41%, waited p50 8s p95 35s
-  memory p50 5.2G p95 7.4G p99 7.8G max 7.9G
+  memory p50 5.2G p95 7.4G p99 7.7G max 7.8G
   cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9
-  keep 9G: what its largest job needs (p99 peak + 15%) is 9G
+  keep 9G: its largest peak + 15% is 9G
 
-  REPOSITORY      JOB                     RUNS   P50   P95   P99  CPU P99  WAIT P95  NEEDS
-  halyard/ledger  CI / build               212  3.1G  4.2G  4.5G      7.6       30s  5.25G
-  halyard/ledger  CI / integration tests   188  5.2G  7.4G  7.8G      7.6       35s  9G
+  REPOSITORY      JOB                     RUNS   P50   P95   P99   MAX  CPU P99  WAIT P95  NEEDS
+  halyard/ledger  CI / build               212  3.1G  4.2G  4.5G  4.6G      7.6       30s  5.5G
+  halyard/ledger  CI / integration tests   188  5.2G  7.4G  7.7G  7.8G      7.6       35s  9G
 
 node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
-  memory p50 1.4G p95 1.9G p99 2.1G max 2.2G
+  memory p50 1.4G p95 1.9G p99 2G max 2.1G
   cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9
-  lower memory to 2.5G from 7G, what its largest job needs (p99 peak + 15%); 5 slots fit in the same 14G
+  lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G
   runnerctl sizing apply node
 
-  REPOSITORY          JOB         RUNS   P50   P95   P99  CPU P99  WAIT P95  NEEDS
-  halyard/storefront  CI / build   236  1.4G  1.9G  2.1G      7.6    4m 20s  2.5G
-  halyard/storefront  CI / e2e       6  1.8G    2G    2G      7.6    4m 40s  max 2G
+  REPOSITORY          JOB         RUNS   P50   P95  P99   MAX  CPU P99  WAIT P95  NEEDS
+  halyard/storefront  CI / build   236  1.4G  1.9G   2G  2.1G      7.6    4m 20s  2.5G
+  halyard/storefront  CI / e2e       6  1.8G    2G   2G    2G      7.6    4m 40s  max 2G
 ```
 
 `runnerctl sizing apply node` shows `memory = "7G" -> "2.5G"` and `slots = 2 -> 5` under `[profiles.node]` and asks before it writes. Without a terminal to ask on it needs `--yes`. The rest of the file, comments included, stays as written.

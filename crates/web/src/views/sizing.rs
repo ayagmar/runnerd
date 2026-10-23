@@ -1,5 +1,5 @@
-//! `/sizing`: per profile, what its jobs use of their memory cap (sampled peaks by percentile, with the margin
-//! advice adds), how long they waited and how busy the slots were, the advice, and a row per job. Applying advice
+//! `/sizing`: per profile, what its jobs use of their memory cap (sampled peaks by percentile, and what the advice
+//! sizes for: the largest with the margin), how long they waited and how busy the slots were, the advice, and a row per job. Applying advice
 //! opens the config editor with the profile's new `memory` and `slots` in it; nothing is written until it is saved.
 
 use maud::{Markup, html};
@@ -36,8 +36,8 @@ pub(crate) fn render(view: &SizingView) -> Markup {
                 span.muted { " since " (format::date(sizing.since)) }
             }
             p.muted {
-                "Peaks are sampled every " (sizing.sample_interval) " s, so a shorter spike goes unseen: advice adds "
-                (sizing.margin) "% to the p99 peak, and waits for " (sizing.min_jobs) " jobs."
+                "Peaks are sampled every " (sizing.sample_interval) " s, so a shorter spike goes unseen:  advice adds "
+                (sizing.margin) "% to the largest, and waits for " (sizing.min_jobs) " jobs."
             }
         }
         @for (index, profile) in sizing.profiles.iter().enumerate() {
@@ -49,7 +49,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
 
 fn advice_class(advice: Advice) -> &'static str {
     match advice {
-        Advice::Raise { .. } => "advice raise",
+        Advice::Raise { .. } | Advice::SliceTooSmall { .. } => "advice raise",
         Advice::Lower { .. } => "advice lower",
         Advice::Keep { .. } => "advice keep",
         Advice::TooFew { .. } => "advice too-few",
@@ -62,7 +62,7 @@ fn needs(job: &JobSizing) -> Markup {
         Advice::TooFew { jobs } => {
             html! { span.muted title=(format!("{jobs} runs; largest peak shown")) { "max " (format::bytes(job.peaks.memory.max)) } }
         }
-        Advice::Raise { memory, .. } => {
+        Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
             html! { strong.over { (format::bytes(memory)) ", over the cap" } }
         }
         Advice::Keep { memory } | Advice::Lower { memory, .. } => html! { (format::bytes(memory)) },
@@ -88,7 +88,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
             div class=(advice_class(profile.advice)) {
                 p { (sizing.advice_line(profile)) }
                 @if let Some(change) = profile.advice.change() {
-                    a.button href=(format!("/config?resize={}", profile.name)) {
+                    a.button href=(format!("/config?{}", serde_urlencoded::to_string([("resize", &profile.name)]).unwrap_or_default())) {
                         "Review memory " (format::bytes(change.memory)) ", " (change.slots) " slots in the config"
                     }
                 }
@@ -135,14 +135,21 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
     }
 }
 
-/// The cap as a track, the jobs' peaks from p50 to p99 on it, and the p99 with the margin as a mark.
+/// The cap as a track, the jobs' peaks from p50 to p99 on it, and what the advice sizes for as a mark: the memory
+/// it advises, or with too few jobs, the largest peak with the margin.
 fn scale(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
     let memory = &profile.peaks.memory;
-    let need = memory.p99 + memory.p99 * u64::from(sizing.margin) / 100;
+    let need = match profile.advice {
+        Advice::Keep { memory }
+        | Advice::Lower { memory, .. }
+        | Advice::Raise { memory, .. }
+        | Advice::SliceTooSmall { memory } => memory,
+        Advice::TooFew { .. } => memory.max + memory.max * u64::from(sizing.margin) / 100,
+    };
     let whole = profile.memory.max(need).max(memory.max).max(1);
     let at = |bytes: u64| format!("{:.2}%", ratio(bytes, whole) * 100.0);
     let label = format!(
-        "Memory peaks: p50 {}, p95 {}, p99 {}, largest {}; p99 + {}% is {}; the cap is {}",
+        "Memory peaks: p50 {}, p95 {}, p99 {}, largest {}; the largest + {}% is {}; the cap is {}",
         format::bytes(memory.p50),
         format::bytes(memory.p95),
         format::bytes(memory.p99),
@@ -158,7 +165,7 @@ fn scale(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
             span.mark.p95 style=(format!("--at: {}", at(memory.p95))) title=(format!("p95 {}", format::bytes(memory.p95))) {}
             // Near the end of the track, the label goes to the mark's left.
             span class=(if ratio(need, whole) > 0.7 { "mark need end" } else { "mark need" }) style=(format!("--at: {}", at(need))) {
-                span { "p99 + " (sizing.margin) "% " (format::bytes(need)) }
+                span { "max + " (sizing.margin) "% " (format::bytes(need)) }
             }
         }
         p.scale-keys.muted {

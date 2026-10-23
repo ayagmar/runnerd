@@ -1253,12 +1253,17 @@ fn sizing_profiles(
 ) {
     let wide = profiles_area.width >= 100;
     let mut columns = vec![("PROFILE", 0), ("MEMORY", 10), ("JOBS", 5)];
+    // Narrow, the largest peak advice is sized for stays and the percentiles go.
     if wide {
         columns.push(("P50", 6));
     }
-    columns.extend([("P95", 6), ("P99", 6)]);
+    columns.push(("P95", 6));
     if wide {
-        columns.extend([("MAX", 6), ("AT CAP", 6)]);
+        columns.push(("P99", 6));
+    }
+    columns.push(("MAX", 6));
+    if wide {
+        columns.push(("AT CAP", 6));
     }
     columns.extend([("CPU P99", 7), ("BUSY", 5), ("WAIT P95", 8), ("ADVICE", 11)]);
     let rows = sizing.profiles.iter().map(|profile| {
@@ -1274,12 +1279,12 @@ fn sizing_profiles(
         if wide {
             cells.push(Cell::from(bytes(peaks.memory.p50)));
         }
-        cells.extend([
-            Cell::from(bytes(peaks.memory.p95)),
-            Cell::from(bytes(peaks.memory.p99)),
-        ]);
+        cells.push(Cell::from(bytes(peaks.memory.p95)));
         if wide {
-            cells.push(Cell::from(bytes(peaks.memory.max)));
+            cells.push(Cell::from(bytes(peaks.memory.p99)));
+        }
+        cells.push(Cell::from(bytes(peaks.memory.max)));
+        if wide {
             cells.push(Cell::from(if peaks.at_cap > 0 {
                 Span::styled(peaks.at_cap.to_string(), theme.tone(Tone::Bad))
             } else {
@@ -1313,11 +1318,11 @@ fn sizing_jobs(
     theme: Theme,
 ) {
     let mut columns = vec![("REPOSITORY", 0), ("JOB", 0), ("RUNS", 5)];
-    columns.extend([("P95", 6), ("P99", 6)]);
+    columns.push(("P95", 6));
     if wide {
-        columns.push(("MAX", 6));
+        columns.push(("P99", 6));
     }
-    columns.extend([("CPU P99", 7), ("WAIT P95", 8), ("NEEDS", 11)]);
+    columns.extend([("MAX", 6), ("CPU P99", 7), ("WAIT P95", 8), ("NEEDS", 11)]);
     // The repository and the job share what the other columns and the spaces between them leave.
     let fixed: usize = columns.iter().map(|(_, width)| width + 1).sum::<usize>() - 1;
     let shared = usize::from(jobs_area.width).saturating_sub(fixed);
@@ -1327,7 +1332,7 @@ fn sizing_jobs(
             Advice::TooFew { .. } => {
                 Span::styled(format!("max {}", bytes(job.peaks.memory.max)), theme.dim())
             }
-            Advice::Raise { memory, .. } => {
+            Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
                 Span::styled(format!("{} > cap", bytes(memory)), theme.tone(Tone::Bad))
             }
             Advice::Keep { memory } | Advice::Lower { memory, .. } => Span::raw(bytes(memory)),
@@ -1341,12 +1346,12 @@ fn sizing_jobs(
             Cell::from(fit(&name, shared - repository_width)),
             Cell::from(job.peaks.jobs.to_string()),
             Cell::from(bytes(job.peaks.memory.p95)),
-            Cell::from(bytes(job.peaks.memory.p99)),
         ];
         if wide {
-            cells.push(Cell::from(bytes(job.peaks.memory.max)));
+            cells.push(Cell::from(bytes(job.peaks.memory.p99)));
         }
         cells.extend([
+            Cell::from(bytes(job.peaks.memory.max)),
             Cell::from(cores(job.peaks.cpu.p99)),
             Cell::from(duration(job.wait.p95)),
             Cell::from(needs),
@@ -1373,7 +1378,7 @@ fn widths(columns: &[(&str, usize)]) -> Vec<Constraint> {
 
 fn advice_tone(advice: Advice) -> Tone {
     match advice {
-        Advice::Raise { .. } => Tone::Bad,
+        Advice::Raise { .. } | Advice::SliceTooSmall { .. } => Tone::Bad,
         Advice::Lower { .. } => Tone::Busy,
         Advice::Keep { .. } => Tone::Good,
         Advice::TooFew { .. } => Tone::Plain,
@@ -1385,6 +1390,7 @@ fn advice_word(advice: Advice) -> String {
     match advice {
         Advice::TooFew { .. } => "too few".to_owned(),
         Advice::Keep { .. } => "keep".to_owned(),
+        Advice::SliceTooSmall { .. } => "grow slice".to_owned(),
         Advice::Lower { memory, slots } | Advice::Raise { memory, slots } => {
             format!("{} × {slots}", bytes(memory))
         }

@@ -708,7 +708,7 @@ fn find_job(fake: &Fake, id: u64) -> Option<Job> {
 }
 
 /// The slice the fixtures' config names has a `MemoryMax` of 33G.
-/// What the history says of the config's profiles: jvm's tests peak near 7.8G of 9G, so 9G stays; node's builds
+/// What the history says of the config's profiles: jvm's tests peak at 7.8G of 9G, so 9G stays; node's builds
 /// peak at 2.1G of 7G and wait for a slot, so 2.5G caps fit 5 in its 2 × 7G. The end-to-end job has too few runs.
 fn sizing(fixtures: &Fixtures) -> Sizing {
     let config = runnerd_core::config::Config::parse(&fixtures.config).unwrap();
@@ -733,7 +733,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
         .iter()
         .map(|(name, profile)| {
             let (busy, wait, memory, advice, jobs) = if name == "jvm" {
-                let memory = spread(gib(52), gib(74), gib(78), gib(79));
+                let memory = spread(gib(52), gib(74), gib(77), gib(78));
                 let wait = spread(8, 35, 70, 95);
                 (
                     41,
@@ -748,7 +748,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                             spread(gib(31), gib(42), gib(45), gib(46)),
                             spread(7, 30, 66, 90),
                             Advice::Lower {
-                                memory: 5376 * MIB,
+                                memory: 5632 * MIB,
                                 slots: 2,
                             },
                         ),
@@ -763,7 +763,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                     ],
                 )
             } else {
-                let memory = spread(gib(14), gib(19), gib(21), gib(22));
+                let memory = spread(gib(14), gib(19), gib(20), gib(21));
                 let wait = spread(12, 260, 430, 610);
                 (
                     78,

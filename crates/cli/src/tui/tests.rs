@@ -555,7 +555,7 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
     let shown = screen(&app, 120, 24, false);
     for expected in [
         "Sizing",
-        "node: lower memory to 2.5G from 7G, what its largest job needs (p99 peak + 15%); 5 slots fit in the same 14G",
+        "node: lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G",
         "halyard/storefront",
         "CI / build",
         "a writes memory = \"2.5G\", slots = 5",
@@ -590,7 +590,7 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
     );
     let narrow = screen(&app, 80, 24, false);
     assert!(
-        narrow.contains("WAIT P95") && narrow.contains("fit in the same 14G"),
+        narrow.contains("WAIT P95") && narrow.contains("same 14G"),
         "the sizing view fits 80 columns, the advice on two lines: {narrow}"
     );
 }

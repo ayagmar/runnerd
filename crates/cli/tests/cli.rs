@@ -867,7 +867,7 @@ fn sizing_shows_the_advice_and_applies_it_only_when_told_to() {
     );
     assert!(
         text.contains(
-            "lower memory to 2.5G from 7G, what its largest job needs (p99 peak + 15%); 5 slots fit in the same 14G"
+            "lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G"
         ),
         "{text}"
     );

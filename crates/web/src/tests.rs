@@ -1352,8 +1352,8 @@ async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved
     let sizing = dashboard.page(&cookie, "/sizing").await;
     assert_eq!(sizing.status, StatusCode::OK);
     for expected in [
-        "lower memory to 2.5G from 7G, what its largest job needs (p99 peak + 15%); 5 slots fit in the same 14G",
-        "keep 9G: what its largest job needs (p99 peak + 15%) is 9G",
+        "lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G",
+        "keep 9G: its largest peak + 15% is 9G",
         r#"href="/config?resize=node""#,
         "Review memory 2.5G, 5 slots in the config",
         "integration tests",
