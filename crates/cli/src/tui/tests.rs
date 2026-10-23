@@ -423,6 +423,41 @@ fn a_refused_pause_is_forced_only_after_y() {
 }
 
 #[test]
+fn a_profile_a_reload_adds_or_removes_comes_and_goes_and_the_selection_stays_on_a_slot() {
+    let mut app = app();
+    app.update(event(
+        Some(5),
+        Event::ProfileChanged {
+            profile: profile("rust", 1, 4 << 30),
+        },
+    ));
+    assert!(
+        screen(&app, 120, 40, false).contains("rust · slot 1"),
+        "the new profile's slot shows"
+    );
+    for _ in 0..3 {
+        app.update(key(KeyCode::Char('j')));
+    }
+    app.update(event(
+        Some(6),
+        Event::ProfileRemoved {
+            profile: "rust".to_owned(),
+        },
+    ));
+    assert!(
+        !screen(&app, 120, 40, false).contains("rust · slot 1"),
+        "the removed profile's slot is gone"
+    );
+    assert_eq!(
+        app.update(key(KeyCode::Char('R'))),
+        vec![Effect::Reseed {
+            profile: "node".to_owned()
+        }],
+        "the selection moved to the last slot left"
+    );
+}
+
+#[test]
 fn shift_p_and_u_pause_and_resume_every_repository_and_a_refused_pause_of_all_is_forced_after_y() {
     let mut app = app();
     assert_eq!(

@@ -370,6 +370,10 @@ impl App {
                 };
                 self.flash(text, outcome);
             }
+            Event::ProfileChanged { .. } | Event::ProfileRemoved { .. } => {
+                // A reload can take away the selected slot; the selection stays on one that is there.
+                self.slot = self.slot.min(self.slots().count().saturating_sub(1));
+            }
             _ => {}
         }
         let Some(open) = &mut self.job else {
