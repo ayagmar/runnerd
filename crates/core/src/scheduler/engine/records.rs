@@ -14,6 +14,7 @@ use tracing::{info, warn};
 
 use super::control::ControlError;
 use super::{Engine, Occupant};
+use crate::admission::HIGH_WATER;
 use crate::api;
 use crate::config::ByteSize;
 use crate::docker::{DockerApi, Tty, TtySize, is_not_found};
@@ -639,6 +640,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     record.profile
                 )));
             }
+        }
+        // Under measured admission nothing starts at the high-water mark, a shell no more than a runner.
+        if self.admitting(&mut [], None).held {
+            return Err(ControlError::Conflict(format!(
+                "the slice is at {HIGH_WATER}% of its MemoryMax, where measured admission starts nothing; open it \
+                 once it falls under"
+            )));
         }
         let body = self.shell_body(&record, memory, cpus);
         self.records.opened += 1;

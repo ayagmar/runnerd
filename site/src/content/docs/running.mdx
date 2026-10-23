@@ -79,7 +79,7 @@ runner@4be1c0d2a7e9:~/_work/ledger/ledger$
 `--step 3` shows step 3 instead.
 
 - The terminal goes over the API socket and keeps the size it was opened with.
-- The shell's container counts against the budget with the profile's memory cap, and is refused when the budget cannot hold it.
+- The shell's container counts against the budget with the profile's memory cap, and is refused when the budget cannot hold it, or under [measured admission](../configuration/#measured-admission) while the slice is at 90% of `MemoryMax`.
 - It mounts the profile's snapshot and the shared pnpm and Maven caches read-only. While it is open, the profile does not reseed (`runnerctl reseed` answers 409) and the shared caches are not trimmed or cleaned. It is refused while the profile reseeds or the shared caches are trimmed.
 - It goes when the shell exits, when the client goes away, or after 8 hours.
 
