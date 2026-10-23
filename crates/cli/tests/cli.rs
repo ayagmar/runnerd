@@ -20,10 +20,11 @@ use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use runnerd_core::api::{
-    Budget, Busy, Check, CheckStatus, ConfigCheck, Doctor, ErrorResponse, Event, EventEnvelope,
-    Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary, Paused, ProfileStatus, QueuedJob,
-    Record, RecordLimits, Records, RemovedRecords, RepositoryStatus, RunnerStatus, RunningJob,
-    SlotStatus, Status, Timeline,
+    Advice, Budget, Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse,
+    Event, EventEnvelope, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary, LogSummary,
+    Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record, RecordLimits, Records,
+    RemovedRecords, RepositoryStatus, RunnerStatus, RunningJob, Sizing, SlotStatus, Spread, Status,
+    Timeline,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -151,6 +152,8 @@ struct Fake {
     requests: Vec<String>,
     /// The body of every config check.
     checked: Vec<String>,
+    /// The body of every config replacement.
+    replaced: Vec<String>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -247,6 +250,68 @@ async fn check_config(State(fake): State<Shared>, body: String) -> axum::Json<Co
         warnings: Vec::new(),
         memory_caps: Some(20 << 30),
         memory_max: Some(16 << 30),
+    })
+}
+
+/// The daemon's config: `node` 2 × 7G, with a comment that must survive an edit.
+const CONFIG: &str = "[profiles.node]\nimage_stage = \"node\"\ncpus = 8\nmemory = \"7G\" # peaked at 6G once\nslots = 2\n";
+
+async fn get_config() -> axum::Json<ConfigFile> {
+    axum::Json(ConfigFile {
+        path: "/home/u/.config/runnerd/runnerd.toml".to_owned(),
+        text: CONFIG.to_owned(),
+    })
+}
+
+async fn replace_config(State(fake): State<Shared>, body: String) -> axum::Json<ConfigCheck> {
+    fake.lock().unwrap().replaced.push(body);
+    axum::Json(ConfigCheck {
+        valid: true,
+        message: "valid, memory caps sum to 13G".to_owned(),
+        warnings: Vec::new(),
+        memory_caps: Some(13 << 30),
+        memory_max: Some(16 << 30),
+    })
+}
+
+/// `node`'s 100 builds peak at 2.1G: 2.5G with the margin, 5 of them in the 14G its 2 slots take.
+async fn get_sizing() -> axum::Json<Sizing> {
+    let spread = |p50, p95, p99, max| Spread { p50, p95, p99, max };
+    let peaks = Peaks {
+        jobs: 100,
+        at_cap: 0,
+        memory: spread(1500 << 20, 2 << 30, 2150 << 20, 2200 << 20),
+        cpu: spread(3000, 6000, 7500, 8000),
+    };
+    let advice = Advice::Lower {
+        memory: 2560 << 20,
+        slots: 5,
+    };
+    axum::Json(Sizing {
+        since: 1_700_000_000,
+        until: 1_700_086_400,
+        margin: 15,
+        sample_interval: 2,
+        min_jobs: 10,
+        memory_max: Some(16 << 30),
+        profiles: vec![ProfileSizing {
+            name: "node".to_owned(),
+            memory: 7 << 30,
+            cpus: 8,
+            slots: 2,
+            peaks: peaks.clone(),
+            wait: spread(30, 240, 300, 320),
+            busy: 80,
+            advice,
+            jobs: vec![JobSizing {
+                repository: "halyard/storefront".to_owned(),
+                workflow: Some("CI".to_owned()),
+                name: "build".to_owned(),
+                peaks,
+                wait: spread(30, 240, 300, 320),
+                advice,
+            }],
+        }],
     })
 }
 
@@ -349,6 +414,8 @@ fn serve(socket: &Path) -> Shared {
         )
         .route("/v1/profiles/{name}/reseed", post(reseed))
         .route("/v1/config/check", post(check_config))
+        .route("/v1/config", get(get_config).put(replace_config))
+        .route("/v1/sizing", get(get_sizing))
         .route("/v1/doctor", get(get_doctor))
         .route("/v1/events", get(events))
         .route("/v1/records", get(get_records))
@@ -435,6 +502,7 @@ fn runnerctl(socket: &Path, args: &[&str]) -> Output {
         .arg(socket)
         .args(args)
         .env_remove("NO_COLOR")
+        .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
@@ -782,5 +850,51 @@ fn a_shell_the_budget_has_no_room_for_says_so() {
         stderr(&refused).contains("the budget is full"),
         "{}",
         stderr(&refused)
+    );
+}
+
+#[test]
+fn sizing_shows_the_advice_and_applies_it_only_when_told_to() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fake = serve(&socket);
+    let shown = runnerctl(&socket, &["sizing"]);
+    assert!(shown.status.success(), "{}", stderr(&shown));
+    let text = stdout(&shown);
+    assert!(
+        text.contains("node  7G × 2, 8 CPUs; 100 jobs, slots busy 80%"),
+        "{text}"
+    );
+    assert!(
+        text.contains(
+            "lower memory to 2.5G from 7G, what its largest job needs (p99 peak + 15%); 5 slots fit in the same 14G"
+        ),
+        "{text}"
+    );
+    assert!(text.contains("runnerctl sizing apply node"), "{text}");
+    assert!(text.contains("halyard/storefront  CI / build"), "{text}");
+
+    // No terminal to ask on: nothing is written.
+    let asked = runnerctl(&socket, &["sizing", "apply", "node"]);
+    assert!(!asked.status.success());
+    assert!(stderr(&asked).contains("pass --yes"), "{}", stderr(&asked));
+    assert!(
+        fake.lock().unwrap().replaced.is_empty(),
+        "nothing is written without a yes"
+    );
+
+    let applied = runnerctl(&socket, &["sizing", "apply", "node", "--yes"]);
+    assert!(applied.status.success(), "{}", stderr(&applied));
+    assert!(
+        stdout(&applied).contains("node: memory 2.5G, 5 slots written"),
+        "{}",
+        stdout(&applied)
+    );
+    let replaced = fake.lock().unwrap().replaced.clone();
+    assert_eq!(
+        replaced,
+        [CONFIG
+            .replace("memory = \"7G\"", "memory = \"2.5G\"")
+            .replace("slots = 2", "slots = 5")]
     );
 }
