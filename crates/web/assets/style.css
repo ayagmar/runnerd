@@ -1903,7 +1903,6 @@ html {
     font-size: 0.8125rem;
     line-height: 1.15;
     white-space: normal;
-    overflow-wrap: anywhere;
   }
 
   .step-list li {
@@ -1923,6 +1922,17 @@ html {
   .record-table td:nth-child(4),
   .record-table th:nth-child(4) {
     display: table-cell;
+  }
+
+  /* Its name wraps and its cells pad less, so the Remove button stays in view. */
+  .record-table th,
+  .record-table td {
+    padding-inline: 0.4rem;
+  }
+
+  .record-table tbody th {
+    white-space: normal;
+    overflow-wrap: anywhere;
   }
 
   .filters label,
