@@ -17,8 +17,10 @@ The dashboard still listens on loopback only; a proxy in front of it is the owne
 - `[web] origins` in `runnerd.toml` lists the proxies' origins. A write needs the session cookie and an `Origin`
   that is the dashboard's own or one of them. The config check refuses an origin with a path, query, user or a
   port that is not a number, and `http` for a host other than a loopback one, since the cookie would cross the
-  network in the clear. Origins are kept as a browser sends them: lower case, without the default port. The daemon
-  reads `[web]` when it starts, as it does `--web`; a saved config does not change it.
+  network in the clear. Origins are kept as a browser sends them, as the URL standard serializes them: lower case,
+  without the default port, an IPv6 address in its shortest form. An IPv4 address must be four decimal numbers:
+  the standard also reads `2130706433` or `0x7f.1` as `127.0.0.1`, and those are refused rather than rewritten.
+  The daemon reads `[web]` when it starts, as it does `--web`; a saved config does not change it.
 - The login stays one-time and per browser. The URL in `runnerd.web` names the loopback address;
   `runnerctl web --base <origin>` swaps it for a proxy's. Cookies are scoped by host, so a browser on the proxy's
   address gets its own session.
@@ -29,13 +31,15 @@ The dashboard still listens on loopback only; a proxy in front of it is the owne
   from the mark, and a 512 px maskable one with the bars inside the safe zone. It and its icons are assets, served
   without a session, since browsers fetch a manifest without cookies. The Content-Security-Policy gains
   `manifest-src 'self'`.
-- No service worker. Chrome dropped the requirement for a service worker with a `fetch` handler for installing from
-  the menu in 108 on mobile and 112 on desktop
-  ([Chrome's blog](https://developer.chrome.com/blog/update-install-criteria)); the remaining criteria are HTTPS,
-  and a manifest with a name, 192 and 512 px icons, `start_url` and a standalone `display`
-  ([web.dev](https://web.dev/articles/install-criteria)). `http://127.0.0.1` is a secure context
-  ([MDN](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts)). Only the automatic install
-  prompt still needs a `fetch` handler, and live data must not be cached, so there is none.
+- No service worker: live data must not be cached, and installing does not need one. Chrome dropped the
+  requirement of a service worker with a `fetch` handler for installing from the menu in 108 on mobile and 112 on
+  desktop ([Chrome's blog](https://developer.chrome.com/blog/update-install-criteria), 2023). Chrome's current
+  criteria for offering the install itself (`beforeinstallprompt` and its own promotion) name no service worker
+  either: the app is not installed yet, the user clicked or tapped the page once and spent 30 seconds on it, it is
+  served over HTTPS, and its manifest has a `name` or `short_name`, 192 and 512 px icons, a `start_url`, a
+  `display` of `standalone` or similar, and no `prefer_related_applications: true`
+  ([web.dev](https://web.dev/articles/install-criteria), updated 2024-09-19). `http://127.0.0.1` is a secure
+  context ([MDN](https://developer.mozilla.org/en-US/docs/Web/Security/Secure_Contexts)).
 
 ## Consequences
 
@@ -48,4 +52,4 @@ The dashboard still listens on loopback only; a proxy in front of it is the owne
 - Firefox installs web apps only on Windows; on Linux it stays a tab.
 - Rejected: listening on a non-loopback address with TLS of runnerd's own (certificates to manage, and the proxy
   already does it); accepting any `Origin` that matches the request's `Host` (the check would then rest on a header
-  the proxy sets; a list the owner writes says which addresses they meant); a service worker for the install prompt (code to keep correct for one prompt).
+  the proxy sets; a list the owner writes says which addresses they meant).

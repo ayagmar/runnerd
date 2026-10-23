@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::fmt;
+use std::net::{Ipv4Addr, Ipv6Addr};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::str::FromStr;
@@ -363,7 +364,8 @@ pub struct Web {
 }
 
 /// An origin as a browser sends it in `Origin`: `https://host[:port]`, or `http://` for a loopback host, in lower
-/// case and without the scheme's default port. Nothing after the port: no path, query or user.
+/// case, without the scheme's default port, and an address written as the URL standard serializes it. Nothing after
+/// the port: no path, query or user.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Origin(String);
 
@@ -411,16 +413,38 @@ impl FromStr for Origin {
             },
         };
         let host = host.to_ascii_lowercase();
-        let named = host
-            .chars()
-            .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.');
-        let address = host
-            .strip_prefix('[')
-            .and_then(|host| host.strip_suffix(']'))
-            .and_then(|address| address.parse::<std::net::Ipv6Addr>().ok());
-        if host.is_empty() || !(named || address.is_some()) {
-            return Err(invalid("its host is not a name or an address"));
-        }
+        let not_a_host = || invalid("its host is not a name or an address");
+        // An address is kept as a browser serializes it, or it would never match the `Origin` the browser sends.
+        let (host, loopback) =
+            if let Some(v6) = host.strip_prefix('[').and_then(|v6| v6.strip_suffix(']')) {
+                let address: Ipv6Addr = v6.parse().map_err(|_| not_a_host())?;
+                (format!("[{}]", ipv6_origin(address)), address.is_loopback())
+            } else {
+                if host.is_empty()
+                    || !host
+                        .chars()
+                        .all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '.')
+                {
+                    return Err(not_a_host());
+                }
+                // As the URL standard reads a host: one whose last label is a number is an IPv4 address.
+                let name = host.strip_suffix('.').unwrap_or(&host);
+                let last = name.rsplit('.').next().unwrap_or_default();
+                let numeric = !last.is_empty()
+                    && (last.bytes().all(|byte| byte.is_ascii_digit())
+                        || last
+                            .strip_prefix("0x")
+                            .is_some_and(|hex| hex.bytes().all(|byte| byte.is_ascii_hexdigit())));
+                if numeric {
+                    let address: Ipv4Addr = name.parse().map_err(|_| {
+                        invalid("its IPv4 address is not four decimal numbers, such as 192.0.2.1")
+                    })?;
+                    (address.to_string(), address.is_loopback())
+                } else {
+                    let loopback = host == "localhost";
+                    (host, loopback)
+                }
+            };
         let port = port
             .map(|port| {
                 Some(port)
@@ -430,11 +454,6 @@ impl FromStr for Origin {
                     .ok_or_else(|| invalid("its port is not a number from 1 to 65535"))
             })
             .transpose()?;
-        let loopback = host == "localhost"
-            || address.is_some_and(|address| address.is_loopback())
-            || host
-                .parse::<std::net::Ipv4Addr>()
-                .is_ok_and(|address| address.is_loopback());
         let default_port = match scheme.as_str() {
             "https" => 443,
             "http" if loopback => 80,
@@ -451,6 +470,36 @@ impl FromStr for Origin {
             _ => format!("{scheme}://{host}"),
         }))
     }
+}
+
+/// An IPv6 address as the URL standard serializes it: lower-case hex pieces, the first longest run of two or more
+/// zero pieces as `::`, and no dotted IPv4 tail.
+fn ipv6_origin(address: Ipv6Addr) -> String {
+    let pieces = address.segments();
+    let (mut zeros_at, mut zeros) = (0, 0);
+    let mut at = 0;
+    while at < pieces.len() {
+        let run = pieces[at..].iter().take_while(|piece| **piece == 0).count();
+        if run > zeros {
+            (zeros_at, zeros) = (at, run);
+        }
+        at += run.max(1);
+    }
+    let hex = |pieces: &[u16]| {
+        pieces
+            .iter()
+            .map(|piece| format!("{piece:x}"))
+            .collect::<Vec<_>>()
+            .join(":")
+    };
+    if zeros < 2 {
+        return hex(&pieces);
+    }
+    format!(
+        "{}::{}",
+        hex(&pieces[..zeros_at]),
+        hex(&pieces[zeros_at + zeros..])
+    )
 }
 
 impl fmt::Display for Origin {

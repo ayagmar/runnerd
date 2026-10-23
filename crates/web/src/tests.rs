@@ -326,6 +326,23 @@ async fn a_write_through_a_configured_proxy_reaches_the_daemon_and_others_stay_4
 }
 
 #[tokio::test]
+async fn a_proxy_configured_by_a_long_address_takes_writes_with_the_origin_a_browser_sends() {
+    let dashboard = Dashboard::behind(&["http://[0:0:0:0:0:0:0:1]:8443"]).await;
+    let cookie = dashboard.sign_in().await;
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
+    // `new URL("http://[0:0:0:0:0:0:0:1]:8443").origin` in a browser.
+    let headers = [("cookie", cookie.as_str()), ("origin", "http://[::1]:8443")];
+    let reply = dashboard
+        .send(dashboard.build("POST", "/v1/repositories/halyard/ledger/resume", &headers))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(
+        !dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused,
+        "halyard/ledger runs again"
+    );
+}
+
+#[tokio::test]
 async fn a_login_through_an_https_proxy_sets_a_secure_cookie_and_a_loopback_one_does_not() {
     let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
     let mut cookies = Vec::new();
