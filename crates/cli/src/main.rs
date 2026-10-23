@@ -199,6 +199,14 @@ enum SizingCommand {
         #[arg(long)]
         yes: bool,
     },
+    /// Write back a profile's memory and slots from before auto sizing last changed them, after showing the change
+    /// and asking.
+    Undo {
+        profile: String,
+        /// Write it without asking.
+        #[arg(long)]
+        yes: bool,
+    },
 }
 
 #[derive(Subcommand)]
@@ -631,12 +639,16 @@ async fn sizing(
         since: since.map(|age| now().saturating_sub(age)),
     };
     let sizing: Sizing = client.get_query("/v1/sizing", &query).await?;
-    let Some(SizingCommand::Apply { profile, yes }) = command else {
-        if json {
-            return print_json(&sizing);
+    let (profile, yes, undo) = match command {
+        None => {
+            if json {
+                return print_json(&sizing);
+            }
+            output::text(&human::sizing(&sizing, now(), output::paint()));
+            return Ok(ExitCode::SUCCESS);
         }
-        output::text(&human::sizing(&sizing, now(), output::paint()));
-        return Ok(ExitCode::SUCCESS);
+        Some(SizingCommand::Apply { profile, yes }) => (profile, yes, false),
+        Some(SizingCommand::Undo { profile, yes }) => (profile, yes, true),
     };
     let Some(advised) = sizing.profiles.iter().find(|p| p.name == profile) else {
         let names: Vec<_> = sizing.profiles.iter().map(|p| p.name.as_str()).collect();
@@ -645,8 +657,31 @@ async fn sizing(
             names.join(", ")
         )));
     };
-    let line = format!("{profile}: {}", sizing.advice_line(advised));
-    let Some(resize) = advised.advice.change() else {
+    let (line, resize) = if undo {
+        let Some(change) = sizing
+            .changes
+            .iter()
+            .rfind(|change| change.profile == profile)
+        else {
+            return Err(Error::Local(format!(
+                "auto sizing changed {profile} in none of the history read"
+            )));
+        };
+        (
+            format!(
+                "{profile}: undo auto sizing's {}, {}",
+                change.line(),
+                human::ago(change.at, now())
+            ),
+            Some(change.from),
+        )
+    } else {
+        (
+            format!("{profile}: {}", sizing.advice_line(advised)),
+            advised.advice.change(),
+        )
+    };
+    let Some(resize) = resize else {
         if !json {
             output::line(format_args!("{line}; nothing to change"));
         }
@@ -655,7 +690,7 @@ async fn sizing(
     if !yes {
         if json || !std::io::stdin().is_terminal() {
             return Err(Error::Local(
-                "no terminal to ask on; pass --yes to write the advice".to_owned(),
+                "no terminal to ask on; pass --yes to write the change".to_owned(),
             ));
         }
         output::line(&line);
@@ -687,11 +722,18 @@ async fn sizing(
         ByteSize(resize.memory),
         resize.slots
     ));
+    if undo && sizing.auto {
+        output::line(
+            "auto sizing is on: it may change them again after [sizing] interval; bound the profile with \
+             min_memory, max_memory or max_slots to keep them",
+        );
+    }
     Ok(ExitCode::SUCCESS)
 }
 
 /// Writes a profile's new memory and slots into the daemon's config through `PUT /v1/config`, which checks it
-/// against the slice's budget first; the rest of the file stays as written.
+/// against the slice's budget first; the rest of the file stays as written. A config replaced between the read and
+/// the write, as by auto sizing, is not overwritten.
 pub(crate) async fn write_resize(
     client: &Client,
     profile: &str,
@@ -700,8 +742,12 @@ pub(crate) async fn write_resize(
     let file: ConfigFile = client.get("/v1/config").await?;
     let text = resize_profile(&file.text, profile, resize)
         .map_err(|error| Error::Local(error.to_string()))?;
+    let path = match &file.revision {
+        Some(revision) => format!("/v1/config?revision={revision}"),
+        None => "/v1/config".to_owned(),
+    };
     let reply = client
-        .request(Method::PUT, "/v1/config", Some(Body::toml(text)))
+        .request(Method::PUT, &path, Some(Body::toml(text)))
         .await?;
     match serde_json::from_slice::<ConfigCheck>(&reply.body) {
         Ok(checked) if reply.status.is_success() => Ok(checked),

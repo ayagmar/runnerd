@@ -64,7 +64,9 @@ client → transport → principal → handler → core
    the store's events as server-sent events. The config routes
    ([`crates/daemon/src/api/control.rs`](crates/daemon/src/api/control.rs)) validate a new config and hand the
    engine the parsed config with a `Commit` that writes the file; the engine runs the commit between ticks and runs
-   with the config before its next tick, only if the file was written.
+   with the config before its next tick, only if the file was written. Under `[sizing] auto`,
+   [`crates/daemon/src/api/auto.rs`](crates/daemon/src/api/auto.rs) applies sizing advice through the same function
+   every 5 minutes ([ADR 0039](docs/adr/0039-auto-sizing.md)).
    `POST /v1/records/{job}/shell` ([`crates/daemon/src/api/records.rs`](crates/daemon/src/api/records.rs)) answers
    `101 Switching Protocols` and carries the shell's terminal over the same connection
    ([ADR 0031](docs/adr/0031-records-of-failed-jobs.md)).
@@ -128,7 +130,7 @@ nothing until Docker has listed them.
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
 | Dashboard session | in memory, new each daemon run; the one-time login URL in `runnerd.web` next to the socket (0600) |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories, what became of each record; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories, what became of each record, auto sizing's changes; times in ms |
 
 ## Invariants
 
@@ -159,9 +161,17 @@ nothing until Docker has listed them.
 - `Control` records the paused repositories in the store, under the lock that changes them, and answers a pause or
   resume once the record commits, or fails it (`ControlError::NotRecorded`, 500) if it does not; the engine starts
   with the recorded ones paused, minus those its config lacks, so a paused repository gets no runner after a restart.
-- Sizing advice (`GET /v1/sizing`, `sizing::advise`) is computed from the job history and never written by the
-  daemon: a client applies it on request, after a confirmation, through `PUT /v1/config`
-  ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)).
+- Sizing advice (`GET /v1/sizing`, `sizing::advise`) is computed from the job history. A client applies it on
+  request, after a confirmation, through `PUT /v1/config`
+  ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)). Under `[sizing] auto` the daemon applies what
+  `sizing::auto::changes` picks through the same check and commit (`api::control::replace`), at most one change per
+  profile per `[sizing] interval`, never lowering a profile a run met the cap of, never leaving a profile's bounds,
+  and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
+  before the commit). Each change is recorded as pending in the history, synced to disk, before its file is written,
+  then done (with a durable `sizing.changed` event) or failed; a pending one is settled at every look, auto sizing
+  on or off, as done or uncertain, never failed ([ADR 0039](docs/adr/0039-auto-sizing.md)).
+- `PUT /v1/config?revision=` refuses a text made from another revision than the config runnerd runs with, or sent
+  while the file on disk is not that revision's text, so an editor opened before a change cannot save over it.
 - What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`. Under
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under

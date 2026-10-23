@@ -37,10 +37,11 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0029](0029-profile-events-and-what-a-restart-announces.md) | Profile events, and what a restart announces |
 | [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core |
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets |
-| [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check |
+| [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check (amended by 0037, 0039) |
 | [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag (amended by 0036) |
 | [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit |
 | [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time |
 | [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |
 | [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |
+| [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default |

@@ -486,6 +486,15 @@ impl App {
                 };
                 self.flash(text, outcome);
             }
+            Event::SizingChanged { change } => {
+                self.flash(
+                    format!("{}: auto sizing: {}", change.profile, change.line()),
+                    Outcome::Done,
+                );
+                if self.view == View::Sizing {
+                    effects.push(Effect::Sizing);
+                }
+            }
             Event::RecordCreated { .. } | Event::RecordDeleted { .. }
                 if self.view == View::Records =>
             {

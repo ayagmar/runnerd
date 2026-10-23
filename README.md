@@ -120,7 +120,7 @@ cargo binstall runnerd runnerd-cli
 The site, <https://ayagmar.github.io/runnerd/>, has the guides:
 
 - [Install](https://ayagmar.github.io/runnerd/install/): requirements, `runnerd init`'s output, verifying a release.
-- [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, profiles, runner images, records of failed jobs, sizing advice from the job history, measured admission, the budget check, isolation.
+- [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, profiles, runner images, records of failed jobs, sizing advice from the job history and auto sizing, measured admission, the budget check, isolation.
 - [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled and caches kept warm, records of failed jobs and their shells, the job history, and the JSON API and its events.
 - [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/): the web dashboard, every `runnerctl` command, and `runnerctl tui` with its keys.
 

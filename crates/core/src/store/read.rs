@@ -376,6 +376,50 @@ pub(super) fn log_lines(
     .collect()
 }
 
+pub(super) fn sizing_change(row: &Row<'_>) -> rusqlite::Result<api::SizingChange> {
+    Ok(api::SizingChange {
+        profile: row.get("profile")?,
+        at: secs(row.get("at")?),
+        from: api::Resize {
+            memory: row.get("from_memory")?,
+            slots: row.get("from_slots")?,
+        },
+        to: api::Resize {
+            memory: row.get("to_memory")?,
+            slots: row.get("to_slots")?,
+        },
+        reason: row.get("reason")?,
+        uncertain: row.get::<_, String>("state")? == "uncertain",
+    })
+}
+
+/// The changes auto sizing wrote, or may have, since `since` (ms), oldest first.
+pub(super) fn sizing_changes(
+    db: &Connection,
+    since: u64,
+) -> rusqlite::Result<Vec<api::SizingChange>> {
+    db.prepare_cached(
+        "SELECT * FROM auto_sizing WHERE state IN ('done', 'uncertain') AND at >= ?1 ORDER BY at, id",
+    )?
+    .query_map([since], sizing_change)?
+    .collect()
+}
+
+/// The latest pending, done or uncertain change of each profile, and the pending ones.
+pub(super) fn auto_sizing(db: &Connection) -> rusqlite::Result<super::AutoSizing> {
+    let last = db
+        .prepare_cached(
+            "SELECT profile, MAX(at) FROM auto_sizing WHERE state IN ('pending', 'done', 'uncertain') GROUP BY profile",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, secs(row.get(1)?))))?
+        .collect::<rusqlite::Result<_>>()?;
+    let pending = db
+        .prepare_cached("SELECT * FROM auto_sizing WHERE state = 'pending' ORDER BY id")?
+        .query_map([], |row| Ok((row.get("id")?, sizing_change(row)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(super::AutoSizing { last, pending })
+}
+
 pub(super) fn events_after(
     db: &Connection,
     after: u64,

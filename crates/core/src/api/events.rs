@@ -5,7 +5,9 @@
 use serde::{Deserialize, Serialize};
 
 use super::jobs::{HostSample, JobSummary, Sample, Step};
-use super::{Budget, ProfileStatus, Record, RecordRemoval, RepositoryStatus, SlotStatus};
+use super::{
+    Budget, ProfileStatus, Record, RecordRemoval, RepositoryStatus, SizingChange, SlotStatus,
+};
 
 /// One event as `GET /v1/events` sends it: the SSE `data` field. The SSE `event` field is `event.kind()` and the
 /// SSE `id` field is `id`.
@@ -115,6 +117,12 @@ pub enum Event {
         /// Why.
         removed_by: RecordRemoval,
     },
+    /// Auto sizing wrote a profile's new `memory` and `slots` into the config, and the daemon runs with them.
+    #[serde(rename = "sizing.changed")]
+    SizingChanged {
+        /// The change.
+        change: SizingChange,
+    },
     /// Live: a running job's container was sampled.
     #[serde(rename = "job.sample")]
     JobSample {
@@ -158,6 +166,7 @@ impl Event {
             Event::CacheReseeded { .. } => "cache.reseeded",
             Event::RecordCreated { .. } => "record.created",
             Event::RecordDeleted { .. } => "record.deleted",
+            Event::SizingChanged { .. } => "sizing.changed",
             Event::JobSample { .. } => "job.sample",
             Event::HostSample { .. } => "host.sample",
             Event::LogLine { .. } => "log.line",
@@ -190,6 +199,7 @@ impl Event {
             | Event::RepositoryChanged { .. }
             | Event::RepositoryRemoved { .. }
             | Event::CacheReseeded { .. }
+            | Event::SizingChanged { .. }
             | Event::HostSample { .. } => None,
         }
     }

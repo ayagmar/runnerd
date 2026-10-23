@@ -1950,3 +1950,17 @@ html {
     transition: none !important;
   }
 }
+
+.sizing-changes {
+  margin: 1rem 0;
+}
+
+.sizing-changes h3 {
+  margin: 0 0 0.5rem;
+  font-size: 1rem;
+}
+
+.sizing-changes ol {
+  margin: 0 0 0.75rem;
+  padding-left: 1.25rem;
+}

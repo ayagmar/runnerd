@@ -703,11 +703,16 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             Tone::Dim,
             &format!(
                 "from the last {} of history; peaks are sampled every {} s, so advice adds {}% to the largest \
-                 and waits for {} jobs",
+                 and waits for {} jobs{}",
                 duration(now.saturating_sub(sizing.since)),
                 sizing.sample_interval,
                 sizing.margin,
-                sizing.min_jobs
+                sizing.min_jobs,
+                if sizing.auto {
+                    "; auto sizing applies it"
+                } else {
+                    ""
+                }
             )
         )
     );
@@ -755,7 +760,9 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             Advice::TooFew { .. } => Tone::Dim,
         };
         let _ = writeln!(out, "  {}", paint.paint(tone, &sizing.advice_line(profile)));
-        if profile.advice.change().is_some() {
+        out.push_str(&sizing_changes(sizing, &profile.name, now, paint));
+        // Under auto sizing the daemon applies it.
+        if !sizing.auto && profile.advice.change().is_some() {
             let _ = writeln!(
                 out,
                 "  {}",
@@ -769,6 +776,31 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             out.push('\n');
             out.push_str(&sizing_jobs(&profile.jobs, paint));
         }
+    }
+    out
+}
+
+/// A line per change auto sizing made to a profile, and how to undo the last.
+fn sizing_changes(sizing: &Sizing, profile: &str, now: u64, paint: Paint) -> String {
+    let mut out = String::new();
+    for change in sizing
+        .changes
+        .iter()
+        .filter(|change| change.profile == profile)
+    {
+        let _ = writeln!(
+            out,
+            "  auto sizing {}: {}",
+            ago(change.at, now),
+            change.line()
+        );
+    }
+    if !out.is_empty() {
+        let _ = writeln!(
+            out,
+            "  {}",
+            paint.paint(Tone::Dim, &format!("runnerctl sizing undo {profile}"))
+        );
     }
     out
 }
@@ -943,6 +975,7 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             bytes(record.bytes)
         ),
         Event::RecordDeleted { job, removed_by } => format!("{job} record {removed_by}"),
+        Event::SizingChanged { change } => format!("{} {}", change.profile, change.line()),
         Event::JobSample { .. } | Event::HostSample { .. } | Event::LogLine { .. } => return None,
     };
     Some(format!(

@@ -23,15 +23,17 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
-use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Sizing, Spread};
+use runnerd_core::api::{
+    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread,
+};
 use runnerd_core::api::{
     Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
     CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, EventQuery,
     HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary,
     LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus, QueuedJob, Record, RecordLimits,
-    RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, RepositoryStatus,
-    RunnerStatus, RunningJob, Sample, SampleSeries, SlotStatus, Stats, StatsRow, Status, Step,
-    Timeline,
+    RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery,
+    RepositoryStatus, RunnerStatus, RunningJob, Sample, SampleSeries, SlotStatus, Stats, StatsRow,
+    Status, Step, Timeline,
 };
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -55,6 +57,8 @@ pub struct Fixtures {
     pub records: Records,
     /// What `GET /v1/config` reads and `PUT /v1/config` replaces.
     pub config: String,
+    /// Written over `config` right after the next `PUT /v1/config` answers, as auto sizing may.
+    pub after_put: Option<String>,
     /// The requests to the control endpoints, such as `POST /v1/profiles/jvm/reseed`.
     pub controls: Vec<String>,
     /// Whether the job history fails to record a pause or resume of every repository, as the daemon's 500.
@@ -644,6 +648,7 @@ impl Fixtures {
             cache_history,
             records,
             config: include_str!("../../../../examples/runnerd.toml").to_owned(),
+            after_put: None,
             controls: Vec::new(),
             unrecorded: false,
         }
@@ -827,6 +832,22 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
         })
         .collect();
     Sizing {
+        auto: false,
+        // Auto sizing, since turned off, lowered jvm two days ago.
+        changes: vec![SizingChange {
+            at: fixtures.now - 2 * 86_400,
+            profile: "jvm".to_owned(),
+            from: Resize {
+                memory: 10 * GIB,
+                slots: 2,
+            },
+            to: Resize {
+                memory: 9 * GIB,
+                slots: 2,
+            },
+            reason: "lower memory to 9G from 10G, its largest peak + 15%".to_owned(),
+            uncertain: false,
+        }],
         since: fixtures.now - 30 * 86_400,
         until: fixtures.now,
         margin: 15,
@@ -1137,17 +1158,29 @@ fn router(fake: Fake) -> Router {
         .route(
             "/v1/config",
             get(|State(fake): State<Fake>| async move {
+                let text = fake.fixtures.lock().unwrap().config.clone();
                 Json(ConfigFile {
                     path: "/home/forge/.config/runnerd/runnerd.toml".to_owned(),
-                    text: fake.fixtures.lock().unwrap().config.clone(),
+                    revision: Some(runnerd_core::config::revision(&text)),
+                    text,
                 })
             })
-            .put(|State(fake): State<Fake>, text: String| async move {
-                let (config, checked) = check(&text);
+            .put(|State(fake): State<Fake>, Query(query): Query<ReplaceQuery>, text: String| async move {
+                let now = runnerd_core::config::revision(&fake.fixtures.lock().unwrap().config);
+                if query.revision.is_some_and(|read| read != now) {
+                    return (
+                        StatusCode::CONFLICT,
+                        Json(ErrorResponse { message: "the config changed since it was read".to_owned() }),
+                    )
+                        .into_response();
+                }
+                let (config, mut checked) = check(&text);
                 if config.is_none() {
                     return (StatusCode::UNPROCESSABLE_ENTITY, Json(checked)).into_response();
                 }
-                fake.fixtures.lock().unwrap().config = text;
+                checked.revision = Some(runnerd_core::config::revision(&text));
+                let mut fixtures = fake.fixtures.lock().unwrap();
+                fixtures.config = fixtures.after_put.take().unwrap_or(text);
                 Json(checked).into_response()
             }),
         )

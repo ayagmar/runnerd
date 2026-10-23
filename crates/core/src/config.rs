@@ -145,6 +145,12 @@ pub struct Profile {
     pub slots: u32,
     /// Whether a failed job's runner is kept as a record, to open a shell in (`runnerctl shell`).
     pub record_failures: bool,
+    /// The least `memory` auto sizing lowers it to; `None` for no bound.
+    pub min_memory: Option<ByteSize>,
+    /// The most `memory` auto sizing raises it to; `None` for what the slice's `MemoryMax` holds.
+    pub max_memory: Option<ByteSize>,
+    /// The most `slots` auto sizing raises them to; `None` leaves raising them to the owner.
+    pub max_slots: Option<u32>,
 }
 
 /// The image a profile's runners run.
@@ -178,6 +184,9 @@ struct ProfileToml {
     slots: u32,
     #[serde(default)]
     record_failures: bool,
+    min_memory: Option<ByteSize>,
+    max_memory: Option<ByteSize>,
+    max_slots: Option<u32>,
 }
 
 impl TryFrom<ProfileToml> for Profile {
@@ -207,6 +216,9 @@ impl TryFrom<ProfileToml> for Profile {
             memory: profile.memory,
             slots: profile.slots,
             record_failures: profile.record_failures,
+            min_memory: profile.min_memory,
+            max_memory: profile.max_memory,
+            max_slots: profile.max_slots,
         })
     }
 }
@@ -285,7 +297,8 @@ impl Default for Records {
     }
 }
 
-/// `[sizing]`: how `runnerctl sizing` turns the job history's peaks into advice. Every field has a default.
+/// `[sizing]`: how `runnerctl sizing` turns the job history's peaks into advice, and whether the daemon applies it
+/// itself. Every field has a default.
 #[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
 #[serde(deny_unknown_fields, default)]
 pub struct Sizing {
@@ -295,6 +308,14 @@ pub struct Sizing {
     /// The fewest jobs a profile, or a job of a repository's workflow, needs before its peaks become advice.
     /// Default 10.
     pub min_jobs: u32,
+    /// Whether the daemon writes each profile's advice into the config itself, within each profile's
+    /// `min_memory`, `max_memory` and `max_slots`. Default off.
+    pub auto: bool,
+    /// The least time between two changes auto sizing makes to one profile. Default 24 hours.
+    #[serde(deserialize_with = "duration")]
+    pub interval: Duration,
+    /// The most a change moves a profile's `memory`, in percent of it. Default 25.
+    pub max_step: u32,
 }
 
 impl Default for Sizing {
@@ -302,6 +323,9 @@ impl Default for Sizing {
         Sizing {
             margin: 15,
             min_jobs: 10,
+            auto: false,
+            interval: Duration::from_hours(24),
+            max_step: 25,
         }
     }
 }
@@ -358,6 +382,15 @@ pub enum ConfigError {
     CpuOvercommit {
         /// The value set.
         value: f64,
+    },
+    /// A profile's `memory` or `slots` are outside its `min_memory`, `max_memory` or `max_slots`, or its
+    /// `min_memory` is above its `max_memory`.
+    #[error("profiles.{profile}: {why}")]
+    SizingBounds {
+        /// The profile.
+        profile: String,
+        /// Which bound, such as `memory is above its max_memory`.
+        why: &'static str,
     },
     /// The caps add up past `u64::MAX` bytes.
     #[error("slots × memory over all profiles plus the mirror is too large to add up")]
@@ -462,6 +495,7 @@ impl Config {
                 warnings: Vec::new(),
                 memory_caps: memory_caps.map(|caps| caps.0),
                 memory_max: max.map(|max| max.0),
+                revision: None,
             }
         };
         let config = match Config::parse(text) {
@@ -491,6 +525,7 @@ impl Config {
                     warnings: warnings.iter().map(ToString::to_string).collect(),
                     memory_caps: Some(total.0),
                     memory_max: max.map(|max| max.0),
+                    revision: None,
                 };
                 (Some(config), check)
             }
@@ -522,6 +557,33 @@ impl Config {
             .ok_or(ConfigError::BudgetOverflow)
     }
 
+    /// Refuses a profile outside the bounds auto sizing keeps it in, or whose bounds cross.
+    fn check_sizing_bounds(&self) -> Result<(), ConfigError> {
+        for (name, p) in &self.profiles {
+            let memory = p.memory.0;
+            let field = if p
+                .min_memory
+                .zip(p.max_memory)
+                .is_some_and(|(min, max)| min.0 > max.0)
+            {
+                "min_memory is above its max_memory"
+            } else if p.min_memory.is_some_and(|min| memory < min.0) {
+                "memory is below its min_memory"
+            } else if p.max_memory.is_some_and(|max| memory > max.0) {
+                "memory is above its max_memory"
+            } else if p.max_slots.is_some_and(|max| p.slots > max) {
+                "slots are above its max_slots"
+            } else {
+                continue;
+            };
+            return Err(ConfigError::SizingBounds {
+                profile: name.clone(),
+                why: field,
+            });
+        }
+        Ok(())
+    }
+
     /// Checks the config against the slice's `MemoryMax` (`None` when the slice is unlimited).
     pub fn validate(&self, memory_max: Option<ByteSize>) -> Result<Vec<Warning>, ConfigError> {
         if self.host.isolation == Isolation::UnsafeDind && !self.host.allow_unsafe {
@@ -532,6 +594,7 @@ impl Config {
                 (p.memory.0 == 0, format!("profiles.{name}.memory")),
                 (p.cpus == 0, format!("profiles.{name}.cpus")),
                 (p.slots == 0, format!("profiles.{name}.slots")),
+                (p.max_slots == Some(0), format!("profiles.{name}.max_slots")),
             ]
         });
         let mirror = &self.caches.mirror;
@@ -550,6 +613,8 @@ impl Config {
             ),
             (self.records.max_count == 0, "records.max_count".to_owned()),
             (self.sizing.min_jobs == 0, "sizing.min_jobs".to_owned()),
+            (self.sizing.interval.is_zero(), "sizing.interval".to_owned()),
+            (self.sizing.max_step == 0, "sizing.max_step".to_owned()),
             (
                 self.records.max_total.0 == 0,
                 "records.max_total".to_owned(),
@@ -561,6 +626,7 @@ impl Config {
         {
             return Err(ConfigError::ZeroLimit { field });
         }
+        self.check_sizing_bounds()?;
         if let Some(value) = self
             .host
             .cpu_overcommit
@@ -660,6 +726,15 @@ pub fn resize_profile(
         table.insert(key, toml_edit::Item::Value(value));
     }
     Ok(document.to_string())
+}
+
+/// A config text's revision: a hash of its bytes (64-bit FNV-1a, in hex), the same in every runnerd. `PUT
+/// /v1/config?revision=` refuses a text sent against another revision than the daemon's.
+pub fn revision(text: &str) -> String {
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 /// Reads a slice's `MemoryMax` from systemd; `None` when it is unlimited.

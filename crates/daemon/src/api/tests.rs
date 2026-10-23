@@ -10,8 +10,8 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 use runnerd_core::api::{
     Advice, Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
-    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, RunningJob, Sizing,
-    Status,
+    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, Resize, RunningJob,
+    Sizing, SizingChange, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::docker::Tty;
@@ -244,6 +244,18 @@ async fn start_with(
     sync_dir: SyncDir,
     memory_max: MemoryMax,
 ) -> Daemon {
+    start_serving(dir, owner, engine, sync_dir, memory_max, EXAMPLE).await
+}
+
+/// `start_with`, serving the config `text`.
+async fn start_serving(
+    dir: &Path,
+    owner: Option<u32>,
+    engine: bool,
+    sync_dir: SyncDir,
+    memory_max: MemoryMax,
+    text: &str,
+) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
     let (control, commands) =
@@ -266,17 +278,18 @@ async fn start_with(
     };
     let config = dir.join("runnerd.toml");
     let file = dir.join("config.toml");
-    std::fs::write(&file, EXAMPLE).unwrap();
+    std::fs::write(&file, text).unwrap();
     std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o640)).unwrap();
     if !config.exists() {
         std::os::unix::fs::symlink(&file, &config).unwrap();
     }
     let source = ConfigSource {
         path: config.clone(),
-        text: EXAMPLE.to_owned(),
+        text: text.to_owned(),
         memory_max,
         cpus: unreadable_cpus,
         sync_dir,
+        auto_every: Duration::from_millis(20),
     };
     let listener = bind(&socket).await.unwrap();
     let mode = std::fs::metadata(&socket).unwrap();
@@ -436,6 +449,403 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
             slots: 2
         }
     );
+    daemon.stop().await;
+}
+
+/// Records ten finished `o/app` jobs of `profile` at a `cap`, each peaking at `peak`.
+async fn finished_jobs(store: &Store, profile: &str, cap: u64, peak: u64) {
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    for id in 1..=10 {
+        let runner = format!("runner-{id}");
+        store.queued(
+            "o/app",
+            &QueuedJob {
+                id,
+                run_id: 2,
+                name: "build".to_owned(),
+                created_at: now - 60_000,
+                ..QueuedJob::default()
+            },
+        );
+        store.runner_started(RunnerRecord {
+            admission: None,
+            name: runner.clone(),
+            repository: "o/app".to_owned(),
+            profile: profile.to_owned(),
+            slot: 1,
+            container: format!("c{id}"),
+            started_at: now - 50_000,
+            memory_cap: Some(cap),
+            cpu_cap: Some(8000),
+        });
+        store.claimed(id, 2, &runner, now - 40_000);
+        store.samples(vec![SampleRecord {
+            events: runnerd_core::observe::metrics::Events::default(),
+            runner: runner.clone(),
+            at: now - 30_000,
+            cpu: 0,
+            cpu_usage: 0,
+            memory: peak,
+            network_received: 0,
+            network_sent: 0,
+        }]);
+        store.lost(id, now - 20_000);
+    }
+    store.flush().await;
+}
+
+#[tokio::test]
+async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_the_interval() {
+    let dir = Dir::new();
+    let text = auto_sizing();
+    let mut daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &text).await;
+    let mut events = daemon
+        .client
+        .get("http://runnerd/v1/events")
+        .send()
+        .await
+        .unwrap();
+    // Ten node jobs at their 7G cap peaking at 2G: lowered, by at most 25% a change.
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    let sizing = async || -> Sizing {
+        let response = daemon
+            .client
+            .get("http://runnerd/v1/sizing")
+            .send()
+            .await
+            .unwrap();
+        serde_json::from_slice(&body(response).await).unwrap()
+    };
+    let changed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let sizing = sizing().await;
+            if !sizing.changes.is_empty() {
+                return sizing;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("auto sizing changes node within 10 s");
+    assert!(changed.auto, "the advice says auto sizing is on");
+    let resized = Resize {
+        memory: 5376 << 20,
+        slots: 2,
+    };
+    assert_eq!(
+        changed
+            .changes
+            .iter()
+            .map(|change| (change.profile.as_str(), change.from, change.to))
+            .collect::<Vec<_>>(),
+        vec![(
+            "node",
+            Resize {
+                memory: 7 << 30,
+                slots: 2
+            },
+            resized
+        )]
+    );
+    let written = std::fs::read_to_string(&daemon.config).unwrap();
+    let node = &Config::parse(&written).unwrap().profiles["node"];
+    assert_eq!((node.memory.0, node.slots), (resized.memory, resized.slots));
+    for comment in text
+        .lines()
+        .filter(|line| line.trim_start().starts_with('#'))
+    {
+        assert!(written.contains(comment), "the file keeps {comment:?}");
+    }
+    let reloaded = daemon.reloads.recv().await.unwrap();
+    assert_eq!(reloaded.profiles["node"].memory.0, resized.memory);
+    // Read until it, past the jobs' own events.
+    let announced = loop {
+        let [envelope] = &read_events(&mut events, 1).await[..] else {
+            unreachable!("one event read")
+        };
+        if let Event::SizingChanged { change } = &envelope.event {
+            break change.clone();
+        }
+    };
+    assert_eq!(announced, changed.changes[0]);
+    // Many looks later, the 24h interval still holds node where it is.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(sizing().await.changes.len(), 1);
+    assert!(daemon.reloads.try_recv().is_err(), "no second reload");
+    daemon.stop().await;
+}
+
+/// The example with auto sizing on.
+fn auto_sizing() -> String {
+    format!("{EXAMPLE}\n# Let runnerd follow the advice.\n[sizing]\nauto = true\n")
+}
+
+/// The advice, with the changes auto sizing made.
+async fn read_sizing(daemon: &Daemon) -> Sizing {
+    let response = daemon
+        .client
+        .get("http://runnerd/v1/sizing")
+        .send()
+        .await
+        .unwrap();
+    serde_json::from_slice(&body(response).await).unwrap()
+}
+
+#[tokio::test]
+async fn auto_sizing_leaves_a_file_edited_on_disk_until_runnerd_runs_with_it() {
+    let dir = Dir::new();
+    let mut daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &auto_sizing()).await;
+    let edited = format!("{}\n# Edited by hand, not reloaded yet.\n", auto_sizing());
+    std::fs::write(&daemon.config, &edited).unwrap();
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), edited);
+    assert_eq!(read_sizing(&daemon).await.changes, Vec::new());
+    assert!(daemon.reloads.try_recv().is_err(), "nothing reloaded");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_change_the_history_cannot_record_is_not_written() {
+    let dir = Dir::new();
+    let mut daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &auto_sizing()).await;
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_insert BEFORE INSERT ON auto_sizing BEGIN SELECT RAISE(ABORT, 'full'); END;",
+        )
+        .unwrap();
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(
+        std::fs::read_to_string(&daemon.config).unwrap(),
+        auto_sizing()
+    );
+    assert!(daemon.reloads.try_recv().is_err(), "nothing reloaded");
+    drop(fault);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_change_a_crash_left_pending_is_resolved_from_the_file_and_holds_its_interval() {
+    let dir = Dir::new();
+    // The file has node's change: the daemon stopped after writing it, before recording it as done.
+    let written = auto_sizing().replacen("memory = \"7G\"", "memory = \"5.25G\"", 1);
+    let mut daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &written).await;
+    let change = |profile: &str| SizingChange {
+        at: super::history::now(),
+        profile: profile.to_owned(),
+        from: Resize {
+            memory: 7 << 30,
+            slots: 2,
+        },
+        to: Resize {
+            memory: 5376 << 20,
+            slots: 2,
+        },
+        reason: "lower memory".to_owned(),
+        uncertain: false,
+    };
+    daemon.store.sizing_intent(change("node")).await.unwrap();
+    finished_jobs(&daemon.store, "node", 5376 << 20, 2 << 30).await;
+    let resolved = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let sizing = read_sizing(&daemon).await;
+            if !sizing.changes.is_empty() {
+                return sizing.changes;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the pending change is resolved within 10 s");
+    assert_eq!(resolved, vec![change("node")]);
+    assert_eq!(
+        daemon.store.auto_sizing().await.unwrap().pending,
+        Vec::new()
+    );
+    // node's peaks would lower it further, but its change holds the interval.
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), written);
+    assert!(daemon.reloads.try_recv().is_err(), "nothing reloaded");
+    daemon.stop().await;
+}
+
+/// Waits until the history lists `count` changes auto sizing made.
+async fn until_changes(daemon: &Daemon, count: usize) -> Vec<SizingChange> {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let changes = read_sizing(daemon).await.changes;
+            if changes.len() >= count {
+                return changes;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("the changes are listed within 10 s")
+}
+
+#[tokio::test]
+async fn a_written_change_whose_record_failed_and_was_then_changed_by_hand_stays_uncertain_and_holds_its_interval()
+ {
+    let dir = Dir::new();
+    let mut daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &auto_sizing()).await;
+    // The history takes the pending record but not what became of it.
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_update BEFORE UPDATE ON auto_sizing BEGIN SELECT RAISE(ABORT, 'full'); END;",
+        )
+        .unwrap();
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    let reloaded = daemon.reloads.recv().await.unwrap();
+    assert_eq!(reloaded.profiles["node"].memory.0, 5376 << 20);
+    // Before the history can settle it, a person sets node to 6G.
+    let by_hand = std::fs::read_to_string(&daemon.config).unwrap().replacen(
+        "memory = \"5.25G\"",
+        "memory = \"6G\"",
+        1,
+    );
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(by_hand.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    fault.execute_batch("DROP TRIGGER no_update;").unwrap();
+    let changes = until_changes(&daemon, 1).await;
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (change.from.memory, change.to.memory, change.uncertain))
+            .collect::<Vec<_>>(),
+        [(7 << 30, 5376 << 20, true)],
+        "listed as uncertain, with what it replaced"
+    );
+    assert!(
+        daemon
+            .store
+            .auto_sizing()
+            .await
+            .unwrap()
+            .last
+            .contains_key("node"),
+        "it holds node's interval"
+    );
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), by_hand);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_change_left_pending_is_settled_with_auto_sizing_turned_off() {
+    let dir = Dir::new();
+    // Written before a crash; the owner then turned auto sizing off.
+    let written = EXAMPLE.replacen("memory = \"7G\"", "memory = \"5.25G\"", 1);
+    let daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &written).await;
+    let change = SizingChange {
+        at: super::history::now(),
+        profile: "node".to_owned(),
+        from: Resize {
+            memory: 7 << 30,
+            slots: 2,
+        },
+        to: Resize {
+            memory: 5376 << 20,
+            slots: 2,
+        },
+        reason: "lower memory".to_owned(),
+        uncertain: false,
+    };
+    daemon.store.sizing_intent(change.clone()).await.unwrap();
+    assert_eq!(until_changes(&daemon, 1).await, vec![change]);
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), written);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_save_made_from_a_revision_is_refused_once_the_file_was_edited_on_disk() {
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    let response = daemon
+        .client
+        .get("http://runnerd/v1/config")
+        .send()
+        .await
+        .unwrap();
+    let read: ConfigFile = serde_json::from_slice(&body(response).await).unwrap();
+    let edited = format!("{EXAMPLE}\n# Edited by hand.\n");
+    std::fs::write(&daemon.config, &edited).unwrap();
+    let response = daemon
+        .client
+        .put(format!(
+            "http://runnerd/v1/config?revision={}",
+            read.revision.unwrap()
+        ))
+        .body(EXAMPLE.replacen("slots = 2", "slots = 1", 1))
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), edited);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_config_made_from_a_revision_replaced_since_is_refused() {
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    let read = |daemon: &Daemon| {
+        let client = daemon.client.clone();
+        async move {
+            let response = client.get("http://runnerd/v1/config").send().await.unwrap();
+            serde_json::from_slice::<ConfigFile>(&body(response).await).unwrap()
+        }
+    };
+    let first = read(&daemon).await;
+    let first_revision = first.revision.clone().unwrap();
+    let put = |text: String, revision: &str| {
+        daemon
+            .client
+            .put(format!("http://runnerd/v1/config?revision={revision}"))
+            .body(text)
+            .send()
+    };
+    // As auto sizing would, between the editor's read and its save.
+    let changed = EXAMPLE.replacen("slots = 2", "slots = 1", 1);
+    let response = put(changed.clone(), &first_revision).await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let saved: ConfigCheck = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(
+        saved.revision,
+        Some(runnerd_core::config::revision(&changed)),
+        "the reply has the revision of the text written"
+    );
+    let stale = EXAMPLE.replacen("memory = \"7G\"", "memory = \"6G\"", 1);
+    let response = put(stale, &first_revision).await.unwrap();
+    assert_eq!(response.status(), StatusCode::CONFLICT);
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), changed);
+    let second = read(&daemon).await;
+    assert_ne!(second.revision, first.revision);
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn auto_sizing_off_leaves_the_file_as_written() {
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), EXAMPLE);
     daemon.stop().await;
 }
 

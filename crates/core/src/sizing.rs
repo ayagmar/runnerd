@@ -1,7 +1,7 @@
 //! Right-sizing advice from the job history: the spread of each profile's and each job's sampled peaks, waits and
 //! slot use, and the `memory` and `slots` to set. Pure: the store reads the history, the daemon serves the result
-//! (`api::Sizing`). It never changes the config; a client applies advice through `PUT /v1/config`, which validates
-//! it like any other config.
+//! (`api::Sizing`). It never changes the config: a client applies advice through `PUT /v1/config`, which validates
+//! it like any other config, and under `[sizing] auto` the daemon applies what `auto::changes` picks the same way.
 
 use std::collections::BTreeMap;
 
@@ -239,6 +239,8 @@ pub fn advise(
             Admission::Measured => api::AdmissionPolicy::Measured,
         },
         profiles,
+        auto: config.sizing.auto,
+        changes: Vec::new(),
     }
 }
 
@@ -343,6 +345,8 @@ pub(crate) fn spread(mut values: Vec<u64>) -> Spread {
         max: values.last().copied().unwrap_or(0),
     }
 }
+
+pub mod auto;
 
 #[cfg(test)]
 mod tests;

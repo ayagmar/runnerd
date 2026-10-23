@@ -59,7 +59,7 @@ Below the charts: every job, filtered by repository and outcome.
 | Page | Shows |
 |---|---|
 | Caches | each volume, its bound and its size over 30 days; reseed a snapshot or empty a cache; the records of failed jobs, removed one at a time or all at once |
-| Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../configuration/#sizing), and a row per job; a button opens the advice in the config editor, unsaved |
+| Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../configuration/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; under [auto sizing](../configuration/#auto-sizing), the changes it made, with a link that opens the last one undone in the editor |
 | Config | `runnerd.toml` in an editor that checks it against `MemoryMax` as you type, saves and reloads only when it fits; the doctor's checks |
 
 ## runnerctl
@@ -99,6 +99,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl records`, `records rm <job>` | the records of failed jobs with their sizes and limits; removes one, or `--all`, or those `--older-than 2d` |
 | `runnerctl sizing [--since 7d]` | per profile and per job: percentiles and the largest of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../configuration/#sizing) |
 | `runnerctl sizing apply <profile> [--yes]` | writes a profile's advised `memory` and `slots` into the daemon's config after showing the change and asking; the daemon checks it against the budget first |
+| `runnerctl sizing undo <profile> [--yes]` | writes back the `memory` and `slots` [auto sizing](../configuration/#auto-sizing) last replaced, the same way; both refuse to write over a config changed since they read it |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
@@ -131,6 +132,14 @@ node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
 ```
 
 `runnerctl sizing apply node` shows `memory = "7G" -> "2.5G"` and `slots = 2 -> 5` under `[profiles.node]` and asks before it writes. Without a terminal to ask on it needs `--yes`. The rest of the file, comments included, stays as written.
+
+Under [auto sizing](../configuration/#auto-sizing) the first line ends with `auto sizing applies it`, the `apply` hint goes, and each change shows under its profile:
+
+```console wrap=false
+  lower memory to 2.5G from 5.25G, its largest peak + 15%; 5 slots fit in the same 10.5G
+  auto sizing 2d 3h ago: memory 7G → 5.25G, slots 2
+  runnerctl sizing undo node
+```
 
 ### Jobs and watch
 
@@ -200,7 +209,7 @@ The dashboard, for a host you reach over SSH. It shows what the web dashboard do
 - the slice's memory and CPU, the repositories, and the queued and latest jobs;
 - the history, filtered by outcome and repository;
 - the records of failed jobs, with the command that opens a shell in each;
-- sizing: each profile's peaks and advice, its jobs below;
+- sizing: each profile's peaks and advice, its jobs below, and what auto sizing last changed;
 - a job: its timeline, its steps on one time axis, memory and CPU against its container's caps, and its log, followed while the job runs.
 
 ```sh

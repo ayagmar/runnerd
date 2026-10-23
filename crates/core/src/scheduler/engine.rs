@@ -30,7 +30,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 pub use self::control::{
-    Command, Commands, Commit, Control, ControlError, RunningJobs, Shutdown, Target,
+    Command, Commands, Commit, Control, ControlError, RunningJobs, RunningSlots, Shutdown, Target,
 };
 use self::history::{Closing, Found};
 use self::images::ImageState;

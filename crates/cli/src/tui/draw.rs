@@ -106,7 +106,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) {
         View::Overview => overview(frame, body, app, now, theme),
         View::History => history(frame, body, app, now, theme),
         View::Records => records(frame, body, app, now, theme),
-        View::Sizing => sizing(frame, body, app, theme),
+        View::Sizing => sizing(frame, body, app, now, theme),
         View::Job => {
             if let Some(open) = &app.job {
                 job(frame, body, app, open, now, theme);
@@ -1214,7 +1214,7 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
 
 /// What each profile's jobs use and what to set its memory and slots to; the selected profile's jobs below. Under
 /// 100 columns the medians, the jobs at their cap and the largest peaks are left out.
-fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let Some(sizing) = &app.sizing else {
         let [title, rest] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
@@ -1236,11 +1236,16 @@ fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         title,
         "Sizing",
         format!(
-            "{} of history · peaks every {} s +{}% · advice after {} jobs",
+            "{} of history · peaks every {} s +{}% · advice after {} jobs{}",
             duration(sizing.until.saturating_sub(sizing.since)),
             sizing.sample_interval,
             sizing.margin,
-            sizing.min_jobs
+            sizing.min_jobs,
+            if sizing.auto {
+                " · auto sizing on"
+            } else {
+                ""
+            }
         ),
         theme,
     );
@@ -1254,13 +1259,30 @@ fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         format!("{}: {}", profile.name, sizing.advice_line(profile)),
         theme.tone(advice_tone(profile.advice)),
     )];
-    if let Some(change) = profile.advice.change() {
+    let last = sizing
+        .changes
+        .iter()
+        .rfind(|change| change.profile == profile.name);
+    if let Some(change) = profile.advice.change().filter(|_| !sizing.auto) {
         lines.push(Line::styled(
             fit(
                 &format!(
                     "a writes memory = \"{}\", slots = {} into the config; the daemon checks it first",
                     ByteSize(change.memory),
                     change.slots
+                ),
+                width,
+            ),
+            theme.dim(),
+        ));
+    } else if let Some(change) = last {
+        lines.push(Line::styled(
+            fit(
+                &format!(
+                    "auto sizing {}: {}; runnerctl sizing undo {} writes it back",
+                    human::ago(change.at, now),
+                    change.line(),
+                    profile.name
                 ),
                 width,
             ),

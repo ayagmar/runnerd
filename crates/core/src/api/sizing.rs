@@ -36,6 +36,31 @@ pub struct Sizing {
     pub admission: AdmissionPolicy,
     /// Every configured profile, by name.
     pub profiles: Vec<ProfileSizing>,
+    /// Whether the daemon applies advice itself, `[sizing] auto`.
+    #[serde(default)]
+    pub auto: bool,
+    /// The changes auto sizing made since `since`, oldest first.
+    #[serde(default)]
+    pub changes: Vec<SizingChange>,
+}
+
+/// A profile's `memory` and `slots` as auto sizing changed them in the config file.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizingChange {
+    /// When it was written.
+    pub at: u64,
+    /// The profile.
+    pub profile: String,
+    /// What they were: writing these back undoes it.
+    pub from: Resize,
+    /// What they are now.
+    pub to: Resize,
+    /// Why, as the advice said it then.
+    pub reason: String,
+    /// Whether it may not have been written: recorded before its file was written, and the config no longer said
+    /// whether it was when runnerd looked again. It still holds the interval, and `from` is still what it replaced.
+    #[serde(default)]
+    pub uncertain: bool,
 }
 
 /// One profile: its limits now, its jobs' peaks and waits, and the advice.
@@ -171,6 +196,31 @@ pub struct Resize {
     pub slots: u32,
 }
 
+impl SizingChange {
+    /// What it changed, such as `memory 9G → 6.75G, slots 2`.
+    pub fn line(&self) -> String {
+        let memory = if self.from.memory == self.to.memory {
+            format!("memory {}", ByteSize(self.to.memory))
+        } else {
+            format!(
+                "memory {} → {}",
+                ByteSize(self.from.memory),
+                ByteSize(self.to.memory)
+            )
+        };
+        let slots = if self.from.slots == self.to.slots {
+            format!("slots {}", self.to.slots)
+        } else {
+            format!("slots {} → {}", self.from.slots, self.to.slots)
+        };
+        if self.uncertain {
+            format!("{memory}, {slots} (may not have been written)")
+        } else {
+            format!("{memory}, {slots}")
+        }
+    }
+}
+
 impl Sizing {
     /// One line on what to do with a profile and why, as `runnerctl sizing`, the dashboard and `runnerd doctor`
     /// say it, such as `lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G`.
@@ -191,7 +241,8 @@ impl Sizing {
         }
     }
 
-    fn memory_line(&self, profile: &ProfileSizing) -> String {
+    /// `advice_line` without what it says about slots under measured admission.
+    pub(crate) fn memory_line(&self, profile: &ProfileSizing) -> String {
         let size = |bytes: u64| ByteSize(bytes).to_string();
         let peaks = &profile.peaks;
         let need = format!("its largest peak + {}%", self.margin);
@@ -257,3 +308,7 @@ impl Sizing {
         }
     }
 }
+
+// The wire format is JSON, which only the host and client features read.
+#[cfg(all(test, any(feature = "host", feature = "client")))]
+mod tests;

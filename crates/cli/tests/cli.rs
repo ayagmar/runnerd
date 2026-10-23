@@ -23,8 +23,8 @@ use runnerd_core::api::{
     Advice, Budget, Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse,
     Event, EventEnvelope, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary, LogSummary,
     Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record, RecordLimits, Records,
-    RemovedRecords, RepositoryStatus, RunnerStatus, RunningJob, Sizing, SlotStatus, Spread, Status,
-    Timeline,
+    RemovedRecords, RepositoryStatus, Resize, RunnerStatus, RunningJob, Sizing, SizingChange,
+    SlotStatus, Spread, Status, Timeline,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -164,6 +164,8 @@ struct Fake {
     checked: Vec<String>,
     /// The body of every config replacement.
     replaced: Vec<String>,
+    /// The query of every config replacement.
+    replaced_queries: Vec<Option<String>>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -260,6 +262,7 @@ async fn check_config(State(fake): State<Shared>, body: String) -> axum::Json<Co
         warnings: Vec::new(),
         memory_caps: Some(20 << 30),
         memory_max: Some(16 << 30),
+        revision: None,
     })
 }
 
@@ -270,21 +273,30 @@ async fn get_config() -> axum::Json<ConfigFile> {
     axum::Json(ConfigFile {
         path: "/home/u/.config/runnerd/runnerd.toml".to_owned(),
         text: CONFIG.to_owned(),
+        revision: Some("c0ffee".to_owned()),
     })
 }
 
-async fn replace_config(State(fake): State<Shared>, body: String) -> axum::Json<ConfigCheck> {
-    fake.lock().unwrap().replaced.push(body);
+async fn replace_config(
+    State(fake): State<Shared>,
+    RawQuery(query): RawQuery,
+    body: String,
+) -> axum::Json<ConfigCheck> {
+    let mut fake = fake.lock().unwrap();
+    fake.replaced.push(body);
+    fake.replaced_queries.push(query);
     axum::Json(ConfigCheck {
         valid: true,
         message: "valid, memory caps sum to 13G".to_owned(),
         warnings: Vec::new(),
         memory_caps: Some(13 << 30),
         memory_max: Some(16 << 30),
+        revision: None,
     })
 }
 
-/// `node`'s 100 builds peak at 2.1G: 2.5G with the margin, 5 of them in the 14G its 2 slots take.
+/// `node`'s 100 builds peak at 2.1G: 2.5G with the margin, 5 of them in the 14G its 2 slots take. Auto sizing,
+/// since turned off, lowered it from 9G.
 async fn get_sizing() -> axum::Json<Sizing> {
     let spread = |p50, p95, p99, max| Spread { p50, p95, p99, max };
     let peaks = Peaks {
@@ -298,6 +310,21 @@ async fn get_sizing() -> axum::Json<Sizing> {
         slots: 5,
     };
     axum::Json(Sizing {
+        auto: false,
+        changes: vec![SizingChange {
+            at: 1_700_050_000,
+            profile: "node".to_owned(),
+            from: Resize {
+                memory: 9 << 30,
+                slots: 2,
+            },
+            to: Resize {
+                memory: 7 << 30,
+                slots: 2,
+            },
+            reason: "lower memory to 2.5G from 9G, its largest peak + 15%".to_owned(),
+            uncertain: false,
+        }],
         since: 1_700_000_000,
         until: 1_700_086_400,
         margin: 15,
@@ -912,5 +939,29 @@ fn sizing_shows_the_advice_and_applies_it_only_when_told_to() {
         [CONFIG
             .replace("memory = \"7G\"", "memory = \"2.5G\"")
             .replace("slots = 2", "slots = 5")]
+    );
+}
+
+#[test]
+fn sizing_shows_what_auto_sizing_changed_and_undoes_it_back_to_what_it_replaced() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fake = serve(&socket);
+    let shown = runnerctl(&socket, &["sizing"]);
+    let text = stdout(&shown);
+    assert!(text.contains("memory 9G → 7G, slots 2"), "{text}");
+    assert!(text.contains("runnerctl sizing undo node"), "{text}");
+
+    let undone = runnerctl(&socket, &["sizing", "undo", "node", "--yes"]);
+    assert!(undone.status.success(), "{}", stderr(&undone));
+    assert_eq!(
+        fake.lock().unwrap().replaced_queries,
+        [Some("revision=c0ffee".to_owned())],
+        "the write is made against the config it read, so one replaced since is not overwritten"
+    );
+    let replaced = fake.lock().unwrap().replaced.clone();
+    assert_eq!(
+        replaced,
+        [CONFIG.replace("memory = \"7G\"", "memory = \"9G\"")]
     );
 }

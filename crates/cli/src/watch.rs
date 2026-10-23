@@ -165,7 +165,8 @@ impl State {
             Event::CacheReseeded { .. }
             | Event::LogLine { .. }
             | Event::RecordCreated { .. }
-            | Event::RecordDeleted { .. } => {}
+            | Event::RecordDeleted { .. }
+            | Event::SizingChanged { .. } => {}
         }
         None
     }
