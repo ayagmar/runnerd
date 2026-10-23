@@ -928,6 +928,49 @@ async fn a_running_jobs_stream_appends_new_log_lines_and_updates_its_charts() {
     assert!(update.contains("sampled peak 8G"), "{update}");
 }
 
+#[tokio::test]
+async fn a_job_stream_that_misses_log_lines_fails_so_the_page_connects_again() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let lines = dashboard.fake.fixtures.lock().unwrap().logs[&LEDGER_RUNNING].len() as u64;
+    let mut stream = dashboard
+        .stream(&cookie, &format!("/live/jobs/{LEDGER_RUNNING}"))
+        .await;
+    read_until(&mut stream, |text| text.contains(r#"id="metrics""#)).await;
+    dashboard
+        .fake
+        .events
+        .send(EventEnvelope {
+            id: None,
+            at: NOW + 2,
+            event: Event::LogLine {
+                job: LEDGER_RUNNING,
+                line: lines + 1,
+                text: "BUILD SUCCESSFUL in 2m 28s".to_owned(),
+            },
+        })
+        .unwrap();
+    // Datastar retries a stream that fails, not one that ends.
+    let end = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match stream.frame().await {
+                Some(Ok(frame)) => {
+                    let data = frame.into_data().unwrap_or_default();
+                    assert!(
+                        !String::from_utf8_lossy(&data).contains("BUILD SUCCESSFUL"),
+                        "a line after a gap is not appended"
+                    );
+                }
+                Some(Err(_)) => return "failed",
+                None => return "ended",
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert_eq!(end, "failed");
+}
+
 /// The log lines a browser shows, as `(number, text)`: what the job page rendered, then each of the job stream's
 /// patches to `#log-lines` applied the way Datastar applies them.
 struct ShownLog(Vec<(Option<u64>, String)>);

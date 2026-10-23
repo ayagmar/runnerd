@@ -21,7 +21,9 @@ its own first publish and trusted publisher before a release could go out.
 
 ## Consequences
 
-`runnerctl`, its terminal UI and the dashboard read events the same way; a dashboard page's stream now survives the
-daemon closing the event stream, and ends (so the page reconnects and reads afresh) only when nothing could be resumed.
+`runnerctl`, its terminal UI and the dashboard read events the same way. The reader resumes after the last durable
+event, but live events (samples, log lines) from the gap are never replayed, so a dashboard page's stream fails
+whenever the reader opened the stream again. Its body ends in an error rather than cleanly, since Datastar retries
+only a failed request. The page then connects again and reads the daemon afresh.
 hyper, hyper-util, http-body-util and serde_urlencoded are workspace dependencies used through core, and the
 boundary check is unchanged: `client` brings no Docker, GitHub or TLS code.

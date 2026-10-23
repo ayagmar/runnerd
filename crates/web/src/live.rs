@@ -4,11 +4,14 @@
 //! lacks is sent: a region whose HTML differs, or when only some of its parts (`views::Parts`) do, those parts. On
 //! connecting, the stream skips the regions the page already has, which the page names by digest in its `shown`
 //! signal; after each update the stream sets that signal to what the page shows now, and the time, which live
-//! charts follow. The stream ends when the page closes, the daemon's stream ends for good, or the dashboard
-//! stops.
+//! charts follow. The stream ends when the page closes, its job finishes, or the dashboard stops. When the
+//! daemon's events end or have a gap, it fails instead, so the page connects again and reads the daemon afresh.
 
 use std::collections::{HashMap, HashSet};
-use std::convert::Infallible;
+use std::future::Future;
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::Duration;
 
 use axum::extract::{Path, Query, State};
@@ -32,13 +35,49 @@ const SETTLE: Duration = Duration::from_millis(250);
 
 type Patches = mpsc::Sender<SseEvent>;
 
+/// How a page's stream ended.
+enum End {
+    /// As it should: the page closed, its job finished, or the dashboard is stopping.
+    Done,
+    /// The daemon's events stopped or have a gap: the page must connect again and read the daemon afresh.
+    Lost,
+}
+
+/// The page's SSE response. Unless the task ended it as `Done`, the body ends in an error rather than cleanly: Datastar
+/// retries a stream that fails, not one that finishes, and so the page connects again.
 fn respond(
     receiver: mpsc::Receiver<SseEvent>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let events = stream::unfold(receiver, |mut receiver| async move {
-        receiver.recv().await.map(|event| (Ok(event), receiver))
+    done: Arc<AtomicBool>,
+) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
+    let events = stream::unfold(Some(receiver), move |receiver| {
+        let done = done.clone();
+        async move {
+            let mut receiver = receiver?;
+            match receiver.recv().await {
+                Some(event) => Some((Ok(event), Some(receiver))),
+                None if done.load(Ordering::Acquire) => None,
+                None => Some((Err(io::Error::other("the daemon's events stopped")), None)),
+            }
+        }
     });
     Sse::new(events).keep_alive(KeepAlive::default())
+}
+
+/// Runs a page's stream and says how it ended, for `respond`.
+async fn run_page(
+    patches: Patches,
+    done: Arc<AtomicBool>,
+    what: &str,
+    run: impl Future<Output = Result<End, ClientError>>,
+) {
+    match run.await {
+        Ok(End::Done) => done.store(true, Ordering::Release),
+        Ok(End::Lost) => debug!("{what} stream lost the daemon's events"),
+        Err(error) => {
+            debug!("{what} stream ended: {error}");
+            notice(&patches, &error).await;
+        }
+    }
 }
 
 /// What a page says it shows when its stream connects: the `shown` signal, which Datastar sends as JSON in the
@@ -213,13 +252,12 @@ async fn notice(patches: &Patches, error: &ClientError) {
     let _ = patches.send(event).await;
 }
 
-/// The daemon's events as a stream. The reader reconnects on its own and resumes after the last durable event; the
-/// stream ends when it cannot, or when it reconnected with nothing to resume after, so the page's own stream ends
-/// and the page connects again, reading the daemon afresh.
+/// The daemon's events as a stream, which ends when the reader fails or opens the stream again: live events (samples,
+/// log lines) of the gap are lost even when it resumes, so the page connects again and reads the daemon afresh.
 fn envelopes(events: Events) -> impl Stream<Item = EventEnvelope> {
     stream::unfold(events, |mut events| async move {
         let envelope = events.next().await.ok()?;
-        (!events.missed_events()).then_some((envelope, events))
+        (!events.reopened()).then_some((envelope, events))
     })
 }
 
@@ -241,16 +279,16 @@ async fn settle(
     }
 }
 
-/// Waits for the next event; `None` when the stream, the page or the dashboard ended.
+/// Waits for the next event; how the stream ends when the daemon's events, the page or the dashboard ended.
 async fn next_event(
     events: &mut (impl Stream<Item = EventEnvelope> + Unpin),
     patches: &Patches,
     stopping: &mut watch::Receiver<bool>,
-) -> Option<Event> {
+) -> Result<Event, End> {
     tokio::select! {
-        event = events.next() => event.map(|envelope| envelope.event),
-        () = patches.closed() => None,
-        _ = stopping.wait_for(|stopping| *stopping) => None,
+        event = events.next() => event.map(|envelope| envelope.event).ok_or(End::Lost),
+        () = patches.closed() => Err(End::Done),
+        _ = stopping.wait_for(|stopping| *stopping) => Err(End::Done),
     }
 }
 
@@ -258,22 +296,22 @@ async fn next_event(
 pub(crate) async fn overview(
     State(app): State<App>,
     Query(signals): Query<Signals>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
     let (patches, receiver) = mpsc::channel(16);
+    let done = Arc::new(AtomicBool::new(false));
+    let ended = done.clone();
     tokio::spawn(async move {
-        if let Err(error) = run_overview(&app, &patches, signals.shown()).await {
-            debug!("overview stream ended: {error}");
-            notice(&patches, &error).await;
-        }
+        let run = run_overview(&app, &patches, signals.shown());
+        run_page(patches.clone(), ended, "overview", run).await;
     });
-    respond(receiver)
+    respond(receiver, done)
 }
 
 async fn run_overview(
     app: &App,
     patches: &Patches,
     shown: Option<Shown>,
-) -> Result<(), ClientError> {
+) -> Result<End, ClientError> {
     // Subscribed before reading, so nothing that happens in between is missed.
     let events = app.daemon.events(EventQuery::default(), None).await?;
     let mut events = Box::pin(envelopes(events));
@@ -291,10 +329,11 @@ async fn run_overview(
             .await
             .is_err()
         {
-            return Ok(());
+            return Ok(End::Done);
         }
-        let Some(first) = next_event(&mut events, patches, &mut stopping).await else {
-            return Ok(());
+        let first = match next_event(&mut events, patches, &mut stopping).await {
+            Ok(event) => event,
+            Err(end) => return Ok(end),
         };
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
@@ -341,7 +380,7 @@ async fn run_overview(
                 .jobs;
         }
         if !open {
-            return Ok(());
+            return Ok(End::Lost);
         }
     }
 }
@@ -351,15 +390,15 @@ pub(crate) async fn job(
     State(app): State<App>,
     Path(id): Path<u64>,
     Query(signals): Query<Signals>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
     let (patches, receiver) = mpsc::channel(64);
+    let done = Arc::new(AtomicBool::new(false));
+    let ended = done.clone();
     tokio::spawn(async move {
-        if let Err(error) = run_job(&app, &patches, id, signals.shown()).await {
-            debug!("job stream ended: {error}");
-            notice(&patches, &error).await;
-        }
+        let run = run_job(&app, &patches, id, signals.shown());
+        run_page(patches.clone(), ended, "job", run).await;
     });
-    respond(receiver)
+    respond(receiver, done)
 }
 
 /// Appends log lines `first`, `first + 1`, … (counted from 0) to the `shown` lines of the page, and drops the
@@ -407,7 +446,7 @@ async fn run_job(
     patches: &Patches,
     id: u64,
     shown: Option<Shown>,
-) -> Result<(), ClientError> {
+) -> Result<End, ClientError> {
     let events = app
         .daemon
         .events(
@@ -440,7 +479,7 @@ async fn run_job(
         patches.send(tail.write_as_axum_sse_event()).await.is_ok()
     };
     if !sent_log {
-        return Ok(());
+        return Ok(End::Done);
     }
     let mut sent = Sent::default();
     if let Some(shown) = shown {
@@ -454,13 +493,14 @@ async fn run_job(
             .await
             .is_err()
         {
-            return Ok(());
+            return Ok(End::Done);
         }
         if data.job.summary.state.is_final() {
-            return Ok(());
+            return Ok(End::Done);
         }
-        let Some(first) = next_event(&mut events, patches, &mut stopping).await else {
-            return Ok(());
+        let first = match next_event(&mut events, patches, &mut stopping).await {
+            Ok(event) => event,
+            Err(end) => return Ok(end),
         };
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
@@ -469,7 +509,10 @@ async fn run_job(
         let mut lines = Vec::new();
         for event in batch {
             match event {
-                Event::LogLine { line, text, .. } if line >= next_line => {
+                // A line skipped means the daemon dropped some for this stream: the page connects again and gets
+                // them from the stored log.
+                Event::LogLine { line, .. } if line > next_line => return Ok(End::Lost),
+                Event::LogLine { line, text, .. } if line == next_line => {
                     next_line = line + 1;
                     lines.push(text);
                 }
@@ -482,13 +525,13 @@ async fn run_job(
             }
         }
         if !append_lines(patches, first_line, &lines, &mut shown_lines).await {
-            return Ok(());
+            return Ok(End::Done);
         }
         if changed {
             data.job = app.daemon.get::<Job>(&format!("/v1/jobs/{id}")).await?;
         }
         if !open {
-            return Ok(());
+            return Ok(End::Lost);
         }
     }
 }

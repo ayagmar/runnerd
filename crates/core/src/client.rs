@@ -350,6 +350,7 @@ impl Client {
             lines: None,
             closed: 0,
             missed: false,
+            reopened: false,
         };
         events.connect().await?;
         Ok(events)
@@ -483,7 +484,8 @@ impl SseParser {
 /// Dropping a pending `next` loses no event but restarts the idle timeout, so a caller that also waits on something
 /// else (a redraw tick) keeps one `next` pending across it, as `runnerctl watch` does. With no durable event read yet
 /// there is nothing to resume after, so the new stream is live only and what happened in between is lost:
-/// [`Events::missed_events`] says so, and a caller that keeps state reads it again.
+/// [`Events::missed_events`] says so, and a caller that keeps state reads it again. Live events (samples, log lines)
+/// carry no ID and are never replayed: [`Events::reopened`] says when the stream was opened again at all.
 #[derive(Debug)]
 pub struct Events {
     client: Client,
@@ -494,6 +496,8 @@ pub struct Events {
     closed: u32,
     /// Set when a stream was opened again with no event to resume after.
     missed: bool,
+    /// Set when a stream was opened again, resumed or not.
+    reopened: bool,
 }
 
 impl Events {
@@ -501,6 +505,12 @@ impl Events {
     /// the time it was closed are lost. Cleared by the call.
     pub fn missed_events(&mut self) -> bool {
         std::mem::take(&mut self.missed)
+    }
+
+    /// Whether, since the last call, the stream was opened again, so live events from the time it was closed are
+    /// lost even when it resumed after the last durable one. Cleared by the call.
+    pub fn reopened(&mut self) -> bool {
+        std::mem::take(&mut self.reopened)
     }
 
     async fn connect(&mut self) -> Result<(), ClientError> {
@@ -527,6 +537,7 @@ impl Events {
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 self.connect().await?;
                 self.missed |= self.last_id.is_none();
+                self.reopened = true;
                 continue;
             };
             // A silent stream, and one cut off mid-body as when the daemon is killed, end like a closed one.
@@ -663,12 +674,19 @@ mod tests {
         let client = &fake.client;
         let read = async {
             let mut events = client.events(EventQuery::default(), None).await?;
-            Ok::<_, ClientError>((events.next().await?.id, events.next().await?.id))
+            let first = events.next().await?.id;
+            let reopened_before = events.reopened();
+            let second = events.next().await?.id;
+            Ok::<_, ClientError>((first, second, reopened_before, events.reopened()))
         };
-        let ids = tokio::time::timeout(Duration::from_secs(10), read)
+        let read = tokio::time::timeout(Duration::from_secs(10), read)
             .await
             .expect("the events should come");
-        assert_eq!(ids.unwrap(), (Some(7), Some(8)));
+        assert_eq!(
+            read.unwrap(),
+            (Some(7), Some(8), false, true),
+            "resumed after 7, and says it was opened again"
+        );
         assert_eq!(*seen.lock().unwrap(), [None, Some("7".to_owned())]);
     }
 
