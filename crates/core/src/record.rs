@@ -3,9 +3,10 @@
 //! (`scheduler::engine`) commits, lists and removes the images, and the daemon serves the shell.
 //!
 //! A record is the runner container's own layer, committed as the image `runnerd-record:<job>` once the runner
-//! exited: the workspace and everything else the job wrote outside the slot's volumes. The runner image's entrypoint
-//! deletes the runner's credentials and other known secret files when the runner exits (`image/scrub.sh`); before a
-//! commit, `secrets_left` checks the container's changed paths and the engine keeps no record that still holds one.
+//! exited: the workspace and everything else the job wrote outside the slot's volumes. When the runner exits, the
+//! runner image's entrypoint deletes what the job added or changed among the runner's dot-files and in the temporary
+//! directories, and the step scripts (`image/scrub.sh`); before a commit, `secrets_left` checks the container's
+//! changed paths and the engine keeps no record that still holds one.
 
 use std::collections::BTreeSet;
 use std::fmt::Write as _;
@@ -35,39 +36,35 @@ pub fn failed(runner_log: &str) -> bool {
     runner_log.lines().any(|line| line.ends_with(FAILED))
 }
 
-/// The paths that hold credentials, as a container's changes list them: the runner's own registration and
-/// credentials, the JIT config, the job's temporary directory (where the runner writes the step scripts, `GITHUB_ENV`
-/// and the credentials `actions/checkout` and `setup-node` leave) and the files tools keep logins in.
-const SECRET_FILES: &[&str] = &[
-    "/home/runner/.runner",
-    "/home/runner/.credentials",
-    "/home/runner/.credentials_rsaparams",
-    "/home/runner/.docker/config.json",
-    "/home/runner/.git-credentials",
-    "/home/runner/.netrc",
-    "/home/runner/.npmrc",
-    "/home/runner/.pypirc",
-    "/home/runner/.cargo/credentials",
-    "/home/runner/.cargo/credentials.toml",
-];
+/// The runner's home, whose dot-files (`.runner`, `.credentials`, `.gitconfig`, `.aws`, `.gnupg`, …) a job's changes
+/// must not leave in a record: the runner keeps its registration and credentials there, and tools their logins and
+/// keys.
+const HOME: &str = "/home/runner/";
 
-/// Directories nothing may be kept under.
+/// Directories nothing a job changed in may be kept: the JIT config's, the step scripts' (`GITHUB_ENV` and the
+/// credentials `actions/checkout` and `setup-node` leave), and the temporary directories, where a job may put a key
+/// or a kubeconfig.
 const SECRET_DIRS: &[&str] = &[
     "/run/runnerd",
     "/home/runner/_work/_temp",
-    "/home/runner/.ssh",
-    "/home/runner/.config/gh",
-    "/home/runner/.kube",
+    "/tmp",
+    "/var/tmp",
 ];
 
-/// The changed paths of a runner container that hold secrets: a record of it must not be made. `changed` are the
-/// paths Docker reports added or modified.
+/// Changed paths the rules above catch that hold nothing of a job's. None so far: the runner image's scrub deletes
+/// all of them.
+const HARMLESS: &[&str] = &[];
+
+/// The changed paths of a runner container that a record must not hold: anything added or modified among the
+/// runner's dot-files, in the temporary directories, or where the runner keeps the JIT config and step scripts. A
+/// record of it must not be made. `changed` are the paths Docker reports added or modified.
 pub fn secrets_left<'path>(changed: impl IntoIterator<Item = &'path str>) -> Vec<String> {
     changed
         .into_iter()
+        .filter(|path| !HARMLESS.contains(path))
         .filter(|path| {
-            SECRET_FILES.contains(path)
-                || SECRET_DIRS.contains(path)
+            path.strip_prefix(HOME)
+                .is_some_and(|rest| rest.starts_with('.'))
                 || SECRET_DIRS.iter().any(|dir| {
                     path.strip_prefix(dir)
                         .is_some_and(|rest| rest.starts_with('/'))

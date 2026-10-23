@@ -61,6 +61,30 @@ const SECRETS: &[(&str, &str)] = &[
     ),
     ("home/runner/.config/gh/hosts.yml", TOKEN),
     ("home/runner/.kube/config", "token: from-a-secret"),
+    // What a job's own steps and tools leave, which no list of names covers.
+    (
+        "home/runner/.gitconfig",
+        "[url \"https://x-access-token:github_pat_11ABCDEFG@github.com/\"]\n\tinsteadOf = https://github.com/",
+    ),
+    (
+        "home/runner/.aws/credentials",
+        "[default]\naws_secret_access_key = from-a-secret",
+    ),
+    (
+        "home/runner/.gnupg/private-keys-v1.d/0A1B.key",
+        "(private-key from-a-secret)",
+    ),
+    ("home/runner/.config/gcloud/credentials.db", "from-a-secret"),
+    ("home/runner/.terraformrc", "token = \"from-a-secret\""),
+    ("tmp/deploy.pem", "-----BEGIN RSA PRIVATE KEY-----"),
+    ("var/tmp/kubeconfig", "token: from-a-secret"),
+];
+
+/// What the image has before the runner starts, which stays.
+const IMAGE: &[(&str, &str)] = &[
+    ("home/runner/.bashrc", "# ~/.bashrc"),
+    ("tmp/hsperfdata_root/12", "jvm"),
+    ("run/docker.pid", "42"),
 ];
 
 /// What the job made, which a record is for.
@@ -87,15 +111,19 @@ fn write(root: &Path, path: &str, text: &str) {
     std::fs::write(path, text).unwrap();
 }
 
-/// Every path under `root` as a container's changes list it: `/home/runner/...`.
-fn paths(root: &Path) -> Vec<String> {
+/// The paths under `root` changed after `since`, as a container's changes list them: `/home/runner/...`.
+fn changed(root: &Path, since: (i64, i64)) -> Vec<String> {
+    use std::os::unix::fs::MetadataExt as _;
     let mut found = Vec::new();
     let mut dirs = vec![root.to_owned()];
     while let Some(dir) = dirs.pop() {
         for entry in std::fs::read_dir(&dir).unwrap() {
             let path = entry.unwrap().path();
-            found.push(format!("/{}", path.strip_prefix(root).unwrap().display()));
-            if path.is_dir() {
+            let metadata = std::fs::symlink_metadata(&path).unwrap();
+            if (metadata.ctime(), metadata.ctime_nsec()) > since {
+                found.push(format!("/{}", path.strip_prefix(root).unwrap().display()));
+            }
+            if metadata.is_dir() {
                 dirs.push(path);
             }
         }
@@ -104,10 +132,24 @@ fn paths(root: &Path) -> Vec<String> {
     found
 }
 
+/// Touches the marker the entrypoint writes before the runner starts, a moment after what is there already.
+fn runner_starts(root: &Path) -> (i64, i64) {
+    use std::os::unix::fs::MetadataExt as _;
+    std::thread::sleep(Duration::from_millis(20));
+    write(root, "run/runnerd-since", "");
+    let marker = std::fs::metadata(root.join("run/runnerd-since")).unwrap();
+    std::thread::sleep(Duration::from_millis(20));
+    (marker.ctime(), marker.ctime_nsec())
+}
+
 #[test]
 fn a_record_keeps_no_secret_of_the_runner_or_the_job() {
     let dir = TestDir::new("scrub");
     let root = &dir.0;
+    for (path, text) in IMAGE {
+        write(root, path, text);
+    }
+    let started = runner_starts(root);
     for (path, text) in SECRETS.iter().chain(WORKSPACE) {
         write(root, path, text);
     }
@@ -118,7 +160,7 @@ fn a_record_keeps_no_secret_of_the_runner_or_the_job() {
         GIT_CONFIG,
     );
 
-    let before = paths(root);
+    let before = changed(root, started);
     let caught = secrets_left(before.iter().map(String::as_str));
     for (secret, _) in SECRETS {
         assert!(
@@ -131,7 +173,7 @@ fn a_record_keeps_no_secret_of_the_runner_or_the_job() {
     let status = Command::new("bash").arg(script).arg(root).status().unwrap();
     assert!(status.success(), "scrub.sh exits 0");
 
-    let after = paths(root);
+    let after = changed(root, started);
     assert_eq!(
         secrets_left(after.iter().map(String::as_str)),
         Vec::<String>::new()
@@ -149,7 +191,7 @@ fn a_record_keeps_no_secret_of_the_runner_or_the_job() {
             );
         }
     }
-    for (path, text) in WORKSPACE {
+    for (path, text) in WORKSPACE.iter().chain(IMAGE) {
         assert_eq!(std::fs::read_to_string(root.join(path)).unwrap(), *text);
     }
     let config =
