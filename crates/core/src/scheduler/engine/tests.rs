@@ -3,6 +3,7 @@
 //! pause of one repository or all, forced or not and across restarts, reseed, cache clean and reload.
 
 use std::collections::{BTreeMap, BTreeSet, HashMap};
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
 
@@ -10,8 +11,8 @@ use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
 use super::{
-    Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, Setup, Shutdown,
-    Target,
+    Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, RunningSlots, Setup,
+    Shutdown, Target,
 };
 use crate::api::{self, JobState};
 use crate::cache::Names;
@@ -1400,7 +1401,7 @@ async fn a_listing_finishes_while_a_long_command_runs() {
             Ok(None)
         });
         control
-            .replace_config(other_repository(), None, None, commit)
+            .replace_config(other_repository(), None, None, commit, RunningSlots::Drain)
             .await
     });
     writes.await.unwrap();
@@ -1828,6 +1829,58 @@ async fn fewer_slots_stop_new_starts_but_not_the_running_job() {
 }
 
 #[tokio::test]
+async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runner_is_in_one_it_drops()
+ {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    // As when a runner starts in slot 2 after auto sizing read one runner in its profile.
+    running_job(&github, &docker, "o/r", 2, 1);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    let one_slot = || Config::parse(&CONFIG.replace("slots = 2", "slots = 1")).unwrap();
+    let written = Arc::new(AtomicBool::new(false));
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let commit = {
+        let written = written.clone();
+        Commit::new(move || {
+            written.store(true, Ordering::SeqCst);
+            Ok(None)
+        })
+    };
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(one_slot()),
+            memory_max: None,
+            cpus: None,
+            commit,
+            running: RunningSlots::Keep,
+            reply,
+        })
+        .await;
+    assert!(matches!(
+        answer.await.unwrap(),
+        Err(ControlError::Conflict(_))
+    ));
+    assert!(!written.load(Ordering::SeqCst), "the file is not written");
+    assert_eq!(engine.config.profiles["app"].slots, 2);
+
+    // A person's reload lets the slot drain instead.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(one_slot()),
+            memory_max: None,
+            cpus: None,
+            commit: Commit::new(|| Ok(None)),
+            running: RunningSlots::Drain,
+            reply,
+        })
+        .await;
+    assert_eq!(answer.await.unwrap(), Ok(None));
+    assert_eq!(engine.config.profiles["app"].slots, 1);
+}
+
+#[tokio::test]
 async fn a_requested_reseed_holds_back_new_runners_until_the_profile_is_free_and_then_runs() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
@@ -2214,6 +2267,7 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
             memory_max: None,
             cpus: None,
             commit: failing_commit(),
+            running: RunningSlots::Drain,
             reply,
         })
         .await;
@@ -2254,7 +2308,13 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
     until_polled(&github, 1).await;
     let refused = handle
         .control
-        .replace_config(other_repository(), None, None, failing_commit())
+        .replace_config(
+            other_repository(),
+            None,
+            None,
+            failing_commit(),
+            RunningSlots::Drain,
+        )
         .await;
     assert!(matches!(refused, Err(ControlError::Failed(_))));
     // The command is followed by a tick: it runs under the old config and starts nothing for `o/x`.
@@ -2268,6 +2328,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
             None,
             None,
             Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
+            RunningSlots::Drain,
         )
         .await;
     assert_eq!(

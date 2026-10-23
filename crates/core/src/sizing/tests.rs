@@ -509,12 +509,13 @@ mod auto {
         }
     }
 
-    /// The changes due at `NOW` against a slice of `memory_max`, after `earlier`, with nothing running.
+    /// The changes due at `NOW` against a slice of `memory_max`, after the last changes `last`, with nothing
+    /// running.
     fn due(
         config: &Config,
         history: &History,
         memory_max: u64,
-        earlier: &[SizingChange],
+        last: &BTreeMap<String, u64>,
     ) -> Vec<SizingChange> {
         changes(
             config,
@@ -522,7 +523,7 @@ mod auto {
             Context {
                 memory_max: Some(memory_max),
                 window: window(),
-                earlier,
+                last,
                 running: &BTreeMap::new(),
             },
         )
@@ -540,9 +541,9 @@ mod auto {
         let config = on(CONFIG, "");
         // Peaks up to 2G need 2.25G of node's 7G, but a change moves memory by at most 25%: 5.25G.
         let few = history(builds(9, 1000 * M, 2000 * M, 5));
-        assert_eq!(due(&config, &few, 33 * G, &[]), Vec::new());
+        assert_eq!(due(&config, &few, 33 * G, &BTreeMap::new()), Vec::new());
         let enough = history(builds(10, 1000 * M, 2000 * M, 5));
-        let lowered = due(&config, &enough, 33 * G, &[]);
+        let lowered = due(&config, &enough, 33 * G, &BTreeMap::new());
         assert_eq!(
             resized(&lowered),
             vec![(
@@ -568,7 +569,7 @@ mod auto {
     fn auto_sizing_is_off_unless_the_config_turns_it_on() {
         let config = Config::parse(CONFIG).unwrap();
         let enough = history(builds(10, 1000 * M, 2000 * M, 5));
-        assert_eq!(due(&config, &enough, 33 * G, &[]), Vec::new());
+        assert_eq!(due(&config, &enough, 33 * G, &BTreeMap::new()), Vec::new());
     }
 
     #[test]
@@ -579,7 +580,7 @@ mod auto {
         );
         let enough = history(builds(10, 1000 * M, 2000 * M, 5));
         assert_eq!(
-            resized(&due(&config, &enough, 33 * G, &[])),
+            resized(&due(&config, &enough, 33 * G, &BTreeMap::new())),
             vec![(
                 "node",
                 Resize {
@@ -594,22 +595,17 @@ mod auto {
     fn waits_the_interval_between_changes() {
         let config = on(CONFIG, "interval = \"12h\"");
         let enough = history(builds(10, 1000 * M, 2000 * M, 5));
-        let change = |hours_ago: u64| SizingChange {
-            at: (NOW - hours_ago * HOUR) / 1000,
-            profile: "node".to_owned(),
-            from: Resize {
-                memory: 9 * G,
-                slots: 2,
-            },
-            to: Resize {
-                memory: 7 * G,
-                slots: 2,
-            },
-            reason: String::new(),
-        };
-        assert_eq!(due(&config, &enough, 33 * G, &[change(11)]), Vec::new());
+        let changed =
+            |hours_ago: u64| BTreeMap::from([("node".to_owned(), (NOW - hours_ago * HOUR) / 1000)]);
+        assert_eq!(due(&config, &enough, 33 * G, &changed(11)), Vec::new());
+        let long = on(CONFIG, "interval = \"60d\"");
         assert_eq!(
-            resized(&due(&config, &enough, 33 * G, &[change(13), change(30)])),
+            due(&long, &enough, 33 * G, &changed(45 * 24)),
+            Vec::new(),
+            "an interval longer than the advice's 30 days still holds"
+        );
+        assert_eq!(
+            resized(&due(&config, &enough, 33 * G, &changed(13))),
             vec![(
                 "node",
                 Resize {
@@ -633,10 +629,13 @@ mod auto {
     fn never_raises_past_memory_max() {
         let config = on(CONFIG, "");
         // 24G less node's 14G and the mirror's 0.5G leaves 9.5G: not one slot of 10.5G.
-        assert_eq!(due(&config, &at_jvm_cap(), 24 * G, &[]), Vec::new());
+        assert_eq!(
+            due(&config, &at_jvm_cap(), 24 * G, &BTreeMap::new()),
+            Vec::new()
+        );
         // 33G leaves 18.5G: one slot of 10.5G.
         assert_eq!(
-            resized(&due(&config, &at_jvm_cap(), 33 * G, &[])),
+            resized(&due(&config, &at_jvm_cap(), 33 * G, &BTreeMap::new())),
             vec![(
                 "jvm",
                 Resize {
@@ -654,7 +653,7 @@ mod auto {
             "",
         );
         assert_eq!(
-            resized(&due(&config, &at_jvm_cap(), 36 * G, &[])),
+            resized(&due(&config, &at_jvm_cap(), 36 * G, &BTreeMap::new())),
             vec![(
                 "jvm",
                 Resize {
@@ -675,7 +674,7 @@ mod auto {
             Context {
                 memory_max: Some(33 * G),
                 window: window(),
-                earlier: &[],
+                last: &BTreeMap::new(),
                 running: &running,
             },
         );
@@ -691,7 +690,65 @@ mod auto {
             succeeded: false,
             ..job("halyard/storefront", "build", "node", 0, 5)
         });
-        assert_eq!(due(&config, &killed, 33 * G, &[]), Vec::new());
+        assert_eq!(due(&config, &killed, 33 * G, &BTreeMap::new()), Vec::new());
+    }
+
+    #[test]
+    fn two_profiles_never_both_take_a_slot_only_one_fits() {
+        // Both 2 slots at 3G caps, their jobs peaking at 2G and waiting; a 1G mirror in an 11G slice. One more slot
+        // fits (3 × 2G + 2 × 2G + 1G = 11G), two do not.
+        let text = r#"
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+admission = "measured"
+
+[caches]
+mirror = { enabled = true, memory = "1G", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+[profiles.jvm]
+image_stage = "jvm"
+cpus = 4
+memory = "3G"
+slots = 2
+max_slots = 3
+
+[profiles.node]
+image_stage = "node"
+cpus = 4
+memory = "3G"
+slots = 2
+max_slots = 3
+
+[[repositories]]
+name = "halyard/ledger"
+profile = "jvm"
+labels = ["jvm"]
+
+[[repositories]]
+name = "halyard/storefront"
+profile = "node"
+labels = ["node"]
+"#;
+        let config = on(text, "");
+        let waited = |repository: &str, profile: &str| -> Vec<Ran> {
+            (0..10)
+                .map(|_| Ran {
+                    memory_cap: Some(3 * G),
+                    ..job(repository, "build", profile, 2 * G, 300)
+                })
+                .collect()
+        };
+        let mut jobs = waited("halyard/ledger", "jvm");
+        jobs.extend(waited("halyard/storefront", "node"));
+        let raised = due(&config, &history(jobs), 11 * G, &BTreeMap::new());
+        assert_eq!(
+            raised.iter().map(|change| change.to.slots).sum::<u32>(),
+            5,
+            "one profile gets the third slot: {raised:?}"
+        );
     }
 
     #[test]
@@ -702,8 +759,8 @@ mod auto {
         // Peaks of 4812M at a 5.5G cap: kept, and they waited 5 minutes.
         let waited = history(capped_builds(10, 4812 * M, 300));
         // jvm 2 × 9G (too few jobs: at its cap), node 5 × 4812M, the mirror 0.5G: 43004M.
-        assert_eq!(due(&config, &waited, 41 * G, &[]), Vec::new());
-        let raised = due(&config, &waited, 42 * G, &[]);
+        assert_eq!(due(&config, &waited, 41 * G, &BTreeMap::new()), Vec::new());
+        let raised = due(&config, &waited, 42 * G, &BTreeMap::new());
         assert_eq!(
             resized(&raised),
             vec![(
@@ -718,9 +775,9 @@ mod auto {
             &measured().replace("slots = 4", "slots = 4\nmax_slots = 4"),
             "",
         );
-        assert_eq!(due(&at_max, &waited, 64 * G, &[]), Vec::new());
+        assert_eq!(due(&at_max, &waited, 64 * G, &BTreeMap::new()), Vec::new());
         assert_eq!(
-            due(&on(&measured(), ""), &waited, 64 * G, &[]),
+            due(&on(&measured(), ""), &waited, 64 * G, &BTreeMap::new()),
             Vec::new(),
             "without max_slots, slots stay the owner's"
         );

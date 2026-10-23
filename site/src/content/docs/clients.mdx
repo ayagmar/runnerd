@@ -99,7 +99,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl records`, `records rm <job>` | the records of failed jobs with their sizes and limits; removes one, or `--all`, or those `--older-than 2d` |
 | `runnerctl sizing [--since 7d]` | per profile and per job: percentiles and the largest of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../configuration/#sizing) |
 | `runnerctl sizing apply <profile> [--yes]` | writes a profile's advised `memory` and `slots` into the daemon's config after showing the change and asking; the daemon checks it against the budget first |
-| `runnerctl sizing undo <profile> [--yes]` | writes back the `memory` and `slots` [auto sizing](../configuration/#auto-sizing) last replaced, the same way |
+| `runnerctl sizing undo <profile> [--yes]` | writes back the `memory` and `slots` [auto sizing](../configuration/#auto-sizing) last replaced, the same way; both refuse to write over a config changed since they read it |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |

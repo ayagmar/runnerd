@@ -376,29 +376,47 @@ pub(super) fn log_lines(
     .collect()
 }
 
-/// The changes auto sizing made since `since` (ms), oldest first, from their `sizing.changed` events.
+pub(super) fn sizing_change(row: &Row<'_>) -> rusqlite::Result<api::SizingChange> {
+    Ok(api::SizingChange {
+        profile: row.get("profile")?,
+        at: secs(row.get("at")?),
+        from: api::Resize {
+            memory: row.get("from_memory")?,
+            slots: row.get("from_slots")?,
+        },
+        to: api::Resize {
+            memory: row.get("to_memory")?,
+            slots: row.get("to_slots")?,
+        },
+        reason: row.get("reason")?,
+    })
+}
+
+/// The changes auto sizing wrote since `since` (ms), oldest first.
 pub(super) fn sizing_changes(
     db: &Connection,
     since: u64,
 ) -> rusqlite::Result<Vec<api::SizingChange>> {
-    let bodies: Vec<(u64, String)> = db
+    db.prepare_cached(
+        "SELECT * FROM auto_sizing WHERE state = 'done' AND at >= ?1 ORDER BY at, id",
+    )?
+    .query_map([since], sizing_change)?
+    .collect()
+}
+
+/// The latest pending or done change of each profile, and the pending ones.
+pub(super) fn auto_sizing(db: &Connection) -> rusqlite::Result<super::AutoSizing> {
+    let last = db
         .prepare_cached(
-            "SELECT id, body FROM events WHERE at >= ?1 AND json_extract(body, '$.type') = 'sizing.changed' \
-             ORDER BY id",
+            "SELECT profile, MAX(at) FROM auto_sizing WHERE state IN ('pending', 'done') GROUP BY profile",
         )?
-        .query_map([since], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .query_map([], |row| Ok((row.get(0)?, secs(row.get(1)?))))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(bodies
-        .into_iter()
-        .filter_map(|(id, body)| match serde_json::from_str(&body) {
-            Ok(api::Event::SizingChanged { change }) => Some(change),
-            Ok(_) => None,
-            Err(error) => {
-                warn!("job history: skipping event {id}, which does not parse: {error}");
-                None
-            }
-        })
-        .collect())
+    let pending = db
+        .prepare_cached("SELECT * FROM auto_sizing WHERE state = 'pending' ORDER BY id")?
+        .query_map([], |row| Ok((row.get("id")?, sizing_change(row)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(super::AutoSizing { last, pending })
 }
 
 pub(super) fn events_after(

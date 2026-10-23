@@ -383,11 +383,14 @@ pub enum ConfigError {
         /// The value set.
         value: f64,
     },
-    /// A profile's `min_memory` is above its `max_memory`.
-    #[error("profiles.{profile}.min_memory is above its max_memory")]
+    /// A profile's `memory` or `slots` are outside its `min_memory`, `max_memory` or `max_slots`, or its
+    /// `min_memory` is above its `max_memory`.
+    #[error("profiles.{profile}: {why}")]
     SizingBounds {
         /// The profile.
         profile: String,
+        /// Which bound, such as `memory is above its max_memory`.
+        why: &'static str,
     },
     /// The caps add up past `u64::MAX` bytes.
     #[error("slots × memory over all profiles plus the mirror is too large to add up")]
@@ -552,18 +555,31 @@ impl Config {
             .ok_or(ConfigError::BudgetOverflow)
     }
 
-    /// Refuses a profile whose `min_memory` is above its `max_memory`.
+    /// Refuses a profile outside the bounds auto sizing keeps it in, or whose bounds cross.
     fn check_sizing_bounds(&self) -> Result<(), ConfigError> {
-        match self.profiles.iter().find(|(_, p)| {
-            p.min_memory
+        for (name, p) in &self.profiles {
+            let memory = p.memory.0;
+            let field = if p
+                .min_memory
                 .zip(p.max_memory)
                 .is_some_and(|(min, max)| min.0 > max.0)
-        }) {
-            Some((profile, _)) => Err(ConfigError::SizingBounds {
-                profile: profile.clone(),
-            }),
-            None => Ok(()),
+            {
+                "min_memory is above its max_memory"
+            } else if p.min_memory.is_some_and(|min| memory < min.0) {
+                "memory is below its min_memory"
+            } else if p.max_memory.is_some_and(|max| memory > max.0) {
+                "memory is above its max_memory"
+            } else if p.max_slots.is_some_and(|max| p.slots > max) {
+                "slots are above its max_slots"
+            } else {
+                continue;
+            };
+            return Err(ConfigError::SizingBounds {
+                profile: name.clone(),
+                why: field,
+            });
         }
+        Ok(())
     }
 
     /// Checks the config against the slice's `MemoryMax` (`None` when the slice is unlimited).
@@ -708,6 +724,15 @@ pub fn resize_profile(
         table.insert(key, toml_edit::Item::Value(value));
     }
     Ok(document.to_string())
+}
+
+/// A config text's revision: a hash of its bytes (64-bit FNV-1a, in hex), the same in every runnerd. `PUT
+/// /v1/config?revision=` refuses a text sent against another revision than the daemon's.
+pub fn revision(text: &str) -> String {
+    let hash = text.bytes().fold(0xcbf2_9ce4_8422_2325_u64, |hash, byte| {
+        (hash ^ u64::from(byte)).wrapping_mul(0x0100_0000_01b3)
+    });
+    format!("{hash:016x}")
 }
 
 /// Reads a slice's `MemoryMax` from systemd; `None` when it is unlimited.

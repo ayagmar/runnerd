@@ -130,7 +130,7 @@ nothing until Docker has listed them.
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
 | Dashboard session | in memory, new each daemon run; the one-time login URL in `runnerd.web` next to the socket (0600) |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories, what became of each record; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories, what became of each record, auto sizing's changes; times in ms |
 
 ## Invariants
 
@@ -165,8 +165,12 @@ nothing until Docker has listed them.
   request, after a confirmation, through `PUT /v1/config`
   ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)). Under `[sizing] auto` the daemon applies what
   `sizing::auto::changes` picks through the same check and commit (`api::control::replace`), at most one change per
-  profile per `[sizing] interval`, never lowering a profile a run met the cap of or `slots` under what runs; each
-  change is a durable `sizing.changed` event holding the old values ([ADR 0039](docs/adr/0039-auto-sizing.md)).
+  profile per `[sizing] interval`, never lowering a profile a run met the cap of, never leaving a profile's bounds,
+  and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
+  before the commit). Each change is recorded as pending in the history before its file is written, then done (with
+  a durable `sizing.changed` event) or failed ([ADR 0039](docs/adr/0039-auto-sizing.md)).
+- `PUT /v1/config?revision=` refuses a text made from another revision than the config runnerd runs with, so an
+  editor opened before a change cannot save over it.
 - What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`. Under
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under

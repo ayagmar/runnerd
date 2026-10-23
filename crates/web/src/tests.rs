@@ -1396,6 +1396,54 @@ async fn an_auto_sizing_change_is_listed_and_undoing_it_opens_what_it_replaced_i
 }
 
 #[tokio::test]
+async fn an_editor_opened_before_the_config_changed_cannot_save_over_the_change() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let before = dashboard.fake.fixtures.lock().unwrap().config.clone();
+    let editor = dashboard.page(&cookie, "/config").await;
+    let read = runnerd_core::config::revision(&before);
+    assert!(
+        editor
+            .body
+            .contains(&format!("data-signals:revision=\"'{read}'\"")),
+        "the editor keeps the revision it was opened with"
+    );
+    // As when auto sizing lowers node while the editor is open.
+    let changed = before.replacen("memory = \"7G\"", "memory = \"5.25G\"", 1);
+    dashboard.fake.fixtures.lock().unwrap().config = changed.clone();
+    let stale = before.replacen("slots = 2", "slots = 1", 1);
+    let saved = dashboard
+        .write(
+            &cookie,
+            "PUT",
+            "/config",
+            &serde_json::json!({ "toml": stale, "revision": read }),
+        )
+        .await;
+    assert!(saved.body.contains("Not saved"), "{}", saved.body);
+    assert_eq!(
+        dashboard.fake.fixtures.lock().unwrap().config,
+        changed,
+        "the change made meanwhile stays"
+    );
+    let fresh = runnerd_core::config::revision(&changed);
+    let saved = dashboard
+        .write(
+            &cookie,
+            "PUT",
+            "/config",
+            &serde_json::json!({ "toml": changed.replacen("slots = 2", "slots = 1", 1), "revision": fresh }),
+        )
+        .await;
+    assert!(saved.body.contains("Saved and reloaded"), "{}", saved.body);
+    let next = runnerd_core::config::revision(&dashboard.fake.fixtures.lock().unwrap().config);
+    assert!(
+        saved.body.contains(&format!("'{next}'")),
+        "the next save is made against what was saved"
+    );
+}
+
+#[tokio::test]
 async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

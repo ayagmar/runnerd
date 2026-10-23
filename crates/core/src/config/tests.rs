@@ -174,16 +174,25 @@ fn auto_sizing_is_off_and_bounded_unless_configured() {
     );
     assert_eq!(config.sizing.interval, Duration::from_hours(24));
     assert_eq!(config.sizing.max_step, 25);
-    let bounds = MINIMAL.replace(
-        "slots = 1",
-        "slots = 1\nmin_memory = \"6G\"\nmax_memory = \"5G\"",
-    );
-    let error = Config::parse(&bounds)
-        .unwrap()
-        .validate(Some(size("33G")))
-        .unwrap_err()
-        .to_string();
-    assert!(error.contains("profiles.app.min_memory"), "{error}");
+    // app has 4G and 1 slot.
+    for (bounds, why) in [
+        (
+            "min_memory = \"6G\"\nmax_memory = \"5G\"",
+            "min_memory is above its max_memory",
+        ),
+        ("max_memory = \"2G\"", "memory is above its max_memory"),
+        ("min_memory = \"6G\"", "memory is below its min_memory"),
+        ("slots = 2\nmax_slots = 1", "slots are above its max_slots"),
+    ] {
+        let text = MINIMAL.replace("slots = 1", &format!("slots = 1\n{bounds}"));
+        let text = text.replace("slots = 1\nslots = 2", "slots = 2");
+        let error = Config::parse(&text)
+            .unwrap()
+            .validate(Some(size("33G")))
+            .unwrap_err()
+            .to_string();
+        assert_eq!(error, format!("profiles.app: {why}"));
+    }
 }
 
 #[test]

@@ -119,10 +119,21 @@ impl ConfigView {
 pub(crate) enum Outcome {
     /// Only checked.
     Checked,
-    /// Written to the file and reloaded.
-    Saved(String),
+    /// Written to the file and reloaded: its path, and the revision the editor saves against next.
+    Saved {
+        path: String,
+        revision: Option<String>,
+    },
     /// Refused; the file is as it was.
     Refused,
+}
+
+/// A revision as a JavaScript string for a signal; `None` for one that is not hex, which the daemon never sends.
+fn quoted(revision: &str) -> Option<String> {
+    revision
+        .bytes()
+        .all(|byte| byte.is_ascii_hexdigit())
+        .then(|| format!("'{revision}'"))
 }
 
 /// The whole page.
@@ -133,7 +144,7 @@ pub(crate) fn render(view: &ConfigView) -> Markup {
             p.muted { code { (view.file.path) } }
         }
         div.config-layout {
-            section.editor aria-labelledby="editor-title" {
+            section.editor aria-labelledby="editor-title" "data-signals:revision"=[view.file.revision.as_deref().and_then(quoted)] {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
                 label.visually-hidden for="toml" { "runnerd.toml" }
                 textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"
@@ -221,14 +232,14 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
         section #config-result class=(class) aria-labelledby="result-title" aria-live="polite" {
             h2 #result-title {
                 @match (outcome, check.valid) {
-                    (Outcome::Saved(_), _) => "Saved and reloaded",
+                    (Outcome::Saved { .. }, _) => "Saved and reloaded",
                     (Outcome::Refused, _) => "Not saved",
                     (Outcome::Checked, true) => "Fits the budget",
                     (Outcome::Checked, false) => "Does not fit",
                 }
             }
-            @if let Outcome::Saved(path) = outcome {
-                p { "Written to " code { (path) } ". runnerd runs with it now." }
+            @if let Outcome::Saved { path, revision } = outcome {
+                p "data-signals:revision"=[revision.as_deref().and_then(quoted)] { "Written to " code { (path) } ". runnerd runs with it now." }
             }
             @if *outcome == Outcome::Refused {
                 p { (path_unchanged()) }

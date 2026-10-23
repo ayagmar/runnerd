@@ -732,7 +732,8 @@ async fn sizing(
 }
 
 /// Writes a profile's new memory and slots into the daemon's config through `PUT /v1/config`, which checks it
-/// against the slice's budget first; the rest of the file stays as written.
+/// against the slice's budget first; the rest of the file stays as written. A config replaced between the read and
+/// the write, as by auto sizing, is not overwritten.
 pub(crate) async fn write_resize(
     client: &Client,
     profile: &str,
@@ -741,8 +742,12 @@ pub(crate) async fn write_resize(
     let file: ConfigFile = client.get("/v1/config").await?;
     let text = resize_profile(&file.text, profile, resize)
         .map_err(|error| Error::Local(error.to_string()))?;
+    let path = match &file.revision {
+        Some(revision) => format!("/v1/config?revision={revision}"),
+        None => "/v1/config".to_owned(),
+    };
     let reply = client
-        .request(Method::PUT, "/v1/config", Some(Body::toml(text)))
+        .request(Method::PUT, &path, Some(Body::toml(text)))
         .await?;
     match serde_json::from_slice::<ConfigCheck>(&reply.body) {
         Ok(checked) if reply.status.is_success() => Ok(checked),

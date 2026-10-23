@@ -957,3 +957,79 @@ fn doctor_reads_the_peaks_of_a_history_from_before_runners_had_caps() {
         .unwrap();
     assert_eq!(version, 1, "doctor does not migrate it");
 }
+
+fn sizing_change(profile: &str, at: u64) -> crate::api::SizingChange {
+    crate::api::SizingChange {
+        at,
+        profile: profile.to_owned(),
+        from: crate::api::Resize {
+            memory: 7 << 30,
+            slots: 2,
+        },
+        to: crate::api::Resize {
+            memory: 5376 << 20,
+            slots: 2,
+        },
+        reason: "lower memory".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn an_auto_sizing_change_holds_its_interval_from_before_its_file_is_written_however_old_it_is()
+ {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    let mut events = store.subscribe();
+    // Two months ago, written; now, pending; and one that failed.
+    let old = store
+        .sizing_intent(sizing_change("jvm", 1_700_000_000))
+        .await
+        .unwrap();
+    assert!(store.sizing_resolved(old, super::Resolution::Done).await);
+    let pending = store
+        .sizing_intent(sizing_change("node", 1_705_000_000))
+        .await
+        .unwrap();
+    let failed = store
+        .sizing_intent(sizing_change("web", 1_705_000_000))
+        .await
+        .unwrap();
+    assert!(
+        store
+            .sizing_resolved(failed, super::Resolution::Failed)
+            .await
+    );
+    store
+        .prune(u64::MAX / 2, &crate::config::History::default())
+        .await
+        .unwrap();
+    // A restart reads them back.
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let auto = store.auto_sizing().await.unwrap();
+    assert_eq!(
+        auto.last,
+        BTreeMap::from([
+            ("jvm".to_owned(), 1_700_000_000),
+            ("node".to_owned(), 1_705_000_000)
+        ]),
+        "pending and written changes hold their intervals, failed ones do not, and pruning keeps them"
+    );
+    assert_eq!(
+        auto.pending,
+        vec![(pending, sizing_change("node", 1_705_000_000))]
+    );
+    assert_eq!(
+        store.sizing_changes(0).await.unwrap(),
+        vec![sizing_change("jvm", 1_700_000_000)],
+        "only written changes are listed"
+    );
+    let announced = events.recv().await.unwrap();
+    assert_eq!(
+        announced.event,
+        crate::api::Event::SizingChanged {
+            change: sizing_change("jvm", 1_700_000_000)
+        }
+    );
+}

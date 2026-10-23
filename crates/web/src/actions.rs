@@ -280,6 +280,9 @@ async fn remove_records(app: &App, path: &str) -> Response {
 #[derive(Debug, Deserialize)]
 pub(crate) struct Edit {
     toml: String,
+    /// The revision of the config the editor started from; a config replaced since is not overwritten.
+    #[serde(default)]
+    revision: Option<String>,
 }
 
 /// `POST /config/check`: the result region for the text in the editor.
@@ -296,13 +299,16 @@ pub(crate) async fn check_config(State(app): State<App>, Json(edit): Json<Edit>)
 
 /// `PUT /config`: saves the text in the editor and has the daemon reload it, or says why the daemon would not.
 pub(crate) async fn save_config(State(app): State<App>, Json(edit): Json<Edit>) -> Response {
+    let path = match &edit.revision {
+        Some(revision) => format!(
+            "/v1/config?{}",
+            serde_urlencoded::to_string([("revision", revision)]).unwrap_or_default()
+        ),
+        None => "/v1/config".to_owned(),
+    };
     let reply = match app
         .daemon
-        .request(
-            Method::PUT,
-            "/v1/config",
-            Some(Body::toml(edit.toml.clone())),
-        )
+        .request(Method::PUT, &path, Some(Body::toml(edit.toml.clone())))
         .await
     {
         Ok(reply) => reply,
@@ -311,12 +317,16 @@ pub(crate) async fn save_config(State(app): State<App>, Json(edit): Json<Edit>) 
     let check = serde_json::from_slice::<ConfigCheck>(&reply.body);
     match (reply.status, check) {
         (status, Ok(check)) if status.is_success() => {
-            let path = app
-                .daemon
-                .get::<ConfigFile>("/v1/config")
-                .await
-                .map_or_else(|_| "runnerd.toml".to_owned(), |file| file.path);
-            html(&[config::result(&check, &edit.toml, &Outcome::Saved(path))])
+            let file = app.daemon.get::<ConfigFile>("/v1/config").await.ok();
+            let path = file
+                .as_ref()
+                .map_or_else(|| "runnerd.toml".to_owned(), |file| file.path.clone());
+            let revision = file.and_then(|file| file.revision);
+            html(&[config::result(
+                &check,
+                &edit.toml,
+                &Outcome::Saved { path, revision },
+            )])
         }
         (StatusCode::UNPROCESSABLE_ENTITY, Ok(check)) => {
             html(&[config::result(&check, &edit.toml, &Outcome::Refused)])

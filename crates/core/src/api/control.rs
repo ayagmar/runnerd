@@ -60,6 +60,17 @@ pub struct ConfigFile {
     pub path: String,
     /// The TOML, as last loaded or written by the daemon.
     pub text: String,
+    /// `config::revision` of `text`: send it as `PUT /v1/config?revision=` and a config replaced meanwhile, as
+    /// by auto sizing, is not overwritten (409). `None` from a daemon before it.
+    #[serde(default)]
+    pub revision: Option<String>,
+}
+
+/// `PUT /v1/config` query parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ReplaceQuery {
+    /// The revision of the config the new text was made from; absent, the text replaces whatever runs.
+    pub revision: Option<String>,
 }
 
 /// `POST /v1/config/check` and `PUT /v1/config`: what `runnerd check-config` prints for a config. `PUT` refuses

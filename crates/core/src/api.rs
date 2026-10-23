@@ -45,7 +45,8 @@ mod sizing;
 
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
 pub use control::{
-    Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, RunningJob,
+    Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, ReplaceQuery,
+    RunningJob,
 };
 pub use events::{Event, EventEnvelope, EventQuery};
 pub use jobs::{

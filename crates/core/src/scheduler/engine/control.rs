@@ -48,6 +48,15 @@ pub enum RunningJobs {
     Kill,
 }
 
+/// What a new config may do to slots with a runner in them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum RunningSlots {
+    /// A slot past a lowered `slots`, or of a removed profile, stays until its runner finishes.
+    Drain,
+    /// The config is refused while a runner is in a slot it does not have: what auto sizing asks for.
+    Keep,
+}
+
 /// The repositories a pause or a resume applies to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -131,6 +140,8 @@ pub enum Command {
         cpus: Option<u64>,
         /// Writes the file.
         commit: Commit,
+        /// Whether it may leave runners in slots it does not have.
+        running: RunningSlots,
         /// Answered once the engine runs with it: with a warning from the commit, or why it did not commit.
         reply: oneshot::Sender<Result<Option<String>, ControlError>>,
     },
@@ -390,20 +401,23 @@ impl Control {
     }
 
     /// Runs `commit` to write a validated config, and if it commits, runs with the config from then on, before the
-    /// next tick. If it does not, nothing changes and the answer is `Failed`. Running jobs keep running: removed
-    /// profiles and slots go as their runners finish.
+    /// next tick. If it does not, nothing changes and the answer is `Failed`. Running jobs keep running: under
+    /// `RunningSlots::Drain` removed profiles and slots go as their runners finish; under `Keep` a config without a
+    /// slot a runner is in is refused (`Conflict`) before `commit` runs.
     pub async fn replace_config(
         &self,
         config: Config,
         memory_max: Option<u64>,
         cpus: Option<u64>,
         commit: Commit,
+        running: RunningSlots,
     ) -> Result<Option<String>, ControlError> {
         self.send(|reply| Command::ReplaceConfig {
             config: Box::new(config),
             memory_max,
             cpus,
             commit,
+            running,
             reply,
         })
         .await?
@@ -459,8 +473,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 memory_max,
                 cpus,
                 commit,
+                running,
                 reply,
             } => {
+                if running == RunningSlots::Keep
+                    && let Some(occupied) = self.occupied_past(&config)
+                {
+                    let _ = reply.send(Err(ControlError::Conflict(occupied)));
+                    return;
+                }
                 let answer = match commit.run().await {
                     Ok(warning) => {
                         self.reload(*config, memory_max, cpus);
@@ -712,6 +733,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // Measured again once idle.
         self.trim_due = true;
         Ok(())
+    }
+
+    /// The first slot with a runner in it that `config` does not have, for people to read.
+    fn occupied_past(&self, config: &Config) -> Option<String> {
+        self.slots.iter().find_map(|(name, slots)| {
+            let kept = config
+                .profiles
+                .get(name)
+                .map_or(0, |profile| profile.slots as usize);
+            slots
+                .iter()
+                .enumerate()
+                .skip(kept)
+                .find(|(_, slot)| slot.is_some())
+                .map(|(index, _)| {
+                    format!(
+                        "{name}'s slot {} has a runner, and the new config keeps {kept} slots",
+                        index + 1
+                    )
+                })
+        })
     }
 
     /// Runs with a new, validated config. Running jobs keep running: a removed profile, or slots past a lowered

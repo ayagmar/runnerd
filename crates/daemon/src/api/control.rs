@@ -11,9 +11,9 @@ use axum::Json;
 use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
-use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery};
-use runnerd_core::config::Config;
-use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs, Target};
+use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery, ReplaceQuery};
+use runnerd_core::config::{Config, revision};
+use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs, RunningSlots, Target};
 use runnerd_core::sizing::Window;
 use tracing::info;
 
@@ -136,6 +136,7 @@ pub(super) async fn config(_: Authenticated, State(state): State<AppState>) -> J
     Json(ConfigFile {
         path: file.path.display().to_string(),
         text: file.text.clone(),
+        revision: Some(revision(&file.text)),
     })
 }
 
@@ -167,11 +168,24 @@ pub(super) async fn check_config(
 pub(super) async fn replace_config(
     Authenticated(principal): Authenticated,
     State(state): State<AppState>,
+    Query(query): Query<ReplaceQuery>,
     text: String,
 ) -> Response {
     // One replacement at a time, so the file and the engine end up with the same config.
     let mut file = state.config.lock().await;
-    match replace(&state, &mut file, text).await {
+    // A text made from a config replaced since, as by auto sizing, would undo that change.
+    if let Some(read) = query.revision
+        && read != revision(&file.text)
+    {
+        return error(
+            StatusCode::CONFLICT,
+            &format!(
+                "the config changed since revision {read} was read (now {}); read it again and redo the change",
+                revision(&file.text)
+            ),
+        );
+    }
+    match replace(&state, &mut file, text, RunningSlots::Drain, None).await {
         Ok(checked) => {
             info!("{} replaced by {principal:?}", file.path.display());
             Json(checked).into_response()
@@ -204,11 +218,14 @@ impl std::fmt::Display for Refusal {
 }
 
 /// Validates `text` against the slice's budget; the engine writes it in place of `file` and runs with it, between
-/// its ticks. What `PUT /v1/config` and auto sizing do; the caller holds `file`'s lock.
+/// its ticks, as `running` allows. With `on_disk`, the file is written only if it still holds that text then. What
+/// `PUT /v1/config` and auto sizing do; the caller holds `file`'s lock.
 pub(super) async fn replace(
     state: &AppState,
     file: &mut ConfigText,
     text: String,
+    running: RunningSlots,
+    on_disk: Option<String>,
 ) -> Result<ConfigCheck, Refusal> {
     let (config, mut checked) = check(state.memory_max, text.clone())
         .await
@@ -243,7 +260,35 @@ pub(super) async fn replace(
     // The engine writes the file between its ticks and runs with the config before the next: nothing runs under a
     // config whose file was not written, and nothing changes if it was not.
     let (path, written, sync) = (file.path.clone(), text.clone(), state.sync_dir);
-    let commit = Commit::new(move || match write_atomically(&path, &written, sync) {
+    let commit = Commit::new(move || {
+        if let Some(expected) = on_disk {
+            match std::fs::read_to_string(&path) {
+                Ok(text) if text == expected => {}
+                Ok(_) => {
+                    return Err(format!(
+                        "{} changed on disk since it was read; not written",
+                        path.display()
+                    ));
+                }
+                Err(io_error) => return Err(format!("cannot read {}: {io_error}", path.display())),
+            }
+        }
+        commit(&path, &written, sync)
+    });
+    let warning = state
+        .handle
+        .control
+        .replace_config(config, checked.memory_max, cpus, commit, running)
+        .await
+        .map_err(Refusal::Control)?;
+    checked.warnings.extend(warning);
+    file.text = text;
+    Ok(checked)
+}
+
+/// Writes `text` in place of `path`: `Err` when it was not written, a warning when it was but may not last a crash.
+fn commit(path: &Path, text: &str, sync: SyncDir) -> Result<Option<String>, String> {
+    match write_atomically(path, text, sync) {
         Ok(None) => Ok(None),
         // In place: the engine runs with it, as it would after a restart.
         Ok(Some(io_error)) => Ok(Some(format!(
@@ -251,16 +296,7 @@ pub(super) async fn replace(
             path.display()
         ))),
         Err(io_error) => Err(format!("cannot write {}: {io_error}", path.display())),
-    });
-    let warning = state
-        .handle
-        .control
-        .replace_config(config, checked.memory_max, cpus, commit)
-        .await
-        .map_err(Refusal::Control)?;
-    checked.warnings.extend(warning);
-    file.text = text;
-    Ok(checked)
+    }
 }
 
 /// Flushes a directory's entries, such as a rename in it, to disk.

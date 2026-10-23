@@ -1,7 +1,8 @@
 //! Auto sizing: which profiles' `memory` and `slots` the daemon changes now, from the advice and within the limits
-//! `[sizing]` and each profile set. Pure: the daemon reads the history and the changes made before, writes each
-//! change through the config check as `PUT /v1/config` does, and records it. Never lowers a profile a run met the
-//! cap of, never lowers `slots`, and never sizes a profile from fewer than `[sizing] min_jobs` jobs.
+//! `[sizing]` and each profile set. Pure: the daemon reads the history and when each profile last changed, writes
+//! each change through the config check as `PUT /v1/config` does, and records it. Never lowers a profile a run met
+//! the cap of, never sizes a profile from fewer than `[sizing] min_jobs` jobs, never leaves a profile outside its
+//! bounds, and sizes each profile against the budget the changes before it in the same look leave.
 
 use std::collections::BTreeMap;
 
@@ -17,18 +18,19 @@ pub struct Context<'run> {
     pub memory_max: Option<u64>,
     /// The history's window; `now` is when the changes are made.
     pub window: Window,
-    /// The changes auto sizing made before, in any order.
-    pub earlier: &'run [SizingChange],
+    /// When auto sizing last changed each profile, in seconds, by name, however long ago.
+    pub last: &'run BTreeMap<String, u64>,
     /// How many runners each profile runs now, by name.
     pub running: &'run BTreeMap<String, u32>,
 }
 
-/// The changes to make now: one per profile whose advice is to change it, that no change in the last
+/// The changes to make now, in order: one per profile whose advice is to change it, that no change in the last
 /// `[sizing] interval` touched. Empty unless `[sizing] auto` is on. Each moves `memory` toward the advice by at most
 /// `[sizing] max_step` percent, within the profile's `min_memory` and `max_memory`. Under `caps` admission `slots`
 /// follow the memory as the advice has them, at most `max_slots`, and never under what runs; under `measured`, a
 /// profile whose jobs wait gets one more slot, up to `max_slots`, when every profile's slots fit the slice at their
-/// jobs' p95 peaks.
+/// jobs' p95 peaks. Each change is sized as if the ones before it were written: they take budget the later ones
+/// cannot.
 pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<SizingChange> {
     let rules = &config.sizing;
     if !rules.auto {
@@ -38,55 +40,89 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
     let sizing = advise(config, context.memory_max, history, window);
     let now = window.now / 1000;
     let interval = rules.interval.as_secs();
-    sizing
-        .profiles
-        .iter()
-        .filter_map(|advised| {
-            let profile = config.profiles.get(&advised.name)?;
-            let last = context
-                .earlier
-                .iter()
-                .filter(|change| change.profile == advised.name)
-                .map(|change| change.at)
-                .max();
-            if last.is_some_and(|at| now < at.saturating_add(interval)) {
-                return None;
-            }
-            let from = Resize {
-                memory: profile.memory.0,
-                slots: profile.slots,
-            };
-            let met_cap = met_cap(history, &advised.name);
-            let mut reasons = Vec::new();
-            let memory = memory(config, profile, advised.advice, met_cap);
-            if memory != from.memory {
-                reasons.push(sizing.memory_line(advised));
-            }
-            let running = context.running.get(&advised.name).copied().unwrap_or(0);
-            let slots = match config.host.admission {
-                Admission::Caps => caps_slots(config, profile, advised, memory, &context, running),
-                Admission::Measured => {
-                    let slots = measured_slots(config, &sizing.profiles, advised, &context);
-                    if slots > from.slots {
-                        reasons.push(format!(
-                            "jobs waited {}s for a slot (p95) and slots were busy {}%; {slots} slots at their jobs' \
-                             p95 peaks fit the slice beside the other profiles'",
-                            advised.wait.p95, advised.busy
-                        ));
-                    }
-                    slots
+    let mut budget = Budget {
+        caps: config.memory_caps().map_or(u64::MAX, |caps| caps.0),
+        slots: sizing
+            .profiles
+            .iter()
+            .map(|advised| (advised.name.clone(), advised.slots))
+            .collect(),
+    };
+    let mut changes = Vec::new();
+    for advised in &sizing.profiles {
+        let Some(profile) = config.profiles.get(&advised.name) else {
+            continue;
+        };
+        if context
+            .last
+            .get(&advised.name)
+            .is_some_and(|at| now < at.saturating_add(interval))
+        {
+            continue;
+        }
+        let from = Resize {
+            memory: profile.memory.0,
+            slots: profile.slots,
+        };
+        let mut reasons = Vec::new();
+        let memory = memory(
+            config,
+            profile,
+            advised.advice,
+            met_cap(history, &advised.name),
+        );
+        if memory != from.memory {
+            reasons.push(sizing.memory_line(advised));
+        }
+        let running = context.running.get(&advised.name).copied().unwrap_or(0);
+        let slots = match config.host.admission {
+            Admission::Caps => caps_slots(profile, advised, memory, &context, &budget, running),
+            Admission::Measured => {
+                let slots = measured_slots(config, &sizing.profiles, advised, &context, &budget);
+                if slots > from.slots {
+                    reasons.push(format!(
+                        "jobs waited {}s for a slot (p95) and slots were busy {}%; {slots} slots at their jobs' \
+                         p95 peaks fit the slice beside the other profiles'",
+                        advised.wait.p95, advised.busy
+                    ));
                 }
-            };
-            let to = Resize { memory, slots };
-            (to != from && slots > 0).then(|| SizingChange {
-                at: now,
-                profile: advised.name.clone(),
-                from,
-                to,
-                reason: reasons.join("; "),
-            })
-        })
-        .collect()
+                slots
+            }
+        };
+        let to = Resize { memory, slots };
+        if to == from || slots == 0 || !within(profile, from, to) {
+            continue;
+        }
+        budget.caps = budget
+            .caps
+            .saturating_sub(from.memory.saturating_mul(u64::from(from.slots)))
+            .saturating_add(to.memory.saturating_mul(u64::from(to.slots)));
+        budget.slots.insert(advised.name.clone(), to.slots);
+        changes.push(SizingChange {
+            at: now,
+            profile: advised.name.clone(),
+            from,
+            to,
+            reason: reasons.join("; "),
+        });
+    }
+    changes
+}
+
+/// The budget as the changes picked so far leave it.
+struct Budget {
+    /// `slots × memory` over all profiles, with the mirror.
+    caps: u64,
+    /// Each profile's slots.
+    slots: BTreeMap<String, u32>,
+}
+
+/// Whether `to` keeps the profile within its bounds: `memory` within `min_memory` and `max_memory`, and `slots` at
+/// most `max_slots` when they grow.
+fn within(profile: &Profile, from: Resize, to: Resize) -> bool {
+    profile.min_memory.is_none_or(|min| to.memory >= min.0)
+        && profile.max_memory.is_none_or(|max| to.memory <= max.0)
+        && (to.slots <= from.slots || profile.max_slots.is_some_and(|max| to.slots <= max))
 }
 
 /// Whether a run of the profile in the history, cancelled ones too, was killed for memory or met its cap.
@@ -126,11 +162,11 @@ fn memory(config: &Config, profile: &Profile, advice: Advice, met_cap: bool) -> 
 /// the memory the slots take now holds, up to `max_slots`; a raise keeps as many as the slice holds beside the other
 /// profiles, and 0, no change, while more than that run. Otherwise the same.
 fn caps_slots(
-    config: &Config,
     profile: &Profile,
     advised: &ProfileSizing,
     memory: u64,
     context: &Context<'_>,
+    budget: &Budget,
     running: u32,
 ) -> u32 {
     let current = profile.slots;
@@ -145,9 +181,8 @@ fn caps_slots(
         let Some(memory_max) = context.memory_max else {
             return current;
         };
-        let caps = config.memory_caps().map_or(u64::MAX, |caps| caps.0);
         let share = profile.memory.0.saturating_mul(u64::from(current));
-        let room = memory_max.saturating_sub(caps.saturating_sub(share));
+        let room = memory_max.saturating_sub(budget.caps.saturating_sub(share));
         // Fewer slots than run would leave the running ones over the budget: wait for some to finish.
         let slots = fit(room).min(current);
         return if slots < running { 0 } else { slots };
@@ -157,12 +192,13 @@ fn caps_slots(
 
 /// Under `measured`: one more slot when its jobs waited and every profile's slots, this one's with the new one, fit
 /// the slice beside the mirror at their jobs' p95 peaks (at its cap, a profile with fewer than `min_jobs` jobs), up
-/// to `max_slots`. Otherwise the same.
+/// to `max_slots`, with the slots the changes before it gave. Otherwise the same.
 fn measured_slots(
     config: &Config,
     profiles: &[ProfileSizing],
     advised: &ProfileSizing,
     context: &Context<'_>,
+    budget: &Budget,
 ) -> u32 {
     let current = advised.slots;
     let wants = advised.wants_slots && !matches!(advised.advice, Advice::TooFew { .. });
@@ -188,7 +224,11 @@ fn measured_slots(
             let slots = if other.name == advised.name {
                 current + 1
             } else {
-                other.slots
+                budget
+                    .slots
+                    .get(&other.name)
+                    .copied()
+                    .unwrap_or(other.slots)
             };
             peak.saturating_mul(u64::from(slots))
         })

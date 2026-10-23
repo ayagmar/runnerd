@@ -164,6 +164,8 @@ struct Fake {
     checked: Vec<String>,
     /// The body of every config replacement.
     replaced: Vec<String>,
+    /// The query of every config replacement.
+    replaced_queries: Vec<Option<String>>,
 }
 
 type Shared = Arc<Mutex<Fake>>;
@@ -270,11 +272,18 @@ async fn get_config() -> axum::Json<ConfigFile> {
     axum::Json(ConfigFile {
         path: "/home/u/.config/runnerd/runnerd.toml".to_owned(),
         text: CONFIG.to_owned(),
+        revision: Some("c0ffee".to_owned()),
     })
 }
 
-async fn replace_config(State(fake): State<Shared>, body: String) -> axum::Json<ConfigCheck> {
-    fake.lock().unwrap().replaced.push(body);
+async fn replace_config(
+    State(fake): State<Shared>,
+    RawQuery(query): RawQuery,
+    body: String,
+) -> axum::Json<ConfigCheck> {
+    let mut fake = fake.lock().unwrap();
+    fake.replaced.push(body);
+    fake.replaced_queries.push(query);
     axum::Json(ConfigCheck {
         valid: true,
         message: "valid, memory caps sum to 13G".to_owned(),
@@ -942,6 +951,11 @@ fn sizing_shows_what_auto_sizing_changed_and_undoes_it_back_to_what_it_replaced(
 
     let undone = runnerctl(&socket, &["sizing", "undo", "node", "--yes"]);
     assert!(undone.status.success(), "{}", stderr(&undone));
+    assert_eq!(
+        fake.lock().unwrap().replaced_queries,
+        [Some("revision=c0ffee".to_owned())],
+        "the write is made against the config it read, so one replaced since is not overwritten"
+    );
     let replaced = fake.lock().unwrap().replaced.clone();
     assert_eq!(
         replaced,

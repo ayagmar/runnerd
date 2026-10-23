@@ -7,11 +7,12 @@ use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
-use tokio::sync::{broadcast, mpsc};
+use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::read::{self, secs};
 use super::{
-    HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, RunnerRecord, SampleRecord, Write, logged,
+    HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, Resolution, RunnerRecord, SampleRecord, Write,
+    logged,
 };
 use crate::api::{self, Event, EventEnvelope};
 use crate::github::{JobDetails, JobStep, QueuedJob};
@@ -149,6 +150,14 @@ impl Writer<'_> {
             Write::Paused { repositories, done } => {
                 let _ = done.send(self.paused(&repositories));
             }
+            Write::SizingIntent { change, done } => {
+                let _ = done.send(self.sizing_intent(&change));
+            }
+            Write::SizingResolved {
+                id,
+                resolution,
+                done,
+            } => self.sizing_resolved(id, resolution, done),
             Write::Flush(done) => {
                 self.store_host_samples();
                 let _ = done.send(());
@@ -691,6 +700,52 @@ impl Writer<'_> {
             }
             Ok(())
         })
+    }
+
+    fn sizing_intent(&self, change: &api::SizingChange) -> Option<i64> {
+        let mut id = None;
+        self.change("record an auto sizing change", |_| {
+            self.db.execute(
+                "INSERT INTO auto_sizing (profile, at, from_memory, from_slots, to_memory, to_slots, reason, state) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')",
+                params![
+                    change.profile,
+                    change.at.saturating_mul(1000),
+                    change.from.memory,
+                    change.from.slots,
+                    change.to.memory,
+                    change.to.slots,
+                    change.reason
+                ],
+            )?;
+            id = Some(self.db.last_insert_rowid());
+            Ok(())
+        })
+        .then_some(id)
+        .flatten()
+    }
+
+    fn sizing_resolved(&self, id: i64, resolution: Resolution, done: oneshot::Sender<bool>) {
+        let resolved = self.change("resolve an auto sizing change", |announced| {
+            let state = match resolution {
+                Resolution::Done => "done",
+                Resolution::Failed => "failed",
+            };
+            self.db.execute(
+                "UPDATE auto_sizing SET state = ?2 WHERE id = ?1 AND state = 'pending'",
+                params![id, state],
+            )?;
+            if resolution == Resolution::Done {
+                let change = self.db.query_row(
+                    "SELECT * FROM auto_sizing WHERE id = ?1",
+                    [id],
+                    read::sizing_change,
+                )?;
+                announced.push(Event::SizingChanged { change });
+            }
+            Ok(())
+        });
+        let _ = done.send(resolved);
     }
 
     /// Counts a batch of the mirror's log and where it ends, together: counting part of it, or counting it without

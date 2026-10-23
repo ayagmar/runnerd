@@ -36,6 +36,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0006_records.sql"),
     include_str!("store/migrations/0007_admission.sql"),
     include_str!("store/migrations/0008_memory_without_page_cache.sql"),
+    include_str!("store/migrations/0009_auto_sizing.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -254,7 +255,36 @@ enum Write {
         /// Whether it committed.
         done: oneshot::Sender<bool>,
     },
+    SizingIntent {
+        change: api::SizingChange,
+        /// Its row, once it committed.
+        done: oneshot::Sender<Option<i64>>,
+    },
+    SizingResolved {
+        id: i64,
+        resolution: Resolution,
+        /// Whether it committed.
+        done: oneshot::Sender<bool>,
+    },
     Flush(oneshot::Sender<()>),
+}
+
+/// What became of a pending auto sizing change.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Resolution {
+    /// The config file has it: announced as `sizing.changed`.
+    Done,
+    /// The file was not written.
+    Failed,
+}
+
+/// Auto sizing as the history keeps it: when each profile last changed, and changes not yet known to be written.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct AutoSizing {
+    /// The latest pending or done change of each profile, in seconds, however old.
+    pub last: BTreeMap<String, u64>,
+    /// Changes recorded before their file was written and not resolved since, by row.
+    pub pending: Vec<(i64, api::SizingChange)>,
 }
 
 /// The job history. Cloning shares it.
@@ -510,6 +540,33 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
+    /// Records a change auto sizing is about to write, as pending, before the file is. The future has its row once
+    /// it committed, `None` if it did not: then nothing may be written.
+    pub fn sizing_intent(
+        &self,
+        change: api::SizingChange,
+    ) -> impl Future<Output = Option<i64>> + use<> {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::SizingIntent { change, done });
+        async move { committed.await.ok().flatten() }
+    }
+
+    /// Records what became of a pending change; a done one is announced as `sizing.changed` in the same
+    /// transaction. The future says whether it committed.
+    pub fn sizing_resolved(
+        &self,
+        id: i64,
+        resolution: Resolution,
+    ) -> impl Future<Output = bool> + use<> {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::SizingResolved {
+            id,
+            resolution,
+            done,
+        });
+        async move { committed.await.unwrap_or(false) }
+    }
+
     /// Deletes what is older than `history` keeps, at `now` (ms), off the writer, in batches the writer's
     /// transactions fit between. A prune while the last one runs does nothing. The handle finishes with it; dropping
     /// it lets it run.
@@ -602,9 +659,14 @@ impl Store {
             .await
     }
 
-    /// The changes auto sizing made since `since` (ms), oldest first, as their events recorded them.
+    /// The changes auto sizing wrote since `since` (ms), oldest first.
     pub async fn sizing_changes(&self, since: u64) -> Result<Vec<api::SizingChange>, StoreError> {
         self.read(move |db| read::sizing_changes(db, since)).await
+    }
+
+    /// When each profile last changed, and the changes still pending.
+    pub async fn auto_sizing(&self) -> Result<AutoSizing, StoreError> {
+        self.read(read::auto_sizing).await
     }
 
     /// The profiles and repositories as the stored events last announced them, so a restarted daemon announces
