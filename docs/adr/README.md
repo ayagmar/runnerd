@@ -12,7 +12,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md) | GPUI desktop app pinned to a Zed commit (superseded by 0034) |
 | [0005](0005-isolation-backends-sysbox-by-default.md) | Isolation backends: sysbox by default, privileged DinD only when asked |
 | [0006](0006-ephemeral-jit-runners.md) | Ephemeral JIT runners, one per job |
-| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer |
+| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041) |
 | [0008](0008-auth-with-the-gh-token.md) | Authenticate with the `gh` CLI's token |
 | [0009](0009-newest-stable-and-locked-dependencies.md) | Every dependency newest stable and locked (in part superseded by 0025) |
 | [0010](0010-mit-license-public-repository.md) | MIT license, public repository |
@@ -46,3 +46,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |
 | [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default |
 | [0040](0040-unused-runner-images-removed.md) | Runner images no profile runs are removed |
+| [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits |

@@ -1714,6 +1714,30 @@ async fn until_called(
 }
 
 #[tokio::test]
+async fn the_mirrors_storage_over_its_limit_is_emptied_once_the_mirror_is_down() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volume_sizes
+        .insert("runnerd-mirror".to_owned(), 11 << 30);
+    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    until_called(&mut engine, &docker, "remove volume runnerd-mirror").await;
+    let calls = docker.calls();
+    let stopped = calls
+        .iter()
+        .position(|call| call == "remove runnerd-mirror");
+    let emptied = calls
+        .iter()
+        .position(|call| call == "remove volume runnerd-mirror");
+    assert!(stopped < emptied, "the mirror stops first: {calls:?}");
+}
+
+#[tokio::test]
 async fn killing_the_runner_of_a_cancelled_run_trims_the_shared_caches_and_reseeds_its_profile() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let (mut engine, handle, _dir) = engine(&github, &docker);

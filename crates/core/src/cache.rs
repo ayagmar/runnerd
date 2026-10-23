@@ -186,6 +186,15 @@ pub async fn mirror_down(docker: &impl DockerApi, names: &Names) -> Result<(), E
     }
 }
 
+/// Whether the mirror's container is down, so its storage can be removed.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Mirror {
+    /// It runs, or may: an earlier daemon may have left it up.
+    Up,
+    /// It is stopped.
+    Down,
+}
+
 /// What `trim_shared` measured and emptied.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Trimmed {
@@ -204,18 +213,24 @@ pub struct Emptied {
     pub size: ByteSize,
 }
 
-/// Empties the shared caches that outgrew their limit; call only while no runner runs.
+/// Empties the shared caches that outgrew their limit, the mirror's storage among them once the mirror is down
+/// (`Mirror::Down`); call only while no runner runs.
 pub async fn trim_shared(
     docker: &impl DockerApi,
     names: &Names,
     caches: &config::Caches,
+    mirror: Mirror,
 ) -> Result<Trimmed, Error> {
     let sizes = docker.volume_sizes().await?;
     let mut emptied = Vec::new();
-    for (name, limit) in [
+    let mut limits = vec![
         (names.pnpm(), caches.pnpm.max_size),
         (names.maven(), caches.maven.max_size),
-    ] {
+    ];
+    if mirror == Mirror::Down {
+        limits.push((names.mirror(), caches.mirror.max_size));
+    }
+    for (name, limit) in limits {
         if let Some(&size) = sizes.get(&name)
             && size > limit.0
         {
@@ -244,7 +259,7 @@ pub fn volumes(names: &Names, config: &config::Config) -> Vec<api::CacheVolume> 
             api::CacheKind::Snapshot {
                 profile: profile.clone(),
             },
-            None,
+            Some(config.caches.snapshot_max.0),
         ));
         for slot in 1..=settings.slots as usize {
             volumes.push(volume(
@@ -268,7 +283,11 @@ pub fn volumes(names: &Names, config: &config::Config) -> Vec<api::CacheVolume> 
         Some(config.caches.maven.max_size.0),
     ));
     if config.caches.mirror.enabled {
-        volumes.push(volume(names.mirror(), api::CacheKind::Mirror, None));
+        volumes.push(volume(
+            names.mirror(),
+            api::CacheKind::Mirror,
+            Some(config.caches.mirror.max_size.0),
+        ));
     }
     volumes.sort_by(|a, b| a.name.cmp(&b.name));
     volumes
@@ -293,12 +312,15 @@ pub struct Reseed<'profile> {
     pub memory: ByteSize,
     /// Slot 1's layers must have changed at least this much (`caches.reseed_at`).
     pub min_changes: ByteSize,
+    /// A snapshot that would outgrow this starts over (`caches.snapshot_max`).
+    pub max_size: ByteSize,
     /// How the seed container is isolated, as runners are.
     pub isolation: &'profile dyn Isolation,
 }
 
 /// Makes slot 1's layers the profile's new snapshot and drops every slot's own layer changes (`image/seed.sh`),
-/// if slot 1 changed at least `min_changes`. Call only while none of the profile's slots runs. Returns the seed
+/// if slot 1 changed at least `min_changes`. A snapshot that would outgrow `max_size` starts over from slot 1's
+/// changes alone, or from the image when those outgrow it too. Call only while none of the profile's slots runs. Returns the seed
 /// container's output.
 pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<String, Error> {
     let names = reseed.names;
@@ -330,6 +352,7 @@ pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<Stri
         entrypoint: Some(vec![
             "/usr/local/sbin/runnerd-seed".to_owned(),
             reseed.min_changes.0.to_string(),
+            reseed.max_size.0.to_string(),
         ]),
         jit_config: None,
     };

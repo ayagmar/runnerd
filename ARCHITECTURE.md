@@ -115,7 +115,8 @@ queued → slot → container → removed
    runner's `_diag/pages`, CPU and memory from the container's cgroup every 2 s (`observe::metrics`), and the
    mirror's bytes from its access log (`observe::mirror`). The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`).
-6. When a profile is idle after its slot 1 ran a job, `cache::reseed` makes slot 1's layers the profile's snapshot.
+6. When a profile is idle after its slot 1 ran a job, `cache::reseed` makes slot 1's layers the profile's snapshot,
+   which starts over above `[caches] snapshot_max` ([ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md)).
 
 On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`) and schedules
 nothing until Docker has listed them.
