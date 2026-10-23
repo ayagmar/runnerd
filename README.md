@@ -12,7 +12,7 @@ Releases are early 0.0.x builds for Linux on x86_64 and aarch64. The installer d
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh
 ```
 
-Pass `--prefix DIR` to install into `DIR/bin` instead, or `--version v0.0.1` for a specific release:
+Pass `--prefix DIR` to install into `DIR/bin` instead, or `--version v0.0.4` for a specific release (for v0.0.3 and earlier, run that release's own `install.sh`):
 
 ```sh
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd
@@ -240,7 +240,7 @@ block glyphs. At 80×24 the slots become one line each and the charts drop out f
 
 SIGINT, SIGTERM and SIGHUP quit and SIGTSTP suspends, each after giving the terminal back. When the daemon goes
 away the header says `reconnecting`. Once it is back, the event stream resumes after the last event read, or the
-state is read again if none was; an open job's log carries on from its next line. Build without it with `cargo build -p runnerctl --no-default-features`.
+state is read again if none was; an open job's log carries on from its next line. Build without it with `cargo build -p runnerd-cli --no-default-features`.
 
 From the bash `ci` tool:
 

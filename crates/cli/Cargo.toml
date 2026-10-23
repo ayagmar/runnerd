@@ -1,11 +1,15 @@
 [package]
-name = "runnerctl"
+name = "runnerd-cli"
 description = "Command-line client for the runnerd daemon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+
+[[bin]]
+name = "runnerctl"
+path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true

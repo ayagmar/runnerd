@@ -54,8 +54,10 @@ cache.
 It builds `runnerd` and `runnerctl` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with
 [dist](https://github.com/axodotdev/cargo-dist), attests every archive plus `install.sh`, `sha256.sum` and the source
 tarball, and creates the release with the archives, a `.sha256` per archive, `sha256.sum`, and `install.sh` set to
-install that tag. The tag must match the workspace version in `Cargo.toml`, and a tag without a suffix must be on
-`main`, or the `plan` job fails.
+install that tag. dist names each archive for its crate, so `runnerctl` ships in
+`runnerd-cli-<target>.tar.xz`; `install.sh` and the crates' `[package.metadata.binstall]` expect those names. The tag
+must match the workspace version in `Cargo.toml`, and a tag without a suffix must be on `main`, or the `plan` job
+fails.
 
 The workflow started as dist's generated one and was edited (its header lists how), so `Cargo.toml` sets
 `allow-dirty = ["ci"]`. It is not a pull request check; `lint` still runs actionlint and zizmor on it.

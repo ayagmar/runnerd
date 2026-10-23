@@ -1440,7 +1440,23 @@ dependencies = [
 ]
 
 [[package]]
-name = "runnerctl"
+name = "runnerd"
+version = "0.0.3"
+dependencies = [
+ "axum",
+ "clap",
+ "futures-util",
+ "reqwest",
+ "runnerd-core",
+ "runnerd-web",
+ "serde_json",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+]
+
+[[package]]
+name = "runnerd-cli"
 version = "0.0.3"
 dependencies = [
  "axum",
@@ -1457,22 +1473,6 @@ dependencies = [
  "serde_urlencoded",
  "tokio",
  "unicode-width",
-]
-
-[[package]]
-name = "runnerd"
-version = "0.0.3"
-dependencies = [
- "axum",
- "clap",
- "futures-util",
- "reqwest",
- "runnerd-core",
- "runnerd-web",
- "serde_json",
- "tokio",
- "tracing",
- "tracing-subscriber",
 ]
 
 [[package]]

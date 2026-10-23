@@ -28,6 +28,6 @@ giving the terminal back and stopping its process group with SIGSTOP; SIGCONT ta
   widget is left out, so `time` is not built. None of it is Docker or GitHub code, so the boundary check passes.
 - `rustix` (already in the lockfile through crossterm) sends that SIGSTOP without `unsafe`, which the workspace
   forbids; its tests use it to drive `runnerctl tui` in a pseudo-terminal.
-- `cargo build -p runnerctl --no-default-features` builds a CLI without the TUI and these crates.
+- `cargo build -p runnerd-cli --no-default-features` builds a CLI without the TUI and these crates.
 - Colours are xterm-256 approximations of the dashboard's palette; `NO_COLOR` leaves only bold, dim, reverse and
   block glyphs.
