@@ -9,7 +9,7 @@
 
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development: the daemon schedules runners, records every job, can keep a failed job's runner to open a shell in, advises on each profile's memory and slots from past jobs' peaks, can admit runners by those peaks instead of their caps, serves a JSON API and a web dashboard, and `runnerctl` reads and controls it from a terminal.
+It is in early development: the daemon schedules runners, records every job, can keep a failed job's runner to open a shell in, advises on each profile's memory and slots from past jobs' peaks and can apply that advice itself, can admit runners by those peaks instead of their caps and by CPU, serves a JSON API and a web dashboard you can install as an app and reach through a proxy, and `runnerctl` reads and controls it from a terminal.
 
 ```mermaid
 flowchart TB
@@ -120,9 +120,11 @@ cargo binstall runnerd runnerd-cli
 The site, <https://ayagmar.github.io/runnerd/>, has the guides:
 
 - [Install](https://ayagmar.github.io/runnerd/install/): requirements, `runnerd init`'s output, verifying a release.
-- [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, profiles, runner images, records of failed jobs, sizing advice from the job history and auto sizing, measured admission, the budget check, isolation.
+- [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, runner images, records of failed jobs, the budget check, isolation, and every key with its default.
+- [Admission and sizing](https://ayagmar.github.io/runnerd/admission/): what a job's memory counts, sizing advice from the job history and auto sizing, measured and CPU admission, `runnerd simulate`.
 - [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled and caches kept warm, records of failed jobs and their shells, the job history, and the JSON API and its events.
-- [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/): the web dashboard, every `runnerctl` command, and `runnerctl tui` with its keys.
+- [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/): the web dashboard, from another device too, every `runnerctl` command, and `runnerctl tui` with its keys.
+- [Upgrading](https://ayagmar.github.io/runnerd/upgrading/): what each release changes on an existing host, and what to do before and after.
 
 [ARCHITECTURE.md](https://github.com/ayagmar/runnerd/blob/main/ARCHITECTURE.md) says where the code lives and [docs/adr](https://github.com/ayagmar/runnerd/blob/main/docs/adr/README.md) why.
 
