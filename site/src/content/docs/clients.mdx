@@ -28,7 +28,7 @@ Pages update as things happen. Memory and CPU are sampled every 2 s, so a shorte
   sizes="(min-width: 72rem) 45rem, 100vw"
 />
 
-Below the slots: the slice over the last half hour, pause and resume per repository, the latest jobs. A pause lasts until a resume, across restarts.
+Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the latest jobs. A pause lasts until a resume, across restarts.
 
 ### A job
 
@@ -132,6 +132,20 @@ CPU and MEM are the last sample, taken every few seconds. Ctrl-C quits.
 $ runnerctl pause halyard/ledger
 error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105; pause with force to cancel it
 `runnerctl pause --force halyard/ledger` cancels its runs and removes their runners
+```
+
+### Every repository at once
+
+```console wrap=false
+$ runnerctl pause --all
+error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792721996; halyard/storefront runs job 120055991650 on runnerd-3f9a-forge-node-1-1792722114; pause with force to cancel them
+`runnerctl pause --force --all` cancels its runs and removes their runners
+$ runnerctl pause --all --force
+every repository paused: it gets no new runners
+stopped job 120055991700 on runnerd-3f9a-forge-jvm-1-1792721996
+stopped job 120055991650 on runnerd-3f9a-forge-node-1-1792722114
+$ runnerctl resume --all
+every repository resumed
 ```
 
 ## runnerctl tui
