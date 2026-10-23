@@ -54,8 +54,18 @@ cache.
 It builds `runnerd` and `runnerctl` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with
 [dist](https://github.com/axodotdev/cargo-dist), attests every archive plus `install.sh`, `sha256.sum` and the source
 tarball, and creates the release with the archives, a `.sha256` per archive, `sha256.sum`, and `install.sh` set to
-install that tag. The tag must match the workspace version in `Cargo.toml`, and a tag without a suffix must be on
-`main`, or the `plan` job fails.
+install that tag. dist names each archive for its crate, so `runnerctl` ships in
+`runnerd-cli-<target>.tar.xz`; `install.sh` and the crates' `[package.metadata.binstall]` expect those names. The tag
+must match the workspace version in `Cargo.toml`, and a tag without a suffix must be on `main`, or the `plan` job
+fails.
+
+After the GitHub release, the `publish-crates` job publishes `runnerd-core`, `runnerd-web`, `runnerd` and
+`runnerd-cli` to crates.io with [trusted publishing](https://crates.io/docs/trusted-publishing): a token that lasts 30
+minutes, minted from the run's OIDC identity, so no crates.io token is stored. It is skipped until the repository
+variable `CRATES_IO_TRUSTED_PUBLISHING` is `true`. crates.io only accepts a trusted publisher for a crate that exists,
+so the first version of each is published by hand (`cargo publish --workspace` with a personal token). Then, for each
+crate, Settings → Trusted Publishing on crates.io adds a GitHub publisher with owner `ayagmar`, repository `runnerd`
+and workflow `release.yml`, and the variable is set.
 
 The workflow started as dist's generated one and was edited (its header lists how), so `Cargo.toml` sets
 `allow-dirty = ["ci"]`. It is not a pull request check; `lint` still runs actionlint and zizmor on it.

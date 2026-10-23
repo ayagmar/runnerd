@@ -1,11 +1,18 @@
 [package]
-name = "runnerctl"
+name = "runnerd-cli"
 description = "Command-line client for the runnerd daemon"
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+readme.workspace = true
+keywords = ["github-actions", "ci", "runner", "tui"]
+categories = ["command-line-utilities", "development-tools"]
+
+[[bin]]
+name = "runnerctl"
+path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
@@ -31,6 +38,13 @@ axum.workspace = true
 futures-util.workspace = true
 rustix = { workspace = true, features = ["fs", "process", "pty", "termios"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+
+# cargo binstall downloads the release archive dist builds (named for the crate; the binary sits in a directory of the
+# same name) instead of compiling. Releases cover Linux x86_64 and aarch64 on musl.
+[package.metadata.binstall]
+pkg-url = "{ repo }/releases/download/v{ version }/{ name }-{ target }{ archive-suffix }"
+bin-dir = "{ name }-{ target }/{ bin }{ binary-ext }"
+pkg-fmt = "txz"
 
 [lints]
 workspace = true

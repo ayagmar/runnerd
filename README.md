@@ -12,7 +12,7 @@ Releases are early 0.0.x builds for Linux on x86_64 and aarch64. The installer d
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh
 ```
 
-Pass `--prefix DIR` to install into `DIR/bin` instead, or `--version v0.0.1` for a specific release:
+Pass `--prefix DIR` to install into `DIR/bin` instead, or `--version v0.0.4` for a specific release (for v0.0.3 and earlier, run that release's own `install.sh`):
 
 ```sh
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd
@@ -25,6 +25,13 @@ curl -fsSLO https://github.com/ayagmar/runnerd/releases/latest/download/install.
 gh attestation verify install.sh -R ayagmar/runnerd
 sh install.sh
 gh attestation verify runnerd-x86_64-unknown-linux-musl.tar.xz -R ayagmar/runnerd
+```
+
+From crates.io, the daemon is the crate `runnerd` and `runnerctl` is in `runnerd-cli`, so install both. `cargo install` builds them with Rust 1.99 or later; [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) downloads the same release archives as `install.sh` instead:
+
+```sh
+cargo install --locked runnerd runnerd-cli
+cargo binstall runnerd runnerd-cli
 ```
 
 ## Requirements
@@ -42,13 +49,13 @@ runnerd doctor runnerd.toml
 
 ## Runner image
 
-[`image/`](image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base. A profile's `image_stage` picks the stage:
+[`image/`](https://github.com/ayagmar/runnerd/tree/main/image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base. A profile's `image_stage` picks the stage:
 
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
 ```
 
-`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it. Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
+`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it. Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
 
 Documentation: <https://ayagmar.github.io/runnerd/>
 
@@ -99,7 +106,7 @@ Where the data comes from:
 ### API
 
 runnerd serves JSON on `$XDG_RUNTIME_DIR/runnerd.sock` (mode 0600; only the user it runs as may connect). The types are
-in [`crates/core/src/api.rs`](crates/core/src/api.rs) and its modules. Times are seconds since the Unix epoch, sizes
+in [`crates/core/src/api.rs`](https://github.com/ayagmar/runnerd/blob/main/crates/core/src/api.rs) and its modules. Times are seconds since the Unix epoch, sizes
 bytes, CPU millicores.
 
 | Request | Response |
@@ -183,7 +190,7 @@ unchanged.
 
 ```console
 $ runnerctl status
-runnerd 0.0.3  4.5G of 33G reserved in runnerd.slice
+runnerd 0.0.4  4.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY      RUNNER                       UP
 jvm         1  busy   halyard/ledger  runnerd-5f2a91c0-jvm-1-k3j9  21s
@@ -240,7 +247,7 @@ block glyphs. At 80×24 the slots become one line each and the charts drop out f
 
 SIGINT, SIGTERM and SIGHUP quit and SIGTSTP suspends, each after giving the terminal back. When the daemon goes
 away the header says `reconnecting`. Once it is back, the event stream resumes after the last event read, or the
-state is read again if none was; an open job's log carries on from its next line. Build without it with `cargo build -p runnerctl --no-default-features`.
+state is read again if none was; an open job's log carries on from its next line. Build without it with `cargo build -p runnerd-cli --no-default-features`.
 
 From the bash `ci` tool:
 
@@ -256,7 +263,7 @@ From the bash `ci` tool:
 
 ## Config
 
-One file, `runnerd.toml`, lists the repositories to serve, the runner profile each one uses, the shared caches and the systemd slice whose limits form the budget. [`examples/runnerd.toml`](examples/runnerd.toml) is a complete example.
+One file, `runnerd.toml`, lists the repositories to serve, the runner profile each one uses, the shared caches and the systemd slice whose limits form the budget. [`examples/runnerd.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/runnerd.toml) is a complete example.
 
 ```sh
 runnerd check-config runnerd.toml
@@ -275,8 +282,8 @@ cargo build --release
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`. Before sending a change, run the checks listed under "The gate" in
-[AGENTS.md](AGENTS.md); CI runs the same. [CONTRIBUTING.md](CONTRIBUTING.md) explains which CI jobs a change triggers,
-and [ARCHITECTURE.md](ARCHITECTURE.md) where the code lives.
+[AGENTS.md](https://github.com/ayagmar/runnerd/blob/main/AGENTS.md); CI runs the same. [CONTRIBUTING.md](https://github.com/ayagmar/runnerd/blob/main/CONTRIBUTING.md) explains which CI jobs a change triggers,
+and [ARCHITECTURE.md](https://github.com/ayagmar/runnerd/blob/main/ARCHITECTURE.md) where the code lives.
 
 The tests that start real containers are ignored by default. They need Docker with sysbox and the images:
 
@@ -286,7 +293,7 @@ docker build --target base -t runnerd-runner:base image
 cargo test -p runnerd-core --test docker_smoke --test cache_reseed -- --ignored
 ```
 
-[`examples/sandbox.toml`](examples/sandbox.toml) is the setup for the end-to-end test against the throwaway repository `ayagmar/runnerd-sandbox`.
+[`examples/sandbox.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/sandbox.toml) is the setup for the end-to-end test against the throwaway repository `ayagmar/runnerd-sandbox`.
 
 ## License
 

@@ -13,6 +13,9 @@ yanked = "deny"
 # rusqlite's statement cache.
 allow = ["MIT", "Apache-2.0", "Unicode-3.0", "ISC", "BSD-3-Clause", "CDLA-Permissive-2.0", "Zlib"]
 confidence-threshold = 0.93
+# The dashboard's vendored font (crates/web/assets/fonts) is under the SIL Open Font License, which allows bundling it
+# in software under any license.
+exceptions = [{ crate = "runnerd-web", allow = ["OFL-1.1"] }]
 
 [bans]
 multiple-versions = "warn"

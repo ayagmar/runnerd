@@ -64,9 +64,14 @@ tmp=$(mktemp -d)
 trap 'rm -rf "$tmp" "$bindir/.runnerd.new" "$bindir/.runnerctl.new"' EXIT
 trap 'exit 1' INT TERM
 
-# Download and verify every archive before installing anything.
-for app in runnerd runnerctl; do
-  archive=$app-$target.tar.xz
+# Download and verify every archive before installing anything. Archives are named for the crate: runnerctl comes
+# in runnerd-cli's.
+for crate in runnerd runnerd-cli; do
+  case "$crate" in
+    runnerd) app=runnerd ;;
+    runnerd-cli) app=runnerctl ;;
+  esac
+  archive=$crate-$target.tar.xz
   echo "downloading $base/$archive"
   curl -fsSL -o "$tmp/$archive" "$base/$archive" || die "could not download $archive"
   curl -fsSL -o "$tmp/$archive.sha256" "$base/$archive.sha256" || die "could not download $archive.sha256"
@@ -75,7 +80,8 @@ for app in runnerd runnerctl; do
   [ -n "$expected" ] && [ "$expected" = "$actual" ] \
     || die "checksum mismatch for $archive: expected $expected, got $actual; nothing was installed"
   tar -xJf "$tmp/$archive" -C "$tmp"
-  [ -f "$tmp/$app-$target/$app" ] || die "$archive does not contain $app"
+  [ -f "$tmp/$crate-$target/$app" ] || die "$archive does not contain $app"
+  mv "$tmp/$crate-$target/$app" "$tmp/$app"
 done
 
 mkdir -p "$bindir" || die "cannot create $bindir; pick another directory with --prefix"
@@ -83,7 +89,7 @@ mkdir -p "$bindir" || die "cannot create $bindir; pick another directory with --
 # Copy both binaries next to their targets first, then rename both, so a failed copy (a full disk) leaves the old pair
 # in place, and a running binary is replaced in one step.
 for app in runnerd runnerctl; do
-  cp "$tmp/$app-$target/$app" "$bindir/.$app.new"
+  cp "$tmp/$app" "$bindir/.$app.new"
   chmod 755 "$bindir/.$app.new"
 done
 for app in runnerd runnerctl; do

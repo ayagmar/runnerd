@@ -9,6 +9,7 @@
 # - Linux only: no Windows or container steps, no PR runs;
 # - install.sh is published with the release's tag as its default version.
 # - a release tag without a suffix fails unless its commit is on main.
+# - after the GitHub release, the crates are published to crates.io (not a dist job; see `publish-crates`).
 # To pick up a newer dist, regenerate into a scratch copy and carry its changes over by hand.
 
 name: release
@@ -193,3 +194,28 @@ jobs:
           flags=()
           [ "$PRERELEASE" != true ] || flags+=(--prerelease)
           gh release create "$TAG" --target "$RELEASE_COMMIT" "${flags[@]}" --title "$TITLE" --notes-file "$RUNNER_TEMP/notes.txt" artifacts/*
+
+  # Publishes the four crates to crates.io with a short-lived token from trusted publishing; no token is stored. It
+  # does nothing until the repository variable CRATES_IO_TRUSTED_PUBLISHING is "true", which is set once each crate has
+  # had its first publish and has this workflow as its trusted publisher (CONTRIBUTING.md, "Releases").
+  publish-crates:
+    name: publish to crates.io
+    needs: host
+    if: ${{ vars.CRATES_IO_TRUSTED_PUBLISHING == 'true' }}
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      id-token: write # crates-io-auth-action exchanges the run's OIDC token for a crates.io token
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      # Installs the toolchain pinned in rust-toolchain.toml.
+      - run: rustup toolchain install
+      - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
+        id: auth
+      # Publishes runnerd-core, runnerd-web, runnerd and runnerd-cli in dependency order, each after the one it needs
+      # is in the index.
+      - run: cargo publish --workspace --locked
+        env:
+          CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
