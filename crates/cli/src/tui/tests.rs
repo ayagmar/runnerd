@@ -35,7 +35,7 @@ use runnerd_core::api::{
 
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, Effect, Msg, View};
+use super::app::{App, Connection, Effect, Msg, Refused, View};
 use super::draw::{Theme, draw};
 use super::feed;
 use crate::testing::Fake;
@@ -397,18 +397,20 @@ fn a_refused_pause_is_forced_only_after_y() {
             force: false
         }]
     );
-    app.update(Msg::Busy {
+    app.update(Msg::Busy(Refused {
         repository: Some("halyard/ledger".to_owned()),
         message: "halyard/ledger runs job 42 on runnerd-ab12-jvm-1".to_owned(),
-    });
+        jobs: 1,
+    }));
     assert!(screen(&app, 120, 40, false).contains("runs job 42"));
     assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
     assert!(app.confirm.is_none());
 
-    app.update(Msg::Busy {
+    app.update(Msg::Busy(Refused {
         repository: Some("halyard/ledger".to_owned()),
         message: "halyard/ledger runs job 42".to_owned(),
-    });
+        jobs: 1,
+    }));
     assert_eq!(
         app.update(key(KeyCode::Char('y'))),
         vec![Effect::Pause {
@@ -428,10 +430,23 @@ fn shift_p_and_u_pause_and_resume_every_repository_and_a_refused_pause_of_all_is
             force: false
         }]
     );
-    app.update(Msg::Busy {
+    app.update(Msg::Busy(Refused {
         repository: None,
-        message: "halyard/ledger runs job 42".to_owned(),
-    });
+        message: "halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792721996; \
+                  halyard/storefront runs job 120055991650 on runnerd-3f9a-forge-node-1-1792722114"
+            .to_owned(),
+        jobs: 2,
+    }));
+    let asked = screen(&app, 136, 40, false);
+    let prompt = asked.lines().last().unwrap();
+    assert!(
+        prompt.starts_with(" y cancels 2 runs and pauses, any other key keeps them running: "),
+        "{prompt}"
+    );
+    assert!(
+        prompt.trim_end().ends_with('…'),
+        "a message too long for the line is cut with …: {prompt}"
+    );
     assert_eq!(
         app.update(key(KeyCode::Char('y'))),
         vec![Effect::Pause {

@@ -52,13 +52,19 @@ pub(crate) enum Msg {
     Done(String),
     /// A request failed.
     Failed(String),
-    /// A pause was refused because the repository, or one of them in a pause of all, runs a job; the daemon's text
-    /// names it.
-    Busy {
-        /// `None` for every repository.
-        repository: Option<String>,
-        message: String,
-    },
+    /// A pause was refused because the repository, or one of them in a pause of all, runs a job.
+    Busy(Refused),
+}
+
+/// A pause the daemon refused because jobs run, waiting for `y` to force it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refused {
+    /// `None` for every repository.
+    pub(crate) repository: Option<String>,
+    /// The daemon's text, naming the jobs.
+    pub(crate) message: String,
+    /// How many jobs a forced pause cancels.
+    pub(crate) jobs: usize,
 }
 
 /// A request `update` asks for.
@@ -214,8 +220,7 @@ pub(crate) struct App {
     pub(crate) history: History,
     pub(crate) job: Option<JobView>,
     pub(crate) flash: Option<Flash>,
-    /// A refused pause waiting for `y` to force it: the repository (`None` for all) and the daemon's text.
-    pub(crate) confirm: Option<(Option<String>, String)>,
+    pub(crate) confirm: Option<Refused>,
     pub(crate) help: bool,
 }
 
@@ -317,10 +322,7 @@ impl App {
             Msg::Status(status) => self.live.status = status,
             Msg::Done(text) => self.flash(text, Outcome::Done),
             Msg::Failed(text) => self.flash(text, Outcome::Failed),
-            Msg::Busy {
-                repository,
-                message,
-            } => self.confirm = Some((repository, message)),
+            Msg::Busy(refused) => self.confirm = Some(refused),
         }
         Vec::new()
     }
@@ -405,10 +407,10 @@ impl App {
             }
         }
         self.flash = None;
-        if let Some((repository, _)) = self.confirm.take() {
+        if let Some(refused) = self.confirm.take() {
             return match key.code {
                 KeyCode::Char('y') => vec![Effect::Pause {
-                    repository,
+                    repository: refused.repository,
                     force: true,
                 }],
                 _ => Vec::new(),

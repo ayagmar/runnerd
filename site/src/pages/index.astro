@@ -64,8 +64,8 @@ const steps = [
 ];
 
 // Real output of runnerctl from main, against the web dashboard's demo daemon (crates/web/examples/demo).
-const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105; pause with force to cancel it
-\`runnerctl pause --force halyard/ledger\` cancels its runs and removes their runners`;
+const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105
+\`runnerctl pause --force halyard/ledger\` cancels its run and removes its runner`;
 
 // The clients, each a slot: filled once released, with a link to it; free until it ships with real output.
 const clientsDoc = `${base}clients/`;

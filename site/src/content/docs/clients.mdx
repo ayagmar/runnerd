@@ -130,16 +130,16 @@ CPU and MEM are the last sample, taken every few seconds. Ctrl-C quits.
 
 ```console
 $ runnerctl pause halyard/ledger
-error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105; pause with force to cancel it
-`runnerctl pause --force halyard/ledger` cancels its runs and removes their runners
+error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105
+`runnerctl pause --force halyard/ledger` cancels its run and removes its runner
 ```
 
 ### Every repository at once
 
 ```console wrap=false
 $ runnerctl pause --all
-error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792721996; halyard/storefront runs job 120055991650 on runnerd-3f9a-forge-node-1-1792722114; pause with force to cancel them
-`runnerctl pause --force --all` cancels its runs and removes their runners
+error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792721996; halyard/storefront runs job 120055991650 on runnerd-3f9a-forge-node-1-1792722114
+`runnerctl pause --force --all` cancels their runs and removes their runners
 $ runnerctl pause --all --force
 every repository paused: it gets no new runners
 stopped job 120055991700 on runnerd-3f9a-forge-jvm-1-1792721996

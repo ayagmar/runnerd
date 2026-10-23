@@ -25,7 +25,7 @@ mod draw;
 #[cfg(test)]
 mod tests;
 
-use app::{App, Effect, LOG_LINES, Msg};
+use app::{App, Effect, LOG_LINES, Msg, Refused};
 use draw::Theme;
 
 /// How long the feed waits between attempts to reach a daemon that went away.
@@ -430,10 +430,15 @@ async fn pause(client: &Client, repository: Option<String>, force: bool) -> Msg 
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
-        Err(ClientError::Api { status, message }) if status == StatusCode::CONFLICT => Msg::Busy {
+        Err(ClientError::Api {
+            status,
+            message,
+            jobs,
+        }) if status == StatusCode::CONFLICT => Msg::Busy(Refused {
             repository,
             message,
-        },
+            jobs: jobs.len(),
+        }),
         Err(error) => Msg::Failed(error.to_string()),
     }
 }

@@ -192,6 +192,7 @@ fn page(rendered: Result<Markup, ClientError>) -> Response {
         Err(ClientError::Api {
             status: StatusCode::NOT_FOUND,
             message,
+            ..
         }) => (
             StatusCode::NOT_FOUND,
             views::error_page("Not found", &message),
@@ -249,7 +250,9 @@ async fn job(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {
 async fn job_log(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {
     match app.daemon.text(&format!("/v1/jobs/{id}/logs")).await {
         Ok(text) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response(),
-        Err(ClientError::Api { status, message }) => (status, message).into_response(),
+        Err(ClientError::Api {
+            status, message, ..
+        }) => (status, message).into_response(),
         Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
     }
 }

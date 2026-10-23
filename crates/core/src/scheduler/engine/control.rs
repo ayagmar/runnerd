@@ -462,12 +462,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .iter()
                 .map(|(repository, jobs)| format!("{repository} runs {}", list(jobs)))
                 .collect();
+            // The jobs only: each client says how to force the pause in its own terms.
             return Err(ControlError::Busy {
-                message: format!(
-                    "{}; pause with force to cancel {}",
-                    runs.join("; "),
-                    if jobs.len() == 1 { "it" } else { "them" }
-                ),
+                message: runs.join("; "),
                 jobs,
             });
         }

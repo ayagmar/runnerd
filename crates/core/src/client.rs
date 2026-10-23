@@ -19,7 +19,7 @@ use tokio::net::UnixStream;
 
 pub use hyper::{Method, StatusCode};
 
-use crate::api::{ErrorResponse, EventEnvelope, EventQuery, LogQuery};
+use crate::api::{Busy, ErrorResponse, EventEnvelope, EventQuery, LogQuery, RunningJob};
 
 /// How long the client waits for the daemon.
 #[derive(Debug, Clone, Copy)]
@@ -54,6 +54,8 @@ pub enum ClientError {
         status: StatusCode,
         /// The daemon's `ErrorResponse.message`, or the body when it sent none.
         message: String,
+        /// The runners in the way, when the daemon refused with a [`Busy`]; else empty.
+        jobs: Vec<RunningJob>,
     },
     /// The daemon did not answer within this long.
     Timeout(Duration),
@@ -72,7 +74,9 @@ impl fmt::Display for ClientError {
                  or `runnerd serve`",
                 socket.display()
             ),
-            ClientError::Api { status, message } => write!(f, "{message} ({status})"),
+            ClientError::Api {
+                status, message, ..
+            } => write!(f, "{message} ({status})"),
             ClientError::Timeout(after) => {
                 write!(f, "runnerd did not answer within {}s", after.as_secs())
             }
@@ -271,9 +275,13 @@ impl Client {
             .await
             .map(http_body_util::Collected::to_bytes)
             .unwrap_or_default();
+        let jobs = serde_json::from_slice::<Busy>(&body)
+            .map(|busy| busy.jobs)
+            .unwrap_or_default();
         Err(ClientError::Api {
             status,
             message: error_message(status, &body),
+            jobs,
         })
     }
 

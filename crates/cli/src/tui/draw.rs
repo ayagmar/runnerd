@@ -152,13 +152,19 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 }
 
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let line = if let Some((_, message)) = &app.confirm {
+    let line = if let Some(refused) = &app.confirm {
+        let ask = if refused.jobs == 1 {
+            " y cancels 1 run and pauses, any other key keeps it running: ".to_owned()
+        } else {
+            format!(
+                " y cancels {} runs and pauses, any other key keeps them running: ",
+                refused.jobs
+            )
+        };
+        let rest = usize::from(area.width).saturating_sub(ask.width());
         Line::from(vec![
-            Span::styled(
-                " y cancels its run and pauses, any other key keeps it running: ",
-                bold(),
-            ),
-            Span::styled(message.clone(), theme.wait()),
+            Span::styled(ask, bold()),
+            Span::styled(fit(&refused.message, rest), theme.wait()),
         ])
     } else if let Some(flash) = &app.flash {
         let style = if flash.outcome == Outcome::Failed {
