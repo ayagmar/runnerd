@@ -24,13 +24,13 @@ maven = { max_size = "5G" }
 reseed_at = "2G"
 
 [profiles.jvm]
-image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5"
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.6"
 cpus = 8
 memory = "9G"
 slots = 2
 
 [profiles.node]
-image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.5"
+image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.6"
 cpus = 8
 memory = "7G"
 slots = 2
@@ -61,7 +61,7 @@ Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them.
 
 | Key | Runs | Pulled |
 |---|---|---|
-| `image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5"` | the published stage | before the profile's first runner |
+| `image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.6"` | the published stage | before the profile's first runner |
 | `image_stage = "jvm"` | `runnerd-runner:jvm`, built on this host | never |
 
 runnerd logs the pull's progress, and `runnerd doctor` says whether each image is present or can be pulled. Keep the tag at the daemon's version: the image's scripts and the daemon change together, and `runnerd doctor` warns when they differ. To run your own changes to `image/`, build the stage from a clone and set `image_stage`:
