@@ -1480,7 +1480,7 @@ async fn a_paused_repository_a_reload_removes_comes_back_active_also_after_a_res
     assert_eq!(
         handle.control.set_paused(&one("o/s"), false).await,
         Err(ControlError::NotFound(
-            "o/s is not a configured repository".to_owned()
+            "o/s is not a configured repository; configured: o/r".to_owned()
         ))
     );
 

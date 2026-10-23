@@ -241,13 +241,16 @@ pub enum ConfigError {
     Parse(#[from] toml::de::Error),
     /// A repository names a profile `[profiles]` does not define.
     #[error(
-        "repository {repository} uses profile {profile:?}, which is not defined under [profiles]"
+        "repository {repository} uses profile {profile:?}, which is not defined under [profiles]; {}",
+        defined_profiles(.defined)
     )]
     UnknownProfile {
         /// The repository's `owner/name`.
         repository: String,
         /// The profile it names.
         profile: String,
+        /// The profiles `[profiles]` defines.
+        defined: Vec<String>,
     },
     /// A repository has no labels, or an empty one.
     #[error("repository {repository} needs at least one non-empty label")]
@@ -273,7 +276,8 @@ pub enum ConfigError {
     /// The caps add up to more than the slice's `MemoryMax`.
     #[error(
         "slots × memory over all profiles plus the mirror is {total}, \
-         the slice {slice}'s MemoryMax is {memory_max}"
+         the slice {slice}'s MemoryMax is {memory_max}; lower `slots` or `memory`, or raise the slice's \
+         MemoryMax (`runnerd doctor` prints its unit)"
     )]
     OverBudget {
         /// What every runner and the mirror may use at once.
@@ -283,6 +287,14 @@ pub enum ConfigError {
         /// The slice's `MemoryMax`.
         memory_max: ByteSize,
     },
+}
+
+fn defined_profiles(defined: &[String]) -> String {
+    if defined.is_empty() {
+        "it defines none".to_owned()
+    } else {
+        format!("defined: {}", defined.join(", "))
+    }
 }
 
 /// What a valid config should still fix.
@@ -423,6 +435,7 @@ impl Config {
                 return Err(ConfigError::UnknownProfile {
                     repository: repository.name.clone(),
                     profile: repository.profile.clone(),
+                    defined: self.profiles.keys().cloned().collect(),
                 });
             }
             if repository.labels.is_empty() || repository.labels.iter().any(|l| l.trim().is_empty())

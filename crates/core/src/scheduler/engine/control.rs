@@ -225,7 +225,7 @@ impl Control {
             let names: Vec<&String> = match target {
                 Target::Repository(repository) => {
                     let Some(name) = repositories.get(repository) else {
-                        return Err(not_configured(repository));
+                        return Err(not_configured(repository, repositories.iter()));
                     };
                     vec![name]
                 }
@@ -362,8 +362,20 @@ impl Control {
     }
 }
 
-fn not_configured(repository: &str) -> ControlError {
-    ControlError::NotFound(format!("{repository} is not a configured repository"))
+/// Names the repositories there are, so a mistyped name shows its fix.
+fn not_configured<'name>(
+    repository: &str,
+    configured: impl Iterator<Item = &'name String>,
+) -> ControlError {
+    let configured: Vec<&str> = configured.map(String::as_str).collect();
+    let configured = if configured.is_empty() {
+        "none is configured".to_owned()
+    } else {
+        format!("configured: {}", configured.join(", "))
+    };
+    ControlError::NotFound(format!(
+        "{repository} is not a configured repository; {configured}"
+    ))
 }
 
 /// `jobs` for people to read: `job 1 on runner-a, runner-b`.
@@ -422,7 +434,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     ) -> Result<api::Paused, ControlError> {
         let repositories: BTreeSet<String> = match target {
             Target::Repository(repository) if !self.repositories.contains_key(repository) => {
-                return Err(not_configured(repository));
+                return Err(not_configured(repository, self.repositories.keys()));
             }
             Target::Repository(repository) => BTreeSet::from([repository.clone()]),
             Target::All => self.repositories.keys().cloned().collect(),
@@ -581,7 +593,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .find(|volume| volume.name == name)
         else {
             return Err(ControlError::NotFound(format!(
-                "{name} is not a cache volume of this config"
+                "{name} is not a cache volume of this config; `runnerctl caches` lists them"
             )));
         };
         let users: Vec<api::RunningJob> = match &volume.kind {
@@ -608,7 +620,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         if !users.is_empty() {
             return Err(ControlError::Busy {
-                message: format!("{name} is in use by {}", list(&users)),
+                message: format!(
+                    "{name} is in use by {}; clean it once they finish",
+                    list(&users)
+                ),
                 jobs: users,
             });
         }
