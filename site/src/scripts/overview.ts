@@ -1,15 +1,17 @@
 // The landing page's dashboard overview, replayed: the web dashboard's demo daemon (crates/web/examples/demo) as a
 // script of what it would show over six minutes. `at(t)` is the whole state at demo second t, so the page renders
-// second 0 at build time and the script only moves t. It must not invent states or numbers the dashboard does not have.
+// second 0 at build time and the script only moves t. Every number comes from the demo's own formulas: the fixture's
+// samples up to second 0 (fake.rs, `job`), then the samples main.rs sends every 2 seconds. Nothing here is tuned.
 
 const GIB = 1024 ** 3;
+const MIB = 1024 ** 2;
 
 /** Bytes the way runnerd's ByteSize prints them: the largest unit, two decimals, trailing zeros dropped. */
 export function size(bytes: number): string {
   const units: [string, number][] = [
     ['T', 1024 ** 4],
     ['G', GIB],
-    ['M', 1024 ** 2],
+    ['M', MIB],
     ['K', 1024],
   ];
   const unit = units.find(([, factor]) => bytes >= factor);
@@ -17,8 +19,8 @@ export function size(bytes: number): string {
   return `${(bytes / unit[1]).toFixed(2).replace(/0+$/, '').replace(/\.$/, '')}${unit[0]}`;
 }
 
-/** Cores with two decimals, trailing zeros dropped, as the dashboard prints them. */
-const cores = (n: number) => n.toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
+/** Millicores as cores with two decimals, trailing zeros dropped, as the dashboard prints them. */
+const cores = (millicores: number) => (millicores / 1000).toFixed(2).replace(/0+$/, '').replace(/\.$/, '');
 
 /** The dashboard's run time: 9s, 8m 46s. */
 function duration(s: number): string {
@@ -28,38 +30,47 @@ function duration(s: number): string {
 
 const ago = (s: number) => (s < 10 ? 'just now' : s < 60 ? `${Math.floor(s)} s ago` : `${Math.floor(s / 60)} min ago`);
 
-// The fixtures' two workflows: step names and seconds from fake.rs; memory (GiB) and CPU (cores) each step settles
-// at, chosen so the replay passes through the published screenshot's 4.14G and 2.63G.
-type Step = [name: string, seconds: number, memory: number, cpu: number];
+// The fixtures' two workflows, step names and seconds from fake.rs.
+type Step = [name: string, seconds: number];
 const LEDGER: Step[] = [
-  ['Set up job', 3, 0.3, 0.5],
-  ['Run actions/checkout@v6', 4, 0.4, 0.8],
-  ['Set up JDK 21', 6, 0.7, 1.2],
-  ['Restore Gradle cache', 9, 0.9, 1.5],
-  ['Build', 148, 2.6, 6.2],
-  ['Unit tests', 212, 3.3, 4.5],
-  ['Integration tests (Testcontainers)', 281, 4.1, 1.6],
-  ['Post Run actions/checkout@v6', 1, 4.1, 0.6],
-  ['Complete job', 1, 4.1, 0.4],
+  ['Set up job', 3],
+  ['Run actions/checkout@v6', 4],
+  ['Set up JDK 21', 6],
+  ['Restore Gradle cache', 9],
+  ['Build', 148],
+  ['Unit tests', 212],
+  ['Integration tests (Testcontainers)', 281],
+  ['Post Run actions/checkout@v6', 1],
+  ['Complete job', 1],
 ];
 const STOREFRONT: Step[] = [
-  ['Set up job', 2, 0.3, 0.5],
-  ['Run actions/checkout@v6', 3, 0.4, 0.8],
-  ['Set up pnpm', 5, 0.5, 1],
-  ['pnpm install --frozen-lockfile', 41, 1.1, 3.5],
-  ['Build', 96, 1.8, 5.5],
-  ['Playwright e2e', 388, 2.6, 1.6],
-  ['Post Run actions/checkout@v6', 1, 2.6, 0.6],
-  ['Complete job', 1, 2.6, 0.4],
+  ['Set up job', 2],
+  ['Run actions/checkout@v6', 3],
+  ['Set up pnpm', 5],
+  ['pnpm install --frozen-lockfile', 41],
+  ['Build', 96],
+  ['Playwright e2e', 388],
+  ['Post Run actions/checkout@v6', 1],
+  ['Complete job', 1],
 ];
+
+interface Sample {
+  at: number;
+  memory: number;
+  cpu: number;
+}
 
 interface Run {
   repo: string;
   name: string;
   steps: Step[];
+  /** The fixture's `Spec::memory`: what its sampled memory is drawn around. */
+  memory: number;
   /** Demo second the runner's container started; it registers and waits for its job until `started`. */
   container: number;
   started: number;
+  /** The fixture's samples up to second 0, for the two jobs running when the demo starts. */
+  history: Sample[];
 }
 
 interface Profile {
@@ -73,43 +84,94 @@ interface Profile {
 
 const length = (run: Run) => run.steps.reduce((sum, step) => sum + step[1], 0);
 
+/** fake.rs's `Noise`: a 64-bit LCG seeded with 7, so the fixture's samples come out the same here. */
+class Noise {
+  state = 7n;
+  next(below: number): number {
+    this.state = (this.state * 6_364_136_223_846_793_005n + 1_442_695_040_888_963_407n) & 0xffff_ffff_ffff_ffffn;
+    return Number((this.state >> 33n) % BigInt(Math.max(1, below)));
+  }
+}
+
+/** fake.rs's `job` samples of a job running at second 0: every 2 s from its container's start, in the order it adds
+ * them (ledger, then storefront), so each draws the same noise. */
+function history(run: Run, noise: Noise): Sample[] {
+  const samples: Sample[] = [];
+  for (let at = run.container; at <= 0; at += 2) {
+    const progress = Math.floor(((at - run.container) * 100) / Math.max(1, -run.container));
+    const memory = Math.floor((run.memory * (35 + Math.min(progress, 60))) / 100) + noise.next(Math.floor(run.memory / 10));
+    const cpu = 400 + noise.next(progress > 20 ? 7200 : 2000);
+    noise.next(3 * MIB);
+    samples.push({ at, memory, cpu });
+  }
+  return samples;
+}
+
+/** main.rs's live sample of a running job at demo second n (even, from 2): around 1.5 times its first sample. A job
+ * the replay starts has no fixture samples; its first is `job`'s formula at progress 0, without the noise. */
+function live(run: Run, n: number): Sample {
+  const first = run.history[0]?.memory ?? Math.floor((run.memory * 35) / 100);
+  const base = Math.floor((first * 3) / 2);
+  return { at: n, memory: base + ((n * 7919) % 97) * Math.floor(base / 600), cpu: 1500 + ((n * 6151) % 5200) };
+}
+
+/** A running job's last sample at demo second t. */
+function sampleAt(run: Run, t: number): Sample {
+  if (t >= 2 && t - (t % 2) > run.started) return live(run, t - (t % 2));
+  return run.history.length ? run.history[run.history.length - 1] : live(run, Math.max(2, run.started + 2 - (run.started % 2)));
+}
+
+/** main.rs's sample of the slice at demo second t: 9G and a little more, whatever runs. */
+function slice(t: number): number {
+  const n = Math.max(2, t - (t % 2));
+  const base = 9 * GIB;
+  return base + ((n * 104_729) % 89) * Math.floor(base / 300);
+}
+
 // Second 0 is the fixture: ledger's build 422 s in (step 7 of 9), storefront's playwright 305 s in (step 6 of 8),
 // a storefront runner in node slot 2 for the one queued job, jvm slot 2 free. Then that runner takes its job,
 // both first jobs finish and free their slots, and a new ledger job gets a runner in jvm slot 1, the first free.
 const ledger = 'halyard/ledger';
 const storefront = 'halyard/storefront';
+const LEDGER_MEMORY = Math.floor((9 * GIB * 7) / 10);
+const STOREFRONT_MEMORY = Math.floor((7 * GIB * 6) / 10);
+const run = (repo: string, name: string, steps: Step[], memory: number, container: number, started: number): Run => ({
+  repo,
+  name,
+  steps,
+  memory,
+  container,
+  started,
+  history: [],
+});
+const firstLedger = run(ledger, 'build', LEDGER, LEDGER_MEMORY, -427, -422);
+const firstStorefront = run(storefront, 'playwright', STOREFRONT, STOREFRONT_MEMORY, -309, -305);
+const noise = new Noise();
+firstLedger.history = history(firstLedger, noise);
+firstStorefront.history = history(firstStorefront, noise);
 const PROFILES: Profile[] = [
   {
     name: 'jvm',
     memory: 9 * GIB,
     cpus: 8,
     tone: 'p0',
-    slots: [
-      [
-        { repo: ledger, name: 'build', steps: LEDGER, container: -426, started: -422 },
-        { repo: ledger, name: 'build', steps: LEDGER, container: 258, started: 268 },
-      ],
-      [],
-    ],
+    slots: [[firstLedger, run(ledger, 'build', LEDGER, LEDGER_MEMORY, 258, 268)], []],
   },
   {
     name: 'node',
     memory: 7 * GIB,
     cpus: 8,
     tone: 'p1',
-    slots: [
-      [{ repo: storefront, name: 'playwright', steps: STOREFRONT, container: -309, started: -305 }],
-      [{ repo: storefront, name: 'playwright', steps: STOREFRONT, container: -12, started: 6 }],
-    ],
+    slots: [[firstStorefront], [run(storefront, 'playwright', STOREFRONT, STOREFRONT_MEMORY, -12, 6)]],
   },
 ];
 const MAX = 33 * GIB;
-const MIRROR = 512 * 1024 ** 2;
+const MIRROR = 512 * MIB;
 export const LOOP = 360;
 /** When a slot changes, for the scrubber's marks: a runner starts, takes its job, or its job ends. */
 export const MOMENTS = [
   ...new Set(
-    PROFILES.flatMap((p) => p.slots.flat().flatMap((run) => [run.container, run.started, run.started + length(run)])).filter(
+    PROFILES.flatMap((p) => p.slots.flat().flatMap((r) => [r.container, r.started, r.started + length(r)])).filter(
       (t) => t > 0 && t < LOOP,
     ),
   ),
@@ -119,80 +181,47 @@ export const SPEED = 8;
 /** How far back a slot's sparkline reaches, as on the dashboard. */
 const SPARK = 300;
 
-/** Deterministic noise in [-1, 1], so every replay and the built page agree. */
-function noise(seed: number): number {
-  const x = Math.sin(seed * 12.9898 + 78.233) * 43758.5453;
-  return (x - Math.floor(x)) * 2 - 1;
-}
-
-/** A running job's sample at demo second t: each step ramps from the last step's level to its own over 30 s. */
-function sample(run: Run, t: number) {
-  const elapsed = t - run.started;
-  let at = 0;
-  let from = [0.25, 0.4];
-  for (const [index, [, seconds, memory, cpu]] of run.steps.entries()) {
-    if (elapsed < at + seconds || index === run.steps.length - 1) {
-      const k = Math.min(1, Math.max(0, (elapsed - at) / 30));
-      const seed = Math.floor(t / 2) * 2 + run.started;
-      return {
-        memory: (from[0] + (memory - from[0]) * k + noise(seed) * memory * 0.03) * GIB,
-        cpu: Math.max(0.2, from[1] + (cpu - from[1]) * k + noise(seed + 0.5) * cpu * 0.45),
-      };
-    }
-    at += seconds;
-    from = [memory, cpu];
-  }
-  return { memory: 0, cpu: 0 };
-}
-
 interface Slot {
   key: string;
   profile: Profile;
   number: number;
   state: 'idle' | 'starting' | 'busy';
+  /** The runner in the slot now, if any. */
   run?: Run;
+  /** The slot's latest job that has started, running or done: an open card keeps listing its steps. */
+  last?: Run;
+  /** How many steps its jobs have: an open card keeps room for them all. */
+  rows: number;
   /** Index of the step running, which is also how many are done; for a busy slot. */
   step?: number;
-  memory?: number;
-  cpu?: number;
+  sample?: Sample;
   t: number;
 }
 
 export function at(t: number) {
   const slots: Slot[] = PROFILES.flatMap((profile) =>
     profile.slots.map((runs, i) => {
-      const slot: Slot = { key: `${profile.name}-${i + 1}`, profile, number: i + 1, state: 'idle', t };
-      const run = runs.find((r) => t >= r.container && t < r.started + length(r));
-      if (!run) return slot;
-      slot.run = run;
-      if (t < run.started) return { ...slot, state: 'starting' };
-      let end = run.started;
-      const step = run.steps.findIndex(([, seconds]) => t < (end += seconds));
-      return { ...slot, state: 'busy', step, ...sample(run, t) };
+      const last = runs.filter((r) => r.started <= t).pop();
+      const rows = Math.max(0, ...runs.map((r) => r.steps.length));
+      const slot: Slot = { key: `${profile.name}-${i + 1}`, profile, number: i + 1, state: 'idle', rows, last, t };
+      const r = runs.find((r) => t >= r.container && t < r.started + length(r));
+      if (!r) return slot;
+      if (t < r.started) return { ...slot, run: r, state: 'starting' };
+      let end = r.started;
+      const step = r.steps.findIndex(([, seconds]) => t < (end += seconds));
+      return { ...slot, run: r, state: 'busy', step, sample: sampleAt(r, t) };
     }),
   );
-  const running = slots.filter((s) => s.state !== 'idle');
-  const reserved = running.reduce((sum, s) => sum + s.profile.memory, 0) + MIRROR;
-  const jobs = slots.filter((s) => s.state === 'busy');
-  // The slice holds more than the jobs' sampled memory: Docker inside each runner, page cache. The fixture's host
-  // samples sit at 600M with nothing running.
-  const inUse = 0.6 * GIB + jobs.reduce((sum, s) => sum + s.memory! * 1.55, 0) + noise(Math.floor(t / 2)) * 0.15 * GIB;
-  return { t, slots, reserved, inUse };
+  const reserved = slots.filter((s) => s.state !== 'idle').reduce((sum, s) => sum + s.profile.memory, 0) + MIRROR;
+  return { t, slots, reserved, inUse: slice(t) };
 }
 
 type State = ReturnType<typeof at>;
 
 const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;');
 
-/** What the readout above the bar says about one block: a figure in the big type, and the words after it. */
-interface Lens {
-  figure: string;
-  text: string;
-}
-
-/** The readout: the slice's total, or what the block under the pointer or focus holds. */
-export function readout(state: State, lens?: Lens): string {
-  if (lens) return `<span class="big">${lens.figure}</span> ${escape(lens.text)}`;
+/** The readout: the slice's total, which stays while the lens beside it says what one block holds. */
+export function readout(state: State): string {
   return `<span class="big">${size(state.reserved)}</span> of ${size(MAX)} in <code>ci.slice</code><span class="muted"> · ${size(state.inUse)} in use</span>`;
 }
 
@@ -201,17 +230,19 @@ const FREE = MAX - MIRROR - PROFILES.reduce((sum, p) => sum + p.memory * p.slots
 /** The budget's blocks after the slots, the mirror and what is free, in GiB. */
 export const rest = () => ({ mirror: MIRROR / GIB, free: FREE / GIB });
 
-function lens(slot: Slot): Lens {
+/** The lens: what one slot holds, its figure in bold. */
+export function lens(slot: Slot): string {
   const name = `${slot.profile.name} ${slot.number}`;
   const cap = size(slot.profile.memory);
-  if (slot.state === 'busy') return { figure: size(slot.memory!), text: `of ${cap} in ${name}, ${slot.run!.name} on ${slot.run!.repo}` };
-  if (slot.state === 'starting') return { figure: cap, text: `${name}, a runner for ${slot.run!.repo} waiting for its job` };
-  return { figure: cap, text: `${name}, idle` };
+  if (slot.state === 'busy')
+    return `<strong>${size(slot.sample!.memory)}</strong> of ${cap} in ${name}, ${slot.run!.name} on ${slot.run!.repo}`;
+  if (slot.state === 'starting') return `<strong>${cap}</strong> ${name}, a runner for ${slot.run!.repo} waiting for its job`;
+  return `<strong>${cap}</strong> ${name}, idle`;
 }
 
 /** A slot's block in the budget: its size and name; `--fill` its job's memory against the cap. */
 export function block(slot: Slot) {
-  const fill = slot.memory ? Math.min(1, slot.memory / slot.profile.memory) : 0;
+  const fill = slot.sample ? Math.min(1, slot.sample.memory / slot.profile.memory) : 0;
   return {
     className: `block ${slot.profile.tone} ${slot.state}`,
     fill: fill.toFixed(3),
@@ -228,41 +259,44 @@ export function barLabel(state: State): string {
   return `Memory budget of ci.slice: ${size(state.reserved)} of ${size(MAX)} reserved; ${slots.join('; ')}; 512M mirror`;
 }
 
-/** A sparkline from the job's start or five minutes back, whichever is later, in the dashboard's 1000 by 100 box. */
+/** A sparkline from the job's start or five minutes back, whichever is later, in the dashboard's 1000 by 100 box:
+ * the fixture's samples, then the live ones. */
 function spark(slot: Slot, key: 'memory' | 'cpu', top: number): string {
-  const run = slot.run!;
-  const from = Math.max(run.started, slot.t - SPARK);
-  const points: string[] = [];
-  for (let at = from - (from % 2); at <= slot.t; at += 2) {
-    const x = ((Math.max(at, from) - from) / Math.max(1, slot.t - from)) * 1000;
-    const y = 100 - Math.min(1, sample(run, at)[key] / top) * 100;
-    points.push(`${x.toFixed(1)},${y.toFixed(1)}`);
-  }
-  if (points.length < 2) return '';
-  const first = points[0].split(',')[0];
-  const last = points[points.length - 1].split(',')[0];
-  return `<svg class="sparkline" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true"><path class="area ${key}" d="M${first},100L${points.join('L')}L${last},100Z"/><path class="line ${key}" d="M${points.join('L')}" vector-effect="non-scaling-stroke"/></svg>`;
+  const r = slot.run!;
+  const from = Math.max(r.started, slot.t - SPARK);
+  const samples = [...r.history, ...Array.from({ length: Math.floor(slot.t / 2) }, (_, i) => 2 * (i + 1))
+    .filter((n) => n > r.started)
+    .map((n) => live(r, n))].filter((s) => s.at >= from && s.at <= slot.t);
+  if (samples.length < 2) return '';
+  const points = samples.map((s) => `${(((s.at - from) / Math.max(1, slot.t - from)) * 1000).toFixed(1)},${(100 - Math.min(1, s[key] / top) * 100).toFixed(1)}`);
+  const x0 = points[0].split(',')[0];
+  const x1 = points[points.length - 1].split(',')[0];
+  return `<svg class="sparkline" viewBox="0 0 1000 100" preserveAspectRatio="none" aria-hidden="true"><path class="area ${key}" d="M${x0},100L${points.join('L')}L${x1},100Z"/><path class="line ${key}" d="M${points.join('L')}" vector-effect="non-scaling-stroke"/></svg>`;
 }
 
 /** A slot's card under its heading, as the dashboard draws it. */
 export function card(slot: Slot): string {
-  const { run } = slot;
+  const r = slot.run;
   if (slot.state === 'idle') return '';
   if (slot.state === 'starting')
-    return `<span class="repo">${run!.repo}</span><p class="slot-idle">Waiting for its job <span class="muted">${ago(slot.t - run!.container)}</span></p>`;
-  const steps = run!.steps;
-  return `<div class="slot-title"><p class="slot-job"><span class="repo">${run!.repo}</span><span class="job-name">${run!.name}</span></p><p class="elapsed"><span class="visually-hidden">Running for </span>${duration(slot.t - run!.started)}</p></div><p class="step"><span class="step-count">${slot.step}/${steps.length}</span> ${escape(steps[slot.step!][0])}</p><dl class="slot-figures"><div><dt class="visually-hidden">Memory</dt><dd>${size(slot.memory!)}</dd>${spark(slot, 'memory', slot.profile.memory)}</div><div><dt class="visually-hidden">CPU</dt><dd>${cores(slot.cpu!)} cores</dd>${spark(slot, 'cpu', slot.profile.cpus)}</div></dl>`;
+    return `<span class="repo">${r!.repo}</span><p class="slot-idle">Waiting for its job <span class="muted">${ago(slot.t - r!.container)}</span></p>`;
+  const steps = r!.steps;
+  const s = slot.sample!;
+  return `<div class="slot-title"><p class="slot-job"><span class="repo">${r!.repo}</span><span class="job-name">${r!.name}</span></p><p class="elapsed"><span class="visually-hidden">Running for </span>${duration(slot.t - r!.started)}</p></div><p class="step"><span class="step-count">${slot.step}/${steps.length}</span> ${escape(steps[slot.step!][0])}</p><dl class="slot-figures"><div><dt class="visually-hidden">Memory</dt><dd>${size(s.memory)}</dd>${spark(slot, 'memory', slot.profile.memory)}</div><div><dt class="visually-hidden">CPU</dt><dd>${cores(s.cpu)} cores</dd>${spark(slot, 'cpu', slot.profile.cpus * 1000)}</div></dl>`;
 }
 
-/** A busy slot's steps, as its job page lists them: done with their time, the one running, those to come. */
+/** The steps of a slot's latest job, as its job page lists them: done with their time, the one running, those to
+ * come. A finished job's stay listed until the next one starts, so the card keeps its height. */
 export function steps(slot: Slot): string {
-  if (slot.state !== 'busy') return '';
-  let start = slot.run!.started;
-  return `<ol>${slot
-    .run!.steps.map(([name, seconds], i) => {
-      const state = i < slot.step! ? 'done' : i === slot.step ? 'now' : 'next';
+  const r = slot.last;
+  if (!r) return '';
+  let start = r.started;
+  return `<ol>${r.steps
+    .map(([name, seconds]) => {
+      const end = start + seconds;
+      const state = slot.t >= end ? 'done' : slot.t >= start ? 'now' : 'next';
       const time = state === 'done' ? duration(seconds) : state === 'now' ? duration(slot.t - start) : '';
-      start += seconds;
+      start = end;
       return `<li class="${state}"${state === 'now' ? ' aria-current="step"' : ''}><span>${escape(name)}</span><span>${time}</span></li>`;
     })
     .join('')}</ol>`;
@@ -274,9 +308,10 @@ export function mount(root: HTMLElement) {
   const cards = new Map([...root.querySelectorAll<HTMLElement>('[data-card]')].map((el) => [el.dataset.card!, el]));
   const bar = root.querySelector<HTMLElement>('[data-bar]')!;
   const readoutEl = root.querySelector<HTMLElement>('[data-readout]')!;
+  const lensEl = root.querySelector<HTMLElement>('[data-lens]')!;
   const play = root.querySelector<HTMLButtonElement>('[data-play]')!;
   const scrub = root.querySelector<HTMLInputElement>('[data-scrub]')!;
-  const clock = root.querySelector<HTMLOutputElement>('[data-clock]')!;
+  const clock = root.querySelector<HTMLElement>('[data-clock]')!;
   root.querySelector<HTMLElement>('[data-controls]')!.hidden = false;
 
   let t = 0;
@@ -297,26 +332,29 @@ export function mount(root: HTMLElement) {
   const render = () => {
     const state = at(t);
     const hot = state.slots.find((slot) => slot.key === hovered);
-    set(readoutEl, readout(state, hot && lens(hot)));
+    set(readoutEl, readout(state));
+    set(lensEl, hot ? lens(hot) : '');
     bar.setAttribute('aria-label', barLabel(state));
     for (const slot of state.slots) {
       const b = block(slot);
+      const linked = slot.key === hovered;
       const blockEl = blocks.get(slot.key)!;
-      blockEl.className = b.className;
+      blockEl.className = `${b.className}${linked ? ' linked' : ''}`;
       blockEl.style.setProperty('--fill', b.fill);
       set(blockEl, b.html);
       const cardEl = cards.get(slot.key)!;
-      cardEl.className = `card ${slot.profile.tone} ${slot.state}`;
+      cardEl.className = `card ${slot.profile.tone} ${slot.state}${linked ? ' linked' : ''}`;
       set(cardEl.querySelector<HTMLElement>('[data-body]')!, card(slot));
-      const open = picked === slot.key && slot.state === 'busy';
       const pick = cardEl.querySelector<HTMLElement>('[data-pick]')!;
-      if (slot.state === 'busy') pick.setAttribute('aria-expanded', String(open));
+      if (slot.rows) pick.setAttribute('aria-expanded', String(picked === slot.key));
       else pick.removeAttribute('aria-expanded');
-      set(cardEl.querySelector<HTMLElement>('[data-steps]')!, open ? steps(slot) : '');
+      const stepsEl = cardEl.querySelector<HTMLElement>('[data-steps]')!;
+      stepsEl.toggleAttribute('data-open', picked === slot.key && slot.rows > 0);
+      set(stepsEl, picked === slot.key ? steps(slot) : '');
     }
     scrub.value = String(Math.floor(t));
     const time = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
-    clock.value = time;
+    clock.textContent = time;
     scrub.setAttribute('aria-valuetext', time);
   };
 
@@ -340,31 +378,35 @@ export function mount(root: HTMLElement) {
     render();
   });
 
-  // A slot's block and card are one thing: pointing at either, or focusing the card, lights both and puts the slot
-  // in the readout. A click or tap on either, or Enter on the card, opens or closes its steps; Escape closes them.
+  // A slot's block and card are one thing: pointing at, focusing or tapping either outlines both and puts the slot in
+  // the lens, as the dashboard does. A click or tap, or Enter on the card, also opens or closes its steps; Escape
+  // closes them.
   const hover = (key: string | null) => {
     hovered = key;
-    if (key) root.dataset.hot = key;
-    else delete root.dataset.hot;
     render();
   };
-  const pick = (key: string | null) => {
+  // A slot that never runs a job in the replay has no steps to open.
+  const pick = (key: string) => {
+    hovered = key;
+    if (!at(t).slots.find((slot) => slot.key === key)?.rows) return render();
     picked = picked === key ? null : key;
     render();
   };
   for (const [key, el] of [...blocks, ...cards]) {
     el.addEventListener('pointerenter', (e) => e.pointerType === 'mouse' && hover(key));
-    el.addEventListener('pointerleave', () => hover(null));
+    el.addEventListener('pointerleave', (e) => e.pointerType === 'mouse' && hovered === key && hover(null));
   }
   for (const [key, el] of blocks) el.addEventListener('click', () => pick(key));
   for (const [key, el] of cards) {
     const button = el.querySelector<HTMLElement>('[data-pick]')!;
     button.addEventListener('focus', () => hover(key));
-    button.addEventListener('blur', () => hover(null));
+    button.addEventListener('blur', () => hovered === key && hover(null));
     button.addEventListener('click', () => pick(key));
   }
   root.addEventListener('keydown', (e) => {
-    if (e.key === 'Escape' && picked) pick(picked);
+    if (e.key !== 'Escape' || !picked) return;
+    picked = null;
+    render();
   });
 
   new IntersectionObserver(([entry]) => {
