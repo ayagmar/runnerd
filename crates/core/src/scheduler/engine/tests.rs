@@ -199,6 +199,8 @@ struct DockerState {
     missing_images: BTreeSet<String>,
     /// Every pull fails, as when the registry does not answer.
     fail_pulls: bool,
+    /// Pulls do not finish while this is set, as when a large image downloads.
+    block_pulls: bool,
     /// The image of each runner container started, in order.
     started_images: Vec<String>,
     calls: Vec<String>,
@@ -228,6 +230,12 @@ impl DockerApi for FakeDocker {
     ) -> Result<String, docker::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("start {}", spec.name));
+        if state.missing_images.contains(&spec.image) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 404,
+                message: format!("No such image: {}", spec.image),
+            });
+        }
         state.started_images.push(spec.image.clone());
         state.memory.insert(spec.name.clone(), spec.memory.0);
         state
@@ -362,8 +370,11 @@ impl DockerApi for FakeDocker {
     }
 
     async fn pull(&self, image: &str) -> Result<(), docker::Error> {
+        self.0.lock().unwrap().calls.push(format!("pull {image}"));
+        while self.0.lock().unwrap().block_pulls {
+            tokio::time::sleep(Duration::from_millis(5)).await;
+        }
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("pull {image}"));
         if state.fail_pulls {
             return Err(docker::Error::DockerResponseServerError {
                 status_code: 500,
@@ -2109,7 +2120,7 @@ async fn a_failed_pull_starts_no_runner_and_is_not_retried_on_the_next_tick() {
 }
 
 #[tokio::test]
-async fn an_image_built_from_a_stage_is_never_pulled() {
+async fn a_stage_image_docker_lacks_is_never_pulled_and_its_runner_fails_to_start() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     github.0.lock().unwrap().queued = vec![job(1)];
     docker.0.lock().unwrap().missing_images = BTreeSet::from(["runnerd-runner:app".to_owned()]);
@@ -2117,8 +2128,34 @@ async fn an_image_built_from_a_stage_is_never_pulled() {
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(pulled(&docker.calls()), Vec::<&String>::new());
+    assert_eq!(registered(&github.calls()).len(), 1);
     assert_eq!(
         docker.0.lock().unwrap().started_images,
-        ["runnerd-runner:app"]
+        Vec::<String>::new()
     );
+}
+
+#[tokio::test]
+async fn a_requested_reseed_waits_for_the_profiles_image_and_then_runs() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.missing_images = BTreeSet::from([PUBLISHED.to_owned()]);
+        state.block_pulls = true;
+    }
+    let config = CONFIG.replace("image_stage = \"app\"", &format!("image = \"{PUBLISHED}\""));
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    engine.request_reseed("app").unwrap();
+    until_called(&mut engine, &docker, &format!("pull {PUBLISHED}")).await;
+    let seed = format!("start {}", Names::new("runnerd").seed("app"));
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(!docker.calls().contains(&seed), "{:?}", docker.calls());
+    docker.0.lock().unwrap().block_pulls = false;
+    until_called(&mut engine, &docker, &seed).await;
+    assert_eq!(docker.0.lock().unwrap().started_images, [PUBLISHED]);
 }

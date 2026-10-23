@@ -39,8 +39,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Reseeds the idle profiles whose slot 1 ran a job; with no runner running at all, stops the mirror and,
-    /// unless shutting down, empties the shared caches over their limit.
+    /// Reseeds the idle profiles whose slot 1 ran a job, once Docker has their image; with no runner running at all,
+    /// stops the mirror and, unless shutting down, empties the shared caches over their limit.
     pub(super) async fn idle_caches(&mut self, mode: Shutdown) {
         if mode == Shutdown::No {
             let due: Vec<String> = self
@@ -50,6 +50,14 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     self.slots
                         .get(*name)
                         .is_some_and(|slots| slots.iter().all(Option::is_none))
+                })
+                // The seed container runs the profile's image: a reseed waits for its pull, still due.
+                .filter(|name| {
+                    !self
+                        .config
+                        .profiles
+                        .get(*name)
+                        .is_some_and(|profile| self.awaits_image(&profile.image))
                 })
                 .cloned()
                 .collect();
