@@ -3,7 +3,7 @@
 use std::collections::BTreeMap;
 
 use super::{
-    Basis, Copies, HIGH_WATER, JobPeak, Key, Policy, Predictor, UNPREDICTABLE_FOR, simulate,
+    Basis, Copies, HIGH_WATER, JobPeak, Key, Policy, Predictor, Replay, UNPREDICTABLE_FOR, simulate,
 };
 use crate::config::Config;
 use crate::sizing::Ran;
@@ -554,10 +554,8 @@ fn a_job_seen_only_cancelled_reserves_its_cap() {
     assert_eq!(prediction.memory, 7 * G);
 }
 
-#[test]
-fn a_replayed_burst_of_copies_of_a_young_job_starts_one_by_its_own_runs_and_the_rest_by_its_profile()
- {
-    // A profile whose p95 is 4.8G, then two 1.3G builds, long before.
+/// A profile whose p95 is 4.8G, then two 1.3G builds, long before: a build's own runs say 1.5G, its profile 5.5G.
+fn young_history() -> Vec<Ran> {
     let mut jobs: Vec<Ran> = (0..30)
         .map(|i| {
             let (name, peak) = if i % 3 == 0 {
@@ -585,6 +583,31 @@ fn a_replayed_burst_of_copies_of_a_young_job_starts_one_by_its_own_runs_and_the_
             1300 * M,
         ));
     }
+    jobs
+}
+
+/// `young_history`, then six builds queued at once peaking at `peak`: the first runs 1 minute, the others 30.
+fn burst_after_young_history(peak: u64) -> Replay {
+    let mut jobs = young_history();
+    let burst = NOW + 600 * MINUTE;
+    jobs.extend((0..6).map(|i| {
+        let minutes = if i == 0 { 1 } else { 30 };
+        run("halyard/storefront", "build", "node", burst, minutes, peak)
+    }));
+    let slots = BTreeMap::from([("node".to_owned(), 6)]);
+    simulate(
+        &config(),
+        Some(20 * G + 512 * M),
+        &jobs,
+        Policy::Measured,
+        &slots,
+    )
+}
+
+#[test]
+fn a_replayed_burst_of_copies_of_a_young_job_starts_one_by_its_own_runs_and_the_rest_by_its_profile()
+ {
+    let mut jobs = young_history();
     // Six builds queue at once.
     let burst = NOW + 600 * MINUTE;
     jobs.extend((0..6).map(|_| run("halyard/storefront", "build", "node", burst, 30, 1300 * M)));
@@ -599,4 +622,25 @@ fn a_replayed_burst_of_copies_of_a_young_job_starts_one_by_its_own_runs_and_the_
     // The first reserves 1.5G, each other 5.5G: 4 of the 20G budget at once, not the 6 that 1.5G each would fit.
     assert_eq!(replay.most_running, 4);
     assert_eq!(replay.never_started, 0);
+}
+
+#[test]
+fn once_the_first_copy_ends_the_replay_lets_the_next_running_copy_go_by_its_own_runs() {
+    let replay = burst_after_young_history(1300 * M);
+    // 1.5G and three 5.5G of the 20G budget run at once. When the first ends a minute in, the next running copy
+    // drops to 1.5G, so a fifth starts at 5.5G beside them; the sixth waits for the others' 30 minutes.
+    assert_eq!(replay.most_running, 4);
+    // Of the 38 jobs replayed, only those two wait.
+    assert_eq!((replay.wait.p95, replay.wait.max), (60, 30 * 60));
+    assert_eq!(replay.under_predicted, 0);
+}
+
+#[test]
+fn a_replayed_copy_past_its_own_runs_makes_the_running_copies_reserve_its_peak() {
+    let replay = burst_after_young_history(1600 * M);
+    // The first copy reserved 1.5G and peaked at 1.6G. The others drop from 5.5G to 1.6G + 15%, rounded up to 2G,
+    // for the week after: the two waiting start at 2G beside them.
+    assert_eq!(replay.under_predicted, 1);
+    assert_eq!(replay.most_running, 5);
+    assert_eq!(replay.wait.max, 60);
 }

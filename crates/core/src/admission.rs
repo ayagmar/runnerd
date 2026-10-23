@@ -2,7 +2,7 @@
 //! replayed through admission by caps and by predictions (`simulate`), to show what each would have done with the
 //! same jobs. Pure: no I/O, no clock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
 use crate::api::Spread;
 use crate::api::{Basis, JobPeak};
@@ -255,7 +255,7 @@ pub struct Replay {
     pub worst_overlap: u64,
     /// Seconds from the first job queued to the last one finished.
     pub makespan: u64,
-    /// Jobs whose peak was above what admission reserved for them.
+    /// Jobs whose peak was above what admission reserved for them when they ended.
     pub under_predicted: u64,
     /// How many times the high-water mark held a job back that the predictions had room for.
     pub held_back: u64,
@@ -275,7 +275,10 @@ struct Running<'run> {
 /// admits them, oldest first, a job that does not fit letting a later one past, as `scheduler::plan` does.
 /// Measured admission predicts from the runs finished before it decides, as the daemon would, and holds each
 /// running job at its peak for its whole run, which the daemon does not see. A job with copies waiting or running
-/// beside it is predicted as one with `Copies::Several`.
+/// beside it is predicted as one with `Copies::Several`. Each moment, the running jobs are predicted again, the
+/// first running copy of a job going by its own runs, as the daemon does each tick. Unlike the daemon, the replay
+/// knows a job from its start: it never sees a runner whose job is not known yet, and the order jobs started
+/// stands for the daemon's slot order.
 pub fn simulate(
     config: &Config,
     memory_max: Option<u64>,
@@ -314,6 +317,7 @@ pub fn simulate(
             break;
         };
         replayer.finish(now);
+        replayer.rereserve(now);
         while let Some(run) = queue.get(next).filter(|run| run.queued_at <= now) {
             waiting.push(run);
             next += 1;
@@ -370,6 +374,7 @@ impl<'run> Replayer<'run> {
         self.running = running;
         for ended in ended {
             let cap = self.config.profiles[ended.profile].memory.0;
+            self.under_predicted += u64::from(ended.peak > ended.reserved);
             let reserved = (self.policy == Policy::Measured).then_some(ended.reserved);
             let run = Ran {
                 reserved,
@@ -377,6 +382,29 @@ impl<'run> Replayer<'run> {
             };
             self.predictor.learn(&run, ended.profile, cap, ended.ends);
             self.last_end = self.last_end.max(ended.ends);
+        }
+    }
+
+    /// Under measured admission, predicts each running job again, as the daemon's runners follow their job's
+    /// prediction every tick: the first running copy of a job, in the order they started, goes by its own runs, and
+    /// the others have it beside them.
+    fn rereserve(&mut self, now: u64) {
+        if self.policy != Policy::Measured {
+            return;
+        }
+        let mut seen = BTreeSet::new();
+        for running in &mut self.running {
+            let key = Key::of(running.run);
+            let copies = if seen.insert(key.clone()) {
+                Copies::Alone
+            } else {
+                Copies::Several
+            };
+            let cap = self.config.profiles[running.profile].memory.0;
+            running.reserved = self
+                .predictor
+                .predict(&key, running.profile, cap, now, copies)
+                .memory;
         }
     }
 
@@ -466,7 +494,6 @@ impl<'run> Replayer<'run> {
         }
         // A job over its cap is killed at it.
         let peak = run.memory_peak.min(cap);
-        self.under_predicted += u64::from(peak > reserved);
         let ran_for = run
             .finished_at
             .unwrap_or_default()
