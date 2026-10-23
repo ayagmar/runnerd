@@ -119,6 +119,50 @@ What sizing cannot see:
 
 Advice is only written when you apply it: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button, which opens the change in the config editor. Each goes through the same check as any config, so a change `MemoryMax` cannot hold is refused. Lowering never asks for more than the profile's slots take now, and raising takes only what `MemoryMax` has spare, so two raises applied one after the other can be refused. `runnerd doctor` warns when a profile's jobs need more than its `memory`. Run without a daemon, it reads the history database read-only and does not migrate it. SQLite still leaves the `-wal` and `-shm` files a WAL database needs next to it when it may write there, so run it as the user who runs the daemon. Where it may not write, it reads the database file alone, and skips the sizing check while the `-wal` holds changes the file lacks. Sizing reads the slice's `MemoryMax` on each request, so one raised after `systemctl daemon-reload` counts without restarting runnerd.
 
+## Measured admission
+
+By default a runner starts only when its profile's `memory` fits `MemoryMax` beside the caps of everything running, and the budget check below holds `slots × memory` to `MemoryMax`. Most jobs peak far under their caps, so that memory sits reserved and unused. `admission = "measured"` under `[host]` has each runner reserve its job's predicted peak instead:
+
+```toml
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+admission = "measured"
+
+[profiles.node]
+image_stage = "node"
+cpus = 8
+memory = "7G"   # still each container's hard limit
+slots = 8       # how many run at once; 8 × 7G may exceed MemoryMax
+```
+
+- A job is predicted from its own runs (repository, workflow and job name): with `[sizing] min_jobs` of them, their p95 peak plus `[sizing] margin`, rounded up to 256M.
+- With fewer, the larger of its profile's p95 and its own largest peak, each plus the margin. With too few runs of the profile as well, the cap.
+- A run that peaked within 5% of its cap, or in which the kernel killed a process for memory, puts its job back on its cap for 7 days.
+- A runner may take any of its repository's queued jobs, so it reserves the largest of their predictions.
+- Nothing starts while the slice uses 90% of `MemoryMax` or more. Without a sample of the slice from the last few seconds, runners reserve their caps.
+- The check asks only that one runner of each profile, with the mirror, fits `MemoryMax`, and that the slice has one.
+
+The caps still stop a container that goes over them. What measured admission trades for the shorter waits is that several jobs going over their predictions at once can fill the slice, which the kernel then answers by reclaiming page cache and killing a process inside it. Each job's record says how its runner was admitted (`runnerctl job <id>`, the dashboard's job page).
+
+Try it on your own history before turning it on. `runnerd simulate` replays the last 30 days through both policies, each job queued when it was and running as long as it ran, and changes nothing:
+
+```text
+$ runnerd simulate --memory-max 33G --slots node=8
+1555 finished jobs replayed against a MemoryMax of 33G, each queued when it was and running as long as it ran.
+PEAKS is every running job's peak added up at the busiest moment, with the mirror: more than the slice ever held.
+
+POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD
+caps      jvm 2, node 2                 0s    20m56s    55m35s     3m21s       4   21.45G       0     0
+caps*     jvm 3, node 8                 0s    13m34s    31m55s     1m41s       4   21.85G       0     0
+measured  jvm 3, node 8                 0s    10m18s    28m38s     1m07s       9   26.78G       2     0
+
+* more slots than the caps fit in MemoryMax, which the config check refuses with admission = "caps".
+UNDER: jobs that peaked above what admission reserved for them. HELD: times the high-water mark held back a job the predictions had room for.
+```
+
+Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--days` sets the window. A `PEAKS` over `MemoryMax` is marked `!`.
+
 ## The budget check
 
 `runnerd check-config [file]`, by default on `~/.config/runnerd/runnerd.toml`, reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
@@ -130,7 +174,7 @@ $ runnerd check-config runnerd.toml --memory-max 24G
 error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G
 ```
 
-A slice without a unit file has no `MemoryMax`; the check then passes with a warning, since nothing would hold the runners to their caps.
+A slice without a unit file has no `MemoryMax`; the check then passes with a warning, since nothing would hold the runners to their caps. Under [measured admission](#measured-admission) it holds one runner of each profile, with the mirror, to `MemoryMax`, and refuses a slice without one.
 
 ## Isolation
 
