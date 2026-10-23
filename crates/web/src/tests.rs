@@ -37,6 +37,8 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{Event, EventEnvelope, HostSample, Sample};
 
+use crate::views::slot_id;
+
 /// 2026-10-22T14:03:07Z.
 const NOW: u64 = 1_792_677_787;
 const LEDGER_RUNNING: u64 = 120_055_991_700;
@@ -360,34 +362,40 @@ async fn every_page_renders_from_the_daemons_data() {
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
 }
 
+/// The HTML from the start of the element whose `data-on:pointerenter` selects `key` to that attribute.
+fn selector_of<'page>(page: &'page str, key: &str, tag: &str) -> &'page str {
+    let at = page
+        .find(&format!("data-on:pointerenter=\"$_slot = '{key}'\""))
+        .unwrap_or_else(|| panic!("nothing selects {key}"));
+    let start = page[..at].rfind(tag).unwrap();
+    &page[start..at]
+}
+
 #[tokio::test]
 async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let overview = dashboard.page(&cookie, "/").await.body;
-    let block = |slot: &str| {
-        let at = overview
-            .find(&format!("$_slot = '{slot}'"))
-            .unwrap_or_else(|| panic!("no block for {slot}"));
-        let start = overview[..at].rfind("<a ").unwrap();
-        overview[start..at].to_owned()
-    };
+    let jvm_1 = slot_id("jvm", 1);
+    let jvm_2 = slot_id("jvm", 2);
     assert!(
-        block("slot-jvm-1").contains(&format!(r#"href="/jobs/{LEDGER_RUNNING}""#)),
+        selector_of(&overview, &jvm_1, "<a ")
+            .contains(&format!(r#"href="/jobs/{LEDGER_RUNNING}""#)),
         "jvm 1's block opens the ledger build it runs"
     );
     assert!(
-        block("slot-jvm-2").contains(r##"href="#slot-jvm-2""##),
+        selector_of(&overview, &jvm_2, "<a ").contains(&format!(r##"href="#{jvm_2}""##)),
         "the idle jvm 2's block points at its card"
     );
-    for card in ["slot-jvm-1", "slot-jvm-2", "slot-node-1", "slot-node-2"] {
+    for (profile, slot) in [("jvm", 1), ("jvm", 2), ("node", 1), ("node", 2)] {
+        let card = slot_id(profile, slot);
         assert!(
             overview.contains(&format!(r#"<li id="{card}""#))
                 && overview.contains(&format!("data-class:linked=\"$_slot == '{card}'")),
-            "{card}'s card exists and lights up with its block"
+            "{profile} {slot}'s card exists and lights up with its block"
         );
     }
-    // A name ends its `aria-label`; the same words in the readout's expression end in a quote.
+    // A name ends its `aria-label`; the readout's lines end in a tag.
     for name in [
         "of 9G in jvm 1, build on halyard/ledger",
         "9G jvm 2, idle",
@@ -398,6 +406,40 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
             "a block is named {name:?} for screen readers"
         );
     }
+}
+
+#[tokio::test]
+async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    read_until(&mut stream, |text| text.contains(r#"id="recent""#)).await;
+    let at = NOW + 2;
+    dashboard
+        .fake
+        .events
+        .send(EventEnvelope {
+            id: None,
+            at,
+            event: Event::JobSample {
+                job: LEDGER_RUNNING,
+                sample: Sample {
+                    at,
+                    cpu: 2000,
+                    memory: 5 << 30,
+                    network_received: 0,
+                    network_sent: 0,
+                },
+            },
+        })
+        .unwrap();
+    // The page keeps only which block is selected; its line comes in the patch, rendered from the new sample.
+    let line = format!(
+        "data-show=\"$_slot == '{}'\"><strong>5G</strong> of 9G in jvm 1",
+        slot_id("jvm", 1)
+    );
+    let update = read_until(&mut stream, |text| text.contains(&line)).await;
+    assert!(update.contains(r#"id="budget""#), "{update}");
 }
 
 #[tokio::test]

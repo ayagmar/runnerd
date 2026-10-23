@@ -372,7 +372,7 @@ html {
   padding: clamp(0.45rem, 1vw, 0.9rem);
   overflow: hidden;
   text-decoration: none;
-  transition: flex-grow 300ms var(--ease), background-color 200ms, opacity 150ms var(--ease);
+  transition: flex-grow 300ms var(--ease), background-color 200ms;
 }
 
 .block {
@@ -448,9 +448,14 @@ html {
   color: var(--muted);
 }
 
-/* The readout above the bar: the slice's total, or what the hovered or focused block holds. */
+/* The readout above the bar: the slice's total, and the selected block's line beside it. The line keeps its height
+   while empty, so selecting a block moves nothing. */
 .budget .figures {
-  min-height: 2rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1.5rem;
   margin: 0.75rem 0 1rem;
 }
 
@@ -461,17 +466,55 @@ html {
   gap: 0 0.35rem;
 }
 
-/* Linked views: hovering, focusing or tapping a slot's block, card, job row or repository lights up the others
-   standing for the same thing, and dims the rest. */
-main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.linked) {
-  opacity: 0.4;
+.lens {
+  min-height: 1.45em;
+  color: var(--muted);
 }
 
-.slot,
-.job-list > li,
-.repository {
-  transition: opacity 150ms var(--ease);
+.lens strong {
+  color: var(--ink);
 }
+
+/* Linked views: selecting a slot's block, card, job row or repository (hover, focus or tap) outlines the others
+   standing for the same thing. Nothing else changes, so every text keeps its contrast. */
+:is(.block, .free, .slot, .job-list > li, .repository, .bar-key).linked {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* Rows sit 2px apart: their outline goes inside, where the next row can't cover it. */
+:is(.job-list > li, .repository).linked {
+  outline-offset: -2px;
+}
+
+.bar-keys {
+  display: none;
+  flex-wrap: wrap;
+  gap: var(--gap);
+  margin-top: var(--gap);
+}
+
+@media (pointer: coarse) {
+  .bar-keys {
+    display: flex;
+  }
+}
+
+.bar-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0 0.85rem;
+  border: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+.key-mirror .swatch { background: var(--ink); }
+.key-free .swatch { background: var(--bg); box-shadow: inset 0 0 0 1px var(--line); }
 
 /* Ink, not the accent: an idle block's outline is a profile colour that may be the accent's. */
 .block:focus-visible,
@@ -1017,17 +1060,16 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
   transition: opacity 150ms var(--ease);
 }
 
-/* A phase and its legend entry light up together. */
-.timeline:has(.phase:hover) :is(.phase, .phase-legend li):not(:hover) { opacity: 0.4; }
+/* Pointing at a phase or its legend entry fades the other phases' fills; the legend's text stays as it is. */
+.timeline:has(.phase:hover) .phase:not(:hover) { opacity: 0.4; }
 .timeline:has(.phase.wait:hover) .phase-legend .wait,
 .timeline:has(.phase.start:hover) .phase-legend .start,
 .timeline:has(.phase.run:hover) .phase-legend .run,
-.timeline:has(.phase.clean:hover) .phase-legend .clean { opacity: 1; }
-.timeline:has(.phase-legend li:hover) .phase:not(:hover) { opacity: 0.4; }
-.timeline:has(.phase-legend .wait:hover) .phase.wait,
-.timeline:has(.phase-legend .start:hover) .phase.start,
-.timeline:has(.phase-legend .run:hover) .phase.run,
-.timeline:has(.phase-legend .clean:hover) .phase.clean { opacity: 1; }
+.timeline:has(.phase.clean:hover) .phase-legend .clean { text-decoration: underline; text-underline-offset: 0.25em; }
+.timeline:has(.phase-legend .wait:hover) .phase:not(.wait),
+.timeline:has(.phase-legend .start:hover) .phase:not(.start),
+.timeline:has(.phase-legend .run:hover) .phase:not(.run),
+.timeline:has(.phase-legend .clean:hover) .phase:not(.clean) { opacity: 0.4; }
 
 /* The phase still going on ends in a fading edge, and breathes. */
 .phase.ongoing {

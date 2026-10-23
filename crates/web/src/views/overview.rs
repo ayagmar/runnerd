@@ -152,43 +152,35 @@ fn gib(bytes: u64) -> f64 {
     bytes as f64 / f64::from(1u32 << 30)
 }
 
-/// What an element standing for a slot does on hover, focus and touch: it lights up the slot's block, card and job
-/// rows, and puts its figure and text in the budget's readout.
+/// What an element standing for a slot does on hover, focus and touch: it selects the slot, which outlines its
+/// block, card and job rows and shows its line of the budget's readout. Only the key is kept, so each live update
+/// renders that line from the new data.
 struct Link {
     enter: String,
-    /// Clears what `enter` set, unless another element has set its own since, as a tap does before the last one's
+    /// Clears the selection, unless another element has made its own since, as a tap does before the last one's
     /// blur.
     leave: String,
-    /// `leave` for a mouse only: a finger leaves as soon as it lifts, so what a tap lit up stays until the next tap
+    /// `leave` for a mouse only: a finger leaves as soon as it lifts, so what a tap selected stays until the next tap
     /// or until focus moves on.
     pointer_leave: String,
     linked: String,
 }
 
-fn link(key: &str, repository: Option<&str>, lens: &Lens) -> Link {
+fn link(key: &str, repository: Option<&str>) -> Link {
+    let key = js(key);
     Link {
-        enter: format!(
-            "$_slot = {}; $_fig = {}; $_lens = {}",
-            js(key),
-            js(&lens.figure),
-            js(&lens.text)
-        ),
-        leave: format!(
-            "$_slot == {} && ($_slot = '', $_fig = '', $_lens = '')",
-            js(key)
-        ),
-        pointer_leave: format!(
-            "evt.pointerType == 'mouse' && $_slot == {} && ($_slot = '', $_fig = '', $_lens = '')",
-            js(key)
-        ),
+        enter: format!("$_slot = {key}"),
+        leave: format!("$_slot == {key} && ($_slot = '')"),
+        pointer_leave: format!("evt.pointerType == 'mouse' && $_slot == {key} && ($_slot = '')"),
         linked: match repository {
-            Some(repository) => format!("$_slot == {} || $_repo == {}", js(key), js(repository)),
-            None => format!("$_slot == {}", js(key)),
+            Some(repository) => format!("$_slot == {key} || $_repo == {}", js(repository)),
+            None => format!("$_slot == {key}"),
         },
     }
 }
 
-/// What the budget's readout shows for a block: a figure in the big type, and the words after it.
+/// What the budget's readout shows for a block: a figure in bold, and the words after it.
+#[derive(Clone)]
 struct Lens {
     figure: String,
     text: String,
@@ -294,30 +286,32 @@ pub(crate) fn budget(overview: &Overview) -> Markup {
         figure: format::bytes(other),
         text: "held by the mirror and seed containers".to_owned(),
     };
+    let free = free.filter(|free| *free > 0);
     let free_lens = free.map(|free| Lens {
         figure: format::bytes(free),
         text: format!("of {max} free"),
     });
+    let mut lenses: Vec<(String, Lens)> = status
+        .profiles
+        .iter()
+        .flat_map(|profile| {
+            profile.slots.iter().map(|slot| {
+                let view = slot_view(overview, profile, slot);
+                (view.key, view.lens)
+            })
+        })
+        .collect();
+    if other > 0 {
+        lenses.push(("other".to_owned(), other_lens.clone()));
+    }
+    if let Some(lens) = &free_lens {
+        lenses.push(("free".to_owned(), lens.clone()));
+    }
     html! {
         section #budget .budget aria-labelledby="budget-title"
-            "data-signals:_slot__ifmissing"="''" "data-signals:_repo__ifmissing"="''"
-            "data-signals:_fig__ifmissing"="''" "data-signals:_lens__ifmissing"="''" {
+            "data-signals:_slot__ifmissing"="''" "data-signals:_repo__ifmissing"="''" {
             h2 #budget-title .visually-hidden { "Budget" }
-            // The readout: the slice's total, or what the hovered block holds. Each block has its own name, so
-            // the lens is for the eye only.
-            p.figures {
-                span.readout data-show="!$_fig" {
-                    span.big { (format::bytes(budget.memory_in_use)) }
-                    span { " of " (budget.memory_max.map_or("unlimited".to_owned(), format::bytes)) " in " code { (budget.slice) } }
-                    @if let Some(used) = used_now {
-                        span.muted { " · " (format::bytes(used)) " in use" }
-                    }
-                }
-                span.readout aria-hidden="true" style="display: none" data-show="$_fig" {
-                    span.big data-text="$_fig" {}
-                    " " span data-text="$_lens" {}
-                }
-            }
+            (readout(overview, used_now, &lenses))
             div.bar role="group" aria-label=(label) {
                 @for profile in &status.profiles {
                     @for slot in &profile.slots {
@@ -325,7 +319,7 @@ pub(crate) fn budget(overview: &Overview) -> Markup {
                     }
                 }
                 @if other > 0 {
-                    @let link = link("other", None, &other_lens);
+                    @let link = link("other", None);
                     div.block.other tabindex="0" role="img" style=(format!("--size: {:.3}", gib(other)))
                         aria-label=(format!("{} mirror and seed containers", other_lens.figure))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
@@ -334,8 +328,8 @@ pub(crate) fn budget(overview: &Overview) -> Markup {
                         span.name { "mirror" }
                     }
                 }
-                @if let Some((free, lens)) = free.filter(|free| *free > 0).zip(free_lens) {
-                    @let link = link("free", None, &lens);
+                @if let Some((free, lens)) = free.zip(free_lens.as_ref()) {
+                    @let link = link("free", None);
                     div.free tabindex="0" role="img" style=(format!("--size: {:.3}", gib(free)))
                         aria-label=(format!("{} {}", lens.figure, lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
@@ -344,8 +338,56 @@ pub(crate) fn budget(overview: &Overview) -> Markup {
                     }
                 }
             }
+            (bar_keys(other, &other_lens, free_lens.as_ref()))
             @if status.shutting_down {
                 p.warning { "runnerd is shutting down: it starts no new runners and stops once running jobs finish." }
+            }
+        }
+    }
+}
+
+/// The slice's total, and beside it the selected block's line. Each block has its own name, so the lines are for the
+/// eye only.
+fn readout(overview: &Overview, used_now: Option<u64>, lenses: &[(String, Lens)]) -> Markup {
+    let budget = &overview.status.budget;
+    html! {
+        div.figures {
+            p.readout {
+                span.big { (format::bytes(budget.memory_in_use)) }
+                span { " of " (budget.memory_max.map_or("unlimited".to_owned(), format::bytes)) " in " code { (budget.slice) } }
+                @if let Some(used) = used_now {
+                    span.muted { " · " (format::bytes(used)) " in use" }
+                }
+            }
+            p.lens aria-hidden="true" {
+                @for (key, lens) in lenses {
+                    span style="display: none" data-show=(format!("$_slot == {}", js(key))) {
+                        strong { (lens.figure) } " " (lens.text)
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// On a touch screen the mirror and the free remainder may be too thin to tap: keys under the bar select them
+/// instead, and say their sizes.
+fn bar_keys(other: u64, other_lens: &Lens, free_lens: Option<&Lens>) -> Markup {
+    html! {
+        @if other > 0 || free_lens.is_some() {
+            div.bar-keys {
+                @if other > 0 {
+                    button.bar-key.key-mirror type="button" data-on:click="$_slot = $_slot == 'other' ? '' : 'other'"
+                        data-class:linked="$_slot == 'other'" {
+                        span.swatch aria-hidden="true" {} (other_lens.figure) " mirror"
+                    }
+                }
+                @if let Some(lens) = free_lens {
+                    button.bar-key.key-free type="button" data-on:click="$_slot = $_slot == 'free' ? '' : 'free'"
+                        data-class:linked="$_slot == 'free'" {
+                        span.swatch aria-hidden="true" {} (lens.figure) " free"
+                    }
+                }
             }
         }
     }
@@ -373,7 +415,7 @@ fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus) -> Mar
         .runner
         .as_ref()
         .map(|runner| runner.repository.as_str());
-    let link = link(&view.key, repository, &view.lens);
+    let link = link(&view.key, repository);
     html! {
         a class=(format!("block {class} {state}")) href=(href)
             style=(format!("--size: {:.3}; --fill: {:.3}", gib(profile.memory), fill.unwrap_or(0.0)))
@@ -420,7 +462,7 @@ fn slot_card(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus) ->
         .runner
         .as_ref()
         .map(|runner| runner.repository.as_str());
-    let link = link(&view.key, repository, &view.lens);
+    let link = link(&view.key, repository);
     html! {
         li #(view.key) class=(format!("slot {class}{state}"))
             data-on:pointerenter=(link.enter) data-on:focusin=(link.enter)
