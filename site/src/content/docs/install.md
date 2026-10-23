@@ -10,6 +10,8 @@ description: Install runnerd, write a starter config and a user unit with runner
 - A systemd slice whose `MemoryMax` is the budget for all runners. `runnerd init` prints one sized for the host.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 
+`runnerd doctor` checks each of these, the slice the config names and that the config fits in it, and prints the fix for what is missing. It reads `~/.config/runnerd/runnerd.toml` when it exists; `runnerd doctor <file>` checks another.
+
 The binaries are built for x86_64 and aarch64. The runner images are linux/amd64 only, so on aarch64 runners do not start yet.
 
 ## First run

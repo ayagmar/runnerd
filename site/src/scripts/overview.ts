@@ -236,7 +236,7 @@ const escape = (text: string) => text.replace(/&/g, '&amp;').replace(/</g, '&lt;
 
 /** The readout: the slice's total, which stays while the lens beside it says what one block holds. */
 export function readout(state: State): string {
-  return `<span class="big">${size(state.reserved)}</span> of ${size(MAX)} in <code>ci.slice</code><span class="muted"> · ${size(state.inUse)} in use</span>`;
+  return `<span class="big">${size(state.reserved)}</span> of ${size(MAX)} in <code>runnerd.slice</code><span class="muted"> · ${size(state.inUse)} in use</span>`;
 }
 
 const FREE = MAX - MIRROR - PROFILES.reduce((sum, p) => sum + p.memory * p.slots.length, 0);
@@ -284,7 +284,7 @@ export function barLabel(state: State): string {
     const what = slot.state === 'busy' ? `${slot.run!.name} on ${slot.run!.repo}` : slot.state === 'starting' ? `a runner for ${slot.run!.repo}` : 'idle';
     return `${slot.profile.name} ${slot.number} ${size(slot.profile.memory)}, ${what}`;
   });
-  return `Memory budget of ci.slice: ${size(state.reserved)} of ${size(MAX)} reserved; ${slots.join('; ')}; ${size(MIRROR)} mirror; ${size(FREE)} free`;
+  return `Memory budget of runnerd.slice: ${size(state.reserved)} of ${size(MAX)} reserved; ${slots.join('; ')}; ${size(MIRROR)} mirror; ${size(FREE)} free`;
 }
 
 /** A sparkline from the job's start or five minutes back, whichever is later, in the dashboard's 1000 by 100 box:

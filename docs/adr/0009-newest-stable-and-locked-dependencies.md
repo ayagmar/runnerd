@@ -1,5 +1,7 @@
 # 0009. Every dependency newest stable and locked
 
+Superseded in part by [0025](0025-published-runner-images-named-by-reference.md): the runner image a profile runs is named by tag, such as `jvm-0.0.5`. Images the repository builds from stay pinned by digest.
+
 ## Context
 
 Floating versions and tags make builds change without a commit.

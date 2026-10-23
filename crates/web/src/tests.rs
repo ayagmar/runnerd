@@ -386,7 +386,7 @@ async fn every_page_renders_from_the_daemons_data() {
     let overview = dashboard.page(&cookie, "/").await;
     assert_eq!(overview.status, StatusCode::OK);
     for expected in [
-        "ci.slice",
+        "runnerd.slice",
         "halyard/ledger",
         "halyard/storefront",
         "Integration tests (Testcontainers)",
@@ -1272,7 +1272,7 @@ async fn a_config_over_the_budget_is_not_saved_and_the_page_shows_both_numbers()
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let before = dashboard.fake.fixtures.lock().unwrap().config.clone();
-    // 2 × 12G + 2 × 7G + 512M = 38.5G, over ci.slice's 33G.
+    // 2 × 12G + 2 × 7G + 512M = 38.5G, over runnerd.slice's 33G.
     let toml = with_jvm_memory(&dashboard, "12G");
     let reply = dashboard
         .write(

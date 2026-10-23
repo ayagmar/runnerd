@@ -25,5 +25,5 @@ at once, and a version with its SHA-256 for each download. Rebuild the stages an
 ## Consequences
 
 Rebuilding a commit gives the same packages. Security updates arrive only with a new snapshot date. A bump changes
-the JDK, browser libraries and other tools that jobs see in every profile, including trellis's and glowly's (`jvm`
-and `node`), so it is its own commit.
+the JDK, browser libraries and other tools that jobs see in every profile (`jvm` and `node`), so it is its own
+commit.

@@ -1,8 +1,8 @@
-# An example: two repositories with two runners each, inside ci.slice (MemoryMax=33G).
+# An example: two repositories with two runners each, inside runnerd.slice (MemoryMax=33G).
 # 2 × 9G + 2 × 7G + 512M for the mirror = 32.5G.
 
 [host]
-slice = "ci.slice"
+slice = "runnerd.slice"
 isolation = "sysbox"
 
 [caches]

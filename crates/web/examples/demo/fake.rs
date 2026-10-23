@@ -497,7 +497,7 @@ impl Fixtures {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
             budget: Budget {
-                slice: "ci.slice".to_owned(),
+                slice: "runnerd.slice".to_owned(),
                 memory_max: Some(33 * GIB),
                 memory_in_use: 9 * GIB + 7 * GIB + 7 * GIB + 512 * MIB,
                 mirror_memory: 512 * MIB,
@@ -935,8 +935,8 @@ fn router(fake: Fake) -> Router {
                         Check {
                             name: "slice".to_owned(),
                             status: CheckStatus::Warn,
-                            detail: "ci.slice has MemoryMax=33G but no MemoryHigh".to_owned(),
-                            fix: Some("systemctl edit ci.slice, then add MemoryHigh=30G under [Slice]".to_owned()),
+                            detail: "runnerd.slice has MemoryMax=33G but no MemoryHigh".to_owned(),
+                            fix: Some("systemctl edit runnerd.slice, then add MemoryHigh=30G under [Slice]".to_owned()),
                         },
                     ],
                 })

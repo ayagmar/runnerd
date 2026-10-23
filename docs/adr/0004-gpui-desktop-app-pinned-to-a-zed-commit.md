@@ -6,7 +6,7 @@ The crates.io release of `gpui` (0.2.2) was last published in 2025-10 and lags t
 
 ## Decision
 
-The desktop app (`crates/desktop`, plan 008) depends on `gpui` from `zed-industries/zed` at a pinned commit.
+The desktop app (`crates/desktop`, to come later) depends on `gpui` from `zed-industries/zed` at a pinned commit.
 
 ## Consequences
 

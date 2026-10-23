@@ -15,10 +15,12 @@ cargo clippy -p runnerd-core --no-default-features --features client --all-targe
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 .github/scripts/check-boundaries.sh
+cargo build --locked -p runnerd -p runnerd-cli && .github/scripts/check-docs-commands.sh target/debug
 cargo machete
 typos
 taplo fmt --check
 cargo deny check
+pnpm -C site build   # once: pnpm -C site install --frozen-lockfile
 ```
 
 Workflow changes also go through `actionlint` and `zizmor`, shell scripts through `shellcheck`.
@@ -32,7 +34,7 @@ versions.
 - Anything that talks to Docker or GitHub, or schedules runners: a `host` module of `crates/core`.
 - The daemon's commands and its socket API: `crates/daemon`. Terminal output goes through
   `crates/daemon/src/output.rs` only.
-- Clients (`crates/cli`, later `crates/web` and `crates/desktop`) talk to the daemon's API. They never depend on
+- Clients (`crates/cli`, `crates/web`, later `crates/desktop`) talk to the daemon's API. They never depend on
   `bollard`, `reqwest` or core's `host` feature; `check-boundaries.sh` fails if they do.
 - Every module starts with a `//!` doc saying what it owns and what it must not do.
 

@@ -13,7 +13,7 @@ Two repositories with two runners each, in a slice with `MemoryMax=33G`. [`examp
 # 2 × 9G + 2 × 7G + 512M for the mirror = 32.5G.
 
 [host]
-slice = "ci.slice"
+slice = "runnerd.slice"
 isolation = "sysbox"
 
 [caches]
@@ -64,11 +64,13 @@ Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them.
 | `image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5"` | the published stage | before the profile's first runner |
 | `image_stage = "jvm"` | `runnerd-runner:jvm`, built on this host | never |
 
-Keep the tag at the daemon's version: the image's scripts and the daemon change together, and `runnerd doctor` warns when they differ. To run your own changes to `image/`, build the stage from a clone and set `image_stage`:
+runnerd logs the pull's progress, and `runnerd doctor` says whether each image is present or can be pulled. Keep the tag at the daemon's version: the image's scripts and the daemon change together, and `runnerd doctor` warns when they differ. To run your own changes to `image/`, build the stage from a clone and set `image_stage`:
 
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
 ```
+
+Rebuilds install the same versions: Ubuntu packages come from one snapshot date, and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)). [Install](../install/#verify-a-release) shows how to check where a published image came from.
 
 ## The budget check
 
@@ -78,7 +80,7 @@ docker build --target jvm -t runnerd-runner:jvm image
 $ runnerd check-config runnerd.toml
 runnerd.toml: valid, memory caps sum to 32.5G
 $ runnerd check-config runnerd.toml --memory-max 24G
-error: slots × memory over all profiles plus the mirror is 32.5G, the slice ci.slice's MemoryMax is 24G
+error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G
 ```
 
 A slice without a unit file has no `MemoryMax`; the check then passes with a warning, since nothing would hold the runners to their caps.

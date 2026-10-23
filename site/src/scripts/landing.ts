@@ -55,7 +55,7 @@ function calculator() {
     bar.classList.toggle('over', over);
     result.classList.toggle('error', over);
     result.textContent = over
-      ? `error: slots × memory over all profiles plus the mirror is ${size(total)}, the slice ci.slice's MemoryMax is ${size(max)}`
+      ? `error: slots × memory over all profiles plus the mirror is ${size(total)}, the slice runnerd.slice's MemoryMax is ${size(max)}`
       : `runnerd.toml: valid, memory caps sum to ${size(total)}`;
   };
 

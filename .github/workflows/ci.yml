@@ -29,6 +29,7 @@ jobs:
       pull-requests: read # paths-filter lists the pull request's files through the API
     outputs:
       rust: ${{ steps.pick.outputs.rust }}
+      docs: ${{ steps.pick.outputs.docs }}
       deny: ${{ steps.pick.outputs.deny }}
       image: ${{ steps.pick.outputs.image }}
       site: ${{ steps.pick.outputs.site }}
@@ -54,6 +55,16 @@ jobs:
               - 'deny.toml'
               - '.github/scripts/check-boundaries.sh'
               - '.github/workflows/ci.yml'
+            # The commands the docs show, and the code that defines them.
+            docs:
+              - 'README.md'
+              - 'site/src/content/docs/**'
+              - 'crates/**'
+              - '**/Cargo.toml'
+              - 'Cargo.lock'
+              - 'rust-toolchain.toml'
+              - '.github/scripts/check-docs-commands.sh'
+              - '.github/workflows/ci.yml'
             deny:
               - '**/Cargo.toml'
               - 'Cargo.lock'
@@ -74,6 +85,7 @@ jobs:
         env:
           EVENT: ${{ github.event_name }}
           RUST: ${{ steps.filter.outputs.rust }}
+          DOCS: ${{ steps.filter.outputs.docs }}
           DENY: ${{ steps.filter.outputs.deny }}
           IMAGE: ${{ steps.filter.outputs.image }}
           SITE: ${{ steps.filter.outputs.site }}
@@ -81,11 +93,12 @@ jobs:
           TEXT: ${{ steps.filter.outputs.text }}
         run: |
           case "$EVENT" in
-            push) RUST=true DENY=true IMAGE=true SITE=true LINT=true TEXT=true ;;
-            schedule) RUST=false DENY=true IMAGE=false SITE=false LINT=false TEXT=false ;;
+            push) RUST=true DOCS=true DENY=true IMAGE=true SITE=true LINT=true TEXT=true ;;
+            schedule) RUST=false DOCS=false DENY=true IMAGE=false SITE=false LINT=false TEXT=false ;;
           esac
           {
             echo "rust=$RUST"
+            echo "docs=$DOCS"
             echo "deny=$DENY"
             echo "image=$IMAGE"
             echo "site=$SITE"
@@ -111,8 +124,10 @@ jobs:
           rustup toolchain install
           rustup toolchain uninstall stable
       # Pull requests restore main's cache but never write their own, so the cache stays within the repository limit.
+      # The docs job restores the same cache under the shared key.
       - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
         with:
+          shared-key: rust
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
@@ -167,6 +182,28 @@ jobs:
           push: false
           cache-from: type=gha,scope=${{ matrix.stage }}
           cache-to: type=gha,mode=max,scope=${{ matrix.stage }}
+
+  # Every runnerd and runnerctl command, subcommand and option the README and the site's docs show exists. Builds the
+  # two binaries only, on the rust job's cache, so a docs-only pull request checks its commands too.
+  docs:
+    name: docs-commands
+    needs: changes
+    if: needs.changes.outputs.docs == 'true'
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - run: |
+          rustup toolchain install
+          rustup toolchain uninstall stable
+      # Restores the rust job's cache and never saves its own.
+      - uses: Swatinem/rust-cache@d1527c8f67ef9af357290475d4af4b0fab8f12e0 # v2.9.3
+        with:
+          shared-key: rust
+          save-if: false
+      - run: cargo build --locked -p runnerd -p runnerd-cli
+      - run: .github/scripts/check-docs-commands.sh target/debug
 
   site:
     name: site-build
@@ -283,7 +320,7 @@ jobs:
   # The one required check. It passes when every job it needs passed or was skipped by the changes job.
   gate:
     name: gate
-    needs: [changes, rust, deny, image, site, lint, text]
+    needs: [changes, rust, docs, deny, image, site, lint, text]
     if: ${{ !cancelled() }}
     runs-on: ubuntu-24.04
     permissions:

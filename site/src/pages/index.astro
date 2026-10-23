@@ -17,7 +17,7 @@ const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/d
 const firstRun = ['runnerd init halyard/ledger halyard/storefront', 'systemctl --user enable --now runnerd'];
 
 // The calculator's starting config, the example on every page: two jvm and two node slots and the Docker Hub mirror,
-// in GiB, inside ci.slice.
+// in GiB, inside runnerd.slice.
 const example = {
   max: 33,
   profiles: [
@@ -64,7 +64,7 @@ const steps = [
 ];
 
 // Real output of runnerctl from main, against the web dashboard's demo daemon (crates/web/examples/demo).
-const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105
+const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792741296
 \`runnerctl pause --force halyard/ledger\` cancels its run and removes its runner`;
 
 // The clients, each a slot: filled once released, with a link to it; free until it ships with real output.
@@ -146,7 +146,7 @@ const clients = [
           <figcaption class="prompt-line"><code>$ runnerctl tui</code></figcaption>
           <Tui
             name="overview"
-            label="runnerctl tui's overview at 136 by 28: the budget bar with jvm slot 1 at 4.3G and node slot 1 at 2.7G used, four slot cards, the slice's memory and CPU charts, the repositories and the latest jobs."
+            label="runnerctl tui's overview at 136 by 28: the budget bar with jvm slot 1 at 4.43G and node slot 1 at 2.82G used, node slot 2's idle runner and the mirror, four slot cards, the slice's memory and CPU charts, the repositories and the latest jobs."
           />
         </figure>
         <div class="live-pause">
@@ -195,7 +195,7 @@ const clients = [
               </label>
             </fieldset>
             <fieldset>
-              <legend>ci.slice</legend>
+              <legend>runnerd.slice</legend>
               <label>
                 <span>MemoryMax=</span>
                 <input type="range" name="max" min="8" max="64" step="1" value={example.max} />
