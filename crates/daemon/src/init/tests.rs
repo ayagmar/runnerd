@@ -254,12 +254,54 @@ fn a_failed_forced_init_keeps_the_old_config() {
 }
 
 #[test]
-fn a_dangling_symlink_counts_as_an_existing_file() {
+fn init_refuses_a_destination_that_is_not_a_regular_file_even_with_force() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Replace);
+    std::fs::create_dir_all(request.config.parent().unwrap()).unwrap();
+    std::fs::create_dir_all(dir.0.join("elsewhere")).unwrap();
+    for target in ["nowhere", "elsewhere"] {
+        let _ = std::fs::remove_file(&request.config);
+        std::os::unix::fs::symlink(dir.0.join(target), &request.config).unwrap();
+        let error = init(&request, &machine(64, 16, None)).unwrap_err();
+        assert!(error.contains("not a regular file"), "{target}: {error}");
+        assert_eq!(
+            std::fs::read_link(&request.config).unwrap(),
+            dir.0.join(target),
+            "the symlink to {target} is kept"
+        );
+        assert!(!request.unit.exists(), "the unit is not written either");
+    }
+}
+
+#[test]
+fn a_failed_init_leaves_another_runs_staged_file_alone() {
     let dir = Dir::new();
     let request = request(&dir.0, Overwrite::Refuse);
-    std::fs::create_dir_all(request.unit.parent().unwrap()).unwrap();
-    std::os::unix::fs::symlink(dir.0.join("nowhere"), &request.unit).unwrap();
-    let error = init(&request, &machine(64, 16, None)).unwrap_err();
-    assert!(error.contains("--force"), "{error}");
-    assert!(!request.config.exists(), "the config is not written either");
+    let config_dir = request.config.parent().unwrap();
+    std::fs::create_dir_all(config_dir).unwrap();
+    let sentinel = config_dir.join(format!(".runnerd.toml.runnerd-init-{}", std::process::id()));
+    std::fs::write(&sentinel, "another run's").unwrap();
+    std::fs::write(dir.0.join("systemd"), "").unwrap();
+    init(&request, &machine(64, 16, None)).unwrap_err();
+    assert_eq!(std::fs::read_to_string(&sentinel).unwrap(), "another run's");
+    let left: Vec<_> = std::fs::read_dir(config_dir)
+        .unwrap()
+        .map(|entry| entry.unwrap().path())
+        .collect();
+    assert_eq!(left, [sentinel], "only the other run's file is left");
+}
+
+#[test]
+fn a_staging_name_that_exists_is_skipped_not_reused() {
+    let dir = Dir::new();
+    let mut taken = Vec::new();
+    let (path, ()) = super::unique(&dir.0, "runnerd.toml", |path| {
+        if taken.len() < 3 {
+            taken.push(path.to_owned());
+            return Err(std::io::ErrorKind::AlreadyExists.into());
+        }
+        Ok(())
+    })
+    .unwrap();
+    assert!(!taken.contains(&path), "{path:?} was taken");
 }

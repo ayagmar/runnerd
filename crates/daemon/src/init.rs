@@ -7,6 +7,7 @@ use std::fs::OpenOptions;
 use std::io::Write as _;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::{SystemTime, UNIX_EPOCH};
 
 use runnerd_core::api::{Check, CheckStatus};
 use runnerd_core::config::{ByteSize, Config, slice_memory_max};
@@ -159,36 +160,67 @@ pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, Strin
     let sizing = size(machine)?;
     let config = config_text(request, machine, &sizing);
     let unit = unit_text(&request.runnerd, &request.config)?;
-    if request.overwrite == Overwrite::Refuse {
-        let existing: Vec<String> = [&request.config, &request.unit]
-            .iter()
-            .filter(|path| path.symlink_metadata().is_ok())
-            .map(|path| path.display().to_string())
-            .collect();
-        if !existing.is_empty() {
-            return Err(format!(
-                "{} already {}; pass --force to replace {}",
-                existing.join(" and "),
-                if existing.len() == 1 {
-                    "exists"
-                } else {
-                    "exist"
-                },
-                if existing.len() == 1 { "it" } else { "them" }
-            ));
+    let mut existing = Vec::new();
+    for path in [&request.config, &request.unit] {
+        match path.symlink_metadata() {
+            Ok(metadata) if !metadata.is_file() => {
+                return Err(format!(
+                    "{} exists and is not a regular file; move it away first",
+                    path.display()
+                ));
+            }
+            Ok(_) => existing.push(path.display().to_string()),
+            Err(_) => {}
         }
+    }
+    if request.overwrite == Overwrite::Refuse && !existing.is_empty() {
+        return Err(format!(
+            "{} already {}; pass --force to replace {}",
+            existing.join(" and "),
+            if existing.len() == 1 {
+                "exists"
+            } else {
+                "exist"
+            },
+            if existing.len() == 1 { "it" } else { "them" }
+        ));
     }
     let mut config = Staged::write(&request.config, &config)?;
     let mut unit = Staged::write(&request.unit, &unit)?;
     config.publish(request.overwrite)?;
     if let Err(error) = unit.publish(request.overwrite) {
-        config.undo();
-        return Err(error);
+        return Err(match config.undo() {
+            Ok(()) => error,
+            Err(undo) => format!("{error}; {undo}"),
+        });
     }
     Ok(sizing)
 }
 
+/// Runs `create` on a fresh path in `dir` named after `name`, trying another name while one exists.
+fn unique<T>(
+    dir: &Path,
+    name: &str,
+    mut create: impl FnMut(&Path) -> std::io::Result<T>,
+) -> std::io::Result<(PathBuf, T)> {
+    let nanos = SystemTime::now()
+        .duration_since(UNIX_EPOCH)
+        .map_or(0, |time| time.subsec_nanos());
+    for attempt in 0..16 {
+        let path = dir.join(format!(
+            ".{name}.runnerd-init-{}-{nanos}-{attempt}",
+            std::process::id()
+        ));
+        match create(&path) {
+            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {}
+            result => return result.map(|value| (path, value)),
+        }
+    }
+    Err(std::io::ErrorKind::AlreadyExists.into())
+}
+
 /// A file written in full next to its destination, so a failure before `publish` leaves the destination as it was.
+/// Removes its temp file, and the backup of what it replaced, on drop.
 struct Staged<'path> {
     path: &'path Path,
     temp: PathBuf,
@@ -199,23 +231,21 @@ struct Staged<'path> {
 impl Staged<'_> {
     fn write<'path>(path: &'path Path, text: &str) -> Result<Staged<'path>, String> {
         let fail = |error: std::io::Error| format!("cannot write {}: {error}", path.display());
-        let dir = path
-            .parent()
-            .ok_or_else(|| fail(std::io::ErrorKind::InvalidInput.into()))?;
-        let name = path.file_name().unwrap_or_default().to_string_lossy();
+        let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
+            return Err(fail(std::io::ErrorKind::InvalidInput.into()));
+        };
         std::fs::create_dir_all(dir).map_err(fail)?;
-        let temp = dir.join(format!(".{name}.runnerd-init-{}", std::process::id()));
+        let (temp, mut file) = unique(dir, &name.to_string_lossy(), |temp| {
+            OpenOptions::new().write(true).create_new(true).open(temp)
+        })
+        .map_err(fail)?;
+        // Only now is the temp file ours to remove.
         let staged = Staged {
             path,
             temp,
             backup: None,
         };
-        OpenOptions::new()
-            .write(true)
-            .create_new(true)
-            .open(&staged.temp)
-            .and_then(|mut file| file.write_all(text.as_bytes()))
-            .map_err(fail)?;
+        file.write_all(text.as_bytes()).map_err(fail)?;
         Ok(staged)
     }
 
@@ -225,9 +255,14 @@ impl Staged<'_> {
         match overwrite {
             Overwrite::Refuse => std::fs::hard_link(&self.temp, self.path).map_err(fail),
             Overwrite::Replace => {
-                if self.path.is_file() {
-                    let backup = self.temp.with_extension("old");
-                    std::fs::hard_link(self.path, &backup).map_err(fail)?;
+                // `init` refused anything but a regular file here.
+                if self.path.symlink_metadata().is_ok() {
+                    let dir = self.temp.parent().unwrap_or(Path::new("."));
+                    let name = self.path.file_name().unwrap_or_default().to_string_lossy();
+                    let (backup, ()) = unique(dir, &format!("{name}.old"), |backup| {
+                        std::fs::hard_link(self.path, backup)
+                    })
+                    .map_err(fail)?;
                     self.backup = Some(backup);
                 }
                 std::fs::rename(&self.temp, self.path).map_err(fail)
@@ -235,12 +270,20 @@ impl Staged<'_> {
         }
     }
 
-    /// Puts back what `publish` replaced, or removes what it created.
-    fn undo(&mut self) {
-        let _ = match self.backup.take() {
-            Some(backup) => std::fs::rename(backup, self.path),
-            None => std::fs::remove_file(self.path),
-        };
+    /// Puts back what `publish` replaced, or removes what it created. When that fails, keeps the backup and names it.
+    fn undo(&mut self) -> Result<(), String> {
+        match self.backup.take() {
+            Some(backup) => std::fs::rename(&backup, self.path).map_err(|error| {
+                format!(
+                    "restoring {} failed: {error}; the previous file is at {}",
+                    self.path.display(),
+                    backup.display()
+                )
+            }),
+            None => std::fs::remove_file(self.path).map_err(|error| {
+                format!("removing the new {} failed: {error}", self.path.display())
+            }),
+        }
     }
 }
 
