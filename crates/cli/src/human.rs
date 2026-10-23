@@ -662,6 +662,14 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             ),
             None => format!("{profile} slot {} free", slot.slot),
         },
+        Event::ProfileChanged { profile } => format!(
+            "{} {} {} slots{}",
+            profile.name,
+            profile.image,
+            profile.slots.len(),
+            if profile.reseeding { " reseeding" } else { "" }
+        ),
+        Event::ProfileRemoved { profile } => format!("{profile} removed"),
         Event::BudgetChanged { budget } => format!(
             "{} reserved{}",
             bytes(budget.memory_in_use),

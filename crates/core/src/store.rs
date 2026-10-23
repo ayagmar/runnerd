@@ -30,6 +30,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0002_runner_caps.sql"),
     include_str!("store/migrations/0003_paused.sql"),
     include_str!("store/migrations/0004_prune.sql"),
+    include_str!("store/migrations/0005_announced_profiles.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -115,6 +116,16 @@ pub struct Measured {
     pub at: Option<u64>,
     /// Each volume's size in bytes, by name.
     pub bytes: BTreeMap<String, u64>,
+}
+
+/// The profiles and repositories as the stored events last announced them: what clients resuming after those
+/// events have.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Announced {
+    /// The last `profile.changed` of each profile not removed since, by name.
+    pub profiles: Vec<api::ProfileStatus>,
+    /// The last `repository.changed` of each repository not removed since, by name.
+    pub repositories: Vec<api::RepositoryStatus>,
 }
 
 /// A job the history has not closed, as the engine needs it after a restart.
@@ -496,10 +507,10 @@ impl Store {
             .await
     }
 
-    /// The repositories as the stored events last announced them, so a restarted daemon announces only what
-    /// changed since, including the repositories its config no longer has. Blocks on the database: for startup.
-    pub fn announced_repositories(&self) -> Result<Vec<api::RepositoryStatus>, StoreError> {
-        Ok(read::announced_repositories(&lock(&self.reader))?)
+    /// The profiles and repositories as the stored events last announced them, so a restarted daemon announces
+    /// only what changed since, including what its config no longer has. Blocks on the database: for startup.
+    pub fn announced(&self) -> Result<Announced, StoreError> {
+        Ok(read::announced(&lock(&self.reader))?)
     }
 
     /// The repositories recorded paused, for the engine to start with. Blocks on the database: for startup.

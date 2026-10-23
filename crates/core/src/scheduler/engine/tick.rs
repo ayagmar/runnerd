@@ -199,6 +199,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Memory caps of the runners, the seed containers (which run with their profile's limits) and the mirror.
     pub(super) fn memory_in_use(&self) -> u64 {
+        let runners: u64 = self.occupied().map(|(_, occupant)| occupant.memory).sum();
+        let reseeds: u64 = self.reseed_memory.values().sum();
+        runners + reseeds + self.mirror_memory_in_use()
+    }
+
+    /// The mirror's part of `memory_in_use`.
+    pub(super) fn mirror_memory_in_use(&self) -> u64 {
         // The configured mirror is reserved for; a running one keeps the cap it started with until it stops.
         let mirror = &self.config.caches.mirror;
         let configured = if mirror.enabled { mirror.memory.0 } else { 0 };
@@ -207,9 +214,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         } else {
             0
         };
-        let runners: u64 = self.occupied().map(|(_, occupant)| occupant.memory).sum();
-        let reseeds: u64 = self.reseed_memory.values().sum();
-        runners + reseeds + configured.max(running)
+        configured.max(running)
     }
 
     /// Takes each repository's queued jobs from its listing; a repository a command removed meanwhile is skipped.

@@ -441,8 +441,19 @@ fn repository(name: &str) -> crate::api::RepositoryStatus {
     }
 }
 
+fn profile(name: &str) -> crate::api::ProfileStatus {
+    crate::api::ProfileStatus {
+        name: name.to_owned(),
+        image: format!("runnerd-runner:{name}"),
+        cpus: 2,
+        memory: 4 << 30,
+        reseeding: false,
+        slots: Vec::new(),
+    }
+}
+
 #[tokio::test]
-async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository() {
+async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_profile() {
     use crate::api::Event;
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
@@ -455,11 +466,22 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository() {
     store.event(Event::RepositoryRemoved {
         repository: "o/s".to_owned(),
     });
+    store.event(Event::ProfileChanged {
+        profile: profile("app"),
+    });
+    store.event(Event::ProfileChanged {
+        profile: profile("small"),
+    });
+    store.event(Event::ProfileRemoved {
+        profile: "small".to_owned(),
+    });
     store.event(Event::BudgetChanged {
         budget: crate::api::Budget {
             slice: "ci.slice".to_owned(),
             memory_max: None,
             memory_in_use: 0,
+            mirror_memory: 0,
+            seed_memory: Vec::new(),
         },
     });
     store.flush().await;
@@ -471,7 +493,9 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository() {
         .await
         .unwrap();
 
-    assert_eq!(store.announced_repositories().unwrap(), [repository("o/r")]);
+    let announced = store.announced().unwrap();
+    assert_eq!(announced.repositories, [repository("o/r")]);
+    assert_eq!(announced.profiles, [profile("app")]);
     let kept: Vec<_> = store
         .events_after(0, 10)
         .await
@@ -596,8 +620,24 @@ async fn a_history_from_before_version_4_keeps_the_latest_event_of_each_reposito
         .prune(400 * DAY_MS, &crate::config::History::default())
         .await
         .unwrap();
-    assert_eq!(store.announced_repositories().unwrap(), [repository("o/r")]);
+    assert_eq!(store.announced().unwrap().repositories, [repository("o/r")]);
     assert_eq!(store.events_after(0, 10).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_budget_event_an_older_daemon_stored_still_reads() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    // As runnerd 0.0.5 stored it, without the mirror's and seed containers' memory.
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            r#"INSERT INTO events (at, body) VALUES (1000,
+                '{"type":"budget.changed","budget":{"slice":"ci.slice","memory_max":null,"memory_in_use":0}}')"#,
+        )
+        .unwrap();
+    assert_eq!(store.events_after(0, 10).await.unwrap().len(), 1);
 }
 
 #[tokio::test]
@@ -614,7 +654,7 @@ async fn a_repository_event_that_does_not_read_fails_the_startup_read() {
         .execute_batch(r#"UPDATE events SET body = '{"type":"repository.changed","repository":7}'"#)
         .unwrap();
     assert!(
-        store.announced_repositories().is_err(),
+        store.announced().is_err(),
         "an incomplete list would keep a removed repository in resuming clients"
     );
 }

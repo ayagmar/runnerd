@@ -124,6 +124,20 @@ impl State {
                     *known = slot.clone();
                 }
             }
+            Event::ProfileChanged { profile } => {
+                match self
+                    .status
+                    .profiles
+                    .iter_mut()
+                    .find(|known| known.name == profile.name)
+                {
+                    Some(known) => *known = profile.clone(),
+                    None => self.status.profiles.push(profile.clone()),
+                }
+            }
+            Event::ProfileRemoved { profile } => {
+                self.status.profiles.retain(|known| known.name != *profile);
+            }
             Event::BudgetChanged { budget } => self.status.budget = budget.clone(),
             Event::RepositoryChanged { repository } => {
                 match self
@@ -446,6 +460,8 @@ mod tests {
                     slice: "runnerd.slice".to_owned(),
                     memory_max: Some(8 << 30),
                     memory_in_use: 0,
+                    mirror_memory: 0,
+                    seed_memory: Vec::new(),
                 },
                 profiles: vec![ProfileStatus {
                     name: "jvm".to_owned(),
@@ -459,6 +475,7 @@ mod tests {
                     }],
                 }],
                 repositories: Vec::new(),
+                queued: Vec::new(),
             },
             queued: BTreeMap::default(),
             running: BTreeMap::default(),
@@ -535,6 +552,28 @@ mod tests {
     }
 
     #[test]
+    fn a_profile_a_reload_adds_shows_with_its_slots_and_one_it_removes_goes() {
+        let mut state = state();
+        let mut node = state.status.profiles[0].clone();
+        node.name = "node".to_owned();
+        state.apply(&event(Event::ProfileChanged {
+            profile: node.clone(),
+        }));
+        state.apply(&event(Event::SlotChanged {
+            profile: "node".to_owned(),
+            slot: SlotStatus {
+                slot: 1,
+                runner: None,
+            },
+        }));
+        assert!(screen(&state).contains("node"), "{}", screen(&state));
+        state.apply(&event(Event::ProfileRemoved {
+            profile: "jvm".to_owned(),
+        }));
+        assert_eq!(state.status.profiles, [node]);
+    }
+
+    #[test]
     fn a_job_started_before_the_daemon_knew_its_name_shows_its_id_and_is_read_again() {
         let mut state = state();
         let mut unnamed = summary(JobState::Running);
@@ -600,6 +639,8 @@ mod tests {
                     slice: "runnerd.slice".to_owned(),
                     memory_max: None,
                     memory_in_use: 7,
+                    mirror_memory: 0,
+                    seed_memory: Vec::new(),
                 },
             },
         };

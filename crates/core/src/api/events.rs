@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::jobs::{HostSample, JobSummary, Sample, Step};
-use super::{Budget, RepositoryStatus, SlotStatus};
+use super::{Budget, ProfileStatus, RepositoryStatus, SlotStatus};
 
 /// One event as `GET /v1/events` sends it: the SSE `data` field. The SSE `event` field is `event.kind()` and the
 /// SSE `id` field is `id`.
@@ -57,6 +57,20 @@ pub enum Event {
         profile: String,
         /// The slot as it is now.
         slot: SlotStatus,
+    },
+    /// The daemon started or a reload added the profile, a reload changed its image, CPUs, memory or slots, or it
+    /// started or stopped reseeding. A slot's runner changing is `slot.changed` only; this event carries every slot as it is now, so a
+    /// client can replace the whole profile.
+    #[serde(rename = "profile.changed")]
+    ProfileChanged {
+        /// The profile as it is now.
+        profile: ProfileStatus,
+    },
+    /// A reload removed the profile and its last runner and reseed are gone.
+    #[serde(rename = "profile.removed")]
+    ProfileRemoved {
+        /// Its name.
+        profile: String,
     },
     /// The memory caps in use changed.
     #[serde(rename = "budget.changed")]
@@ -122,6 +136,8 @@ impl Event {
             Event::JobStep { .. } => "job.step",
             Event::JobFinished { .. } => "job.finished",
             Event::SlotChanged { .. } => "slot.changed",
+            Event::ProfileChanged { .. } => "profile.changed",
+            Event::ProfileRemoved { .. } => "profile.removed",
             Event::BudgetChanged { .. } => "budget.changed",
             Event::RepositoryChanged { .. } => "repository.changed",
             Event::RepositoryRemoved { .. } => "repository.removed",
@@ -150,6 +166,8 @@ impl Event {
             | Event::JobSample { job, .. }
             | Event::LogLine { job, .. } => Some(*job),
             Event::SlotChanged { .. }
+            | Event::ProfileChanged { .. }
+            | Event::ProfileRemoved { .. }
             | Event::BudgetChanged { .. }
             | Event::RepositoryChanged { .. }
             | Event::RepositoryRemoved { .. }

@@ -511,7 +511,7 @@ fn engine_with(
             names: Names::new("runnerd"),
             identity: identity("ci", ID_A),
             memory_max: None,
-            announced: store.announced_repositories().unwrap(),
+            announced: store.announced().unwrap(),
             paused: store.paused_repositories().unwrap(),
             store,
             paths: Paths {
@@ -2136,6 +2136,11 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
 
 /// The `repository.*` events stored after `after`, and the last event's ID.
 async fn repository_events(handle: &Handle, after: &mut u64) -> Vec<api::Event> {
+    events_of(handle, after, "repository.").await
+}
+
+/// The stored events after `after` whose kind starts with `prefix`; moves `after` past every event read.
+async fn events_of(handle: &Handle, after: &mut u64, prefix: &str) -> Vec<api::Event> {
     handle.store.flush().await;
     let events = handle.store.events_after(*after, 100).await.unwrap();
     if let Some(last) = events.last() {
@@ -2144,7 +2149,7 @@ async fn repository_events(handle: &Handle, after: &mut u64) -> Vec<api::Event> 
     events
         .into_iter()
         .map(|envelope| envelope.event)
-        .filter(|event| event.kind().starts_with("repository."))
+        .filter(|event| event.kind().starts_with(prefix))
         .collect()
 }
 
@@ -2258,6 +2263,253 @@ async fn a_restart_without_a_repository_announces_its_removal_to_clients_resumin
             api::Event::RepositoryRemoved {
                 repository: "o/r".to_owned()
             }
+        ]
+    );
+}
+
+/// `CONFIG` with a second profile, `small`.
+fn with_small(config: &str) -> String {
+    format!(
+        "{config}\n[profiles.small]\nimage_stage = \"small\"\ncpus = 1\nmemory = \"1G\"\nslots = 1\n"
+    )
+}
+
+#[tokio::test]
+async fn each_change_to_a_profile_is_announced_once_and_a_runner_only_as_its_slot() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    let profile = |name: &str| {
+        let status = handle.status.borrow();
+        let profile = status.profiles.iter().find(|profile| profile.name == name);
+        api::Event::ProfileChanged {
+            profile: profile.unwrap().clone(),
+        }
+    };
+    let mut after = 0;
+    assert_eq!(
+        events_of(&handle, &mut after, "profile.").await,
+        [profile("app")]
+    );
+    engine.publish();
+    assert_eq!(events_of(&handle, &mut after, "profile.").await, []);
+
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert!(runner_in(&handle, 1).is_some(), "a runner starts in slot 1");
+    assert_eq!(events_of(&handle, &mut after, "profile.").await, []);
+
+    engine.reload(
+        Config::parse(&CONFIG.replace("slots = 2", "slots = 3")).unwrap(),
+        None,
+    );
+    engine.publish();
+    assert_eq!(
+        events_of(&handle, &mut after, "profile.").await,
+        [profile("app")]
+    );
+    assert_eq!(handle.status.borrow().profiles[0].slots.len(), 3);
+
+    engine.reload(
+        Config::parse(&with_small(&CONFIG.replace("slots = 2", "slots = 3"))).unwrap(),
+        None,
+    );
+    engine.publish();
+    assert_eq!(
+        events_of(&handle, &mut after, "profile.").await,
+        [profile("small")]
+    );
+
+    engine.reload(Config::parse(CONFIG).unwrap(), None);
+    engine.publish();
+    // `app`'s third slot is free, so it goes with the reload.
+    assert_eq!(
+        events_of(&handle, &mut after, "profile.").await,
+        [
+            profile("app"),
+            api::Event::ProfileRemoved {
+                profile: "small".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_profile_that_starts_reseeding_is_announced_with_its_seed_containers_memory() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &sized("512M", "8G", "1G"));
+    engine.recover().await.unwrap();
+    engine.publish();
+    let mut after = 0;
+    events_of(&handle, &mut after, "profile.").await;
+
+    engine.request_reseed("app").unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let status = handle.status.borrow().clone();
+    assert_eq!(
+        events_of(&handle, &mut after, "profile.").await,
+        [api::Event::ProfileChanged {
+            profile: status.profiles[0].clone()
+        }]
+    );
+    assert!(status.profiles[0].reseeding, "app shows reseeding");
+    // The enabled mirror is reserved for while it is down.
+    assert_eq!(status.budget.mirror_memory, 512 << 20);
+    assert_eq!(
+        status.budget.seed_memory,
+        [api::SeedMemory {
+            profile: "app".to_owned(),
+            memory: 8 << 30
+        }]
+    );
+    assert_eq!(status.budget.memory_in_use, (8 << 30) + (512 << 20));
+}
+
+#[tokio::test]
+async fn a_restart_without_a_profile_leaves_clients_resuming_after_the_last_run_where_the_status_is()
+ {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &with_small(CONFIG));
+    engine.recover().await.unwrap();
+    engine.publish();
+    assert!(
+        runner_in(&handle, 1).is_some(),
+        "the runner shows in slot 1"
+    );
+    // A client following the events of both runs.
+    let mut cursor = 0;
+    let mut shown: Vec<api::ProfileStatus> = Vec::new();
+    let mut follow = |events: Vec<api::Event>| {
+        for event in events {
+            match event {
+                api::Event::ProfileChanged { profile } => {
+                    shown.retain(|known| known.name != profile.name);
+                    shown.push(profile);
+                }
+                api::Event::ProfileRemoved { profile } => {
+                    shown.retain(|known| known.name != profile);
+                }
+                api::Event::SlotChanged { profile, slot } => {
+                    if let Some(known) = shown
+                        .iter_mut()
+                        .filter(|known| known.name == profile)
+                        .flat_map(|known| known.slots.iter_mut())
+                        .find(|known| known.slot == slot.slot)
+                    {
+                        *known = slot;
+                    }
+                }
+                _ => {}
+            }
+        }
+    };
+    follow(events_of(&handle, &mut cursor, "").await);
+    drop((engine, handle));
+
+    // Restarted without `small`, and the runner's container went while runnerd was down.
+    docker.0.lock().unwrap().containers.clear();
+    let (_engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    let events = events_of(&handle, &mut cursor, "").await;
+    let profile_events: Vec<_> = events
+        .iter()
+        .filter(|event| event.kind().starts_with("profile."))
+        .cloned()
+        .collect();
+    assert_eq!(
+        profile_events,
+        [api::Event::ProfileRemoved {
+            profile: "small".to_owned()
+        }]
+    );
+    follow(events);
+    let mut expected = handle.status.borrow().profiles.clone();
+    expected.sort_by(|a, b| a.name.cmp(&b.name));
+    shown.sort_by(|a, b| a.name.cmp(&b.name));
+    assert_eq!(shown, expected);
+}
+
+#[tokio::test]
+async fn a_daemon_shutting_down_lists_no_queued_jobs_since_it_no_longer_polls_them() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(handle.status.borrow().queued.len(), 1);
+
+    engine.tick(Shutdown::Graceful).await;
+    engine.publish();
+    assert_eq!(handle.status.borrow().queued, []);
+}
+
+#[tokio::test]
+async fn the_status_lists_the_queued_jobs_runners_can_take_and_none_holds_oldest_first() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    // Job 1 is queued at GitHub still, but the runner in slot 1 holds it.
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    // Paused, so no runner takes the others.
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![
+        QueuedJob {
+            run_attempt: 2,
+            workflow: Some("CI".to_owned()),
+            branch: Some("main".to_owned()),
+            url: Some("https://github.com/o/r/actions/runs/1/job/5".to_owned()),
+            created_at: 1_700_000_000_900,
+            ..job(5)
+        },
+        QueuedJob {
+            labels: vec!["self-hosted".to_owned(), "gpu".to_owned()],
+            ..job(4)
+        },
+        job(3),
+        job(1),
+    ];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let status = handle.status.borrow().clone();
+    let queued = |id,
+                  run_attempt,
+                  workflow: Option<&str>,
+                  branch: Option<&str>,
+                  url: Option<&str>,
+                  queued_at| {
+        api::QueuedJob {
+            id,
+            repository: "o/r".to_owned(),
+            run_id: 1,
+            run_attempt,
+            workflow: workflow.map(str::to_owned),
+            name: "build".to_owned(),
+            branch: branch.map(str::to_owned),
+            url: url.map(str::to_owned),
+            queued_at,
+        }
+    };
+    assert_eq!(
+        status.queued,
+        [
+            queued(3, 0, None, None, None, 0),
+            queued(
+                5,
+                2,
+                Some("CI"),
+                Some("main"),
+                Some("https://github.com/o/r/actions/runs/1/job/5"),
+                1_700_000_000
+            ),
         ]
     );
 }

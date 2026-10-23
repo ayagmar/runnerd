@@ -71,6 +71,12 @@ pub struct Status {
     pub profiles: Vec<ProfileStatus>,
     /// Every configured repository.
     pub repositories: Vec<RepositoryStatus>,
+    /// Queued jobs the repositories' runners can take and none holds yet, at the last poll, oldest first. No event
+    /// carries the list: `job.queued` announces a job, `job.started` and `job.finished` its leaving the queue.
+    /// A repository whose last listing failed, as while GitHub rate-limits runnerd, or that is no longer polled
+    /// because runnerd is shutting down, shows no jobs here, while the history keeps its jobs queued.
+    #[serde(default)]
+    pub queued: Vec<QueuedJob>,
 }
 
 /// The memory budget runners and the mirror share, in bytes.
@@ -82,6 +88,21 @@ pub struct Budget {
     pub memory_max: Option<u64>,
     /// Memory caps of the running containers: runners, seed containers and the mirror.
     pub memory_in_use: u64,
+    /// The mirror's part of `memory_in_use`: its cap while it is enabled or still running, else 0.
+    #[serde(default)]
+    pub mirror_memory: u64,
+    /// The seed containers' part of `memory_in_use`, one per profile that reseeds, by profile name.
+    #[serde(default)]
+    pub seed_memory: Vec<SeedMemory>,
+}
+
+/// A running seed container's memory cap: its profile's limit when the reseed started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedMemory {
+    /// The profile it reseeds.
+    pub profile: String,
+    /// Its cap in bytes.
+    pub memory: u64,
 }
 
 /// A runner profile and what runs in its slots.
@@ -140,6 +161,29 @@ pub struct RepositoryStatus {
     pub paused: bool,
     /// Queued jobs whose labels these runners match, at the last poll.
     pub queued_jobs: usize,
+}
+
+/// A queued job runners of this daemon can take, as GitHub listed it at the last poll.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedJob {
+    /// GitHub's job ID.
+    pub id: u64,
+    /// The repository whose runners can take it, `owner/name`.
+    pub repository: String,
+    /// The workflow run it belongs to.
+    pub run_id: u64,
+    /// 1 for the first attempt of the run, higher for re-runs.
+    pub run_attempt: u32,
+    /// The workflow's name.
+    pub workflow: Option<String>,
+    /// The job's name in the workflow.
+    pub name: String,
+    /// The branch the run is for.
+    pub branch: Option<String>,
+    /// The job's page on GitHub.
+    pub url: Option<String>,
+    /// When GitHub queued it, in seconds since the Unix epoch; 0 if GitHub did not say.
+    pub queued_at: u64,
 }
 
 /// `POST /v1/shutdown`.

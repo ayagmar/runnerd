@@ -51,10 +51,11 @@ pub(super) fn run(db: &Db<'_>, now: u64, history: &History) {
         "prune events",
         batches(
             db,
-            // `announced` keeps each repository's latest: what a restarted daemon compares its config with to
-            // announce a removal (`read::announced_repositories`).
+            // `announced` and `announced_profiles` keep each repository's and profile's latest: what a restarted
+            // daemon compares its config with to announce a removal (`read::announced`).
             "DELETE FROM events WHERE id IN (SELECT id FROM events WHERE at < ?1 \
-             AND id NOT IN (SELECT event FROM announced) LIMIT ?2)",
+             AND id NOT IN (SELECT event FROM announced) \
+             AND id NOT IN (SELECT event FROM announced_profiles) LIMIT ?2)",
             before(history.events),
         ),
     );
