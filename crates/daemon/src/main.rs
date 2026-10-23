@@ -452,6 +452,7 @@ async fn serve(
     let web_listener = runnerd_web::listen(web)
         .await
         .map_err(|error| fail(&format_args!("--web {web}: {error}")))?;
+    let proxies = config.web.origins.clone();
     let (engine, handle) = Engine::new(
         config,
         github,
@@ -499,7 +500,8 @@ async fn serve(
         let _ = stop.await;
     }));
     let (web_stopped, web_stop) = tokio::sync::oneshot::channel::<()>();
-    let web = web_listener.map(|listener| runnerd_web::spawn(listener, socket.clone(), web_stop));
+    let web = web_listener
+        .map(|listener| runnerd_web::spawn(listener, socket.clone(), proxies, web_stop));
     let engine_done = engine.await;
     let _ = web_stopped.send(());
     let _ = stopped.send(());

@@ -141,6 +141,7 @@ pub(crate) fn page(
                 meta name="description" content="runnerd's dashboard: its slots, jobs, caches and config on this machine.";
                 title { (title) " · runnerd" }
                 link rel="icon" href=(assets::path("mark.svg")) type="image/svg+xml";
+                link rel="manifest" href=(assets::path("manifest.webmanifest"));
                 link rel="preload" href=(assets::path("libre-franklin.woff2")) as="font" type="font/woff2" crossorigin;
                 link rel="stylesheet" href=(assets::path("style.css"));
                 script src=(assets::path("theme.js")) {}
@@ -201,6 +202,7 @@ pub(crate) fn signed_out(reason: SignedOut) -> Markup {
         section.signed-out {
             h1 { @if reason == SignedOut::CodeUsed { "That link was used already" } @else { "Open the dashboard from your terminal" } }
             p { "Run " code { "runnerctl web" } " on this machine. It opens a one-time link that signs this browser in." }
+            p { "Here through a proxy from another device? Run " code { "runnerctl web --no-open --base https://host:port" } " on runnerd's machine, with this page's address, and open the link it prints here." }
             p.muted { "Each link works once. The daemon writes a fresh one to " code { "$XDG_RUNTIME_DIR/runnerd.web" } " after every use." }
         }
     };

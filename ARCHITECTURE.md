@@ -87,7 +87,9 @@ A new transport (SSH, Tailscale) produces a `Principal` and reuses the handlers.
 
 The dashboard's path is browser → loopback TCP → session check → `runnerd-web` → Unix socket → the path above. Its
 session check ([`crates/web/src/auth.rs`](crates/web/src/auth.rs)) admits a request only with the session cookie, and
-a write only with the dashboard's own `Origin`; the daemon then sees the dashboard as its own user.
+a write only with the dashboard's own `Origin` or one of `[web] origins`, the proxies the owner runs in front of it
+([ADR 0042](docs/adr/0042-dashboard-behind-a-proxy-and-installable.md)); the daemon then sees the dashboard as its
+own user.
 
 ## Job lifecycle
 
@@ -207,4 +209,5 @@ nothing until Docker has listed them.
   exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.
   A record with a shell open is never removed.
 - The dashboard listens on loopback only, never logs its session token or login code, and serves every file its
-  pages load; its Content-Security-Policy allows nothing else.
+  pages load, its web app manifest and icons included; its Content-Security-Policy allows nothing else. Other
+  devices reach it only through a proxy the owner runs, whose origin `[web] origins` lists.

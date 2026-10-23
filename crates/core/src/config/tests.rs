@@ -112,6 +112,7 @@ fn config_rejects_unknown_fields_in_every_table() {
             MINIMAL.replace("profile = \"app\"", "profile = \"app\"\ntypo = 1"),
         ),
         ("records", format!("{MINIMAL}\n[records]\ntypo = 1")),
+        ("web", format!("{MINIMAL}\n[web]\ntypo = 1")),
     ] {
         let error = Config::parse(&with_typo).unwrap_err().to_string();
         assert!(error.contains("unknown field `typo`"), "{table}: {error}");
@@ -192,6 +193,95 @@ fn auto_sizing_is_off_and_bounded_unless_configured() {
             .unwrap_err()
             .to_string();
         assert_eq!(error, format!("profiles.app: {why}"));
+    }
+}
+
+fn origins(list: &str) -> Result<Vec<String>, String> {
+    Config::parse(&format!("{MINIMAL}\n[web]\norigins = [{list}]\n"))
+        .map(|config| config.web.origins.iter().map(ToString::to_string).collect())
+        .map_err(|error| error.to_string())
+}
+
+#[test]
+fn the_dashboard_takes_writes_from_no_other_origin_unless_configured() {
+    let config = Config::parse(MINIMAL).unwrap();
+    assert!(config.web.origins.is_empty(), "no extra origins by default");
+}
+
+/// Each input and what `new URL(input).origin` gives for it in Node 24, which follows the WHATWG URL standard as
+/// browsers do: the `Origin` header a page at that address sends.
+const BROWSER_ORIGINS: [(&str, &str); 11] = [
+    (
+        "https://Host.Example.ts.net:443",
+        "https://host.example.ts.net",
+    ),
+    ("https://host.example.:8443", "https://host.example.:8443"),
+    ("http://localhost:8080", "http://localhost:8080"),
+    ("http://[0:0:0:0:0:0:0:1]:8443", "http://[::1]:8443"),
+    ("https://[2001:0DB8::1]:8443", "https://[2001:db8::1]:8443"),
+    (
+        "https://[2001:db8:0:0:1:0:0:1]",
+        "https://[2001:db8::1:0:0:1]",
+    ),
+    ("https://[1:0:0:2:0:0:0:3]", "https://[1:0:0:2::3]"),
+    ("https://[0:0:1:0:0:0:0:0]", "https://[0:0:1::]"),
+    (
+        "https://[::ffff:127.0.0.1]:8443",
+        "https://[::ffff:7f00:1]:8443",
+    ),
+    ("http://127.0.0.1.:7477", "http://127.0.0.1:7477"),
+    ("https://192.0.2.1:8443", "https://192.0.2.1:8443"),
+];
+
+#[test]
+fn an_origin_is_kept_as_the_browser_sends_it() {
+    for (input, browser) in BROWSER_ORIGINS {
+        assert_eq!(
+            origins(&format!("{input:?}")),
+            Ok(vec![browser.to_owned()]),
+            "{input}"
+        );
+    }
+}
+
+#[test]
+fn an_ipv4_address_in_another_form_than_four_decimals_is_refused() {
+    // Browsers read each as 127.0.0.1 or 8.0.0.1; written that way they would be a second spelling to get wrong.
+    for input in [
+        "https://2130706433:8443",
+        "https://0x7f.1",
+        "http://127.1:7477",
+        "https://127.000.0.1",
+        "https://010.0.0.1",
+        "https://example.0x",
+    ] {
+        let error = origins(&format!("{input:?}")).unwrap_err();
+        assert!(error.contains("four decimal numbers"), "{input}: {error}");
+    }
+}
+
+#[test]
+fn an_origin_with_a_path_plain_http_or_no_port_number_is_refused() {
+    for (origin, why) in [
+        ("https://host.example.ts.net:8443/", "it has a path"),
+        ("https://host.example/dashboard", "it has a path"),
+        (
+            "http://host.example.ts.net:8443",
+            "http is for a loopback host only",
+        ),
+        ("host.example.ts.net:8443", "it has no scheme"),
+        ("ftp://host.example", "its scheme is not https"),
+        ("https://host.example:http", "its port is not a number"),
+        ("https://host.example:0", "its port is not a number"),
+        ("https://me@host.example", "it names a user"),
+        ("https://", "its host is not a name"),
+    ] {
+        let error = origins(&format!("{origin:?}")).unwrap_err();
+        assert!(error.contains(why), "{origin}: {error}");
+        assert!(
+            error.contains("origins = ["),
+            "{origin} shows the line: {error}"
+        );
     }
 }
 

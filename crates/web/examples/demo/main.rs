@@ -1,7 +1,7 @@
 //! The dashboard against made-up data, for working on its design: `cargo run -p runnerd-web --example demo -- DIR
-//! [ADDR]` serves a fake daemon's socket in DIR and the dashboard on ADDR (default 127.0.0.1:7478), and sends a
-//! sample of each running job and of the slice every 2 seconds, and a log line every second. Open the URL in
-//! `DIR/runnerd.web`.
+//! [ADDR [ORIGIN...]]` serves a fake daemon's socket in DIR and the dashboard on ADDR (default 127.0.0.1:7478),
+//! taking writes from each ORIGIN as from `[web] origins` too, and sends a sample of each running job and of the
+//! slice every 2 seconds, and a log line every second. Open the URL in `DIR/runnerd.web`.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,13 +29,19 @@ async fn main() {
     let mut args = std::env::args().skip(1);
     let dir = PathBuf::from(args.next().expect("usage: demo DIR [ADDR]"));
     let addr = args.next().unwrap_or_else(|| "127.0.0.1:7478".to_owned());
+    let proxies = args.map(|origin| origin.parse().unwrap()).collect();
     std::fs::create_dir_all(&dir).unwrap();
     let socket = dir.join("runnerd.sock");
     let _ = std::fs::remove_file(&socket);
     let fake = fake::Fake::new(fake::Fixtures::new(now()));
     fake::serve(&socket, fake.clone());
     let listener = runnerd_web::listen(&addr).await.unwrap().unwrap();
-    let web = runnerd_web::spawn(listener, socket.clone(), std::future::pending::<()>());
+    let web = runnerd_web::spawn(
+        listener,
+        socket.clone(),
+        proxies,
+        std::future::pending::<()>(),
+    );
     println!(
         "login URL in {}",
         runnerd_web::login_file(&socket).display()

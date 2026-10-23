@@ -73,13 +73,22 @@ impl Dashboard {
     }
 
     async fn start() -> Dashboard {
+        Dashboard::behind(&[]).await
+    }
+
+    /// The dashboard that also takes writes from the pages of `proxies`, as `[web] origins` sets.
+    async fn behind(proxies: &[&str]) -> Dashboard {
+        let proxies = proxies
+            .iter()
+            .map(|origin| origin.parse().unwrap())
+            .collect();
         let dir = TempDir::new();
         let socket = dir.0.join("runnerd.sock");
         let fake = fake::Fake::new(fake::Fixtures::new(NOW));
         fake::serve(&socket, fake.clone());
         let listener = crate::listen("127.0.0.1:0").await.unwrap().unwrap();
         let addr = listener.local_addr().unwrap();
-        crate::spawn(listener, socket, std::future::pending::<()>());
+        crate::spawn(listener, socket, proxies, std::future::pending::<()>());
         // The login file is written before the first request is served.
         for _ in 0..100 {
             if crate::login_file(&dir.0.join("runnerd.sock")).exists() {
@@ -281,6 +290,131 @@ async fn a_write_from_another_origin_is_403_even_with_the_cookie() {
         assert_eq!(reply.status, StatusCode::FORBIDDEN, "origin {origin:?}");
     }
     assert!(!dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
+}
+
+#[tokio::test]
+async fn a_write_through_a_configured_proxy_reaches_the_daemon_and_others_stay_403() {
+    let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
+    let cookie = dashboard.sign_in().await;
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
+    let resume = |origin: &'static str| {
+        let headers = [("cookie", cookie.as_str()), ("origin", origin)];
+        let request = dashboard.build("POST", "/v1/repositories/halyard/ledger/resume", &headers);
+        dashboard.send(request)
+    };
+    for origin in [
+        "https://forge.example.ts.net",
+        "http://forge.example.ts.net:8443",
+        "https://evil.example.ts.net:8443",
+    ] {
+        assert_eq!(
+            resume(origin).await.status,
+            StatusCode::FORBIDDEN,
+            "origin {origin}"
+        );
+    }
+    assert!(
+        dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused,
+        "halyard/ledger stays paused"
+    );
+    let reply = resume("https://forge.example.ts.net:8443").await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(
+        !dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused,
+        "halyard/ledger runs again"
+    );
+}
+
+#[tokio::test]
+async fn a_proxy_configured_by_a_long_address_takes_writes_with_the_origin_a_browser_sends() {
+    let dashboard = Dashboard::behind(&["http://[0:0:0:0:0:0:0:1]:8443"]).await;
+    let cookie = dashboard.sign_in().await;
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
+    // `new URL("http://[0:0:0:0:0:0:0:1]:8443").origin` in a browser.
+    let headers = [("cookie", cookie.as_str()), ("origin", "http://[::1]:8443")];
+    let reply = dashboard
+        .send(dashboard.build("POST", "/v1/repositories/halyard/ledger/resume", &headers))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    assert!(
+        !dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused,
+        "halyard/ledger runs again"
+    );
+}
+
+#[tokio::test]
+async fn a_login_through_an_https_proxy_sets_a_secure_cookie_and_a_loopback_one_does_not() {
+    let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
+    let mut cookies = Vec::new();
+    for headers in [vec![], vec![("x-forwarded-proto", "https")]] {
+        let url = dashboard.login_url();
+        let path = url
+            .strip_prefix(&format!("http://{}", dashboard.addr))
+            .unwrap();
+        let reply = dashboard.request("GET", path, &headers).await;
+        assert_eq!(reply.status, StatusCode::SEE_OTHER);
+        cookies.push(
+            reply.headers[header::SET_COOKIE]
+                .to_str()
+                .unwrap()
+                .to_owned(),
+        );
+    }
+    assert!(!cookies[0].contains("Secure"), "{}", cookies[0]);
+    assert!(
+        cookies[1].ends_with("; Secure") && cookies[1].contains("SameSite=Strict"),
+        "{}",
+        cookies[1]
+    );
+}
+
+#[tokio::test]
+async fn every_page_links_a_manifest_a_browser_can_install_without_a_session() {
+    let dashboard = Dashboard::start().await;
+    let signed_out = dashboard.request("GET", "/", &[]).await;
+    let cookie = dashboard.sign_in().await;
+    for page in [
+        signed_out,
+        dashboard.page(&cookie, "/").await,
+        dashboard.page(&cookie, "/nowhere").await,
+    ] {
+        let link = r#"<link rel="manifest" href=""#;
+        let from = page.body.find(link).unwrap() + link.len();
+        let url = &page.body[from..from + page.body[from..].find('"').unwrap()];
+        assert!(
+            page.headers[header::CONTENT_SECURITY_POLICY]
+                .to_str()
+                .unwrap()
+                .contains("manifest-src 'self'"),
+            "the policy lets the page load its manifest"
+        );
+        // A browser fetches the manifest and its icons without cookies.
+        let manifest = dashboard.request("GET", url, &[]).await;
+        assert_eq!(manifest.status, StatusCode::OK);
+        assert_eq!(
+            manifest.headers[header::CONTENT_TYPE],
+            "application/manifest+json"
+        );
+        let manifest: serde_json::Value = serde_json::from_str(&manifest.body).unwrap();
+        assert_eq!(manifest["start_url"], "/");
+        assert_eq!(manifest["display"], "standalone");
+        assert!(manifest["name"].is_string(), "the manifest names the app");
+        let icons = manifest["icons"].as_array().unwrap();
+        for size in ["192x192", "512x512"] {
+            assert!(
+                icons
+                    .iter()
+                    .any(|icon| icon["sizes"] == size && icon["purpose"] == "any"),
+                "an icon of {size}, as Chrome needs to install"
+            );
+        }
+        for icon in icons {
+            let src = icon["src"].as_str().unwrap();
+            let reply = dashboard.request("HEAD", src, &[]).await;
+            assert_eq!(reply.status, StatusCode::OK, "{src}");
+            assert_eq!(reply.headers[header::CONTENT_TYPE], "image/png", "{src}");
+        }
+    }
 }
 
 #[tokio::test]

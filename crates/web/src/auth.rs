@@ -1,5 +1,6 @@
 //! Who may use the dashboard. The port is open to every local user, so every request but the login and the static
-//! assets needs the session cookie, and every write also needs an `Origin` of the dashboard itself.
+//! assets needs the session cookie, and every write also needs an `Origin` of the dashboard itself: its loopback
+//! address, or one of `[web] origins`, the addresses of a reverse proxy in front of it.
 //!
 //! The session token is random per daemon run. A browser gets it by opening the one-time login URL, which the
 //! daemon keeps in a file only its user can read (`login_file`); each use replaces the URL with a new one. This
@@ -16,6 +17,7 @@ use axum::extract::{Query, Request, State};
 use axum::http::{HeaderMap, Method, StatusCode, header};
 use axum::middleware::Next;
 use axum::response::{IntoResponse, Redirect, Response};
+use runnerd_core::config::Origin;
 use serde::Deserialize;
 use tracing::warn;
 
@@ -60,13 +62,19 @@ pub(crate) struct Auth {
 }
 
 impl Auth {
-    /// A fresh token and login code for a dashboard on `addr`; writes the login URL to `file`.
-    pub(crate) fn new(addr: SocketAddr, file: PathBuf) -> io::Result<Arc<Auth>> {
+    /// A fresh token and login code for a dashboard on `addr`, which also takes writes from `proxies`; writes the
+    /// login URL to `file`.
+    pub(crate) fn new(
+        addr: SocketAddr,
+        proxies: &[Origin],
+        file: PathBuf,
+    ) -> io::Result<Arc<Auth>> {
         let base = format!("http://{addr}");
         let mut origins = vec![base.clone()];
         if addr.ip().is_loopback() {
             origins.push(format!("http://localhost:{}", addr.port()));
         }
+        origins.extend(proxies.iter().map(|origin| origin.as_str().to_owned()));
         let auth = Auth {
             token: random_token()?,
             code: Mutex::new(random_token()?),
@@ -151,8 +159,13 @@ pub(crate) struct Login {
     code: String,
 }
 
-/// `GET /login?code=…`: a valid code sets the session cookie and goes to the overview.
-pub(crate) async fn login(State(auth): State<Arc<Auth>>, Query(login): Query<Login>) -> Response {
+/// `GET /login?code=…`: a valid code sets the session cookie and goes to the overview. Through a proxy that says
+/// it took the request over https (`X-Forwarded-Proto`, as `tailscale serve` sends), the cookie is `Secure`.
+pub(crate) async fn login(
+    State(auth): State<Arc<Auth>>,
+    Query(login): Query<Login>,
+    headers: HeaderMap,
+) -> Response {
     if !auth.redeem(&login.code) {
         return (
             StatusCode::UNAUTHORIZED,
@@ -160,15 +173,20 @@ pub(crate) async fn login(State(auth): State<Arc<Auth>>, Query(login): Query<Log
         )
             .into_response();
     }
+    let https = headers
+        .get("x-forwarded-proto")
+        .is_some_and(|proto| proto.as_bytes().eq_ignore_ascii_case(b"https"));
     let cookie = format!(
-        "{}={}; Path=/; HttpOnly; SameSite=Strict",
-        auth.cookie, auth.token
+        "{}={}; Path=/; HttpOnly; SameSite=Strict{}",
+        auth.cookie,
+        auth.token,
+        if https { "; Secure" } else { "" }
     );
     ([(header::SET_COOKIE, cookie)], Redirect::to("/")).into_response()
 }
 
 /// Lets through the login, the assets, and requests with the session cookie; writes also need the dashboard's own
-/// `Origin`. A missing or wrong cookie is 401, a foreign origin 403.
+/// `Origin` or a proxy's. A missing or wrong cookie is 401, a foreign origin 403.
 pub(crate) async fn require_session(
     State(auth): State<Arc<Auth>>,
     request: Request,
@@ -204,7 +222,7 @@ mod tests {
     fn a_login_code_works_once_and_the_file_then_holds_a_new_one() {
         let dir = crate::tests::TempDir::new();
         let file = dir.0.join("runnerd.web");
-        let auth = Auth::new("127.0.0.1:7477".parse().unwrap(), file.clone()).unwrap();
+        let auth = Auth::new("127.0.0.1:7477".parse().unwrap(), &[], file.clone()).unwrap();
         let url = std::fs::read_to_string(&file).unwrap();
         let code = url.trim().split_once("code=").unwrap().1.to_owned();
         assert!(url.starts_with("http://127.0.0.1:7477/login?code="));

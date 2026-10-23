@@ -22,6 +22,33 @@ Pages update as things happen, over one server-sent event stream per page. Memor
 
 Any local user can reach the port, so every page needs the session cookie the login URL sets, and writes such as a pause also need the dashboard's own `Origin`, so another site the browser has open cannot send them. The pages load nothing from elsewhere: the Datastar script and the font are in the binary.
 
+### From another device
+
+The dashboard listens on loopback only. To open it on a phone or another computer, put a proxy that serves HTTPS in front of it, such as `tailscale serve`, which reaches every device on your tailnet:
+
+```sh
+tailscale serve --https 8443 http://127.0.0.1:7477
+```
+
+Then add the proxy's address to `runnerd.toml` and restart runnerd, so writes from its pages pass the `Origin` check:
+
+```toml
+[web]
+origins = ["https://forge.tail0b5e.ts.net:8443"]
+```
+
+The login URL names the loopback address. `--base` prints it for the proxy instead; open what it prints on the other device:
+
+```sh
+runnerctl web --no-open --base https://forge.tail0b5e.ts.net:8443
+```
+
+Each link works once and signs in one browser. Behind a proxy that says it took the request over HTTPS (`X-Forwarded-Proto`, which `tailscale serve` sends), the session cookie is `Secure`. Anyone who can reach the proxy sees the sign-in page and nothing else without a link.
+
+### Install it as an app
+
+Chromium-based browsers (Chrome, Edge, Brave) install the dashboard as an app with its own window: on the desktop, the install button in the address bar or **Install** in the menu; on Android, **Add to home screen** in Chrome's menu, then **Install**. Both work through the HTTPS proxy and on `http://127.0.0.1:7477`, which browsers treat as secure. Each address installs as its own app. The app is the same live pages and needs runnerd running; nothing is kept for offline use. Firefox installs web apps on Windows only, so on Linux it stays a tab.
+
 Views of the same thing are linked. On the overview, pointing at, focusing or tapping a slot's block, card, running job or repository lights up the others and says above the bar what the block holds, free space included; a slot's block opens its job. On a job, a step marks its stretch of the memory and CPU charts. On the history, a day, pointed at or stepped to with the arrow keys, is marked on all three charts and its numbers replace the 30 days' in the headline.
 
 ### Overview
