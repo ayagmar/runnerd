@@ -812,8 +812,10 @@ async fn check(docker: &impl DockerApi, container: &str) -> Result<Checked, Stri
     let secrets = record::secrets_left(changed.iter().map(String::as_str));
     if !secrets.is_empty() {
         return Err(format!(
-            "its runner left files a record must not keep ({}); a runner image of this release deletes them",
-            record::listed(&secrets)
+            "its runner left files a record must not keep ({}): runner images before runnerd 0.0.7 do not delete \
+             them; use the image of runnerd {}, or rebuild image_stage from its image/",
+            record::listed(&secrets),
+            env!("CARGO_PKG_VERSION")
         ));
     }
     let incoming = docker
