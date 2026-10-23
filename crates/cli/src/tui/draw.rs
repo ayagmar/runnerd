@@ -15,7 +15,7 @@ use ratatui::widgets::{
 use runnerd_core::api::{
     Job, JobSummary, ProfileStatus, RepositoryStatus, Sample, SlotStatus, Step,
 };
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Connection, JobView, Outcome, Pane, View};
 use crate::human::{self, Tone, bytes, cores, duration};
@@ -389,24 +389,24 @@ fn spark(values: impl DoubleEndedIterator<Item = u64>, max: u64, width: usize) -
 }
 
 /// `text` cut or padded to `width` terminal cells, ending in `…` when cut.
+///
+/// The cut is measured on the whole prefix, not per character: a sequence such as `❤️` (a character and a
+/// variation selector) takes more cells than its characters do one by one.
 fn fit(text: &str, width: usize) -> String {
     let mut cut = String::new();
-    let mut used = 0;
     if text.width() <= width {
         cut.push_str(text);
-        used = text.width();
     } else if width > 0 {
         for character in text.chars() {
-            let cells = character.width().unwrap_or(0);
-            if used + cells + 1 > width {
+            cut.push(character);
+            if cut.width() + 1 > width {
+                cut.pop();
                 break;
             }
-            cut.push(character);
-            used += cells;
         }
         cut.push('…');
-        used += 1;
     }
+    let used = cut.width();
     cut.extend(std::iter::repeat_n(' ', width.saturating_sub(used)));
     cut
 }

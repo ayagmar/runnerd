@@ -975,6 +975,24 @@ fn wide_characters_are_fitted_by_the_cells_they_take() {
 }
 
 #[test]
+fn an_emoji_branch_cut_in_the_history_ends_in_an_ellipsis() {
+    // `❤️` is a character and a variation selector: two cells, though each character alone takes one or none.
+    let mut app = app();
+    let mut job = finished(7, 60);
+    job.branch = Some("❤️".repeat(20));
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(generation, vec![job], None));
+    for width in [120, 136] {
+        let history = screen(&app, width, 24, false);
+        let row = rows_with(&history, "SUCCESS")[0];
+        assert!(
+            row.contains("…"),
+            "the branch ends in an ellipsis at {width}: {history}"
+        );
+    }
+}
+
+#[test]
 fn the_open_job_metrics_drop_whole_figures_to_fit() {
     let mut app = app();
     running_job(&mut app);
