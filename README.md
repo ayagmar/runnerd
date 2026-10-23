@@ -13,10 +13,14 @@ curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.s
 runnerd init halyard/ledger halyard/storefront
 ```
 
+Serve only private repositories: on a public one, anyone who opens a pull request can run code on this host
+([Configuration](https://ayagmar.github.io/runnerd/configuration/)).
+
 `runnerd init` writes two files and changes nothing else:
 
-- `~/.config/runnerd/runnerd.toml`: the repositories, and one profile sized to three quarters of the host's memory
-  (or the slice's `MemoryMax` if that is smaller) and its CPUs, so `runnerd check-config` passes;
+- `~/.config/runnerd/runnerd.toml`: the repositories, and one profile with slots of up to 8G, one per 4 CPUs, inside
+  three quarters of the host's memory (or the slice's `MemoryMax` if that is smaller), so `runnerd check-config`
+  passes;
 - `~/.config/systemd/user/runnerd.service`: a user unit running `runnerd serve` with that config.
 
 It then runs `runnerd doctor` and prints what is left as commands. It prints the ones that need root and never runs
