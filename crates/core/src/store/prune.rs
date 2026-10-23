@@ -165,7 +165,7 @@ fn jobs(db: &Db<'_>, before: u64) -> rusqlite::Result<()> {
     }
     let runners: Vec<String> = db
         .prepare(
-            "SELECT name FROM runners WHERE coalesce(removed_at, started_at) < ?1 \
+            "SELECT name FROM runners WHERE removed_at < ?1 \
              AND name NOT IN (SELECT runner FROM jobs WHERE runner IS NOT NULL)",
         )?
         .query_map([before], |row| row.get(0))?
