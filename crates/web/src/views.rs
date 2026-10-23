@@ -218,9 +218,42 @@ pub(crate) fn durations(job: &JobSummary, now: u64) -> Durations {
     Durations { waited, ran }
 }
 
+/// Text as a JavaScript string literal, for a Datastar expression: `it's` → `'it\'s'`.
+pub(crate) fn js(text: &str) -> String {
+    let mut literal = String::with_capacity(text.len() + 2);
+    literal.push('\'');
+    for c in text.chars() {
+        match c {
+            '\\' | '\'' => {
+                literal.push('\\');
+                literal.push(c);
+            }
+            '\n' => literal.push_str("\\n"),
+            _ => literal.push(c),
+        }
+    }
+    literal.push('\'');
+    literal
+}
+
+/// The id of a slot's card, which its budget block and its job's rows point at: `jvm` slot 1 → `slot-jvm-1`.
+pub(crate) fn slot_id(profile: &str, slot: usize) -> String {
+    format!("slot-{}-{slot}", slug(profile))
+}
+
 /// The path of a repository's row, for the ids live updates use: `halyard/ledger` → `halyard-ledger`.
 pub(crate) fn slug(name: &str) -> String {
     name.chars()
         .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn a_quote_in_a_job_name_stays_inside_its_expression_string() {
+        assert_eq!(js(r"it's a \ test"), r"'it\'s a \\ test'");
+    }
 }

@@ -317,7 +317,7 @@ async fn every_page_renders_from_the_daemons_data() {
         "halyard/storefront",
         "Integration tests (Testcontainers)",
         "MemoryMax 33G",
-        "Sampled peak",
+        "peak",
     ] {
         assert!(
             overview.body.contains(expected),
@@ -358,6 +358,46 @@ async fn every_page_renders_from_the_daemons_data() {
 
     let missing = dashboard.page(&cookie, "/jobs/7").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let block = |slot: &str| {
+        let at = overview
+            .find(&format!("$_slot = '{slot}'"))
+            .unwrap_or_else(|| panic!("no block for {slot}"));
+        let start = overview[..at].rfind("<a ").unwrap();
+        overview[start..at].to_owned()
+    };
+    assert!(
+        block("slot-jvm-1").contains(&format!(r#"href="/jobs/{LEDGER_RUNNING}""#)),
+        "jvm 1's block opens the ledger build it runs"
+    );
+    assert!(
+        block("slot-jvm-2").contains(r##"href="#slot-jvm-2""##),
+        "the idle jvm 2's block points at its card"
+    );
+    for card in ["slot-jvm-1", "slot-jvm-2", "slot-node-1", "slot-node-2"] {
+        assert!(
+            overview.contains(&format!(r#"<li id="{card}""#))
+                && overview.contains(&format!("data-class:linked=\"$_slot == '{card}'")),
+            "{card}'s card exists and lights up with its block"
+        );
+    }
+    // A name ends its `aria-label`; the same words in the readout's expression end in a quote.
+    for name in [
+        "of 9G in jvm 1, build on halyard/ledger",
+        "9G jvm 2, idle",
+        "of 33G free",
+    ] {
+        assert!(
+            overview.contains(&format!(r#"{name}""#)),
+            "a block is named {name:?} for screen readers"
+        );
+    }
 }
 
 #[tokio::test]

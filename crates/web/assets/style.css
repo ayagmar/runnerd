@@ -376,7 +376,8 @@ html {
   justify-content: flex-end;
   padding: clamp(0.45rem, 1vw, 0.9rem);
   overflow: hidden;
-  transition: flex-grow 300ms var(--ease), background-color 200ms;
+  text-decoration: none;
+  transition: flex-grow 300ms var(--ease), background-color 200ms, opacity 150ms var(--ease);
 }
 
 .block {
@@ -457,6 +458,36 @@ html {
   color: var(--muted);
 }
 
+/* The readout above the bar: the slice's total, or what the hovered or focused block holds. */
+.budget .figures {
+  min-height: 2rem;
+  margin-bottom: 1rem;
+}
+
+.readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.35rem;
+}
+
+/* Linked views: hovering, focusing or tapping a slot's block, card, job row or repository lights up the others
+   standing for the same thing, and dims the rest. */
+main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.linked) {
+  opacity: 0.4;
+}
+
+.slot,
+.job-list > li,
+.repository {
+  transition: opacity 150ms var(--ease);
+}
+
+.block:focus-visible,
+.free:focus-visible {
+  outline-offset: -3px;
+}
+
 .p0 { --profile: var(--p0); }
 .p1 { --profile: var(--p1); }
 .p2 { --profile: var(--p2); }
@@ -491,17 +522,37 @@ html {
   background: var(--surface);
   border-top: 6px solid var(--profile);
   min-height: 11rem;
+  scroll-margin-top: 1rem;
+}
+
+/* An idle slot's card is drawn like its block: an outline in the profile's colour, nothing in it. */
+.slot.idle {
+  background: transparent;
+  border-top: 0;
+  padding-top: calc(1rem + 6px);
+  box-shadow: inset 0 0 0 2px var(--profile);
+}
+
+.slot.starting {
+  background: color-mix(in srgb, var(--profile) 18%, var(--surface));
+}
+
+.slot:target {
+  outline: 3px solid var(--ink);
+  outline-offset: 2px;
 }
 
 .slot-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.5rem;
   font-size: 0.875rem;
 }
 
 .slot-name {
-  font-weight: 600;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .slot-caps {
@@ -513,9 +564,23 @@ html {
   color: var(--muted);
 }
 
+.slot-title {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 .slot-job {
   display: grid;
+  min-width: 0;
   text-decoration: none;
+}
+
+.elapsed {
+  color: var(--muted);
+  font-size: 0.9375rem;
+  white-space: nowrap;
 }
 
 .slot-job .job-name {
@@ -551,7 +616,7 @@ html {
 
 .slot-figures {
   display: grid;
-  grid-template-columns: auto 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 0.75rem;
   margin: 0.25rem 0 0;
 }
@@ -728,7 +793,7 @@ html {
 .repo-list,
 .job-list {
   list-style: none;
-  margin: 1rem 0 0;
+  margin: 0;
   padding: 0;
   display: grid;
   gap: 2px;
@@ -825,6 +890,14 @@ html {
   padding: 0.55rem 0.75rem;
   background: var(--surface);
   text-decoration: none;
+}
+
+.job-list .all a {
+  display: block;
+  background: none;
+  color: var(--muted);
+  font-weight: 500;
+  text-decoration: underline;
 }
 
 .job-list a:hover .job-name {

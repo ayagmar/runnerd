@@ -9,7 +9,7 @@ use runnerd_core::api::{
     RepositoryStatus, Sample, SampleSeries, SlotStatus, Status,
 };
 
-use super::{Page, badge, page, profile_class, slug, time_ago};
+use super::{Page, badge, js, page, profile_class, slot_id, slug, time_ago};
 use crate::chart::{Base, Series, TimeChart, nice_top, sparkline};
 use crate::daemon::{Daemon, Error};
 use crate::format;
@@ -152,8 +152,96 @@ fn gib(bytes: u64) -> f64 {
     bytes as f64 / f64::from(1u32 << 30)
 }
 
+/// What an element standing for a slot does on hover, focus and touch: it lights up the slot's block, card and job
+/// rows, and puts its figure and text in the budget's readout.
+struct Link {
+    enter: String,
+    linked: String,
+}
+
+/// Clears what [`Link::enter`] set.
+const LEAVE: &str = "$_slot = ''; $_fig = ''; $_lens = ''";
+
+fn link(key: &str, repository: Option<&str>, lens: &Lens) -> Link {
+    Link {
+        enter: format!(
+            "$_slot = {}; $_fig = {}; $_lens = {}",
+            js(key),
+            js(&lens.figure),
+            js(&lens.text)
+        ),
+        linked: match repository {
+            Some(repository) => format!("$_slot == {} || $_repo == {}", js(key), js(repository)),
+            None => format!("$_slot == {}", js(key)),
+        },
+    }
+}
+
+/// What the budget's readout shows for a block: a figure in the big type, and the words after it.
+struct Lens {
+    figure: String,
+    text: String,
+}
+
+/// A slot's lens, its card's id, and the job it runs, if any.
+struct SlotView<'overview> {
+    key: String,
+    job: Option<&'overview Job>,
+    memory: Option<u64>,
+    lens: Lens,
+}
+
+fn slot_view<'overview>(
+    overview: &'overview Overview,
+    profile: &ProfileStatus,
+    slot: &SlotStatus,
+) -> SlotView<'overview> {
+    let job = overview.job_in(&profile.name, slot.slot);
+    let memory = job
+        .and_then(|job| overview.samples.get(&job.summary.id))
+        .and_then(|samples| samples.last())
+        .map(|sample| sample.memory);
+    let name = format!("{} {}", profile.name, slot.slot);
+    let cap = format::bytes(profile.memory);
+    let lens = match (&slot.runner, job, memory) {
+        (Some(_), Some(job), Some(memory)) => Lens {
+            figure: format::bytes(memory),
+            text: format!(
+                "of {cap} in {name}, {} on {}",
+                job.summary.name, job.summary.repository
+            ),
+        },
+        (Some(_), Some(job), None) => Lens {
+            figure: cap,
+            text: format!("{name}, {} on {}", job.summary.name, job.summary.repository),
+        },
+        (Some(runner), None, _) => Lens {
+            figure: cap,
+            text: format!(
+                "{name}, a runner for {} waiting for its job",
+                runner.repository
+            ),
+        },
+        (None, _, _) if profile.reseeding && slot.slot == 1 => Lens {
+            figure: cap,
+            text: format!("{name}, reseeding the snapshot"),
+        },
+        (None, _, _) => Lens {
+            figure: cap,
+            text: format!("{name}, idle"),
+        },
+    };
+    SlotView {
+        key: slot_id(&profile.name, slot.slot),
+        job,
+        memory,
+        lens,
+    }
+}
+
 /// The budget: the slice as the ground, a block per slot sized by its memory cap, filled as high as the job's last
-/// sampled memory; whatever else holds memory (the mirror, a seed container); and what is free.
+/// sampled memory; whatever else holds memory (the mirror, a seed container); and what is free. A block opens its
+/// job, or its slot's card; hovering or focusing one says what it holds in the readout above the bar.
 pub(crate) fn budget(overview: &Overview) -> Markup {
     let status = &overview.status;
     let budget = &status.budget;
@@ -179,46 +267,69 @@ pub(crate) fn budget(overview: &Overview) -> Markup {
         .memory_max
         .map(|max| max.saturating_sub(reserved + other));
     let used_now = overview.host.samples.last().map(|sample| sample.memory);
+    let max = budget
+        .memory_max
+        .map_or("no limit".to_owned(), format::bytes);
     let label = format!(
-        "Memory budget of {}: {} of {} reserved by running containers{}",
+        "Memory budget of {}: {} of {max} reserved by running containers{}",
         budget.slice,
         format::bytes(budget.memory_in_use),
-        budget
-            .memory_max
-            .map_or("no limit".to_owned(), format::bytes),
         used_now.map_or(String::new(), |used| format!(
             ", {} in use",
             format::bytes(used)
         )),
     );
+    let other_lens = Lens {
+        figure: format::bytes(other),
+        text: "held by the mirror and seed containers".to_owned(),
+    };
+    let free_lens = free.map(|free| Lens {
+        figure: format::bytes(free),
+        text: format!("of {max} free"),
+    });
     html! {
-        section #budget .budget aria-labelledby="budget-title" {
-            div.section-head {
-                h2 #budget-title { "Budget" }
-                p.figures {
+        section #budget .budget aria-labelledby="budget-title"
+            "data-signals:_slot__ifmissing"="''" "data-signals:_repo__ifmissing"="''"
+            "data-signals:_fig__ifmissing"="''" "data-signals:_lens__ifmissing"="''" {
+            h2 #budget-title .visually-hidden { "Budget" }
+            // The readout: the slice's total, or what the hovered block holds. Each block has its own name, so
+            // the lens is for the eye only.
+            p.figures {
+                span.readout data-show="!$_fig" {
                     span.big { (format::bytes(budget.memory_in_use)) }
-                    span { " of " (budget.memory_max.map_or("unlimited".to_owned(), format::bytes)) " reserved in " code { (budget.slice) } }
+                    span { " of " (budget.memory_max.map_or("unlimited".to_owned(), format::bytes)) " in " code { (budget.slice) } }
                     @if let Some(used) = used_now {
-                        span.muted { " · " (format::bytes(used)) " in use, sampled" }
+                        span.muted { " · " (format::bytes(used)) " in use" }
                     }
                 }
+                span.readout aria-hidden="true" style="display: none" data-show="$_fig" {
+                    span.big data-text="$_fig" {}
+                    " " span data-text="$_lens" {}
+                }
             }
-            div.bar role="img" aria-label=(label) {
+            div.bar role="group" aria-label=(label) {
                 @for profile in &status.profiles {
                     @for slot in &profile.slots {
                         (block(overview, profile, slot))
                     }
                 }
                 @if other > 0 {
-                    div.block.other style=(format!("--size: {:.3}", gib(other))) title=(format!("Mirror and seed containers: {}", format::bytes(other))) {
-                        span.size { (format::bytes(other)) }
+                    @let link = link("other", None, &other_lens);
+                    div.block.other tabindex="0" role="img" style=(format!("--size: {:.3}", gib(other)))
+                        aria-label=(format!("{} {}", other_lens.figure, other_lens.text))
+                        data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
+                        data-on:pointerleave=(LEAVE) data-on:blur=(LEAVE) data-class:linked=(link.linked) {
+                        span.size { (other_lens.figure) }
                         span.name { "mirror" }
                     }
                 }
-                @if let Some(free) = free.filter(|free| *free > 0) {
-                    div.free style=(format!("--size: {:.3}", gib(free))) {
-                        span.size { (format::bytes(free)) }
-                        span.name { "free" }
+                @if let Some((free, lens)) = free.filter(|free| *free > 0).zip(free_lens) {
+                    @let link = link("free", None, &lens);
+                    div.free tabindex="0" role="img" style=(format!("--size: {:.3}", gib(free)))
+                        aria-label=(format!("{} {}", lens.figure, lens.text))
+                        data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
+                        data-on:pointerleave=(LEAVE) data-on:blur=(LEAVE) data-class:linked=(link.linked) {
+                        span.size { (lens.figure) }
                     }
                 }
             }
@@ -231,33 +342,36 @@ pub(crate) fn budget(overview: &Overview) -> Markup {
 
 fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus) -> Markup {
     let class = profile_class(&overview.status, &profile.name);
-    let job = overview.job_in(&profile.name, slot.slot);
-    let memory = job
-        .and_then(|job| overview.samples.get(&job.summary.id))
-        .and_then(|samples| samples.last())
-        .map(|sample| sample.memory);
+    let view = slot_view(overview, profile, slot);
     #[allow(
         clippy::cast_precision_loss,
         reason = "a ratio of two sizes for a CSS fill"
     )]
-    let fill = memory.map(|memory| (memory as f64 / profile.memory.max(1) as f64).min(1.0));
-    let state = match (&slot.runner, job) {
+    let fill = view
+        .memory
+        .map(|memory| (memory as f64 / profile.memory.max(1) as f64).min(1.0));
+    let state = match (&slot.runner, view.job) {
         (None, _) => "idle",
         (Some(_), Some(_)) => "busy",
         (Some(_), None) => "starting",
     };
+    let href = view.job.map_or(format!("#{}", view.key), |job| {
+        format!("/jobs/{}", job.summary.id)
+    });
+    let repository = slot
+        .runner
+        .as_ref()
+        .map(|runner| runner.repository.as_str());
+    let link = link(&view.key, repository, &view.lens);
     html! {
-        div class=(format!("block {class} {state}")) style=(format!("--size: {:.3}; --fill: {:.3}", gib(profile.memory), fill.unwrap_or(0.0))) {
+        a class=(format!("block {class} {state}")) href=(href)
+            style=(format!("--size: {:.3}; --fill: {:.3}", gib(profile.memory), fill.unwrap_or(0.0)))
+            aria-label=(format!("{} {}", view.lens.figure, view.lens.text))
+            data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
+            data-on:pointerleave=(LEAVE) data-on:blur=(LEAVE) data-class:linked=(link.linked) {
             @if fill.is_some() { span.fill aria-hidden="true" {} }
             span.size { (format::bytes(profile.memory)) }
             span.name { (profile.name) " " (slot.slot) }
-            span.repo {
-                @match (&slot.runner, memory) {
-                    (Some(_), Some(memory)) => { (format::bytes(memory)) " used" },
-                    (Some(runner), None) => { (runner.repository) },
-                    (None, _) => { "idle" },
-                }
-            }
         }
     }
 }
@@ -267,13 +381,7 @@ pub(crate) fn slots(overview: &Overview) -> Markup {
     let status = &overview.status;
     html! {
         section #slots .slots aria-labelledby="slots-title" {
-            div.section-head {
-                h2 #slots-title { "Slots" }
-                p.muted {
-                    (overview.running.len()) " running · "
-                    (status.repositories.iter().map(|repository| repository.queued_jobs).sum::<usize>()) " queued"
-                }
-            }
+            h2 #slots-title .visually-hidden { "Slots" }
             @if status.profiles.is_empty() {
                 p.muted { "No profiles in runnerd.toml, so no slots." }
             }
@@ -290,21 +398,36 @@ pub(crate) fn slots(overview: &Overview) -> Markup {
 
 fn slot_card(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus) -> Markup {
     let class = profile_class(&overview.status, &profile.name);
-    let job = overview.job_in(&profile.name, slot.slot);
+    let view = slot_view(overview, profile, slot);
+    let state = match (&slot.runner, view.job) {
+        (None, _) => " idle",
+        (Some(_), None) => " starting",
+        (Some(_), Some(_)) => "",
+    };
+    let repository = slot
+        .runner
+        .as_ref()
+        .map(|runner| runner.repository.as_str());
+    let link = link(&view.key, repository, &view.lens);
     html! {
-        li class=(format!("slot {class}")) {
+        li #(view.key) class=(format!("slot {class}{state}"))
+            data-on:pointerenter=(link.enter) data-on:focusin=(link.enter)
+            data-on:pointerleave=(LEAVE) data-on:focusout=(LEAVE) data-class:linked=(link.linked) {
             div.slot-head {
-                span.swatch aria-hidden="true" {}
-                span.slot-name { (profile.name) " · slot " (slot.slot) }
+                h3.slot-name { (profile.name) " " (slot.slot) }
                 span.slot-caps { (format::bytes(profile.memory)) " · " (profile.cpus) " CPUs" }
             }
-            @match (&slot.runner, job) {
+            @match (&slot.runner, view.job) {
                 (None, _) => {
-                    p.slot-idle { @if profile.reseeding && slot.slot == 1 { "Reseeding the profile's snapshot" } @else { "Idle" } }
+                    @if profile.reseeding && slot.slot == 1 {
+                        p.slot-idle { "Reseeding the profile's snapshot" }
+                    } @else {
+                        p.visually-hidden { "Idle" }
+                    }
                 }
                 (Some(runner), None) => {
-                    p.slot-idle { "Runner for " strong { (runner.repository) } " waiting for its job" }
-                    p.muted { "started " (time_ago(runner.started_at, overview.now)) }
+                    span.repo { (runner.repository) }
+                    p.slot-idle { "Waiting for its job " span.muted { (time_ago(runner.started_at, overview.now)) } }
                 }
                 (Some(_), Some(job)) => { (running_job(overview, profile, job)) }
             }
@@ -351,9 +474,12 @@ fn running_job(overview: &Overview, profile: &ProfileStatus, job: &Job) -> Marku
         .collect();
     let last = samples.last();
     html! {
-        a.slot-job href=(format!("/jobs/{}", summary.id)) {
-            span.repo { (summary.repository) }
-            span.job-name { (summary.name) }
+        div.slot-title {
+            a.slot-job href=(format!("/jobs/{}", summary.id)) {
+                span.repo { (summary.repository) }
+                span.job-name { (summary.name) }
+            }
+            p.elapsed { span.visually-hidden { "Running for " } (format::duration(now.saturating_sub(started))) }
         }
         p.step {
             @if let Some(step) = current {
@@ -364,15 +490,14 @@ fn running_job(overview: &Overview, profile: &ProfileStatus, job: &Job) -> Marku
             }
         }
         dl.slot-figures {
-            div { dt { "Running" } dd { (format::duration(now.saturating_sub(started))) } }
             div.memory {
-                dt { "Memory" }
+                dt.visually-hidden { "Memory" }
                 dd { (last.map_or("–".to_owned(), |sample| format::bytes(sample.memory))) }
                 (sparkline(&memory, from, now, profile.memory, "memory"))
             }
             div.cpu {
-                dt { "CPU" }
-                dd { (last.map_or("–".to_owned(), |sample| format::cores(sample.cpu))) }
+                dt.visually-hidden { "CPU" }
+                dd { (last.map_or("–".to_owned(), |sample| format!("{} cores", format::cores(sample.cpu)))) }
                 (sparkline(&cpu, from, now, u64::from(profile.cpus) * 1000, "cpu"))
             }
         }
@@ -396,7 +521,10 @@ pub(crate) fn host(overview: &Overview) -> Markup {
     let memory_peak = memory.iter().map(|point| point.1).max().unwrap_or(0);
     let cpu_peak = cpu.iter().map(|point| point.1).max().unwrap_or(0);
     let memory_chart = TimeChart {
-        title: format!("Memory of {} over the last 30 minutes", status.budget.slice),
+        title: format!(
+            "Memory of {} over the last 30 minutes, sampled every {} s",
+            status.budget.slice, overview.host.interval
+        ),
         start,
         end: now,
         series: vec![Series {
@@ -418,7 +546,10 @@ pub(crate) fn host(overview: &Overview) -> Markup {
         Base::Binary,
     );
     let cpu_chart = TimeChart {
-        title: format!("CPU of {} over the last 30 minutes", status.budget.slice),
+        title: format!(
+            "CPU of {} over the last 30 minutes, sampled every {} s",
+            status.budget.slice, overview.host.interval
+        ),
         start,
         end: now,
         series: vec![Series {
@@ -435,20 +566,27 @@ pub(crate) fn host(overview: &Overview) -> Markup {
     let cpu_top = nice_top(cpu_peak.max(cpus * 1000), Base::Decimal);
     html! {
         section #host .host aria-labelledby="host-title" {
-            div.section-head {
-                h2 #host-title { "Slice" }
-                p.muted { "Every runner container together, sampled every " (overview.host.interval) " s" }
-            }
+            h2 #host-title .visually-hidden { "Slice" }
             div.charts {
                 div.chart-card {
-                    h3 { "Memory" span.reading { (overview.host.samples.last().map_or("–".to_owned(), |s| format::bytes(s.memory))) } }
+                    h3 {
+                        "Memory"
+                        span.reading {
+                            (overview.host.samples.last().map_or("–".to_owned(), |s| format::bytes(s.memory)))
+                            span.muted { " · peak " (format::bytes(memory_peak)) }
+                        }
+                    }
                     (memory_chart.render(memory_top))
-                    p.muted { "Sampled peak " (format::bytes(memory_peak)) }
                 }
                 div.chart-card {
-                    h3 { "CPU" span.reading { (overview.host.samples.last().map_or("–".to_owned(), |s| format!("{} cores", format::cores(s.cpu)))) } }
+                    h3 {
+                        "CPU"
+                        span.reading {
+                            (overview.host.samples.last().map_or("–".to_owned(), |s| format!("{} cores", format::cores(s.cpu))))
+                            span.muted { " · peak " (format::cores(cpu_peak)) }
+                        }
+                    }
                     (cpu_chart.render(cpu_top))
-                    p.muted { "Sampled peak " (format::cores(cpu_peak)) " cores" }
                 }
             }
         }
@@ -463,7 +601,7 @@ fn relative_clock(at: u64) -> String {
 pub(crate) fn repositories(status: &Status) -> Markup {
     html! {
         section #repositories .repositories aria-labelledby="repositories-title" {
-            h2 #repositories-title { "Repositories" }
+            h2 #repositories-title .visually-hidden { "Repositories" }
             @if status.repositories.is_empty() {
                 p.muted { "No repositories yet. Add a " code { "[[repositories]]" } " table to runnerd.toml." }
             }
@@ -476,7 +614,8 @@ pub(crate) fn repositories(status: &Status) -> Markup {
     }
 }
 
-/// One repository's row; a pause or resume replaces it.
+/// One repository's row; a pause or resume replaces it. Hovering it lights up the slots its runners hold and its
+/// latest jobs.
 pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> Markup {
     let class = profile_class(status, &repository.profile);
     let (action, label) = if repository.paused {
@@ -484,15 +623,35 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
     } else {
         ("pause", "Pause")
     };
+    let held: Vec<String> = status
+        .profiles
+        .iter()
+        .flat_map(|profile| {
+            profile.slots.iter().filter_map(|slot| {
+                slot.runner
+                    .as_ref()
+                    .filter(|runner| runner.repository == repository.name)
+                    .map(|_| js(&slot_id(&profile.name, slot.slot)))
+            })
+        })
+        .collect();
+    let enter = format!("$_repo = {}", js(&repository.name));
+    let linked = format!(
+        "$_repo == {} || [{}].includes($_slot)",
+        js(&repository.name),
+        held.join(", ")
+    );
     html! {
-        li #(format!("repo-{}", slug(&repository.name))) class=(format!("repository {class}")) {
+        li #(format!("repo-{}", slug(&repository.name))) class=(format!("repository {class}"))
+            data-on:pointerenter=(enter) data-on:focusin=(enter)
+            data-on:pointerleave="$_repo = ''" data-on:focusout="$_repo = ''" data-class:linked=(linked) {
             div.repo-name {
                 span.swatch aria-hidden="true" {}
                 a href=(format!("/history?repository={}", repository.name)) { (repository.name) }
             }
             div.repo-meta {
                 span { (repository.profile) }
-                span { (repository.queued_jobs) " queued" }
+                @if repository.queued_jobs > 0 { span { (repository.queued_jobs) " queued" } }
                 @if repository.paused { span.badge.neutral { "paused" } }
             }
             // One busy signal per row, so a pending pause greys out only its own button.
@@ -507,20 +666,27 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
     }
 }
 
-/// The latest jobs, any state.
+/// The latest jobs, any state. A running job's row lights up its slot.
 pub(crate) fn recent(overview: &Overview) -> Markup {
     html! {
         section #recent .recent aria-labelledby="recent-title" {
-            div.section-head {
-                h2 #recent-title { "Latest jobs" }
-                a href="/history" { "All history" }
-            }
+            h2 #recent-title .visually-hidden { "Latest jobs" }
             @if overview.recent.is_empty() {
                 p.muted { "No jobs yet. Jobs show here once a runner of this machine takes one." }
             } @else {
                 ul.job-list {
                     @for job in &overview.recent {
-                        li {
+                        @let running = job.runner.as_ref().filter(|_| job.state == JobState::Running);
+                        @let key = running.map(|runner| js(&slot_id(&runner.profile, runner.slot)));
+                        @let linked = match &key {
+                            Some(key) => format!("$_slot == {key} || $_repo == {}", js(&job.repository)),
+                            None => format!("$_repo == {}", js(&job.repository)),
+                        };
+                        @let enter = key.as_ref().map(|key| format!("$_slot = {key}"));
+                        li data-class:linked=(linked)
+                            data-on:pointerenter=[enter.as_ref()] data-on:focusin=[enter.as_ref()]
+                            data-on:pointerleave=[enter.as_ref().map(|_| "$_slot = ''")]
+                            data-on:focusout=[enter.as_ref().map(|_| "$_slot = ''")] {
                             a href=(format!("/jobs/{}", job.id)) {
                                 (badge(job))
                                 span.job-name { (job.name) }
@@ -529,6 +695,7 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
                             }
                         }
                     }
+                    li.all { a href="/history" { "All history" } }
                 }
             }
         }
