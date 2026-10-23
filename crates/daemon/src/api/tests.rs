@@ -18,6 +18,8 @@ use runnerd_core::scheduler::engine::{
 use runnerd_core::store::{LogPosition, RunnerRecord, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 
+use crate::testdir::Dir;
+
 use super::{ConfigSource, SyncDir, bind, serve, serve_for, sync_dir};
 
 const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
@@ -120,13 +122,13 @@ fn status() -> Status {
 }
 
 /// Serves the API on a socket in a fresh directory; returns a client bound to it and the controls behind it.
-async fn daemon() -> (reqwest::Client, Arc<Control>, tempdir::Dir) {
+async fn daemon() -> (reqwest::Client, Arc<Control>, Dir) {
     daemon_for(None).await
 }
 
 /// `daemon`, serving only the user `owner` when given, instead of the user the test runs as.
-async fn daemon_for(owner: Option<u32>) -> (reqwest::Client, Arc<Control>, tempdir::Dir) {
-    let dir = tempdir::Dir::new();
+async fn daemon_for(owner: Option<u32>) -> (reqwest::Client, Arc<Control>, Dir) {
+    let dir = Dir::new();
     let daemon = start(&dir.0, owner).await;
     // Serves until the test ends.
     std::mem::forget(daemon.stop);
@@ -352,7 +354,7 @@ async fn a_pause_while_a_job_runs_is_refused_naming_the_job_unless_forced() {
 
 #[tokio::test]
 async fn a_config_over_the_budget_is_refused_with_both_numbers_and_the_file_is_unchanged() {
-    let dir = tempdir::Dir::new();
+    let dir = Dir::new();
     let mut daemon = start(&dir.0, None).await;
     let before = std::fs::read(&daemon.config).unwrap();
     // A third jvm slot: 3 × 9G + 2 × 7G + 512M = 41.5G.
@@ -406,7 +408,7 @@ async fn a_config_over_the_budget_is_refused_with_both_numbers_and_the_file_is_u
 
 #[tokio::test]
 async fn a_config_the_engine_cannot_take_leaves_the_file_unchanged() {
-    let dir = tempdir::Dir::new();
+    let dir = Dir::new();
     let daemon = start_with(&dir.0, None, false, sync_dir).await;
     let before = std::fs::read_to_string(&daemon.config).unwrap();
     let response = daemon
@@ -436,7 +438,7 @@ async fn a_config_the_engine_cannot_take_leaves_the_file_unchanged() {
 
 #[tokio::test]
 async fn a_config_whose_file_cannot_be_written_is_refused_and_not_run() {
-    let dir = tempdir::Dir::new();
+    let dir = Dir::new();
     let mut daemon = start(&dir.0, None).await;
     let set_mode = |mode| {
         std::fs::set_permissions(&dir.0, std::os::unix::fs::PermissionsExt::from_mode(mode))
@@ -473,7 +475,7 @@ async fn a_config_whose_file_cannot_be_written_is_refused_and_not_run() {
 
 #[tokio::test]
 async fn a_config_in_place_whose_directory_cannot_be_flushed_is_run_and_shown_with_a_warning() {
-    let dir = tempdir::Dir::new();
+    let dir = Dir::new();
     let mut daemon = start_with(&dir.0, None, true, failing_sync).await;
     let new = EXAMPLE.replacen("slots = 2", "slots = 1", 1);
     let response = daemon
@@ -517,7 +519,7 @@ async fn a_config_in_place_whose_directory_cannot_be_flushed_is_run_and_shown_wi
 
 #[tokio::test]
 async fn a_valid_config_replaces_the_file_it_links_to_with_its_permissions_and_is_reloaded() {
-    let dir = tempdir::Dir::new();
+    let dir = Dir::new();
     let mut daemon = start(&dir.0, None).await;
     let new = EXAMPLE.replacen("slots = 2", "slots = 1", 1);
     let response = daemon
@@ -602,7 +604,7 @@ fn memory(events: &[EventEnvelope]) -> Vec<u64> {
 
 #[tokio::test]
 async fn after_a_restart_the_event_stream_resumes_after_the_last_id_without_duplicates() {
-    let dir = tempdir::Dir::new();
+    let dir = Dir::new();
     let daemon = start(&dir.0, None).await;
     daemon.store.event(budget(1));
     daemon.store.event(budget(2));
@@ -647,7 +649,7 @@ async fn after_a_restart_the_event_stream_resumes_after_the_last_id_without_dupl
 
 #[tokio::test]
 async fn a_followed_log_sends_stored_and_new_lines_and_ends_when_the_job_finishes() {
-    let dir = tempdir::Dir::new();
+    let dir = Dir::new();
     let daemon = start(&dir.0, None).await;
     let store = &daemon.store;
     store.queued(
@@ -722,28 +724,4 @@ async fn a_followed_log_sends_stored_and_new_lines_and_ends_when_the_job_finishe
     let job = store.job(1).await.unwrap().unwrap();
     assert_eq!(job.summary.state, JobState::Completed);
     daemon.stop().await;
-}
-
-mod tempdir {
-    use std::path::PathBuf;
-
-    /// A directory under the system temp dir, removed on drop.
-    pub(crate) struct Dir(pub PathBuf);
-
-    impl Dir {
-        pub(crate) fn new() -> Dir {
-            static NEXT: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
-            let n = NEXT.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-            let path =
-                std::env::temp_dir().join(format!("runnerd-test-api-{}-{n}", std::process::id()));
-            std::fs::create_dir_all(&path).unwrap();
-            Dir(path)
-        }
-    }
-
-    impl Drop for Dir {
-        fn drop(&mut self) {
-            let _ = std::fs::remove_dir_all(&self.0);
-        }
-    }
 }

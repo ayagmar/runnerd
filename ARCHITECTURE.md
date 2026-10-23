@@ -7,7 +7,7 @@ Where things live and which rules hold them together. The why behind each rule i
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
 | `runnerd-core` | `crates/core` | config, API types, scheduling, Docker and GitHub clients, caches, job history | anything; Docker, GitHub and Tokio only behind the `host` feature |
-| `runnerd` | `crates/daemon` | the daemon binary: `serve`, `stop`, `doctor`, `check-config`, the Unix-socket API | `runnerd-core` with `host` |
+| `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, the Unix-socket API | `runnerd-core` with `host` |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `client` (socket, HTTP, event stream; reused by `runnerctl tui`), `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` without `host`; `hyper` for HTTP over the socket; `ratatui` and `rustix` for the TUI |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` without `host` |
 

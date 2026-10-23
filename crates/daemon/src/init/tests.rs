@@ -1,0 +1,179 @@
+//! `init` on made-up machines, writing into temp dirs.
+
+use std::path::Path;
+
+use runnerd_core::config::{ByteSize, Config};
+
+use super::{Machine, Overwrite, Request, init, size};
+use crate::testdir::Dir;
+
+const GIB: u64 = 1 << 30;
+
+fn machine(memory_gib: u64, cpus: u32, slice_memory_max: Option<ByteSize>) -> Machine {
+    Machine {
+        memory: ByteSize(memory_gib * GIB),
+        cpus,
+        slice_memory_max,
+    }
+}
+
+fn request(dir: &Path, overwrite: Overwrite) -> Request {
+    Request {
+        repositories: vec!["halyard/ledger".to_owned(), "halyard/storefront".to_owned()],
+        slice: "runnerd.slice".to_owned(),
+        runnerd: "/home/dana/.local/bin/runnerd".into(),
+        config: dir.join("runnerd/runnerd.toml"),
+        unit: dir.join("systemd/user/runnerd.service"),
+        overwrite,
+    }
+}
+
+fn check(text: &str, memory_max: Option<ByteSize>) -> runnerd_core::api::ConfigCheck {
+    Config::check(text, |_| Ok(memory_max)).1
+}
+
+#[test]
+fn the_starter_config_passes_check_config_before_and_after_the_slice_exists() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    let sizing = init(&request, &machine(64, 16, None)).unwrap();
+    assert_eq!(sizing.budget, ByteSize(48 * GIB), "three quarters of 64G");
+    let text = std::fs::read_to_string(&request.config).unwrap();
+    let before = check(&text, None);
+    assert!(before.valid, "{}", before.message);
+    let after = check(&text, Some(sizing.budget));
+    assert!(after.valid, "{}", after.message);
+    assert!(after.warnings.is_empty(), "{:?}", after.warnings);
+    let config = Config::parse(&text).unwrap();
+    let names: Vec<&str> = config
+        .repositories
+        .iter()
+        .map(|r| r.name.as_str())
+        .collect();
+    assert_eq!(names, ["halyard/ledger", "halyard/storefront"]);
+    assert_eq!(config.host.slice, "runnerd.slice");
+}
+
+#[test]
+fn the_starter_config_fits_the_memory_max_of_an_existing_slice() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    let memory_max = ByteSize(20 * GIB);
+    let sizing = init(&request, &machine(128, 32, Some(memory_max))).unwrap();
+    assert_eq!(sizing.budget, memory_max);
+    let text = std::fs::read_to_string(&request.config).unwrap();
+    let check = check(&text, Some(memory_max));
+    assert!(check.valid, "{}", check.message);
+}
+
+#[test]
+fn every_sizing_fits_its_budget() {
+    for memory_gib in 1..=256 {
+        for cpus in [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64, 128] {
+            let machine = machine(memory_gib, cpus, None);
+            let Ok(sizing) = size(&machine) else {
+                assert!(memory_gib < 4, "a {memory_gib}G host gets a config");
+                continue;
+            };
+            let room = sizing.budget.0 - super::MIRROR_MEMORY.0;
+            assert!(
+                u64::from(sizing.slots) * sizing.memory.0 <= room,
+                "{memory_gib}G, {cpus} CPUs: {sizing:?}"
+            );
+            assert!(
+                sizing.slots >= 1 && sizing.cpus >= 1,
+                "{memory_gib}G, {cpus} CPUs: {sizing:?}"
+            );
+        }
+    }
+}
+
+#[test]
+fn a_host_too_small_for_one_runner_gets_no_config() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    let error = init(&request, &machine(2, 4, None)).unwrap_err();
+    assert!(error.contains("a runner needs at least 2G"), "{error}");
+    assert!(!request.config.exists(), "no config is written");
+}
+
+#[test]
+fn init_refuses_to_replace_a_file_without_force() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    std::fs::create_dir_all(request.unit.parent().unwrap()).unwrap();
+    std::fs::write(&request.unit, "mine").unwrap();
+    let error = init(&request, &machine(64, 16, None)).unwrap_err();
+    assert!(error.contains("--force"), "{error}");
+    assert_eq!(std::fs::read_to_string(&request.unit).unwrap(), "mine");
+    assert!(!request.config.exists(), "the config is not written either");
+
+    let forced = Request {
+        overwrite: Overwrite::Replace,
+        ..request
+    };
+    init(&forced, &machine(64, 16, None)).unwrap();
+    assert!(
+        std::fs::read_to_string(&forced.unit)
+            .unwrap()
+            .contains("ExecStart="),
+        "--force replaces the unit"
+    );
+}
+
+#[test]
+fn the_unit_serves_the_written_config_with_this_binary() {
+    let dir = Dir::new();
+    let request = Request {
+        runnerd: "/opt/run nerd/bin/runnerd".into(),
+        config: dir.0.join("100%/runnerd.toml"),
+        ..request(&dir.0, Overwrite::Refuse)
+    };
+    init(&request, &machine(64, 16, None)).unwrap();
+    let unit = std::fs::read_to_string(&request.unit).unwrap();
+    let exec_start = unit
+        .lines()
+        .find_map(|line| line.strip_prefix("ExecStart="))
+        .unwrap();
+    assert_eq!(
+        exec_start,
+        format!(
+            "\"/opt/run nerd/bin/runnerd\" serve --config {}/100%%/runnerd.toml",
+            dir.0.display()
+        )
+    );
+    assert!(unit.contains("WantedBy=default.target"), "{unit}");
+}
+
+#[test]
+fn init_rejects_a_repository_that_is_not_owner_slash_name() {
+    let dir = Dir::new();
+    for name in ["ledger", "halyard/ledger/x", "halyard/", "halyard/le\"dger"] {
+        let request = Request {
+            repositories: vec![name.to_owned()],
+            ..request(&dir.0, Overwrite::Refuse)
+        };
+        let error = init(&request, &machine(64, 16, None)).unwrap_err();
+        assert!(error.contains("owner/name"), "{name}: {error}");
+    }
+    assert!(!dir.0.join("runnerd").exists(), "nothing is written");
+}
+
+#[test]
+fn the_slice_fix_adds_a_drop_in_rather_than_replace_an_existing_slice_unit() {
+    let fix = super::slice_fix(
+        "ci.slice",
+        ByteSize(33 * GIB),
+        Some("/etc/systemd/system/ci.slice"),
+    );
+    assert!(
+        fix.contains("sudo tee /etc/systemd/system/ci.slice.d/runnerd.conf"),
+        "{fix}"
+    );
+    let fix = super::slice_fix("ci.slice", ByteSize(33 * GIB), None);
+    assert!(
+        fix.contains("sudo tee /etc/systemd/system/ci.slice >"),
+        "{fix}"
+    );
+    assert!(fix.contains("MemoryMax=33G"), "{fix}");
+}
