@@ -9,7 +9,8 @@ starts only the jobs those paths can affect:
 
 | Job | Runs on a pull request that changes |
 |---|---|
-| `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, the docs' commands check, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh`, `.github/scripts/check-docs-commands.sh` |
+| `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh` |
+| `docs-commands`: builds `runnerd` and `runnerctl` and checks every command and option the docs show against their `--help` | `README.md`, `site/src/content/docs/**`, `crates/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.github/scripts/check-docs-commands.sh` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `jvm` and `node` stages, pushes nothing | `image/**` |
 | `site-build`: Astro build | `site/**` |
@@ -29,7 +30,7 @@ run's job timings to the run summary.
 Caches:
 
 - Rust: `Swatinem/rust-cache` keeps the cargo registry and `target/`, keyed on `Cargo.lock` and the toolchain. Only
-  `main` saves it; pull requests restore `main`'s copy.
+  `main`'s `rust` job saves it; pull requests and `docs-commands` restore that copy.
 - Image: build layers go to the Actions cache, one scope per stage.
 - Site: `actions/setup-node` caches the pnpm store.
 
