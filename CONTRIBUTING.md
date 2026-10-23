@@ -88,7 +88,7 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    - `README.md`: the installer's `--version` example;
    - `examples/runnerd.toml`: each profile's `image` tag (the doctor tests compare it with the crate version);
    - `crates/core/src/config.rs`: the `image` key's doc comment;
-   - the site: `install.md`, `configuration.md`, `clients.mdx`, `src/pages/index.astro` and the TUI frames in
+   - the site: `install.md`, `configuration.mdx`, `clients.mdx`, `src/pages/index.astro` and the TUI frames in
      `src/assets/tui/`, which are recaptured rather than edited.
 
    Tests that use a version only as an example, such as `store/tests.rs`'s "as runnerd 0.0.5 stored it", stay.

@@ -3,6 +3,8 @@ title: Configuration
 description: The runnerd.toml file, runner profiles, and the memory budget check.
 ---
 
+import Budget from '../../components/diagrams/Budget.astro';
+
 One file, `~/.config/runnerd/runnerd.toml`: the repositories to serve, the profile each one runs on, the shared caches, and the systemd slice whose `MemoryMax` is the budget. `runnerd init` writes a starter one.
 
 ## An example
@@ -120,6 +122,8 @@ What sizing cannot see:
 Advice is only written when you apply it: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button, which opens the change in the config editor. Each goes through the same check as any config, so a change `MemoryMax` cannot hold is refused. Lowering never asks for more than the profile's slots take now, and raising takes only what `MemoryMax` has spare, so two raises applied one after the other can be refused. `runnerd doctor` warns when a profile's jobs need more than its `memory`. Run without a daemon, it reads the history database read-only and does not migrate it. SQLite still leaves the `-wal` and `-shm` files a WAL database needs next to it when it may write there, so run it as the user who runs the daemon. Where it may not write, it reads the database file alone, and skips the sizing check while the `-wal` holds changes the file lacks. Sizing reads the slice's `MemoryMax` on each request, so one raised after `systemctl daemon-reload` counts without restarting runnerd.
 
 ## The budget check
+
+<Budget />
 
 `runnerd check-config [file]`, by default on `~/.config/runnerd/runnerd.toml`, reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
 

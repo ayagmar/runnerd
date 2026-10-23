@@ -1,0 +1,68 @@
+---
+// The big picture: GitHub, the daemon and its clients, and the runner containers Docker runs in the slice.
+import Diagram from '../Diagram.astro';
+---
+
+<Diagram name="overview" caption="One daemon between GitHub and Docker; every client goes through its API.">
+  <svg viewBox="0 0 480 486" role="img" aria-labelledby="overview-title" aria-describedby="overview-desc">
+    <title id="overview-title">How runnerd fits together</title>
+    <desc id="overview-desc">
+      runnerd serve polls GitHub over HTTPS with the gh CLI's token and registers a just-in-time runner for each queued
+      job it starts. Inside the daemon are the engine, the job history in SQLite, the API and the web dashboard.
+      runnerctl and runnerctl tui reach the API over the Unix socket; a browser reaches the dashboard on 127.0.0.1:7477,
+      which reads the same API. The daemon starts containers through the Docker API, in the slice whose MemoryMax is
+      the budget: one per slot, here jvm 1, jvm 2, node 1 and node 2, plus the Docker Hub mirror.
+    </desc>
+    <defs>
+      <marker id="overview-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path class="head" d="M0 1L10 5L0 9z"></path>
+      </marker>
+    </defs>
+
+    <rect class="box" x="0" y="0" width="300" height="60"></rect>
+    <text class="t" x="16" y="26">GitHub</text>
+    <text class="m" x="16" y="48">queued jobs, JIT runners, steps</text>
+
+    <path class="line" d="M40 62V122" marker-start="url(#overview-arrow)" marker-end="url(#overview-arrow)"></path>
+    <text class="m" x="56" y="88">HTTPS, the gh CLI's token:</text>
+    <text class="m" x="56" y="108">polls, registers runners</text>
+
+    <rect class="ink" x="0" y="126" width="300" height="168"></rect>
+    <text class="t on-ink" x="16" y="154">runnerd serve</text>
+    <text class="on-ink" x="16" y="186">engine: polls, plans, starts</text>
+    <text class="on-ink" x="16" y="212">job history (SQLite)</text>
+    <text class="on-ink" x="16" y="238">API: JSON and events</text>
+    <text class="on-ink" x="16" y="264">dashboard</text>
+
+    <rect class="box" x="330" y="126" width="150" height="52"></rect>
+    <text x="344" y="148">runnerctl</text>
+    <text class="m" x="344" y="168">Unix socket</text>
+    <rect class="box" x="330" y="184" width="150" height="52"></rect>
+    <text x="344" y="206">runnerctl tui</text>
+    <text class="m" x="344" y="226">Unix socket</text>
+    <rect class="box" x="330" y="242" width="150" height="52"></rect>
+    <text x="344" y="264">browser</text>
+    <text class="m" x="344" y="284">127.0.0.1:7477</text>
+    <path class="line" d="M328 152H304" marker-end="url(#overview-arrow)"></path>
+    <path class="line" d="M328 210H304" marker-end="url(#overview-arrow)"></path>
+    <path class="line" d="M328 268H304" marker-end="url(#overview-arrow)"></path>
+
+    <path class="line" d="M40 296V350" marker-end="url(#overview-arrow)"></path>
+    <text class="m" x="56" y="328">Docker API</text>
+
+    <rect class="frame" x="1" y="354" width="478" height="131"></rect>
+    <text class="t" x="16" y="382">runnerd.slice</text>
+    <text class="m" x="134" y="382">MemoryMax is the budget</text>
+    <rect class="jvm" x="16" y="398" width="84" height="44"></rect>
+    <text class="on-block" x="28" y="425">jvm 1</text>
+    <rect class="jvm" x="106" y="398" width="84" height="44"></rect>
+    <text class="on-block" x="118" y="425">jvm 2</text>
+    <rect class="node" x="196" y="398" width="84" height="44"></rect>
+    <text class="on-block" x="208" y="425">node 1</text>
+    <rect class="node" x="286" y="398" width="84" height="44"></rect>
+    <text class="on-block" x="298" y="425">node 2</text>
+    <rect class="box-2" x="376" y="398" width="88" height="44"></rect>
+    <text x="388" y="425">mirror</text>
+    <text class="m" x="16" y="468">a slot's runner: one job, its own Docker, sysbox</text>
+  </svg>
+</Diagram>
