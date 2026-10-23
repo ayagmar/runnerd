@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
-use super::{Engine, Occupant, RunningJobs, image, unix_secs};
+use super::{Engine, Occupant, RunningJobs, unix_secs};
 use crate::cache::{self, runner_mounts};
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
@@ -23,7 +23,7 @@ enum Release {
 }
 
 /// Where the next backoff of a repository whose runners keep failing ends.
-fn backoff(failures: u32) -> Duration {
+pub(super) fn backoff(failures: u32) -> Duration {
     Duration::from_secs(30 << failures.saturating_sub(1).min(5)).min(Duration::from_secs(600))
 }
 
@@ -245,7 +245,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         };
         let spec = RunnerSpec {
             name: name.clone(),
-            image: image(&profile.image_stage),
+            image: profile.image.reference(),
             profile: slot.profile.clone(),
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
@@ -289,6 +289,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             }
             Err(error) => {
                 warn!("{repository}: cannot start {name}: {error}");
+                self.recheck_image(&spec.image);
                 if let Err(error) = self.github.delete_runner(repository, runner.id).await {
                     warn!("{repository}: cannot delete {name}: {error}");
                 }

@@ -59,6 +59,13 @@ install that tag. dist names each archive for its crate, so `runnerctl` ships in
 must match the workspace version in `Cargo.toml`, and a tag without a suffix must be on `main`, or the `plan` job
 fails.
 
+Before the GitHub release, the `images` job ([`images.yml`](.github/workflows/images.yml)) builds every stage of
+`image/Dockerfile` from the tag for linux/amd64, pushes it to `ghcr.io/ayagmar/runnerd-runner:<stage>-<version>`
+labelled `runnerd.version=<version>`, which `runnerd doctor` compares with its own version, and attests it. To publish
+the images of a release that has none, run that workflow by hand: `gh workflow run images.yml -f tag=v0.0.4`. It
+builds the tag's `image/`, so nothing is retagged. A new package on ghcr.io is private: once, after its first push,
+the owner makes it public (the package's Package settings → Danger Zone → Change visibility → Public).
+
 After the GitHub release, the `publish-crates` job publishes `runnerd-core`, `runnerd-web`, `runnerd` and
 `runnerd-cli` to crates.io with [trusted publishing](https://crates.io/docs/trusted-publishing): a token that lasts 30
 minutes, minted from the run's OIDC identity, so no crates.io token is stored. It is skipped until the repository

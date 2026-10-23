@@ -30,3 +30,4 @@ with a line pointing to the record that replaces it.
 | [0022](0022-terminal-ui-is-ratatui-in-runnerctl.md) | The terminal UI is ratatui in runnerctl, behind a feature |
 | [0023](0023-runner-image-pinned-to-a-snapshot-date.md) | Runner image pinned to an Ubuntu snapshot date |
 | [0024](0024-pauses-recorded-in-the-job-history.md) | Pauses are recorded in the job history and survive restarts |
+| [0025](0025-published-runner-images-named-by-reference.md) | Published runner images, named by reference |

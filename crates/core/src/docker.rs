@@ -1,13 +1,15 @@
-//! Runner containers through the Docker Engine API: the connection, container and volume requests, and the
+//! Runner containers through the Docker Engine API: the connection, container, volume and image requests, and the
 //! `DockerApi` trait the engine and the caches call. It decides nothing about scheduling, and a JIT config only
 //! ever reaches a container as a root-only file, never the create request or a log line.
 
 use std::collections::{BTreeMap, HashMap};
 use std::fmt;
+use std::time::{Duration, Instant};
 
 use bollard::exec::{CreateExecOptions, StartExecResults};
 use bollard::models::{
-    ContainerCreateBody, HostConfig, Mount, NetworkCreateRequest, SystemInfo, VolumeCreateRequest,
+    ContainerCreateBody, CreateImageInfo, HostConfig, Mount, NetworkCreateRequest, SystemInfo,
+    VolumeCreateRequest,
 };
 use bollard::query_parameters::{
     CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DataUsageOptionsBuilder,
@@ -16,6 +18,7 @@ use bollard::query_parameters::{
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
+use tracing::info;
 
 use crate::config::ByteSize;
 use crate::isolation::Isolation;
@@ -183,8 +186,10 @@ pub trait DockerApi: Send + Sync {
         container: &str,
         command: Vec<String>,
     ) -> impl Future<Output = Result<Output, Error>> + Send;
-    /// Pulls an image unless it is present.
-    fn ensure_image(&self, image: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    /// Whether Docker has an image.
+    fn image_present(&self, image: &str) -> impl Future<Output = Result<bool, Error>> + Send;
+    /// Pulls an image, logging its progress every few seconds.
+    fn pull(&self, image: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// Creates a bridge network unless it exists.
     fn ensure_network(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// Creates a volume unless it exists.
@@ -210,6 +215,36 @@ impl Docker {
     /// The Engine's system information.
     pub async fn info(&self) -> Result<SystemInfo, Error> {
         self.api.info().await
+    }
+
+    /// An image's labels; `None` when Docker does not have it.
+    pub async fn image_labels(
+        &self,
+        image: &str,
+    ) -> Result<Option<HashMap<String, String>>, Error> {
+        match self.api.inspect_image(image).await {
+            Ok(inspect) => Ok(Some(
+                inspect
+                    .config
+                    .and_then(|config| config.labels)
+                    .unwrap_or_default(),
+            )),
+            Err(error) if is_not_found(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
+    }
+
+    /// Asks the image's registry for its manifest, without pulling it, and returns the platforms it is built for,
+    /// such as `linux/amd64`. An error means `pull` could not get it.
+    pub async fn registry_platforms(&self, image: &str) -> Result<Vec<String>, Error> {
+        let inspect = self.api.inspect_registry_image(image, None).await?;
+        Ok(inspect
+            .platforms
+            .into_iter()
+            .filter_map(|platform| Some(format!("{}/{}", platform.os?, platform.architecture?)))
+            // Attestation manifests in an index carry the platform unknown/unknown.
+            .filter(|platform| platform != "unknown/unknown")
+            .collect())
     }
 }
 
@@ -376,18 +411,25 @@ impl DockerApi for Docker {
         }
     }
 
-    async fn ensure_image(&self, image: &str) -> Result<(), Error> {
-        match self.api.inspect_image(image).await {
-            Err(error) if is_not_found(&error) => {
-                let options = CreateImageOptionsBuilder::new().from_image(image).build();
-                self.api
-                    .create_image(Some(options), None, None)
-                    .try_collect::<Vec<_>>()
-                    .await?;
-                Ok(())
+    async fn image_present(&self, image: &str) -> Result<bool, Error> {
+        Ok(self.image_labels(image).await?.is_some())
+    }
+
+    async fn pull(&self, image: &str) -> Result<(), Error> {
+        let options = CreateImageOptionsBuilder::new().from_image(image).build();
+        let mut stream = self.api.create_image(Some(options), None, None);
+        let mut progress = PullProgress::default();
+        let mut logged = Instant::now();
+        info!("pulling {image}");
+        while let Some(update) = stream.try_next().await? {
+            progress.update(&update);
+            if logged.elapsed() >= PULL_LOG_INTERVAL {
+                logged = Instant::now();
+                info!("pulling {image}: {progress}");
             }
-            other => other.map(|_| ()),
         }
+        info!("pulled {image}");
+        Ok(())
     }
 
     async fn ensure_network(&self, name: &str) -> Result<(), Error> {
@@ -437,6 +479,69 @@ impl DockerApi for Docker {
                 Some((name, size))
             })
             .collect())
+    }
+}
+
+/// How often `pull` logs its progress.
+const PULL_LOG_INTERVAL: Duration = Duration::from_secs(10);
+
+/// A pull's layers so far, from the statuses Docker streams per layer.
+#[derive(Debug, Default)]
+struct PullProgress {
+    layers: BTreeMap<String, Layer>,
+}
+
+#[derive(Debug, Default)]
+struct Layer {
+    downloaded: u64,
+    size: u64,
+    done: bool,
+}
+
+impl PullProgress {
+    fn update(&mut self, update: &CreateImageInfo) {
+        let (Some(id), Some(status)) = (&update.id, &update.status) else {
+            return;
+        };
+        let bytes = |value: Option<i64>| value.and_then(|value| u64::try_from(value).ok());
+        let detail = update.progress_detail.as_ref();
+        match status.as_str() {
+            "Pulling fs layer" | "Waiting" => {
+                self.layers.entry(id.clone()).or_default();
+            }
+            "Downloading" => {
+                let layer = self.layers.entry(id.clone()).or_default();
+                layer.downloaded =
+                    bytes(detail.and_then(|detail| detail.current)).unwrap_or(layer.downloaded);
+                layer.size = bytes(detail.and_then(|detail| detail.total)).unwrap_or(layer.size);
+            }
+            "Download complete" => {
+                if let Some(layer) = self.layers.get_mut(id) {
+                    layer.downloaded = layer.size;
+                }
+            }
+            "Pull complete" | "Already exists" => {
+                let layer = self.layers.entry(id.clone()).or_default();
+                layer.downloaded = layer.size;
+                layer.done = true;
+            }
+            _ => {}
+        }
+    }
+}
+
+impl fmt::Display for PullProgress {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let done = self.layers.values().filter(|layer| layer.done).count();
+        let downloaded: u64 = self.layers.values().map(|layer| layer.downloaded).sum();
+        let size: u64 = self.layers.values().map(|layer| layer.size).sum();
+        write!(
+            f,
+            "{done} of {} layers done, {} of {} downloaded",
+            self.layers.len(),
+            ByteSize(downloaded),
+            ByteSize(size)
+        )
     }
 }
 

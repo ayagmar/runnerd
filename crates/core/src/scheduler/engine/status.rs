@@ -1,7 +1,7 @@
 //! Publishes `api::Status` after each tick and command, and records the slots, budget and repositories that
 //! changed as events. It reads engine state and must not change it, besides the status channel.
 
-use super::{Engine, Shutdown, image, unix_secs};
+use super::{Engine, Shutdown, unix_secs};
 use crate::api;
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
@@ -16,7 +16,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .chain(&self.retired)
             .map(|(name, profile)| api::ProfileStatus {
                 name: name.clone(),
-                image: image(&profile.image_stage),
+                image: profile.image.reference(),
                 cpus: profile.cpus,
                 memory: profile.memory.0,
                 reseeding: self.is_reseeding(name),

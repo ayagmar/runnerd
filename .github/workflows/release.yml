@@ -9,6 +9,8 @@
 # - Linux only: no Windows or container steps, no PR runs;
 # - install.sh is published with the release's tag as its default version.
 # - a release tag without a suffix fails unless its commit is on main.
+# - the runner images are published (images.yml) before the GitHub release is created, so a release never points at
+#   images that do not exist;
 # - after the GitHub release, the crates are published to crates.io (not a dist job; see `publish-crates`).
 # To pick up a newer dist, regenerate into a scratch copy and carry its changes over by hand.
 
@@ -152,10 +154,24 @@ jobs:
             ${{ steps.cargo-dist.outputs.paths }}
             ${{ env.BUILD_MANIFEST_NAME }}
 
+  # Pushes every runner image stage to ghcr.io, tagged <stage>-<version>, and attests it.
+  images:
+    name: images
+    needs: plan
+    permissions:
+      contents: read # check out the tag
+      packages: write # push to ghcr.io
+      id-token: write # attest signs with the run's OIDC identity
+      attestations: write # attest stores the attestation
+    # actionlint 1.7.12 rejects the $/ form zizmor's self-repository audit suggests.
+    uses: ./.github/workflows/images.yml # zizmor: ignore[self-repository]
+    with:
+      tag: ${{ github.ref_name }}
+
   # Creates the GitHub release with every artifact attached.
   host:
     name: release
-    needs: [plan, build-local-artifacts, build-global-artifacts]
+    needs: [plan, build-local-artifacts, build-global-artifacts, images]
     runs-on: ubuntu-24.04
     permissions:
       contents: write # create the release and upload its assets

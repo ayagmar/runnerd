@@ -23,11 +23,11 @@ It then runs `runnerd doctor` and prints what is left as commands. It prints the
 them; on a fresh host they are usually the slice, sized for this host, and Sysbox. Run the commands your `init`
 printed, not a copy from elsewhere.
 
-Then build the runner image (published images are on the way; `init` will use them once they ship) and start the
-service. The image is built for linux/amd64 only today, so on aarch64 runners do not start yet.
+Then start the service. The config's profile runs this release's published image,
+`ghcr.io/ayagmar/runnerd-runner:base-<version>`, which runnerd pulls before the first runner. Published images are
+linux/amd64 only today, so on aarch64 runners do not start yet.
 
 ```sh
-docker build --target base -t runnerd-runner:base https://github.com/ayagmar/runnerd.git#v0.0.4:image
 systemctl --user daemon-reload
 systemctl --user enable --now runnerd
 runnerctl status
@@ -101,13 +101,28 @@ running. A config saved from the dashboard or `PUT /v1/config` applies without a
 
 ## Runner image
 
-[`image/`](https://github.com/ayagmar/runnerd/tree/main/image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base. A profile's `image_stage` picks the stage:
+[`image/`](https://github.com/ayagmar/runnerd/tree/main/image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base (`base`, `jvm`, `node`). Each release publishes every stage to `ghcr.io/ayagmar/runnerd-runner:<stage>-<version>` for linux/amd64, with a build provenance attestation. A profile names the image its runners run with the `image` key (since 0.0.5):
+
+```toml
+[profiles.jvm]
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5"
+```
+
+runnerd pulls the image before the profile's first runner and logs the pull's progress; `runnerd doctor` says whether each image is present or can be pulled. Keep the tag at the daemon's version: the image's scripts and the daemon change together, and doctor warns when they differ. To check where an image came from:
+
+```sh
+gh attestation verify oci://ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5 --repo ayagmar/runnerd
+```
+
+runnerd 0.0.4 does not know `image`; pull and retag the published image, then keep `image_stage = "jvm"`: `docker pull ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4 && docker tag ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4 runnerd-runner:jvm`.
+
+To run your own changes to `image/`, build the stage from a clone and set `image_stage` instead of `image`; runners then run the local image `runnerd-runner:<image_stage>`, which runnerd never pulls:
 
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
 ```
 
-`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it. Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
+Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
 
 Documentation: <https://ayagmar.github.io/runnerd/>
 

@@ -34,8 +34,8 @@ pub struct Repository {
 pub struct Profile {
     /// Memory a slot's container may use.
     pub memory: u64,
-    /// While the profile's snapshot is rebuilt, none of its slots starts.
-    pub reseeding: bool,
+    /// While the profile's snapshot is rebuilt or its image pulled, none of its slots starts.
+    pub preparing: bool,
     /// Index 0 is slot 1.
     pub slots: Vec<Slot>,
 }
@@ -168,7 +168,7 @@ pub fn plan(
             let taken = profile
                 .slots
                 .iter()
-                .map(|slot| profile.reseeding || *slot != Slot::Free)
+                .map(|slot| profile.preparing || *slot != Slot::Free)
                 .collect();
             (name.as_str(), taken)
         })

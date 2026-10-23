@@ -42,7 +42,7 @@ fn profiles(slots: Vec<Slot>) -> BTreeMap<String, Profile> {
         "app".to_owned(),
         Profile {
             memory: 4 * GIB,
-            reseeding: false,
+            preparing: false,
             slots,
         },
     )])
@@ -188,7 +188,7 @@ fn paused_held_and_reseeding_start_nothing() {
         );
     }
     let mut reseeding = profiles(vec![Slot::Free]);
-    reseeding.get_mut("app").unwrap().reseeding = true;
+    reseeding.get_mut("app").unwrap().preparing = true;
     let repositories = [repository("o/a", "app", queued())];
     assert_eq!(plan(&repositories, &reseeding, None, now()), []);
 }

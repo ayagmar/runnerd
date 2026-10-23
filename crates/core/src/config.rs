@@ -103,18 +103,79 @@ pub struct CacheLimit {
     pub max_size: ByteSize,
 }
 
-/// An image stage with its limits; every job of the profile gets one container with these limits.
+/// A runner image with its limits; every job of the profile gets one container with these limits.
 #[derive(Debug, Clone, Deserialize)]
-#[serde(deny_unknown_fields)]
+#[serde(try_from = "ProfileToml")]
 pub struct Profile {
-    /// The stage of `image/Dockerfile`; runners run the image `runnerd-runner:<image_stage>`.
-    pub image_stage: String,
+    /// The image its runners run: `image_stage` or `image`, exactly one of them.
+    pub image: Image,
     /// CPUs per slot.
     pub cpus: u32,
     /// Memory per slot; the container's hard limit.
     pub memory: ByteSize,
     /// The most jobs of this profile running at once.
     pub slots: u32,
+}
+
+/// The image a profile's runners run.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Image {
+    /// `image_stage`: a stage of `image/Dockerfile` built on this host as `runnerd-runner:<stage>`.
+    Stage(String),
+    /// `image`: a reference runnerd pulls when Docker lacks it, such as
+    /// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5`.
+    Pulled(String),
+}
+
+impl Image {
+    /// The reference Docker runs.
+    pub fn reference(&self) -> String {
+        match self {
+            Image::Stage(stage) => format!("runnerd-runner:{stage}"),
+            Image::Pulled(reference) => reference.clone(),
+        }
+    }
+}
+
+/// `[profiles.<name>]` as written, before `Profile` checks it names one image.
+#[derive(Deserialize)]
+#[serde(deny_unknown_fields)]
+struct ProfileToml {
+    image_stage: Option<String>,
+    image: Option<String>,
+    cpus: u32,
+    memory: ByteSize,
+    slots: u32,
+}
+
+impl TryFrom<ProfileToml> for Profile {
+    type Error = String;
+
+    fn try_from(profile: ProfileToml) -> Result<Profile, String> {
+        let image = match (profile.image_stage, profile.image) {
+            (Some(stage), None) if !stage.is_empty() => Image::Stage(stage),
+            (None, Some(reference)) if !reference.is_empty() => Image::Pulled(reference),
+            (Some(_), Some(_)) => {
+                return Err(
+                    "set image_stage (a stage built from image/Dockerfile) or image (a reference to pull), \
+                     not both"
+                        .to_owned(),
+                );
+            }
+            _ => {
+                return Err(
+                    "set image_stage (a stage built from image/Dockerfile) or image (a reference to pull)"
+                        .to_owned(),
+                );
+            }
+        };
+        Ok(Profile {
+            image,
+            cpus: profile.cpus,
+            memory: profile.memory,
+            slots: profile.slots,
+        })
+    }
 }
 
 /// A repository to serve: `[[repositories]]`.

@@ -32,6 +32,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         self.take_found();
         self.follow_jobs().await;
         self.count_mirror_bytes().await;
+        if mode == Shutdown::No {
+            self.pull_images().await;
+        }
         let decisions = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Force => self
@@ -110,7 +113,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     .collect();
                 let profile = Profile {
                     memory: profile.memory.0,
-                    reseeding: self.is_reseeding(name),
+                    preparing: self.is_reseeding(name) || self.awaits_image(&profile.image),
                     slots,
                 };
                 (name.clone(), profile)
