@@ -295,6 +295,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 slice: config.host.slice.clone(),
                 memory_max,
                 memory_in_use: 0,
+                mirror_memory: 0,
+                seed_memory: Vec::new(),
             },
             profiles: Vec::new(),
             // What clients resuming after the last run's events have, so the first publish announces the difference.

@@ -460,6 +460,8 @@ mod tests {
                     slice: "runnerd.slice".to_owned(),
                     memory_max: Some(8 << 30),
                     memory_in_use: 0,
+                    mirror_memory: 0,
+                    seed_memory: Vec::new(),
                 },
                 profiles: vec![ProfileStatus {
                     name: "jvm".to_owned(),
@@ -636,6 +638,8 @@ mod tests {
                     slice: "runnerd.slice".to_owned(),
                     memory_max: None,
                     memory_in_use: 7,
+                    mirror_memory: 0,
+                    seed_memory: Vec::new(),
                 },
             },
         };

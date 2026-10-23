@@ -110,6 +110,8 @@ fn status() -> Status {
             slice: "ci.slice".to_owned(),
             memory_max: Some(33 << 30),
             memory_in_use: 0,
+            mirror_memory: 0,
+            seed_memory: Vec::new(),
         },
         profiles: vec![ProfileStatus {
             name: "sandbox".to_owned(),
@@ -635,6 +637,8 @@ fn budget(memory_in_use: u64) -> Event {
             slice: "ci.slice".to_owned(),
             memory_max: None,
             memory_in_use,
+            mirror_memory: 0,
+            seed_memory: Vec::new(),
         },
     }
 }

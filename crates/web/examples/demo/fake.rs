@@ -499,6 +499,8 @@ impl Fixtures {
                 slice: "ci.slice".to_owned(),
                 memory_max: Some(33 * GIB),
                 memory_in_use: 9 * GIB + 7 * GIB + 7 * GIB + 512 * MIB,
+                mirror_memory: 512 * MIB,
+                seed_memory: Vec::new(),
             },
             profiles: vec![
                 ProfileStatus {

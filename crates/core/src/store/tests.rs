@@ -480,6 +480,8 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
             slice: "ci.slice".to_owned(),
             memory_max: None,
             memory_in_use: 0,
+            mirror_memory: 0,
+            seed_memory: Vec::new(),
         },
     });
     store.flush().await;
@@ -620,6 +622,22 @@ async fn a_history_from_before_version_4_keeps_the_latest_event_of_each_reposito
         .unwrap();
     assert_eq!(store.announced().unwrap().repositories, [repository("o/r")]);
     assert_eq!(store.events_after(0, 10).await.unwrap().len(), 2);
+}
+
+#[tokio::test]
+async fn a_budget_event_an_older_daemon_stored_still_reads() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    // As runnerd 0.0.5 stored it, without the mirror's and seed containers' memory.
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(
+            r#"INSERT INTO events (at, body) VALUES (1000,
+                '{"type":"budget.changed","budget":{"slice":"ci.slice","memory_max":null,"memory_in_use":0}}')"#,
+        )
+        .unwrap();
+    assert_eq!(store.events_after(0, 10).await.unwrap().len(), 1);
 }
 
 #[tokio::test]

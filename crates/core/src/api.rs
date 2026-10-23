@@ -82,6 +82,21 @@ pub struct Budget {
     pub memory_max: Option<u64>,
     /// Memory caps of the running containers: runners, seed containers and the mirror.
     pub memory_in_use: u64,
+    /// The mirror's part of `memory_in_use`: its cap while it is enabled or still running, else 0.
+    #[serde(default)]
+    pub mirror_memory: u64,
+    /// The seed containers' part of `memory_in_use`, one per profile that reseeds, by profile name.
+    #[serde(default)]
+    pub seed_memory: Vec<SeedMemory>,
+}
+
+/// A running seed container's memory cap: its profile's limit when the reseed started.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SeedMemory {
+    /// The profile it reseeds.
+    pub profile: String,
+    /// Its cap in bytes.
+    pub memory: u64,
 }
 
 /// A runner profile and what runs in its slots.

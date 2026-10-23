@@ -70,16 +70,30 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let status = api::Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: mode != Shutdown::No,
-            budget: api::Budget {
-                slice: self.config.host.slice.clone(),
-                memory_max: self.memory_max,
-                memory_in_use: self.memory_in_use(),
-            },
+            budget: self.budget(),
             profiles,
             repositories,
         };
         self.announce_changes(&previous, announced.as_deref(), &status);
         self.status.send_replace(status);
+    }
+
+    /// The memory caps in use, with the mirror's and each seed container's part.
+    fn budget(&self) -> api::Budget {
+        api::Budget {
+            slice: self.config.host.slice.clone(),
+            memory_max: self.memory_max,
+            memory_in_use: self.memory_in_use(),
+            mirror_memory: self.mirror_memory_in_use(),
+            seed_memory: self
+                .reseed_memory
+                .iter()
+                .map(|(profile, memory)| api::SeedMemory {
+                    profile: profile.clone(),
+                    memory: *memory,
+                })
+                .collect(),
+        }
     }
 
     /// Announces the profiles, slots, budget and repositories that changed between two statuses. The events carry

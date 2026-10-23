@@ -2336,6 +2336,40 @@ async fn each_change_to_a_profile_is_announced_once_and_a_runner_only_as_its_slo
 }
 
 #[tokio::test]
+async fn a_profile_that_starts_reseeding_is_announced_with_its_seed_containers_memory() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &sized("512M", "8G", "1G"));
+    engine.recover().await.unwrap();
+    engine.publish();
+    let mut after = 0;
+    events_of(&handle, &mut after, "profile.").await;
+
+    engine.request_reseed("app").unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let status = handle.status.borrow().clone();
+    assert_eq!(
+        events_of(&handle, &mut after, "profile.").await,
+        [api::Event::ProfileChanged {
+            profile: status.profiles[0].clone()
+        }]
+    );
+    assert!(status.profiles[0].reseeding, "app shows reseeding");
+    // The enabled mirror is reserved for while it is down.
+    assert_eq!(status.budget.mirror_memory, 512 << 20);
+    assert_eq!(
+        status.budget.seed_memory,
+        [api::SeedMemory {
+            profile: "app".to_owned(),
+            memory: 8 << 30
+        }]
+    );
+    assert_eq!(status.budget.memory_in_use, (8 << 30) + (512 << 20));
+}
+
+#[tokio::test]
 async fn a_restart_without_a_profile_leaves_clients_resuming_after_the_last_run_where_the_status_is()
  {
     let github = FakeGithub::default();
