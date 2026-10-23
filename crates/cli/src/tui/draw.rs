@@ -13,11 +13,11 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState,
 };
 use runnerd_core::api::{
-    Job, JobSummary, ProfileStatus, RepositoryStatus, Sample, SlotStatus, Step,
+    Job, JobSummary, ProfileStatus, RepositoryStatus, Sample, SlotStatus, Status, Step,
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, JobView, Outcome, Pane, View};
+use super::app::{App, Connection, JobView, LatestRow, Outcome, Pane, View};
 use crate::human::{self, Tone, bytes, cores, duration};
 use crate::watch;
 
@@ -152,13 +152,20 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 }
 
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let line = if let Some((_, message)) = &app.confirm {
+    let line = if let Some(refused) = &app.confirm {
+        let ask = if refused.jobs == 1 {
+            " y cancels the job's run and pauses, any other key keeps it running: ".to_owned()
+        } else {
+            // Jobs of one workflow share a run, so the count is of jobs.
+            format!(
+                " y cancels the runs of {} jobs and pauses, any other key keeps them running: ",
+                refused.jobs
+            )
+        };
+        let rest = usize::from(area.width).saturating_sub(ask.width());
         Line::from(vec![
-            Span::styled(
-                " y cancels its run and pauses, any other key keeps it running: ",
-                bold(),
-            ),
-            Span::styled(message.clone(), theme.wait()),
+            Span::styled(ask, bold()),
+            Span::styled(fit(&refused.message, rest), theme.wait()),
         ])
     } else if let Some(flash) = &app.flash {
         let style = if flash.outcome == Outcome::Failed {
@@ -282,8 +289,8 @@ fn scale(part: u64, whole: u64, width: u16) -> u16 {
     u16::try_from(cells).unwrap_or(width).min(width)
 }
 
-/// The budget as one bar: a block per slot as wide as its memory, filled as far as its job uses it; then what
-/// else is reserved (the mirror, seed containers), then what is free.
+/// The budget as one bar: a block per slot as wide as its memory, filled as far as its job uses it; then the
+/// mirror and each seed container, then what is free.
 fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let status = &app.live.status;
     let budget = &status.budget;
@@ -304,13 +311,11 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         let _ = write!(note, " · {} in use, sampled", bytes(host.memory));
     }
     let [title, bar, labels] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
-    heading(frame, title, "Budget", note, theme);
 
     let caps: u64 = app.slots().map(|(_, profile, _)| profile.memory).sum();
     let whole = budget.memory_max.unwrap_or(caps).max(caps);
     let mut cells = Vec::new();
     let mut names = Vec::new();
-    let mut reserved = 0;
     let mut drawn = 0;
     for (index, profile, slot) in app.slots() {
         let width = scale(profile.memory, whole, bar.width).max(1);
@@ -319,7 +324,6 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             slot_job(app, profile, slot).and_then(|job| app.live.samples.get(&job.summary.id));
         let used = sample.map_or(0, |sample| scale(sample.memory, profile.memory, width));
         let (text, label) = if slot.runner.is_some() {
-            reserved += profile.memory;
             (
                 format!(
                     "{}{}",
@@ -357,17 +361,68 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         ));
         drawn += width;
     }
-    let other = scale(
-        budget.memory_in_use.saturating_sub(reserved),
-        whole,
-        bar.width,
-    )
-    .min(bar.width.saturating_sub(drawn));
-    cells.push(Span::raw("▒".repeat(usize::from(other))));
-    let free = bar.width.saturating_sub(drawn + other);
+    // The mirror and each seed container, named as the slots are, or in the heading when too narrow for it.
+    for Held {
+        style,
+        label,
+        memory,
+    } in held(status, theme)
+    {
+        let width = scale(memory, whole, bar.width)
+            .max(2)
+            .min(bar.width.saturating_sub(drawn));
+        let room = usize::from(width.saturating_sub(1));
+        if label.width() > room {
+            let _ = write!(note, " · {label}");
+        }
+        if width < 2 {
+            continue;
+        }
+        let mut text = "▒".repeat(room);
+        text.push(' ');
+        cells.push(Span::styled(text, style));
+        let name = if label.width() <= room {
+            label
+        } else {
+            String::new()
+        };
+        names.push(Span::styled(format!("{name:room$} "), style));
+        drawn += width;
+    }
+    heading(frame, title, "Budget", note, theme);
+    let free = bar.width.saturating_sub(drawn);
     cells.push(Span::styled("·".repeat(usize::from(free)), theme.dim()));
     frame.render_widget(Line::from(cells), bar);
     frame.render_widget(Line::from(names), labels);
+}
+
+/// Memory the budget holds for something other than a slot.
+struct Held {
+    style: Style,
+    label: String,
+    memory: u64,
+}
+
+/// The mirror, then each seed container in its profile's colour.
+fn held(status: &Status, theme: Theme) -> Vec<Held> {
+    let budget = &status.budget;
+    let mirror = (budget.mirror_memory > 0).then(|| Held {
+        style: Style::default(),
+        label: format!("mirror {}", bytes(budget.mirror_memory)),
+        memory: budget.mirror_memory,
+    });
+    let seeds = budget.seed_memory.iter().map(|seed| {
+        let index = status
+            .profiles
+            .iter()
+            .position(|profile| profile.name == seed.profile);
+        Held {
+            style: theme.profile(index),
+            label: format!("{} seed {}", seed.profile, bytes(seed.memory)),
+            memory: seed.memory,
+        }
+    });
+    mirror.into_iter().chain(seeds).collect()
 }
 
 /// The running job in a slot.
@@ -467,7 +522,7 @@ fn step_label(job: &Job) -> Option<(String, String)> {
 
 fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let running = app.live.running.len();
-    let queued = app.live.queued.len();
+    let queued = app.live.status.queued.len();
     let [title, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     heading(
         frame,
@@ -549,7 +604,7 @@ fn slot_cards(
         format!(
             "{} running · {} queued",
             app.live.running.len(),
-            app.live.queued.len()
+            app.live.status.queued.len()
         ),
         theme,
     );
@@ -857,23 +912,34 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     let focused = app.pane == Pane::Latest;
     let width = usize::from(area.width);
     let rows: Vec<_> = app
-        .live
-        .recent
-        .iter()
-        .map(|job| {
-            let ran = human::ran(job, now).map_or_else(String::new, duration);
-            (job, ran, finished_ago(job, now))
+        .latest_rows()
+        .map(|row| match row {
+            LatestRow::Queued(job) => (
+                Span::styled(
+                    format!("{:<9}", "QUEUED"),
+                    theme.tone(Tone::Busy).add_modifier(Modifier::BOLD),
+                ),
+                format!("{} {}", human::queued_title(job), job.repository),
+                String::new(),
+                human::queued_ago(job, now),
+            ),
+            LatestRow::Finished(job) => (
+                badge(job, theme),
+                format!("{} {}", human::title(job), job.repository),
+                human::ran(job, now).map_or_else(String::new, duration),
+                finished_ago(job, now),
+            ),
         })
         .collect();
     // The times are as wide as the widest of them; the job's name takes what is left.
     let ran_width = rows
         .iter()
-        .map(|(_, ran, _)| ran.width())
+        .map(|(_, _, ran, _)| ran.width())
         .max()
         .unwrap_or(0);
     let ago_width = rows
         .iter()
-        .map(|(_, _, ago)| ago.width())
+        .map(|(_, _, _, ago)| ago.width())
         .max()
         .unwrap_or(0);
     let name_width = width
@@ -882,14 +948,11 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     let lines: Vec<Line<'_>> = rows
         .into_iter()
         .enumerate()
-        .map(|(position, (job, ran, ago))| {
+        .map(|(position, (badge, name, ran, ago))| {
             let line = Line::from(vec![
-                badge(job, theme),
+                badge,
                 Span::raw(" "),
-                Span::raw(fit(
-                    &format!("{} {}", human::title(job), job.repository),
-                    name_width,
-                )),
+                Span::raw(fit(&name, name_width)),
                 Span::raw(format!(" {ran:>ran_width$} ")),
                 Span::styled(format!("{ago:>ago_width$}"), theme.dim()),
             ]);
@@ -1032,7 +1095,7 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
             (Some(memory), Some(cpu), _) => {
                 details.push((
                     4,
-                    format!("capped at {} and {} cores", bytes(memory), cores(cpu)),
+                    format!("capped at {} and {} CPUs", bytes(memory), cores(cpu)),
                 ));
             }
             (_, _, Some(profile)) => details.push((
@@ -1052,7 +1115,11 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
     if let Some(ran) = human::ran(summary, now) {
         details.push((0, format!("ran {}", duration(ran))));
     }
-    let details = fit_details(details, usize::from(head.width));
+    let width = usize::from(head.width);
+    let details = fit_details(details, width);
+    let badge = badge(summary, theme);
+    let title = human::title(summary);
+    let title_width = title.width().min(width.saturating_sub(badge.width() + 2));
     let style = summary.runner.as_ref().map_or_else(
         || theme.dim(),
         |runner| theme.profile(app.profile_index(&runner.profile)),
@@ -1062,30 +1129,14 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
             Line::from(vec![
                 Span::styled("■ ", style),
                 Span::styled(
-                    format!(
-                        "{}{}",
-                        summary.repository,
-                        summary
-                            .workflow
-                            .as_ref()
-                            .map_or_else(String::new, |workflow| format!(" · {workflow}"))
-                    ),
+                    fit(&summary.repository, width.saturating_sub(2)),
                     theme.dim(),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(
-                    format!(
-                        "{}  ",
-                        if summary.name.is_empty() {
-                            human::title(summary)
-                        } else {
-                            summary.name.clone()
-                        }
-                    ),
-                    bold(),
-                ),
-                badge(summary, theme),
+                Span::styled(fit(&title, title_width), bold()),
+                Span::raw("  "),
+                badge,
             ]),
             Line::styled(details, theme.dim()),
         ]),
@@ -1376,7 +1427,7 @@ fn job_charts(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, them
     .render(frame, memory_area, theme);
     Chart {
         title: "CPU",
-        limit_label: format!("cap {}", in_cores(cpu_cap)),
+        limit_label: format!("cap {} CPUs", cores(cpu_cap)),
         values: open.samples.iter().map(|sample| sample.cpu).collect(),
         limit: cpu_cap,
         unit: in_cores,

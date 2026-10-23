@@ -282,11 +282,15 @@ jvm         2  free
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
 halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
 halyard/storefront  node     paused       2  self-hosted,linux,x64,node
+
+JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
+120055991710  halyard/storefront  E2E / visual-diff  3m 12s ago
+120055991714  halyard/storefront  E2E / a11y         41s ago
 ```
 
 | Command | What it shows or does |
 |---|---|
-| `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queues |
+| `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queued jobs |
 | `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
 | `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
 | `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |
@@ -307,9 +311,10 @@ Memory and CPU come from samples every 2 s, so a peak is the highest sample: a s
 A full-screen dashboard for hosts reached over SSH, where the web dashboard is not open. It shows what the web
 dashboard does:
 
-- the budget as one bar, a block per slot as wide as its memory and filled as far as its job uses it;
+- the budget as one bar, a block per slot as wide as its memory and filled as far as its job uses it, then the
+  mirror and each seed container;
 - a card per slot with the job, its step, run time, and memory and CPU sparklines;
-- the slice's memory and CPU, the repositories, and the latest jobs;
+- the slice's memory and CPU, the repositories, and the queued and latest jobs;
 - the history, filtered by outcome and repository;
 - a job: its timeline, its steps as bars on one time axis, memory and CPU against its container's caps, and its log,
   followed while the job runs.

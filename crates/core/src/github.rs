@@ -1,6 +1,6 @@
-//! The GitHub REST API as the scheduler needs it: queued jobs, just-in-time runner configs and repository runners.
-//! Owns the token, conditional requests and rate-limit backoff. It must never put the token in a log line, a
-//! `Debug` output or an error, and it decides nothing about scheduling.
+//! The GitHub REST API as the scheduler and the history need it: queued jobs, a job's steps, just-in-time runner
+//! configs, repository runners and cancelling a run. Owns the token, conditional requests and rate-limit backoff. It
+//! must never put the token in a log line, a `Debug` output or an error, and it decides nothing about scheduling.
 
 use std::collections::HashMap;
 use std::fmt;

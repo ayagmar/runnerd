@@ -3,11 +3,11 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{Check, CheckStatus, ConfigCheck, ConfigFile, Doctor};
+use runnerd_core::client::{Client, ClientError};
 use runnerd_core::config::Config;
 
 use super::{Page, page};
 use crate::chart::ratio;
-use crate::daemon::{Daemon, Error};
 use crate::format;
 
 /// Everything the config page shows.
@@ -19,9 +19,11 @@ pub(crate) struct ConfigView {
 }
 
 impl ConfigView {
-    pub(crate) async fn load(daemon: &Daemon) -> Result<ConfigView, Error> {
+    pub(crate) async fn load(daemon: &Client) -> Result<ConfigView, ClientError> {
         let file: ConfigFile = daemon.get("/v1/config").await?;
-        let check = daemon.check(file.text.clone()).await?;
+        let check = daemon
+            .post_toml("/v1/config/check", file.text.clone())
+            .await?;
         Ok(ConfigView {
             doctor: daemon.get("/v1/doctor").await?,
             file,
@@ -98,7 +100,7 @@ fn blocks(text: &str) -> Vec<Block> {
         blocks.push(Block {
             label: "mirror".to_owned(),
             bytes: config.caches.mirror.memory.0,
-            class: "other".to_owned(),
+            class: "mirror".to_owned(),
         });
     }
     blocks

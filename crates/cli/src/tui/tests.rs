@@ -29,13 +29,13 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
-    LogSummary, ProfileStatus, RepositoryStatus, RunnerStatus, Sample, SlotStatus, Status, Step,
-    Timeline,
+    LogSummary, ProfileStatus, QueuedJob, RepositoryStatus, RunnerStatus, Sample, SeedMemory,
+    SlotStatus, Status, Step, Timeline,
 };
 
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, Effect, Msg, View};
+use super::app::{App, Connection, Effect, Msg, Refused, View};
 use super::draw::{Theme, draw};
 use super::feed;
 use crate::testing::Fake;
@@ -86,7 +86,6 @@ fn app() -> App {
             ],
             queued: Vec::new(),
         },
-        queued: BTreeMap::new(),
         running: BTreeMap::new(),
         samples: BTreeMap::new(),
         host: None,
@@ -263,7 +262,7 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
     assert!(overview.contains("jvm · slot 1"), "{overview}");
     assert!(overview.contains("CI / build"), "{overview}");
     assert!(overview.contains("2/3 Unit tests"), "{overview}");
-    assert!(overview.contains("mem 4.0G"), "{overview}");
+    assert!(overview.contains("mem 4G"), "{overview}");
     assert!(overview.contains("1m 31s"), "ran since 1009: {overview}");
 
     // Enter on the selected slot opens its job.
@@ -274,9 +273,11 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
         text: "##[group]Unit tests".to_owned(),
     });
     let job = screen(&app, 120, 40, false);
-    assert!(
-        job.contains("CI / build") || job.contains("build  RUNNING"),
-        "{job}"
+    let head: Vec<&str> = job.lines().skip(1).take(2).map(str::trim_end).collect();
+    assert_eq!(
+        head,
+        ["■ halyard/ledger", "CI / build  RUNNING"],
+        "the repository, then the job as every other view names it: {job}"
     );
     for expected in [
         "Set up job",
@@ -287,7 +288,7 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
         "–",
         "waiting for a runner 4s",
         "runner starting 5s",
-        "capped at 9.0G and 8.00 cores",
+        "capped at 9G and 8 CPUs",
         "##[group]Unit tests",
     ] {
         assert!(job.contains(expected), "{expected}: {job}");
@@ -397,24 +398,197 @@ fn a_refused_pause_is_forced_only_after_y() {
             force: false
         }]
     );
-    app.update(Msg::Busy {
+    app.update(Msg::Busy(Refused {
         repository: Some("halyard/ledger".to_owned()),
         message: "halyard/ledger runs job 42 on runnerd-ab12-jvm-1".to_owned(),
-    });
+        jobs: 1,
+    }));
     assert!(screen(&app, 120, 40, false).contains("runs job 42"));
     assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
     assert!(app.confirm.is_none());
 
-    app.update(Msg::Busy {
+    app.update(Msg::Busy(Refused {
         repository: Some("halyard/ledger".to_owned()),
         message: "halyard/ledger runs job 42".to_owned(),
-    });
+        jobs: 1,
+    }));
     assert_eq!(
         app.update(key(KeyCode::Char('y'))),
         vec![Effect::Pause {
             repository: Some("halyard/ledger".to_owned()),
             force: true
         }]
+    );
+}
+
+#[test]
+fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_others() {
+    let mut app = app();
+    let queued = |id, name: &str, at| QueuedJob {
+        id,
+        repository: "halyard/storefront".to_owned(),
+        run_id: 4002,
+        run_attempt: 1,
+        workflow: Some("E2E".to_owned()),
+        name: name.to_owned(),
+        branch: Some("main".to_owned()),
+        url: None,
+        queued_at: at,
+    };
+    app.live.status.queued = vec![queued(51, "visual-diff", 1041), queued(52, "a11y", 1090)];
+    app.live.recent = vec![summary(42, JobState::Completed)];
+    let shown = screen(&app, 120, 40, false);
+    let rows: Vec<&str> = shown
+        .lines()
+        .filter_map(|line| {
+            let at = line.find("QUEUED").or_else(|| line.find("COMPLETED"))?;
+            Some(line[at..].trim_end())
+        })
+        .collect();
+    assert_eq!(rows.len(), 3, "{shown}");
+    assert!(
+        rows[0].starts_with("QUEUED    E2E / visual-diff halyard/storefront")
+            && rows[0].ends_with("59s ago"),
+        "{rows:?}"
+    );
+    assert!(rows[1].starts_with("QUEUED    E2E / a11y"), "{rows:?}");
+    assert!(rows[2].contains("CI / build halyard/ledger"), "{rows:?}");
+
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Tab));
+    assert_eq!(
+        app.update(key(KeyCode::Char('p'))),
+        vec![Effect::Pause {
+            repository: Some("halyard/storefront".to_owned()),
+            force: false
+        }]
+    );
+    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenJob(51)]);
+    let job = screen(&app, 120, 40, false);
+    let head: Vec<&str> = job.lines().skip(1).take(2).map(str::trim_end).collect();
+    assert_eq!(
+        head,
+        ["■ halyard/storefront", "E2E / visual-diff  QUEUED"],
+        "{job}"
+    );
+}
+
+#[test]
+fn the_selected_latest_job_stays_selected_when_a_queued_job_above_it_starts() {
+    let mut app = app();
+    let queued = |id, repository: &str| QueuedJob {
+        id,
+        repository: repository.to_owned(),
+        run_id: 4002,
+        run_attempt: 1,
+        workflow: Some("CI".to_owned()),
+        name: "build".to_owned(),
+        branch: Some("main".to_owned()),
+        url: None,
+        queued_at: 1000,
+    };
+    app.live.status.queued = vec![
+        queued(51, "halyard/ledger"),
+        queued(52, "halyard/storefront"),
+    ];
+    app.live.recent = vec![summary(42, JobState::Completed)];
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Down));
+    app.update(event(
+        Some(9),
+        Event::JobStarted {
+            job: summary(51, JobState::Running),
+        },
+    ));
+    assert_eq!(
+        app.update(key(KeyCode::Char('p'))),
+        vec![Effect::Pause {
+            repository: Some("halyard/storefront".to_owned()),
+            force: false
+        }]
+    );
+    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenJob(52)]);
+
+    app.update(key(KeyCode::Esc));
+    app.update(key(KeyCode::Down));
+    app.update(event(
+        Some(10),
+        Event::JobStarted {
+            job: summary(52, JobState::Running),
+        },
+    ));
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::OpenJob(42)],
+        "a selection whose job left the list moves to a row still there"
+    );
+}
+
+#[test]
+fn the_budget_names_the_mirror_and_each_seed_container() {
+    let mut app = app();
+    let budget = &mut app.live.status.budget;
+    budget.mirror_memory = 4 << 30;
+    budget.seed_memory = vec![SeedMemory {
+        profile: "jvm".to_owned(),
+        memory: 9 << 30,
+    }];
+    budget.memory_in_use = 13 << 30;
+    let shown = screen(&app, 160, 40, false);
+    let names = shown.lines().nth(3).unwrap();
+    assert!(
+        names.contains("mirror 4G") && names.contains("jvm seed 9G"),
+        "{shown}"
+    );
+
+    // A 512M mirror is a cell or two at common widths: the heading names it.
+    app.live.status.budget.mirror_memory = 512 << 20;
+    let shown = screen(&app, 120, 40, false);
+    let mut lines = shown.lines().skip(1);
+    let (heading, bar) = (lines.next().unwrap(), lines.next().unwrap());
+    assert!(heading.ends_with("· mirror 512M"), "{shown}");
+    assert!(bar.contains("▒ "), "the mirror's block shows: {shown}");
+
+    // Without a MemoryMax the slots fill the bar, leaving no room for a block: the heading still names each.
+    app.live.status.budget.memory_max = None;
+    let shown = screen(&app, 120, 40, false);
+    let heading = shown.lines().nth(1).unwrap();
+    assert!(heading.contains("· mirror 512M · jvm seed 9G"), "{shown}");
+}
+
+#[test]
+fn a_profile_a_reload_adds_or_removes_comes_and_goes_and_the_selection_stays_on_a_slot() {
+    let mut app = app();
+    app.update(event(
+        Some(5),
+        Event::ProfileChanged {
+            profile: profile("rust", 1, 4 << 30),
+        },
+    ));
+    assert!(
+        screen(&app, 120, 40, false).contains("rust · slot 1"),
+        "the new profile's slot shows"
+    );
+    for _ in 0..3 {
+        app.update(key(KeyCode::Char('j')));
+    }
+    app.update(event(
+        Some(6),
+        Event::ProfileRemoved {
+            profile: "rust".to_owned(),
+        },
+    ));
+    assert!(
+        !screen(&app, 120, 40, false).contains("rust · slot 1"),
+        "the removed profile's slot is gone"
+    );
+    assert_eq!(
+        app.update(key(KeyCode::Char('R'))),
+        vec![Effect::Reseed {
+            profile: "node".to_owned()
+        }],
+        "the selection moved to the last slot left"
     );
 }
 
@@ -428,10 +602,25 @@ fn shift_p_and_u_pause_and_resume_every_repository_and_a_refused_pause_of_all_is
             force: false
         }]
     );
-    app.update(Msg::Busy {
+    app.update(Msg::Busy(Refused {
         repository: None,
-        message: "halyard/ledger runs job 42".to_owned(),
-    });
+        message: "halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792721996; \
+                  halyard/storefront runs job 120055991650 on runnerd-3f9a-forge-node-1-1792722114"
+            .to_owned(),
+        jobs: 2,
+    }));
+    let asked = screen(&app, 136, 40, false);
+    let prompt = asked.lines().last().unwrap();
+    assert!(
+        prompt.starts_with(
+            " y cancels the runs of 2 jobs and pauses, any other key keeps them running: "
+        ),
+        "{prompt}"
+    );
+    assert!(
+        prompt.trim_end().ends_with('…'),
+        "a message too long for the line is cut with …: {prompt}"
+    );
     assert_eq!(
         app.update(key(KeyCode::Char('y'))),
         vec![Effect::Pause {
@@ -922,7 +1111,7 @@ fn the_open_job_header_drops_whole_details_to_fit() {
         "run 40018663900",
         "slot jvm",
         "1",
-        "capped at 9.0G and 8.00 cores",
+        "capped at 9G and 8 CPUs",
         "waited 9s",
         "ran 1m 31s",
     ];
@@ -1007,7 +1196,7 @@ fn wide_characters_are_fitted_by_the_cells_they_take() {
         "run 4001".to_owned(),
         "slot jvm".to_owned(),
         "1".to_owned(),
-        "capped at 9.0G and 8.00 cores".to_owned(),
+        "capped at 9G and 8 CPUs".to_owned(),
         "waited 9s".to_owned(),
         "ran 1m 31s".to_owned(),
     ];
@@ -1169,6 +1358,9 @@ async fn a_stream_reopened_at_once_with_no_event_to_resume_after_reads_the_state
     .await
     .expect("the state should be read again after the gap");
     assert_eq!(app.connection, Connection::Live);
-    assert!(screen(&app, 120, 40, false).contains("1.0G of 33G reserved"));
+    assert!(
+        screen(&app, 120, 40, false).contains("1G of 33G reserved"),
+        "the reread status shows"
+    );
     assert_eq!(*streams.lock().unwrap(), [None, None]);
 }

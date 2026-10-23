@@ -8,12 +8,12 @@ use runnerd_core::api::{
     HostSample, HostSamples, Job, JobPage, JobQuery, JobState, JobSummary, ProfileStatus,
     RepositoryStatus, Sample, SampleSeries, SlotStatus, Status,
 };
+use runnerd_core::client::{Client, ClientError};
 
 use super::{
     Live, Page, Parts, badge, digest, js, page, profile_class, repository_id, slot_id, time_ago,
 };
 use crate::chart::{Base, Series, Sparkline, TimeChart, nice_top};
-use crate::daemon::{Daemon, Error};
 use crate::format;
 
 /// How far back the host charts reach.
@@ -24,6 +24,8 @@ const HOST_MARGIN: u64 = 5 * 60;
 const SPARK_WINDOW: u64 = 5 * 60;
 /// Latest jobs listed.
 const RECENT: u32 = 8;
+/// Queued jobs listed, the oldest; the history lists the rest.
+const QUEUED_SHOWN: usize = 8;
 
 /// Everything the overview shows.
 #[derive(Debug, Clone)]
@@ -39,7 +41,7 @@ pub(crate) struct Overview {
 }
 
 impl Overview {
-    pub(crate) async fn load(daemon: &Daemon, now: u64) -> Result<Overview, Error> {
+    pub(crate) async fn load(daemon: &Client, now: u64) -> Result<Overview, ClientError> {
         let status: Status = daemon.get("/v1/status").await?;
         let host = daemon
             .get(&format!(
@@ -69,7 +71,7 @@ impl Overview {
     }
 
     /// Reads the running jobs again, and the samples of those not seen before.
-    pub(crate) async fn reload_running(&mut self, daemon: &Daemon) -> Result<(), Error> {
+    pub(crate) async fn reload_running(&mut self, daemon: &Client) -> Result<(), ClientError> {
         let page: JobPage = daemon
             .get_query(
                 "/v1/jobs",
@@ -268,8 +270,8 @@ fn slot_view<'overview>(
 }
 
 /// The budget: the slice as the ground, a block per slot sized by its memory cap, filled as high as the job's last
-/// sampled memory; whatever else holds memory (the mirror, a seed container); and what is free. A block opens its
-/// job, or its slot's card; hovering or focusing one says what it holds in the readout above the bar.
+/// sampled memory; the mirror and each seed container; and what is free. A block opens its job, or its slot's card;
+/// hovering or focusing one says what it holds in the readout above the bar.
 pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     let status = &overview.status;
     let budget = &status.budget;
@@ -278,22 +280,11 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
         .iter()
         .map(|profile| profile.memory * profile.slots.len() as u64)
         .sum();
-    let running_caps: u64 = status
-        .profiles
-        .iter()
-        .map(|profile| {
-            profile.memory
-                * profile
-                    .slots
-                    .iter()
-                    .filter(|slot| slot.runner.is_some())
-                    .count() as u64
-        })
-        .sum();
-    let other = budget.memory_in_use.saturating_sub(running_caps);
+    let held = held(status);
+    let held_total: u64 = held.iter().map(|part| part.memory).sum();
     let free = budget
         .memory_max
-        .map(|max| max.saturating_sub(reserved + other));
+        .map(|max| max.saturating_sub(reserved + held_total));
     let used_now = overview.host.samples.last().map(|sample| sample.memory);
     let max = budget
         .memory_max
@@ -304,10 +295,6 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
         budget.slice,
         format::bytes(budget.memory_in_use),
     );
-    let other_lens = Lens {
-        figure: format::bytes(other),
-        text: "held by the mirror and seed containers".to_owned(),
-    };
     let free = free.filter(|free| *free > 0);
     let free_lens = free.map(|free| Lens {
         figure: format::bytes(free),
@@ -323,9 +310,10 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
             })
         })
         .collect();
-    if other > 0 {
-        lenses.push(("other".to_owned(), other_lens.clone()));
-    }
+    lenses.extend(
+        held.iter()
+            .map(|part| (part.key.clone(), part.lens.clone())),
+    );
     if let Some(lens) = &free_lens {
         lenses.push(("free".to_owned(), lens.clone()));
     }
@@ -340,14 +328,15 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                         (block(overview, profile, slot, parts))
                     }
                 }
-                @if other > 0 {
-                    @let link = link("other", None);
-                    div.block.other tabindex="0" role="img" style=(format!("--size: {:.3}", gib(other)))
-                        aria-label=(format!("{} mirror and seed containers", other_lens.figure))
+                @for part in &held {
+                    @let link = link(&part.key, None);
+                    div class=(format!("block {}", part.class)) tabindex="0" role="img"
+                        style=(format!("--size: {:.3}", gib(part.memory)))
+                        aria-label=(format!("{} {}", part.lens.figure, part.lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
                         data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
-                        span.size { (other_lens.figure) }
-                        span.name { "mirror" }
+                        span.size { (part.lens.figure) }
+                        span.name { (part.name) }
                     }
                 }
                 @if let Some((free, lens)) = free.zip(free_lens.as_ref()) {
@@ -360,7 +349,7 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                     }
                 }
             }
-            (bar_keys(other, &other_lens, free_lens.as_ref()))
+            (bar_keys(&held, free_lens.as_ref()))
             @if status.shutting_down {
                 p.warning { "runnerd is shutting down: it starts no new runners and stops once running jobs finish." }
             }
@@ -410,16 +399,18 @@ fn lens_id(key: &str) -> String {
     format!("lens-{key}")
 }
 
-/// On a touch screen the mirror and the free remainder may be too thin to tap: keys under the bar select them
-/// instead, and say their sizes.
-fn bar_keys(other: u64, other_lens: &Lens, free_lens: Option<&Lens>) -> Markup {
+/// On a touch screen the mirror, a seed container and the free remainder may be too thin to tap: keys under the bar
+/// select them instead, and say their sizes.
+fn bar_keys(held: &[Held], free_lens: Option<&Lens>) -> Markup {
     html! {
-        @if other > 0 || free_lens.is_some() {
+        @if !held.is_empty() || free_lens.is_some() {
             div.bar-keys {
-                @if other > 0 {
-                    button.bar-key.key-mirror type="button" data-on:click="$_slot = $_slot == 'other' ? '' : 'other'"
-                        data-class:linked="$_slot == 'other'" {
-                        span.swatch aria-hidden="true" {} (other_lens.figure) " mirror"
+                @for part in held {
+                    @let key = js(&part.key);
+                    button class=(format!("bar-key {}", part.class)) type="button"
+                        data-on:click=(format!("$_slot = $_slot == {key} ? '' : {key}"))
+                        data-class:linked=(format!("$_slot == {key}")) {
+                        span.swatch aria-hidden="true" {} (part.lens.figure) " " (part.name)
                     }
                 }
                 @if let Some(lens) = free_lens {
@@ -431,6 +422,43 @@ fn bar_keys(other: u64, other_lens: &Lens, free_lens: Option<&Lens>) -> Markup {
             }
         }
     }
+}
+
+/// Memory the budget holds for something other than a slot: the mirror, or a profile's seed container.
+struct Held {
+    key: String,
+    /// The block's classes.
+    class: String,
+    /// What its block says under its size.
+    name: String,
+    memory: u64,
+    lens: Lens,
+}
+
+/// The mirror, then each seed container, in the colour of the profile it reseeds.
+fn held(status: &Status) -> Vec<Held> {
+    let budget = &status.budget;
+    let mirror = (budget.mirror_memory > 0).then(|| Held {
+        key: "mirror".to_owned(),
+        class: "mirror".to_owned(),
+        name: "mirror".to_owned(),
+        memory: budget.mirror_memory,
+        lens: Lens {
+            figure: format::bytes(budget.mirror_memory),
+            text: "held by the mirror".to_owned(),
+        },
+    });
+    let seeds = budget.seed_memory.iter().map(|seed| Held {
+        key: format!("seed-{}", slot_id(&seed.profile, 0)),
+        class: format!("seed {}", profile_class(status, &seed.profile)),
+        name: format!("{} seed", seed.profile),
+        memory: seed.memory,
+        lens: Lens {
+            figure: format::bytes(seed.memory),
+            text: format!("held by {}'s seed container", seed.profile),
+        },
+    });
+    mirror.into_iter().chain(seeds).collect()
 }
 
 fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus, parts: &Parts) -> Markup {
@@ -836,16 +864,44 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
     }
 }
 
-/// The latest jobs, any state. A running job's row lights up its slot.
+/// The jobs: those queued, oldest first, then the latest ones, any state. A queued job's row opens it on GitHub and
+/// lights up its repository; a running job's row lights up its slot.
 pub(crate) fn recent(overview: &Overview) -> Markup {
+    let queued = &overview.status.queued;
+    let more_queued = queued.len().saturating_sub(QUEUED_SHOWN);
+    // The history has queued jobs too; the status's queue shows them.
+    let latest = overview
+        .recent
+        .iter()
+        .filter(|job| !queued.iter().any(|known| known.id == job.id));
     html! {
         section #recent .recent aria-labelledby="recent-title" {
             h2 #recent-title .visually-hidden { "Latest jobs" }
-            @if overview.recent.is_empty() {
+            @if overview.recent.is_empty() && queued.is_empty() {
                 p.muted { "No jobs yet. Jobs show here once a runner of this machine takes one." }
             } @else {
                 ul.job-list {
-                    @for job in &overview.recent {
+                    @for job in queued.iter().take(QUEUED_SHOWN) {
+                        @let repository = js(&job.repository);
+                        @let enter = format!("$_repo = {repository}");
+                        li.queued data-class:linked=(format!("$_repo == {repository}"))
+                            data-on:pointerenter=(enter) data-on:focusin=(enter)
+                            data-on:pointerleave="evt.pointerType == 'mouse' && ($_repo = '')"
+                            data-on:focusout="$_repo = ''" {
+                            a href=(job.url.clone().unwrap_or_else(|| format!("/jobs/{}", job.id))) {
+                                span.badge.queued { "queued" }
+                                (job_name(job.workflow.as_deref(), &job.name))
+                                span.repo { (job.repository) }
+                                @if job.queued_at > 0 {
+                                    span.when { (time_ago(job.queued_at, overview.now)) }
+                                }
+                            }
+                        }
+                    }
+                    @if more_queued > 0 {
+                        li.all { a href="/history?outcome=queued" { (more_queued) " more queued" } }
+                    }
+                    @for job in latest {
                         @let running = job.runner.as_ref().filter(|_| job.state == JobState::Running);
                         @let key = running.map(|runner| js(&slot_id(&runner.profile, runner.slot)));
                         @let linked = match &key {
@@ -859,7 +915,7 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
                             data-on:focusout=[enter.as_ref().map(|_| "$_slot = ''")] {
                             a href=(format!("/jobs/{}", job.id)) {
                                 (badge(job))
-                                span.job-name { (job.name) }
+                                (job_name(job.workflow.as_deref(), &job.name))
                                 span.repo { (job.repository) }
                                 span.when { (time_ago(job.timeline.queued_at, overview.now)) }
                             }
@@ -868,6 +924,16 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
                     li.all { a href="/history" { "All history" } }
                 }
             }
+        }
+    }
+}
+
+/// A job's name after its workflow's, which reads quieter: `CI / build`, as every client names a job.
+fn job_name(workflow: Option<&str>, name: &str) -> Markup {
+    html! {
+        span.job-name {
+            @if let Some(workflow) = workflow { span.workflow { (workflow) " / " } }
+            (name)
         }
     }
 }

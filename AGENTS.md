@@ -11,6 +11,7 @@ Run before every commit; CI runs the same:
 cargo fmt --check
 cargo clippy --workspace --all-targets --locked -- -D warnings
 cargo clippy -p runnerd-core --no-default-features --all-targets --locked -- -D warnings
+cargo clippy -p runnerd-core --no-default-features --features client --all-targets --locked -- -D warnings
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 .github/scripts/check-boundaries.sh

@@ -1,5 +1,8 @@
 # 0021. Clients speak HTTP over the socket with hyper
 
+Where the client lives is superseded by [0030](0030-one-socket-client-in-core.md): `runnerd_core::client`, shared by
+every client.
+
 ## Context
 
 Clients may not build `reqwest` (ADR 0014, `check-boundaries.sh`): it brings TLS and a connection pool a client of

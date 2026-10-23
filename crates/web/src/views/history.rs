@@ -3,11 +3,11 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsRow, Status};
+use runnerd_core::client::{Client, ClientError};
 use serde::{Deserialize, Serialize};
 
 use super::{Durations, Page, Parts, badge, durations, js, page, profile_class, time_ago};
 use crate::chart::{Band, Bar, Base, Series, TimeChart, nice_top, stacked_bars};
-use crate::daemon::{Daemon, Error};
 use crate::format;
 
 /// How far back the trends reach.
@@ -83,7 +83,11 @@ pub(crate) struct History {
 }
 
 impl History {
-    pub(crate) async fn load(daemon: &Daemon, filter: Filter, now: u64) -> Result<History, Error> {
+    pub(crate) async fn load(
+        daemon: &Client,
+        filter: Filter,
+        now: u64,
+    ) -> Result<History, ClientError> {
         let status = daemon.get("/v1/status").await?;
         let page = daemon.get_query("/v1/jobs", &filter.query()).await?;
         let trends = daemon

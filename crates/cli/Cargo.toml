@@ -16,15 +16,11 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
-http-body-util.workspace = true
-hyper = { workspace = true, features = ["client", "http1"] }
-hyper-util = { workspace = true, features = ["tokio"] }
 ratatui = { workspace = true, optional = true }
-runnerd-core.workspace = true
+runnerd-core = { workspace = true, features = ["client"] }
 rustix = { workspace = true, features = ["process"], optional = true }
 serde.workspace = true
 serde_json.workspace = true
-serde_urlencoded.workspace = true
 tokio = { workspace = true, features = ["macros", "net", "rt", "sync", "time"] }
 unicode-width = { workspace = true, optional = true }
 

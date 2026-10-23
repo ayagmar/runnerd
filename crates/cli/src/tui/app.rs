@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use runnerd_core::api::{
-    Event, EventEnvelope, HostSample, Job, JobPage, JobQuery, JobSummary, Sample, SampleSeries,
-    Status,
+    Event, EventEnvelope, HostSample, Job, JobMetrics, JobPage, JobQuery, JobState, JobSummary,
+    LogSummary, QueuedJob, Sample, SampleSeries, Status, Timeline,
 };
 
 use crate::watch;
@@ -52,13 +52,66 @@ pub(crate) enum Msg {
     Done(String),
     /// A request failed.
     Failed(String),
-    /// A pause was refused because the repository, or one of them in a pause of all, runs a job; the daemon's text
-    /// names it.
-    Busy {
-        /// `None` for every repository.
-        repository: Option<String>,
-        message: String,
-    },
+    /// A pause was refused because the repository, or one of them in a pause of all, runs a job.
+    Busy(Refused),
+}
+
+/// What the job's page shows of a queued job until its record arrives.
+fn queued_summary(job: &QueuedJob) -> JobSummary {
+    JobSummary {
+        id: job.id,
+        repository: job.repository.clone(),
+        run_id: job.run_id,
+        run_attempt: job.run_attempt,
+        workflow: job.workflow.clone(),
+        name: job.name.clone(),
+        branch: job.branch.clone(),
+        url: job.url.clone(),
+        labels: Vec::new(),
+        state: JobState::Queued,
+        conclusion: None,
+        runner: None,
+        timeline: Timeline {
+            queued_at: job.queued_at,
+            ..Timeline::default()
+        },
+        metrics: JobMetrics::default(),
+        log: LogSummary::default(),
+    }
+}
+
+/// A row of the latest jobs pane.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LatestRow<'app> {
+    Queued(&'app QueuedJob),
+    Finished(&'app JobSummary),
+}
+
+impl LatestRow<'_> {
+    fn id(self) -> u64 {
+        match self {
+            LatestRow::Queued(job) => job.id,
+            LatestRow::Finished(job) => job.id,
+        }
+    }
+
+    fn repository(&self) -> &str {
+        match self {
+            LatestRow::Queued(job) => &job.repository,
+            LatestRow::Finished(job) => &job.repository,
+        }
+    }
+}
+
+/// A pause the daemon refused because jobs run, waiting for `y` to force it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Refused {
+    /// `None` for every repository.
+    pub(crate) repository: Option<String>,
+    /// The daemon's text, naming the jobs.
+    pub(crate) message: String,
+    /// How many jobs a forced pause cancels.
+    pub(crate) jobs: usize,
 }
 
 /// A request `update` asks for.
@@ -214,8 +267,7 @@ pub(crate) struct App {
     pub(crate) history: History,
     pub(crate) job: Option<JobView>,
     pub(crate) flash: Option<Flash>,
-    /// A refused pause waiting for `y` to force it: the repository (`None` for all) and the daemon's text.
-    pub(crate) confirm: Option<(Option<String>, String)>,
+    pub(crate) confirm: Option<Refused>,
     pub(crate) help: bool,
 }
 
@@ -251,6 +303,22 @@ impl App {
     }
 
     pub(crate) fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        if let Msg::Key(key) = msg {
+            return self.key(key);
+        }
+        // Rows of the latest jobs come and go above the selected one, as queued jobs start: the selection follows its
+        // job, or stays on a row that is there when the job left.
+        let selected = self.latest_rows().nth(self.latest).map(LatestRow::id);
+        let effects = self.apply(msg);
+        let rows = self.latest_rows().count();
+        self.latest = selected
+            .and_then(|id| self.latest_rows().position(|row| row.id() == id))
+            .unwrap_or(self.latest)
+            .min(rows.saturating_sub(1));
+        effects
+    }
+
+    fn apply(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Key(key) => return self.key(key),
             Msg::Resize => {}
@@ -317,10 +385,7 @@ impl App {
             Msg::Status(status) => self.live.status = status,
             Msg::Done(text) => self.flash(text, Outcome::Done),
             Msg::Failed(text) => self.flash(text, Outcome::Failed),
-            Msg::Busy {
-                repository,
-                message,
-            } => self.confirm = Some((repository, message)),
+            Msg::Busy(refused) => self.confirm = Some(refused),
         }
         Vec::new()
     }
@@ -368,6 +433,10 @@ impl App {
                 };
                 self.flash(text, outcome);
             }
+            Event::ProfileChanged { .. } | Event::ProfileRemoved { .. } => {
+                // A reload can take away the selected slot; the selection stays on one that is there.
+                self.slot = self.slot.min(self.slots().count().saturating_sub(1));
+            }
             _ => {}
         }
         let Some(open) = &mut self.job else {
@@ -405,10 +474,10 @@ impl App {
             }
         }
         self.flash = None;
-        if let Some((repository, _)) = self.confirm.take() {
+        if let Some(refused) = self.confirm.take() {
             return match key.code {
                 KeyCode::Char('y') => vec![Effect::Pause {
-                    repository,
+                    repository: refused.repository,
                     force: true,
                 }],
                 _ => Vec::new(),
@@ -545,7 +614,11 @@ impl App {
             .running
             .get(&id)
             .map(|job| job.summary.clone())
-            .or_else(|| self.jobs_listed().find(|job| job.id == id).cloned());
+            .or_else(|| self.jobs_listed().find(|job| job.id == id).cloned())
+            .or_else(|| {
+                let queued = self.live.status.queued.iter().find(|job| job.id == id)?;
+                Some(queued_summary(queued))
+            });
         let Some(summary) = summary else {
             return Vec::new();
         };
@@ -583,6 +656,7 @@ impl App {
 
     fn step(&mut self, by: isize) {
         let slots = self.slots().count();
+        let latest = self.latest_rows().count();
         let (selected, len) = match (self.view, self.pane) {
             (View::Job, _) => {
                 if let Some(open) = &mut self.job {
@@ -598,11 +672,17 @@ impl App {
             (View::Overview, Pane::Repositories) => {
                 (&mut self.repository, self.live.status.repositories.len())
             }
-            (View::Overview, Pane::Latest) => (&mut self.latest, self.live.recent.len()),
+            (View::Overview, Pane::Latest) => (&mut self.latest, latest),
         };
         *selected = selected
             .saturating_add_signed(by)
             .min(len.saturating_sub(1));
+    }
+
+    /// The latest jobs pane's rows: the queued jobs, oldest first, then the last finished ones.
+    pub(crate) fn latest_rows(&self) -> impl Iterator<Item = LatestRow<'_>> {
+        let queued = self.live.status.queued.iter().map(LatestRow::Queued);
+        queued.chain(self.live.recent.iter().map(LatestRow::Finished))
     }
 
     /// Every slot in config order, with its profile's position.
@@ -640,7 +720,9 @@ impl App {
                     .job_in(&profile.name, slot.slot)
                     .map(|job| job.summary.id)
             }
-            (View::Overview, Pane::Latest) => self.live.recent.get(self.latest).map(|job| job.id),
+            (View::Overview, Pane::Latest) => {
+                self.latest_rows().nth(self.latest).map(LatestRow::id)
+            }
             _ => None,
         }
     }
@@ -664,10 +746,9 @@ impl App {
                 slot.runner.as_ref().map(|runner| runner.repository.clone())
             }
             (View::Overview, Pane::Latest) => self
-                .live
-                .recent
-                .get(self.latest)
-                .map(|job| job.repository.clone()),
+                .latest_rows()
+                .nth(self.latest)
+                .map(|row| row.repository().to_owned()),
         }
     }
 

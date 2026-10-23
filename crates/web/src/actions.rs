@@ -9,10 +9,10 @@ use axum::http::{Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use maud::Markup;
 use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, RunningJob, Status};
+use runnerd_core::client::{Body, Reply};
 use serde::Deserialize;
 
 use crate::App;
-use crate::daemon::{Body, Reply};
 use crate::views::config::{self, Outcome};
 use crate::views::{self, Tone, overview};
 
@@ -68,35 +68,28 @@ async fn rows(app: &App) -> Result<Markup, Markup> {
     Ok(overview::repositories(&status))
 }
 
-/// The question a pause refused with 409 asks: the jobs it waits for, by repository, and whether to cancel them
-/// with `force`. The daemon's message tells a CLI user how to force it; the question asks instead.
-fn ask_to_force(reply: &Reply, force: &str, label: &str, dismiss: &str) -> Response {
-    let message = match serde_json::from_slice::<Busy>(&reply.body) {
-        Ok(busy) if !busy.jobs.is_empty() => {
-            let mut repositories: Vec<(&str, Vec<String>)> = Vec::new();
-            for job in &busy.jobs {
-                match repositories
-                    .iter_mut()
-                    .find(|(repository, _)| *repository == job.repository)
-                {
-                    Some((_, jobs)) => jobs.push(job.to_string()),
-                    None => repositories.push((&job.repository, vec![job.to_string()])),
-                }
-            }
-            let runs: Vec<String> = repositories
-                .iter()
-                .map(|(repository, jobs)| format!("{repository} runs {}", jobs.join(", ")))
-                .collect();
-            let them = if busy.jobs.len() == 1 { "it" } else { "them" };
-            format!("{}. Pausing now cancels {them} on GitHub.", runs.join("; "))
-        }
-        _ => reply.message(),
+/// The question a pause refused with 409 asks: the jobs it waits for, as the daemon names them, and whether to
+/// cancel their runs with `force`.
+fn ask_to_force(reply: &Reply, force: &str, label: &str) -> Response {
+    let (message, them) = match serde_json::from_slice::<Busy>(&reply.body) {
+        Ok(busy) if busy.jobs.len() == 1 => (
+            format!("{}. Pausing now cancels its run on GitHub.", busy.message),
+            "it",
+        ),
+        Ok(busy) if !busy.jobs.is_empty() => (
+            format!(
+                "{}. Pausing now cancels their runs on GitHub.",
+                busy.message
+            ),
+            "them",
+        ),
+        _ => (reply.message(), "them"),
     };
     html(&[views::question(
         &message,
         &format!("@post('{force}')"),
         label,
-        dismiss,
+        &format!("Keep {them} running"),
     )])
 }
 
@@ -140,7 +133,6 @@ pub(crate) async fn pause(
             &reply,
             &format!("/v1/repositories/{repository}/pause?force=true"),
             "Cancel and pause",
-            "Keep it running",
         );
     }
     if !reply.status.is_success() {
@@ -169,7 +161,6 @@ pub(crate) async fn pause_all(State(app): State<App>, Query(query): Query<PauseQ
             &reply,
             "/v1/repositories/pause?force=true",
             "Cancel and pause all",
-            "Keep them running",
         );
     }
     if !reply.status.is_success() {
@@ -243,7 +234,11 @@ pub(crate) struct Edit {
 
 /// `POST /config/check`: the result region for the text in the editor.
 pub(crate) async fn check_config(State(app): State<App>, Json(edit): Json<Edit>) -> Response {
-    match app.daemon.check(edit.toml.clone()).await {
+    match app
+        .daemon
+        .post_toml::<ConfigCheck>("/v1/config/check", edit.toml.clone())
+        .await
+    {
         Ok(check) => html(&[config::result(&check, &edit.toml, &Outcome::Checked)]),
         Err(error) => refused(&error.to_string()),
     }

@@ -4,11 +4,16 @@
 //! lacks is sent: a region whose HTML differs, or when only some of its parts (`views::Parts`) do, those parts. On
 //! connecting, the stream skips the regions the page already has, which the page names by digest in its `shown`
 //! signal; after each update the stream sets that signal to what the page shows now, and the time, which live
-//! charts follow. The stream ends when the page closes, the daemon's stream ends, or the dashboard stops.
+//! charts follow. The stream ends when the page closes, its job finishes, the daemon answers with an error (shown as
+//! a notice), or the dashboard stops. When the daemon's events end or have a gap, it fails instead, so the page
+//! connects again and reads the daemon afresh.
 
 use std::collections::{HashMap, HashSet};
-use std::convert::Infallible;
-use std::time::Duration;
+use std::future::Future;
+use std::io;
+use std::sync::Arc;
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -16,28 +21,70 @@ use datastar::consts::Namespace;
 use datastar::prelude::{ElementPatchMode, PatchElements, PatchSignals};
 use futures_util::{Stream, StreamExt, stream};
 use maud::Markup;
-use runnerd_core::api::{Event, EventQuery, Job};
+use runnerd_core::api::{Event, EventEnvelope, EventQuery, Job};
+use runnerd_core::client::{ClientError, Events};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
 use crate::App;
-use crate::daemon::Error;
 use crate::views::job::{self, JobView};
 use crate::views::{self, Part, Parts, Tone, digest, overview};
 
 /// How long to collect events before rendering: a burst (a slot and the budget change together) renders once.
 const SETTLE: Duration = Duration::from_millis(250);
 
+/// How old the overview's status may get while host samples arrive. Some of its changes have no event of their own
+/// (`shutting_down`, a repository's queue listing failing or recovering), so it is read again this often.
+const STATUS_AGE: Duration = Duration::from_secs(10);
+
 type Patches = mpsc::Sender<SseEvent>;
 
+/// How a page's stream ended.
+enum End {
+    /// As it should: the page closed, its job finished, or the dashboard is stopping.
+    Done,
+    /// The daemon's events stopped or have a gap: the page must connect again and read the daemon afresh.
+    Lost,
+}
+
+/// The page's SSE response. Unless the task marked it done, the body ends in an error rather than cleanly: Datastar
+/// retries a stream that fails, not one that finishes, and so the page connects again.
 fn respond(
     receiver: mpsc::Receiver<SseEvent>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
-    let events = stream::unfold(receiver, |mut receiver| async move {
-        receiver.recv().await.map(|event| (Ok(event), receiver))
+    done: Arc<AtomicBool>,
+) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
+    let events = stream::unfold(Some(receiver), move |receiver| {
+        let done = done.clone();
+        async move {
+            let mut receiver = receiver?;
+            match receiver.recv().await {
+                Some(event) => Some((Ok(event), Some(receiver))),
+                None if done.load(Ordering::Acquire) => None,
+                None => Some((Err(io::Error::other("the daemon's events stopped")), None)),
+            }
+        }
     });
     Sse::new(events).keep_alive(KeepAlive::default())
+}
+
+/// Runs a page's stream and says how it ended, for `respond`.
+async fn run_page(
+    patches: Patches,
+    done: Arc<AtomicBool>,
+    what: &str,
+    run: impl Future<Output = Result<End, ClientError>>,
+) {
+    match run.await {
+        Ok(End::Done) => done.store(true, Ordering::Release),
+        Ok(End::Lost) => debug!("{what} stream lost the daemon's events"),
+        // A retry would most likely fail the same way and replace the notice, so the stream ends with it shown.
+        Err(error) => {
+            debug!("{what} stream ended: {error}");
+            notice(&patches, &error).await;
+            done.store(true, Ordering::Release);
+        }
+    }
 }
 
 /// What a page says it shows when its stream connects: the `shown` signal, which Datastar sends as JSON in the
@@ -206,15 +253,24 @@ impl Sent {
     }
 }
 
-async fn notice(patches: &Patches, error: &Error) {
+async fn notice(patches: &Patches, error: &ClientError) {
     let event = PatchElements::new(views::notice(&error.to_string(), Tone::Failed).into_string())
         .write_as_axum_sse_event();
     let _ = patches.send(event).await;
 }
 
+/// The daemon's events as a stream, which ends when the reader fails or opens the stream again: live events (samples,
+/// log lines) of the gap are lost even when it resumes, so the page connects again and reads the daemon afresh.
+fn envelopes(events: Events) -> impl Stream<Item = EventEnvelope> {
+    stream::unfold(events, |mut events| async move {
+        let envelope = events.next().await.ok()?;
+        (!events.reopened()).then_some((envelope, events))
+    })
+}
+
 /// Waits `SETTLE` for more events, adding them to `batch`; `false` once the daemon's stream ended.
 async fn settle(
-    events: &mut (impl Stream<Item = runnerd_core::api::EventEnvelope> + Unpin),
+    events: &mut (impl Stream<Item = EventEnvelope> + Unpin),
     batch: &mut Vec<Event>,
 ) -> bool {
     let deadline = tokio::time::sleep(SETTLE);
@@ -230,16 +286,16 @@ async fn settle(
     }
 }
 
-/// Waits for the next event; `None` when the stream, the page or the dashboard ended.
+/// Waits for the next event; how the stream ends when the daemon's events, the page or the dashboard ended.
 async fn next_event(
-    events: &mut (impl Stream<Item = runnerd_core::api::EventEnvelope> + Unpin),
+    events: &mut (impl Stream<Item = EventEnvelope> + Unpin),
     patches: &Patches,
     stopping: &mut watch::Receiver<bool>,
-) -> Option<Event> {
+) -> Result<Event, End> {
     tokio::select! {
-        event = events.next() => event.map(|envelope| envelope.event),
-        () = patches.closed() => None,
-        _ = stopping.wait_for(|stopping| *stopping) => None,
+        event = events.next() => event.map(|envelope| envelope.event).ok_or(End::Lost),
+        () = patches.closed() => Err(End::Done),
+        _ = stopping.wait_for(|stopping| *stopping) => Err(End::Done),
     }
 }
 
@@ -247,23 +303,28 @@ async fn next_event(
 pub(crate) async fn overview(
     State(app): State<App>,
     Query(signals): Query<Signals>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
     let (patches, receiver) = mpsc::channel(16);
+    let done = Arc::new(AtomicBool::new(false));
+    let ended = done.clone();
     tokio::spawn(async move {
-        if let Err(error) = run_overview(&app, &patches, signals.shown()).await {
-            debug!("overview stream ended: {error}");
-            notice(&patches, &error).await;
-        }
+        let run = run_overview(&app, &patches, signals.shown());
+        run_page(patches.clone(), ended, "overview", run).await;
     });
-    respond(receiver)
+    respond(receiver, done)
 }
 
-async fn run_overview(app: &App, patches: &Patches, shown: Option<Shown>) -> Result<(), Error> {
+async fn run_overview(
+    app: &App,
+    patches: &Patches,
+    shown: Option<Shown>,
+) -> Result<End, ClientError> {
     // Subscribed before reading, so nothing that happens in between is missed.
-    let events = app.daemon.events(&EventQuery::default()).await?;
-    let mut events = Box::pin(events);
+    let events = app.daemon.events(EventQuery::default(), None).await?;
+    let mut events = Box::pin(envelopes(events));
     let mut stopping = app.stopping.clone();
     let mut data = overview::Overview::load(&app.daemon, crate::now()).await?;
+    let mut status_read = Instant::now();
     let mut sent = Sent::default();
     if let Some(shown) = shown {
         data.now = shown.at;
@@ -276,34 +337,46 @@ async fn run_overview(app: &App, patches: &Patches, shown: Option<Shown>) -> Res
             .await
             .is_err()
         {
-            return Ok(());
+            return Ok(End::Done);
         }
-        let Some(first) = next_event(&mut events, patches, &mut stopping).await else {
-            return Ok(());
+        let first = match next_event(&mut events, patches, &mut stopping).await {
+            Ok(event) => event,
+            Err(end) => return Ok(end),
         };
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
         let mut jobs_changed = false;
+        let mut status_changed = false;
         for event in batch {
             match event {
                 Event::JobSample { job, sample } => data.add_job_sample(job, sample),
-                Event::HostSample { sample } => data.add_host_sample(sample),
-                Event::LogLine { .. }
-                | Event::CacheReseeded { .. }
-                | Event::BudgetChanged { .. }
+                Event::HostSample { sample } => {
+                    data.add_host_sample(sample);
+                    status_changed |= status_read.elapsed() >= STATUS_AGE;
+                }
+                Event::LogLine { .. } | Event::CacheReseeded { .. } => {}
+                Event::BudgetChanged { .. }
                 | Event::ProfileChanged { .. }
                 | Event::ProfileRemoved { .. }
                 | Event::RepositoryChanged { .. }
-                | Event::RepositoryRemoved { .. } => {}
+                | Event::RepositoryRemoved { .. } => status_changed = true,
+                Event::JobStep { .. } => jobs_changed = true,
+                // The status's queue and slots follow jobs.
                 Event::JobQueued { .. }
                 | Event::JobStarted { .. }
-                | Event::JobStep { .. }
                 | Event::JobFinished { .. }
-                | Event::SlotChanged { .. } => jobs_changed = true,
+                | Event::SlotChanged { .. } => {
+                    jobs_changed = true;
+                    status_changed = true;
+                }
             }
         }
-        // The budget, profiles and repositories come with it; the status is cheap to read on every update.
-        data.status = app.daemon.get("/v1/status").await?;
+        // Read again only when an event says it changed, or it is `STATUS_AGE` old: with a long queue the status is
+        // large, and most batches are samples.
+        if status_changed {
+            data.status = app.daemon.get("/v1/status").await?;
+            status_read = Instant::now();
+        }
         if jobs_changed {
             data.reload_running(&app.daemon).await?;
             data.recent = app
@@ -319,7 +392,7 @@ async fn run_overview(app: &App, patches: &Patches, shown: Option<Shown>) -> Res
                 .jobs;
         }
         if !open {
-            return Ok(());
+            return Ok(End::Lost);
         }
     }
 }
@@ -329,15 +402,15 @@ pub(crate) async fn job(
     State(app): State<App>,
     Path(id): Path<u64>,
     Query(signals): Query<Signals>,
-) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
     let (patches, receiver) = mpsc::channel(64);
+    let done = Arc::new(AtomicBool::new(false));
+    let ended = done.clone();
     tokio::spawn(async move {
-        if let Err(error) = run_job(&app, &patches, id, signals.shown()).await {
-            debug!("job stream ended: {error}");
-            notice(&patches, &error).await;
-        }
+        let run = run_job(&app, &patches, id, signals.shown());
+        run_page(patches.clone(), ended, "job", run).await;
     });
-    respond(receiver)
+    respond(receiver, done)
 }
 
 /// Appends log lines `first`, `first + 1`, … (counted from 0) to the `shown` lines of the page, and drops the
@@ -380,15 +453,23 @@ async fn append_lines(patches: &Patches, first: u64, lines: &[String], shown: &m
     patches.send(trim).await.is_ok()
 }
 
-async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) -> Result<(), Error> {
+async fn run_job(
+    app: &App,
+    patches: &Patches,
+    id: u64,
+    shown: Option<Shown>,
+) -> Result<End, ClientError> {
     let events = app
         .daemon
-        .events(&EventQuery {
-            job: Some(id),
-            logs: true,
-        })
+        .events(
+            EventQuery {
+                job: Some(id),
+                logs: true,
+            },
+            None,
+        )
         .await?;
-    let mut events = Box::pin(events);
+    let mut events = Box::pin(envelopes(events));
     let mut stopping = app.stopping.clone();
     let mut data = JobView::load(&app.daemon, id, crate::now()).await?;
     let mut next_line = data.log_from + data.log.len() as u64;
@@ -410,7 +491,7 @@ async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) ->
         patches.send(tail.write_as_axum_sse_event()).await.is_ok()
     };
     if !sent_log {
-        return Ok(());
+        return Ok(End::Done);
     }
     let mut sent = Sent::default();
     if let Some(shown) = shown {
@@ -424,13 +505,14 @@ async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) ->
             .await
             .is_err()
         {
-            return Ok(());
+            return Ok(End::Done);
         }
         if data.job.summary.state.is_final() {
-            return Ok(());
+            return Ok(End::Done);
         }
-        let Some(first) = next_event(&mut events, patches, &mut stopping).await else {
-            return Ok(());
+        let first = match next_event(&mut events, patches, &mut stopping).await {
+            Ok(event) => event,
+            Err(end) => return Ok(end),
         };
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
@@ -439,7 +521,10 @@ async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) ->
         let mut lines = Vec::new();
         for event in batch {
             match event {
-                Event::LogLine { line, text, .. } if line >= next_line => {
+                // A line skipped means the daemon dropped some for this stream: the page connects again and gets
+                // them from the stored log.
+                Event::LogLine { line, .. } if line > next_line => return Ok(End::Lost),
+                Event::LogLine { line, text, .. } if line == next_line => {
                     next_line = line + 1;
                     lines.push(text);
                 }
@@ -452,13 +537,13 @@ async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) ->
             }
         }
         if !append_lines(patches, first_line, &lines, &mut shown_lines).await {
-            return Ok(());
+            return Ok(End::Done);
         }
         if changed {
             data.job = app.daemon.get::<Job>(&format!("/v1/jobs/{id}")).await?;
         }
         if !open {
-            return Ok(());
+            return Ok(End::Lost);
         }
     }
 }

@@ -4,10 +4,10 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{Job, JobSummary, Sample, SampleSeries, Status, Step};
+use runnerd_core::client::{Client, ClientError};
 
 use super::{Live, Parts, badge, digest, page};
 use crate::chart::{Band, Base, Series, TimeChart, nice_top};
-use crate::daemon::{Daemon, Error};
 use crate::format;
 
 /// Log lines the page shows; the full log is at `/jobs/{id}/log`.
@@ -28,7 +28,7 @@ pub(crate) struct JobView {
 }
 
 impl JobView {
-    pub(crate) async fn load(daemon: &Daemon, id: u64, now: u64) -> Result<JobView, Error> {
+    pub(crate) async fn load(daemon: &Client, id: u64, now: u64) -> Result<JobView, ClientError> {
         let job: Job = daemon.get(&format!("/v1/jobs/{id}")).await?;
         let samples = daemon.get(&format!("/v1/jobs/{id}/samples")).await?;
         let status: Status = daemon.get("/v1/status").await?;

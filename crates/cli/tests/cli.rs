@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use runnerd_core::api::{
     Budget, Busy, Check, CheckStatus, ConfigCheck, Doctor, ErrorResponse, Event, EventEnvelope,
-    Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary, Paused, ProfileStatus,
+    Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary, Paused, ProfileStatus, QueuedJob,
     RepositoryStatus, RunnerStatus, RunningJob, SlotStatus, Status, Timeline,
 };
 
@@ -90,7 +90,17 @@ fn status() -> Status {
             paused: false,
             queued_jobs: 1,
         }],
-        queued: Vec::new(),
+        queued: vec![QueuedJob {
+            id: 9002,
+            repository: "halyard/ledger".to_owned(),
+            run_id: 78,
+            run_attempt: 1,
+            workflow: Some("build".to_owned()),
+            name: "lint".to_owned(),
+            branch: Some("main".to_owned()),
+            url: None,
+            queued_at: 1_000_000,
+        }],
     }
 }
 
@@ -414,7 +424,7 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
     let text = stdout(&output);
     assert!(!text.contains('\x1b'), "{text:?}");
     assert!(
-        text.contains("6.0G of 16G reserved in runnerd.slice"),
+        text.contains("6G of 16G reserved in runnerd.slice"),
         "{text}"
     );
     let slots: Vec<&str> = text
@@ -426,6 +436,13 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
         slots[0].find("busy"),
         slots[1].find("free"),
         "the state column lines up:\n{text}"
+    );
+    assert!(
+        text.lines().any(
+            |line| line.starts_with("9002  halyard/ledger  build / lint  ")
+                && line.ends_with(" ago")
+        ),
+        "the queued job is listed under the repositories:\n{text}"
     );
 }
 
@@ -643,7 +660,7 @@ fn a_job_shows_the_caps_its_container_ran_with() {
     let output = runnerctl(&socket, &["job", "9001"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
-        stdout(&output).contains("(profile jvm, slot 1, capped at 6.0G and 4.00 cores)"),
+        stdout(&output).contains("(profile jvm, slot 1, capped at 6G and 4 CPUs)"),
         "{}",
         stdout(&output)
     );

@@ -1,6 +1,7 @@
-//! The daemon's API over its Unix socket: JSON requests, streamed text and the event stream, as `runnerd_core::api`
-//! types. Owns HTTP, timeouts, error decoding and the server-sent events reader, and nothing a terminal shows, so
-//! `runnerctl tui` can reuse it. It never talks to Docker or GitHub.
+//! A client of the daemon's API over its Unix socket, for every client crate: JSON requests, streamed text and the
+//! event stream, as [`api`](crate::api) types. Owns HTTP, timeouts, error decoding and the server-sent events reader,
+//! with reconnecting and `Last-Event-ID`; it knows no routes beyond the paths callers give it and nothing about how a
+//! client shows an answer. It never talks to Docker or GitHub. Built with the `client` feature.
 
 use std::fmt;
 use std::io;
@@ -10,21 +11,24 @@ use std::time::Duration;
 use http_body_util::{BodyExt, Full};
 use hyper::body::{Bytes, Incoming};
 use hyper::header::{self, HeaderValue};
-use hyper::{Method, Request, Response, StatusCode};
+use hyper::{Request, Response};
 use hyper_util::rt::TokioIo;
-use runnerd_core::api::{ErrorResponse, EventEnvelope, EventQuery, LogQuery};
 use serde::Serialize;
 use serde::de::DeserializeOwned;
 use tokio::net::UnixStream;
 
+pub use hyper::{Method, StatusCode};
+
+use crate::api::{Busy, ErrorResponse, EventEnvelope, EventQuery, LogQuery, RunningJob};
+
 /// How long the client waits for the daemon.
 #[derive(Debug, Clone, Copy)]
-pub(crate) struct Timeouts {
+pub struct Timeouts {
     /// For a request to be answered, and a plain response to arrive in full; for a log that is not followed, for
     /// each part of its body. A forced pause cancels runs on GitHub and removes containers before it answers.
-    pub(crate) request: Duration,
+    pub request: Duration,
     /// For the event stream to send something. The daemon sends a keep-alive comment every 15 s.
-    pub(crate) idle: Duration,
+    pub idle: Duration,
 }
 
 impl Default for Timeouts {
@@ -41,7 +45,7 @@ const RECONNECT_DELAY: Duration = Duration::from_millis(500);
 
 /// Why a request failed.
 #[derive(Debug)]
-pub(crate) enum ClientError {
+pub enum ClientError {
     /// Nothing listens on the socket.
     NotRunning(PathBuf),
     /// The daemon answered with an error.
@@ -50,6 +54,8 @@ pub(crate) enum ClientError {
         status: StatusCode,
         /// The daemon's `ErrorResponse.message`, or the body when it sent none.
         message: String,
+        /// The runners in the way, when the daemon refused with a [`Busy`]; else empty.
+        jobs: Vec<RunningJob>,
     },
     /// The daemon did not answer within this long.
     Timeout(Duration),
@@ -68,7 +74,9 @@ impl fmt::Display for ClientError {
                  or `runnerd serve`",
                 socket.display()
             ),
-            ClientError::Api { status, message } => write!(f, "{message} ({status})"),
+            ClientError::Api {
+                status, message, ..
+            } => write!(f, "{message} ({status})"),
             ClientError::Timeout(after) => {
                 write!(f, "runnerd did not answer within {}s", after.as_secs())
             }
@@ -84,23 +92,62 @@ fn transport(error: impl fmt::Display) -> ClientError {
     ClientError::Transport(error.to_string())
 }
 
+fn decode<T: DeserializeOwned>(bytes: &[u8]) -> Result<T, ClientError> {
+    serde_json::from_slice(bytes).map_err(|error| ClientError::Decode(error.to_string()))
+}
+
+/// A request body and its media type.
+#[derive(Debug)]
+pub struct Body {
+    content_type: &'static str,
+    bytes: Vec<u8>,
+}
+
+impl Body {
+    /// A config file, as `PUT /v1/config` and `POST /v1/config/check` take it.
+    pub fn toml(text: String) -> Body {
+        Body {
+            content_type: "application/toml",
+            bytes: text.into_bytes(),
+        }
+    }
+}
+
+/// The daemon's whole answer, whatever its status, for a client that passes it on.
+#[derive(Debug)]
+pub struct Reply {
+    /// The response's status.
+    pub status: StatusCode,
+    /// Its body.
+    pub body: Bytes,
+}
+
+impl Reply {
+    /// The daemon's `ErrorResponse.message`, or the body itself, or the status's reason.
+    pub fn message(&self) -> String {
+        error_message(self.status, &self.body)
+    }
+}
+
 /// A client of the daemon on one socket. Each request opens its own connection.
 #[derive(Debug, Clone)]
-pub(crate) struct Client {
+pub struct Client {
     socket: PathBuf,
     timeouts: Timeouts,
 }
 
 impl Client {
-    pub(crate) fn new(socket: PathBuf) -> Client {
+    /// A client of the daemon listening on `socket`, with the default timeouts.
+    pub fn new(socket: PathBuf) -> Client {
         Client {
             socket,
             timeouts: Timeouts::default(),
         }
     }
 
-    #[cfg(test)]
-    pub(crate) fn with_timeouts(self, timeouts: Timeouts) -> Client {
+    /// The same client, waiting this long instead.
+    #[must_use]
+    pub fn with_timeouts(self, timeouts: Timeouts) -> Client {
         Client { timeouts, ..self }
     }
 
@@ -115,18 +162,18 @@ impl Client {
             .map_err(|_| ClientError::Timeout(after))?
     }
 
-    pub(crate) fn socket(&self) -> &Path {
+    /// The socket it connects to.
+    pub fn socket(&self) -> &Path {
         &self.socket
     }
 
     /// `GET path` and decode the JSON answer.
-    pub(crate) async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
-        let bytes = self.call(Method::GET, path, None).await?;
-        serde_json::from_slice(&bytes).map_err(|error| ClientError::Decode(error.to_string()))
+    pub async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, ClientError> {
+        decode(&self.call(Method::GET, path, None).await?)
     }
 
     /// `GET path?query` and decode the JSON answer.
-    pub(crate) async fn get_query<T: DeserializeOwned>(
+    pub async fn get_query<T: DeserializeOwned>(
         &self,
         path: &str,
         query: &impl Serialize,
@@ -134,42 +181,66 @@ impl Client {
         self.get(&with_query(path, query)?).await
     }
 
+    /// `GET path` as text, such as a job's whole log.
+    pub async fn text(&self, path: &str) -> Result<String, ClientError> {
+        let bytes = self.call(Method::GET, path, None).await?;
+        Ok(String::from_utf8_lossy(&bytes).into_owned())
+    }
+
     /// `POST path?query` without a body; the answer's body, which may be empty.
-    pub(crate) async fn post(
-        &self,
-        path: &str,
-        query: &impl Serialize,
-    ) -> Result<Bytes, ClientError> {
+    pub async fn post(&self, path: &str, query: &impl Serialize) -> Result<Bytes, ClientError> {
         self.call(Method::POST, &with_query(path, query)?, None)
             .await
     }
 
     /// `POST path` with a TOML body, and decode the JSON answer.
-    pub(crate) async fn post_toml<T: DeserializeOwned>(
+    pub async fn post_toml<T: DeserializeOwned>(
         &self,
         path: &str,
         toml: String,
     ) -> Result<T, ClientError> {
-        let body = (toml.into_bytes(), "application/toml");
-        let bytes = self.call(Method::POST, path, Some(body)).await?;
-        serde_json::from_slice(&bytes).map_err(|error| ClientError::Decode(error.to_string()))
+        decode(
+            &self
+                .call(Method::POST, path, Some(Body::toml(toml)))
+                .await?,
+        )
     }
 
     /// `POST path?query` without a body, and decode the JSON answer.
-    pub(crate) async fn post_json<T: DeserializeOwned>(
+    pub async fn post_json<T: DeserializeOwned>(
         &self,
         path: &str,
         query: &impl Serialize,
     ) -> Result<T, ClientError> {
-        let bytes = self.post(path, query).await?;
-        serde_json::from_slice(&bytes).map_err(|error| ClientError::Decode(error.to_string()))
+        decode(&self.post(path, query).await?)
+    }
+
+    /// Sends a request and reads the whole answer; an error status is a [`Reply`] too, not a [`ClientError`].
+    pub async fn request(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Body>,
+    ) -> Result<Reply, ClientError> {
+        self.in_time(async {
+            let response = self.exchange(method, path, body, None).await?;
+            let status = response.status();
+            let body = response
+                .into_body()
+                .collect()
+                .await
+                .map_err(transport)?
+                .to_bytes();
+            Ok(Reply { status, body })
+        })
+        .await
     }
 
     async fn call(
         &self,
         method: Method,
         path: &str,
-        body: Option<(Vec<u8>, &'static str)>,
+        body: Option<Body>,
     ) -> Result<Bytes, ClientError> {
         self.in_time(async {
             let response = self.send(method, path, body, None).await?;
@@ -190,7 +261,36 @@ impl Client {
         &self,
         method: Method,
         path: &str,
-        body: Option<(Vec<u8>, &'static str)>,
+        body: Option<Body>,
+        last_event_id: Option<u64>,
+    ) -> Result<Response<Incoming>, ClientError> {
+        let response = self.exchange(method, path, body, last_event_id).await?;
+        if response.status().is_success() {
+            return Ok(response);
+        }
+        let status = response.status();
+        let body = response
+            .into_body()
+            .collect()
+            .await
+            .map(http_body_util::Collected::to_bytes)
+            .unwrap_or_default();
+        let jobs = serde_json::from_slice::<Busy>(&body)
+            .map(|busy| busy.jobs)
+            .unwrap_or_default();
+        Err(ClientError::Api {
+            status,
+            message: error_message(status, &body),
+            jobs,
+        })
+    }
+
+    /// Sends one request and returns the response once its headers arrived, whatever its status.
+    async fn exchange(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Body>,
         last_event_id: Option<u64>,
     ) -> Result<Response<Incoming>, ClientError> {
         let stream =
@@ -212,9 +312,9 @@ impl Client {
             .uri(path)
             .header(header::HOST, "runnerd");
         let mut bytes = Vec::new();
-        if let Some((body, content_type)) = body {
-            request = request.header(header::CONTENT_TYPE, content_type);
-            bytes = body;
+        if let Some(body) = body {
+            request = request.header(header::CONTENT_TYPE, body.content_type);
+            bytes = body.bytes;
         }
         if let Some(id) = last_event_id {
             request = request.header("last-event-id", HeaderValue::from(id));
@@ -222,26 +322,12 @@ impl Client {
         let request = request
             .body(Full::new(Bytes::from(bytes)))
             .map_err(transport)?;
-        let response = sender.send_request(request).await.map_err(transport)?;
-        if response.status().is_success() {
-            return Ok(response);
-        }
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .map(http_body_util::Collected::to_bytes)
-            .unwrap_or_default();
-        Err(ClientError::Api {
-            status,
-            message: error_message(status, &body),
-        })
+        sender.send_request(request).await.map_err(transport)
     }
 
     /// `GET /v1/jobs/{id}/logs`: the job's log, as lines. Unless followed, each part of the body must come within the
     /// request timeout.
-    pub(crate) async fn logs(&self, id: u64, query: &LogQuery) -> Result<Lines, ClientError> {
+    pub async fn logs(&self, id: u64, query: &LogQuery) -> Result<Lines, ClientError> {
         let path = with_query(&format!("/v1/jobs/{id}/logs"), query)?;
         let response = self
             .in_time(self.send(Method::GET, &path, None, None))
@@ -252,7 +338,7 @@ impl Client {
     }
 
     /// `GET /v1/events`: the event stream, resumed after `last_id` when given.
-    pub(crate) async fn events(
+    pub async fn events(
         &self,
         query: EventQuery,
         last_id: Option<u64>,
@@ -264,6 +350,7 @@ impl Client {
             lines: None,
             closed: 0,
             missed: false,
+            reopened: false,
         };
         events.connect().await?;
         Ok(events)
@@ -296,7 +383,7 @@ fn with_query(path: &str, query: &impl Serialize) -> Result<String, ClientError>
 
 /// A response body read line by line.
 #[derive(Debug)]
-pub(crate) struct Lines {
+pub struct Lines {
     body: Incoming,
     buffer: Vec<u8>,
     done: bool,
@@ -316,7 +403,7 @@ impl Lines {
 
     /// The next line without its newline; `None` once the body ended. A last line without a newline is returned too.
     /// Fails with [`ClientError::Timeout`] when the body stays silent for longer than its idle time.
-    pub(crate) async fn next(&mut self) -> Result<Option<String>, ClientError> {
+    pub async fn next(&mut self) -> Result<Option<String>, ClientError> {
         loop {
             if let Some(end) = self.buffer.iter().position(|&byte| byte == b'\n') {
                 let mut line: Vec<u8> = self.buffer.drain(..=end).collect();
@@ -395,11 +482,12 @@ impl SseParser {
 /// `GET /v1/events`, read event by event. When the daemon closes the stream (it does for a client too far behind),
 /// the connection breaks or the stream stays silent, it reconnects, resuming after the last durable event read.
 /// Dropping a pending `next` loses no event but restarts the idle timeout, so a caller that also waits on something
-/// else (a redraw tick) keeps one `next` pending across it, as `watch::run` does. With no durable event read yet
+/// else (a redraw tick) keeps one `next` pending across it, as `runnerctl watch` does. With no durable event read yet
 /// there is nothing to resume after, so the new stream is live only and what happened in between is lost:
-/// [`Events::missed_events`] says so, and a caller that keeps state reads it again.
+/// [`Events::missed_events`] says so, and a caller that keeps state reads it again. Live events (samples, log lines)
+/// carry no ID and are never replayed: [`Events::reopened`] says when the stream was opened again at all.
 #[derive(Debug)]
-pub(crate) struct Events {
+pub struct Events {
     client: Client,
     query: EventQuery,
     last_id: Option<u64>,
@@ -408,13 +496,21 @@ pub(crate) struct Events {
     closed: u32,
     /// Set when a stream was opened again with no event to resume after.
     missed: bool,
+    /// Set when a stream was opened again, resumed or not.
+    reopened: bool,
 }
 
 impl Events {
     /// Whether, since the last call, the stream was opened again with no event ID to resume after, so events from
     /// the time it was closed are lost. Cleared by the call.
-    pub(crate) fn missed_events(&mut self) -> bool {
+    pub fn missed_events(&mut self) -> bool {
         std::mem::take(&mut self.missed)
+    }
+
+    /// Whether, since the last call, the stream was opened again, so live events from the time it was closed are
+    /// lost even when it resumed after the last durable one. Cleared by the call.
+    pub fn reopened(&mut self) -> bool {
+        std::mem::take(&mut self.reopened)
     }
 
     async fn connect(&mut self) -> Result<(), ClientError> {
@@ -432,7 +528,7 @@ impl Events {
 
     /// The next event. Fails when reconnecting failed, as when the daemon stopped, or when the new stream ended
     /// too before sending anything. Events of a type this client does not know (from a newer daemon) are skipped.
-    pub(crate) async fn next(&mut self) -> Result<EventEnvelope, ClientError> {
+    pub async fn next(&mut self) -> Result<EventEnvelope, ClientError> {
         loop {
             let Some((lines, parser)) = &mut self.lines else {
                 if self.closed > 1 {
@@ -441,6 +537,7 @@ impl Events {
                 tokio::time::sleep(RECONNECT_DELAY).await;
                 self.connect().await?;
                 self.missed |= self.last_id.is_none();
+                self.reopened = true;
                 continue;
             };
             // A silent stream, and one cut off mid-body as when the daemon is killed, end like a closed one.
@@ -469,6 +566,11 @@ impl Events {
 }
 
 #[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    clippy::expect_used,
+    reason = "tests: a fake daemon that cannot start fails the test"
+)]
 mod tests {
     use std::convert::Infallible;
     use std::time::Duration;
@@ -481,10 +583,32 @@ mod tests {
 
     use axum::extract::State;
     use axum::http::HeaderMap;
-    use runnerd_core::api::{Budget, Event, EventEnvelope, EventQuery, LogQuery};
 
-    use super::{ClientError, RawEvent, SseParser};
-    use crate::testing::Fake;
+    use super::{Client, ClientError, RawEvent, SseParser, Timeouts};
+    use crate::api::{Budget, Event, EventEnvelope, EventQuery, LogQuery};
+    use crate::testdir::TestDir;
+
+    /// A fake daemon on a temporary socket serving `router` until the test ends, and a client of it whose requests
+    /// time out after `request` and whose streams after `idle` of silence. Never the user's socket.
+    struct Fake {
+        _dir: TestDir,
+        client: Client,
+    }
+
+    impl Fake {
+        fn serve(router: Router, request: Duration, idle: Duration) -> Fake {
+            let dir = TestDir::new("client");
+            let socket = dir.0.join("runnerd.sock");
+            let listener = tokio::net::UnixListener::bind(&socket).unwrap();
+            tokio::spawn(async move {
+                let _ = axum::serve(listener, router).await;
+            });
+            Fake {
+                _dir: dir,
+                client: Client::new(socket).with_timeouts(Timeouts { request, idle }),
+            }
+        }
+    }
 
     /// A 200 response whose body never comes.
     fn stalled() -> Body {
@@ -544,24 +668,36 @@ mod tests {
             Router::new()
                 .route("/v1/events", get(breaking_stream))
                 .with_state(seen.clone()),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
         );
-        let client = fake.client(Duration::from_secs(5), Duration::from_secs(5));
+        let client = &fake.client;
         let read = async {
             let mut events = client.events(EventQuery::default(), None).await?;
-            Ok::<_, ClientError>((events.next().await?.id, events.next().await?.id))
+            let first = events.next().await?.id;
+            let reopened_before = events.reopened();
+            let second = events.next().await?.id;
+            Ok::<_, ClientError>((first, second, reopened_before, events.reopened()))
         };
-        let ids = tokio::time::timeout(Duration::from_secs(10), read)
+        let read = tokio::time::timeout(Duration::from_secs(10), read)
             .await
             .expect("the events should come");
-        assert_eq!(ids.unwrap(), (Some(7), Some(8)));
+        assert_eq!(
+            read.unwrap(),
+            (Some(7), Some(8), false, true),
+            "resumed after 7, and says it was opened again"
+        );
         assert_eq!(*seen.lock().unwrap(), [None, Some("7".to_owned())]);
     }
 
     #[tokio::test]
     async fn a_log_that_is_not_followed_fails_when_its_body_stalls() {
-        let fake =
-            Fake::serve(Router::new().route("/v1/jobs/{id}/logs", get(|| async { stalled() })));
-        let client = fake.client(Duration::from_millis(300), Duration::from_secs(60));
+        let fake = Fake::serve(
+            Router::new().route("/v1/jobs/{id}/logs", get(|| async { stalled() })),
+            Duration::from_millis(300),
+            Duration::from_secs(60),
+        );
+        let client = &fake.client;
         let read = async {
             let mut lines = client.logs(1, &LogQuery::default()).await?;
             lines.next().await
@@ -570,6 +706,28 @@ mod tests {
             .await
             .expect("the read should fail, not hang");
         assert!(matches!(read, Err(ClientError::Timeout(_))), "{read:?}");
+    }
+
+    #[tokio::test]
+    async fn events_with_crlf_line_ends_are_read() {
+        let crlf = || async {
+            let event = String::from_utf8(budget_event(3).to_vec()).unwrap();
+            let body = Bytes::from(event.replace('\n', "\r\n"));
+            Body::from_stream(stream::iter([Ok::<_, Infallible>(body)]).chain(stream::pending()))
+        };
+        let fake = Fake::serve(
+            Router::new().route("/v1/events", get(crlf)),
+            Duration::from_secs(5),
+            Duration::from_secs(5),
+        );
+        let read = async {
+            let mut events = fake.client.events(EventQuery::default(), None).await?;
+            events.next().await
+        };
+        let event = tokio::time::timeout(Duration::from_secs(5), read)
+            .await
+            .expect("the event should come");
+        assert_eq!(event.unwrap().id, Some(3));
     }
 
     fn parse(text: &str) -> Vec<RawEvent> {
