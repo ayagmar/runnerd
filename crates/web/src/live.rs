@@ -140,7 +140,6 @@ impl Sent {
                 let now: HashSet<&str> =
                     rendered.parts.iter().map(|part| part.id.as_str()).collect();
                 let mut html = String::new();
-                let mut svg = String::new();
                 for part in &rendered.parts {
                     match (before.get(part.id.as_str()), &part.group) {
                         (Some(sent), _) if **sent == *part => {}
@@ -151,14 +150,13 @@ impl Sent {
                                 .namespace(Namespace::Svg),
                         ),
                         (_, None) => html.push_str(&part.html),
-                        (_, Some(_)) => svg.push_str(&part.html),
+                        // One patch each: Datastar 1.0.4 drops every second element of an SVG patch.
+                        (_, Some(_)) => events
+                            .push(PatchElements::new(part.html.clone()).namespace(Namespace::Svg)),
                     }
                 }
                 if !html.is_empty() {
                     events.push(PatchElements::new(html));
-                }
-                if !svg.is_empty() {
-                    events.push(PatchElements::new(svg).namespace(Namespace::Svg));
                 }
                 let gone: Vec<String> = sent
                     .parts
