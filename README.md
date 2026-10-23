@@ -311,9 +311,10 @@ Memory and CPU come from samples every 2 s, so a peak is the highest sample: a s
 A full-screen dashboard for hosts reached over SSH, where the web dashboard is not open. It shows what the web
 dashboard does:
 
-- the budget as one bar, a block per slot as wide as its memory and filled as far as its job uses it;
+- the budget as one bar, a block per slot as wide as its memory and filled as far as its job uses it, then the
+  mirror and each seed container;
 - a card per slot with the job, its step, run time, and memory and CPU sparklines;
-- the slice's memory and CPU, the repositories, and the latest jobs;
+- the slice's memory and CPU, the repositories, and the queued and latest jobs;
 - the history, filtered by outcome and repository;
 - a job: its timeline, its steps as bars on one time axis, memory and CPU against its container's caps, and its log,
   followed while the job runs.

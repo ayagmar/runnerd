@@ -28,7 +28,7 @@ Pages update as things happen. Memory and CPU are sampled every 2 s, so a shorte
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the latest jobs. A pause lasts until a resume, across restarts.
+Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the queued jobs and the latest. A pause lasts until a resume, across restarts.
 
 ### A job
 
@@ -59,21 +59,24 @@ Below the charts: every job, filtered by repository and outcome.
 
 ## runnerctl
 
-It talks to the socket (`--socket` picks another), prints aligned text, coloured on a terminal unless `NO_COLOR` is set, and with `--json` prints the API's response unchanged. Sizes of 10 or more round to whole units, so the demo's 23.5G reads 24G.
+It talks to the socket (`--socket` picks another), prints aligned text, coloured on a terminal unless `NO_COLOR` is set, and with `--json` prints the API's response unchanged.
 
 ```console wrap=false
 $ runnerctl status
-runnerd 0.0.5  24G of 33G reserved in ci.slice
+runnerd 0.0.5  23.5G of 33G reserved in ci.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
-jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792708105    7m 9s
+jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792736600   8m 33s
 jvm         2  free
-node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792708223  5m 11s
-node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792708520     14s
+node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792736718  6m 35s
+node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792737015  1m 38s
 
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
 halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
 halyard/storefront  node     active       1  self-hosted,linux,x64,node
+
+JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
+120055991710  halyard/storefront  E2E / visual-diff  2m 7s ago
 ```
 
 | Command | What it shows or does |
@@ -97,10 +100,10 @@ halyard/storefront  node     active       1  self-hosted,linux,x64,node
 ```console wrap=false
 $ runnerctl jobs --repo halyard/ledger --limit 4
 JOB           REPOSITORY      WORKFLOW / NAME  BRANCH            RESULT   WAITED     RAN  MEM PEAK  QUEUED
-120055991700  halyard/ledger  CI / build       main              running      9s   7m 4s      6.6G  7m 13s ago
-120055991600  halyard/ledger  CI / build       main              success      9s  11m 5s      6.6G  30m 13s ago
-120055991526  halyard/ledger  CI / build       feat/checkout-v2  success     27s  11m 5s      6.6G  1h 52m ago
-120055991489  halyard/ledger  CI / build       main              failure     11s  11m 5s      6.6G  2h 31m ago
+120055991700  halyard/ledger  CI / build       main              running      9s  8m 28s     6.61G  8m 37s ago
+120055991600  halyard/ledger  CI / build       main              success      9s  11m 5s     6.61G  31m 37s ago
+120055991526  halyard/ledger  CI / build       feat/checkout-v2  success     27s  11m 5s     6.61G  1h 53m ago
+120055991489  halyard/ledger  CI / build       main              failure     11s  11m 5s     6.61G  2h 33m ago
 memory peaks are sampled every 2 s; spikes shorter than that do not show
 older jobs: --before 120055991489
 ```
@@ -108,20 +111,23 @@ older jobs: --before 120055991489
 One frame of `runnerctl watch`:
 
 ```console wrap=false
-runnerd 0.0.5  24G of 33G reserved  ci.slice uses 5.18 cores, 11G
+runnerd 0.0.5  23.5G of 33G reserved  ci.slice uses 2.89 cores, 10.95G
 
-SLOT    JOB                                      STEP                                         RAN   CPU   MEM
-jvm 1   halyard/ledger CI / build                Integration tests (Testcontainers) (7/9)   7m 7s  2.01  4.4G
+SLOT    JOB                                      STEP                                         RAN   CPU    MEM
+jvm 1   halyard/ledger CI / build                Integration tests (Testcontainers) (7/9)  8m 32s  3.89  4.17G
 jvm 2   free
-node 1  halyard/storefront E2E / playwright      Playwright e2e (6/8)                      5m 10s  2.01  2.8G
+node 1  halyard/storefront E2E / playwright      Playwright e2e (6/8)                      6m 35s  3.89  2.65G
 node 2  waiting for a job of halyard/storefront
 
+Queued
+  halyard/storefront  E2E / visual-diff  2m 11s ago
+
 Finished
-  success  halyard/ledger      CI / build        11m 5s  19m 2s ago
-  success  halyard/storefront  E2E / playwright  8m 57s  1h 1m ago
-  success  halyard/ledger      CI / build        11m 5s  1h 40m ago
-  failure  halyard/ledger      CI / build        11m 5s  2h 20m ago
-  success  halyard/storefront  E2E / playwright  8m 57s  3h 5m ago
+  success  halyard/ledger      CI / build        11m 5s  20m 27s ago
+  success  halyard/storefront  E2E / playwright  8m 57s  1h 2m ago
+  success  halyard/ledger      CI / build        11m 5s  1h 42m ago
+  failure  halyard/ledger      CI / build        11m 5s  2h 22m ago
+  success  halyard/storefront  E2E / playwright  8m 57s  3h 6m ago
 
 CPU and MEM are the last sample, taken every 2 s. Ctrl-C quits.
 ```
@@ -130,7 +136,7 @@ CPU and MEM are the last sample, taken every 2 s. Ctrl-C quits.
 
 ```console
 $ runnerctl pause halyard/ledger
-error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792708105
+error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792736600
 `runnerctl pause --force halyard/ledger` cancels its run and removes its runner
 ```
 
