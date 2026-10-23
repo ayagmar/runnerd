@@ -299,26 +299,33 @@ async fn run_overview(
         let mut batch = vec![first];
         let open = settle(&mut events, &mut batch).await;
         let mut jobs_changed = false;
+        let mut status_changed = false;
         for event in batch {
             match event {
                 Event::JobSample { job, sample } => data.add_job_sample(job, sample),
                 Event::HostSample { sample } => data.add_host_sample(sample),
-                Event::LogLine { .. }
-                | Event::CacheReseeded { .. }
-                | Event::BudgetChanged { .. }
+                Event::LogLine { .. } | Event::CacheReseeded { .. } => {}
+                Event::BudgetChanged { .. }
                 | Event::ProfileChanged { .. }
                 | Event::ProfileRemoved { .. }
                 | Event::RepositoryChanged { .. }
-                | Event::RepositoryRemoved { .. } => {}
+                | Event::RepositoryRemoved { .. } => status_changed = true,
+                Event::JobStep { .. } => jobs_changed = true,
+                // The status's queue and slots follow jobs.
                 Event::JobQueued { .. }
                 | Event::JobStarted { .. }
-                | Event::JobStep { .. }
                 | Event::JobFinished { .. }
-                | Event::SlotChanged { .. } => jobs_changed = true,
+                | Event::SlotChanged { .. } => {
+                    jobs_changed = true;
+                    status_changed = true;
+                }
             }
         }
-        // The budget, profiles and repositories come with it; the status is cheap to read on every update.
-        data.status = app.daemon.get("/v1/status").await?;
+        // Read again only when an event says it changed: with a long queue the status is large, and most batches
+        // are samples.
+        if status_changed {
+            data.status = app.daemon.get("/v1/status").await?;
+        }
         if jobs_changed {
             data.reload_running(&app.daemon).await?;
             data.recent = app
