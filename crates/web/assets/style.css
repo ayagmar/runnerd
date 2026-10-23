@@ -401,13 +401,14 @@ html {
   flex-basis: 3px;
 }
 
+/* The block's height, moved down by what is not filled: a new sample animates a transform, not the layout. */
 .block .fill {
   position: absolute;
-  inset: auto 0 0 0;
-  height: calc(var(--fill) * 100%);
+  inset: 0;
+  transform: translateY(calc((1 - var(--fill)) * 100%));
   background: color-mix(in srgb, var(--block-ink) 14%, transparent);
   border-top: 2px solid color-mix(in srgb, var(--block-ink) 55%, transparent);
-  transition: height 600ms var(--ease);
+  transition: transform 600ms var(--ease);
 }
 
 .block > span:not(.fill),
