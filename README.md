@@ -134,6 +134,10 @@ Runners started afterwards get the new limits, image and labels. `history.databa
 
 Every event but the live ones has an ID; send the last one seen as `Last-Event-ID` and the stream resumes after it,
 across daemon restarts. Live events are not stored: a client that missed some reads the job's samples or log.
+`slot.changed`, `budget.changed` and `repository.changed` carry the state as it is after a change, not each
+transition: a pause and a resume that land before the daemon publishes its status send nothing, since the state did
+not change. Applying `repository.changed` and `repository.removed` to the repositories of a status keeps them equal
+to what `/v1/status` returns.
 
 ```sh
 curl --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/status

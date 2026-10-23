@@ -81,7 +81,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         self.status.send_replace(status);
     }
 
-    /// Announces the slots, the budget and the repositories that changed between two statuses.
+    /// Announces the slots, the budget and the repositories that changed between two statuses. The events carry
+    /// state, not transitions: a pause undone before the next publish announces nothing, and a client that applies
+    /// the events still ends where the status is.
     fn announce_changes(&self, previous: &api::Status, status: &api::Status) {
         for profile in &status.profiles {
             let before = previous

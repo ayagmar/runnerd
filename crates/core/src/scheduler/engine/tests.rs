@@ -1787,3 +1787,32 @@ async fn a_restart_without_a_repository_announces_its_removal_to_clients_resumin
         ]
     );
 }
+
+#[tokio::test]
+async fn a_pause_undone_before_it_is_published_leaves_clients_where_the_status_is() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    // A client: the status, then the repository events after what it read.
+    let mut cursor = 0;
+    repository_events(&handle, &mut cursor).await;
+    let mut shown = handle.status.borrow().repositories.clone();
+
+    engine.pause("o/r", RunningJobs::Keep).await.unwrap();
+    assert!(handle.control.set_paused("o/r", false), "o/r is configured");
+    engine.publish();
+    for event in repository_events(&handle, &mut cursor).await {
+        match event {
+            api::Event::RepositoryChanged { repository } => {
+                shown.retain(|known| known.name != repository.name);
+                shown.push(repository);
+            }
+            api::Event::RepositoryRemoved { repository } => {
+                shown.retain(|known| known.name != repository);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(shown, handle.status.borrow().repositories);
+    assert!(!shown[0].paused, "o/r shows resumed");
+}
