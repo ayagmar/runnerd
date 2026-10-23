@@ -5,8 +5,8 @@
 use maud::{Markup, html};
 use runnerd_core::api::{Job, Sample, SampleSeries, Status, Step};
 
-use super::{Durations, badge, durations, page};
-use crate::chart::{Base, Series, TimeChart, nice_top, ratio};
+use super::{badge, page};
+use crate::chart::{Band, Base, Series, TimeChart, nice_top, ratio};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -81,7 +81,6 @@ pub(crate) fn render(view: &JobView) -> Markup {
 /// The title, outcome and where the job came from.
 pub(crate) fn head(view: &JobView) -> Markup {
     let summary = &view.job.summary;
-    let Durations { waited, ran } = durations(summary, view.now);
     html! {
         header #job-head .job-head {
             p.crumbs {
@@ -89,18 +88,16 @@ pub(crate) fn head(view: &JobView) -> Markup {
                 @if let Some(workflow) = &summary.workflow { " · " (workflow) }
             }
             h1 { (summary.name) " " (badge(summary)) }
-            dl.facts {
-                @if let Some(branch) = &summary.branch { div { dt { "Branch" } dd { code { (branch) } } } }
-                div { dt { "Run" } dd { (summary.run_id) @if summary.run_attempt > 1 { ", attempt " (summary.run_attempt) } } }
-                @if let Some(runner) = &summary.runner {
-                    div { dt { "Slot" } dd { (runner.profile) " · " (runner.slot) } }
+            // Waited, ran and the queued time are the timeline's.
+            p.job-facts {
+                @if let Some(branch) = &summary.branch { code { (branch) } }
+                @let run = html! { "run " (summary.run_id) @if summary.run_attempt > 1 { ", attempt " (summary.run_attempt) } };
+                @if let Some(url) = &summary.url {
+                    a.external href=(url) rel="noreferrer" aria-label=(format!("Run {} on GitHub", summary.run_id)) { (run) }
+                } @else {
+                    span { (run) }
                 }
-                @if let Some(waited) = waited { div { dt { "Waited" } dd { (format::duration(waited)) } } }
-                @if let Some(ran) = ran { div { dt { "Ran" } dd { (format::duration(ran)) } } }
-                div { dt { "Queued" } dd { (format::timestamp(summary.timeline.queued_at)) } }
-            }
-            @if let Some(url) = &summary.url {
-                p { a.external href=(url) rel="noreferrer" { "Open on GitHub" } }
+                @if let Some(runner) = &summary.runner { span { (runner.profile) " " (runner.slot) } }
             }
         }
     }
@@ -149,7 +146,7 @@ pub(crate) fn timeline(view: &JobView) -> Markup {
     let total = end.saturating_sub(timeline.queued_at).max(1);
     html! {
         section #timeline .timeline aria-labelledby="timeline-title" {
-            h2 #timeline-title { "Timeline" }
+            h2 #timeline-title .visually-hidden { "Timeline" }
             div.phases role="img" aria-label=(phases.iter().map(|(label, _, from, to)| format!("{label} {}", format::duration(to.unwrap_or(now).saturating_sub(*from)))).collect::<Vec<_>>().join(", ")) {
                 @for (_, class, from, to) in &phases {
                     @let seconds = to.unwrap_or(now).saturating_sub(*from);
@@ -201,19 +198,28 @@ pub(crate) fn steps(view: &JobView) -> Markup {
     let end = job.summary.timeline.finished_at.unwrap_or(now);
     html! {
         section #steps .steps aria-labelledby="steps-title" {
-            div.section-head {
-                h2 #steps-title { "Steps" }
-                @if let Some(start) = start { p.muted { (format::duration(end.saturating_sub(start))) " in " (job.steps.len()) " steps" } }
-            }
+            h2 #steps-title .visually-hidden { "Steps" }
             @if job.steps.is_empty() {
                 p.muted { "GitHub has not reported any steps yet." }
             } @else {
-                ol.step-list {
-                    @for step in &job.steps {
+                // A step that ran lights up its stretch of the memory and CPU charts on hover, focus or tap.
+                ol.step-list "data-signals:_step__ifmissing"="0" {
+                    @for (index, step) in job.steps.iter().enumerate() {
                         @let class = step_class(step);
                         @let seconds = step.started_at.map(|from| step.completed_at.unwrap_or(now).saturating_sub(from));
-                        li class=(class) {
-                            span.step-name { (step.name) }
+                        @let usage = step.started_at.and_then(|from| usage(&view.samples.samples, from, step.completed_at.unwrap_or(now)));
+                        @let number = index + 1;
+                        @let enter = format!("$_step = {number}");
+                        li class=(class) tabindex=[usage.is_some().then_some("0")]
+                            data-on:pointerenter=[usage.is_some().then_some(&enter)]
+                            data-on:focus=[usage.is_some().then_some(&enter)]
+                            data-on:pointerleave=[usage.is_some().then_some("evt.pointerType == 'mouse' && ($_step = 0)")]
+                            data-on:blur=[usage.is_some().then_some("$_step = 0")]
+                            data-class:linked=[usage.is_some().then(|| format!("$_step == {number}"))] {
+                            span.step-name {
+                                (step.name)
+                                @if let Some(usage) = &usage { span.visually-hidden { ", " (usage.describe()) } }
+                            }
                             span.step-time {
                                 @match (seconds, class) {
                                     (_, "skipped") => "skipped",
@@ -229,6 +235,11 @@ pub(crate) fn steps(view: &JobView) -> Markup {
                                     @let left = ratio(from.saturating_sub(start), span) * 100.0;
                                     @let width = ratio(to - from, span) * 100.0;
                                     span.step-bar style=(format!("--left: {left:.2}%; --width: {width:.2}%")) {}
+                                    // Shown on the side of the track away from the bar while the row is lit up:
+                                    // the charts may be off screen.
+                                    @if let Some(usage) = &usage {
+                                        span class=(if left + width / 2.0 > 50.0 { "step-usage start" } else { "step-usage end" }) { (usage.describe()) }
+                                    }
                                 }
                             }
                         }
@@ -301,16 +312,12 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
     };
     let optional =
         |value: Option<u64>, write: fn(u64) -> String| value.map_or("–".to_owned(), write);
+    let bands = step_bands(view);
     html! {
         section #metrics .metrics aria-labelledby="metrics-title" {
-            div.section-head {
-                h2 #metrics-title { "Resources" }
-                p.muted {
-                    "Sampled every " (view.samples.interval) " s; a peak between samples does not show."
-                    @if configured_now {
-                        " This record lacks its container's caps: the dashed lines are " (profile) "'s limits in the config now, which may not be the ones the job ran with."
-                    }
-                }
+            h2 #metrics-title .visually-hidden { "Resources" }
+            @if configured_now {
+                p.muted { "This record lacks its container's caps: the dashed lines are " (profile) "'s limits in the config now, which may not be the ones the job ran with." }
             }
             @if samples.is_empty() {
                 p.muted { "No samples: the runner's container never ran, or its samples are past `history.samples`." }
@@ -318,16 +325,18 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
                 div.charts {
                     div.chart-card {
                         h3 { "Memory" span.reading { "sampled peak " (format::bytes(memory_peak)) } }
-                        (memory.render(nice_top(memory_peak.max(memory_limit.unwrap_or(0)), Base::Binary)))
+                        (memory.render_with(nice_top(memory_peak.max(memory_limit.unwrap_or(0)), Base::Binary), &bands.memory))
                     }
                     div.chart-card {
                         h3 { "CPU" span.reading { "sampled peak " (format::cores(cpu_peak)) " cores" } }
-                        (cpu.render(nice_top(cpu_peak.max(cpu_limit.unwrap_or(0)), Base::Decimal)))
+                        (cpu.render_with(nice_top(cpu_peak.max(cpu_limit.unwrap_or(0)), Base::Decimal), &bands.cpu))
                     }
                 }
             }
             dl.totals {
-                div { dt { "Sampled memory peak" } dd { (optional(metrics.memory_peak, format::bytes)) } }
+                // The job's own peak, which history keeps after its samples are deleted; the charts' peak is of the
+                // samples left.
+                div { dt { "Memory peak over the job" } dd { (optional(metrics.memory_peak, format::bytes)) } }
                 div { dt { "Average memory" } dd { (optional(metrics.memory_average, format::bytes)) } }
                 div { dt { "CPU time" } dd { (optional(metrics.cpu_time.map(|ms| ms / 1000), format::duration)) } }
                 div { dt { "Average CPU" } dd { (optional(metrics.cpu_average, |m| format!("{} cores", format::cores(m)))) } }
@@ -340,6 +349,73 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
 }
 
 /// The dashed memory and CPU lines of the job's charts, with their labels.
+/// What a job used over a stretch of its run, from the samples in it.
+struct Usage {
+    memory_peak: u64,
+    cpu_average: u64,
+}
+
+impl Usage {
+    fn describe(&self) -> String {
+        format!(
+            "peak {}, average {} cores",
+            format::bytes(self.memory_peak),
+            format::cores(self.cpu_average)
+        )
+    }
+}
+
+/// The samples taken from `from` to `to`; none when the stretch fell between two samples.
+fn usage(samples: &[Sample], from: u64, to: u64) -> Option<Usage> {
+    let inside: Vec<&Sample> = samples
+        .iter()
+        .filter(|sample| (from..=to).contains(&sample.at))
+        .collect();
+    let count = u64::try_from(inside.len())
+        .ok()
+        .filter(|count| *count > 0)?;
+    Some(Usage {
+        memory_peak: inside.iter().map(|sample| sample.memory).max()?,
+        cpu_average: inside.iter().map(|sample| sample.cpu).sum::<u64>() / count,
+    })
+}
+
+/// Each step's stretch over the memory and CPU charts, labelled with what it used.
+struct StepBands {
+    memory: Vec<Band>,
+    cpu: Vec<Band>,
+}
+
+fn step_bands(view: &JobView) -> StepBands {
+    let mut bands = StepBands {
+        memory: Vec::new(),
+        cpu: Vec::new(),
+    };
+    for (index, step) in view.job.steps.iter().enumerate() {
+        let Some(from) = step.started_at else {
+            continue;
+        };
+        let to = step.completed_at.unwrap_or(view.now);
+        let Some(usage) = usage(&view.samples.samples, from, to) else {
+            continue;
+        };
+        let shown = format!("$_step == {}", index + 1);
+        bands.memory.push(Band {
+            from,
+            to,
+            shown: shown.clone(),
+            label: format!("peak {}", format::bytes(usage.memory_peak)),
+        });
+        bands.cpu.push(Band {
+            from,
+            to,
+            shown,
+            label: format!("average {} cores", format::cores(usage.cpu_average)),
+        });
+    }
+    bands
+}
+
 struct LimitLines {
     memory: Option<(u64, String)>,
     cpu: Option<(u64, String)>,
@@ -383,11 +459,11 @@ pub(crate) fn log(view: &JobView) -> Markup {
     html! {
         section #log .log aria-labelledby="log-title" {
             div.section-head {
-                h2 #log-title { "Log" }
+                h2 #log-title .visually-hidden { "Log" }
                 p.muted {
-                    (summary.log.lines) " lines, " (format::bytes(summary.log.bytes))
+                    a href=(format!("/jobs/{}/log", summary.id)) { "Full log" }
+                    " · " (summary.log.lines) " lines, " (format::bytes(summary.log.bytes))
                     @if summary.log.truncated { ", cut at history.log_max" }
-                    " · " a href=(format!("/jobs/{}/log", summary.id)) { "Full log" }
                 }
             }
             @if view.log_from > 0 {

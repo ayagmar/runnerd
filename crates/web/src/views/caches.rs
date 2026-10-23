@@ -4,7 +4,7 @@ use maud::{Markup, html};
 use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Status};
 
 use super::{Page, page, profile_class, time_ago};
-use crate::chart::{Base, Series, TimeChart, nice_top, ratio};
+use crate::chart::{Base, Series, TimeChart, nice_top};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -78,15 +78,17 @@ fn action(volume: &CacheVolume) -> Markup {
 pub(crate) fn render(view: &CachesView) -> Markup {
     let total: u64 = view.caches.volumes.iter().map(|volume| volume.bytes).sum();
     let main = html! {
-        div.section-head.page-head {
-            h1 { "Caches" }
-            p.muted {
-                (format::bytes(total)) " in " (view.caches.volumes.len()) " volumes"
-                @if let Some(at) = view.caches.measured_at { ", measured " (time_ago(at, view.now)) }
-                @else { ", not measured yet" }
+        div.page-head {
+            h1.visually-hidden { "Caches" }
+            p.figures title="Docker measures volumes slowly, so runnerd does at start and whenever no runner runs after jobs ended." {
+                span.big { (format::bytes(total)) }
+                span.muted {
+                    " in " (view.caches.volumes.len()) " volumes"
+                    @if let Some(at) = view.caches.measured_at { ", measured " (time_ago(at, view.now)) }
+                    @else { ", not measured yet" }
+                }
             }
         }
-        p.lead { "Docker measures volumes slowly, so runnerd does at start and whenever no runner runs after jobs ended." }
         (volumes(view))
     };
     page("Caches", Some(Page::Caches), None, &main)
@@ -107,20 +109,13 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                 @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes);
                 li class=(format!("volume {class}")) {
                     div.volume-head {
-                        span.swatch aria-hidden="true" {}
                         h2 { (label) }
+                        (action(volume))
                     }
                     p.volume-name { code { (volume.name) } }
-                    (action(volume))
                     p.volume-size {
                         span.big { (format::bytes(volume.bytes)) }
                         @if let Some(limit) = volume.limit { span.muted { " of " (format::bytes(limit)) } }
-                    }
-                    @if let Some(limit) = volume.limit {
-                        div.meter role="meter" aria-valuemin="0" aria-valuemax=(limit) aria-valuenow=(volume.bytes.min(limit))
-                            aria-label=(format!("{} of {}", format::bytes(volume.bytes), format::bytes(limit))) {
-                            span style=(format!("--fill: {:.3}", ratio(volume.bytes, limit).min(1.0))) {}
-                        }
                     }
                     @if points.len() > 1 {
                         (TimeChart {

@@ -45,13 +45,13 @@ pub(crate) enum Outcome {
 pub(crate) fn render(view: &ConfigView) -> Markup {
     let main = html! {
         div.section-head.page-head {
-            h1 { "Config" }
+            h1.visually-hidden { "Config" }
             p.muted { code { (view.file.path) } }
         }
         div.config-layout {
             section.editor aria-labelledby="editor-title" {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
-                label.editor-label for="toml" { "runnerd.toml" }
+                label.visually-hidden for="toml" { "runnerd.toml" }
                 textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"
                     data-bind:toml=""
                     "data-on:input__debounce.400ms"="@post('/config/check')" { (view.file.text) }
@@ -131,7 +131,8 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
             @if *outcome == Outcome::Refused {
                 p { (path_unchanged()) }
             }
-            p.check-message { (check.message) }
+            // A valid config's message repeats the figures below it.
+            @if !check.valid { p.check-message { (check.message) } }
             @if check.memory_caps.is_some() {
                 dl.facts {
                     div { dt { "Memory caps" } dd { (format::bytes(caps)) } }
@@ -145,7 +146,7 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
                 }
             }
             @if !blocks.is_empty() {
-                div.bar.bar-small role="img" aria-label=(format!("Memory caps {} of {}", format::bytes(caps), check.memory_max.map_or("no limit".to_owned(), format::bytes))) {
+                div.bar.bar-small role="img" aria-label=(format!("Memory caps {} of {}: {}", format::bytes(caps), check.memory_max.map_or("no limit".to_owned(), format::bytes), blocks.iter().map(|block| format!("{} {}", block.label, format::bytes(block.bytes))).collect::<Vec<_>>().join(", "))) {
                     @for block in &blocks {
                         div class=(format!("block {}", block.class)) style=(format!("--size: {:.4}", ratio(block.bytes, whole))) title=(format!("{}: {}", block.label, format::bytes(block.bytes))) {
                             span.size { (format::bytes(block.bytes)) }
@@ -190,7 +191,6 @@ fn doctor(doctor: &Doctor) -> Markup {
     html! {
         section.doctor aria-labelledby="doctor-title" {
             h2 #doctor-title { "Doctor" }
-            p.muted { "What " code { "runnerd doctor" } " finds on this host for this config." }
             ul.check-list {
                 @for check in &doctor.checks {
                     @let (text, class) = label(check);

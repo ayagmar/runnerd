@@ -37,6 +37,8 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{Event, EventEnvelope, HostSample, Sample};
 
+use crate::views::{repository_id, slot_id};
+
 /// 2026-10-22T14:03:07Z.
 const NOW: u64 = 1_792_677_787;
 const LEDGER_RUNNING: u64 = 120_055_991_700;
@@ -269,7 +271,9 @@ async fn a_resume_from_the_dashboard_reaches_the_daemon_and_returns_the_row_with
     assert_eq!(reply.status, StatusCode::OK);
     assert!(!dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
     assert!(
-        reply.body.contains(r#"id="repo-halyard-ledger""#),
+        reply
+            .body
+            .contains(&format!(r#"id="{}""#, repository_id("halyard/ledger"))),
         "{}",
         reply.body
     );
@@ -289,6 +293,51 @@ async fn a_resume_from_the_dashboard_reaches_the_daemon_and_returns_the_row_with
     assert!(
         unknown.body.contains(r#"id="notice""#)
             && unknown.body.contains("not a configured repository")
+    );
+}
+
+#[tokio::test]
+async fn repositories_whose_names_differ_only_in_punctuation_keep_their_own_rows() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let mut dash = fixtures.status.repositories[0].clone();
+        dash.name = "halyard/b-c".to_owned();
+        dash.paused = true;
+        let mut underscore = dash.clone();
+        underscore.name = "halyard/b_c".to_owned();
+        fixtures.status.repositories = vec![dash, underscore];
+    }
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let (dash, underscore) = (repository_id("halyard/b-c"), repository_id("halyard/b_c"));
+    for id in [&dash, &underscore] {
+        assert_eq!(
+            overview.matches(&format!(r#"id="{id}""#)).count(),
+            1,
+            "one row has the id {id}"
+        );
+        let busy = format!(r#"data-indicator="_busy_{}""#, id.replace('-', "_"));
+        assert_eq!(
+            overview.matches(&busy).count(),
+            1,
+            "{id}'s pause button has its own busy signal"
+        );
+    }
+    // The resume's reply replaces the row with its id: it must be that repository's.
+    let origin = format!("http://{}", dashboard.addr);
+    let reply = dashboard
+        .request(
+            "POST",
+            "/v1/repositories/halyard/b_c/resume",
+            &[("cookie", &cookie), ("origin", &origin)],
+        )
+        .await;
+    assert!(
+        reply.body.contains(&format!(r#"id="{underscore}""#))
+            && !reply.body.contains(&format!(r#"id="{dash}""#)),
+        "{}",
+        reply.body
     );
 }
 
@@ -317,7 +366,7 @@ async fn every_page_renders_from_the_daemons_data() {
         "halyard/storefront",
         "Integration tests (Testcontainers)",
         "MemoryMax 33G",
-        "Sampled peak",
+        "peak",
     ] {
         assert!(
             overview.body.contains(expected),
@@ -358,6 +407,218 @@ async fn every_page_renders_from_the_daemons_data() {
 
     let missing = dashboard.page(&cookie, "/jobs/7").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+/// The HTML from the start of the element whose `data-on:pointerenter` selects `key` to that attribute.
+fn selector_of<'page>(page: &'page str, key: &str, tag: &str) -> &'page str {
+    let at = page
+        .find(&format!("data-on:pointerenter=\"$_slot = '{key}'\""))
+        .unwrap_or_else(|| panic!("nothing selects {key}"));
+    let start = page[..at].rfind(tag).unwrap();
+    &page[start..at]
+}
+
+#[tokio::test]
+async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let jvm_1 = slot_id("jvm", 1);
+    let jvm_2 = slot_id("jvm", 2);
+    assert!(
+        selector_of(&overview, &jvm_1, "<a ")
+            .contains(&format!(r#"href="/jobs/{LEDGER_RUNNING}""#)),
+        "jvm 1's block opens the ledger build it runs"
+    );
+    assert!(
+        selector_of(&overview, &jvm_2, "<a ").contains(&format!(r##"href="#{jvm_2}""##)),
+        "the idle jvm 2's block points at its card"
+    );
+    for (profile, slot) in [("jvm", 1), ("jvm", 2), ("node", 1), ("node", 2)] {
+        let card = slot_id(profile, slot);
+        assert!(
+            overview.contains(&format!(r#"<li id="{card}""#))
+                && overview.contains(&format!("data-class:linked=\"$_slot == '{card}'")),
+            "{profile} {slot}'s card exists and lights up with its block"
+        );
+    }
+    // Every block's line is in the readout, toggled by a class: hiding one with `display: none` would let the
+    // readout shrink and grow, and move the bar under the pointer.
+    let lens = &overview[overview.find(r#"<p class="lens""#).unwrap()..];
+    let lens = &lens[..lens.find("</p>").unwrap()];
+    for (profile, slot) in [("jvm", 1), ("jvm", 2), ("node", 1), ("node", 2)] {
+        assert!(
+            lens.contains(&format!(
+                "data-class:on=\"$_slot == '{}'\"",
+                slot_id(profile, slot)
+            )),
+            "the readout has a line for {profile} {slot}"
+        );
+    }
+    assert!(
+        !lens.contains("display: none") && !lens.contains("data-show"),
+        "the readout's lines keep their place while hidden"
+    );
+    // A name ends its `aria-label`; the readout's lines end in a tag.
+    for name in [
+        "of 9G in jvm 1, build on halyard/ledger",
+        "9G jvm 2, idle",
+        "of 33G free",
+    ] {
+        assert!(
+            overview.contains(&format!(r#"{name}""#)),
+            "a block is named {name:?} for screen readers"
+        );
+    }
+}
+
+#[tokio::test]
+async fn profiles_whose_names_differ_only_in_punctuation_keep_their_own_slots() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        fixtures.status.profiles[0].name = "node-js".to_owned();
+        fixtures.status.profiles[1].name = "node_js".to_owned();
+    }
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let dash = slot_id("node-js", 1);
+    let underscore = slot_id("node_js", 1);
+    assert_ne!(dash, underscore);
+    for id in [&dash, &underscore] {
+        assert_eq!(
+            overview.matches(&format!(r#"id="{id}""#)).count(),
+            1,
+            "one card has the id {id}"
+        );
+        assert!(
+            selector_of(&overview, id, "<a ").contains(&format!(r##"href="#{id}""##)),
+            "the block for {id} points at its own card"
+        );
+    }
+}
+
+#[tokio::test]
+async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    read_until(&mut stream, |text| text.contains(r#"id="recent""#)).await;
+    let at = NOW + 2;
+    dashboard
+        .fake
+        .events
+        .send(EventEnvelope {
+            id: None,
+            at,
+            event: Event::JobSample {
+                job: LEDGER_RUNNING,
+                sample: Sample {
+                    at,
+                    cpu: 2000,
+                    memory: 5 << 30,
+                    network_received: 0,
+                    network_sent: 0,
+                },
+            },
+        })
+        .unwrap();
+    // The page keeps only which block is selected; its line comes in the patch, rendered from the new sample.
+    let line = format!(
+        "data-class:on=\"$_slot == '{}'\"><strong>5G</strong> of 9G in jvm 1",
+        slot_id("jvm", 1)
+    );
+    let update = read_until(&mut stream, |text| text.contains(&line)).await;
+    assert!(update.contains(r#"id="budget""#), "{update}");
+}
+
+#[tokio::test]
+async fn a_job_whose_samples_were_deleted_still_shows_its_memory_peak() {
+    let dashboard = Dashboard::start().await;
+    let peak = {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        fixtures.samples.insert(LEDGER_RUNNING, Vec::new());
+        let job = fixtures
+            .jobs
+            .iter()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        job.summary.metrics.memory_peak.unwrap()
+    };
+    let cookie = dashboard.sign_in().await;
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    assert!(
+        job.contains(&format!(
+            "<dt>Memory peak over the job</dt><dd>{}</dd>",
+            crate::format::bytes(peak)
+        )),
+        "the job's kept peak shows without samples"
+    );
+}
+
+#[tokio::test]
+async fn a_step_marks_its_own_stretch_of_the_memory_and_cpu_charts() {
+    let dashboard = Dashboard::start().await;
+    // The first step loses its samples, so it gets no band and the bands are not one per step.
+    let (start, end, from, to) = {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap()
+            .clone();
+        let first = &job.steps[0];
+        let (gone_from, gone_to) = (first.started_at.unwrap(), first.completed_at.unwrap());
+        let samples = fixtures.samples.get_mut(&LEDGER_RUNNING).unwrap();
+        samples.retain(|sample| !(gone_from..=gone_to).contains(&sample.at));
+        let unit_tests = job
+            .steps
+            .iter()
+            .find(|step| step.name == "Unit tests")
+            .unwrap();
+        (
+            samples.first().unwrap().at,
+            samples.last().unwrap().at,
+            unit_tests.started_at.unwrap(),
+            unit_tests.completed_at.unwrap(),
+        )
+    };
+    let cookie = dashboard.sign_in().await;
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    assert!(
+        !job[..job.find(r#"<span class="step-name">Set up job"#).unwrap()]
+            .ends_with(r#"data-class:linked="$_step == 1">"#),
+        "the step without samples is not selectable"
+    );
+    let name = job.find(r#"<span class="step-name">Unit tests"#).unwrap();
+    let focus = r#"data-on:focus="$_step = "#;
+    let enter = job[..name].rfind(focus).unwrap() + focus.len();
+    let number: usize = job[enter..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(number, 6, "Unit tests is the sixth step");
+    #[allow(clippy::cast_precision_loss, reason = "test times are far below 2^52")]
+    let share = |at: u64| (at - start) as f64 / (end - start) as f64 * 100.0;
+    let left = share(from);
+    let stretch = format!(
+        r#"data-class:on="$_step == {number}" style="--left: {left:.2}%; --width: {:.2}%""#,
+        share(to) - left
+    );
+    assert_eq!(
+        job.matches(&stretch).count(),
+        2,
+        "the step's band on the memory and on the CPU chart spans its own start and end"
+    );
 }
 
 #[tokio::test]
@@ -474,7 +735,8 @@ async fn the_overview_shows_a_repository_resumed_from_another_client() {
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let update = read_until(&mut stream, |text| text.contains(r#"id="repositories""#)).await;
     assert!(
-        update.contains(r#"id="repo-halyard-ledger""#) && !update.contains("badge neutral"),
+        update.contains(&format!(r#"id="{}""#, repository_id("halyard/ledger")))
+            && !update.contains("badge neutral"),
         "{update}"
     );
 }
@@ -795,6 +1057,7 @@ async fn the_config_page_shows_the_file_its_budget_and_the_doctor() {
         "/home/forge/.config/runnerd/runnerd.toml",
         "Fits the budget",
         "jvm 2",
+        "node 2 7G",
         "MemoryHigh=30G",
     ] {
         assert!(
@@ -841,7 +1104,10 @@ async fn pausing_a_repository_with_a_running_job_asks_first_and_cancels_only_whe
         )
         .await;
     assert!(
-        forced.body.contains(r#"id="repo-halyard-ledger""#) && forced.body.contains("stopped job"),
+        forced
+            .body
+            .contains(&format!(r#"id="{}""#, repository_id("halyard/ledger")))
+            && forced.body.contains("stopped job"),
         "{}",
         forced.body
     );

@@ -346,11 +346,6 @@ html {
   line-height: 1;
 }
 
-.lead {
-  max-width: 62ch;
-  color: var(--muted);
-}
-
 .warning {
   margin-top: 1rem;
   padding: 0.75rem 1rem;
@@ -376,6 +371,7 @@ html {
   justify-content: flex-end;
   padding: clamp(0.45rem, 1vw, 0.9rem);
   overflow: hidden;
+  text-decoration: none;
   transition: flex-grow 300ms var(--ease), background-color 200ms;
 }
 
@@ -435,11 +431,6 @@ html {
   margin-top: 0.3rem;
 }
 
-.block .repo {
-  font-size: 0.8125rem;
-  color: inherit;
-}
-
 /* A block too narrow for its labels shows none: its size is in the bar's accessible name and its title. */
 .block,
 .free {
@@ -455,6 +446,91 @@ html {
 
 .free {
   color: var(--muted);
+}
+
+/* The readout above the bar: the slice's total, and the selected block's line beside it. */
+.budget .figures {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 0.25rem 1.5rem;
+  margin: 0.75rem 0 1rem;
+}
+
+.readout {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.35rem;
+}
+
+/* The lines share one grid cell: the readout keeps the height of the longest, whichever is shown. */
+.lens {
+  display: grid;
+  min-height: 1.45em;
+  color: var(--muted);
+}
+
+.lens > span {
+  grid-area: 1 / 1;
+  visibility: hidden;
+}
+
+.lens > span.on {
+  visibility: visible;
+}
+
+.lens strong {
+  color: var(--ink);
+}
+
+/* Linked views: selecting a slot's block, card, job row or repository (hover, focus or tap) outlines the others
+   standing for the same thing. Nothing else changes, so every text keeps its contrast. */
+:is(.block, .free, .slot, .job-list > li, .repository, .bar-key).linked {
+  outline: 2px solid var(--ink);
+  outline-offset: 2px;
+}
+
+/* Rows sit 2px apart: their outline goes inside, where the next row can't cover it. */
+:is(.job-list > li, .repository).linked {
+  outline-offset: -2px;
+}
+
+.bar-keys {
+  display: none;
+  flex-wrap: wrap;
+  gap: var(--gap);
+  margin-top: var(--gap);
+}
+
+@media (pointer: coarse) {
+  .bar-keys {
+    display: flex;
+  }
+}
+
+.bar-key {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  min-height: 44px;
+  padding: 0 0.85rem;
+  border: 0;
+  background: var(--surface);
+  color: var(--ink);
+  font: inherit;
+  font-size: 0.875rem;
+}
+
+.key-mirror .swatch { background: var(--ink); }
+.key-free .swatch { background: var(--bg); box-shadow: inset 0 0 0 1px var(--line); }
+
+/* Ink, not the accent: an idle block's outline is a profile colour that may be the accent's. */
+.block:focus-visible,
+.free:focus-visible {
+  outline-color: var(--ink);
+  outline-offset: -3px;
 }
 
 .p0 { --profile: var(--p0); }
@@ -491,17 +567,38 @@ html {
   background: var(--surface);
   border-top: 6px solid var(--profile);
   min-height: 11rem;
+  scroll-margin-top: 1rem;
+}
+
+/* An idle slot's card is drawn like its block: an outline in the profile's colour, nothing in it. */
+.slot.idle {
+  min-height: 0;
+  background: transparent;
+  border-top: 0;
+  padding-top: calc(1rem + 6px);
+  box-shadow: inset 0 0 0 2px var(--profile);
+}
+
+.slot.starting {
+  background: color-mix(in srgb, var(--profile) 18%, var(--surface));
+}
+
+.slot:target {
+  outline: 3px solid var(--ink);
+  outline-offset: 2px;
 }
 
 .slot-head {
   display: flex;
-  align-items: center;
+  align-items: baseline;
   gap: 0.5rem;
   font-size: 0.875rem;
 }
 
 .slot-name {
-  font-weight: 600;
+  font-size: 0.9375rem;
+  font-weight: 700;
+  letter-spacing: 0;
 }
 
 .slot-caps {
@@ -513,9 +610,23 @@ html {
   color: var(--muted);
 }
 
+.slot-title {
+  display: flex;
+  align-items: flex-end;
+  justify-content: space-between;
+  gap: 1rem;
+}
+
 .slot-job {
   display: grid;
+  min-width: 0;
   text-decoration: none;
+}
+
+.elapsed {
+  color: var(--muted);
+  font-size: 0.9375rem;
+  white-space: nowrap;
 }
 
 .slot-job .job-name {
@@ -551,7 +662,7 @@ html {
 
 .slot-figures {
   display: grid;
-  grid-template-columns: auto 1fr 1fr;
+  grid-template-columns: 1fr 1fr;
   gap: 0.75rem;
   margin: 0.25rem 0 0;
 }
@@ -728,7 +839,7 @@ html {
 .repo-list,
 .job-list {
   list-style: none;
-  margin: 1rem 0 0;
+  margin: 0;
   padding: 0;
   display: grid;
   gap: 2px;
@@ -827,6 +938,14 @@ html {
   text-decoration: none;
 }
 
+.job-list .all a {
+  display: block;
+  background: none;
+  color: var(--muted);
+  font-weight: 500;
+  text-decoration: underline;
+}
+
 .job-list a:hover .job-name {
   text-decoration: underline;
 }
@@ -895,6 +1014,17 @@ html {
   font-weight: 500;
 }
 
+.job-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  color: var(--muted);
+}
+
+.job-facts code {
+  color: var(--ink);
+}
+
 .facts,
 .totals,
 .headline {
@@ -937,7 +1067,19 @@ html {
 
 .phase {
   background: var(--profile);
+  transition: opacity 150ms var(--ease);
 }
+
+/* Pointing at a phase or its legend entry fades the other phases' fills; the legend's text stays as it is. */
+.timeline:has(.phase:hover) .phase:not(:hover) { opacity: 0.4; }
+.timeline:has(.phase.wait:hover) .phase-legend .wait,
+.timeline:has(.phase.start:hover) .phase-legend .start,
+.timeline:has(.phase.run:hover) .phase-legend .run,
+.timeline:has(.phase.clean:hover) .phase-legend .clean { text-decoration: underline; text-underline-offset: 0.25em; }
+.timeline:has(.phase-legend .wait:hover) .phase:not(.wait),
+.timeline:has(.phase-legend .start:hover) .phase:not(.start),
+.timeline:has(.phase-legend .run:hover) .phase:not(.run),
+.timeline:has(.phase-legend .clean:hover) .phase:not(.clean) { opacity: 0.4; }
 
 /* The phase still going on ends in a fading edge, and breathes. */
 .phase.ongoing {
@@ -1001,6 +1143,69 @@ html {
   padding: 0;
   display: grid;
   gap: 2px;
+}
+
+.step-usage {
+  position: absolute;
+  inset-block: 0;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 150ms var(--ease);
+}
+
+.step-usage.start { left: 0; }
+.step-usage.end { right: 0; }
+
+.step-list li.linked .step-usage {
+  opacity: 1;
+}
+
+.step-list li.linked {
+  background: var(--surface-2);
+  box-shadow: inset 3px 0 0 var(--ink);
+}
+
+.step-list li[tabindex] {
+  cursor: default;
+}
+
+/* A step's stretch of a chart, drawn while the step is hovered or focused. */
+.band {
+  position: absolute;
+  inset-block: 0;
+  left: var(--left);
+  width: max(2px, var(--width));
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+  box-shadow: inset 1px 0 0 var(--ink), inset -1px 0 0 var(--ink);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms var(--ease);
+}
+
+.band.on {
+  opacity: 1;
+}
+
+.band-label {
+  position: absolute;
+  top: 0.25rem;
+  left: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--surface);
+  padding: 0 0.25rem;
+}
+
+/* A stretch in the right half labels itself to its left. */
+.band.end .band-label {
+  left: auto;
+  right: 0.4rem;
 }
 
 .step-list li {
@@ -1102,6 +1307,19 @@ html {
   align-items: center;
 }
 
+/* The history's charts share a day: a horizontal drag on a touch screen picks days instead of scrolling. */
+.trends .charts {
+  touch-action: pan-y;
+}
+
+.trends .band {
+  left: calc(var(--day, 0) * var(--width));
+}
+
+.trends .charts:focus-visible {
+  outline-offset: 4px;
+}
+
 .charts.three {
   margin-top: 1.25rem;
   grid-template-columns: repeat(auto-fit, minmax(min(100%, 20rem), 1fr));
@@ -1137,7 +1355,8 @@ html {
 
 .job-table tbody th a {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  /* Not minmax(0, …): the cell would shrink below its name, and the name run into the next column. */
+  grid-template-columns: auto 1fr;
   column-gap: 0.6rem;
   align-items: center;
   text-decoration: none;
@@ -1206,31 +1425,25 @@ html {
   color: var(--muted);
 }
 
-.meter {
-  height: 0.6rem;
-  background: var(--surface-2);
-}
-
-.meter span {
-  display: block;
-  height: 100%;
-  width: calc(var(--fill) * 100%);
-  background: var(--memory);
-}
-
 .volume .chart-area {
   height: 5rem;
 }
 
 .volume-action {
-  justify-self: start;
+  margin-left: auto;
   min-height: 36px;
   padding: 0 0.75rem;
   font-size: 0.875rem;
 }
 
+@media (pointer: coarse) {
+  .volume-action {
+    min-height: 44px;
+  }
+}
+
 .volume-head {
-  flex-wrap: wrap;
+  justify-content: space-between;
 }
 
 /* The config editor: the file on the left, what it asks of the budget on the right. */
@@ -1244,10 +1457,6 @@ html {
 .editor {
   display: grid;
   gap: 0.5rem;
-}
-
-.editor-label {
-  font-weight: 600;
 }
 
 .editor textarea {
@@ -1307,6 +1516,14 @@ html {
 .bar-small .block .size,
 .bar-small .free .size {
   font-size: 1.125rem;
+}
+
+/* A narrow block's name wraps rather than losing its end. */
+.bar-small .block > .name {
+  font-size: 0.8125rem;
+  line-height: 1.15;
+  white-space: normal;
+  overflow-wrap: anywhere;
 }
 
 .bar:has(.max-mark) {
@@ -1448,11 +1665,6 @@ html {
     margin-left: auto;
   }
 
-  .block .repo,
-  .free .name {
-    display: none;
-  }
-
   /* Narrow blocks keep their labels: less padding and gap, and a name that may wrap. */
   .bar {
     --gap: 4px;
@@ -1468,14 +1680,6 @@ html {
     line-height: 1.15;
     white-space: normal;
     overflow-wrap: anywhere;
-  }
-
-  .slot-figures {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .slot-figures > div:first-child {
-    grid-column: 1 / -1;
   }
 
   .step-list li {

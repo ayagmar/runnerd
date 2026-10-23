@@ -237,6 +237,12 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
   only when it fits, next to the doctor's checks;
 - pause and resume for each repository; a pause while a job runs asks first, and confirming cancels the job.
 
+Views of the same thing are linked. On the overview, a slot's block opens its job, and pointing at a block, card,
+running job or repository, focusing it or tapping it lights up the others and says above the bar what the block
+holds, including what is free. On a job, a step marks its stretch of the memory and CPU charts. On the history, a
+day (pointed at, or stepped to with the arrow keys) is marked on all three charts and its numbers replace the 30
+days' in the headline.
+
 Open pages update as things happen, over one server-sent event stream per page. Memory and CPU are sampled every 2 s,
 so a peak shorter than that does not show; the dashboard calls them sampled peaks.
 

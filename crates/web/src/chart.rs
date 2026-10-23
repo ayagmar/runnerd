@@ -169,9 +169,38 @@ pub(crate) fn nice_top(max: u64, base: Base) -> u64 {
     .unwrap_or(max)
 }
 
+/// A stretch of a chart's time, such as a job's step, drawn while a Datastar expression holds.
+#[derive(Debug)]
+pub(crate) struct Band {
+    pub(crate) from: u64,
+    pub(crate) to: u64,
+    /// When to draw it, such as `$_step == 3`.
+    pub(crate) shown: String,
+    /// What the chart shows over the stretch, such as its peak.
+    pub(crate) label: String,
+}
+
+impl Band {
+    /// The band from `left` to `right`, as shares of the chart's width.
+    fn render(&self, left: f64, right: f64) -> Markup {
+        let (left, width) = (left * 100.0, (right - left) * 100.0);
+        html! {
+            span class=(if left > 50.0 { "band end" } else { "band" }) aria-hidden="true" data-class:on=(self.shown)
+                style=(format!("--left: {left:.2}%; --width: {width:.2}%")) {
+                @if !self.label.is_empty() { span.band-label { (self.label) } }
+            }
+        }
+    }
+}
+
 impl TimeChart {
     /// The chart, with its y axis topped at `top`.
     pub(crate) fn render(&self, top: u64) -> Markup {
+        self.render_with(top, &[])
+    }
+
+    /// The chart with bands over it, each drawn while its expression holds.
+    pub(crate) fn render_with(&self, top: u64, bands: &[Band]) -> Markup {
         let summary = self
             .series
             .iter()
@@ -211,6 +240,12 @@ impl TimeChart {
                         }
                         @if let (Some((_, label)), Some(y)) = (&self.limit, limit_y) {
                             span.limit-label style=(format!("--y: {:.1}%", y / HEIGHT * 100.0)) { (label) }
+                        }
+                        @for band in bands {
+                            (band.render(
+                                x_of(band.from, self.start, self.end) / WIDTH,
+                                x_of(band.to.max(band.from), self.start, self.end) / WIDTH,
+                            ))
                         }
                     }
                 }
@@ -263,6 +298,7 @@ pub(crate) fn stacked_bars(
     classes: &[&str],
     bars: &[Bar],
     value: fn(u64) -> String,
+    bands: &[Band],
 ) -> Markup {
     let top = nice_top(
         bars.iter()
@@ -315,6 +351,10 @@ pub(crate) fn stacked_bars(
                         aria-label=(title) {
                         line.grid x1="0" x2=(WIDTH) y1="50" y2="50" vector-effect="non-scaling-stroke" {}
                         @for rect in rects { (rect) }
+                    }
+                    // A band's times are bar indexes here: bar `i` spans `i..i + 1`.
+                    @for band in bands {
+                        (band.render(ratio(band.from, bars.len() as u64), ratio(band.to, bars.len() as u64)))
                     }
                 }
             }
