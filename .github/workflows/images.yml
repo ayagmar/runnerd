@@ -1,0 +1,80 @@
+# Publishes every stage of image/Dockerfile to ghcr.io/ayagmar/runnerd-runner:<stage>-<version>, built from a
+# release tag, each with a build provenance attestation. release.yml calls it for every version tag; run it by hand
+# (Actions → images → Run workflow, or `gh workflow run images.yml -f tag=v0.0.4`) to publish the images of a
+# release that has none. It builds the tag's image/, so the images match that release's daemon.
+#
+# linux/amd64 only: the Dockerfile downloads the amd64 GitHub CLI. No layer cache, so a cache write from another
+# workflow cannot change what a release ships.
+
+name: images
+
+on:
+  workflow_call:
+    inputs:
+      tag:
+        description: The release tag to build, such as v0.0.4.
+        required: true
+        type: string
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: The release tag to build, such as v0.0.4.
+        required: true
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  publish:
+    name: publish (${{ matrix.stage }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        stage: [base, jvm, node]
+    permissions:
+      contents: read # check out the tag
+      packages: write # push to ghcr.io
+      id-token: write # attest signs with the run's OIDC identity
+      attestations: write # attest stores the attestation
+    env:
+      IMAGE: ghcr.io/ayagmar/runnerd-runner
+      TAG: ${{ inputs.tag }}
+    steps:
+      - name: Check the tag is a version
+        run: |
+          [[ "$TAG" =~ ^v[0-9]+\.[0-9]+\.[0-9]+ ]] || { echo "::error::$TAG is not a version tag"; exit 1; }
+          echo "VERSION=${TAG#v}" >> "$GITHUB_ENV"
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          ref: refs/tags/${{ inputs.tag }}
+          persist-credentials: false
+      - run: echo "REVISION=$(git rev-parse HEAD)" >> "$GITHUB_ENV"
+      - uses: docker/setup-buildx-action@f87e5991a6d7451dcb8d9637bfbc97413f497069 # v4.4.1
+      - uses: docker/login-action@dbcb813823bdd20940b903addbd779551569679f # v4.6.0
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ github.token }}
+      # runnerd.version is what `runnerd doctor` compares with its own version; images built from the runner base
+      # inherit Ubuntu's org.opencontainers.image.version, so a local build would carry that one.
+      - id: build
+        uses: docker/build-push-action@c3c9e263c25d99ce0380d002d59b67737d91b0dc # v7.4.0
+        with:
+          context: image
+          target: ${{ matrix.stage }}
+          platforms: linux/amd64
+          push: true
+          tags: ${{ env.IMAGE }}:${{ matrix.stage }}-${{ env.VERSION }}
+          labels: |
+            org.opencontainers.image.source=https://github.com/${{ github.repository }}
+            org.opencontainers.image.version=${{ env.VERSION }}
+            runnerd.version=${{ env.VERSION }}
+            org.opencontainers.image.revision=${{ env.REVISION }}
+            org.opencontainers.image.licenses=MIT
+      - uses: actions/attest@1e69f48acb82d1966a394da916b4c1698aa569d6 # v4.2.2
+        with:
+          subject-name: ${{ env.IMAGE }}
+          subject-digest: ${{ steps.build.outputs.digest }}
+          push-to-registry: true
