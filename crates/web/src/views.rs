@@ -130,6 +130,7 @@ pub(crate) fn page(
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="color-scheme" content="light dark";
+                meta name="description" content="runnerd's dashboard: its slots, jobs, caches and config on this machine.";
                 title { (title) " · runnerd" }
                 link rel="icon" href=(assets::path("mark.svg")) type="image/svg+xml";
                 link rel="preload" href=(assets::path("libre-franklin.woff2")) as="font" type="font/woff2" crossorigin;
