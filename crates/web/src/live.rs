@@ -338,9 +338,10 @@ pub(crate) async fn job(
     respond(receiver)
 }
 
-/// Appends log lines `first`, `first + 1`, … (counted from 0) to the page's, and drops the page's oldest beyond
-/// `LOG_TAIL`, so a page left open on a busy job keeps a bounded tail; the full log has the rest.
-async fn append_lines(patches: &Patches, first: u64, lines: &[String]) -> bool {
+/// Appends log lines `first`, `first + 1`, … (counted from 0) to the `shown` lines of the page, and drops the
+/// page's oldest beyond `LOG_TAIL`, so a page left open on a busy job keeps a bounded tail; the full log has the
+/// rest.
+async fn append_lines(patches: &Patches, first: u64, lines: &[String], shown: &mut u64) -> bool {
     if lines.is_empty() {
         return true;
     }
@@ -352,6 +353,14 @@ async fn append_lines(patches: &Patches, first: u64, lines: &[String]) -> bool {
         .selector("#log-lines")
         .mode(ElementPatchMode::Append)
         .write_as_axum_sse_event();
+    if patches.send(append).await.is_err() {
+        return false;
+    }
+    *shown += lines.len() as u64;
+    if *shown <= job::LOG_TAIL {
+        return true;
+    }
+    *shown = job::LOG_TAIL;
     let trim = PatchElements::new("")
         .selector(format!(
             "#log-lines > li:nth-last-child(n+{})",
@@ -359,7 +368,7 @@ async fn append_lines(patches: &Patches, first: u64, lines: &[String]) -> bool {
         ))
         .mode(ElementPatchMode::Remove)
         .write_as_axum_sse_event();
-    patches.send(append).await.is_ok() && patches.send(trim).await.is_ok()
+    patches.send(trim).await.is_ok()
 }
 
 async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) -> Result<(), Error> {
@@ -376,6 +385,7 @@ async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) ->
     // The log's tail as it is now, in place of what the page has: whatever it got from the page's render or from
     // an earlier connection this one retries, each line shows once.
     let mut next_line = data.log_from + data.log.len() as u64;
+    let mut shown_lines = data.log.len() as u64;
     let tail = PatchElements::new(job::log_lines(&data).into_string()).write_as_axum_sse_event();
     if patches.send(tail).await.is_err() {
         return Ok(());
@@ -419,7 +429,7 @@ async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) ->
                 _ => {}
             }
         }
-        if !append_lines(patches, first_line, &lines).await {
+        if !append_lines(patches, first_line, &lines, &mut shown_lines).await {
             return Ok(());
         }
         if changed {
