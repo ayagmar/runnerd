@@ -274,9 +274,11 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
         text: "##[group]Unit tests".to_owned(),
     });
     let job = screen(&app, 120, 40, false);
-    assert!(
-        job.contains("CI / build") || job.contains("build  RUNNING"),
-        "{job}"
+    let head: Vec<&str> = job.lines().skip(1).take(2).map(str::trim_end).collect();
+    assert_eq!(
+        head,
+        ["■ halyard/ledger", "CI / build  RUNNING"],
+        "the repository, then the job as every other view names it: {job}"
     );
     for expected in [
         "Set up job",

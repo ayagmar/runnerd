@@ -1058,7 +1058,11 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
     if let Some(ran) = human::ran(summary, now) {
         details.push((0, format!("ran {}", duration(ran))));
     }
-    let details = fit_details(details, usize::from(head.width));
+    let width = usize::from(head.width);
+    let details = fit_details(details, width);
+    let badge = badge(summary, theme);
+    let title = human::title(summary);
+    let title_width = title.width().min(width.saturating_sub(badge.width() + 2));
     let style = summary.runner.as_ref().map_or_else(
         || theme.dim(),
         |runner| theme.profile(app.profile_index(&runner.profile)),
@@ -1068,30 +1072,14 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
             Line::from(vec![
                 Span::styled("■ ", style),
                 Span::styled(
-                    format!(
-                        "{}{}",
-                        summary.repository,
-                        summary
-                            .workflow
-                            .as_ref()
-                            .map_or_else(String::new, |workflow| format!(" · {workflow}"))
-                    ),
+                    fit(&summary.repository, width.saturating_sub(2)),
                     theme.dim(),
                 ),
             ]),
             Line::from(vec![
-                Span::styled(
-                    format!(
-                        "{}  ",
-                        if summary.name.is_empty() {
-                            human::title(summary)
-                        } else {
-                            summary.name.clone()
-                        }
-                    ),
-                    bold(),
-                ),
-                badge(summary, theme),
+                Span::styled(fit(&title, title_width), bold()),
+                Span::raw("  "),
+                badge,
             ]),
             Line::styled(details, theme.dim()),
         ]),
