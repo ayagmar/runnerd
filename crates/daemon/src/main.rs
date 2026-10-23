@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
+use runnerd_core::api::RepositoryStatus;
 use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, slice_memory_max};
 use runnerd_core::docker::Docker;
@@ -139,6 +140,30 @@ fn default_config() -> Option<PathBuf> {
 }
 
 /// `$XDG_STATE_HOME/runnerd/runnerd.db`, or `~/.local/state/runnerd/runnerd.db`.
+/// The job history, and the repositories its events last announced, which the engine starts from.
+fn open_history(config: &Config) -> Result<(Store, Vec<RepositoryStatus>), ExitCode> {
+    let database = config
+        .history
+        .database
+        .clone()
+        .or_else(default_database)
+        .ok_or_else(|| fail(&"neither XDG_STATE_HOME nor HOME is set; set history.database"))?;
+    let store = Store::open(&database).map_err(|error| {
+        fail(&format_args!(
+            "cannot open the job history {}: {error}",
+            database.display()
+        ))
+    })?;
+    info!("job history in {}", database.display());
+    let announced = store.announced_repositories().map_err(|error| {
+        fail(&format_args!(
+            "cannot read the repositories in the job history {}: {error}",
+            database.display()
+        ))
+    })?;
+    Ok((store, announced))
+}
+
 fn default_database() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -178,19 +203,7 @@ async fn serve(
     let docker = Docker::connect().map_err(|error| fail(&error))?;
     docker.info().await.map_err(|error| fail(&error))?;
     let identity = HostIdentity::read().map_err(|error| fail(&error))?;
-    let database = config
-        .history
-        .database
-        .clone()
-        .or_else(default_database)
-        .ok_or_else(|| fail(&"neither XDG_STATE_HOME nor HOME is set; set history.database"))?;
-    let store = Store::open(&database).map_err(|error| {
-        fail(&format_args!(
-            "cannot open the job history {}: {error}",
-            database.display()
-        ))
-    })?;
-    info!("job history in {}", database.display());
+    let (store, announced) = open_history(&config)?;
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
     let web_listener = runnerd_web::listen(web)
@@ -205,6 +218,7 @@ async fn serve(
             identity,
             memory_max: memory_max.map(|max| max.0),
             store: store.clone(),
+            announced,
             paths: Paths::default(),
         },
     );

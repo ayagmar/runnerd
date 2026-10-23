@@ -412,6 +412,7 @@ fn engine_with(
     dir: &TestDir,
     config: &str,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    let store = Store::open(&dir.0.join("history.db")).unwrap();
     Engine::new(
         Config::parse(config).unwrap(),
         github.clone(),
@@ -420,7 +421,8 @@ fn engine_with(
             names: Names::new("runnerd"),
             identity: identity("ci", ID_A),
             memory_max: None,
-            store: Store::open(&dir.0.join("history.db")).unwrap(),
+            announced: store.announced_repositories().unwrap(),
+            store,
             paths: Paths {
                 cgroup: dir.0.join("cgroup"),
                 proc: dir.0.join("proc"),

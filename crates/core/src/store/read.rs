@@ -388,7 +388,15 @@ pub(super) fn announced_repositories(
             Ok(api::Event::RepositoryRemoved { repository }) => {
                 repositories.remove(&repository);
             }
-            Ok(_) | Err(_) => {}
+            Ok(_) => {}
+            // Skipping it would leave a repository out, and a client resuming after it would keep that one.
+            Err(error) => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                ));
+            }
         }
     }
     Ok(repositories.into_values().collect())

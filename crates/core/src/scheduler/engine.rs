@@ -143,6 +143,9 @@ pub struct Setup {
     pub memory_max: Option<u64>,
     /// The job history.
     pub store: Store,
+    /// The repositories as the last run announced them (`Store::announced_repositories`), so the first publish
+    /// announces only the difference, including the repositories the config no longer has.
+    pub announced: Vec<api::RepositoryStatus>,
     /// Where the cgroup and proc file systems are.
     pub paths: Paths,
 }
@@ -254,6 +257,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             identity,
             memory_max,
             store,
+            announced,
             paths,
         } = setup;
         let slots = config
@@ -284,10 +288,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             },
             profiles: Vec::new(),
             // What clients resuming after the last run's events have, so the first publish announces the difference.
-            repositories: store.announced_repositories().unwrap_or_else(|error| {
-                warn!("cannot read the repositories the last run announced: {error}");
-                Vec::new()
-            }),
+            repositories: announced,
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
