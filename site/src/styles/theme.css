@@ -1,12 +1,6 @@
-/* Shared by the landing page and the Starlight docs: fonts, colour roles, and Starlight's variables mapped onto them. */
-@import '@fontsource-variable/libre-franklin/wght.css';
-@import '@fontsource-variable/source-serif-4/wght.css';
-@import '@fontsource-variable/source-serif-4/wght-italic.css';
-
+/* Shared by the landing page and the Starlight docs: colour roles, and Starlight's variables mapped onto them. The text
+   fonts, --font-display and --font-text, come from astro.config.mjs through <Font> in each page's head. */
 :root {
-  --font-display: 'Libre Franklin Variable', 'Helvetica Neue', Arial, sans-serif;
-  --font-text: 'Source Serif 4 Variable', Georgia, 'Times New Roman', serif;
-
   /* Two profiles in the made-up example config, two colours: mint is jvm, pink is node. */
   --mint: #c3edce;
   --pink: #f8c7c9;

@@ -169,12 +169,6 @@ importers:
       '@astrojs/starlight':
         specifier: 0.42.6
         version: 0.42.6(astro@7.4.2(@types/node@24.19.2)(yaml@2.9.1))
-      '@fontsource-variable/libre-franklin':
-        specifier: 5.3.0
-        version: 5.3.0
-      '@fontsource-variable/source-serif-4':
-        specifier: 5.3.1
-        version: 5.3.1
       astro:
         specifier: 7.4.2
         version: 7.4.2(@types/node@24.19.2)(yaml@2.9.1)
@@ -400,12 +394,6 @@ packages:
 
   '@expressive-code/plugin-text-markers@0.44.3':
     resolution: {integrity: sha512-4Ae2xRSDV5kdWPsi40xWbOtoihbzM0zLVjQKkDAnD5KzFXl+6/kd+VhuWOlTRVaJ5cqGk++vCbAaf0MR1XbZlw==}
-
-  '@fontsource-variable/libre-franklin@5.3.0':
-    resolution: {integrity: sha512-PEQemCKVRtkLZJNpfvR4wG7x87c8iG05XJuEaX59ogMcAQpdtCZz/NXZUrXLJyvyx3/HD70W4LUppWLBdEdU2g==}
-
-  '@fontsource-variable/source-serif-4@5.3.1':
-    resolution: {integrity: sha512-4Rtay22SC4lMvw11r/+9kxANB6P3M0X8s1NudBC2v0J1KU2y3DcMoNcT3lBoZ/CqLirzf+StlO6UlJilyrvaUg==}
 
   '@img/colour@1.1.0':
     resolution: {integrity: sha512-Td76q7j57o/tLVdgS746cYARfSyxk8iEfRxewL9h4OMzYhbW4TAcppl0mT4eyqXddh6L/jwoM75mo7ixa/pCeQ==}
@@ -1977,10 +1965,6 @@ snapshots:
   '@expressive-code/plugin-text-markers@0.44.3':
     dependencies:
       '@expressive-code/core': 0.44.3
-
-  '@fontsource-variable/libre-franklin@5.3.0': {}
-
-  '@fontsource-variable/source-serif-4@5.3.1': {}
 
   '@img/colour@1.1.0':
     optional: true

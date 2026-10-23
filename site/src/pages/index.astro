@@ -1,4 +1,5 @@
 ---
+import { Font } from 'astro:assets';
 import '../styles/theme.css';
 import mark from '../assets/mark.svg?raw';
 import Overview from '../components/Overview.astro';
@@ -90,6 +91,8 @@ const clients = [
     <meta property="og:site_name" content="runnerd" />
     <meta name="twitter:card" content="summary" />
     <link rel="icon" href={`${base}favicon.svg`} type="image/svg+xml" />
+    <Font cssVariable="--font-text" preload={[{ style: 'normal' }]} />
+    <Font cssVariable="--font-display" preload />
     <script is:inline>
       // Same key as Starlight's theme picker, so the landing page and the docs agree.
       const stored = localStorage.getItem('starlight-theme');
