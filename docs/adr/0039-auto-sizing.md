@@ -43,17 +43,27 @@ preconditions keep it from overwriting anything newer or taking a slot away:
 - The file on disk must be the text runnerd runs with. While it differs, as after an edit not yet loaded, auto
   sizing changes nothing and says so once; the commit checks it again just before writing.
 - `PUT /v1/config?revision=` refuses (409) a text made from another revision than the one runnerd runs with
-  (`config::revision`, a hash of the text, in `GET /v1/config`). `runnerctl sizing apply` and `undo`, the TUI and the
-  dashboard's editor send it, so an editor opened before an auto change cannot save over it. Without the parameter
-  a `PUT` replaces whatever runs, as before.
+  (`config::revision`, a hash of the text, in `GET /v1/config`), and one sent while the file on disk is not that
+  revision's text, which the commit checks again. Its reply has the revision of the text it wrote, which the
+  dashboard's editor saves against next: never a later read's, which may be of a config written since.
+  `runnerctl sizing apply` and `undo`, the TUI and the dashboard's editor send it, so an editor opened before an
+  auto change or an edit on disk cannot save over it. Without the parameter a `PUT` replaces whatever runs, as
+  before.
 - The engine checks, between ticks and before the commit runs, that no runner is in a slot the new config lacks
   (`RunningSlots::Keep`). A person's reload keeps draining such slots (`RunningSlots::Drain`).
 
 Each change is recorded in the job history before its file is written: a row in `auto_sizing` with when, the
 profile, the old and new values, why, and `pending`. Once the file is written it becomes `done`, in the same
-transaction as its durable `sizing.changed` event; if not, `failed`. A change the history cannot record is not
-written. One left pending by a crash or a failed write is resolved at the next look from the config: `done` if the
-profile has the new values, else `failed`; until then it holds the interval. The table is never pruned (a few rows
+transaction as its durable `sizing.changed` event; if the write was refused or failed before the rename, `failed`.
+Both transactions commit with `synchronous = FULL`, synced to disk before the file is written or the answer
+returns, so a power failure cannot keep a synced config file and lose its record. The writer goes back to `normal`
+for everything else. A change the history cannot record is not written.
+
+One left pending, by a crash or a record that failed after its file was written, is settled at the next look,
+including the one at start and whether auto sizing is on or not: `done` if the profile has the new values, else
+`uncertain`. Other values do not prove the file was not written, as a person may have changed them since; an
+uncertain change is listed with what it replaced and holds the interval like a done one. Until settled, a pending
+change holds the interval. The table is never pruned (a few rows
 a day at most), so the interval holds however long it is. `GET /v1/sizing` lists the done changes in its window;
 undoing one writes its old values back (`runnerctl sizing undo`, the dashboard's link into the config editor).
 Older clients skip the event type and the new optional fields.
@@ -74,4 +84,4 @@ advice raises it to the largest peak plus the margin, and a run at the cap keeps
 cost is time, not a wrong cap. The owner can raise `max_step` or apply a raise by hand.
 
 A change refused by the check or the engine is recorded as failed and holds no interval: the next look tries again,
-and its refusal is logged once until it changes.
+and its refusal is logged once until it changes. Two synced commits per change cost a few milliseconds a day.

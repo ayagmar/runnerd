@@ -276,6 +276,9 @@ pub enum Resolution {
     Done,
     /// The file was not written.
     Failed,
+    /// Left pending, and the config no longer says whether it was written: it keeps its interval and stays listed,
+    /// with what it replaced.
+    Uncertain,
 }
 
 /// Auto sizing as the history keeps it: when each profile last changed, and changes not yet known to be written.
@@ -540,8 +543,8 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
-    /// Records a change auto sizing is about to write, as pending, before the file is. The future has its row once
-    /// it committed, `None` if it did not: then nothing may be written.
+    /// Records a change auto sizing is about to write, as pending, before the file is, synced to disk. The future
+    /// has its row once it committed, `None` if it did not: then nothing may be written.
     pub fn sizing_intent(
         &self,
         change: api::SizingChange,
@@ -551,8 +554,8 @@ impl Store {
         async move { committed.await.ok().flatten() }
     }
 
-    /// Records what became of a pending change; a done one is announced as `sizing.changed` in the same
-    /// transaction. The future says whether it committed.
+    /// Records what became of a pending change, synced to disk; a done one is announced as `sizing.changed` in the
+    /// same transaction. The future says whether it committed.
     pub fn sizing_resolved(
         &self,
         id: i64,

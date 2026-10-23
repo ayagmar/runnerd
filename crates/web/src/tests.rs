@@ -1396,6 +1396,40 @@ async fn an_auto_sizing_change_is_listed_and_undoing_it_opens_what_it_replaced_i
 }
 
 #[tokio::test]
+async fn after_a_save_the_editor_holds_the_revision_of_what_it_saved_not_of_a_config_written_since()
+{
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let before = dashboard.fake.fixtures.lock().unwrap().config.clone();
+    let saved_text = before.replacen("slots = 2", "slots = 1", 1);
+    // Auto sizing writes C between the save and any read after it.
+    let written_since = before.replacen("memory = \"7G\"", "memory = \"5.25G\"", 1);
+    dashboard.fake.fixtures.lock().unwrap().after_put = Some(written_since.clone());
+    let saved = dashboard
+        .write(
+            &cookie,
+            "PUT",
+            "/config",
+            &serde_json::json!({ "toml": saved_text, "revision": runnerd_core::config::revision(&before) }),
+        )
+        .await;
+    assert!(saved.body.contains("Saved and reloaded"), "{}", saved.body);
+    assert!(
+        saved.body.contains(&format!(
+            "'{}'",
+            runnerd_core::config::revision(&saved_text)
+        )),
+        "the editor saves next against the text it saved"
+    );
+    assert!(
+        !saved
+            .body
+            .contains(&runnerd_core::config::revision(&written_since)),
+        "the editor never takes the revision of a text it does not hold"
+    );
+}
+
+#[tokio::test]
 async fn an_editor_opened_before_the_config_changed_cannot_save_over_the_change() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

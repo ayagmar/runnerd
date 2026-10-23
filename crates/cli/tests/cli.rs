@@ -262,6 +262,7 @@ async fn check_config(State(fake): State<Shared>, body: String) -> axum::Json<Co
         warnings: Vec::new(),
         memory_caps: Some(20 << 30),
         memory_max: Some(16 << 30),
+        revision: None,
     })
 }
 
@@ -290,6 +291,7 @@ async fn replace_config(
         warnings: Vec::new(),
         memory_caps: Some(13 << 30),
         memory_max: Some(16 << 30),
+        revision: None,
     })
 }
 
@@ -321,6 +323,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
                 slots: 2,
             },
             reason: "lower memory to 2.5G from 9G, its largest peak + 15%".to_owned(),
+            uncertain: false,
         }],
         since: 1_700_000_000,
         until: 1_700_086_400,

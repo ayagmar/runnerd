@@ -87,6 +87,10 @@ pub struct ConfigCheck {
     pub memory_caps: Option<u64>,
     /// The `MemoryMax` of the slice it names; `None` when unlimited or unknown.
     pub memory_max: Option<u64>,
+    /// From `PUT /v1/config`, once written: the revision of the text written, to make the next change against.
+    /// `None` from a check, or from a daemon before it.
+    #[serde(default)]
+    pub revision: Option<String>,
 }
 
 /// `GET /v1/doctor`: what `runnerd doctor` checks, for the config the daemon runs with.

@@ -57,6 +57,10 @@ pub struct SizingChange {
     pub to: Resize,
     /// Why, as the advice said it then.
     pub reason: String,
+    /// Whether it may not have been written: recorded before its file was written, and the config no longer said
+    /// whether it was when runnerd looked again. It still holds the interval, and `from` is still what it replaced.
+    #[serde(default)]
+    pub uncertain: bool,
 }
 
 /// One profile: its limits now, its jobs' peaks and waits, and the advice.
@@ -209,7 +213,11 @@ impl SizingChange {
         } else {
             format!("slots {} → {}", self.from.slots, self.to.slots)
         };
-        format!("{memory}, {slots}")
+        if self.uncertain {
+            format!("{memory}, {slots} (may not have been written)")
+        } else {
+            format!("{memory}, {slots}")
+        }
     }
 }
 

@@ -41,6 +41,7 @@ fn sizing() -> Sizing {
                 slots: 2,
             },
             reason: "lower memory to 2.25G from 7G, its largest peak + 15%".to_owned(),
+            uncertain: false,
         }],
     }
 }

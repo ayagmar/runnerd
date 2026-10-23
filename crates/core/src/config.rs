@@ -495,6 +495,7 @@ impl Config {
                 warnings: Vec::new(),
                 memory_caps: memory_caps.map(|caps| caps.0),
                 memory_max: max.map(|max| max.0),
+                revision: None,
             }
         };
         let config = match Config::parse(text) {
@@ -524,6 +525,7 @@ impl Config {
                     warnings: warnings.iter().map(ToString::to_string).collect(),
                     memory_caps: Some(total.0),
                     memory_max: max.map(|max| max.0),
+                    revision: None,
                 };
                 (Some(config), check)
             }

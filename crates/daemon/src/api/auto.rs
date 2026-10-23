@@ -1,10 +1,10 @@
 //! Auto sizing: under `[sizing] auto`, every few minutes, writes the changes `sizing::auto::changes` picks into the
 //! config through the same check and commit as `PUT /v1/config`, keeping the rest of the file as written. Each change
-//! is recorded in the history as pending before the file is written, then as done (announced as `sizing.changed`)
-//! or failed; one left pending by a crash is resolved from the config at the next look. It never writes a config the
-//! check refuses, a file that changed on disk since the daemon read it, or one without a slot a runner is in, and does
-//! nothing while auto sizing is off.
-
+//! is recorded in the history as pending, synced to disk, before the file is written, then as done (announced as
+//! `sizing.changed`) or failed. One left pending by a crash or a failed record is settled at the next look, auto
+//! sizing on or off: done when the config has its values, else uncertain, never failed. It never writes a config
+//! the check refuses, a file that changed on disk since the daemon read it, or one without a slot a runner is in,
+//! and writes nothing while auto sizing is off.
 use std::collections::BTreeMap;
 use std::time::Duration;
 
@@ -54,10 +54,29 @@ async fn look(state: &AppState, refused: &mut BTreeMap<String, String>) {
     let Ok(config) = Config::parse(&file.text) else {
         return;
     };
+    let path = file.path.display().to_string();
+    // Settled whether auto sizing is on or not: a change written before it was turned off still shows, and holds.
+    let auto = match state.handle.store.auto_sizing().await {
+        Ok(auto) => auto,
+        Err(store_error) => {
+            return refuse(
+                refused,
+                &path,
+                format!("cannot read the job history: {store_error}"),
+            );
+        }
+    };
+    if !resolve(state, &config, &auto).await {
+        // Pending changes hold their profiles' intervals until the history says what became of them.
+        return refuse(
+            refused,
+            &path,
+            "the job history cannot record what became of a change".to_owned(),
+        );
+    }
     if !config.sizing.auto {
         return;
     }
-    let path = file.path.display().to_string();
     let read = match read(state, &file, &config).await {
         Ok(read) => read,
         Err(message) => return refuse(refused, &path, message),
@@ -66,7 +85,7 @@ async fn look(state: &AppState, refused: &mut BTreeMap<String, String>) {
     let context = Context {
         memory_max: read.memory_max,
         window: read.window,
-        last: &read.auto.last,
+        last: &auto.last,
         running: &read.running,
     };
     for change in changes(&config, &read.history, context) {
@@ -78,14 +97,13 @@ async fn look(state: &AppState, refused: &mut BTreeMap<String, String>) {
 
 /// What a look sizes from.
 struct Read {
-    auto: AutoSizing,
     window: Window,
     history: History,
     memory_max: Option<u64>,
     running: BTreeMap<String, u32>,
 }
 
-/// Checks the file on disk is the one runnerd runs with, resolves the pending changes, and reads the history, the
+/// Checks the file on disk is the one runnerd runs with, and reads the history, the
 /// slice's `MemoryMax` and what runs; `Err` says why nothing can change now.
 async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Read, String> {
     match std::fs::read_to_string(&file.path) {
@@ -101,16 +119,6 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
     }
     let history_error =
         |store_error: StoreError| format!("cannot read the job history: {store_error}");
-    let auto = state
-        .handle
-        .store
-        .auto_sizing()
-        .await
-        .map_err(history_error)?;
-    if !resolve(state, config, &auto).await {
-        // Pending changes hold their profiles' intervals until the history says what became of them.
-        return Err("the job history cannot record what became of a change".to_owned());
-    }
     let window = Window::new(None, now());
     let history = state
         .handle
@@ -139,7 +147,6 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
         })
         .collect();
     Ok(Read {
-        auto,
         window,
         history,
         memory_max,
@@ -203,16 +210,17 @@ async fn write(
 }
 
 /// Records what became of the changes left pending: done when `config` has the profile at what it was changed to,
-/// failed otherwise. Whether every one was recorded.
+/// uncertain otherwise, keeping its interval and what it replaced. Whether every one was recorded.
 async fn resolve(state: &AppState, config: &Config, auto: &AutoSizing) -> bool {
     for (id, change) in &auto.pending {
         let written = config.profiles.get(&change.profile).is_some_and(|profile| {
             (profile.memory.0, profile.slots) == (change.to.memory, change.to.slots)
         });
+        // Values that differ do not say it was not written: a person may have changed them since.
         let resolution = if written {
             Resolution::Done
         } else {
-            Resolution::Failed
+            Resolution::Uncertain
         };
         if !state.handle.store.sizing_resolved(*id, resolution).await {
             return false;
@@ -224,7 +232,7 @@ async fn resolve(state: &AppState, config: &Config, auto: &AutoSizing) -> bool {
             if written {
                 "in the config"
             } else {
-                "not in the config"
+                "uncertain: the config has other values now"
             }
         );
     }

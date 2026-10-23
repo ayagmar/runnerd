@@ -167,10 +167,11 @@ nothing until Docker has listed them.
   `sizing::auto::changes` picks through the same check and commit (`api::control::replace`), at most one change per
   profile per `[sizing] interval`, never lowering a profile a run met the cap of, never leaving a profile's bounds,
   and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
-  before the commit). Each change is recorded as pending in the history before its file is written, then done (with
-  a durable `sizing.changed` event) or failed ([ADR 0039](docs/adr/0039-auto-sizing.md)).
-- `PUT /v1/config?revision=` refuses a text made from another revision than the config runnerd runs with, so an
-  editor opened before a change cannot save over it.
+  before the commit). Each change is recorded as pending in the history, synced to disk, before its file is written,
+  then done (with a durable `sizing.changed` event) or failed; a pending one is settled at every look, auto sizing
+  on or off, as done or uncertain, never failed ([ADR 0039](docs/adr/0039-auto-sizing.md)).
+- `PUT /v1/config?revision=` refuses a text made from another revision than the config runnerd runs with, or sent
+  while the file on disk is not that revision's text, so an editor opened before a change cannot save over it.
 - What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`. Under
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under

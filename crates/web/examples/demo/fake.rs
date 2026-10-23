@@ -57,6 +57,8 @@ pub struct Fixtures {
     pub records: Records,
     /// What `GET /v1/config` reads and `PUT /v1/config` replaces.
     pub config: String,
+    /// Written over `config` right after the next `PUT /v1/config` answers, as auto sizing may.
+    pub after_put: Option<String>,
     /// The requests to the control endpoints, such as `POST /v1/profiles/jvm/reseed`.
     pub controls: Vec<String>,
     /// Whether the job history fails to record a pause or resume of every repository, as the daemon's 500.
@@ -646,6 +648,7 @@ impl Fixtures {
             cache_history,
             records,
             config: include_str!("../../../../examples/runnerd.toml").to_owned(),
+            after_put: None,
             controls: Vec::new(),
             unrecorded: false,
         }
@@ -843,6 +846,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                 slots: 2,
             },
             reason: "lower memory to 9G from 10G, its largest peak + 15%".to_owned(),
+            uncertain: false,
         }],
         since: fixtures.now - 30 * 86_400,
         until: fixtures.now,
@@ -1170,11 +1174,13 @@ fn router(fake: Fake) -> Router {
                     )
                         .into_response();
                 }
-                let (config, checked) = check(&text);
+                let (config, mut checked) = check(&text);
                 if config.is_none() {
                     return (StatusCode::UNPROCESSABLE_ENTITY, Json(checked)).into_response();
                 }
-                fake.fixtures.lock().unwrap().config = text;
+                checked.revision = Some(runnerd_core::config::revision(&text));
+                let mut fixtures = fake.fixtures.lock().unwrap();
+                fixtures.config = fixtures.after_put.take().unwrap_or(text);
                 Json(checked).into_response()
             }),
         )

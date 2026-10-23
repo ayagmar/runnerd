@@ -971,6 +971,7 @@ fn sizing_change(profile: &str, at: u64) -> crate::api::SizingChange {
             slots: 2,
         },
         reason: "lower memory".to_owned(),
+        uncertain: false,
     }
 }
 

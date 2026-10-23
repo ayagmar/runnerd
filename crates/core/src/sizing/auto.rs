@@ -104,6 +104,7 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
             from,
             to,
             reason: reasons.join("; "),
+            uncertain: false,
         });
     }
     changes

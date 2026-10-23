@@ -173,19 +173,33 @@ pub(super) async fn replace_config(
 ) -> Response {
     // One replacement at a time, so the file and the engine end up with the same config.
     let mut file = state.config.lock().await;
-    // A text made from a config replaced since, as by auto sizing, would undo that change.
-    if let Some(read) = query.revision
-        && read != revision(&file.text)
-    {
-        return error(
-            StatusCode::CONFLICT,
-            &format!(
-                "the config changed since revision {read} was read (now {}); read it again and redo the change",
-                revision(&file.text)
-            ),
-        );
-    }
-    match replace(&state, &mut file, text, RunningSlots::Drain, None).await {
+    // A text made from a config replaced since, as by auto sizing, or edited on disk since, would undo that change.
+    let on_disk = match query.revision {
+        None => None,
+        Some(read) if read != revision(&file.text) => {
+            return error(
+                StatusCode::CONFLICT,
+                &format!(
+                    "the config changed since revision {read} was read (now {}); read it again and redo the change",
+                    revision(&file.text)
+                ),
+            );
+        }
+        Some(_) => {
+            if std::fs::read_to_string(&file.path).ok().as_ref() != Some(&file.text) {
+                return error(
+                    StatusCode::CONFLICT,
+                    &format!(
+                        "{} changed on disk since runnerd read it; saving would overwrite that edit",
+                        file.path.display()
+                    ),
+                );
+            }
+            // Checked again when the engine writes it.
+            Some(file.text.clone())
+        }
+    };
+    match replace(&state, &mut file, text, RunningSlots::Drain, on_disk).await {
         Ok(checked) => {
             info!("{} replaced by {principal:?}", file.path.display());
             Json(checked).into_response()
@@ -282,6 +296,7 @@ pub(super) async fn replace(
         .await
         .map_err(Refusal::Control)?;
     checked.warnings.extend(warning);
+    checked.revision = Some(revision(&text));
     file.text = text;
     Ok(checked)
 }

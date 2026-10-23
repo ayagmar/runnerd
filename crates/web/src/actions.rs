@@ -317,11 +317,13 @@ pub(crate) async fn save_config(State(app): State<App>, Json(edit): Json<Edit>) 
     let check = serde_json::from_slice::<ConfigCheck>(&reply.body);
     match (reply.status, check) {
         (status, Ok(check)) if status.is_success() => {
-            let file = app.daemon.get::<ConfigFile>("/v1/config").await.ok();
-            let path = file
-                .as_ref()
-                .map_or_else(|| "runnerd.toml".to_owned(), |file| file.path.clone());
-            let revision = file.and_then(|file| file.revision);
+            let path = app
+                .daemon
+                .get::<ConfigFile>("/v1/config")
+                .await
+                .map_or_else(|_| "runnerd.toml".to_owned(), |file| file.path);
+            // The revision of the text saved, never a later read's, which may be of a config written since.
+            let revision = check.revision.clone();
             html(&[config::result(
                 &check,
                 &edit.toml,

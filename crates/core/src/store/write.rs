@@ -702,7 +702,27 @@ impl Writer<'_> {
         })
     }
 
+    /// Runs `write` with its commits synced to disk (`synchronous = FULL`), for what must outlast a power failure:
+    /// an auto sizing change recorded before the config file is written and synced, and what became of it. `None`
+    /// when the database will not sync them.
+    fn durably<T>(&self, write: impl FnOnce() -> T) -> Option<T> {
+        logged(
+            "sync commits to disk",
+            self.db.pragma_update(None, "synchronous", "full"),
+        )?;
+        let written = write();
+        logged(
+            "stop syncing every commit",
+            self.db.pragma_update(None, "synchronous", "normal"),
+        );
+        Some(written)
+    }
+
     fn sizing_intent(&self, change: &api::SizingChange) -> Option<i64> {
+        self.durably(|| self.record_intent(change)).flatten()
+    }
+
+    fn record_intent(&self, change: &api::SizingChange) -> Option<i64> {
         let mut id = None;
         self.change("record an auto sizing change", |_| {
             self.db.execute(
@@ -726,10 +746,18 @@ impl Writer<'_> {
     }
 
     fn sizing_resolved(&self, id: i64, resolution: Resolution, done: oneshot::Sender<bool>) {
-        let resolved = self.change("resolve an auto sizing change", |announced| {
+        let resolved = self
+            .durably(|| self.resolve(id, resolution))
+            .unwrap_or(false);
+        let _ = done.send(resolved);
+    }
+
+    fn resolve(&self, id: i64, resolution: Resolution) -> bool {
+        self.change("resolve an auto sizing change", |announced| {
             let state = match resolution {
                 Resolution::Done => "done",
                 Resolution::Failed => "failed",
+                Resolution::Uncertain => "uncertain",
             };
             self.db.execute(
                 "UPDATE auto_sizing SET state = ?2 WHERE id = ?1 AND state = 'pending'",
@@ -744,8 +772,7 @@ impl Writer<'_> {
                 announced.push(Event::SizingChanged { change });
             }
             Ok(())
-        });
-        let _ = done.send(resolved);
+        })
     }
 
     /// Counts a batch of the mirror's log and where it ends, together: counting part of it, or counting it without
@@ -764,5 +791,42 @@ impl Writer<'_> {
             )?;
             Ok(())
         })
+    }
+}
+
+#[cfg(test)]
+#[allow(
+    clippy::unwrap_used,
+    reason = "tests: a database that cannot open fails the test"
+)]
+mod tests {
+    use std::sync::Mutex;
+
+    use rusqlite::Connection;
+    use tokio::sync::broadcast;
+
+    use super::Writer;
+    use crate::testdir::TestDir;
+
+    fn synchronous(db: &Connection) -> u8 {
+        db.pragma_query_value(None, "synchronous", |row| row.get(0))
+            .unwrap()
+    }
+
+    #[test]
+    fn a_durable_write_syncs_its_commits_and_the_writer_goes_back_to_normal_after() {
+        let dir = TestDir::new("store-write");
+        let db = Connection::open(dir.0.join("runnerd.db")).unwrap();
+        super::super::configure(&db).unwrap();
+        let (events, _) = broadcast::channel(1);
+        let held = Mutex::new(Vec::new());
+        let writer = Writer {
+            db,
+            events: &events,
+            held: &held,
+        };
+        // 2 is FULL, 1 NORMAL.
+        assert_eq!(writer.durably(|| synchronous(&writer.db)), Some(2));
+        assert_eq!(synchronous(&writer.db), 1);
     }
 }
