@@ -132,7 +132,8 @@ nothing until Docker has listed them.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the
   config, which a reload may have lowered since they started.
 - No record keeps the JIT config, `_work/_temp`, a git config's `extraheader`, or any dot-file in the runner's home
-  or file in `/tmp` or `/var/tmp` the job added or changed: the runner image deletes them when the runner exits, and
+  (but the Rust toolchain's `~/.rustup` and `~/.cargo/{bin,registry,git}`) or file in `/tmp` or `/var/tmp` the job
+  added or changed: the runner image deletes them when the runner exits, and
   the engine commits no container whose changes still hold one (`record::secrets_left`). Checking and committing a
   container run off the engine's loop.
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It

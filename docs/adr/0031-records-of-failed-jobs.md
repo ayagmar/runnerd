@@ -26,20 +26,26 @@ history, so a restart finds them.
 1. The entrypoint touches `/run/runnerd-since` before it starts `run.sh`. Once the runner exits and its user's
    processes are gone, it runs `runnerd-scrub` (`image/scrub.sh`) as root. The scrub deletes every dot-file or
    dot-directory of the runner's home, and every entry of `/tmp` and `/var/tmp`, whose ctime is newer than the
-   marker (inside an older dot-directory, the newer entries). That covers the runner's registration and credentials
+   marker. A change inside a dot-directory of the image copies the directory up, which gives it a new ctime, so it
+   goes whole. That covers the runner's registration and credentials
    and whatever logins and keys a job's tools leave, whatever their names: `~/.gitconfig` with a token in an
    `insteadOf` URL, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`, `/tmp/deploy.pem`. A job cannot set a ctime back.
+   Tools a job installs there go too (`~/.local`, `~/.nvm`, `~/.dotnet`), except the Rust toolchain: `~/.rustup`,
+   and `~/.cargo`'s `bin`, `registry` and `git`, which hold binaries, downloaded crates and git checkouts a
+   workspace's `Cargo.lock` names anyway. `~/.cargo`'s `credentials.toml` and `config.toml` may hold a registry's
+   token and go. A shell needs a toolchain to re-run a failed step, and Rust's is the one the runner image lacks
+   that installs into home; another may join the list once shown to hold no credentials.
    It also deletes the JIT config's directory and `_work/_temp` (the step scripts, `GITHUB_ENV`), and every
    `extraheader` line in the workspace's git configs. Mount points, the cache layers, are other file systems and
    are left alone: they are not part of a record.
 2. Before committing, the engine reads the container's changes (`docker diff`). It refuses to keep a container
    whose added or modified paths include anything under the runner's dot-files, `/tmp`, `/var/tmp`, `/run/runnerd`
-   or `_work/_temp` (`record::secrets_left`). A short allowlist of harmless paths is there for exceptions; it is
-   empty, because on the sandbox runs the scrub left none. A runner image without the scrub, or a container killed
+   or `_work/_temp` (`record::secrets_left`), but the Rust toolchain's directories above. A refused record's reason
+   names the first five paths and counts the rest. A runner image without the scrub, or a container killed
    before it ran, leaves no record; the job history says why.
 
-Everything else the job changed outside volumes stays. That includes the workspace and anything a job wrote with
-`sudo` outside the runner's home and the temporary directories, such as `/etc` or `/root`. A step that saves a secret
+Everything else the job changed outside volumes stays: the workspace, `_diag`, and anything else outside the
+runner's dot-files and the temporary directories, such as `~/go`. A step that saves a secret
 there, or into the workspace, leaves it in the record: runnerd does not search file contents. `_diag` stays: it has
 the job's log and the job message, which the runner masks as it masks the log on GitHub.
 
@@ -61,8 +67,9 @@ and why it went (`count`, `size`, `age`, `user`), past the record itself.
 - The engine runs the shell's container from the record with the profile's memory cap and counts it in the budget
   like a slot. When the budget cannot hold it, the request fails with 409 and says so.
 - The shell mounts the profile's snapshot and the shared pnpm and Maven caches read-only.
-- While a shell is open, its profile does not reseed, the shared caches are not trimmed, and `caches --clean` of a
-  shared cache is refused.
+- While a shell is open, its profile does not reseed: a requested reseed and `caches --clean` of a shared cache
+  answer 409, and the shared caches are not trimmed. A shell is refused while its profile reseeds or the shared
+  caches are trimmed.
 - The container goes when the shell exits, when the client goes away (the daemon sends the terminal a Ctrl-D, then
   removes it), after 8 hours, when the daemon stops, and, for one a crash left, when the next daemon starts.
 - The terminal keeps the size it was opened with: v1 sends no resize.
@@ -71,7 +78,7 @@ and why it went (`count`, `size`, `age`, `user`), past the record itself.
 in tasks that wake the engine when they finish, so a large workspace does not hold up a tick. The free-space check
 counts the expected size of the records still being committed. A daemon that stops mid-record is caught up at the
 next start: a record image the history has no row for is noted as made, and a stopped runner whose failed job got no
-record is noted as skipped.
+record is noted as skipped, whether the daemon stopped while keeping it or was not running when it stopped.
 
 ## Consequences
 
@@ -84,7 +91,8 @@ its terminal in raw mode for the shell.
 
 The runner image's entrypoint no longer `exec`s the runner: it waits for it, then scrubs. `run.sh` passes on no
 signal, so the entrypoint sends `docker stop`'s TERM to the runner's listener, which cancels the job. Once `run.sh`
-exits, the entrypoint gives the runner user's processes 2 s, then TERM, then KILL, so nothing writes after the scrub.
+exits, the entrypoint sends the runner user's processes left (a Gradle daemon) TERM, gives them 2 s, then KILL, so
+nothing writes after the scrub.
 The runner gives a cancelled step up to 10 s (SIGINT, then SIGTERM after 7.5 s). A `docker stop` with its default
 10 s timeout can therefore kill the container before the scrub. The guard then refuses it, and a cancelled job is
 not recorded anyway.

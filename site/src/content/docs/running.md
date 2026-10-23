@@ -62,7 +62,7 @@ It failed at step 5: Unit tests (exit code 1)
 Its log shows it ran:
     ./gradlew test --no-daemon
     shell: /usr/bin/bash -e {0}
-You are in /home/runner/_work/ledger/ledger, as the job left it. Not kept: the job's Docker containers and images, and what it changed in ~/.cache, the tool cache and the Android SDK, which show the profile's snapshot. Exit to remove this container.
+You are in /home/runner/_work/ledger/ledger, as the job left it. Not kept: the job's Docker containers and images; what it changed in ~/.cache, the tool cache and the Android SDK, which show the profile's snapshot; and what it added or changed among your home's dot-files and in /tmp (logins, and tools in ~/.local or ~/.nvm), except ~/.rustup and ~/.cargo's bin, registry and git. Exit to remove this container.
 runner@4be1c0d2a7e9:~/_work/ledger/ledger$
 ```
 
@@ -70,15 +70,16 @@ runner@4be1c0d2a7e9:~/_work/ledger/ledger$
 
 - The terminal goes over the API socket and keeps the size it was opened with.
 - The shell's container counts against the budget with the profile's memory cap, and is refused when the budget cannot hold it.
-- It mounts the profile's snapshot and the shared pnpm and Maven caches read-only. While it is open, the profile does not reseed and the shared caches are not trimmed or cleaned.
+- It mounts the profile's snapshot and the shared pnpm and Maven caches read-only. While it is open, the profile does not reseed (`runnerctl reseed` answers 409) and the shared caches are not trimmed or cleaned. It is refused while the profile reseeds or the shared caches are trimmed.
 - It goes when the shell exits, when the client goes away, or after 8 hours.
 
 | What | In a record |
 |---|---|
 | the workspace, `_work/<repository>`, with build output and test reports | yes |
 | the runner's `_diag` logs, secrets masked as the runner masks them on GitHub | yes |
-| anything else the job wrote outside volumes, such as files it wrote with `sudo` in `/etc` or `/root` | yes |
-| dot-files and dot-directories the job added or changed in the runner's home (`.gitconfig`, `.aws`, `.gnupg`, `.docker`, the runner's `.credentials`), and what it added or changed in `/tmp` and `/var/tmp` | never |
+| the Rust toolchain a job installed: `~/.rustup`, and `~/.cargo`'s `bin`, `registry` and `git` | yes |
+| anything else the job wrote outside volumes and the places below, such as `~/go` | yes |
+| other dot-files and dot-directories the job added or changed in the runner's home: logins (`.gitconfig`, `.aws`, `.gnupg`, `.docker`, `~/.cargo/credentials.toml` and `config.toml`, the runner's `.credentials`) and tools installed there (`~/.local`, `~/.nvm`, `~/.dotnet`, `~/.bun`, `~/.sdkman`); what it added or changed in `/tmp` and `/var/tmp` | never |
 | the JIT config, `_work/_temp` (step scripts), the token `actions/checkout` puts in `.git/config` | never |
 | the slot's caches, tool cache, Android SDK, and the job's Docker images | no; volumes, which a shell sees as the profile's snapshot |
 
@@ -119,7 +120,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `POST /v1/repositories/{owner}/{name}/pause?force=` | no new runners; `409` naming the running job, unless `force=true` cancels its run |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
 | `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every configured repository; while any runs a job, `409` naming the jobs, and none is paused |
-| `POST /v1/profiles/{name}/reseed` | `202`; the profile starts no runner until its slots are free and slot 1 became its snapshot; `409` while it reseeds |
+| `POST /v1/profiles/{name}/reseed` | `202`; the profile starts no runner until its slots are free and slot 1 became its snapshot; `409` while it reseeds or a shell is open in one of its records |
 | `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache; `409` naming the jobs that use it |
 | `GET /v1/config` | the config file's path and text |
 | `POST /v1/config/check` with TOML | what `runnerd check-config` says about it |
