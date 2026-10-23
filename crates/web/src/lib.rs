@@ -16,7 +16,7 @@ use axum::extract::{Path as UrlPath, Query, Request, State};
 use axum::http::{HeaderValue, StatusCode, header};
 use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use maud::Markup;
 use runnerd_core::client::{Client, ClientError};
 use tokio::net::TcpListener;
@@ -143,6 +143,8 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .route("/v1/repositories/resume", post(actions::resume_all))
         .route("/v1/profiles/{name}/reseed", post(actions::reseed))
         .route("/v1/caches/{name}/clean", post(actions::clean))
+        .route("/v1/records", delete(actions::remove_all_records))
+        .route("/v1/records/{job}", delete(actions::remove_record))
         .route("/assets/{name}", get(assets::serve))
         .fallback(|| async {
             (

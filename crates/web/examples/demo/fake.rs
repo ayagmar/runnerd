@@ -20,14 +20,15 @@ use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
 use runnerd_core::api::{
     Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
     CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, EventQuery,
     HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary,
-    LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus, QueuedJob, RepositoryStatus,
+    LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus, QueuedJob, Record, RecordLimits,
+    RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, RepositoryStatus,
     RunnerStatus, RunningJob, Sample, SampleSeries, SlotStatus, Stats, StatsRow, Status, Step,
     Timeline,
 };
@@ -50,6 +51,7 @@ pub struct Fixtures {
     pub stats: Vec<StatsRow>,
     pub caches: Caches,
     pub cache_history: Vec<CacheSize>,
+    pub records: Records,
     /// What `GET /v1/config` reads and `PUT /v1/config` replaces.
     pub config: String,
     /// The requests to the control endpoints, such as `POST /v1/profiles/jvm/reseed`.
@@ -584,6 +586,46 @@ impl Fixtures {
             }],
         };
         jobs.sort_by_key(|job| std::cmp::Reverse(job.summary.id));
+        // Each failed job left a record, the newest last as the daemon lists them.
+        let mut records: Vec<Record> = jobs
+            .iter_mut()
+            .filter(|job| job.summary.conclusion.as_deref() == Some("failure"))
+            .map(|job| {
+                let summary = &job.summary;
+                let created_at = summary.timeline.finished_at.unwrap_or(now);
+                let bytes = 280 * MIB + noise.next(400) * MIB;
+                job.record = Some(RecordNote {
+                    created_at: Some(created_at),
+                    bytes: Some(bytes),
+                    ..RecordNote::default()
+                });
+                Record {
+                    job: summary.id,
+                    repository: summary.repository.clone(),
+                    profile: summary
+                        .runner
+                        .as_ref()
+                        .map(|runner| runner.profile.clone())
+                        .unwrap_or_default(),
+                    workflow: summary.workflow.clone(),
+                    name: Some(summary.name.clone()),
+                    created_at,
+                    bytes,
+                    image: format!("runnerd-record:{}", summary.id),
+                }
+            })
+            .collect();
+        records.reverse();
+        let records = Records {
+            records,
+            limits: RecordLimits {
+                max_total: 20 * GIB,
+                max_count: 10,
+                max_age: 7 * 86_400,
+                min_free: 10 * GIB,
+            },
+            shells: Vec::new(),
+        };
         Fixtures {
             now,
             status,
@@ -594,6 +636,7 @@ impl Fixtures {
             stats,
             caches,
             cache_history,
+            records,
             config: include_str!("../../../../examples/runnerd.toml").to_owned(),
             controls: Vec::new(),
             unrecorded: false,
@@ -806,6 +849,30 @@ fn set_all_paused(fake: &Fake, paused: bool, force: bool) -> Response {
     }
 }
 
+/// Removes the records `chosen` picks, noting it on their jobs as the daemon's history does.
+fn remove_records(fixtures: &mut Fixtures, chosen: impl Fn(&Record) -> bool) -> RemovedRecords {
+    let now = fixtures.now;
+    let (gone, kept) = std::mem::take(&mut fixtures.records.records)
+        .into_iter()
+        .partition::<Vec<_>, _>(|record| chosen(record));
+    fixtures.records.records = kept;
+    for record in &gone {
+        if let Some(note) = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == record.job)
+            .and_then(|job| job.record.as_mut())
+        {
+            note.removed_at = Some(now);
+            note.removed_by = Some(RecordRemoval::User);
+        }
+    }
+    RemovedRecords {
+        jobs: gone.iter().map(|record| record.job).collect(),
+        bytes: gone.iter().map(|record| record.bytes).sum(),
+    }
+}
+
 fn router(fake: Fake) -> Router {
     Router::new()
         .route(
@@ -914,6 +981,26 @@ fn router(fake: Fake) -> Router {
             post(|State(fake): State<Fake>, UrlPath(name): UrlPath<String>| async move {
                 fake.fixtures.lock().unwrap().controls.push(format!("clean {name}"));
                 StatusCode::NO_CONTENT
+            }),
+        )
+        .route(
+            "/v1/records",
+            get(|State(fake): State<Fake>| async move { Json(fake.fixtures.lock().unwrap().records.clone()) })
+                .delete(|State(fake): State<Fake>, Query(query): Query<RemoveRecordsQuery>| async move {
+                    let mut fixtures = fake.fixtures.lock().unwrap();
+                    fixtures.controls.push(format!("remove records all={}", query.all));
+                    Json(remove_records(&mut fixtures, |_| query.all))
+                }),
+        )
+        .route(
+            "/v1/records/{job}",
+            delete(|State(fake): State<Fake>, UrlPath(job): UrlPath<u64>| async move {
+                let mut fixtures = fake.fixtures.lock().unwrap();
+                fixtures.controls.push(format!("remove record {job}"));
+                if !fixtures.records.records.iter().any(|record| record.job == job) {
+                    return not_found(&format!("job {job} has no record")).into_response();
+                }
+                Json(remove_records(&mut fixtures, |record| record.job == job)).into_response()
             }),
         )
         .route(

@@ -1,5 +1,5 @@
 //! The dashboard's writes: pause (forced or not) and resume of one repository or every one, reseed, empty a cache,
-//! check and save the config. Each passes the request on to the daemon's API and answers with HTML Datastar patches
+//! remove records, check and save the config. Each passes the request on to the daemon's API and answers with HTML Datastar patches
 //! in: the region as it is now, or a notice saying what the daemon refused and why. Datastar applies only 200
 //! responses, so a refusal is a 200 with the notice. Nothing here decides what is allowed; the daemon does.
 
@@ -8,13 +8,16 @@ use axum::extract::{Path, Query, State};
 use axum::http::{Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use maud::Markup;
-use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, RunningJob, Status};
+use runnerd_core::api::{
+    Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
+    RunningJob, Status,
+};
 use runnerd_core::client::{Body, Reply};
 use serde::Deserialize;
 
 use crate::App;
 use crate::views::config::{self, Outcome};
-use crate::views::{self, Tone, overview};
+use crate::views::{self, Tone, caches, overview};
 
 fn html(markup: &[Markup]) -> Response {
     Html(
@@ -223,6 +226,53 @@ pub(crate) async fn clean(State(app): State<App>, Path(volume): Path<String>) ->
         )]),
         Ok(reply) => refused(&reply.message()),
         Err(notice) => html(&[notice]),
+    }
+}
+
+/// `DELETE /v1/records/{job}`.
+pub(crate) async fn remove_record(State(app): State<App>, Path(job): Path<u64>) -> Response {
+    remove_records(&app, &format!("/v1/records/{job}")).await
+}
+
+/// `DELETE /v1/records?all=true`; the dashboard removes no other selection.
+pub(crate) async fn remove_all_records(
+    State(app): State<App>,
+    Query(query): Query<RemoveRecordsQuery>,
+) -> Response {
+    if !query.all {
+        return refused("say which records: all=true");
+    }
+    remove_records(&app, "/v1/records?all=true").await
+}
+
+/// Removes the records `path` names and answers with the records section as it is now and what was freed.
+async fn remove_records(app: &App, path: &str) -> Response {
+    let reply = match app.daemon.request(Method::DELETE, path, None).await {
+        Ok(reply) if reply.status.is_success() => reply,
+        Ok(reply) => return refused(&reply.message()),
+        Err(error) => return refused(&error.to_string()),
+    };
+    let removed: RemovedRecords = serde_json::from_slice(&reply.body).unwrap_or_default();
+    let notice = views::notice(
+        &match removed.jobs.len() {
+            1 => format!(
+                "Removed 1 record, {} freed",
+                crate::format::bytes(removed.bytes)
+            ),
+            count => format!(
+                "Removed {count} records, {} freed",
+                crate::format::bytes(removed.bytes)
+            ),
+        },
+        Tone::Done,
+    );
+    let records = app.daemon.get::<Records>("/v1/records").await;
+    let status = app.daemon.get::<Status>("/v1/status").await;
+    match (status, records) {
+        (Ok(status), Ok(records)) => {
+            html(&[caches::records(&status, &records, crate::now()), notice])
+        }
+        _ => html(&[notice]),
     }
 }
 

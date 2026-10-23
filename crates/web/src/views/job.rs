@@ -1,12 +1,12 @@
 //! `/jobs/{id}`: one job's phases, its steps on a shared time axis, its CPU and memory over time against the caps
 //! its container ran with (or, for records without them, the profile's limits as configured now), and its log, live
-//! while it runs.
+//! while it runs. A failed job whose runner was kept as a record gets the command that opens a shell in it.
 
 use maud::{Markup, html};
 use runnerd_core::api::{Job, JobSummary, Sample, SampleSeries, Status, Step};
 use runnerd_core::client::{Client, ClientError};
 
-use super::{Live, Parts, badge, digest, page};
+use super::{Live, Parts, badge, digest, page, time_ago};
 use crate::chart::{Band, Base, Series, TimeChart, nice_top};
 use crate::format;
 
@@ -105,6 +105,7 @@ pub(crate) fn render(view: &JobView) -> Markup {
         (timeline.1)
         (steps.1)
         (metrics.1)
+        (record(view))
         (log(view))
     };
     page(&title(summary), None, live.as_ref(), &main)
@@ -523,6 +524,44 @@ fn limit_lines(view: &JobView) -> LimitLines {
             || (cpu_cap.is_none() && cpu.is_some()),
         memory,
         cpu,
+    }
+}
+
+/// What became of the failed job's record: the command that opens a shell in it while it is kept.
+fn record(view: &JobView) -> Markup {
+    let Some(note) = &view.job.record else {
+        return html! {};
+    };
+    let id = view.job.summary.id;
+    let command = format!("runnerctl shell {id}");
+    html! {
+        section #record .record aria-labelledby="record-title" {
+            @if let Some(why) = &note.skipped {
+                h2 #record-title { "Record" }
+                p.muted { "Not kept: " (why) "." }
+            } @else if let Some(at) = note.removed_at {
+                h2 #record-title { "Record" }
+                p.muted {
+                    "Kept, then " (note.removed_by.map_or_else(|| "removed".to_owned(), |by| by.to_string()))
+                    " " (time_ago(at, view.now)) "."
+                }
+            } @else {
+                div.section-head {
+                    h2 #record-title { "Open a shell" }
+                    @if let Some(bytes) = note.bytes { p.muted { "Record kept, " (format::bytes(bytes)) } }
+                }
+                p {
+                    "runnerd kept this job's runner as it failed. In a terminal on the host, this opens a shell in its "
+                    "workspace and shows the step that failed:"
+                }
+                div.copy-command {
+                    code { (command) }
+                    button.button-quiet type="button"
+                        data-on:click=(format!("navigator.clipboard.writeText('{command}')"))
+                        aria-label="Copy the command" { "Copy" }
+                }
+            }
+        }
     }
 }
 
