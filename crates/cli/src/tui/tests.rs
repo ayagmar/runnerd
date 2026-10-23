@@ -29,8 +29,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
-    LogSummary, ProfileStatus, QueuedJob, RepositoryStatus, RunnerStatus, Sample, SlotStatus,
-    Status, Step, Timeline,
+    LogSummary, ProfileStatus, QueuedJob, RepositoryStatus, RunnerStatus, Sample, SeedMemory,
+    SlotStatus, Status, Step, Timeline,
 };
 
 use unicode_width::UnicodeWidthStr;
@@ -470,6 +470,24 @@ fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_oth
         head,
         ["■ halyard/storefront", "E2E / visual-diff  QUEUED"],
         "{job}"
+    );
+}
+
+#[test]
+fn the_budget_names_the_mirror_and_each_seed_container() {
+    let mut app = app();
+    let budget = &mut app.live.status.budget;
+    budget.mirror_memory = 4 << 30;
+    budget.seed_memory = vec![SeedMemory {
+        profile: "jvm".to_owned(),
+        memory: 9 << 30,
+    }];
+    budget.memory_in_use = 13 << 30;
+    let shown = screen(&app, 160, 40, false);
+    let names = shown.lines().nth(3).unwrap();
+    assert!(
+        names.contains("mirror 4G") && names.contains("jvm seed 9G"),
+        "{shown}"
     );
 }
 

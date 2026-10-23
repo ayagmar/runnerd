@@ -13,7 +13,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState,
 };
 use runnerd_core::api::{
-    Job, JobSummary, ProfileStatus, RepositoryStatus, Sample, SlotStatus, Step,
+    Job, JobSummary, ProfileStatus, RepositoryStatus, Sample, SlotStatus, Status, Step,
 };
 use unicode_width::UnicodeWidthStr;
 
@@ -288,8 +288,8 @@ fn scale(part: u64, whole: u64, width: u16) -> u16 {
     u16::try_from(cells).unwrap_or(width).min(width)
 }
 
-/// The budget as one bar: a block per slot as wide as its memory, filled as far as its job uses it; then what
-/// else is reserved (the mirror, seed containers), then what is free.
+/// The budget as one bar: a block per slot as wide as its memory, filled as far as its job uses it; then the
+/// mirror and each seed container, then what is free.
 fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let status = &app.live.status;
     let budget = &status.budget;
@@ -316,7 +316,6 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let whole = budget.memory_max.unwrap_or(caps).max(caps);
     let mut cells = Vec::new();
     let mut names = Vec::new();
-    let mut reserved = 0;
     let mut drawn = 0;
     for (index, profile, slot) in app.slots() {
         let width = scale(profile.memory, whole, bar.width).max(1);
@@ -325,7 +324,6 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             slot_job(app, profile, slot).and_then(|job| app.live.samples.get(&job.summary.id));
         let used = sample.map_or(0, |sample| scale(sample.memory, profile.memory, width));
         let (text, label) = if slot.runner.is_some() {
-            reserved += profile.memory;
             (
                 format!(
                     "{}{}",
@@ -363,17 +361,61 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         ));
         drawn += width;
     }
-    let other = scale(
-        budget.memory_in_use.saturating_sub(reserved),
-        whole,
-        bar.width,
-    )
-    .min(bar.width.saturating_sub(drawn));
-    cells.push(Span::raw("▒".repeat(usize::from(other))));
-    let free = bar.width.saturating_sub(drawn + other);
+    // The mirror and each seed container, named as the slots are.
+    for Held {
+        style,
+        label,
+        memory,
+    } in held(status, theme)
+    {
+        let width = scale(memory, whole, bar.width)
+            .max(1)
+            .min(bar.width.saturating_sub(drawn));
+        if width == 0 {
+            break;
+        }
+        let mut text = "▒".repeat(usize::from(width - 1));
+        text.push(' ');
+        cells.push(Span::styled(text, style));
+        names.push(Span::styled(
+            format!("{} ", fit(&label, usize::from(width - 1))),
+            style,
+        ));
+        drawn += width;
+    }
+    let free = bar.width.saturating_sub(drawn);
     cells.push(Span::styled("·".repeat(usize::from(free)), theme.dim()));
     frame.render_widget(Line::from(cells), bar);
     frame.render_widget(Line::from(names), labels);
+}
+
+/// Memory the budget holds for something other than a slot.
+struct Held {
+    style: Style,
+    label: String,
+    memory: u64,
+}
+
+/// The mirror, then each seed container in its profile's colour.
+fn held(status: &Status, theme: Theme) -> Vec<Held> {
+    let budget = &status.budget;
+    let mirror = (budget.mirror_memory > 0).then(|| Held {
+        style: Style::default(),
+        label: format!("mirror {}", bytes(budget.mirror_memory)),
+        memory: budget.mirror_memory,
+    });
+    let seeds = budget.seed_memory.iter().map(|seed| {
+        let index = status
+            .profiles
+            .iter()
+            .position(|profile| profile.name == seed.profile);
+        Held {
+            style: theme.profile(index),
+            label: format!("{} seed {}", seed.profile, bytes(seed.memory)),
+            memory: seed.memory,
+        }
+    });
+    mirror.into_iter().chain(seeds).collect()
 }
 
 /// The running job in a slot.
