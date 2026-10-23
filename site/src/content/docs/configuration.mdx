@@ -60,7 +60,16 @@ Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them.
 
 ## Runner images
 
-[`image/Dockerfile`](https://github.com/ayagmar/runnerd/tree/main/image) has a stage per profile on a common base: `base`, `jvm`, `node`. Each release publishes every stage, for linux/amd64. A profile sets one of:
+[`image/Dockerfile`](https://github.com/ayagmar/runnerd/tree/main/image) has four stages. Each release publishes every one, for linux/amd64.
+
+| Stage | Adds |
+|---|---|
+| `base` | the GitHub Actions runner, Docker Engine with Compose and Buildx, the GitHub CLI, make, xz, zip, zstd, and runnerd's scripts; every common toolchain's cache in `~/.cache` |
+| `android` | the Android SDK command-line tools and platform-tools, and a JDK 17 |
+| `jvm` | nothing yet over `android` |
+| `node` | pipx and Playwright's system libraries, over `android` |
+
+Workflows install their language toolchains themselves (`setup-java`, `setup-node`, `rust-toolchain`), and the slot keeps them warm. A profile sets one of:
 
 | Key | Runs | Pulled |
 |---|---|---|
@@ -72,6 +81,29 @@ runnerd logs the pull's progress, and `runnerd doctor` says whether each image i
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
 ```
+
+### Your own image
+
+When your jobs need system packages the stages lack, build on `base`, or on `android` for Android builds:
+
+```dockerfile
+FROM ghcr.io/ayagmar/runnerd-runner:base-0.0.7
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+```sh
+docker build -t quillstack-runner:0.0.7 .
+```
+
+```toml
+[profiles.quillstack]
+image = "quillstack-runner:0.0.7"
+# cpus, memory and slots as for any profile
+```
+
+Keep the entrypoint, and root as the image's user: the entrypoint starts as root and runs the job as `runner`. runnerd pulls an `image` only when Docker lacks it, so build yours before the profile's first runner. When you upgrade runnerd, rebuild from the new version's `base` tag: your image inherits its `runnerd.version` label, and `runnerd doctor` warns when that is not the daemon's version.
 
 Rebuilds install the same versions: Ubuntu packages come from one snapshot date, and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)). [Install](../install/#verify-a-release) shows how to check where a published image came from.
 
