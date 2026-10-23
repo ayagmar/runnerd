@@ -100,6 +100,8 @@ nothing until Docker has listed them.
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
 - `scheduler::plan` does no I/O and reads no clock.
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order.
+- Host samples reach subscribers when taken and the database a minute's worth at a time; reads include the ones not
+  yet stored.
 - A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored in the same transaction as
   the change it announces and broadcast only after it commits, so its ID is a position a client can resume from
   with `Last-Event-ID`.

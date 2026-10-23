@@ -33,6 +33,10 @@ const MIGRATIONS: &[&str] = &[
 /// disk holds back that job's log, not the daemon's memory.
 pub(crate) const LOG_BACKLOG: u64 = 8 << 20;
 
+/// Host samples the writer holds before it stores them in one transaction: a minute's worth. One transaction per
+/// sample wrote about 300 MB a day to an idle daemon's WAL. A crash loses the samples held.
+const HOST_SAMPLE_BATCH: usize = 30;
+
 /// How many events a slow client may fall behind before its stream ends; it reconnects with `Last-Event-ID`.
 const EVENT_BUFFER: usize = 4096;
 
@@ -212,6 +216,9 @@ enum Write {
 pub struct Store {
     writes: mpsc::UnboundedSender<Write>,
     reader: Arc<Mutex<Connection>>,
+    /// Host samples sent and not yet stored, oldest first; reads include them. The writer removes them once stored.
+    // Locked with `sync::lock`: every critical section is a push, a copy or a drain.
+    held: Arc<Mutex<Vec<api::HostSample>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
     backlog: Arc<Semaphore>,
 }
@@ -243,12 +250,15 @@ impl Store {
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let (writes, receiver) = mpsc::unbounded_channel();
         let thread_events = events.clone();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let thread_held = held.clone();
         std::thread::Builder::new()
             .name("runnerd-store".to_owned())
-            .spawn(move || write::run(db, receiver, &thread_events))?;
+            .spawn(move || write::run(db, receiver, &thread_events, &thread_held))?;
         Ok(Store {
             writes,
             reader: Arc::new(Mutex::new(reader)),
+            held,
             events,
             backlog: Arc::new(Semaphore::new(
                 usize::try_from(LOG_BACKLOG).unwrap_or(usize::MAX),
@@ -354,8 +364,10 @@ impl Store {
         self.send(Write::Samples(samples));
     }
 
-    /// Records a sample of the slice.
+    /// Records a sample of the slice and sends it to every subscriber at once; it is stored with the next ones, a
+    /// minute's worth in one transaction, or at `flush`.
     pub fn host_sample(&self, sample: api::HostSample) {
+        lock(&self.held).push(sample.clone());
         self.send(Write::HostSample(sample));
     }
 
@@ -467,9 +479,18 @@ impl Store {
         Ok(read::paused(&lock(&self.reader))?)
     }
 
-    /// The slice's samples since `since` (seconds), oldest first.
+    /// The slice's samples since `since` (seconds), oldest first, the ones not yet stored included.
     pub async fn host_samples(&self, since: u64) -> Result<Vec<api::HostSample>, StoreError> {
-        self.read(move |db| read::host_samples(db, since)).await
+        // Copied before the read: the writer removes a sample only once it is stored, so each one is in the copy,
+        // the read, or both.
+        let held = lock(&self.held).clone();
+        let mut samples = self.read(move |db| read::host_samples(db, since)).await?;
+        let stored = samples.last().map_or(0, |sample| sample.at);
+        samples.extend(
+            held.into_iter()
+                .filter(|sample| sample.at >= since && sample.at > stored),
+        );
+        Ok(samples)
     }
 
     /// Finished jobs per repository and bucket.

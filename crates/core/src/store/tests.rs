@@ -10,7 +10,7 @@ use super::{
     LOG_BACKLOG, LogPosition, MIGRATIONS, Measured, MirrorPosition, RunnerRecord, SampleRecord,
     Store, StoreError,
 };
-use crate::api::{Bucket, JobQuery, JobState, StatsQuery};
+use crate::api::{Bucket, HostSample, JobQuery, JobState, StatsQuery};
 use crate::github::QueuedJob;
 use crate::testdir::TestDir;
 
@@ -215,6 +215,24 @@ async fn hourly_stats_count_at_most_the_last_31_days() {
     };
     assert_eq!(jobs(Bucket::Hour).await, 0);
     assert_eq!(jobs(Bucket::Day).await, 1);
+}
+
+#[tokio::test]
+async fn a_host_sample_reads_back_at_once_and_is_kept_from_a_flush_on() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    let sample = HostSample {
+        at: 100,
+        cpu: 1500,
+        memory: 1 << 30,
+    };
+    store.host_sample(sample.clone());
+    assert_eq!(store.host_samples(0).await.unwrap(), std::slice::from_ref(&sample));
+    store.flush().await;
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    assert_eq!(store.host_samples(0).await.unwrap(), [sample]);
 }
 
 fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord {

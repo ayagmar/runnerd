@@ -3,31 +3,38 @@
 //! one transaction and are broadcast only after, so a subscriber that reads the stored events after subscribing
 //! misses none, and a crash never keeps a change without its event.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use tokio::sync::{broadcast, mpsc};
 
 use super::read::{self, secs};
-use super::{LogPosition, MirrorPosition, RunnerRecord, SampleRecord, Write, logged};
+use super::{
+    HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, RunnerRecord, SampleRecord, Write, logged,
+};
 use crate::api::{self, Event, EventEnvelope};
 use crate::github::{JobDetails, JobStep, QueuedJob};
+use crate::sync::lock;
 use crate::time;
 
 pub(super) fn run(
     db: Connection,
     mut queue: mpsc::UnboundedReceiver<Write>,
     events: &broadcast::Sender<Arc<EventEnvelope>>,
+    held: &Mutex<Vec<api::HostSample>>,
 ) {
-    let writer = Writer { db, events };
+    let writer = Writer { db, events, held };
     while let Some(write) = queue.blocking_recv() {
         writer.apply(write);
     }
+    writer.store_host_samples();
 }
 
-struct Writer<'events> {
+struct Writer<'store> {
     db: Connection,
-    events: &'events broadcast::Sender<Arc<EventEnvelope>>,
+    events: &'store broadcast::Sender<Arc<EventEnvelope>>,
+    /// `Store::held`.
+    held: &'store Mutex<Vec<api::HostSample>>,
 }
 
 /// The events a change announces once it commits.
@@ -93,14 +100,15 @@ impl Writer<'_> {
                 });
             }
             Write::HostSample(sample) => {
-                self.change("record a host sample", |announced| {
-                    self.db.execute(
-                        "INSERT OR REPLACE INTO host_samples (at, cpu, memory) VALUES (?1, ?2, ?3)",
-                        params![sample.at * 1000, sample.cpu, sample.memory],
-                    )?;
-                    announced.push(Event::HostSample { sample });
-                    Ok(())
-                });
+                // Live: no ID to wait for.
+                let _ = self.events.send(Arc::new(EventEnvelope {
+                    id: None,
+                    at: secs(time::now_ms()),
+                    event: Event::HostSample { sample },
+                }));
+                if lock(self.held).len() >= HOST_SAMPLE_BATCH {
+                    self.store_host_samples();
+                }
             }
             Write::MirrorBytes { bytes, until, done } => {
                 let _ = done.send(self.mirror_bytes(&bytes, until));
@@ -127,9 +135,36 @@ impl Writer<'_> {
             }
             Write::Prune { now, history } => self.prune(now, &history),
             Write::Flush(done) => {
+                self.store_host_samples();
                 let _ = done.send(());
             }
         }
+    }
+
+    /// Stores the held host samples in one transaction, then lets go of them. If that fails they are held for the
+    /// next try, ten batches at most: older ones are dropped.
+    fn store_host_samples(&self) {
+        let samples = lock(self.held).clone();
+        if samples.is_empty() {
+            return;
+        }
+        let stored = self.change("record host samples", |_| {
+            for sample in &samples {
+                self.db.execute(
+                    "INSERT OR REPLACE INTO host_samples (at, cpu, memory) VALUES (?1, ?2, ?3)",
+                    params![sample.at * 1000, sample.cpu, sample.memory],
+                )?;
+            }
+            Ok(())
+        });
+        let mut held = lock(self.held);
+        let done = if stored {
+            samples.len()
+        } else {
+            held.len().saturating_sub(HOST_SAMPLE_BATCH * 10)
+        };
+        let len = held.len();
+        held.drain(..done.min(len));
     }
 
     fn runner_started(&self, runner: &RunnerRecord) {
