@@ -28,7 +28,7 @@ fn config(isolation: &str) -> Config {
     Config::parse(&text).unwrap()
 }
 
-/// The owner's machine with sysbox installed and `ci.slice` at 33G.
+/// A machine with sysbox installed and `runnerd.slice` at 33G, as the example config names it.
 fn ready_host(os_release: &str) -> Host {
     Host {
         docker: Ok(DockerFacts {
@@ -52,7 +52,7 @@ fn ready_host(os_release: &str) -> Host {
             .into(),
         os_release: os_release.to_owned(),
         slice: Some(Ok(Slice {
-            unit_file: Some("/etc/systemd/system/ci.slice".to_owned()),
+            unit_file: Some("/etc/systemd/system/runnerd.slice".to_owned()),
             memory_max: Some(ByteSize(33 << 30)),
             cpu_quota: "infinity".to_owned(),
         })),

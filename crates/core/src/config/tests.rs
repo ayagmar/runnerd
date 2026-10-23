@@ -36,8 +36,8 @@ fn size(s: &str) -> ByteSize {
 }
 
 #[test]
-fn example_config_fits_the_owners_slice() {
-    // 33G as `systemctl show ci.slice -p MemoryMax --value` prints it.
+fn example_config_fits_its_slice() {
+    // 33G as `systemctl show runnerd.slice -p MemoryMax --value` prints it.
     let memory_max = parse_memory_max("35433480192").unwrap();
     assert_eq!(example().validate(memory_max).unwrap(), Vec::new());
 }
@@ -86,7 +86,7 @@ fn config_with_unlimited_slice_validates_with_a_warning() {
     let memory_max = parse_memory_max("infinity").unwrap();
     let warnings = example().validate(memory_max).unwrap();
     assert!(
-        matches!(warnings.as_slice(), [Warning::UnlimitedSlice { slice, .. }] if slice == "ci.slice"),
+        matches!(warnings.as_slice(), [Warning::UnlimitedSlice { slice, .. }] if slice == "runnerd.slice"),
         "{warnings:?}"
     );
 }
