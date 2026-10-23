@@ -16,7 +16,7 @@ flowchart TB
     subgraph core["runnerd-core"]
         types["api, config"]
         client["client"]
-        host["docker, github, cache, isolation, record,<br/>scheduler, observe, sizing, store"]
+        host["admission, docker, github, cache, isolation,<br/>record, scheduler, observe, sizing, store"]
     end
     daemon -->|host| host
     daemon -->|"serves it in its process"| web
@@ -44,7 +44,14 @@ flowchart TB
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
 - `admission`, `docker`, `github`, `cache`, `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host`
   only
-  ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)).
+  ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU
+  and replays the history for `runnerd simulate`; `sizing` turns the history into advice, and `sizing::auto` picks
+  the changes auto sizing makes. Both are pure: the engine and the daemon read the store and act on what they return.
+
+`runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing), `init`, `doctor`, `simulate`, and
+`output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session, the login URL and the `Origin`
+check), `views` (one per page), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
+`assets` (the files the pages load, the web app manifest and icons included).
 
 The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and
 writes only through the API on the Unix socket ([ADR 0020](docs/adr/0020-dashboard-is-an-api-client-on-loopback.md)).

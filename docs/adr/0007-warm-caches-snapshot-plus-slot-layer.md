@@ -1,5 +1,8 @@
 # 0007. Warm caches: per-profile snapshot plus per-slot layer
 
+Amended by [0041](0041-snapshot-and-mirror-limits.md): a snapshot over `[caches] snapshot_max` starts over from slot
+1's changes at its next reseed, and the mirror's storage is emptied above `mirror.max_size`.
+
 ## Context
 
 Fresh containers per job would re-download dependencies and images every time.
