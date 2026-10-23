@@ -48,31 +48,68 @@ cache.
    `lint` job shellchecks.
 5. Cache what the job downloads or compiles, and compare its time on a second run of the same pull request.
 
+## Testing against a real repository
+
+The tests never reach Docker or GitHub; the ignored ones (README, "Building") start containers but serve no
+repository. To run jobs end to end, point a daemon at a sandbox repository of your own.
+
+On a host that already runs runnerd, stop that one first. Both daemons would name their runners with the same
+machine prefix and share the host's Docker, its cache volumes and its slice, and at start `Engine::recover` adopts
+or removes every runner container on the local Docker, whoever started it:
+
+1. `systemctl --user stop runnerd`, and wait for it to exit; it waits for running jobs.
+2. Write a config that serves only the sandbox repository, with its own `[history] database` under a scratch
+   directory, and check it: `runnerd check-config <scratch>/runnerd.toml`.
+3. `runnerd serve --config <scratch>/runnerd.toml --socket <scratch>/runnerd.sock --web off`, and in another
+   terminal `runnerctl --socket <scratch>/runnerd.sock status` (or `watch`, `tui`).
+4. Push to the sandbox repository and watch its jobs run.
+5. Stop the test daemon with `runnerd stop --socket <scratch>/runnerd.sock`, check that `docker ps` lists none of
+   its runners, then `systemctl --user start runnerd`.
+
 ## Releases
 
 `.github/workflows/release.yml` runs when a tag like `v0.0.1` or `v0.0.1-rc.1` is pushed; a suffix makes a pre-release.
-It builds `runnerd` and `runnerctl` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with
-[dist](https://github.com/axodotdev/cargo-dist), attests every archive plus `install.sh`, `sha256.sum` and the source
-tarball, and creates the release with the archives, a `.sha256` per archive, `sha256.sum`, and `install.sh` set to
-install that tag. dist names each archive for its crate, so `runnerctl` ships in
-`runnerd-cli-<target>.tar.xz`; `install.sh` and the crates' `[package.metadata.binstall]` expect those names. The tag
-must match the workspace version in `Cargo.toml`, and a tag without a suffix must be on `main`, or the `plan` job
-fails.
+The tag must match the workspace version in `Cargo.toml`, and a tag without a suffix must be on `main`, or the
+`plan` job fails. To cut one:
 
-Before the GitHub release, the `images` job ([`images.yml`](.github/workflows/images.yml)) builds every stage of
-`image/Dockerfile` from the tag for linux/amd64, pushes it to `ghcr.io/ayagmar/runnerd-runner:<stage>-<version>`
-labelled `runnerd.version=<version>`, which `runnerd doctor` compares with its own version, and attests it. To publish
-the images of a release that has none, run that workflow by hand: `gh workflow run images.yml -f tag=v0.0.4`. It
-builds the tag's `image/`, so nothing is retagged. A new package on ghcr.io is private: once, after its first push,
-the owner makes it public (the package's Package settings → Danger Zone → Change visibility → Public).
+1. On a branch, bump `version` under `[workspace.package]` in `Cargo.toml` and the `version` of the internal
+   dependencies under `[workspace.dependencies]` (`runnerd-core`, `runnerd-web`), then run `cargo check` without
+   `--locked` so `Cargo.lock` follows.
+2. Update every place that names the version. `git grep -nF <old version> -- ':!Cargo.lock' ':!site/pnpm-lock.yaml'`
+   finds them; today they are:
+   - `README.md`: the installer's `--version` example;
+   - `examples/runnerd.toml`: each profile's `image` tag (the doctor tests compare it with the crate version);
+   - `crates/core/src/config.rs`: the `image` key's doc comment;
+   - the site: `install.md`, `configuration.md`, `clients.mdx`, `src/pages/index.astro` and the TUI frames in
+     `src/assets/tui/`, which are recaptured rather than edited.
 
-After the GitHub release, the `publish-crates` job publishes `runnerd-core`, `runnerd-web`, `runnerd` and
-`runnerd-cli` to crates.io with [trusted publishing](https://crates.io/docs/trusted-publishing): a token that lasts 30
-minutes, minted from the run's OIDC identity, so no crates.io token is stored. It is skipped until the repository
-variable `CRATES_IO_TRUSTED_PUBLISHING` is `true`. crates.io only accepts a trusted publisher for a crate that exists,
-so the first version of each is published by hand (`cargo publish --workspace` with a personal token). Then, for each
-crate, Settings → Trusted Publishing on crates.io adds a GitHub publisher with owner `ayagmar`, repository `runnerd`
-and workflow `release.yml`, and the variable is set.
+   Tests that use a version only as an example, such as `store/tests.rs`'s "as runnerd 0.0.5 stored it", stay.
+3. Merge the pull request, then tag the merge commit on `main` and push the tag:
+   `git tag v0.0.6 && git push origin v0.0.6`.
+4. The release run then:
+   - builds `runnerd` and `runnerctl` for `x86_64-unknown-linux-musl` and `aarch64-unknown-linux-musl` with
+     [dist](https://github.com/axodotdev/cargo-dist). dist names each archive for its crate, so `runnerctl` ships in
+     `runnerd-cli-<target>.tar.xz`; `install.sh` and the crates' `[package.metadata.binstall]` expect those names;
+   - builds every stage of `image/Dockerfile` from the tag for linux/amd64 (the `images` job,
+     [`images.yml`](.github/workflows/images.yml)), pushes it to `ghcr.io/ayagmar/runnerd-runner:<stage>-<version>`
+     labelled `runnerd.version=<version>`, which `runnerd doctor` compares with its own version, and attests it;
+   - attests every archive plus `install.sh`, `sha256.sum` and the source tarball, and creates the GitHub release
+     with the archives, a `.sha256` per archive, `sha256.sum`, and `install.sh` set to install that tag;
+   - publishes `runnerd-core`, `runnerd-web`, `runnerd` and `runnerd-cli` to crates.io (the `publish-crates` job)
+     with [trusted publishing](https://crates.io/docs/trusted-publishing): a token that lasts 30 minutes, minted
+     from the run's OIDC identity, so no crates.io token is stored.
+5. Check the result: the images are public
+   (`docker logout ghcr.io; docker pull ghcr.io/ayagmar/runnerd-runner:base-<version>`), `install.sh` installs the
+   new version, and crates.io lists it.
+
+A new package on ghcr.io has so far come out public, as the repository is. If one does not, make it public once:
+the package's Package settings → Danger Zone → Change visibility → Public. To publish the images of a release that
+has none, run the workflow by hand: `gh workflow run images.yml -f tag=v0.0.4`. It builds the tag's `image/`, so
+nothing is retagged.
+
+Trusted publishing is set up: each crate had its first version published by hand, has `release.yml` as its trusted
+publisher on crates.io, and the repository variable `CRATES_IO_TRUSTED_PUBLISHING` is `true`. A new crate needs the
+same before a release can publish it.
 
 The workflow started as dist's generated one and was edited (its header lists how), so `Cargo.toml` sets
 `allow-dirty = ["ci"]`. It is not a pull request check; `lint` still runs actionlint and zizmor on it.
