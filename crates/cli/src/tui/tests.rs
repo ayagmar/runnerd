@@ -1,5 +1,6 @@
 //! The TUI through its reducer and `TestBackend` frames: a job moving through its slot, steps and the latest jobs;
-//! every pane at 80×24; no colour with `NO_COLOR`; a refused pause forced only on `y`; the history's filters; and,
+//! every pane at 80×24; text at 80 to 136 columns that drops whole fields or ends in `…` rather than being cut
+//! mid-word; no colour with `NO_COLOR`; a refused pause forced only on `y`; the history's filters; and,
 //! against a fake daemon, an event stream that drops, shows "reconnecting" and resumes after the last event ID.
 
 #![allow(
@@ -30,6 +31,8 @@ use runnerd_core::api::{
     LogSummary, ProfileStatus, RepositoryStatus, RunnerStatus, Sample, SlotStatus, Status, Step,
     Timeline,
 };
+
+use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Connection, Effect, Msg, View};
 use super::draw::{Theme, draw};
@@ -163,8 +166,12 @@ fn screen(app: &App, width: u16, height: u16, colour: bool) -> String {
     let buffer = terminal.backend().buffer();
     let mut text = String::new();
     for y in 0..height {
-        for x in 0..width {
-            text.push_str(buffer[(x, y)].symbol());
+        let mut x = 0;
+        while x < width {
+            // A wide character covers the cell after it, which ratatui leaves blank.
+            let symbol = buffer[(x, y)].symbol();
+            text.push_str(symbol);
+            x += u16::try_from(symbol.width()).unwrap().max(1);
         }
         text.push('\n');
     }
@@ -763,6 +770,256 @@ fn a_job_read_again_as_finished_leaves_the_slots() {
     }));
     assert!(app.live.running.is_empty() && app.series.is_empty());
     assert!(screen(&app, 120, 40, false).contains("SUCCESS"));
+}
+
+/// halyard/ledger's job `id`, which succeeded `ago` seconds before now.
+fn finished(id: u64, ago: u64) -> JobSummary {
+    let mut job = summary(id, JobState::Completed);
+    job.conclusion = Some("success".to_owned());
+    job.timeline.finished_at = Some(NOW - ago);
+    job.timeline.started_at = Some(0);
+    job
+}
+
+/// The rows of `screen` that contain `text`.
+fn rows_with<'screen>(screen: &'screen str, text: &str) -> Vec<&'screen str> {
+    screen.lines().filter(|row| row.contains(text)).collect()
+}
+
+#[test]
+fn how_long_ago_a_job_finished_reads_in_full_at_every_width() {
+    let mut app = app();
+    app.live.recent = vec![finished(7, 17 * 60 + 31), finished(8, 5)];
+    for width in [80, 96, 104, 120, 136] {
+        let overview = screen(&app, width, 40, false);
+        assert!(
+            overview.contains("17m 31s ago"),
+            "the age reads in full at {width}: {overview}"
+        );
+        assert!(
+            overview.contains("5s ago"),
+            "the age reads in full at {width}: {overview}"
+        );
+    }
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(
+        generation,
+        vec![finished(7, 17 * 60 + 31)],
+        None,
+    ));
+    for width in [80, 96, 120, 136] {
+        let history = screen(&app, width, 24, false);
+        assert!(
+            history.contains("17m 31s ago"),
+            "the age reads in full at {width}: {history}"
+        );
+    }
+}
+
+#[test]
+fn every_slot_card_title_keeps_its_slot_number_and_a_rule() {
+    let mut app = app();
+    app.live.status.profiles[1] = profile("node", 2, 7 << 30);
+    for width in [96, 104, 120, 136] {
+        let overview = screen(&app, width, 40, false);
+        for card in [
+            "jvm · slot 1",
+            "jvm · slot 2",
+            "node · slot 1",
+            "node · slot 2",
+        ] {
+            assert!(
+                overview.contains(&format!("{card} ─")) || overview.contains(&format!("{card} ━")),
+                "{card} then its rule at {width}: {overview}"
+            );
+        }
+        // The size reads the same on every card.
+        let sizes = rows_with(&overview, " · slot ")
+            .iter()
+            .map(|row| row.matches("CPUs").count())
+            .sum::<usize>();
+        assert!(
+            sizes == 0 || sizes == 4,
+            "every card or none shows its CPUs at {width}: {overview}"
+        );
+    }
+}
+
+#[test]
+fn the_open_job_header_drops_whole_details_to_fit() {
+    let mut app = app();
+    running_job(&mut app);
+    app.live.running.get_mut(&42).unwrap().summary.run_id = 40_018_663_900;
+    app.update(key(KeyCode::Enter));
+    let whole = [
+        "branch main",
+        "run 40018663900",
+        "slot jvm",
+        "1",
+        "capped at 9.0G and 8.00 cores",
+        "waited 9s",
+        "ran 1m 31s",
+    ];
+    for width in [80, 96, 104, 120] {
+        let job = screen(&app, width, 40, false);
+        let header = rows_with(&job, "slot jvm · 1")[0].trim_end();
+        assert!(
+            header.ends_with("ran 1m 31s"),
+            "the run time stays at {width}: {header}"
+        );
+        for detail in header.split(" · ") {
+            assert!(
+                whole.contains(&detail),
+                "{detail:?} is whole at {width}: {header}"
+            );
+        }
+    }
+}
+
+#[test]
+fn text_that_does_not_fit_ends_in_an_ellipsis_and_leaves_its_neighbour_a_space() {
+    let mut app = app();
+    running_job(&mut app);
+    let running = app.live.running.get_mut(&42).unwrap();
+    running.summary.timeline.started_at = Some(NOW - (16 * 60 + 40));
+    running.steps[1].name = "Integration tests (Testcontainers)".to_owned();
+    app.live.status.profiles[1] = profile("node", 2, 7 << 30);
+    app.live.status.repositories[1].queued_jobs = 1;
+    app.live.recent = vec![finished(7, 60)];
+
+    let small = screen(&app, 80, 24, false);
+    let storefront = rows_with(&small, "halyard/storefront")[0];
+    assert!(
+        storefront.contains("1 queued "),
+        "a space before the latest jobs: {small}"
+    );
+    let slot = rows_with(&small, "jvm 1  ")[0];
+    assert!(
+        slot.contains("… 16m 40s "),
+        "a space before the run time: {small}"
+    );
+
+    let wide = screen(&app, 136, 40, false);
+    let step = rows_with(&wide, "2/3 Integration tests")[0];
+    assert!(
+        step.contains("(Testcont…"),
+        "the step's name ends in an ellipsis: {wide}"
+    );
+
+    let mut feature = finished(7, 60);
+    feature.branch = Some("feat/checkout-flow".to_owned());
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(generation, vec![feature], None));
+    let history = screen(&app, 120, 24, false);
+    assert!(
+        history.contains(" feat/checkout… "),
+        "the branch ends in an ellipsis: {history}"
+    );
+}
+
+#[test]
+fn wide_characters_are_fitted_by_the_cells_they_take() {
+    let wide = "界".repeat(20);
+    let mut app = app();
+    app.live.status.profiles[1] = profile("ビルド", 2, 7 << 30);
+    running_job(&mut app);
+    app.live.running.get_mut(&42).unwrap().summary.branch = Some(wide.clone());
+
+    for width in [96, 120, 136] {
+        let overview = screen(&app, width, 40, false);
+        for card in ["ビルド · slot 1", "ビルド · slot 2"] {
+            assert!(
+                overview.contains(&format!("{card} ─")),
+                "{card} then its rule at {width}: {overview}"
+            );
+        }
+    }
+
+    app.update(key(KeyCode::Enter));
+    let whole = [
+        format!("branch {wide}"),
+        "run 4001".to_owned(),
+        "slot jvm".to_owned(),
+        "1".to_owned(),
+        "capped at 9.0G and 8.00 cores".to_owned(),
+        "waited 9s".to_owned(),
+        "ran 1m 31s".to_owned(),
+    ];
+    for width in [80, 104, 120] {
+        let job = screen(&app, width, 24, false);
+        let header = rows_with(&job, "slot jvm · 1")[0].trim_end();
+        assert!(
+            header.ends_with("ran 1m 31s"),
+            "the run time stays at {width}: {header}"
+        );
+        for detail in header.split(" · ") {
+            assert!(
+                whole.iter().any(|whole| whole == detail),
+                "{detail:?} is whole at {width}: {header}"
+            );
+        }
+    }
+
+    let mut job = finished(7, 60);
+    job.repository.clone_from(&wide);
+    job.branch = Some(wide.clone());
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(generation, vec![job], None));
+    let history = screen(&app, 120, 24, false);
+    let row = rows_with(&history, "SUCCESS")[0];
+    assert_eq!(
+        row.matches("界…").count(),
+        2,
+        "the repository and the branch end in an ellipsis: {history}"
+    );
+}
+
+#[test]
+fn an_emoji_branch_cut_in_the_history_ends_in_an_ellipsis() {
+    // `❤️` is a character and a variation selector: two cells, though each character alone takes one or none.
+    let mut app = app();
+    let mut job = finished(7, 60);
+    job.branch = Some("❤️".repeat(20));
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    app.update(history_page(generation, vec![job], None));
+    for width in [120, 136] {
+        let history = screen(&app, width, 24, false);
+        let row = rows_with(&history, "SUCCESS")[0];
+        assert!(
+            row.contains("…"),
+            "the branch ends in an ellipsis at {width}: {history}"
+        );
+    }
+}
+
+#[test]
+fn the_open_job_metrics_drop_whole_figures_to_fit() {
+    let mut app = app();
+    running_job(&mut app);
+    app.live.running.get_mut(&42).unwrap().summary.metrics = JobMetrics {
+        cpu_time: Some(1_454_000),
+        cpu_peak: Some(7_960),
+        cpu_average: Some(3_310),
+        memory_peak: Some(7 << 30),
+        memory_average: Some(5 << 30),
+        network_received: Some(329 << 20),
+        network_sent: Some(37 << 20),
+        mirror_bytes: 110 << 20,
+    };
+    app.update(key(KeyCode::Enter));
+    let full = screen(&app, 240, 40, false);
+    let figures: Vec<&str> = rows_with(&full, "mem peak")[0].trim().split("  ").collect();
+    assert!(figures.contains(&"mirror 110M"), "{full}");
+    for (width, height) in [(80, 24), (96, 24), (96, 30), (104, 30)] {
+        let job = screen(&app, width, height, false);
+        let row = rows_with(&job, "mem peak")[0].trim();
+        for figure in row.split("  ") {
+            assert!(
+                figures.contains(&figure),
+                "{figure:?} is whole at {width}×{height}: {row}"
+            );
+        }
+    }
 }
 
 /// A daemon whose first event stream sends only a live sample and ends; the stream the client opens again at
