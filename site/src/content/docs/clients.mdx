@@ -30,7 +30,7 @@ The dashboard listens on loopback only. To open it on a phone or another compute
 tailscale serve --https 8443 http://127.0.0.1:7477
 ```
 
-Then add the proxy's address to `runnerd.toml` and restart runnerd, so writes from its pages pass the `Origin` check:
+Then add the proxy's address to [`[web] origins`](../configuration/#web) in `runnerd.toml` and restart runnerd, so writes from its pages pass the `Origin` check:
 
 ```toml
 [web]
@@ -59,7 +59,7 @@ Views of the same thing are linked. On the overview, pointing at, focusing or ta
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-Under [CPU admission](../configuration/#cpu-admission) the line above the budget bar adds the CPU the runners reserve of the budget, and says when a job waits for CPU. Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the queued jobs and the latest. A pause lasts until a resume, across restarts.
+Under [CPU admission](../admission/#cpu-admission) the line above the budget bar adds the CPU the runners reserve of the budget, and says when a job waits for CPU. Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the queued jobs and the latest. A pause lasts until a resume, across restarts.
 
 ### A job
 
@@ -86,7 +86,7 @@ Below the charts: every job, filtered by repository and outcome.
 | Page | Shows |
 |---|---|
 | Caches | each volume, its bound and its size over 30 days; reseed a snapshot or empty a cache; the records of failed jobs, removed one at a time or all at once |
-| Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../configuration/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; under [auto sizing](../configuration/#auto-sizing), the changes it made, with a link that opens the last one undone in the editor |
+| Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../admission/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; under [auto sizing](../admission/#auto-sizing), the changes it made, with a link that opens the last one undone in the editor |
 | Config | `runnerd.toml` in an editor that checks it against `MemoryMax` as you type, saves and reloads only when it fits; the doctor's checks |
 
 ## runnerctl
@@ -113,7 +113,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 
 | Command | What it shows or does |
 |---|---|
-| `runnerctl status` | the memory budget, and the CPU budget under [CPU admission](../configuration/#cpu-admission), every slot and its runner, the repositories and their queues |
+| `runnerctl status` | the memory budget, and the CPU budget under [CPU admission](../admission/#cpu-admission), every slot and its runner, the repositories and their queues |
 | `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
 | `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
 | `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |
@@ -124,9 +124,9 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl reseed <profile>` | makes slot 1's layers the profile's snapshot once its slots are free, and waits for it (`--no-wait`) |
 | `runnerctl shell <job> [--step 3]` | a shell in a failed job's [record](../running/#records-of-failed-jobs), in its workspace; exiting removes its container |
 | `runnerctl records`, `records rm <job>` | the records of failed jobs with their sizes and limits; removes one, or `--all`, or those `--older-than 2d` |
-| `runnerctl sizing [--since 7d]` | per profile and per job: percentiles and the largest of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../configuration/#sizing) |
+| `runnerctl sizing [--since 7d]` | per profile and per job: percentiles and the largest of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../admission/#sizing) |
 | `runnerctl sizing apply <profile> [--yes]` | writes a profile's advised `memory` and `slots` into the daemon's config after showing the change and asking; the daemon checks it against the budget first |
-| `runnerctl sizing undo <profile> [--yes]` | writes back the `memory` and `slots` [auto sizing](../configuration/#auto-sizing) last replaced, the same way; both refuse to write over a config changed since they read it |
+| `runnerctl sizing undo <profile> [--yes]` | writes back the `memory` and `slots` [auto sizing](../admission/#auto-sizing) last replaced, the same way; both refuse to write over a config changed since they read it |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
@@ -160,7 +160,7 @@ node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
 
 `runnerctl sizing apply node` shows `memory = "7G" -> "2.5G"` and `slots = 2 -> 5` under `[profiles.node]` and asks before it writes. Without a terminal to ask on it needs `--yes`. The rest of the file, comments included, stays as written.
 
-Under [auto sizing](../configuration/#auto-sizing) the first line ends with `auto sizing applies it`, the `apply` hint goes, and each change shows under its profile:
+Under [auto sizing](../admission/#auto-sizing) the first line ends with `auto sizing applies it`, the `apply` hint goes, and each change shows under its profile:
 
 ```console wrap=false
   lower memory to 2.5G from 5.25G, its largest peak + 15%; 5 slots fit in the same 10.5G
@@ -231,7 +231,7 @@ every repository resumed
 
 The dashboard, for a host you reach over SSH. It shows what the web dashboard does:
 
-- the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container; its heading adds the CPU budget under [CPU admission](../configuration/#cpu-admission);
+- the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container; its heading adds the CPU budget under [CPU admission](../admission/#cpu-admission);
 - a card per slot with the job, its step, run time, and memory and CPU sparklines;
 - the slice's memory and CPU, the repositories, and the queued and latest jobs;
 - the history, filtered by outcome and repository;

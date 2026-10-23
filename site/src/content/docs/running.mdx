@@ -39,9 +39,9 @@ Runner containers live in Docker, not in the unit: a restarted runnerd adopts th
 ## How it schedules
 
 - It reads the `gh` CLI's token at start, and again when GitHub rejects it.
-- Every `poll_interval` (`[host]`, default `15s`) it asks GitHub for each repository's queued jobs.
+- Every [`poll_interval`](../configuration/#host) it asks GitHub for each repository's queued jobs.
 - A job is served when every label in its `runs-on` is in its repository's `labels`.
-- For each one it registers a just-in-time runner and starts it in a free slot of the repository's profile, if the slice's `MemoryMax` still has room for the profile's `memory`, or with [measured admission](../configuration/#measured-admission) for the job's predicted peak, and under [CPU admission](../configuration/#cpu-admission) if the CPU budget has room for it too. Other jobs wait in GitHub's queue.
+- For each one it registers a just-in-time runner and starts it in a free slot of the repository's profile, if the slice's `MemoryMax` still has room for the profile's `memory`, or with [measured admission](../admission/#measured-admission) for the job's predicted peak, and under [CPU admission](../admission/#cpu-admission) if the CPU budget has room for it too. Other jobs wait in GitHub's queue.
 - The runner takes one job, its container exits, and runnerd removes it. A runner with no job after 5 minutes is removed.
 - A restarted runnerd adopts the runner containers still running and deletes this host's runners that have none.
 - Before a profile's first runner it pulls the profile's `image`, logging the pull's progress.
@@ -58,9 +58,9 @@ A slot is one concurrent job of a profile. Each job gets a new container, but th
 |---|---|
 | the slot's Docker images, `~/.cache`, tool cache, Android SDK | per slot, between jobs |
 | cargo's credentials and config, Gradle's `gradle.properties` in `~/.cache` | never: no later job or record shell sees them, even from an older snapshot |
-| the profile's snapshot | replaced by slot 1's changes once they reach `reseed_at` (`[caches]`, default `2G`) and the profile is idle; above `snapshot_max` (default `10G`) it starts over from slot 1's changes alone |
-| pnpm store, Maven repository | shared by all slots, emptied above `max_size` when no job runs |
-| Docker Hub mirror | runs while any runner does; its storage is emptied above `mirror.max_size` (default `10G`) when no job runs |
+| the profile's snapshot | replaced by slot 1's changes once they reach [`reseed_at`](../configuration/#caches) and the profile is idle; above `snapshot_max` it starts over from slot 1's changes alone |
+| pnpm store, Maven repository | shared by all slots, emptied above their [`max_size`](../configuration/#caches) when no job runs |
+| Docker Hub mirror | runs while any runner does; its storage is emptied above `mirror.max_size` when no job runs |
 
 ## Records of failed jobs
 
@@ -80,7 +80,7 @@ runner@4be1c0d2a7e9:~/_work/ledger/ledger$
 `--step 3` shows step 3 instead.
 
 - The terminal goes over the API socket and keeps the size it was opened with.
-- The shell's container counts against the budget with the profile's memory cap, and is refused when the budget cannot hold it, or under [measured admission](../configuration/#measured-admission) while the slice is at 90% of `MemoryMax`.
+- The shell's container counts against the budget with the profile's memory cap, and is refused when the budget cannot hold it, or under [measured admission](../admission/#measured-admission) while the slice is at 90% of `MemoryMax`.
 - It mounts the profile's snapshot and the shared pnpm and Maven caches read-only. While it is open, the profile does not reseed (`runnerctl reseed` answers 409) and the shared caches are not trimmed or cleaned. It is refused while the profile reseeds or the shared caches are trimmed.
 - It goes when the shell exits, when the client goes away, or after 8 hours.
 
@@ -102,24 +102,24 @@ Records take disk: committing one takes a second or two, and it takes about twic
 
 ## Job history
 
-runnerd records every job its runners may run in a SQLite database, `$XDG_STATE_HOME/runnerd/runnerd.db` by default. `[history]` in the config changes the path and how long each part is kept. For each job:
+runnerd records every job its runners may run in a SQLite database; [`[history]`](../configuration/#history) sets its path and how long each part is kept. For each job:
 
 | What | Kept |
 |---|---|
 | its timeline: queued, container started, job started, finished, container and runner registration removed | with the job |
 | its steps with their start and end, as GitHub shows them | with the job |
-| CPU, memory and network of its container, sampled every 2 s | samples 7 days (`history.samples`); totals and peaks with the job |
+| CPU, memory and network of its container, sampled every 2 s | samples for `history.samples`; totals and peaks with the job |
 | the bytes the Docker Hub mirror served it | with the job |
-| its log, as GitHub shows it with masked secrets still masked, up to 50M (`history.log_max`) | 30 days (`history.logs`) |
+| its log, as GitHub shows it with masked secrets still masked, up to `history.log_max` | for `history.logs` |
 
-A finished job's record goes after 90 days (`history.jobs`), with its steps and runner. The database file does not shrink when rows go; SQLite reuses the space. runnerd also keeps the sizes of the cache volumes and the slice's CPU and memory over time.
+A finished job's record goes after `history.jobs`, with its steps and runner. The database file does not shrink when rows go; SQLite reuses the space. runnerd also keeps the sizes of the cache volumes and the slice's CPU and memory over time.
 
 Where the data comes from:
 
 - **Which job a runner took**: a small script runnerd runs in the container (`docker exec`, as root) reads the job's ID from the runner's `_diag/Worker_*.log` within a second of the job starting. GitHub's list of queued jobs still shows the job for several seconds after that, and runnerd does not start a second runner for it.
 - **Steps**: GitHub's jobs API, read every poll while a job runs. The runner's own logs name steps differently from GitHub (`Set up runner` for `Set up job`) and change between runner versions. The API's times have second precision.
 - **The log**: the runner's `_diag/pages`, which the same script follows. The runner writes the log there in 4 KiB blocks, so lines arrive a block at a time, and a quiet step's lines arrive when it ends.
-- **CPU and memory**: the container's cgroup files. A container's memory is an estimate of what its job holds without page cache: `memory.current` less the file page cache lists, so lower than `docker stats`, which still counts page cache read twice. The slice's memory is `memory.current` less inactive page cache, as `docker stats` counts it, so the high-water mark errs toward holding starts back. Kills and out-of-memory events come from `memory.events`. Network from `/proc/<pid>/net/dev`.
+- **CPU and memory**: the container's and the slice's cgroup files, every 2 s; [Admission and sizing](../admission/#what-a-jobs-memory-is) says what the memory counts. Network from `/proc/<pid>/net/dev`.
 
 ## API
 
@@ -135,7 +135,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache; `409` naming the jobs that use it |
 | `GET /v1/config` | the config file's path, text and revision |
 | `POST /v1/config/check` with TOML | what `runnerd check-config` says about it |
-| `PUT /v1/config?revision=` with TOML | checks it, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../configuration/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
+| `PUT /v1/config?revision=` with TOML | checks it, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
 | `GET /v1/doctor` | `runnerd doctor`'s checks, for the config runnerd runs with |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
 | `GET /v1/jobs?repository=&state=&conclusion=&since=&until=&before=&limit=` | a page of jobs, newest first; `next` is the `before` of the next page |
@@ -144,7 +144,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `GET /v1/jobs/{id}/logs?from=&follow=` | its log as text; with `follow=true`, open until the job's record is final |
 | `GET /v1/host/samples?since=` | the slice's CPU and memory, the last 24 hours at most |
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`), 744 buckets back at most: counts, queue and run time, CPU, memory, mirror bytes |
-| `GET /v1/sizing?since=` | per configured profile and per job (repository, workflow, name): percentiles of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../configuration/#sizing) for `memory` and `slots`; whether [auto sizing](../configuration/#auto-sizing) is on and the changes it made; the last 30 days by default |
+| `GET /v1/sizing?since=` | per configured profile and per job (repository, workflow, name): percentiles of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../admission/#sizing) for `memory` and `slots`; whether [auto sizing](../admission/#auto-sizing) is on and the changes it made; the last 30 days by default |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
 | `GET /v1/records` | every record of a failed job, oldest first, with the limits and the jobs whose record has a shell open |
 | `DELETE /v1/records/{job}`, `DELETE /v1/records?all=true`, `DELETE /v1/records?older_than=2d` | the jobs whose records went and the disk they took; records with a shell open stay, and removing one by its job is refused with `409` |
@@ -169,7 +169,7 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 | `repository.removed` | a reload removed it |
 | `budget.changed`, `cache.reseeded` | the budget changed; a profile has a new snapshot |
 | `record.created`, `record.deleted` | a failed job's runner was kept as a record; a record went, and why |
-| `sizing.changed` | [auto sizing](../configuration/#auto-sizing) wrote a profile's new `memory` and `slots`; it carries the old ones |
+| `sizing.changed` | [auto sizing](../admission/#auto-sizing) wrote a profile's new `memory` and `slots`; it carries the old ones |
 | `job.sample`, `host.sample`, `log.line` | live: a sample, or a log line with `logs=true` |
 
 Every event but the live ones has an ID: send the last one seen as `Last-Event-ID` and the stream resumes after it, across daemon restarts. Live events are not stored; a client that missed some reads the job's samples or log.
