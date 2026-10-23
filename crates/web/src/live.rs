@@ -80,8 +80,10 @@ impl Rendered {
         let html = markup.into_string();
         let (parts, clocked) = parts.into_parts();
         let mut frame = html.clone();
-        for cut in parts.iter().map(|part| &part.html).chain(&clocked) {
-            if let Some(at) = frame.find(cut.as_str()) {
+        // A clocked value with its quotes, so it is cut from the attribute it is and not from a longer one.
+        let clocked = clocked.iter().map(|value| format!("\"{value}\""));
+        for cut in parts.iter().map(|part| part.html.clone()).chain(clocked) {
+            if let Some(at) = frame.find(&cut) {
                 frame.replace_range(at..at + cut.len(), "");
             }
         }
