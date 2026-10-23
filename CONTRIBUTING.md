@@ -9,7 +9,7 @@ starts only the jobs those paths can affect:
 
 | Job | Runs on a pull request that changes |
 |---|---|
-| `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh` |
+| `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, the docs' commands check, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh`, `.github/scripts/check-docs-commands.sh` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `jvm` and `node` stages, pushes nothing | `image/**` |
 | `site-build`: Astro build | `site/**` |

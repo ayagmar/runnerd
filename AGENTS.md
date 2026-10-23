@@ -15,6 +15,7 @@ cargo clippy -p runnerd-core --no-default-features --features client --all-targe
 cargo test --workspace --locked
 RUSTDOCFLAGS="-D warnings" cargo doc --workspace --no-deps --locked
 .github/scripts/check-boundaries.sh
+cargo build --locked -p runnerd -p runnerd-cli && .github/scripts/check-docs-commands.sh target/debug
 cargo machete
 typos
 taplo fmt --check
