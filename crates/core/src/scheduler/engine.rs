@@ -283,7 +283,11 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 memory_in_use: 0,
             },
             profiles: Vec::new(),
-            repositories: Vec::new(),
+            // What clients resuming after the last run's events have, so the first publish announces the difference.
+            repositories: store.announced_repositories().unwrap_or_else(|error| {
+                warn!("cannot read the repositories the last run announced: {error}");
+                Vec::new()
+            }),
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         // Unknown: an earlier run may have left the mirror up, with the configured cap at best.

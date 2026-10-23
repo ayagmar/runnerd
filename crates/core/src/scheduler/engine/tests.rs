@@ -1760,3 +1760,30 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
         }]
     );
 }
+
+#[tokio::test]
+async fn a_restart_without_a_repository_announces_its_removal_to_clients_resuming_after_the_last_run()
+ {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_in(&github, &docker, &dir);
+    let mut cursor = 0;
+    repository_events(&handle, &mut cursor).await;
+    drop((engine, handle));
+
+    // Restarted with o/s in place of o/r, on the same history.
+    let config = CONFIG.replace("name = \"o/r\"", "name = \"o/s\"");
+    let (_engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut s = repository_status(false, 0);
+    s.name = "o/s".to_owned();
+    assert_eq!(
+        repository_events(&handle, &mut cursor).await,
+        [
+            api::Event::RepositoryChanged { repository: s },
+            api::Event::RepositoryRemoved {
+                repository: "o/r".to_owned()
+            }
+        ]
+    );
+}
