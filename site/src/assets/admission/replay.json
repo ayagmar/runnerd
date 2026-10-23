@@ -1,0 +1,43 @@
+{
+  "command": "runnerd simulate --memory-max 33G --cpus 32 --slots jvm=3 --slots node=8",
+  "table": [
+    "POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD    CPU CPU HELD",
+    "caps      jvm 2, node 2                 0s     8m00s     8m00s     1m30s       4   15.58G       0     0   11.7        -",
+    "caps*     jvm 3, node 8                 0s     9m00s     9m00s     2m21s       4   15.95G       0     0   11.6        -",
+    "measured  jvm 3, node 8                 0s        0s     9m00s       10s       8   25.02G       0     0   23.2        -"
+  ],
+  "jobs": {
+    "halyard/ledger integration tests": {
+      "repository": "halyard/ledger",
+      "job": "CI / integration tests",
+      "profile": "jvm",
+      "runs": 28,
+      "p95": 7889321069,
+      "reserve": 9126805504
+    },
+    "halyard/ledger build": {
+      "repository": "halyard/ledger",
+      "job": "CI / build",
+      "profile": "jvm",
+      "runs": 140,
+      "p95": 4481935658,
+      "reserve": 5368709120
+    },
+    "halyard/storefront build": {
+      "repository": "halyard/storefront",
+      "job": "CI / build",
+      "profile": "node",
+      "runs": 196,
+      "p95": 2019321106,
+      "reserve": 2415919104
+    },
+    "halyard/storefront e2e": {
+      "repository": "halyard/storefront",
+      "job": "CI / e2e",
+      "profile": "node",
+      "runs": 28,
+      "p95": 2120183256,
+      "reserve": 2684354560
+    }
+  }
+}
