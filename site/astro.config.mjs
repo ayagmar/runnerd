@@ -7,6 +7,7 @@ import starlight from '@astrojs/starlight';
 export default defineConfig({
   site: 'https://ayagmar.github.io',
   base: '/runnerd',
+  trailingSlash: 'always',
   fonts: [
     {
       provider: fontProviders.local(),
