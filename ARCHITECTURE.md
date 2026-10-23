@@ -69,8 +69,8 @@ queued → slot → container → removed
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)).
 3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`) and starts its
    container (`DockerApi::start`) under the profile's limits and isolation backend.
-4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials
-   (`image/scrub.sh`). `Engine::collect_finished` sees the container stopped, removes it and the runner's
+4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials and every
+   dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`). `Engine::collect_finished` sees the container stopped, removes it and the runner's
    registration, and frees the slot. A runner that took no job holds the repository back for a while. If the job
    failed and its profile has `record_failures`, the engine first commits the container to a record
    (`runnerd-record:<job>`) within `[records]`' limits, then removes it
@@ -131,11 +131,13 @@ nothing until Docker has listed them.
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the
   config, which a reload may have lowered since they started.
-- No record keeps the JIT config, the runner's registration and credentials, `_work/_temp` or a git config's
-  `extraheader`: the runner image deletes them when the runner exits, and the engine commits no container whose
-  changes still hold one (`record::secrets_left`).
-- A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It is
-  removed when its shell exits, its client goes away, or the daemon stops; `Engine::recover` removes any left over.
+- No record keeps the JIT config, `_work/_temp`, a git config's `extraheader`, or any dot-file in the runner's home
+  or file in `/tmp` or `/var/tmp` the job added or changed: the runner image deletes them when the runner exits, and
+  the engine commits no container whose changes still hold one (`record::secrets_left`). Checking and committing a
+  container run off the engine's loop.
+- A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It
+  mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell
+  exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.
   A record with a shell open is never removed.
 - The dashboard listens on loopback only, never logs its session token or login code, and serves every file its
   pages load; its Content-Security-Policy allows nothing else.

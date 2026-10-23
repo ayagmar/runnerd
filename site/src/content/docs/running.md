@@ -66,16 +66,25 @@ You are in /home/runner/_work/ledger/ledger, as the job left it. Not kept: the j
 runner@4be1c0d2a7e9:~/_work/ledger/ledger$
 ```
 
-`--step 3` shows step 3 instead. The terminal goes over the API socket. The shell's container counts against the budget with the profile's memory cap, and is refused when the budget cannot hold it. It goes when the shell exits or the client goes away.
+`--step 3` shows step 3 instead.
+
+- The terminal goes over the API socket and keeps the size it was opened with.
+- The shell's container counts against the budget with the profile's memory cap, and is refused when the budget cannot hold it.
+- It mounts the profile's snapshot and the shared pnpm and Maven caches read-only. While it is open, the profile does not reseed and the shared caches are not trimmed or cleaned.
+- It goes when the shell exits, when the client goes away, or after 8 hours.
 
 | What | In a record |
 |---|---|
 | the workspace, `_work/<repository>`, with build output and test reports | yes |
-| the runner's `_diag` logs, secrets masked as on GitHub | yes |
-| the runner's registration and credentials, the JIT config, `_work/_temp` (step scripts), the token `actions/checkout` puts in `.git/config` | never |
+| the runner's `_diag` logs, secrets masked as the runner masks them on GitHub | yes |
+| anything else the job wrote outside volumes, such as files it wrote with `sudo` in `/etc` or `/root` | yes |
+| dot-files and dot-directories the job added or changed in the runner's home (`.gitconfig`, `.aws`, `.gnupg`, `.docker`, the runner's `.credentials`), and what it added or changed in `/tmp` and `/var/tmp` | never |
+| the JIT config, `_work/_temp` (step scripts), the token `actions/checkout` puts in `.git/config` | never |
 | the slot's caches, tool cache, Android SDK, and the job's Docker images | no; volumes, which a shell sees as the profile's snapshot |
 
-The runner image deletes the secret files when the runner exits, and runnerd refuses to keep a container whose changes still hold one. What a job writes into its workspace itself stays: a step that saves a secret to a file leaves it in the record.
+The runner image deletes the "never" rows when the runner exits, and runnerd refuses to keep a container whose changes still hold any of them. A step that saves a secret into the workspace or elsewhere outside those places leaves it in the record: runnerd does not read file contents.
+
+Records are readable by anyone who can use Docker on this host (`docker run runnerd-record:<job>`), and by the user runnerd runs as, through its socket, which is the only client the socket accepts. Turn `record_failures` on only for profiles whose jobs you would let those users see.
 
 Records take disk: committing one takes a second or two, and it takes about twice what the job wrote outside volumes, since Docker keeps the layer packed and unpacked. `runnerctl records` lists them with their limits; `runnerctl records rm <job>`, `--all` or `--older-than 2d` removes them. The job history keeps, after a record is gone, when it was made, its size, and why it went (`count`, `size`, `age` or `user`).
 

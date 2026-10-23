@@ -23,15 +23,30 @@ history, so a restart finds them.
 
 **Secrets.** Two layers, so neither alone has to be right:
 
-1. The runner image runs `runnerd-scrub` (`image/scrub.sh`) as root once `run.sh` exits, before the container
-   stops. It deletes the JIT config's directory, the runner's registration and credentials, the usual credential
-   files in the runner's home, `_work/_temp`, and every `extraheader` line in the workspace's git configs.
-2. Before committing, the engine reads the container's changes (`docker diff`) and refuses to keep a container
-   whose added or modified paths include any of those files (`record::secrets_left`). A runner image without the
-   scrub, or a container killed before it ran, leaves no record; the job history says why.
+1. The entrypoint touches `/run/runnerd-since` before it starts `run.sh`. Once the runner exits and its user's
+   processes are gone, it runs `runnerd-scrub` (`image/scrub.sh`) as root. The scrub deletes every dot-file or
+   dot-directory of the runner's home, and every entry of `/tmp` and `/var/tmp`, whose ctime is newer than the
+   marker (inside an older dot-directory, the newer entries). That covers the runner's registration and credentials
+   and whatever logins and keys a job's tools leave, whatever their names: `~/.gitconfig` with a token in an
+   `insteadOf` URL, `~/.aws`, `~/.gnupg`, `~/.config/gcloud`, `/tmp/deploy.pem`. A job cannot set a ctime back.
+   It also deletes the JIT config's directory and `_work/_temp` (the step scripts, `GITHUB_ENV`), and every
+   `extraheader` line in the workspace's git configs. Mount points, the cache layers, are other file systems and
+   are left alone: they are not part of a record.
+2. Before committing, the engine reads the container's changes (`docker diff`). It refuses to keep a container
+   whose added or modified paths include anything under the runner's dot-files, `/tmp`, `/var/tmp`, `/run/runnerd`
+   or `_work/_temp` (`record::secrets_left`). A short allowlist of harmless paths is there for exceptions; it is
+   empty, because on the sandbox runs the scrub left none. A runner image without the scrub, or a container killed
+   before it ran, leaves no record; the job history says why.
 
-What a job writes to its own workspace on purpose is the job's to keep or not; runnerd does not search file
-contents. `_diag` stays: it has the job's log, and the runner masks secrets there as it does on GitHub.
+Everything else the job changed outside volumes stays. That includes the workspace and anything a job wrote with
+`sudo` outside the runner's home and the temporary directories, such as `/etc` or `/root`. A step that saves a secret
+there, or into the workspace, leaves it in the record: runnerd does not search file contents. `_diag` stays: it has
+the job's log and the job message, which the runner masks as it masks the log on GitHub.
+
+**Who can read a record.** Anyone who can use Docker on the host (`docker run runnerd-record:<job>`), and any
+client runnerd's socket accepts, which is only the user runnerd runs as. Through the socket, that user can open a
+shell with the job's files and network access on runnerd's network. The dashboard shows the command, not a
+terminal.
 
 **Storage.** `[records]` bounds them: `max_total` (20G), `max_count` (10), `max_age` (7d), and `min_free` (10G) free
 on Docker's disk. A record is made only if the disk keeps `min_free` after it (estimated at twice the container's
@@ -41,11 +56,22 @@ is never removed. The job history keeps, per job, when its record was made, its 
 and why it went (`count`, `size`, `age`, `user`), past the record itself.
 
 **Shells.** `POST /v1/records/{job}/shell` upgrades the request's own connection to a raw terminal
-(`Upgrade: runnerd-tty`), so a shell needs no listener beyond the API socket and passes its principal check. The
-engine runs the shell's container from the record with the profile's memory cap and counts it in the budget like a
-slot; when the budget cannot hold it, the request fails with 409 and says so. The container goes when the shell
-exits, when the client goes away (the daemon sends the terminal a Ctrl-D, then removes it), when the daemon stops,
-and, for one a crash left, when the next daemon starts.
+(`Upgrade: runnerd-tty`), so a shell needs no listener beyond the API socket and passes its principal check.
+
+- The engine runs the shell's container from the record with the profile's memory cap and counts it in the budget
+  like a slot. When the budget cannot hold it, the request fails with 409 and says so.
+- The shell mounts the profile's snapshot and the shared pnpm and Maven caches read-only.
+- While a shell is open, its profile does not reseed, the shared caches are not trimmed, and `caches --clean` of a
+  shared cache is refused.
+- The container goes when the shell exits, when the client goes away (the daemon sends the terminal a Ctrl-D, then
+  removes it), after 8 hours, when the daemon stops, and, for one a crash left, when the next daemon starts.
+- The terminal keeps the size it was opened with: v1 sends no resize.
+
+**Off the loop.** Docker walks the container's files for `docker diff` and for its size, and commits it. Both happen
+in tasks that wake the engine when they finish, so a large workspace does not hold up a tick. The free-space check
+counts the expected size of the records still being committed. A daemon that stops mid-record is caught up at the
+next start: a record image the history has no row for is noted as made, and a stopped runner whose failed job got no
+record is noted as skipped.
 
 ## Consequences
 
@@ -54,5 +80,11 @@ rm` takes it. The record holds what the job changed outside volumes only: the sl
 job's Docker images show the profile's snapshot in a shell, not what the job left there.
 
 `runnerd` depends on hyper directly to take the upgraded connection, and `runnerctl` on rustix's `termios` to put
-its terminal in raw mode for the shell. The runner image's entrypoint no longer `exec`s the runner: it waits for it,
-forwarding `docker stop`'s signal, so the scrub runs after it.
+its terminal in raw mode for the shell.
+
+The runner image's entrypoint no longer `exec`s the runner: it waits for it, then scrubs. `run.sh` passes on no
+signal, so the entrypoint sends `docker stop`'s TERM to the runner's listener, which cancels the job. Once `run.sh`
+exits, the entrypoint gives the runner user's processes 2 s, then TERM, then KILL, so nothing writes after the scrub.
+The runner gives a cancelled step up to 10 s (SIGINT, then SIGTERM after 7.5 s). A `docker stop` with its default
+10 s timeout can therefore kill the container before the scrub. The guard then refuses it, and a cancelled job is
+not recorded anyway.
