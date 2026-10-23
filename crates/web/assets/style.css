@@ -346,11 +346,6 @@ html {
   line-height: 1;
 }
 
-.lead {
-  max-width: 62ch;
-  color: var(--muted);
-}
-
 .warning {
   margin-top: 1rem;
   padding: 0.75rem 1rem;
@@ -436,11 +431,6 @@ html {
   margin-top: 0.3rem;
 }
 
-.block .repo {
-  font-size: 0.8125rem;
-  color: inherit;
-}
-
 /* A block too narrow for its labels shows none: its size is in the bar's accessible name and its title. */
 .block,
 .free {
@@ -461,7 +451,7 @@ html {
 /* The readout above the bar: the slice's total, or what the hovered or focused block holds. */
 .budget .figures {
   min-height: 2rem;
-  margin-bottom: 1rem;
+  margin: 0.75rem 0 1rem;
 }
 
 .readout {
@@ -527,6 +517,7 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
 
 /* An idle slot's card is drawn like its block: an outline in the profile's colour, nothing in it. */
 .slot.idle {
+  min-height: 0;
   background: transparent;
   border-top: 0;
   padding-top: calc(1rem + 6px);
@@ -968,6 +959,17 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
   font-weight: 500;
 }
 
+.job-facts {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 1.25rem;
+  color: var(--muted);
+}
+
+.job-facts code {
+  color: var(--ink);
+}
+
 .facts,
 .totals,
 .headline {
@@ -1010,7 +1012,20 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
 
 .phase {
   background: var(--profile);
+  transition: opacity 150ms var(--ease);
 }
+
+/* A phase and its legend entry light up together. */
+.timeline:has(.phase:hover) :is(.phase, .phase-legend li):not(:hover) { opacity: 0.4; }
+.timeline:has(.phase.wait:hover) .phase-legend .wait,
+.timeline:has(.phase.start:hover) .phase-legend .start,
+.timeline:has(.phase.run:hover) .phase-legend .run,
+.timeline:has(.phase.clean:hover) .phase-legend .clean { opacity: 1; }
+.timeline:has(.phase-legend li:hover) .phase:not(:hover) { opacity: 0.4; }
+.timeline:has(.phase-legend .wait:hover) .phase.wait,
+.timeline:has(.phase-legend .start:hover) .phase.start,
+.timeline:has(.phase-legend .run:hover) .phase.run,
+.timeline:has(.phase-legend .clean:hover) .phase.clean { opacity: 1; }
 
 /* The phase still going on ends in a fading edge, and breathes. */
 .phase.ongoing {
@@ -1074,6 +1089,49 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
   padding: 0;
   display: grid;
   gap: 2px;
+}
+
+.step-list li.linked {
+  background: var(--surface-2);
+  box-shadow: inset 3px 0 0 var(--ink);
+}
+
+.step-list li[tabindex] {
+  cursor: default;
+}
+
+/* A step's stretch of a chart, drawn while the step is hovered or focused. */
+.band {
+  position: absolute;
+  inset-block: 0;
+  left: var(--left);
+  width: max(2px, var(--width));
+  background: color-mix(in srgb, var(--ink) 10%, transparent);
+  box-shadow: inset 1px 0 0 var(--ink), inset -1px 0 0 var(--ink);
+  opacity: 0;
+  pointer-events: none;
+  transition: opacity 150ms var(--ease);
+}
+
+.band.on {
+  opacity: 1;
+}
+
+.band-label {
+  position: absolute;
+  top: 0.25rem;
+  left: 0.4rem;
+  font-size: 0.75rem;
+  font-weight: 600;
+  white-space: nowrap;
+  background: var(--surface);
+  padding: 0 0.25rem;
+}
+
+/* A stretch in the right half labels itself to its left. */
+.band.end .band-label {
+  left: auto;
+  right: 0.4rem;
 }
 
 .step-list li {
@@ -1173,6 +1231,15 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
   min-height: 44px;
   display: inline-flex;
   align-items: center;
+}
+
+/* The history's charts share a day: a horizontal drag on a touch screen picks days instead of scrolling. */
+.trends .charts {
+  touch-action: pan-y;
+}
+
+.trends .charts:focus-visible {
+  outline-offset: 4px;
 }
 
 .charts.three {
@@ -1279,31 +1346,25 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
   color: var(--muted);
 }
 
-.meter {
-  height: 0.6rem;
-  background: var(--surface-2);
-}
-
-.meter span {
-  display: block;
-  height: 100%;
-  width: calc(var(--fill) * 100%);
-  background: var(--memory);
-}
-
 .volume .chart-area {
   height: 5rem;
 }
 
 .volume-action {
-  justify-self: start;
+  margin-left: auto;
   min-height: 36px;
   padding: 0 0.75rem;
   font-size: 0.875rem;
 }
 
+@media (pointer: coarse) {
+  .volume-action {
+    min-height: 44px;
+  }
+}
+
 .volume-head {
-  flex-wrap: wrap;
+  justify-content: space-between;
 }
 
 /* The config editor: the file on the left, what it asks of the budget on the right. */
@@ -1317,10 +1378,6 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
 .editor {
   display: grid;
   gap: 0.5rem;
-}
-
-.editor-label {
-  font-weight: 600;
 }
 
 .editor textarea {
@@ -1521,11 +1578,6 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
     margin-left: auto;
   }
 
-  .block .repo,
-  .free .name {
-    display: none;
-  }
-
   /* Narrow blocks keep their labels: less padding and gap, and a name that may wrap. */
   .bar {
     --gap: 4px;
@@ -1541,14 +1593,6 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
     line-height: 1.15;
     white-space: normal;
     overflow-wrap: anywhere;
-  }
-
-  .slot-figures {
-    grid-template-columns: 1fr 1fr;
-  }
-
-  .slot-figures > div:first-child {
-    grid-column: 1 / -1;
   }
 
   .step-list li {

@@ -401,6 +401,33 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
 }
 
 #[tokio::test]
+async fn a_step_marks_its_own_stretch_of_the_memory_and_cpu_charts() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    let name = job.find(r#"<span class="step-name">Unit tests"#).unwrap();
+    let focus = r#"data-on:focus="$_step = "#;
+    let enter = job[..name].rfind(focus).unwrap() + focus.len();
+    let number: usize = job[enter..]
+        .split(|c: char| !c.is_ascii_digit())
+        .next()
+        .unwrap()
+        .parse()
+        .unwrap();
+    assert_eq!(number, 6, "Unit tests is the sixth step");
+    let bands = job
+        .match_indices(&format!(r#"data-class:on="$_step == {number}""#))
+        .count();
+    assert_eq!(
+        bands, 2,
+        "the step has a band on the memory and on the CPU chart"
+    );
+}
+
+#[tokio::test]
 async fn a_job_chart_shows_the_caps_its_container_ran_with_not_the_profiles_now() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

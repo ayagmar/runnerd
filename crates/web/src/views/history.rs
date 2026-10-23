@@ -5,8 +5,8 @@ use maud::{Markup, html};
 use runnerd_core::api::{Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsRow, Status};
 use serde::{Deserialize, Serialize};
 
-use super::{Durations, Page, badge, durations, page, profile_class, time_ago};
-use crate::chart::{Bar, Base, Series, TimeChart, nice_top, stacked_bars};
+use super::{Durations, Page, badge, durations, js, page, profile_class, time_ago};
+use crate::chart::{Band, Bar, Base, Series, TimeChart, nice_top, stacked_bars};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -160,7 +160,7 @@ fn days(stats: &Stats, now: u64) -> Vec<Day> {
 /// The whole page.
 pub(crate) fn render(history: &History) -> Markup {
     let main = html! {
-        h1 { "History" }
+        h1.visually-hidden { "History" }
         (filters(history))
         (trends(history))
         (jobs(history))
@@ -171,9 +171,10 @@ pub(crate) fn render(history: &History) -> Markup {
 fn filters(history: &History) -> Markup {
     let filter = &history.filter;
     html! {
-        form.filters method="get" action="/history" {
+        // A change applies the filter; the button is for a browser without scripts.
+        form.filters method="get" action="/history" data-on:change="el.requestSubmit()" {
             label {
-                span { "Repository" }
+                span.visually-hidden { "Repository" }
                 select name="repository" {
                     option value="" { "All repositories" }
                     @for repository in &history.status.repositories {
@@ -182,7 +183,7 @@ fn filters(history: &History) -> Markup {
                 }
             }
             label {
-                span { "Outcome" }
+                span.visually-hidden { "Outcome" }
                 select name="outcome" {
                     option value="" { "Any outcome" }
                     @for (value, label) in OUTCOMES {
@@ -190,7 +191,7 @@ fn filters(history: &History) -> Markup {
                     }
                 }
             }
-            button.button type="submit" { "Filter" }
+            noscript { button.button type="submit" { "Filter" } }
             @if filter.repository.is_some() || filter.outcome.is_some() {
                 a href="/history" { "Clear" }
             }
@@ -198,6 +199,17 @@ fn filters(history: &History) -> Markup {
     }
 }
 
+/// Picks the day under the pointer, from the chart it is over: day `i` is the `i`th thirtieth of the chart's width.
+const DAY_UNDER_POINTER: &str = "const area = evt.target.closest('.chart-card')?.querySelector('.chart-area'); \
+    if (area) { const box = area.getBoundingClientRect(); \
+    $_day = Math.min(29, Math.max(0, Math.floor((evt.clientX - box.left) / box.width * 30))) }";
+/// Steps through the days with the arrow keys.
+const DAY_KEYS: &str = "if (evt.key == 'ArrowLeft') { $_day = Math.max(0, ($_day < 0 ? 30 : $_day) - 1); evt.preventDefault() } \
+    else if (evt.key == 'ArrowRight') { $_day = Math.min(29, $_day + 1); evt.preventDefault() } \
+    else if (evt.key == 'Escape') { $_day = -1 }";
+
+/// The last 30 days as three charts on one day axis. Pointing at a day, or stepping to it with the arrow keys, marks
+/// it on every chart and puts its numbers in the headline.
 fn trends(history: &History) -> Markup {
     let days = days(&history.stats, history.now);
     let peak = days.iter().map(|day| day.memory_peak).max().unwrap_or(0);
@@ -241,17 +253,37 @@ fn trends(history: &History) -> Markup {
         format::bytes,
         &days,
     );
+    let marks = |span: fn(u64, &Day) -> (u64, u64)| -> Vec<Band> {
+        (0u64..)
+            .zip(&days)
+            .map(|(i, day)| {
+                let (from, to) = span(i, day);
+                Band {
+                    from,
+                    to,
+                    shown: format!("$_day == {i}"),
+                    label: String::new(),
+                }
+            })
+            .collect()
+    };
+    let bar_marks = marks(|i, _| (i, i + 1));
+    let day_marks = marks(|_, day| (day.start, day.start + 86_399));
+    let dates: Vec<String> = days
+        .iter()
+        .map(|day| format::short_date(day.start))
+        .collect();
     html! {
-        section.trends aria-labelledby="trends-title" {
-            div.section-head {
-                h2 #trends-title { "Last 30 days" }
-                p.muted { "Jobs that finished, by the day they were queued (UTC)" }
-            }
+        section.trends aria-labelledby="trends-title" "data-signals:_day__ifmissing"="-1" {
+            h2 #trends-title data-text=(lens("Last 30 days", &dates)) { "Last 30 days" }
+            p.visually-hidden { "Jobs that finished, by the day they were queued (UTC). Arrow keys step through the days." }
             (headline(&days))
-            div.charts.three {
+            div.charts.three tabindex="0" aria-label="Charts per day"
+                data-on:pointermove=(DAY_UNDER_POINTER) data-on:pointerdown=(DAY_UNDER_POINTER)
+                data-on:pointerleave="$_day = -1" data-on:keydown=(DAY_KEYS) data-on:blur="$_day = -1" {
                 div.chart-card {
                     h3 { "Jobs per day" }
-                    (stacked_bars("Jobs per day by conclusion", &["success", "failure", "neutral", "other"], &bars, |n| n.to_string()))
+                    (stacked_bars("Jobs per day by conclusion", &["success", "failure", "neutral", "other"], &bars, |n| n.to_string(), &bar_marks))
                     ul.legend {
                         li.success { span.swatch {} "succeeded" }
                         li.failure { span.swatch {} "failed or lost" }
@@ -260,7 +292,7 @@ fn trends(history: &History) -> Markup {
                 }
                 div.chart-card {
                     h3 { "Run time and wait" }
-                    (times.render(time_top))
+                    (times.render_with(time_top, &day_marks))
                     ul.legend {
                         li.run { span.swatch {} "average run" }
                         li.wait { span.swatch {} "average wait for a runner" }
@@ -268,27 +300,35 @@ fn trends(history: &History) -> Markup {
                 }
                 div.chart-card {
                     h3 { "Memory peak" }
-                    (memory.render(nice_top(peak, Base::Binary)))
-                    p.muted { "The highest sampled peak of a job that day" }
+                    (memory.render_with(nice_top(peak, Base::Binary), &day_marks))
                 }
             }
         }
     }
 }
 
-/// One value per day that has one.
+/// A Datastar expression for text that is `whole` with no day picked and the picked day's entry of `per_day` else.
+fn lens(whole: &str, per_day: &[String]) -> String {
+    let entries: Vec<String> = per_day.iter().map(|entry| js(entry)).collect();
+    format!(
+        "$_day < 0 ? {} : [{}][$_day]",
+        js(whole),
+        entries.join(", ")
+    )
+}
+
+/// A day's value at its middle, so a line's points sit over the bars of the same days.
 fn daily(days: &[Day], value: fn(&Day) -> Option<u64>) -> Vec<(u64, u64)> {
     days.iter()
-        .filter_map(|day| value(day).map(|value| (day.start, value)))
+        .filter_map(|day| value(day).map(|value| (day.start + 43_200, value)))
         .collect()
 }
 
-/// A line chart over the days.
 fn per_day(title: &str, series: Vec<Series>, value: fn(u64) -> String, days: &[Day]) -> TimeChart {
     TimeChart {
         title: title.to_owned(),
         start: days.first().map_or(0, |day| day.start),
-        end: days.last().map_or(0, |day| day.start),
+        end: days.last().map_or(0, |day| day.start + 86_399),
         series,
         limit: None,
         value,
@@ -297,22 +337,46 @@ fn per_day(title: &str, series: Vec<Series>, value: fn(u64) -> String, days: &[D
     }
 }
 
-/// The 30 days in five numbers.
+/// The 30 days' totals, or the picked day's.
 fn headline(days: &[Day]) -> Markup {
     let total: u64 = days.iter().map(|day| day.jobs).sum();
     let succeeded: u64 = days.iter().map(|day| day.succeeded).sum();
     let run: u64 = days.iter().map(|day| day.run_seconds).sum();
     let queue: u64 = days.iter().map(|day| day.queue_seconds).sum();
-    let peak = days.iter().map(|day| day.memory_peak).max().unwrap_or(0);
-    let average = |sum: u64, jobs: u64| sum.checked_div(jobs);
+    let share = |succeeded: u64, jobs: u64| {
+        (succeeded * 100)
+            .checked_div(jobs)
+            .map_or("–".to_owned(), |percent| format!("{percent}%"))
+    };
+    let average = |sum: u64, jobs: u64| {
+        sum.checked_div(jobs)
+            .map_or("–".to_owned(), format::duration)
+    };
+    let each = |value: &dyn Fn(&Day) -> String| days.iter().map(value).collect::<Vec<_>>();
+    let figures = [
+        ("Jobs", total.to_string(), each(&|day| day.jobs.to_string())),
+        (
+            "Succeeded",
+            share(succeeded, total),
+            each(&|day| share(day.succeeded, day.jobs)),
+        ),
+        (
+            "Average run",
+            average(run, total),
+            each(&|day| average(day.run_seconds, day.jobs)),
+        ),
+        (
+            "Average wait",
+            average(queue, total),
+            each(&|day| average(day.queue_seconds, day.jobs)),
+        ),
+    ];
     html! {
-    dl.headline {
-        div { dt { "Jobs" } dd { (total) } }
-        div { dt { "Succeeded" } dd { @if total > 0 { (succeeded * 100 / total) "%" } @else { "–" } } }
-        div { dt { "Average run" } dd { (average(run, total).map_or("–".to_owned(), format::duration)) } }
-        div { dt { "Average wait" } dd { (average(queue, total).map_or("–".to_owned(), format::duration)) } }
-        div { dt { "Sampled memory peak" } dd { @if peak > 0 { (format::bytes(peak)) } @else { "–" } } }
-    }
+        dl.headline {
+            @for (label, whole, per_day) in &figures {
+                div { dt { (label) } dd data-text=(lens(whole, per_day)) { (whole) } }
+            }
+        }
     }
 }
 
@@ -330,7 +394,7 @@ fn jobs(history: &History) -> Markup {
     });
     html! {
         section.jobs aria-labelledby="jobs-title" {
-            h2 #jobs-title { "Jobs" }
+            h2 #jobs-title .visually-hidden { "Jobs" }
             @if history.page.jobs.is_empty() {
                 p.muted { "No jobs match." }
             } @else {
