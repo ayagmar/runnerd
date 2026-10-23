@@ -51,12 +51,14 @@ pub struct Prediction {
 }
 
 /// The peaks of a set of runs, sorted, until when a run at its cap makes them unpredictable, and until when a run
-/// past what it reserved makes the largest of them the prediction.
+/// past what it reserved makes the largest of them, or that run's peak if more, the prediction.
 #[derive(Debug, Clone, Default)]
 struct Peaks {
     sorted: Vec<u64>,
     unpredictable_until: u64,
     overran_until: u64,
+    /// The largest peak of a run past what it reserved, cancelled runs' included.
+    overran_peak: u64,
 }
 
 impl Peaks {
@@ -122,6 +124,7 @@ impl Predictor {
         }
         if run.reserved.is_some_and(|reserved| peak > reserved) {
             job.overran_until = job.overran_until.max(at + UNPREDICTABLE_FOR);
+            job.overran_peak = job.overran_peak.max(peak);
         }
     }
 
@@ -140,10 +143,11 @@ impl Predictor {
             };
         }
         let min_jobs = u64::from(self.min_jobs);
-        let job = job.filter(|job| job.runs() > 0);
         let (memory, basis) = match (job, self.profiles.get(profile)) {
+            // Seen only cancelled, so its peaks say nothing.
+            (Some(job), _) if job.runs() == 0 => (cap, Basis::Cap),
             (Some(job), _) if job.overran_until > now => (
-                self.with_margin(job.max()),
+                self.with_margin(job.max().max(job.overran_peak)),
                 Basis::Overran {
                     until: job.overran_until / 1000,
                 },

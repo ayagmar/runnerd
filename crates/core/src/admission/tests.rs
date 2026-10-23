@@ -374,3 +374,42 @@ fn a_runner_starts_reserving_the_largest_prediction_among_the_waiting_jobs_of_it
     // Both waited the 29 minutes; nearest-rank p95 of 23 waits is the 22nd.
     assert_eq!(replay.wait.p95, 29 * 60);
 }
+
+#[test]
+fn a_cancelled_run_past_what_it_reserved_makes_its_job_reserve_at_least_that_runs_peak() {
+    let mut predictor = predictor();
+    for _ in 0..20 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    // Cancelled after it reached 5G on a 2.5G reservation: its peak is not one of the job's, but it ran over.
+    let cancelled = Ran {
+        reserved: Some(2560 * M),
+        ..build(5 * G)
+    };
+    predictor.mark(&cancelled, 7 * G, NOW);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    assert_eq!(
+        prediction.basis,
+        Basis::Overran {
+            until: (NOW + UNPREDICTABLE_FOR) / 1000
+        }
+    );
+    // 5G + 15%, not the 2G its finished runs reached.
+    assert_eq!(prediction.memory, 5888 * M);
+}
+
+#[test]
+fn a_job_seen_only_cancelled_reserves_its_cap() {
+    let mut predictor = predictor();
+    for _ in 0..20 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    predictor.mark(
+        &run("halyard/storefront", "e2e", "node", NOW, 3, G),
+        7 * G,
+        NOW,
+    );
+    let prediction = predictor.predict(&key("e2e"), "node", 7 * G, NOW + MINUTE);
+    assert_eq!(prediction.basis, Basis::Cap);
+    assert_eq!(prediction.memory, 7 * G);
+}
