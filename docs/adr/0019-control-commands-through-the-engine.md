@@ -1,5 +1,8 @@
 # 0019. Control commands go through the engine, a reload keeps running jobs
 
+Amended by [0026](0026-commands-answered-while-a-tick-waits-for-github.md): commands are also answered while a tick
+waits for GitHub.
+
 ## Context
 
 Clients need to pause a repository, cancel its running jobs, reseed a profile, remove a cache volume and replace the

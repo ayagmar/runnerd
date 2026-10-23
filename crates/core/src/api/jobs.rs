@@ -235,7 +235,7 @@ pub struct HostSample {
 /// `GET /v1/host/samples` query parameters.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostSampleQuery {
-    /// Only samples taken at or after this time; default the last hour.
+    /// Only samples taken at or after this time; default the last hour, at most the last 24 hours.
     pub since: Option<u64>,
 }
 
@@ -264,7 +264,8 @@ pub enum Bucket {
 pub struct StatsQuery {
     /// Only this `owner/name`.
     pub repository: Option<String>,
-    /// Only jobs queued at or after this time; default 30 days ago.
+    /// Only jobs queued at or after this time; default 30 days ago. At most 744 buckets before `until` (or now)
+    /// are counted: 31 days of hours, two years of days.
     pub since: Option<u64>,
     /// Only jobs queued before this time.
     pub until: Option<u64>,

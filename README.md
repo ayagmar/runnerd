@@ -148,9 +148,12 @@ runnerd records every job its runners may run in a SQLite database, `$XDG_STATE_
 - its steps with their start and end, as GitHub shows them;
 - CPU, memory and network of its container, sampled every 2 s from the container's cgroup files (memory without page
   cache, as `docker stats` counts it) and `/proc/<pid>/net/dev`; the samples for 7 days, the job's totals and peaks
-  for good;
+  with its record;
 - the bytes the Docker Hub mirror served it, from the mirror's access log;
-- its log, up to 50M, as GitHub shows it, with the secrets the runner masked still masked.
+- its log, up to 50M, as GitHub shows it, with the secrets the runner masked still masked, for 30 days.
+
+A finished job's record goes after 90 days (`history.jobs`), with its steps and runner. The database file does not
+shrink when rows go; SQLite reuses the space.
 
 It also keeps the sizes of the cache volumes, measured at start and whenever no runner runs after jobs ended, and the
 slice's CPU and memory use.
@@ -193,8 +196,8 @@ bytes, CPU millicores.
 | `GET /v1/jobs/{id}` | a job with its timeline, steps, metrics and log size |
 | `GET /v1/jobs/{id}/samples` | its CPU, memory and network over time |
 | `GET /v1/jobs/{id}/logs?from=&follow=` | its log as text; with `follow=true`, open until the job's record is final |
-| `GET /v1/host/samples?since=` | the slice's CPU and memory over time |
-| `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`): counts, queue and run time, CPU, memory, mirror bytes |
+| `GET /v1/host/samples?since=` | the slice's CPU and memory over time, the last 24 hours at most |
+| `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`), 744 buckets back at most: counts, queue and run time, CPU, memory, mirror bytes |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
 | `GET /v1/events?job=&logs=` | server-sent events: `job.queued`, `job.started`, `job.step`, `job.finished`, `slot.changed`, `budget.changed`, `repository.changed` (paused or resumed, its queue, or a reload changed or added it), `repository.removed` (a reload removed it), `cache.reseeded`, and live `job.sample`, `host.sample` and (with `logs=true`) `log.line` |
 

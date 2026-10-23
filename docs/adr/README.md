@@ -31,3 +31,6 @@ with a line pointing to the record that replaces it.
 | [0023](0023-runner-image-pinned-to-a-snapshot-date.md) | Runner image pinned to an Ubuntu snapshot date |
 | [0024](0024-pauses-recorded-in-the-job-history.md) | Pauses are recorded in the job history and survive restarts |
 | [0025](0025-published-runner-images-named-by-reference.md) | Published runner images, named by reference |
+| [0026](0026-commands-answered-while-a-tick-waits-for-github.md) | Commands are answered while a tick waits for GitHub |
+| [0027](0027-pruning-runs-beside-the-writer.md) | Pruning runs beside the writer, a batch at a time |
+| [0028](0028-job-records-expire.md) | Job records expire after `history.jobs` |

@@ -16,7 +16,7 @@ use crate::github::GithubApi;
 use crate::scheduler::SlotRef;
 use crate::time;
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Takes over the seed containers a previous daemon left: a running one counts as its profile's reseed, so no
     /// runner of the profile starts while it rewrites the snapshot and the slots' layers.
     async fn recover_reseeds(&mut self, containers: Vec<docker::Container>) {

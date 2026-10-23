@@ -3,31 +3,38 @@
 //! one transaction and are broadcast only after, so a subscriber that reads the stored events after subscribing
 //! misses none, and a crash never keeps a change without its event.
 
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
 use tokio::sync::{broadcast, mpsc};
 
 use super::read::{self, secs};
-use super::{LogPosition, MirrorPosition, RunnerRecord, SampleRecord, Write, logged};
+use super::{
+    HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, RunnerRecord, SampleRecord, Write, logged,
+};
 use crate::api::{self, Event, EventEnvelope};
 use crate::github::{JobDetails, JobStep, QueuedJob};
+use crate::sync::lock;
 use crate::time;
 
 pub(super) fn run(
     db: Connection,
     mut queue: mpsc::UnboundedReceiver<Write>,
     events: &broadcast::Sender<Arc<EventEnvelope>>,
+    held: &Mutex<Vec<api::HostSample>>,
 ) {
-    let writer = Writer { db, events };
+    let writer = Writer { db, events, held };
     while let Some(write) = queue.blocking_recv() {
         writer.apply(write);
     }
+    writer.store_host_samples();
 }
 
-struct Writer<'events> {
+struct Writer<'store> {
     db: Connection,
-    events: &'events broadcast::Sender<Arc<EventEnvelope>>,
+    events: &'store broadcast::Sender<Arc<EventEnvelope>>,
+    /// `Store::held`.
+    held: &'store Mutex<Vec<api::HostSample>>,
 }
 
 /// The events a change announces once it commits.
@@ -93,14 +100,15 @@ impl Writer<'_> {
                 });
             }
             Write::HostSample(sample) => {
-                self.change("record a host sample", |announced| {
-                    self.db.execute(
-                        "INSERT OR REPLACE INTO host_samples (at, cpu, memory) VALUES (?1, ?2, ?3)",
-                        params![sample.at * 1000, sample.cpu, sample.memory],
-                    )?;
-                    announced.push(Event::HostSample { sample });
-                    Ok(())
-                });
+                // Live: no ID to wait for.
+                let _ = self.events.send(Arc::new(EventEnvelope {
+                    id: None,
+                    at: secs(time::now_ms()),
+                    event: Event::HostSample { sample },
+                }));
+                if lock(self.held).len() >= HOST_SAMPLE_BATCH {
+                    self.store_host_samples();
+                }
             }
             Write::MirrorBytes { bytes, until, done } => {
                 let _ = done.send(self.mirror_bytes(&bytes, until));
@@ -125,11 +133,37 @@ impl Writer<'_> {
             Write::Paused { repositories, done } => {
                 let _ = done.send(self.paused(&repositories));
             }
-            Write::Prune { now, history } => self.prune(now, &history),
             Write::Flush(done) => {
+                self.store_host_samples();
                 let _ = done.send(());
             }
         }
+    }
+
+    /// Stores the held host samples in one transaction, then lets go of them. If that fails they are held for the
+    /// next try, ten batches at most: older ones are dropped.
+    fn store_host_samples(&self) {
+        let samples = lock(self.held).clone();
+        if samples.is_empty() {
+            return;
+        }
+        let stored = self.change("record host samples", |_| {
+            for sample in &samples {
+                self.db.execute(
+                    "INSERT OR REPLACE INTO host_samples (at, cpu, memory) VALUES (?1, ?2, ?3)",
+                    params![sample.at * 1000, sample.cpu, sample.memory],
+                )?;
+            }
+            Ok(())
+        });
+        let mut held = lock(self.held);
+        let done = if stored {
+            samples.len()
+        } else {
+            held.len().saturating_sub(HOST_SAMPLE_BATCH * 10)
+        };
+        let len = held.len();
+        held.drain(..done.min(len));
     }
 
     fn runner_started(&self, runner: &RunnerRecord) {
@@ -181,7 +215,7 @@ impl Writer<'_> {
         true
     }
 
-    /// Stores an event if it is durable, giving it its ID.
+    /// Stores an event if it is durable, giving it its ID. A repository's event becomes its latest in `announced`.
     fn store_event(&self, event: Event) -> rusqlite::Result<EventEnvelope> {
         let at = time::now_ms();
         let id = if event.is_durable() {
@@ -191,7 +225,19 @@ impl Writer<'_> {
                 "INSERT INTO events (at, body) VALUES (?1, ?2)",
                 params![at, body],
             )?;
-            u64::try_from(self.db.last_insert_rowid()).ok()
+            let id = self.db.last_insert_rowid();
+            let repository = match &event {
+                Event::RepositoryChanged { repository } => Some(&repository.name),
+                Event::RepositoryRemoved { repository } => Some(repository),
+                _ => None,
+            };
+            if let Some(repository) = repository {
+                self.db.execute(
+                    "INSERT OR REPLACE INTO announced (repository, event) VALUES (?1, ?2)",
+                    params![repository, id],
+                )?;
+            }
+            u64::try_from(id).ok()
         } else {
             None
         };
@@ -544,45 +590,5 @@ impl Writer<'_> {
             )?;
             Ok(())
         })
-    }
-
-    fn prune(&self, now: u64, history: &crate::config::History) {
-        let before = |keep: std::time::Duration| {
-            now.saturating_sub(u64::try_from(keep.as_millis()).unwrap_or(u64::MAX))
-        };
-        for (what, sql, before) in [
-            (
-                "prune samples",
-                "DELETE FROM samples WHERE at < ?1",
-                before(history.samples),
-            ),
-            (
-                "prune host samples",
-                "DELETE FROM host_samples WHERE at < ?1",
-                before(history.samples),
-            ),
-            (
-                "prune logs",
-                "DELETE FROM log_lines WHERE job IN (SELECT id FROM jobs WHERE finished_at < ?1 \
-                 AND state IN ('completed', 'lost', 'elsewhere'))",
-                before(history.logs),
-            ),
-            (
-                "prune events",
-                // Each repository's latest event stays, whatever its age: it is what a restarted daemon compares
-                // its config with to announce a removal (`read::announced_repositories`).
-                "DELETE FROM events WHERE at < ?1 AND id NOT IN (SELECT max(id) FROM events \
-                 WHERE json_extract(body, '$.type') LIKE 'repository.%' \
-                 GROUP BY coalesce(json_extract(body, '$.repository.name'), json_extract(body, '$.repository')))",
-                before(history.events),
-            ),
-            (
-                "prune cache sizes",
-                "DELETE FROM cache_sizes WHERE at < ?1",
-                before(history.events),
-            ),
-        ] {
-            logged(what, self.db.execute(sql, [before]));
-        }
     }
 }

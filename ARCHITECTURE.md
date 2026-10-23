@@ -35,8 +35,10 @@ client → transport → principal → handler → core
    new config and hand the engine the parsed config with a `Commit` that writes the file; the engine runs the
    commit between ticks and runs with the config before its next tick, only if the file was written.
 4. The engine ([`crates/core/src/scheduler/engine.rs`](crates/core/src/scheduler/engine.rs)) owns all slot state.
-   It publishes `api::Status` after every tick and takes commands only through `Control`: a command that needs slot
-   state is a `Command` on a channel the engine answers between ticks, so it sees the same state a tick does.
+   It publishes `api::Status` after every tick and command and takes commands only through `Control`: a command
+   that needs slot state is a `Command` on a channel the engine answers between ticks, or while a tick waits for
+   GitHub's listings and job reads, never in the middle of applying them
+   ([ADR 0026](docs/adr/0026-commands-answered-while-a-tick-waits-for-github.md)).
    `engine.rs` holds `Engine`'s state, its construction and its loop; each submodule of
    [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
    and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images),
@@ -54,7 +56,8 @@ a write only with the dashboard's own `Origin`; the daemon then sees the dashboa
 queued → slot → container → removed
 
 1. Every `poll_interval` the engine asks GitHub for runners first, then queued jobs (`Engine::tick`; the order
-   avoids starting a second runner for a job its runner just took).
+   avoids starting a second runner for a job its runner just took), every repository at once, a few requests at a
+   time.
 2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget. A profile whose
    `image` Docker lacks starts nothing until the engine pulled it in the background
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)).
@@ -96,7 +99,11 @@ nothing until Docker has listed them.
   (`HostIdentity::prefix`); other machines serve the same repositories. Runner containers on the local Docker are
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
 - `scheduler::plan` does no I/O and reads no clock.
-- Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order.
+- Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
+  exception is pruning, which only deletes, on its own connection, a batch per transaction
+  ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
+- Host samples reach subscribers when taken and the database a minute's worth at a time; reads include the ones not
+  yet stored.
 - A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored in the same transaction as
   the change it announces and broadcast only after it commits, so its ID is a position a client can resume from
   with `Last-Event-ID`.

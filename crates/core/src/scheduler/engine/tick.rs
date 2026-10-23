@@ -1,18 +1,58 @@
 //! One tick: collects finished work, polls GitHub for runners then queued jobs, plans with `scheduler::plan` and
 //! applies the decisions. It owns the memory budget's arithmetic and deletes this machine's runners no slot
-//! holds; starting and removing a slot's runner is `runners`.
+//! holds; starting and removing a slot's runner is `runners`. It lists every repository at once, a few requests at
+//! a time, and answers the API's commands while it waits for the listings (ADR 0026).
 
 use std::collections::BTreeSet;
+use std::sync::Arc;
 use std::time::SystemTime;
 
+use futures_util::StreamExt;
 use tracing::{info, warn};
 
 use super::{Engine, RunningJobs, Shutdown};
 use crate::docker::DockerApi;
-use crate::github::{self, Deleted, GithubApi};
+use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::scheduler::{Decision, Profile, Repository, RunnerSlot, Slot, plan};
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+/// GitHub requests a tick has in flight at most. GitHub asks clients not to flood it with concurrent requests;
+/// a few keep a tick over many repositories short.
+pub(super) const CONCURRENT_REQUESTS: usize = 4;
+
+/// One answer of GitHub's per repository.
+type Answers<T> = Vec<(String, Result<T, github::Error>)>;
+
+/// What a tick's GitHub listings returned, by repository.
+struct Listings {
+    runners: Answers<Vec<Runner>>,
+    queued: Answers<Vec<QueuedJob>>,
+}
+
+/// Lists the runners of `runners`, then the queued jobs of `queued`, `CONCURRENT_REQUESTS` at a time. Owns what it
+/// needs, so the engine answers commands while it runs.
+async fn list<G: GithubApi>(github: Arc<G>, runners: Vec<String>, queued: Vec<String>) -> Listings {
+    let github = &*github;
+    let runners = futures_util::stream::iter(runners)
+        .map(|repository| async move {
+            let answer = github.runners(&repository).await;
+            (repository, answer)
+        })
+        .buffered(CONCURRENT_REQUESTS)
+        .collect()
+        .await;
+    // Only once every runner listing is in: see `tick`.
+    let queued = futures_util::stream::iter(queued)
+        .map(|repository| async move {
+            let answer = github.queued_jobs(&repository).await;
+            (repository, answer)
+        })
+        .buffered(CONCURRENT_REQUESTS)
+        .collect()
+        .await;
+    Listings { runners, queued }
+}
+
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn tick(&mut self, mode: Shutdown) {
         self.collect_reseeds().await;
         self.collect_trim().await;
@@ -21,9 +61,27 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
         // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
         // order sees the job queued and its runner busy, and starts a second runner for it.
-        self.poll_runners().await;
+        let runners = self
+            .repositories
+            .keys()
+            .chain(&self.draining)
+            .cloned()
+            .collect();
+        let queued = match mode {
+            Shutdown::No => self
+                .config
+                .repositories
+                .iter()
+                .map(|repository| repository.name.clone())
+                .collect(),
+            Shutdown::Graceful | Shutdown::Force => Vec::new(),
+        };
+        let listings = self
+            .serving(list(self.github.clone(), runners, queued))
+            .await;
+        self.apply_runners(listings.runners).await;
         if mode == Shutdown::No {
-            self.poll_queued().await;
+            self.apply_queued(listings.queued);
         } else {
             for state in self.repositories.values_mut() {
                 state.listed = false;
@@ -154,10 +212,11 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         runners + reseeds + configured.max(running)
     }
 
-    async fn poll_queued(&mut self) {
-        for repository in &self.config.repositories {
+    /// Takes each repository's queued jobs from its listing; a repository a command removed meanwhile is skipped.
+    fn apply_queued(&mut self, listings: Answers<Vec<QueuedJob>>) {
+        for (repository, answer) in listings {
             let mut listed = false;
-            let queued = match self.github.queued_jobs(&repository.name).await {
+            let queued = match answer {
                 Ok(queued) => {
                     self.rate_limit_logged = false;
                     listed = true;
@@ -177,29 +236,23 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                     Vec::new()
                 }
                 Err(error) => {
-                    warn!("{}: cannot list queued jobs: {error}", repository.name);
+                    warn!("{repository}: cannot list queued jobs: {error}");
                     Vec::new()
                 }
             };
-            if let Some(state) = self.repositories.get_mut(&repository.name) {
+            if let Some(state) = self.repositories.get_mut(&repository) {
                 state.queued = queued;
                 state.listed = listed;
             }
         }
     }
 
-    /// Updates each runner's busy flag and deletes this host's runners that no slot holds.
-    async fn poll_runners(&mut self) {
-        let names: Vec<String> = self
-            .repositories
-            .keys()
-            .chain(&self.draining)
-            .cloned()
-            .collect();
-        for repository in names {
+    /// Updates each runner's busy flag from the listings and deletes this host's runners that no slot holds.
+    async fn apply_runners(&mut self, listings: Answers<Vec<Runner>>) {
+        for (repository, answer) in listings {
             // Whether this machine still has a runner registered on it.
             let mut left = false;
-            let runners = match self.github.runners(&repository).await {
+            let runners = match answer {
                 Ok(runners) => runners,
                 Err(github::Error::RateLimited { .. }) => continue,
                 Err(error) => {

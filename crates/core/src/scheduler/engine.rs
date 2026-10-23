@@ -190,7 +190,8 @@ struct RepositoryState {
 #[derive(Debug)]
 pub struct Engine<G = Github, D = Docker> {
     config: Config,
-    github: G,
+    /// Shared with the listings a tick reads while it answers commands.
+    github: Arc<G>,
     docker: Arc<D>,
     names: Names,
     isolation: &'static dyn Isolation,
@@ -251,7 +252,7 @@ fn unix_secs(time: SystemTime) -> u64 {
         .as_secs()
 }
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// An engine for a validated config. `identity` names this machine's runners, so a restarted daemon recognizes
     /// them; `memory_max` is the slice's.
     pub fn new(config: Config, github: G, docker: D, setup: Setup) -> (Engine<G, D>, Handle) {
@@ -305,7 +306,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         };
         let mut engine = Engine {
             config,
-            github,
+            github: Arc::new(github),
             docker: Arc::new(docker),
             names,
             isolation,
@@ -402,6 +403,32 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             warn!("cannot stop the mirror: {error}");
         }
         info!("stopped");
+    }
+
+    /// Runs `work` as a task of its own, answering commands and publishing after each until it is done, so a command
+    /// waits for a slow GitHub no longer than for the command before it. The task goes on while a command runs: a
+    /// request's timeout runs on the clock, not on polls.
+    async fn serving<T: Send + 'static>(
+        &mut self,
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> T {
+        let mut task = tokio::spawn(work);
+        loop {
+            tokio::select! {
+                biased;
+                done = &mut task => match done.map_err(tokio::task::JoinError::try_into_panic) {
+                    Ok(output) => return output,
+                    // As if it had panicked here.
+                    Err(Ok(panic)) => std::panic::resume_unwind(panic),
+                    // Only while the runtime shuts down, which drops this task too.
+                    Err(Err(_)) => std::future::pending::<()>().await,
+                },
+                Some(command) = self.commands.recv() => {
+                    self.command(command).await;
+                    self.publish();
+                }
+            }
+        }
     }
 
     fn occupied(&self) -> impl Iterator<Item = (SlotRef, &Occupant)> {

@@ -13,7 +13,7 @@ use crate::docker::{DockerApi, is_not_found};
 use crate::github::GithubApi;
 use crate::time;
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Counts what the mirror served each runner since the last count.
     pub(super) async fn count_mirror_bytes(&mut self) {
         if !self.config.caches.mirror.enabled || !self.mirror_up {

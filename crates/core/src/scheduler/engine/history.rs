@@ -10,9 +10,10 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Occupant};
 use crate::docker::DockerApi;
-use crate::github::GithubApi;
+use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
 use crate::scheduler::SlotRef;
@@ -56,7 +57,24 @@ pub(super) struct Found {
     job: u64,
 }
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+/// Asks GitHub for jobs, `CONCURRENT_REQUESTS` at a time; the answers come in the order asked. Owns what it needs,
+/// so the engine answers commands while it runs.
+async fn read_jobs<G: GithubApi>(
+    github: Arc<G>,
+    jobs: Vec<(String, u64)>,
+) -> Vec<(String, u64, Result<JobDetails, github::Error>)> {
+    let github = &*github;
+    futures_util::stream::iter(jobs)
+        .map(|(repository, id)| async move {
+            let answer = github.job(&repository, id).await;
+            (repository, id, answer)
+        })
+        .buffered(CONCURRENT_REQUESTS)
+        .collect()
+        .await
+}
+
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Starts watching a runner's container: records it, samples it, leases its address for the mirror's log, and
     /// captures its job and log.
     pub(super) async fn observe(&mut self, slot: &SlotRef, occupant: &Occupant) {
@@ -156,7 +174,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
-        let left: Vec<(u64, String)> = self
+        let left: Vec<(String, u64)> = self
             .queued_jobs
             .iter()
             .filter(|(id, repository)| {
@@ -165,10 +183,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                         state.listed && !state.queued.iter().any(|job| job.id == **id)
                     })
             })
-            .map(|(id, repository)| (*id, repository.clone()))
+            .map(|(id, repository)| (repository.clone(), *id))
             .collect();
-        for (id, repository) in left {
-            match self.github.job(&repository, id).await {
+        for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), left)).await {
+            match answer {
                 // Still queued: the listing lags.
                 Ok(details) if details.status == "queued" || details.status == "waiting" => {}
                 // One of this machine's runners: its log capture reports it. If it never did by the time the job
@@ -190,27 +208,27 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
             .collect();
-        for (repository, id) in running {
-            match self.github.job(&repository, id).await {
+        for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), running)).await
+        {
+            match answer {
                 Ok(details) => self.store.details(details),
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
-        let closing: Vec<(u64, Closing)> = self
+        let closing: Vec<(String, u64)> = self
             .closing
             .iter()
-            .map(|(id, closing)| (*id, closing.clone()))
+            .map(|(id, closing)| (closing.repository.clone(), *id))
             .collect();
-        for (
-            id,
-            Closing {
-                repository,
-                since,
-                since_ms,
-            },
-        ) in closing
+        for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), closing)).await
         {
-            match self.github.job(&repository, id).await {
+            let Some(Closing {
+                since, since_ms, ..
+            }) = self.closing.get(&id).cloned()
+            else {
+                continue;
+            };
+            match answer {
                 Ok(details) if details.status == "completed" => {
                     self.closing.remove(&id);
                     self.store.details(details);
@@ -235,7 +253,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             return;
         }
         self.last_prune = Some(now);
-        self.store.prune(time::ms(now), &self.config.history);
+        // Runs on its own; the tick does not wait for it.
+        drop(self.store.prune(time::ms(now), &self.config.history));
     }
 
     /// Waits for a runner's log capture to end, which it does once the container stopped; stops it after

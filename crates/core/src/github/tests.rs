@@ -207,6 +207,76 @@ async fn a_rejected_token_is_read_again_once() {
     assert_eq!(seen.lock().unwrap().len(), 2);
 }
 
+/// A client whose token source counts its reads and gives `old` first, `new` after.
+fn rotating_client(url: &str, reads: &Arc<Mutex<u32>>, wait: Duration) -> Github {
+    let counter = reads.clone();
+    Github::new(
+        url,
+        Box::new(move || {
+            std::thread::sleep(wait);
+            let mut reads = counter.lock().unwrap();
+            *reads += 1;
+            Ok(Token(if *reads == 1 { "old" } else { "new" }.to_owned()))
+        }),
+    )
+    .unwrap()
+}
+
+async fn new_token_only() -> String {
+    let (url, _) = fake_github(|request| {
+        if request
+            .headers
+            .get("authorization")
+            .map(HeaderValue::as_bytes)
+            == Some(b"Bearer new")
+        {
+            json(r#"{"runners":[]}"#)
+        } else {
+            StatusCode::UNAUTHORIZED.into_response()
+        }
+    })
+    .await;
+    url
+}
+
+#[tokio::test]
+async fn requests_refused_together_read_the_token_again_once() {
+    let url = new_token_only().await;
+    let reads = Arc::new(Mutex::new(0));
+    let github = rotating_client(&url, &reads, Duration::ZERO);
+    let (a, b, c, d) = tokio::join!(
+        github.runners("o/a"),
+        github.runners("o/b"),
+        github.runners("o/c"),
+        github.runners("o/d")
+    );
+    for answer in [a, b, c, d] {
+        assert_eq!(answer.unwrap(), []);
+    }
+    assert_eq!(*reads.lock().unwrap(), 2);
+}
+
+#[tokio::test]
+async fn a_slow_token_source_does_not_hold_up_other_tasks() {
+    let url = new_token_only().await;
+    let reads = Arc::new(Mutex::new(0));
+    let github = rotating_client(&url, &reads, Duration::from_millis(300));
+    let ticks = Arc::new(Mutex::new(0));
+    let ticker = tokio::spawn({
+        let ticks = ticks.clone();
+        async move {
+            loop {
+                tokio::time::sleep(Duration::from_millis(10)).await;
+                *ticks.lock().unwrap() += 1;
+            }
+        }
+    });
+    assert_eq!(github.runners("o/r").await.unwrap(), []);
+    ticker.abort();
+    // Two reads of 300 ms each: a source run on this thread would leave the ticker none.
+    assert!(*ticks.lock().unwrap() > 20, "other tasks ran meanwhile");
+}
+
 #[tokio::test]
 async fn deleting_a_runner_tells_gone_and_busy_apart() {
     let (url, _) = fake_github(|request| match request.uri.as_str() {

@@ -75,6 +75,12 @@ struct GithubState {
     /// What `GET /actions/jobs/{id}` answers.
     jobs: HashMap<u64, JobDetails>,
     calls: Vec<String>,
+    /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
+    held: tokio::sync::watch::Sender<bool>,
+    /// While true, `GET /actions/jobs/{id}` does not answer.
+    held_jobs: tokio::sync::watch::Sender<bool>,
+    /// Listings and job reads waiting for an answer.
+    waiting: usize,
 }
 
 #[derive(Clone, Default)]
@@ -83,6 +89,50 @@ struct FakeGithub(Arc<Mutex<GithubState>>);
 impl FakeGithub {
     fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap().calls.clone()
+    }
+
+    /// Holds the runners and queued jobs listings until `release`.
+    fn hold(&self) {
+        self.0.lock().unwrap().held.send_replace(true);
+    }
+
+    fn release(&self) {
+        self.0.lock().unwrap().held.send_replace(false);
+    }
+
+    /// Holds job reads until `release_jobs`.
+    fn hold_jobs(&self) {
+        self.0.lock().unwrap().held_jobs.send_replace(true);
+    }
+
+    fn release_jobs(&self) {
+        self.0.lock().unwrap().held_jobs.send_replace(false);
+    }
+
+    /// Waits while the listings are held.
+    async fn answer(&self) {
+        self.wait(|state| &state.held).await;
+    }
+
+    async fn wait(&self, held: fn(&GithubState) -> &tokio::sync::watch::Sender<bool>) {
+        let mut held = {
+            let mut state = self.0.lock().unwrap();
+            state.waiting += 1;
+            held(&state).subscribe()
+        };
+        let _ = held.wait_for(|held| !held).await;
+        self.0.lock().unwrap().waiting -= 1;
+    }
+
+    /// Waits until `count` listings wait for an answer at once.
+    async fn until_waiting(&self, count: usize) {
+        for _ in 0..500 {
+            if self.0.lock().unwrap().waiting >= count {
+                return;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
+        panic!("fewer than {count} listings ever waited at once");
     }
 
     fn polled(state: &mut GithubState) {
@@ -99,6 +149,7 @@ impl FakeGithub {
 
 impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
+        self.answer().await;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("queued {repository}"));
         let queued = state.queued.clone();
@@ -107,6 +158,7 @@ impl GithubApi for FakeGithub {
     }
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
+        self.answer().await;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("runners {repository}"));
         let runners = state
@@ -154,6 +206,7 @@ impl GithubApi for FakeGithub {
     }
 
     async fn job(&self, _repository: &str, id: u64) -> Result<JobDetails, github::Error> {
+        self.wait(|state| &state.held_jobs).await;
         let state = self.0.lock().unwrap();
         state
             .jobs
@@ -1085,6 +1138,177 @@ async fn a_paused_repository_gets_no_runner_after_a_restart_until_it_is_resumed(
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 1);
+}
+
+#[tokio::test]
+async fn a_resumed_repository_shows_active_in_the_status_once_the_resume_answers() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_in(&github, &docker, &dir);
+    tokio::spawn(engine.run());
+    until_polled(&github, 1).await;
+    handle
+        .control
+        .pause(Target::All, RunningJobs::Keep)
+        .await
+        .unwrap();
+    assert!(
+        handle.status.borrow().repositories[0].paused,
+        "o/r shows paused"
+    );
+
+    // The tick the resume wakes waits on GitHub; the status must not.
+    github.hold();
+    handle.control.resume(Target::All).await.unwrap();
+    assert!(
+        !handle.status.borrow().repositories[0].paused,
+        "o/r shows active"
+    );
+    let mut after = 0;
+    let events = repository_events(&handle, &mut after).await;
+    assert_eq!(
+        events.last(),
+        Some(&api::Event::RepositoryChanged {
+            repository: repository_status(false, 0)
+        })
+    );
+    github.release();
+}
+
+#[tokio::test]
+async fn a_pause_answers_and_shows_while_a_tick_waits_for_github() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_in(&github, &docker, &dir);
+    github.hold();
+    tokio::spawn(engine.run());
+    github.until_waiting(1).await;
+
+    let answered = Duration::from_secs(5);
+    tokio::time::timeout(
+        answered,
+        handle.control.pause(one("o/r"), RunningJobs::Keep),
+    )
+    .await
+    .expect("the pause answers")
+    .unwrap();
+    assert!(
+        handle.status.borrow().repositories[0].paused,
+        "o/r shows paused"
+    );
+    tokio::time::timeout(answered, handle.control.resume(one("o/r")))
+        .await
+        .expect("the resume answers")
+        .unwrap();
+    assert!(
+        !handle.status.borrow().repositories[0].paused,
+        "o/r shows active"
+    );
+    assert_eq!(
+        github.calls(),
+        Vec::<String>::new(),
+        "the tick is still waiting"
+    );
+
+    github.release();
+    until_polled(&github, 1).await;
+}
+
+#[tokio::test]
+async fn a_resume_answers_while_a_tick_reads_a_running_jobs_progress() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    github.hold_jobs();
+    let control = handle.control.clone();
+    tokio::join!(engine.tick(Shutdown::No), async {
+        github.until_waiting(1).await;
+        let answered =
+            tokio::time::timeout(Duration::from_secs(5), control.resume(one("o/r"))).await;
+        github.release_jobs();
+        answered.expect("the resume answers").unwrap();
+    });
+}
+
+#[tokio::test]
+async fn a_listing_finishes_while_a_long_command_runs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_in(&github, &docker, &dir);
+    github.hold();
+    tokio::spawn(engine.run());
+    github.until_waiting(1).await;
+
+    // A config whose file takes until `written` to write.
+    let (written, writing) = std::sync::mpsc::channel::<()>();
+    let (started, writes) = tokio::sync::oneshot::channel::<()>();
+    let control = handle.control.clone();
+    let replaced = tokio::spawn(async move {
+        let commit = Commit::new(move || {
+            let _ = started.send(());
+            let _ = writing.recv();
+            Ok(None)
+        });
+        control
+            .replace_config(other_repository(), None, commit)
+            .await
+    });
+    writes.await.unwrap();
+    github.release();
+    for _ in 0..500 {
+        if github
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("runners "))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let listed = github
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("runners "));
+    written.send(()).unwrap();
+    replaced.await.unwrap().unwrap();
+    assert!(
+        listed,
+        "the runners listing finished while the config was written"
+    );
+}
+
+#[tokio::test]
+async fn a_tick_lists_every_repository_at_once() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let config = format!(
+        "{}\n[[repositories]]\nname = \"o/t\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\n",
+        two_repositories()
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    github.hold();
+    tokio::join!(engine.tick(Shutdown::No), async {
+        github.until_waiting(3).await;
+        github.release();
+    });
+    let calls = github.calls();
+    assert_eq!(
+        calls[..3]
+            .iter()
+            .filter(|call| call.starts_with("runners "))
+            .count(),
+        3,
+        "{calls:?}"
+    );
 }
 
 #[tokio::test]

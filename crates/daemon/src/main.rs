@@ -193,8 +193,18 @@ fn doctor(path: Option<&Path>) -> ExitCode {
     }
 }
 
+/// Worker threads at most. The daemon serves a few requests a second; on a many-core host one worker per core
+/// spends more CPU contending for the allocator (musl's especially) than it saves: 50 event subscribers through 200
+/// pause and resume pairs took 16.5 s of CPU on 32 workers and 1.2 s on 4.
+const WORKERS: usize = 4;
+
 fn runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
-    tokio::runtime::Runtime::new().map_err(|error| fail(&error))
+    let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
+    tokio::runtime::Builder::new_multi_thread()
+        .worker_threads(cores.min(WORKERS))
+        .enable_all()
+        .build()
+        .map_err(|error| fail(&error))
 }
 
 /// `$XDG_CONFIG_HOME`, or `~/.config`.
@@ -353,6 +363,7 @@ async fn serve(
     let engine_done = engine.await;
     let _ = web_stopped.send(());
     let _ = stopped.send(());
+    store.close();
     store.flush().await;
     let server_done = server.await;
     if let Some(web) = web {

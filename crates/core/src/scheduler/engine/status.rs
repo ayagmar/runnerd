@@ -6,7 +6,7 @@ use crate::api;
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn publish(&mut self) {
         let mode = self.control.mode();
         let profiles = self

@@ -15,6 +15,10 @@ const DEFAULT_PAGE: u32 = 50;
 const MAX_PAGE: u32 = 500;
 const DAY_MS: u64 = 24 * 3600 * 1000;
 
+/// The most buckets `stats` counts, before `until` or now: 31 days of hours, 4,464 rows for six repositories.
+/// Sixty days of hours were 2 MB of JSON.
+const STATS_BUCKETS: u64 = 31 * 24;
+
 pub(super) fn secs(ms: u64) -> u64 {
     ms / 1000
 }
@@ -369,13 +373,13 @@ pub(super) fn events_after(
         .collect())
 }
 
-/// The repositories as the stored `repository.*` events last announced them, by name.
+/// The repositories as each one's latest stored `repository.*` event announced them, by name.
 pub(super) fn announced_repositories(
     db: &Connection,
 ) -> rusqlite::Result<Vec<api::RepositoryStatus>> {
     let bodies: Vec<String> = db
         .prepare_cached(
-            r#"SELECT body FROM events WHERE body LIKE '%"type":"repository.%' ORDER BY id"#,
+            "SELECT body FROM events WHERE id IN (SELECT event FROM announced) ORDER BY id",
         )?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
@@ -429,10 +433,14 @@ pub(super) fn stats(
         api::Bucket::Hour => 3600 * 1000,
         api::Bucket::Day => DAY_MS,
     };
-    let since = query.since.map_or_else(
-        || now.saturating_mul(1000).saturating_sub(30 * DAY_MS),
-        |since| since.saturating_mul(1000),
-    );
+    let end = query.until.unwrap_or(now).min(now).saturating_mul(1000);
+    let since = query
+        .since
+        .map_or_else(
+            || now.saturating_mul(1000).saturating_sub(30 * DAY_MS),
+            |since| since.saturating_mul(1000),
+        )
+        .max(end.saturating_sub(STATS_BUCKETS * bucket));
     let until = query.until.map_or(i64::MAX, |until| {
         i64::try_from(until.saturating_mul(1000)).unwrap_or(i64::MAX)
     });

@@ -1,13 +1,14 @@
 //! The job history: a SQLite database of jobs, their runners, steps, samples and logs, the events clients resume
 //! from, cache sizes and the paused repositories. Owns the schema and its migrations, the one writer and the event
-//! broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads run on Tokio's
-//! blocking pool. It decides nothing about scheduling and stores no secret: no token, no JIT config, no runner
-//! `_diag` log.
+//! broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads and pruning run
+//! on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about scheduling
+//! and stores no secret: no token, no JIT config, no runner `_diag` log.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::atomic::{AtomicBool, Ordering};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
@@ -19,6 +20,7 @@ use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
 use crate::sync::lock;
 
+mod prune;
 mod read;
 mod write;
 
@@ -27,11 +29,16 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0001_history.sql"),
     include_str!("store/migrations/0002_runner_caps.sql"),
     include_str!("store/migrations/0003_paused.sql"),
+    include_str!("store/migrations/0004_prune.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
 /// disk holds back that job's log, not the daemon's memory.
 pub(crate) const LOG_BACKLOG: u64 = 8 << 20;
+
+/// Host samples the writer holds before it stores them in one transaction: a minute's worth. One transaction per
+/// sample wrote about 300 MB a day to an idle daemon's WAL. A crash loses the samples held.
+const HOST_SAMPLE_BATCH: usize = 30;
 
 /// How many events a slow client may fall behind before its stream ends; it reconnects with `Last-Event-ID`.
 const EVENT_BUFFER: usize = 4096;
@@ -200,10 +207,6 @@ enum Write {
         /// Whether it committed.
         done: oneshot::Sender<bool>,
     },
-    Prune {
-        now: u64,
-        history: History,
-    },
     Flush(oneshot::Sender<()>),
 }
 
@@ -212,6 +215,13 @@ enum Write {
 pub struct Store {
     writes: mpsc::UnboundedSender<Write>,
     reader: Arc<Mutex<Connection>>,
+    /// Taken with `try_lock`, so one prune runs at a time; one that panicked midway left rows the next one deletes.
+    pruner: Arc<Mutex<Connection>>,
+    /// Set by `close`: a running prune stops after its batch, and none starts.
+    closed: Arc<AtomicBool>,
+    /// Host samples sent and not yet stored, oldest first; reads include them. The writer removes them once stored.
+    // Locked with `sync::lock`: every critical section is a push, a copy or a drain.
+    held: Arc<Mutex<Vec<api::HostSample>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
     backlog: Arc<Semaphore>,
 }
@@ -240,15 +250,22 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         configure(&reader)?;
+        let pruner = Connection::open(path)?;
+        configure(&pruner)?;
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let (writes, receiver) = mpsc::unbounded_channel();
         let thread_events = events.clone();
+        let held = Arc::new(Mutex::new(Vec::new()));
+        let thread_held = held.clone();
         std::thread::Builder::new()
             .name("runnerd-store".to_owned())
-            .spawn(move || write::run(db, receiver, &thread_events))?;
+            .spawn(move || write::run(db, receiver, &thread_events, &thread_held))?;
         Ok(Store {
             writes,
             reader: Arc::new(Mutex::new(reader)),
+            pruner: Arc::new(Mutex::new(pruner)),
+            closed: Arc::new(AtomicBool::new(false)),
+            held,
             events,
             backlog: Arc::new(Semaphore::new(
                 usize::try_from(LOG_BACKLOG).unwrap_or(usize::MAX),
@@ -354,8 +371,10 @@ impl Store {
         self.send(Write::Samples(samples));
     }
 
-    /// Records a sample of the slice.
+    /// Records a sample of the slice and sends it to every subscriber at once; it is stored with the next ones, a
+    /// minute's worth in one transaction, or at `flush`.
     pub fn host_sample(&self, sample: api::HostSample) {
+        lock(&self.held).push(sample.clone());
         self.send(Write::HostSample(sample));
     }
 
@@ -385,12 +404,33 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
-    /// Deletes what is older than `history` keeps.
-    pub fn prune(&self, now: u64, history: &History) {
-        self.send(Write::Prune {
-            now,
-            history: history.clone(),
-        });
+    /// Deletes what is older than `history` keeps, at `now` (ms), off the writer, in batches the writer's
+    /// transactions fit between. A prune while the last one runs does nothing. The handle finishes with it; dropping
+    /// it lets it run.
+    pub fn prune(&self, now: u64, history: &History) -> tokio::task::JoinHandle<()> {
+        let pruner = self.pruner.clone();
+        let closed = self.closed.clone();
+        let history = history.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = match pruner.try_lock() {
+                Ok(db) => db,
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            };
+            let db = prune::Db {
+                connection: &db,
+                stop: &closed,
+            };
+            if !db.stop.load(Ordering::Relaxed) {
+                prune::run(&db, now, &history);
+            }
+        })
+    }
+
+    /// Stops a running prune after its batch, and any later one before it starts, so a shutdown does not wait for
+    /// one. What a stopped prune left, the next daemon's deletes. Writes go on as before.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
     }
 
     /// Waits until every write sent before is done.
@@ -467,9 +507,18 @@ impl Store {
         Ok(read::paused(&lock(&self.reader))?)
     }
 
-    /// The slice's samples since `since` (seconds), oldest first.
+    /// The slice's samples since `since` (seconds), oldest first, the ones not yet stored included.
     pub async fn host_samples(&self, since: u64) -> Result<Vec<api::HostSample>, StoreError> {
-        self.read(move |db| read::host_samples(db, since)).await
+        // Copied before the read: the writer removes a sample only once it is stored, so each one is in the copy,
+        // the read, or both.
+        let held = lock(&self.held).clone();
+        let mut samples = self.read(move |db| read::host_samples(db, since)).await?;
+        let stored = samples.last().map_or(0, |sample| sample.at);
+        samples.extend(
+            held.into_iter()
+                .filter(|sample| sample.at >= since && sample.at > stored),
+        );
+        Ok(samples)
     }
 
     /// Finished jobs per repository and bucket.

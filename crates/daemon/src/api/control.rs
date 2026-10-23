@@ -84,7 +84,7 @@ pub(super) async fn resume(
 ) -> Response {
     let repository = format!("{owner}/{name}");
     let target = Target::Repository(repository.clone());
-    match state.handle.control.set_paused(&target, false).await {
+    match state.handle.control.resume(target).await {
         Ok(()) => {
             info!("{repository} resumed by {principal:?}");
             StatusCode::NO_CONTENT.into_response()
@@ -97,7 +97,7 @@ pub(super) async fn resume_all(
     Authenticated(principal): Authenticated,
     State(state): State<AppState>,
 ) -> Response {
-    match state.handle.control.set_paused(&Target::All, false).await {
+    match state.handle.control.resume(Target::All).await {
         Ok(()) => {
             info!("every repository resumed by {principal:?}");
             StatusCode::NO_CONTENT.into_response()

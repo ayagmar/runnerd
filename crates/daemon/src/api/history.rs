@@ -24,6 +24,9 @@ use super::{AppState, Authenticated, error};
 /// Lines per read while a log streams.
 const LOG_BATCH: u64 = 2000;
 
+/// How far back `/v1/host/samples` goes: 43,200 samples, about 2 MB of JSON. Seven days of them were 15 MB.
+const HOST_SAMPLES_WINDOW: u64 = 24 * 3600;
+
 fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
@@ -82,7 +85,11 @@ pub(super) async fn host_samples(
     State(state): State<AppState>,
     Query(query): Query<HostSampleQuery>,
 ) -> Response {
-    let since = query.since.unwrap_or_else(|| now().saturating_sub(3600));
+    let now = now();
+    let since = query
+        .since
+        .unwrap_or_else(|| now.saturating_sub(3600))
+        .max(now.saturating_sub(HOST_SAMPLES_WINDOW));
     match state.handle.store.host_samples(since).await {
         Ok(samples) => Json(HostSamples {
             interval: SAMPLE_INTERVAL.as_secs(),

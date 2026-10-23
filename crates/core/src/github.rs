@@ -4,7 +4,7 @@
 
 use std::collections::HashMap;
 use std::fmt;
-use std::sync::Mutex;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use reqwest::header::{self, HeaderMap, HeaderValue};
@@ -18,6 +18,10 @@ use crate::time;
 
 /// The public API's address.
 pub const API_URL: &str = "https://api.github.com";
+
+/// How long one request may take, connecting included. GitHub answers in well under a second; a request that hangs
+/// holds back the tick that made it.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
 
 /// A GitHub token. Its `Debug` output never shows the value.
 #[derive(Clone)]
@@ -254,9 +258,12 @@ pub trait GithubApi: Send + Sync {
 pub struct Github {
     http: reqwest::Client,
     base: String,
-    token_source: TokenSource,
+    /// Run on Tokio's blocking pool: `gh` may wait on a keyring for seconds.
+    token_source: Arc<dyn Fn() -> Result<Token, Error> + Send + Sync>,
+    /// An async lock, held while the source runs: requests that need a token wait without blocking a worker, and
+    /// concurrent 401s read it once.
+    token: tokio::sync::Mutex<Option<Token>>,
     // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
-    token: Mutex<Option<Token>>,
     etags: Mutex<HashMap<String, (HeaderValue, Vec<u8>)>>,
     blocked_until: Mutex<Option<SystemTime>>,
 }
@@ -330,7 +337,7 @@ impl Github {
         let http = reqwest::Client::builder()
             .user_agent(concat!("runnerd/", env!("CARGO_PKG_VERSION")))
             .default_headers(headers)
-            .timeout(Duration::from_secs(30))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|source| Error::Http {
                 method: Method::GET,
@@ -340,8 +347,8 @@ impl Github {
         Ok(Github {
             http,
             base: base.trim_end_matches('/').to_owned(),
-            token_source,
-            token: Mutex::new(None),
+            token_source: Arc::from(token_source),
+            token: tokio::sync::Mutex::new(None),
             etags: Mutex::new(HashMap::new()),
             blocked_until: Mutex::new(None),
         })
@@ -389,9 +396,10 @@ impl Github {
         if let Some(until) = self.blocked_until() {
             return Err(Error::RateLimited { until });
         }
-        let mut refreshed = false;
+        // The token GitHub refused, once it did.
+        let mut refused: Option<Token> = None;
         loop {
-            let token = self.token(refreshed)?;
+            let token = self.token(refused.as_ref()).await?;
             let mut request = self
                 .http
                 .request(method.clone(), format!("{}{path}", self.base))
@@ -412,8 +420,8 @@ impl Github {
                 source: source.without_url(),
             })?;
             let status = response.status();
-            if status == StatusCode::UNAUTHORIZED && !refreshed {
-                refreshed = true;
+            if status == StatusCode::UNAUTHORIZED && refused.is_none() {
+                refused = Some(token);
                 continue;
             }
             if let Some(until) = rate_limited_until(status, response.headers(), SystemTime::now()) {
@@ -439,10 +447,24 @@ impl Github {
         }
     }
 
-    fn token(&self, refresh: bool) -> Result<Token, Error> {
-        let mut token = lock(&self.token);
-        if refresh || token.is_none() {
-            *token = Some((self.token_source)()?);
+    /// The token, read from the source if there is none yet or it is still the one GitHub `refused`: of several
+    /// requests refused at once, the first reads a new one and the others take it.
+    async fn token(&self, refused: Option<&Token>) -> Result<Token, Error> {
+        let mut token = self.token.lock().await;
+        let stale = match (&*token, refused) {
+            (None, _) => true,
+            (Some(current), Some(refused)) => current.0 == refused.0,
+            (Some(_), None) => false,
+        };
+        if stale {
+            let source = self.token_source.clone();
+            *token = Some(
+                tokio::task::spawn_blocking(move || source())
+                    .await
+                    .map_err(|error| {
+                        Error::Token(format!("the token source stopped: {error}"))
+                    })??,
+            );
         }
         token
             .clone()

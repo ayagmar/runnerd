@@ -1,8 +1,8 @@
 //! Control from the API: the `Control` handle the daemon's API holds (pause flags, which it records in the store so
-//! a restart keeps them, shutdown, a channel of `Command`s) and the engine's side of each command: pause, of one
-//! repository or all, with or without cancelling their runs, reseed, cache clean and config replacement. Commands
-//! run between ticks, so they see the slot state a tick does (ADR 0019). It must not serve HTTP or write the config
-//! file: the daemon does, through `Commit`.
+//! a restart keeps them, shutdown, a channel of `Command`s) and the engine's side of each command: pause and resume,
+//! of one repository or all, with or without cancelling their runs, reseed, cache clean and config replacement.
+//! Commands run between ticks or while a tick waits for GitHub, so they see the slot state a tick does (ADRs 0019,
+//! 0026). It must not serve HTTP or write the config file: the daemon does, through `Commit`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -86,7 +86,7 @@ pub enum ControlError {
     Stopped,
 }
 
-/// A command the engine carries out between ticks, with where its answer goes.
+/// A command the engine carries out between ticks or while a tick waits for GitHub, with where its answer goes.
 #[derive(Debug)]
 pub enum Command {
     /// Pause one repository or all; with `RunningJobs::Kill`, cancel their running jobs.
@@ -97,6 +97,13 @@ pub enum Command {
         jobs: RunningJobs,
         /// The answer.
         reply: oneshot::Sender<Result<api::Paused, ControlError>>,
+    },
+    /// Resume one repository or all.
+    Resume {
+        /// What to resume.
+        target: Target,
+        /// The answer.
+        reply: oneshot::Sender<Result<(), ControlError>>,
     },
     /// Make slot 1's layers the profile's snapshot once its slots are free.
     Reseed {
@@ -209,7 +216,9 @@ impl Control {
 
     /// Pauses or resumes one repository or all, whatever they run, and records it in the store before it answers,
     /// so a restarted daemon starts with the same ones paused. `NotFound` for a repository the config does not have.
-    /// If the record fails, the change holds until a restart and the answer is `NotRecorded`.
+    /// If the record fails, the change holds until a restart and the answer is `NotRecorded`. The status shows it
+    /// at the engine's next publish: the API pauses and resumes through `pause` and `resume`, which publish before
+    /// they answer.
     pub async fn set_paused(&self, target: &Target, paused: bool) -> Result<(), ControlError> {
         let recorded = {
             let repositories = lock(&self.repositories);
@@ -310,6 +319,12 @@ impl Control {
         .await?
     }
 
+    /// Resumes one repository or all, and publishes the status before it answers, so a client that reads the status
+    /// or the events after the answer sees them resumed. Fails as `set_paused` does.
+    pub async fn resume(&self, target: Target) -> Result<(), ControlError> {
+        self.send(|reply| Command::Resume { target, reply }).await?
+    }
+
     /// Reseeds a profile as soon as its slots are free; none of them starts a runner until then.
     pub async fn reseed(&self, profile: &str) -> Result<(), ControlError> {
         self.send(|reply| Command::Reseed {
@@ -359,7 +374,7 @@ fn list(jobs: &[api::RunningJob]) -> String {
         .join(", ")
 }
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Carries out a command from the API.
     pub(super) async fn command(&mut self, command: Command) {
         match command {
@@ -369,6 +384,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 reply,
             } => {
                 let _ = reply.send(self.pause(&target, jobs).await);
+            }
+            Command::Resume { target, reply } => {
+                let _ = reply.send(self.control.set_paused(&target, false).await);
             }
             Command::Reseed { profile, reply } => {
                 let _ = reply.send(self.request_reseed(&profile));
