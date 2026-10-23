@@ -60,7 +60,16 @@ Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them.
 
 ## Runner images
 
-[`image/Dockerfile`](https://github.com/ayagmar/runnerd/tree/main/image) has a stage per profile on a common base: `base`, `jvm`, `node`. Each release publishes every stage, for linux/amd64. A profile sets one of:
+[`image/Dockerfile`](https://github.com/ayagmar/runnerd/tree/main/image) has four stages. Each release publishes every one, for linux/amd64.
+
+| Stage | Adds |
+|---|---|
+| `base` | the GitHub Actions runner, Docker Engine with Compose and Buildx, the GitHub CLI, make, xz, zip, zstd, and runnerd's scripts; every common toolchain's cache in `~/.cache` |
+| `android` | the Android SDK command-line tools and platform-tools, and a JDK 17 |
+| `jvm` | nothing yet over `android` |
+| `node` | pipx and Playwright's system libraries, over `android` |
+
+Workflows install their language toolchains themselves (`setup-java`, `setup-node`, `rust-toolchain`), and the slot keeps them warm. A profile sets one of:
 
 | Key | Runs | Pulled |
 |---|---|---|
@@ -72,6 +81,29 @@ runnerd logs the pull's progress, and `runnerd doctor` says whether each image i
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
 ```
+
+### Your own image
+
+When your jobs need system packages the stages lack, build on `base`, or on `android` for Android builds:
+
+```dockerfile
+FROM ghcr.io/ayagmar/runnerd-runner:base-0.0.7
+RUN apt-get update \
+    && apt-get install -y --no-install-recommends libpq-dev protobuf-compiler \
+    && rm -rf /var/lib/apt/lists/*
+```
+
+```sh
+docker build -t quillstack-runner:0.0.7 .
+```
+
+```toml
+[profiles.quillstack]
+image = "quillstack-runner:0.0.7"
+# cpus, memory and slots as for any profile
+```
+
+Keep the entrypoint, and root as the image's user: the entrypoint starts as root and runs the job as `runner`. runnerd pulls an `image` only when Docker lacks it, so build yours before the profile's first runner. When you upgrade runnerd, rebuild from the new version's `base` tag: your image inherits its `runnerd.version` label, and `runnerd doctor` warns when that is not the daemon's version.
 
 Rebuilds install the same versions: Ubuntu packages come from one snapshot date, and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)). [Install](../install/#verify-a-release) shows how to check where a published image came from.
 
@@ -105,6 +137,7 @@ runnerd keeps each job's sampled memory and CPU peaks. `runnerctl sizing`, the d
 - A peak within 5% of its cap counts as at the cap: the job may have been held back or killed there and need more than it shows. A profile with such a run is never lowered, even when the run was at a smaller cap it had before.
 - When the need is a tenth or more under `memory`, the advice is to lower it. If jobs waited a minute or more for a slot (p95), or the slots were busy half the time, it also adds as many slots as the profile's memory now holds.
 - When the need is over `memory`, the advice is to raise it. Slots go down only if `MemoryMax` cannot hold them. When it cannot hold even one, the advice is to grow the slice first, and there is nothing to apply.
+- Under `admission = "measured"`, `memory` is only each container's limit; runners reserve their predicted peaks, not it. So advice never changes `slots` there: a raise only has to fit one runner beside the mirror, as [the budget check](#the-budget-check) does, and a lower keeps the slots. When jobs waited for a slot or the slots were busy, the advice line says more slots may fit; `runnerd simulate --slots` replays the history with more before you raise `slots` by hand.
 
 `[sizing]` changes the rules; these are the defaults:
 
@@ -119,7 +152,7 @@ What sizing cannot see:
 - A job killed for memory between two samples. The history has no out-of-memory signal: a job that idles at 3G and is killed within one 2 s interval shows a 3G peak, and its failure counts as an ordinary run. Failed jobs count like passing ones. Only cancelled jobs are left out, since a cancel stops a job before its peak.
 - Time the daemon was not running. Jobs queued while it was down show long waits, which can make the advice add slots.
 
-Advice is only written when you apply it: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button, which opens the change in the config editor. Each goes through the same check as any config, so a change `MemoryMax` cannot hold is refused. Lowering never asks for more than the profile's slots take now, and raising takes only what `MemoryMax` has spare, so two raises applied one after the other can be refused. `runnerd doctor` warns when a profile's jobs need more than its `memory`. Run without a daemon, it reads the history database read-only and does not migrate it. SQLite still leaves the `-wal` and `-shm` files a WAL database needs next to it when it may write there, so run it as the user who runs the daemon. Where it may not write, it reads the database file alone, and skips the sizing check while the `-wal` holds changes the file lacks. Sizing reads the slice's `MemoryMax` on each request, so one raised after `systemctl daemon-reload` counts without restarting runnerd.
+Advice is only written when you apply it: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button, which opens the change in the config editor. Each goes through the same check as any config, so a change `MemoryMax` cannot hold is refused. Under `caps`, lowering never asks for more than the profile's slots take now, and raising takes only what `MemoryMax` has spare, so two raises applied one after the other can be refused. `runnerd doctor` warns when a profile's jobs need more than its `memory`. Run without a daemon, it reads the history database read-only and does not migrate it. SQLite still leaves the `-wal` and `-shm` files a WAL database needs next to it when it may write there, so run it as the user who runs the daemon. Where it may not write, it reads the database file alone, and skips the sizing check while the `-wal` holds changes the file lacks. Sizing reads the slice's `MemoryMax` on each request, so one raised after `systemctl daemon-reload` counts without restarting runnerd.
 
 ## Measured admission
 

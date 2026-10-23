@@ -66,6 +66,15 @@ systemctl --user enable --now runnerd
 runnerctl status
 ```
 
+Last, `init` prints the line that sends a workflow job to these runners:
+
+```yaml
+runs-on: [self-hosted, linux, x64]
+```
+
+A job runs here only when every label in its `runs-on` is in its repository's `labels` in `runnerd.toml`; jobs on
+`ubuntu-latest` stay on GitHub's runners.
+
 `init` never replaces a file unless given `--force`. `--slice` names another slice, `--config` writes the config
 elsewhere.
 
@@ -99,7 +108,8 @@ cargo binstall runnerd runnerd-cli
 
 - Linux with cgroup v2, and Docker using the systemd cgroup driver.
 - [Sysbox](https://github.com/nestybox/sysbox), so each runner container can run its own Docker Engine without being
-  privileged.
+  privileged. When it is missing, `runnerd doctor` prints the install commands for Ubuntu, Debian, Arch, and the
+  source build on Fedora, CentOS Stream, Rocky, Alma and Amazon Linux. Red Hat Enterprise Linux has Sysbox-EE only.
 - A systemd slice whose `MemoryMax` is the budget for all runners; `runnerd init` prints one sized for the host.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 

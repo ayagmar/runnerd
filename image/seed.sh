@@ -29,6 +29,7 @@ for layer in "${LAYERS[@]}"; do
     umount /mnt/merged
     # Gradle daemon logs and registry: only meaningful to the daemons of the slot that wrote them.
     rm -rf "/base/$name.new/gradle/daemon"
+    [ "$name" != cache ] || drop_cache_secrets "/base/$name.new"
     rm -rf "/base/$name"
     mv "/base/$name.new" "/base/$name"
     rm -rf /workers/*/"$name"

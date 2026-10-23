@@ -298,6 +298,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
         sample_interval: 2,
         min_jobs: 10,
         memory_max: Some(16 << 30),
+        admission: runnerd_core::api::AdmissionPolicy::Caps,
         profiles: vec![ProfileSizing {
             name: "node".to_owned(),
             memory: 7 << 30,
@@ -306,6 +307,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
             peaks: peaks.clone(),
             wait: spread(30, 240, 300, 320),
             busy: 80,
+            wants_slots: true,
             advice,
             jobs: vec![JobSizing {
                 repository: "halyard/storefront".to_owned(),

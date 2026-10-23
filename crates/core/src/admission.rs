@@ -283,11 +283,7 @@ pub fn simulate(
     policy: Policy,
     slots: &BTreeMap<String, u32>,
 ) -> Replay {
-    let mirror = if config.caches.mirror.enabled {
-        config.caches.mirror.memory.0
-    } else {
-        0
-    };
+    let mirror = config.mirror_memory();
     let budget = memory_max.map(|max| max.saturating_sub(mirror));
     let mut queue: Vec<&Ran> = jobs
         .iter()

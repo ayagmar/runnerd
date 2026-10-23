@@ -304,6 +304,29 @@ impl Drop for Staged<'_> {
     }
 }
 
+/// The labels each repository's runners register with: the ones GitHub gives its own self-hosted runners on this
+/// host, so a workflow written for those runs here unchanged.
+fn labels() -> Vec<&'static str> {
+    let mut labels = vec!["self-hosted", "linux"];
+    labels.extend(match std::env::consts::ARCH {
+        "x86_64" => Some("x64"),
+        "aarch64" => Some("arm64"),
+        _ => None,
+    });
+    labels
+}
+
+/// The `runs-on` line that sends a workflow job to the runners of `labels`, and what it does.
+fn runs_on(labels: &[&str]) -> String {
+    format!(
+        "\nSend a workflow job here with:\n\
+         \x20 runs-on: [{}]\n\
+         A job runs here only when every label in its runs-on is in its repository's labels in runnerd.toml; \
+         other jobs, such as runs-on: ubuntu-latest, stay on GitHub's runners.",
+        labels.join(", ")
+    )
+}
+
 fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String {
     let Sizing {
         budget,
@@ -311,13 +334,7 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
         cpus,
         memory,
     } = sizing;
-    let mut labels = vec!["self-hosted", "linux"];
-    labels.extend(match std::env::consts::ARCH {
-        "x86_64" => Some("x64"),
-        "aarch64" => Some("arm64"),
-        _ => None,
-    });
-    let labels = labels
+    let labels = labels()
         .iter()
         .map(|label| format!("{label:?}"))
         .collect::<Vec<_>>()
@@ -443,6 +460,7 @@ pub(crate) fn run(request: &Request) -> ExitCode {
         output::line(check);
     }
     output::line(next_steps(&checks));
+    output::line(runs_on(&labels()));
     ExitCode::SUCCESS
 }
 

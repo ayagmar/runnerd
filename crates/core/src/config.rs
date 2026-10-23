@@ -483,13 +483,18 @@ impl Config {
         }
     }
 
-    /// The memory every runner and the mirror may use at once.
-    pub fn memory_caps(&self) -> Result<ByteSize, ConfigError> {
-        let mirror = if self.caches.mirror.enabled {
+    /// The mirror's memory cap, 0 when it is disabled.
+    pub fn mirror_memory(&self) -> u64 {
+        if self.caches.mirror.enabled {
             self.caches.mirror.memory.0
         } else {
             0
-        };
+        }
+    }
+
+    /// The memory every runner and the mirror may use at once.
+    pub fn memory_caps(&self) -> Result<ByteSize, ConfigError> {
+        let mirror = self.mirror_memory();
         self.profiles
             .values()
             .try_fold(mirror, |total, p| {
@@ -563,11 +568,7 @@ impl Config {
                     slice: self.host.slice.clone(),
                 });
             };
-            let mirror = if self.caches.mirror.enabled {
-                self.caches.mirror.memory.0
-            } else {
-                0
-            };
+            let mirror = self.mirror_memory();
             if let Some((profile, needs)) = self
                 .profiles
                 .iter()
