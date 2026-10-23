@@ -295,6 +295,7 @@ fn slot(
             container: format!("{started_at:x}c0ffee"),
             busy,
             started_at,
+            reserved: if profile == "jvm" { 9 * GIB } else { 7 * GIB },
         }),
     }
 }

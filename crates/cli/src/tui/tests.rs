@@ -153,6 +153,7 @@ fn runner(busy: bool) -> RunnerStatus {
         container: "c0ffee".to_owned(),
         busy,
         started_at: 1004,
+        reserved: 9 << 30,
     }
 }
 

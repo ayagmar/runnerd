@@ -7,9 +7,8 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    AdmissionPolicy, Advice, CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner,
-    JobSizing, JobState, JobSummary, QueuedJob, Record, RecordNote, Records, RemovedRecords,
-    Sizing, Status, Step,
+    Advice, CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobSizing, JobState,
+    JobSummary, QueuedJob, Record, RecordNote, Records, RemovedRecords, Sizing, Status, Step,
 };
 use runnerd_core::config::ByteSize;
 
@@ -264,13 +263,9 @@ const SAMPLED_NOTE: &str =
 /// The memory line of a status: what is in use of what.
 fn budget_line(status: &Status) -> String {
     let budget = &status.budget;
-    let by = match (budget.admission, budget.held) {
-        (AdmissionPolicy::Caps, _) => "",
-        (AdmissionPolicy::Measured, false) => " by predicted peaks",
-        (AdmissionPolicy::Measured, true) => {
-            " by predicted peaks; the slice is past 90% of its MemoryMax, so no runner starts"
-        }
-    };
+    let by = budget
+        .admission_note()
+        .map_or_else(String::new, |note| format!(" {note}"));
     match budget.memory_max {
         Some(max) => format!(
             "{} of {} reserved in {}{by}",

@@ -121,6 +121,20 @@ pub struct Budget {
     pub shell_memory: Vec<ShellMemory>,
 }
 
+impl Budget {
+    /// How runners are admitted, as clients add it to the budget's line: nothing under caps, else `by predicted
+    /// peaks`, and why nothing starts while the slice is at the high-water mark.
+    pub fn admission_note(&self) -> Option<&'static str> {
+        match (self.admission, self.held) {
+            (AdmissionPolicy::Caps, _) => None,
+            (AdmissionPolicy::Measured, false) => Some("by predicted peaks"),
+            (AdmissionPolicy::Measured, true) => Some(
+                "by predicted peaks; the slice is past 90% of its MemoryMax, so no runner starts",
+            ),
+        }
+    }
+}
+
 /// A shell container's memory cap: its record's profile's limit when the shell opened.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ShellMemory {
@@ -180,6 +194,10 @@ pub struct RunnerStatus {
     pub busy: bool,
     /// Seconds since the Unix epoch.
     pub started_at: u64,
+    /// What it takes of the budget: its cap under caps; under measured admission the larger of its predicted peak
+    /// and its last sampled memory. 0 from a daemon before measured admission.
+    #[serde(default)]
+    pub reserved: u64,
 }
 
 /// A configured repository and its queue.

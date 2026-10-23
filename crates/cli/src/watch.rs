@@ -535,6 +535,7 @@ mod tests {
                     container: "c0ffee".to_owned(),
                     busy: true,
                     started_at: 1005,
+                    reserved: 9 << 30,
                 }),
             },
         }));
@@ -657,6 +658,7 @@ mod tests {
                     container: "c0ffee".to_owned(),
                     busy: true,
                     started_at: 1005,
+                    reserved: 9 << 30,
                 }),
             },
         }));

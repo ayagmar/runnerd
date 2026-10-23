@@ -46,6 +46,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             container: occupant.container.clone(),
                             busy: occupant.busy,
                             started_at: unix_secs(occupant.started_at),
+                            reserved: self.takes(occupant),
                         }),
                     })
                     .collect(),
