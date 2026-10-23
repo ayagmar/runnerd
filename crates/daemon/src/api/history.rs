@@ -125,7 +125,8 @@ pub(super) async fn sizing(
     }
 }
 
-/// The advice for the config the daemon runs with, from the history in `window`.
+/// The advice for the config the daemon runs with, from the history in `window`, against the slice's `MemoryMax`
+/// read now, as a config check reads it: one raised since the daemon started counts without a restart.
 pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizing, String> {
     let history = state
         .handle
@@ -133,10 +134,24 @@ pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizin
         .sizing(window.since)
         .await
         .map_err(|store_error| store_error.to_string())?;
-    let memory_max = state.handle.status.borrow().budget.memory_max;
     let text = state.config.lock().await.text.clone();
     let config = Config::parse(&text).map_err(|parse_error| parse_error.to_string())?;
-    Ok(advise(&config, memory_max, &history, window))
+    let (read, slice) = (state.memory_max, config.host.slice.clone());
+    let memory_max = tokio::task::spawn_blocking(move || read(&slice))
+        .await
+        .map_err(|join_error| join_error.to_string())?
+        .map_err(|read_error| {
+            format!(
+                "cannot read {}'s MemoryMax: {read_error}",
+                config.host.slice
+            )
+        })?;
+    Ok(advise(
+        &config,
+        memory_max.map(|max| max.0),
+        &history,
+        window,
+    ))
 }
 
 pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> Response {
