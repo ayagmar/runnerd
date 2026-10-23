@@ -9,7 +9,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0001](0001-core-owns-domain-logic-and-api-types.md) | `runnerd-core` owns domain logic and API types |
 | [0002](0002-json-and-sse-over-a-unix-socket.md) | JSON and SSE over a Unix socket; the web UI on loopback TCP (refined by 0017, 0020, 0021) |
 | [0003](0003-server-rendered-web-ui-with-datastar.md) | Web UI: axum, server-rendered HTML and Datastar |
-| [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md) | GPUI desktop app pinned to a Zed commit |
+| [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md) | GPUI desktop app pinned to a Zed commit (superseded by 0034) |
 | [0005](0005-isolation-backends-sysbox-by-default.md) | Isolation backends: sysbox by default, privileged DinD only when asked |
 | [0006](0006-ephemeral-jit-runners.md) | Ephemeral JIT runners, one per job |
 | [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer |
@@ -38,4 +38,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core |
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets |
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check |
-| [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit (Proposed; would supersede 0004) |
+| [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit |

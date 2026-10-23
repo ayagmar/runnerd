@@ -1,6 +1,7 @@
 # 0034. Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit
 
-Status: **Proposed** (2026-10-23). If accepted, it supersedes [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md).
+Status: **Accepted** (2026-10-23). Supersedes [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md).
+Building it is deferred until after the 0.0.7 release.
 
 ## Context
 
@@ -165,7 +166,7 @@ not like the dashboard.
 - The release gains at most one Linux binary, the tray, built like `runnerctl` if the musl build works.
 - On a server, a failure reaches the user only through a webhook; without one they see it in the dashboard or TUI.
 
-## Questions for the owner
+## Open questions for the build
 
 - Which events notify: failed jobs only, or also lost jobs, runners that could not start, and the daemon stopping?
 - Which formats ship first: the generic JSON and ntfy, or also Discord or Slack bodies?

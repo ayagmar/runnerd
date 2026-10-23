@@ -1,5 +1,7 @@
 # 0004. GPUI desktop app pinned to a Zed commit
 
+Superseded by [0034](0034-desktop-framework.md).
+
 ## Context
 
 The crates.io release of `gpui` (0.2.2) was last published in 2025-10 and lags the version Zed itself uses.
