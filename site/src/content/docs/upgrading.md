@@ -9,21 +9,32 @@ Upgrade the daemon, `runnerctl` and the runner images together: the images' scri
 
 ### Before
 
-The first start of 0.0.8 migrates the job history to version 9, and 0.0.7 refuses a database that new: it stops with `the job history database is version 9, newer than the 7 this runnerd reads`. To keep a way back, copy the database while runnerd is stopped:
+The first start of 0.0.8 migrates the job history to version 9, and 0.0.7 refuses a database that new: it stops with `the job history database is version 9, newer than the 7 this runnerd reads`. To keep a way back, copy the database while runnerd is stopped.
+
+The database is the file [`history.database`](../configuration/#history) names in the config the service runs, `~/.config/runnerd/runnerd.toml` unless the unit's `--config` names another. Look for it first:
+
+```sh
+grep -E '^\s*database\s*=' ~/.config/runnerd/runnerd.toml
+```
+
+When that prints nothing, the database is the default, and these copy it with its `-wal` and `-shm` files:
 
 ```sh
 systemctl --user stop runnerd
 mkdir -p ~/runnerd-0.0.7
 cp -a "${XDG_STATE_HOME:-$HOME/.local/state}"/runnerd/runnerd.db* ~/runnerd-0.0.7/
+ls ~/runnerd-0.0.7
 ```
 
-The copy is the history up to the upgrade; whatever 0.0.8 records after it stays in the new one.
+When it prints a path, copy that file and the `-wal` and `-shm` files beside it instead. Go on only once the copy lists `runnerd.db`, or the file `database` names. The copy is the history up to the upgrade; whatever 0.0.8 records after it stays in the new one.
 
 ### Upgrade
 
 ```sh
-curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.8/install.sh | sh -s -- --version v0.0.8
 ```
+
+That installs 0.0.8 even after a newer release: this page's steps are for 0.0.8 and its images.
 
 Move each profile's published `image` to the new tag, such as `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.8`, then check the file and start runnerd:
 
