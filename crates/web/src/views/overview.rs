@@ -156,11 +156,14 @@ fn gib(bytes: u64) -> f64 {
 /// rows, and puts its figure and text in the budget's readout.
 struct Link {
     enter: String,
+    /// Clears what `enter` set, unless another element has set its own since, as a tap does before the last one's
+    /// blur.
+    leave: String,
+    /// `leave` for a mouse only: a finger leaves as soon as it lifts, so what a tap lit up stays until the next tap
+    /// or until focus moves on.
+    pointer_leave: String,
     linked: String,
 }
-
-/// Clears what [`Link::enter`] set.
-const LEAVE: &str = "$_slot = ''; $_fig = ''; $_lens = ''";
 
 fn link(key: &str, repository: Option<&str>, lens: &Lens) -> Link {
     Link {
@@ -169,6 +172,14 @@ fn link(key: &str, repository: Option<&str>, lens: &Lens) -> Link {
             js(key),
             js(&lens.figure),
             js(&lens.text)
+        ),
+        leave: format!(
+            "$_slot == {} && ($_slot = '', $_fig = '', $_lens = '')",
+            js(key)
+        ),
+        pointer_leave: format!(
+            "evt.pointerType == 'mouse' && $_slot == {} && ($_slot = '', $_fig = '', $_lens = '')",
+            js(key)
         ),
         linked: match repository {
             Some(repository) => format!("$_slot == {} || $_repo == {}", js(key), js(repository)),
@@ -316,9 +327,9 @@ pub(crate) fn budget(overview: &Overview) -> Markup {
                 @if other > 0 {
                     @let link = link("other", None, &other_lens);
                     div.block.other tabindex="0" role="img" style=(format!("--size: {:.3}", gib(other)))
-                        aria-label=(format!("{} {}", other_lens.figure, other_lens.text))
+                        aria-label=(format!("{} mirror and seed containers", other_lens.figure))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
-                        data-on:pointerleave=(LEAVE) data-on:blur=(LEAVE) data-class:linked=(link.linked) {
+                        data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
                         span.size { (other_lens.figure) }
                         span.name { "mirror" }
                     }
@@ -328,7 +339,7 @@ pub(crate) fn budget(overview: &Overview) -> Markup {
                     div.free tabindex="0" role="img" style=(format!("--size: {:.3}", gib(free)))
                         aria-label=(format!("{} {}", lens.figure, lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
-                        data-on:pointerleave=(LEAVE) data-on:blur=(LEAVE) data-class:linked=(link.linked) {
+                        data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
                         span.size { (lens.figure) }
                     }
                 }
@@ -366,9 +377,10 @@ fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus) -> Mar
     html! {
         a class=(format!("block {class} {state}")) href=(href)
             style=(format!("--size: {:.3}; --fill: {:.3}", gib(profile.memory), fill.unwrap_or(0.0)))
-            aria-label=(format!("{} {}", view.lens.figure, view.lens.text))
+            // The name starts with what the block shows, for voice control.
+            aria-label=(format!("{} {} {}: {} {}", format::bytes(profile.memory), profile.name, slot.slot, view.lens.figure, view.lens.text))
             data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
-            data-on:pointerleave=(LEAVE) data-on:blur=(LEAVE) data-class:linked=(link.linked) {
+            data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
             @if fill.is_some() { span.fill aria-hidden="true" {} }
             span.size { (format::bytes(profile.memory)) }
             span.name { (profile.name) " " (slot.slot) }
@@ -412,7 +424,7 @@ fn slot_card(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus) ->
     html! {
         li #(view.key) class=(format!("slot {class}{state}"))
             data-on:pointerenter=(link.enter) data-on:focusin=(link.enter)
-            data-on:pointerleave=(LEAVE) data-on:focusout=(LEAVE) data-class:linked=(link.linked) {
+            data-on:pointerleave=(link.pointer_leave) data-on:focusout=(link.leave) data-class:linked=(link.linked) {
             div.slot-head {
                 h3.slot-name { (profile.name) " " (slot.slot) }
                 span.slot-caps { (format::bytes(profile.memory)) " · " (profile.cpus) " CPUs" }
@@ -644,7 +656,7 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
     html! {
         li #(format!("repo-{}", slug(&repository.name))) class=(format!("repository {class}"))
             data-on:pointerenter=(enter) data-on:focusin=(enter)
-            data-on:pointerleave="$_repo = ''" data-on:focusout="$_repo = ''" data-class:linked=(linked) {
+            data-on:pointerleave="evt.pointerType == 'mouse' && ($_repo = '')" data-on:focusout="$_repo = ''" data-class:linked=(linked) {
             div.repo-name {
                 span.swatch aria-hidden="true" {}
                 a href=(format!("/history?repository={}", repository.name)) { (repository.name) }
@@ -685,7 +697,7 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
                         @let enter = key.as_ref().map(|key| format!("$_slot = {key}"));
                         li data-class:linked=(linked)
                             data-on:pointerenter=[enter.as_ref()] data-on:focusin=[enter.as_ref()]
-                            data-on:pointerleave=[enter.as_ref().map(|_| "$_slot = ''")]
+                            data-on:pointerleave=[enter.as_ref().map(|_| "evt.pointerType == 'mouse' && ($_slot = '')")]
                             data-on:focusout=[enter.as_ref().map(|_| "$_slot = ''")] {
                             a href=(format!("/jobs/{}", job.id)) {
                                 (badge(job))

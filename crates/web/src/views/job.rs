@@ -93,7 +93,7 @@ pub(crate) fn head(view: &JobView) -> Markup {
                 @if let Some(branch) = &summary.branch { code { (branch) } }
                 @let run = html! { "run " (summary.run_id) @if summary.run_attempt > 1 { ", attempt " (summary.run_attempt) } };
                 @if let Some(url) = &summary.url {
-                    a.external href=(url) rel="noreferrer" title="Open on GitHub" { (run) }
+                    a.external href=(url) rel="noreferrer" aria-label=(format!("Run {} on GitHub", summary.run_id)) { (run) }
                 } @else {
                     span { (run) }
                 }
@@ -213,14 +213,12 @@ pub(crate) fn steps(view: &JobView) -> Markup {
                         li class=(class) tabindex=[usage.is_some().then_some("0")]
                             data-on:pointerenter=[usage.is_some().then_some(&enter)]
                             data-on:focus=[usage.is_some().then_some(&enter)]
-                            data-on:pointerleave=[usage.is_some().then_some("$_step = 0")]
+                            data-on:pointerleave=[usage.is_some().then_some("evt.pointerType == 'mouse' && ($_step = 0)")]
                             data-on:blur=[usage.is_some().then_some("$_step = 0")]
                             data-class:linked=[usage.is_some().then(|| format!("$_step == {number}"))] {
                             span.step-name {
                                 (step.name)
-                                @if let Some(usage) = &usage {
-                                    span.visually-hidden { ", " (usage.describe()) }
-                                }
+                                @if let Some(usage) = &usage { span.visually-hidden { ", " (usage.describe()) } }
                             }
                             span.step-time {
                                 @match (seconds, class) {
@@ -237,6 +235,11 @@ pub(crate) fn steps(view: &JobView) -> Markup {
                                     @let left = ratio(from.saturating_sub(start), span) * 100.0;
                                     @let width = ratio(to - from, span) * 100.0;
                                     span.step-bar style=(format!("--left: {left:.2}%; --width: {width:.2}%")) {}
+                                    // Shown on the side of the track away from the bar while the row is lit up:
+                                    // the charts may be off screen.
+                                    @if let Some(usage) = &usage {
+                                        span class=(if left + width / 2.0 > 50.0 { "step-usage start" } else { "step-usage end" }) { (usage.describe()) }
+                                    }
                                 }
                             }
                         }

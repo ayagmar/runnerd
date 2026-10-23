@@ -253,34 +253,31 @@ fn trends(history: &History) -> Markup {
         format::bytes,
         &days,
     );
-    let marks = |span: fn(u64, &Day) -> (u64, u64)| -> Vec<Band> {
-        (0u64..)
-            .zip(&days)
-            .map(|(i, day)| {
-                let (from, to) = span(i, day);
-                Band {
-                    from,
-                    to,
-                    shown: format!("$_day == {i}"),
-                    label: String::new(),
-                }
-            })
-            .collect()
+    // One band per chart, a day wide, which the stylesheet moves to the picked day by `--day`.
+    let mark = |from, to| {
+        [Band {
+            from,
+            to,
+            shown: "$_day >= 0".to_owned(),
+            label: String::new(),
+        }]
     };
-    let bar_marks = marks(|i, _| (i, i + 1));
-    let day_marks = marks(|_, day| (day.start, day.start + 86_399));
+    let bar_marks = mark(0, 1);
+    let day_marks = days
+        .first()
+        .map_or(mark(0, 0), |day| mark(day.start, day.start + 86_399));
     let dates: Vec<String> = days
         .iter()
         .map(|day| format::short_date(day.start))
         .collect();
     html! {
-        section.trends aria-labelledby="trends-title" "data-signals:_day__ifmissing"="-1" {
+        section.trends aria-labelledby="trends-title" "data-signals:_day__ifmissing"="-1" "data-style:--day"="$_day" {
             h2 #trends-title data-text=(lens("Last 30 days", &dates)) { "Last 30 days" }
             p.visually-hidden { "Jobs that finished, by the day they were queued (UTC). Arrow keys step through the days." }
             (headline(&days))
-            div.charts.three tabindex="0" aria-label="Charts per day"
+            div.charts.three tabindex="0" role="group" aria-label="Charts per day"
                 data-on:pointermove=(DAY_UNDER_POINTER) data-on:pointerdown=(DAY_UNDER_POINTER)
-                data-on:pointerleave="$_day = -1" data-on:keydown=(DAY_KEYS) data-on:blur="$_day = -1" {
+                data-on:pointerleave="evt.pointerType == 'mouse' && ($_day = -1)" data-on:keydown=(DAY_KEYS) data-on:blur="$_day = -1" {
                 div.chart-card {
                     h3 { "Jobs per day" }
                     (stacked_bars("Jobs per day by conclusion", &["success", "failure", "neutral", "other"], &bars, |n| n.to_string(), &bar_marks))
@@ -343,6 +340,13 @@ fn headline(days: &[Day]) -> Markup {
     let succeeded: u64 = days.iter().map(|day| day.succeeded).sum();
     let run: u64 = days.iter().map(|day| day.run_seconds).sum();
     let queue: u64 = days.iter().map(|day| day.queue_seconds).sum();
+    let peak = |peak: u64| {
+        if peak > 0 {
+            format::bytes(peak)
+        } else {
+            "–".to_owned()
+        }
+    };
     let share = |succeeded: u64, jobs: u64| {
         (succeeded * 100)
             .checked_div(jobs)
@@ -370,9 +374,14 @@ fn headline(days: &[Day]) -> Markup {
             average(queue, total),
             each(&|day| average(day.queue_seconds, day.jobs)),
         ),
+        (
+            "Sampled memory peak",
+            peak(days.iter().map(|day| day.memory_peak).max().unwrap_or(0)),
+            each(&|day| peak(day.memory_peak)),
+        ),
     ];
     html! {
-        dl.headline {
+        dl.headline aria-live="polite" {
             @for (label, whole, per_day) in &figures {
                 div { dt { (label) } dd data-text=(lens(whole, per_day)) { (whole) } }
             }

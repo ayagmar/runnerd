@@ -473,8 +473,10 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
   transition: opacity 150ms var(--ease);
 }
 
+/* Ink, not the accent: an idle block's outline is a profile colour that may be the accent's. */
 .block:focus-visible,
 .free:focus-visible {
+  outline-color: var(--ink);
   outline-offset: -3px;
 }
 
@@ -1091,6 +1093,26 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
   gap: 2px;
 }
 
+.step-usage {
+  position: absolute;
+  inset-block: 0;
+  display: flex;
+  align-items: center;
+  color: var(--muted);
+  font-size: 0.8125rem;
+  font-weight: 500;
+  white-space: nowrap;
+  opacity: 0;
+  transition: opacity 150ms var(--ease);
+}
+
+.step-usage.start { left: 0; }
+.step-usage.end { right: 0; }
+
+.step-list li.linked .step-usage {
+  opacity: 1;
+}
+
 .step-list li.linked {
   background: var(--surface-2);
   box-shadow: inset 3px 0 0 var(--ink);
@@ -1238,6 +1260,10 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
   touch-action: pan-y;
 }
 
+.trends .band {
+  left: calc(var(--day, 0) * var(--width));
+}
+
 .trends .charts:focus-visible {
   outline-offset: 4px;
 }
@@ -1277,7 +1303,8 @@ main:has(.linked) :is(.block, .free, .slot, .job-list > li, .repository):not(.li
 
 .job-table tbody th a {
   display: grid;
-  grid-template-columns: auto minmax(0, 1fr);
+  /* Not minmax(0, …): the cell would shrink below its name, and the name run into the next column. */
+  grid-template-columns: auto 1fr;
   column-gap: 0.6rem;
   align-items: center;
   text-decoration: none;
