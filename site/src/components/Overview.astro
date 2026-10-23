@@ -2,7 +2,7 @@
 // The web dashboard's overview as HTML, replaying its demo daemon: the budget's blocks and the slot cards, linked,
 // with a play button and a scrubber. The build renders second 0, so without the script it is the screenshot it
 // replaced. Behaviour and data live in scripts/overview.ts; the look mirrors crates/web/assets/style.css.
-import { at, barLabel, block, card, readout, rest, steps, LOOP, MOMENTS } from '../scripts/overview';
+import { at, barLabel, block, card, lenses, readout, rest, steps, LOOP, MOMENTS } from '../scripts/overview';
 
 const state = at(0);
 const { mirror, free } = rest();
@@ -12,7 +12,7 @@ const open = 'jvm-1';
 <div class="dash" data-overview>
   <div class="figures">
     <p data-readout set:html={readout(state)} />
-    <p class="lens" data-lens aria-hidden="true"></p>
+    <p class="lens" data-lens aria-hidden="true" set:html={lenses(state, null)} />
   </div>
   <div class="dash-bar" role="img" aria-label={barLabel(state)} data-bar>
     {
@@ -137,15 +137,27 @@ const open = 'jvm-1';
     flex: none;
   }
 
+  /* The lens: every slot's line in one cell, hidden but for the selected one, as the dashboard does. Wide, each line
+     keeps to one; narrow, two lines are kept for it, so a selection or a new sample moves nothing. */
   .dash .lens {
+    display: grid;
     flex: 1 1 0;
     min-width: 0;
     min-height: 1.45em;
-    overflow: hidden;
     color: var(--muted);
     text-align: right;
+  }
+
+  .dash .lens > span {
+    grid-area: 1 / 1;
+    overflow: hidden;
     text-overflow: ellipsis;
     white-space: nowrap;
+    visibility: hidden;
+  }
+
+  .dash .lens > span.on {
+    visibility: visible;
   }
 
   .dash .lens strong {
@@ -577,7 +589,25 @@ const open = 'jvm-1';
     .dash .lens {
       flex: none;
       width: 100%;
+      min-height: 2.9em;
       text-align: left;
+    }
+
+    .dash .lens > span {
+      white-space: normal;
+    }
+  }
+
+  /* On a phone the total wraps to two lines as its numbers grow, and the lens may need three: both keep room for it. */
+  @media (max-width: 480px) {
+    .dash .figures > p:first-child {
+      min-height: 3.1rem;
+    }
+  }
+
+  @media (max-width: 359px) {
+    .dash .lens {
+      min-height: 4.35em;
     }
   }
 

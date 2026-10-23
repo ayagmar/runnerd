@@ -121,9 +121,15 @@ function sampleAt(run: Run, t: number): Sample {
   return run.history.length ? run.history[run.history.length - 1] : live(run, Math.max(2, run.started + 2 - (run.started % 2)));
 }
 
-/** main.rs's sample of the slice at demo second t: 9G and a little more, whatever runs. */
+/** fake.rs's last host sample, at second 0: 600M, 4G for each of the two running jobs, and its noise once all 24
+ * history jobs have drawn theirs. Checked in, so the page doesn't replay those jobs to reach it. */
+const FIXTURE_SLICE = 9_742_430_564;
+
+/** The slice's sample at demo second t: the fixture's until main.rs sends its first, at second 2, then main.rs's: 9G
+ * and a little more, whatever runs. */
 function slice(t: number): number {
-  const n = Math.max(2, t - (t % 2));
+  if (t < 2) return FIXTURE_SLICE;
+  const n = t - (t % 2);
   const base = 9 * GIB;
   return base + ((n * 104_729) % 89) * Math.floor(base / 300);
 }
@@ -230,8 +236,14 @@ const FREE = MAX - MIRROR - PROFILES.reduce((sum, p) => sum + p.memory * p.slots
 /** The budget's blocks after the slots, the mirror and what is free, in GiB. */
 export const rest = () => ({ mirror: MIRROR / GIB, free: FREE / GIB });
 
-/** The lens: what one slot holds, its figure in bold. */
-export function lens(slot: Slot): string {
+/** The lens: a line per slot saying what it holds, all in one place and hidden but for the selected slot's, so the
+ * readout is as tall as its longest line and selecting a slot moves nothing. */
+export function lenses(state: State, selected: string | null): string {
+  return state.slots.map((slot) => `<span${slot.key === selected ? ' class="on"' : ''}>${lens(slot)}</span>`).join('');
+}
+
+/** What one slot holds, its figure in bold. */
+function lens(slot: Slot): string {
   const name = `${slot.profile.name} ${slot.number}`;
   const cap = size(slot.profile.memory);
   if (slot.state === 'busy')
@@ -331,9 +343,8 @@ export function mount(root: HTMLElement) {
 
   const render = () => {
     const state = at(t);
-    const hot = state.slots.find((slot) => slot.key === hovered);
     set(readoutEl, readout(state));
-    set(lensEl, hot ? lens(hot) : '');
+    set(lensEl, lenses(state, hovered));
     bar.setAttribute('aria-label', barLabel(state));
     for (const slot of state.slots) {
       const b = block(slot);
