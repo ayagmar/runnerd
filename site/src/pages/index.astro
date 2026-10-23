@@ -5,6 +5,8 @@ import '../styles/theme.css';
 import mark from '../assets/mark.svg?raw';
 import Overview from '../components/Overview.astro';
 import Tui from '../components/Tui.astro';
+import replay from '../assets/admission/replay.json';
+import { size } from '../scripts/overview';
 
 const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 const docs = `${base}install/`;
@@ -69,44 +71,35 @@ const steps = [
 const pauseRefused = `error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792741296
 \`runnerctl pause --force halyard/ledger\` cancels its run and removes its runner`;
 
-// The same 33G under both admission policies, from the jobs in the sizing output below. Under caps a runner reserves
-// its profile's memory and the job inside uses its p95 peak; under measured it reserves that job's p95 peak plus 15%,
-// rounded up to 256M. The measured row is the 8 runners at once `runnerd simulate` reports for it.
-const GIB_ROUND = 0.25;
-const reserve = (p95: number) => Math.ceil((p95 * 1.15) / GIB_ROUND) * GIB_ROUND;
-const jobs = {
-  integration: { kind: 'jvm', name: 'integration tests', p95: 7.4 },
-  build: { kind: 'jvm', name: 'build', p95: 4.2 },
-  web: { kind: 'node', name: 'build', p95: 1.9 },
-  e2e: { kind: 'node', name: 'e2e', p95: 2 },
-};
+// The same 33G under both admission policies, from one fictional 28-day history (assets/admission/replay.json):
+// `runnerd simulate`'s rows, and each job's runs, p95 peak and what measured admission reserves for it once it has
+// `min_jobs` runs, its p95 plus the default 15% margin rounded up to 256M. The bars are one burst of that history
+// at its busiest: 3 jvm and 5 node jobs queued together, of which caps start the first 2 of each profile.
+const GIB = 1024 ** 3;
 const caps = { jvm: 9, node: 7 };
+const job = (key: string) => {
+  const found = replay.jobs[key as keyof typeof replay.jobs];
+  return { ...found, kind: found.profile as 'jvm' | 'node', name: found.job.replace(/^CI \/ /, '') };
+};
+const integration = job('halyard/ledger integration tests');
+const ledger = job('halyard/ledger build');
+const storefront = job('halyard/storefront build');
+const e2e = job('halyard/storefront e2e');
 const packs = [
-  {
-    policy: 'caps',
-    runners: [jobs.integration, jobs.build, jobs.web, jobs.e2e].map((job) => ({ ...job, size: caps[job.kind as 'jvm' | 'node'] })),
-  },
+  { policy: 'caps', runners: [integration, ledger, storefront, storefront].map((j) => ({ ...j, size: caps[j.kind] })) },
   {
     policy: 'measured',
-    runners: [jobs.integration, jobs.build, jobs.build, jobs.web, jobs.web, jobs.web, jobs.web, jobs.e2e].map((job) => ({
-      ...job,
-      size: reserve(job.p95),
+    runners: [integration, ledger, ledger, storefront, storefront, storefront, storefront, e2e].map((j) => ({
+      ...j,
+      size: j.reserve / GIB,
     })),
   },
 ].map((pack) => {
   const reserved = pack.runners.reduce((sum, r) => sum + r.size, 0) + example.mirror;
   return { ...pack, free: example.max - reserved };
 });
-
-// runnerd simulate's table as the admission page prints it, without the CPU budget's rows.
-const simulate = {
-  head: 'POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD    CPU CPU HELD',
-  rows: [
-    'caps      jvm 2, node 6                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -',
-    'caps*     jvm 3, node 8                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -',
-  ],
-  measured: 'measured  jvm 3, node 8                 0s     1m55s     3m20s       18s       8   24.35G       4     0      7        -',
-};
+const [simulateHead, ...simulateRows] = replay.table;
+const simulateMeasured = simulateRows.pop();
 
 // runnerctl sizing's node profile, as the clients page prints it.
 const sizing = `node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
@@ -237,12 +230,14 @@ const clients = [
                 </figcaption>
                 <ul class="pack-bar" style={`--total: ${example.max}`}>
                   {pack.runners.map((runner) => (
-                    <li
-                      class={`block ${runner.kind}`}
-                      style={`--size: ${runner.size}; --used: ${Math.min(1, runner.p95 / runner.size)}`}
-                    >
-                      <span class="pack-size">{runner.size}G</span>
-                      <span class="pack-job">
+                    <li class={`block ${runner.kind}`} style={`--size: ${runner.size}; --used: ${runner.p95 / GIB / runner.size}`}>
+                      <span class="visually-hidden">
+                        {runner.repository} {runner.job}: reserves {size(runner.size * GIB)}, p95 peak {size(runner.p95)}
+                      </span>
+                      <span class="pack-size" aria-hidden="true">
+                        {size(runner.size * GIB)}
+                      </span>
+                      <span class="pack-job" aria-hidden="true">
                         {runner.kind} {runner.name}
                       </span>
                     </li>
@@ -251,7 +246,7 @@ const clients = [
                     <span class="visually-hidden">mirror, 512M</span>
                   </li>
                   <li class="free" style={`--size: ${pack.free}`}>
-                    <span class="visually-hidden">{pack.free}G free</span>
+                    <span class="visually-hidden">{size(pack.free * GIB)} free</span>
                   </li>
                 </ul>
               </figure>
@@ -259,13 +254,15 @@ const clients = [
           }
         </div>
         <p class="pack-note">
-          Measured, each runner reserves its job's p95 peak from history plus 15%. The shaded part is what the job
-          uses.
+          One burst of a 28-day history, replayed. Each block is what its runner reserves, shaded to its job's p95 peak.
+          A job with fewer than 10 runs, or one that ran out of memory, <a href={`${base}admission/#measured-admission`}
+            >reserves more</a
+          >.
         </p>
-        <pre class="terminal wide" tabindex="0" role="region" aria-label="runnerd simulate output"><code><span class="prompt">$ runnerd simulate --memory-max 33G --slots node=8 | grep -E '^(POLICY|caps|measured)'</span>
-{simulate.head}
-{simulate.rows.join('\n')}
-<mark>{simulate.measured}</mark></code></pre>
+        <pre class="terminal wide" tabindex="0" role="region" aria-label="runnerd simulate output"><code><span class="prompt">$ {replay.command} | grep -E '^(POLICY|caps|measured)'</span>
+{simulateHead}
+{simulateRows.join('\n')}
+<mark>{simulateMeasured}</mark></code></pre>
         <a class="text-link" href={`${base}admission/`}>Admission and sizing</a>
       </section>
 
@@ -293,6 +290,7 @@ interval = "24h"</code></pre>
 <span class="prompt"># runnerd.toml</span>
 [web]
 origins = ["{tailnet}"]
+<span class="prompt">$ systemctl --user restart runnerd</span>
 <span class="prompt">$ runnerctl web --no-open --base {tailnet}</span></code></pre>
           <p>The dashboard installs as an app from the browser's menu. Pause, reseed and edit the config from it.</p>
           <a class="text-link" href={`${clientsDoc}#from-another-device`}>From another device</a>
@@ -403,7 +401,9 @@ origins = ["{tailnet}"]
           <div>
             <h3>Disk with a ceiling</h3>
             <pre class="terminal"><code>[caches]
-mirror = {'{'} enabled = true, max_size = "10G" {'}'}
+mirror = {'{'} enabled = true, memory = "512M", cpus = 1, ttl = "168h", max_size = "10G" {'}'}
+pnpm = {'{'} max_size = "5G" {'}'}
+maven = {'{'} max_size = "5G" {'}'}
 snapshot_max = "10G"</code></pre>
             <p>Old published runner images go once no profile names them.</p>
           </div>
