@@ -1,5 +1,8 @@
 # 0032. Sizing advice from sampled peaks, applied through the config check
 
+Amended by [0037](0037-memory-the-kernel-cannot-reclaim.md): samples leave out all reclaimable memory, and a run
+met its cap when its container's `memory.events` say so, not when its peak came within 5% of it.
+
 ## Context
 
 Every profile's `memory` and `slots` are guesses made when the config was written. The job history has what each

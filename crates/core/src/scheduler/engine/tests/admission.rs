@@ -4,6 +4,7 @@
 
 use super::*;
 use crate::api::{AdmissionPolicy, Basis};
+use crate::observe::metrics::Events;
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
 
@@ -57,7 +58,10 @@ async fn history_of(store: &Store, name: &str, first: u64, peak: u64, oom_kills:
             memory: peak,
             network_received: 0,
             network_sent: 0,
-            oom_kills: if i == 9 { oom_kills } else { 0 },
+            events: Some(Events {
+                oom: 0,
+                oom_kill: if i == 9 { oom_kills } else { 0 },
+            }),
         }]);
         store.lost(id, at + 60_000);
         store.runner_removed(&runner, at + 60_000);
@@ -152,6 +156,32 @@ async fn without_a_recent_sample_of_the_slice_runners_are_admitted_at_their_caps
 }
 
 #[tokio::test]
+async fn peaks_sampled_with_page_cache_do_not_predict_what_a_job_reserves() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    history(&handle.store, G, 0).await;
+    // As a history from before version 8 holds them: those runners were sampled counting active page cache.
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute("UPDATE runners SET memory_measure = NULL", [])
+        .unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "no run measured the new way: 2 × the 4G cap"
+    );
+}
+
+#[tokio::test]
 async fn a_job_killed_for_memory_is_admitted_at_its_cap() {
     let (github, docker, dir) = (
         FakeGithub::default(),
@@ -214,7 +244,7 @@ fn runners_used(github: &FakeGithub, store: &Store, memory: u64, at: u64) {
             memory,
             network_received: 0,
             network_sent: 0,
-            oom_kills: 0,
+            events: None,
         })
         .collect();
     store.samples(samples);

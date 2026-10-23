@@ -47,7 +47,7 @@ pub enum Basis {
     },
     /// The cap: admission by caps, or too few runs of the job and of its profile.
     Cap,
-    /// The cap: a run of the job peaked at its cap or was killed for memory lately.
+    /// The cap: a run of the job ran out of memory at its cap or was killed for memory lately.
     Unpredictable {
         /// When the job may be predicted again.
         until: u64,
@@ -100,7 +100,7 @@ impl Admission {
             }
             Basis::Cap => format!("reserved its {reserved} cap: too few runs to predict from"),
             Basis::Unpredictable { .. } => format!(
-                "reserved its {reserved} cap: a run of its job peaked at its cap or was killed for memory lately"
+                "reserved its {reserved} cap: a run of its job ran out of memory at its cap or was killed for memory lately"
             ),
             Basis::Unmeasured => {
                 format!("reserved its {reserved} cap: no recent sample of the slice's memory")

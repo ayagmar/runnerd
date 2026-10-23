@@ -169,8 +169,9 @@ nothing until Docker has listed them.
   reservation follows its repository's queue until its job is known, then that job's prediction, and a waiting
   runner raised past what is free is stopped. The config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing
   starts while the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample,
-  after a run of its job at its cap or killed for memory, or when a restart adopted it
-  ([ADR 0033](docs/adr/0033-measured-admission.md)). Each runner's record keeps what it reserves and why.
+  after a run of its job out of memory at its cap or killed for memory, or when a restart adopted it
+  ([ADR 0033](docs/adr/0033-measured-admission.md)). Memory samples leave out what the kernel can reclaim, and
+  predictions read only runners sampled that way ([ADR 0037](docs/adr/0037-memory-the-kernel-cannot-reclaim.md)). Each runner's record keeps what it reserves and why.
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the

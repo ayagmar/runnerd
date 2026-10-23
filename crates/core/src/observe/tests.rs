@@ -4,19 +4,26 @@
 use std::path::Path;
 
 use super::capture::{Captured, MAX_LINE, Parser};
-use super::metrics::{Paths, Sampler, Tracked};
+use super::metrics::{Events, Paths, Sampler, Tracked};
 use super::mirror::{self, Leases};
 use crate::store::{LOG_BACKLOG, LogPosition, MirrorPosition};
 use crate::testdir::TestDir;
 
-/// Writes a container's cgroup files under the `ci.slice` fixture, and its network counters.
-fn container(paths: &Paths, id: &str, pid: u32, current: u64, inactive_file: u64, usage_usec: u64) {
+/// Writes a container's cgroup files under the `ci.slice` fixture, and its network counters: `current` bytes in
+/// `memory.current`, `cache` of them page cache on the file lists (a third active, the rest inactive), and 300 more
+/// reclaimable slab.
+fn container(paths: &Paths, id: &str, pid: u32, current: u64, cache: u64, usage_usec: u64) {
     let cgroup = paths.container("ci.slice", id);
     std::fs::create_dir_all(&cgroup).unwrap();
     std::fs::write(cgroup.join("memory.current"), format!("{current}\n")).unwrap();
+    let active = cache / 3;
     std::fs::write(
         cgroup.join("memory.stat"),
-        format!("anon 100\nfile 9000\nactive_file 500\ninactive_file {inactive_file}\n"),
+        format!(
+            "anon 100\nfile {cache}\nkernel 400\nshmem 0\ninactive_anon 50\nactive_anon 50\n\
+             inactive_file {}\nactive_file {active}\nslab_reclaimable 300\nslab_unreclaimable 100\n",
+            cache - active
+        ),
     )
     .unwrap();
     std::fs::write(
@@ -62,26 +69,52 @@ fn a_nested_slice_maps_to_its_systemd_cgroup_path() {
 }
 
 #[test]
-fn memory_leaves_out_the_page_cache_and_cpu_is_use_between_samples() {
+fn memory_leaves_out_page_cache_the_kernel_can_take_back_and_cpu_is_use_between_samples() {
     let dir = TestDir::new("observe");
     let paths = paths(&dir.0);
     container(&paths, "a", 10, 4_000_000, 1_500_000, 1_000_000);
     let mut state = Sampler::new(paths.clone(), "ci.slice");
     let runners = [tracked("runner-a", "a", 10)];
     let (first, _) = state.sample(&runners, 10_000);
-    // Two seconds later the container used 3 CPU seconds: 1.5 cores.
-    container(&paths, "a", 10, 5_000_000, 1_000_000, 4_000_000);
+    // Two seconds later the container used 3 CPU seconds: 1.5 cores. Its build read the same files twice, so a
+    // third of its page cache is active: still the kernel's to take back, so still left out.
+    container(&paths, "a", 10, 5_000_000, 3_000_000, 4_000_000);
     let (second, _) = state.sample(&runners, 12_000);
     let observed: Vec<(u64, u64)> = first
         .iter()
         .chain(&second)
         .map(|sample| (sample.memory, sample.cpu))
         .collect();
-    assert_eq!(observed, [(2_500_000, 0), (4_000_000, 1500)]);
+    assert_eq!(observed, [(2_499_700, 0), (1_999_700, 1500)]);
     // eth0 only: not loopback, not the inner Docker Engine's bridge.
     assert_eq!(
         (second[0].network_received, second[0].network_sent),
         (346_864, 129_381)
+    );
+}
+
+#[test]
+fn a_job_whose_page_cache_fills_its_cap_peaks_at_what_it_cannot_give_back() {
+    // As measured on a runner at its 6.25G cap: 0.5G of anonymous memory, tmpfs and kernel memory, the rest page
+    // cache. `docker stats` would say 3.6G.
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    let cgroup = paths.container("ci.slice", "a");
+    container(&paths, "a", 10, 0, 0, 0);
+    std::fs::write(cgroup.join("memory.current"), "6710885400\n").unwrap();
+    std::fs::write(
+        cgroup.join("memory.stat"),
+        "anon 329342080\nfile 6339871296\nkernel 41672024\nshmem 46301184\ninactive_anon 0\n\
+         active_anon 375635072\ninactive_file 3000000000\nactive_file 3293570112\nslab_reclaimable 8112344\n\
+         slab_unreclaimable 2606528\n",
+    )
+    .unwrap();
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let (samples, _) = state.sample(&[tracked("runner-a", "a", 10)], 1_000);
+    // anon + shmem + the kernel memory it can't reclaim.
+    assert_eq!(
+        samples[0].memory,
+        329_342_080 + 46_301_184 + 41_672_024 - 8_112_344
     );
 }
 
@@ -101,23 +134,42 @@ fn a_container_that_disappears_ends_its_series_and_the_others_go_on() {
 }
 
 #[test]
-fn a_process_killed_for_memory_in_a_container_shows_in_its_samples() {
+fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
     let dir = TestDir::new("observe");
     let paths = paths(&dir.0);
     container(&paths, "a", 10, 4_000, 0, 0);
     let mut state = Sampler::new(paths.clone(), "ci.slice");
     let runners = [tracked("runner-a", "a", 10)];
     assert_eq!(
-        state.sample(&runners, 1_000).0[0].oom_kills,
-        0,
+        state.sample(&runners, 1_000).0[0].events,
+        None,
         "no memory.events yet"
+    );
+    // Reclaim at the cap (`max`) is not running out of memory: page cache filling the cap counts there too.
+    std::fs::write(
+        paths.container("ci.slice", "a").join("memory.events"),
+        "low 0\nhigh 0\nmax 10171\noom 0\noom_kill 0\noom_group_kill 0\n",
+    )
+    .unwrap();
+    assert_eq!(
+        state.sample(&runners, 3_000).0[0].events,
+        Some(Events {
+            oom: 0,
+            oom_kill: 0
+        })
     );
     std::fs::write(
         paths.container("ci.slice", "a").join("memory.events"),
-        "low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\noom_group_kill 0\n",
+        "low 0\nhigh 0\nmax 10173\noom 1\noom_kill 1\noom_group_kill 0\n",
     )
     .unwrap();
-    assert_eq!(state.sample(&runners, 3_000).0[0].oom_kills, 1);
+    assert_eq!(
+        state.sample(&runners, 5_000).0[0].events,
+        Some(Events {
+            oom: 1,
+            oom_kill: 1
+        })
+    );
 }
 
 fn feed_all(chunks: &[&[u8]]) -> Vec<Captured> {

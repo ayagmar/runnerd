@@ -18,6 +18,7 @@ use tracing::warn;
 use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
+use crate::observe::metrics::Events;
 use crate::sizing;
 use crate::sync::lock;
 
@@ -34,6 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0005_announced_profiles.sql"),
     include_str!("store/migrations/0006_records.sql"),
     include_str!("store/migrations/0007_admission.sql"),
+    include_str!("store/migrations/0008_unreclaimable_memory.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -114,14 +116,14 @@ pub struct SampleRecord {
     pub cpu: u64,
     /// CPU time so far, in microseconds.
     pub cpu_usage: u64,
-    /// Bytes without page cache.
+    /// Bytes the kernel could not reclaim (`observe::metrics::Usage::memory`).
     pub memory: u64,
     /// Bytes received since the container started.
     pub network_received: u64,
     /// Bytes sent since the container started.
     pub network_sent: u64,
-    /// Processes the kernel killed in the container for memory so far.
-    pub oom_kills: u64,
+    /// The container's `memory.events` so far; `None` when they could not be read.
+    pub events: Option<Events>,
 }
 
 /// The last measurement of the cache volumes.
@@ -723,8 +725,12 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
     }
     // Columns sizing reads that later versions added: before them, a temporary view gives each runner none.
     let added = match found {
-        1 => "NULL AS memory_cap, NULL AS cpu_cap, NULL AS admission, NULL AS oom_kills",
-        2..=6 => "NULL AS admission, NULL AS oom_kills",
+        1 => {
+            "NULL AS memory_cap, NULL AS cpu_cap, NULL AS admission, NULL AS oom_kills, NULL AS ooms, \
+             NULL AS memory_measure"
+        }
+        2..=6 => "NULL AS admission, NULL AS oom_kills, NULL AS ooms, NULL AS memory_measure",
+        7 => "NULL AS ooms, NULL AS memory_measure",
         _ => "",
     };
     if !added.is_empty() {

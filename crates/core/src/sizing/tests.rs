@@ -1,6 +1,6 @@
 //! Advice from synthetic histories: two profiles of a 33G slice, jobs of fictional repositories.
 
-use super::{Held, History, Ran, Window, advise};
+use super::{Held, History, Measure, Ran, Window, advise};
 use crate::api::{Advice, ProfileSizing, Sizing};
 use crate::config::{ByteSize, Config, resize_profile};
 
@@ -62,6 +62,8 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         finished_at: Some(NOW - HOUR),
         oom_killed: false,
         reserved: None,
+        hit_cap: None,
+        measure: Measure::Unreclaimable,
     }
 }
 
@@ -258,6 +260,26 @@ fn each_advised_change_written_into_the_config_still_fits_the_slice() {
             }
         }
     }
+}
+
+#[test]
+fn a_job_killed_for_memory_keeps_its_cap_however_low_its_sampled_peaks() {
+    // The kills came between samples: every sampled peak is 2G of the 7G cap.
+    let mut jobs = builds(20, 2 * G, 2 * G, 0);
+    jobs[0].oom_killed = true;
+    jobs[0].hit_cap = Some(true);
+    let sizing = sizing(&History {
+        jobs,
+        cancelled: Vec::new(),
+        runners: Vec::new(),
+    });
+    let node = profile(&sizing, "node");
+    assert_eq!(node.peaks.at_cap, 1);
+    assert!(
+        matches!(node.advice, Advice::Keep { .. }),
+        "the cap stays: {:?}",
+        node.advice
+    );
 }
 
 #[test]

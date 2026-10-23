@@ -1,5 +1,8 @@
 # 0033. Admission by measured peaks, behind a flag
 
+Amended by [0037](0037-memory-the-kernel-cannot-reclaim.md): samples leave out all reclaimable memory, and a run
+met its cap when its container's `memory.events` say so, not when its peak came within 5% of it.
+
 ## Context
 
 A runner starts only when its profile's `memory` fits the slice's `MemoryMax` beside the caps of everything

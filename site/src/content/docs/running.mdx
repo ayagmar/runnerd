@@ -119,7 +119,7 @@ Where the data comes from:
 - **Which job a runner took**: a small script runnerd runs in the container (`docker exec`, as root) reads the job's ID from the runner's `_diag/Worker_*.log` within a second of the job starting. GitHub's list of queued jobs still shows the job for several seconds after that, and runnerd does not start a second runner for it.
 - **Steps**: GitHub's jobs API, read every poll while a job runs. The runner's own logs name steps differently from GitHub (`Set up runner` for `Set up job`) and change between runner versions. The API's times have second precision.
 - **The log**: the runner's `_diag/pages`, which the same script follows. The runner writes the log there in 4 KiB blocks, so lines arrive a block at a time, and a quiet step's lines arrive when it ends.
-- **CPU and memory**: the container's cgroup files, memory without page cache as `docker stats` counts it; network from `/proc/<pid>/net/dev`.
+- **CPU and memory**: the container's cgroup files. Memory is what the kernel cannot reclaim: `memory.current` less the page cache lists and reclaimable slab, so lower than `docker stats`, which still counts page cache read twice. Kills and out-of-memory events come from `memory.events`. Network from `/proc/<pid>/net/dev`.
 
 ## API
 

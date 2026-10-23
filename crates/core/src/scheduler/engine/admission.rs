@@ -17,7 +17,7 @@ use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{Decision, Repository, matches};
-use crate::sizing::Ran;
+use crate::sizing::{Measure, Ran};
 use crate::time;
 
 /// How often the predictor reads the job history again.
@@ -116,11 +116,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
         };
+        // Peaks sampled before page cache was left out overstate what jobs need, and would keep a job at its cap
+        // for as long as the history holds them: predictions start over from runs sampled the new way.
         let mut runs: Vec<(Ran, bool)> = history
             .jobs
             .into_iter()
             .map(|run| (run, true))
             .chain(history.cancelled.into_iter().map(|run| (run, false)))
+            .filter(|(run, _)| run.measure == Measure::Unreclaimable)
             .collect();
         runs.sort_by_key(|(run, _)| run.finished_at.unwrap_or(run.queued_at));
         let mut predictor = Predictor::new(&self.config.sizing);

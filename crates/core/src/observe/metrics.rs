@@ -1,7 +1,12 @@
 //! CPU, memory and network of runner containers and of their slice, read from cgroup v2 files and
-//! `/proc/<pid>/net/dev` every `SAMPLE_INTERVAL`. Memory leaves out the page cache the way `docker stats` does
-//! (`memory.current` less `inactive_file`), so the numbers match what the bash tool reported. A container whose
-//! files vanish ends its series; that is not an error.
+//! `/proc/<pid>/net/dev` every `SAMPLE_INTERVAL`. Memory is what the kernel cannot take back from the cgroup
+//! without swap: `memory.current` less the file LRU lists (`active_file`, `inactive_file`) and `slab_reclaimable`,
+//! so anonymous memory, tmpfs and shared memory (`shmem`, which sits on the anon lists), and unreclaimable kernel
+//! memory. That is what `memory.max` OOM-kills on: the kernel's cgroup-v2 docs (Documentation/admin-guide/
+//! cgroup-v2.rst) invoke the OOM killer when usage reaches the limit "and can't be reduced". `docker stats`
+//! subtracts only `inactive_file`, which still counts page cache read twice. Whether the cgroup met its limit
+//! comes from `memory.events`, never from how close a sample came to it. A container whose files vanish ends its
+//! series; that is not an error.
 
 use std::collections::HashMap;
 use std::io;
@@ -64,8 +69,18 @@ impl Paths {
 pub struct Usage {
     /// CPU time so far, in microseconds (`cpu.stat` `usage_usec`).
     pub cpu_usage: u64,
-    /// `memory.current` less `inactive_file` from `memory.stat`.
+    /// `memory.current` less `active_file`, `inactive_file` and `slab_reclaimable` from `memory.stat`.
     pub memory: u64,
+}
+
+/// What a cgroup's `memory.events` counted so far, its descendants' included.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct Events {
+    /// Times its memory reached `memory.max`, reclaim could not bring it down and an allocation was about to fail
+    /// (`oom`). Not `max`, which counts every reclaim at the limit, page cache's included.
+    pub oom: u64,
+    /// Processes the kernel killed in it for memory (`oom_kill`).
+    pub oom_kill: u64,
 }
 
 fn read(path: &Path) -> io::Result<String> {
@@ -94,23 +109,27 @@ pub fn read_usage(cgroup: &Path) -> io::Result<Usage> {
         .parse()
         .map_err(|_| invalid(&current_path))?;
     let stat_path = cgroup.join("memory.stat");
-    let inactive_file =
-        field(&read(&stat_path)?, "inactive_file").ok_or_else(|| invalid(&stat_path))?;
+    let stat = read(&stat_path)?;
+    let reclaimable = ["active_file", "inactive_file", "slab_reclaimable"]
+        .iter()
+        .map(|key| field(&stat, key))
+        .sum::<Option<u64>>()
+        .ok_or_else(|| invalid(&stat_path))?;
     let cpu_path = cgroup.join("cpu.stat");
     let cpu_usage = field(&read(&cpu_path)?, "usage_usec").ok_or_else(|| invalid(&cpu_path))?;
     Ok(Usage {
         cpu_usage,
-        memory: current.saturating_sub(inactive_file),
+        memory: current.saturating_sub(reclaimable),
     })
 }
 
-/// Processes the kernel killed in a cgroup and the cgroups under it for memory (`memory.events` `oom_kill`); 0
-/// when the file says nothing of it.
-pub fn read_oom_kills(cgroup: &Path) -> u64 {
-    read(&cgroup.join("memory.events"))
-        .ok()
-        .and_then(|events| field(&events, "oom_kill"))
-        .unwrap_or(0)
+/// A cgroup's `memory.events`; `None` when it can't be read, a counter it lacks being 0.
+pub fn read_events(cgroup: &Path) -> Option<Events> {
+    let events = read(&cgroup.join("memory.events")).ok()?;
+    Some(Events {
+        oom: field(&events, "oom").unwrap_or(0),
+        oom_kill: field(&events, "oom_kill").unwrap_or(0),
+    })
 }
 
 /// Bytes received and sent by a process's network namespace on its `eth*` interfaces: the container's own
@@ -213,7 +232,7 @@ impl Sampler {
                 memory: usage.memory,
                 network_received: received,
                 network_sent: sent,
-                oom_kills: read_oom_kills(&cgroup),
+                events: read_events(&cgroup),
             });
         }
         self.previous = seen;

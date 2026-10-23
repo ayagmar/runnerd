@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 
 use super::{Basis, HIGH_WATER, Key, Policy, Predictor, UNPREDICTABLE_FOR, simulate};
 use crate::config::Config;
-use crate::sizing::Ran;
+use crate::sizing::{Measure, Ran};
 
 const G: u64 = 1 << 30;
 const M: u64 = 1 << 20;
@@ -64,6 +64,8 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         finished_at: Some(queued + minutes * MINUTE),
         oom_killed: false,
         reserved: None,
+        hit_cap: Some(false),
+        measure: Measure::Unreclaimable,
     }
 }
 
@@ -197,12 +199,17 @@ fn without_enough_runs_of_the_job_or_its_profile_a_job_is_admitted_at_its_cap() 
 }
 
 #[test]
-fn a_run_at_its_cap_makes_its_job_unpredictable_for_a_week() {
+fn a_run_out_of_memory_at_its_cap_makes_its_job_unpredictable_for_a_week() {
     let mut predictor = predictor();
     for _ in 0..20 {
         predictor.learn(&build(2 * G), "node", 7 * G, NOW);
     }
-    predictor.learn(&build(6900 * M), "node", 7 * G, NOW);
+    // Reclaim failed at the cap; what it held between samples stayed under 3G.
+    let starved = Ran {
+        hit_cap: Some(true),
+        ..build(3 * G)
+    };
+    predictor.learn(&starved, "node", 7 * G, NOW);
     let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
     assert_eq!(
         prediction.basis,
@@ -213,6 +220,37 @@ fn a_run_at_its_cap_makes_its_job_unpredictable_for_a_week() {
     assert_eq!(prediction.memory, 7 * G);
     let later = predictor.predict(&key("build"), "node", 7 * G, NOW + UNPREDICTABLE_FOR);
     assert_eq!(later.basis, Basis::Job { runs: 21 });
+}
+
+#[test]
+fn a_job_whose_page_cache_fills_its_cap_is_not_put_back_on_its_cap() {
+    let mut predictor = predictor();
+    for _ in 0..20 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    // One run came close to its cap and the kernel never ran out of memory for it: it reclaimed page cache.
+    predictor.learn(&build(6900 * M), "node", 7 * G, NOW);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    assert_eq!(prediction.basis, Basis::Job { runs: 21 });
+    assert!(prediction.memory < 7 * G, "{prediction:?}");
+}
+
+#[test]
+fn without_its_containers_events_a_run_that_peaked_near_its_cap_makes_its_job_unpredictable() {
+    let mut predictor = predictor();
+    for _ in 0..20 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    let unknown = Ran {
+        hit_cap: None,
+        ..build(6900 * M)
+    };
+    predictor.learn(&unknown, "node", 7 * G, NOW);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    assert!(
+        matches!(prediction.basis, Basis::Unpredictable { .. }),
+        "{prediction:?}"
+    );
 }
 
 #[test]

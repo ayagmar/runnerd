@@ -12,7 +12,7 @@ use crate::observe::metrics::SAMPLE_INTERVAL;
 /// Advice rounds memory up to a multiple of this: 256M.
 pub(crate) const GRANULE: u64 = 256 << 20;
 
-/// A peak at or above this share of its container's cap, in percent, likely met the cap.
+/// Without its container's `memory.events`, a peak at or above this share of its cap, in percent, likely met it.
 const AT_CAP: u64 = 95;
 
 /// Lowering a cap is advised once it saves at least this share of it, in percent.
@@ -36,7 +36,7 @@ pub struct Ran {
     pub profile: String,
     /// Its container's memory cap, when recorded.
     pub memory_cap: Option<u64>,
-    /// Its sampled memory peak, bytes.
+    /// Its sampled memory peak, bytes, as `measure` counts memory.
     pub memory_peak: u64,
     /// Its sampled CPU peak, millicores.
     pub cpu_peak: u64,
@@ -48,8 +48,35 @@ pub struct Ran {
     pub finished_at: Option<u64>,
     /// Whether the kernel killed a process in its container for memory.
     pub oom_killed: bool,
+    /// Whether its container's memory reached its cap with nothing left to reclaim (`memory.events` `oom`); `None`
+    /// when its events were not recorded.
+    pub hit_cap: Option<bool>,
+    /// What its sampled memory counts.
+    pub measure: Measure,
     /// What measured admission reserved for it; `None` under caps or for an adopted runner.
     pub reserved: Option<u64>,
+}
+
+/// What a run's sampled memory counts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Measure {
+    /// `memory.current` less `inactive_file`, as runners started before schema version 8 were sampled: page cache
+    /// read twice (`active_file`) counts, so peaks overstate what a job needs.
+    WithActiveFile,
+    /// What the kernel cannot reclaim from the container: `memory.current` less the file LRU lists and
+    /// `slab_reclaimable`.
+    Unreclaimable,
+}
+
+impl Ran {
+    /// Whether it met its container's `cap`: killed for memory, or at the cap with nothing left to reclaim. Without
+    /// its container's events, whether its peak came within `AT_CAP` percent of the cap.
+    pub fn met_cap(&self, cap: u64) -> bool {
+        self.oom_killed
+            || self.hit_cap.unwrap_or_else(|| {
+                self.memory_peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP)
+            })
+    }
 }
 
 /// One runner container's time in a slot. Times in milliseconds.
@@ -276,11 +303,7 @@ impl Sized {
 fn peaks(jobs: &[&Ran]) -> Peaks {
     let at_cap = jobs
         .iter()
-        .filter(|job| {
-            job.memory_cap.is_some_and(|cap| {
-                job.memory_peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP)
-            })
-        })
+        .filter(|job| job.memory_cap.is_some_and(|cap| job.met_cap(cap)))
         .count();
     Peaks {
         jobs: jobs.len() as u64,
