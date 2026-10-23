@@ -4,6 +4,32 @@ Where things live and which rules hold them together. The why behind each rule i
 
 ## Crates
 
+Solid arrows are Cargo dependencies, labelled with the features they turn on; dotted ones are requests at run time.
+
+```mermaid
+flowchart TB
+    subgraph clients["clients: never bollard, reqwest or core's host feature"]
+        cli["runnerd-cli<br/>runnerctl, runnerctl tui"]
+        web["runnerd-web<br/>the dashboard"]
+    end
+    daemon["runnerd<br/>the daemon and its socket API"]
+    subgraph core["runnerd-core"]
+        types["api, config"]
+        client["client"]
+        host["docker, github, cache, isolation, record,<br/>scheduler, observe, sizing, store"]
+    end
+    daemon -->|host| host
+    daemon -->|"serves it in its process"| web
+    cli -->|client| client
+    web -->|client| client
+    client --> types
+    host --> types
+    host --> bollard[("bollard: Docker")]
+    host --> reqwest[("reqwest: GitHub")]
+    cli -.->|Unix socket| daemon
+    web -.->|Unix socket| daemon
+```
+
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
 | `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
