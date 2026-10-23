@@ -180,6 +180,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .collect(),
                     runner_memory: None,
                     runner_cpu: None,
+                    cpu_waiting_since: state.cpu_held_since,
                 }
             })
             .collect();

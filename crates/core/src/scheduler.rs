@@ -12,6 +12,10 @@ pub mod engine;
 /// GitHub's assignment.
 pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 
+/// Once a job has waited this long for CPU, no younger job takes CPU until it fits: smaller jobs arriving all the
+/// time would otherwise take every CPU that frees up before it.
+pub const CPU_PRIORITY_AFTER: Duration = Duration::from_secs(120);
+
 /// A repository as the planner sees it.
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -33,6 +37,17 @@ pub struct Repository {
     /// What a new runner of it takes of the CPU budget, in millicores: `None`, its profile's `cpus`. Under measured
     /// admission, the largest predicted average CPU of its queued jobs.
     pub runner_cpu: Option<u64>,
+    /// Since when its next job waits for CPU that a slot and memory have room for.
+    pub cpu_waiting_since: Option<SystemTime>,
+}
+
+impl Repository {
+    /// Whether its next job has waited `CPU_PRIORITY_AFTER` or more for CPU at `now`.
+    fn starved_of_cpu(&self, now: SystemTime) -> bool {
+        self.cpu_waiting_since
+            .and_then(|since| now.duration_since(since).ok())
+            .is_some_and(|waited| waited >= CPU_PRIORITY_AFTER)
+    }
 }
 
 /// A profile's slots: one concurrent job each.
@@ -123,7 +138,8 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 /// the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `free_memory` and its CPU
 /// (`Repository::runner_cpu`, by default the slot's `cpus`) fits `free_cpu` (`None`: no budget). A repository whose
 /// job had a slot and memory but not CPU is held once (`Decision::HeldForCpu`). An idle runner stops once no queued
-/// job is left for it and it waited `IDLE_TIMEOUT`.
+/// job is left for it and it waited `IDLE_TIMEOUT`. Once a held repository waited `CPU_PRIORITY_AFTER`, no younger
+/// job starts until its own fits.
 pub fn plan(
     repositories: &[Repository],
     profiles: &BTreeMap<String, Profile>,
@@ -212,6 +228,10 @@ pub fn plan(
             };
             if !decisions.contains(&held) {
                 decisions.push(held);
+            }
+            // It waited long enough: no younger job takes CPU until it fits.
+            if repository.starved_of_cpu(now) {
+                break;
             }
             continue;
         }
