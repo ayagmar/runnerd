@@ -37,9 +37,10 @@ rx_bytes() {
 # (daemon.json). A layer whose changes outgrew LAYER_BUDGET_GB starts over from the snapshot. CACHE_SECRETS go
 # from the slot's changes while the layer is unmounted, as overlayfs does not define changes to a mounted upper;
 # the snapshot's, from a snapshot seeded before seed.sh dropped them, are then deleted through the mounted layer,
-# which leaves a whiteout in the slot's changes that the next mount drops and makes again.
+# which leaves a whiteout in the slot's changes that the next mount drops and makes again. The whiteout would hide
+# the image's own copy too, so that copy is put back over it.
 mount_layers() {
-    local layer name path lower
+    local layer name path lower image_copies
     for layer in "${LAYERS[@]}"; do
         name=${layer%%:*} path=${layer#*:}
         [ -d "$path" ] || continue
@@ -47,12 +48,16 @@ mount_layers() {
         lower=$path
         [ ! -d "/base/$name" ] || lower=/base/$name:$lower
         mkdir -p "/state/$name/upper" "/state/$name/work"
-        [ "$name" != cache ] || drop_cache_secrets "/state/$name/upper"
+        if [ "$name" = cache ]; then
+            drop_cache_secrets "/state/$name/upper"
+            image_copies=$(mktemp -d)
+            keep_image_secrets "$path" "$image_copies"
+        fi
         chown runner:runner "/state/$name/upper"
         # Full copies on copy-up and no index, so an upper never depends on the snapshot it was made against.
         mount -t overlay overlay \
             -o "lowerdir=$lower,upperdir=/state/$name/upper,workdir=/state/$name/work,index=off,metacopy=off" "$path"
-        [ "$name" != cache ] || hide_snapshot_secrets "$path"
+        [ "$name" != cache ] || hide_snapshot_secrets "$path" "$image_copies"
     done
 }
 
@@ -64,10 +69,31 @@ drop_cache_secrets() {
     done
 }
 
-# Deletes from the mounted cache layer at $1 the CACHE_SECRETS the profile's snapshot holds.
+# Whether the profile's snapshot holds the cache layer's file $1.
+in_snapshot() {
+    [ -e "/base/cache/$1" ] || [ -L "/base/cache/$1" ]
+}
+
+# Copies into $2 the image's own copies, in the unmounted cache layer's path $1, of the CACHE_SECRETS the profile's
+# snapshot also holds.
+keep_image_secrets() {
+    local file
+    for file in "${CACHE_SECRETS[@]}"; do
+        if in_snapshot "$file" && [ -f "$1/$file" ] && [ ! -L "$1/$file" ]; then
+            mkdir -p "$2/${file%/*}"
+            cp -a "$1/$file" "$2/$file"
+        fi
+    done
+}
+
+# Deletes from the mounted cache layer at $1 the CACHE_SECRETS the profile's snapshot holds, and puts back the
+# image's copies keep_image_secrets kept in $2, which it then removes.
 hide_snapshot_secrets() {
     local file
     for file in "${CACHE_SECRETS[@]}"; do
-        [ ! -e "/base/cache/$file" ] || rm -f "$1/$file"
+        in_snapshot "$file" || continue
+        rm -f "$1/$file"
+        [ ! -e "$2/$file" ] || cp -a "$2/$file" "$1/$file"
     done
+    rm -rf "$2"
 }

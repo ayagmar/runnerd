@@ -30,6 +30,9 @@ const CREDENTIALS: &str = "/home/runner/.cache/cargo/credentials.toml";
 /// A registry token an older image's reseed left in the profile's snapshot.
 const OLD_SNAPSHOT_CREDENTIALS: &str = "gradle/gradle.properties";
 
+/// Settings both a custom image and an older image's snapshot hold.
+const IMAGE_CONFIG: &str = "cargo/config.toml";
+
 /// How a container mounts the profile's snapshot.
 #[derive(Clone, Copy)]
 enum Snapshot {
@@ -46,14 +49,17 @@ async fn run_in_slot(
     slot: usize,
     script: &str,
 ) -> Result<(i64, String), String> {
-    run(docker, names, slot, Snapshot::ReadOnly, script).await
+    run(docker, names, slot, Snapshot::ReadOnly, "", script).await
 }
 
+/// Runs `script` as `run_in_slot` does, after `image_files` puts in the container what a custom image would hold
+/// before the layers are mounted over it.
 async fn run(
     docker: &Docker,
     names: &Names,
     slot: usize,
     snapshot: Snapshot,
+    image_files: &str,
     script: &str,
 ) -> Result<(i64, String), String> {
     let name = format!("{}-slot-{slot}-job", names.network());
@@ -81,7 +87,7 @@ async fn run(
             "-euo".to_owned(),
             "pipefail".to_owned(),
             "-c".to_owned(),
-            format!(". /usr/local/lib/runnerd-layers.sh; mount_layers; {script}"),
+            format!("{image_files} . /usr/local/lib/runnerd-layers.sh; mount_layers; {script}"),
         ]),
         jit_config: None,
     };
@@ -192,7 +198,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
 
 /// After an upgrade: a snapshot seeded before the image dropped credentials still holds one, and stays, as the
 /// profile does not reseed below the threshold. No slot's job sees it, a slot's second job neither, and the rest of
-/// the snapshot stays warm.
+/// the snapshot stays warm. An image's own copy of such a file stays visible.
 async fn old_snapshot(
     docker: &Docker,
     names: &Names,
@@ -203,8 +209,11 @@ async fn old_snapshot(
         names,
         1,
         Snapshot::Writable,
+        "",
         &format!(
-            "mkdir -p /base/cache/gradle && echo signing.password=hunter2 > /base/cache/{OLD_SNAPSHOT_CREDENTIALS}"
+            "mkdir -p /base/cache/gradle /base/cache/cargo \
+             && echo signing.password=hunter2 > /base/cache/{OLD_SNAPSHOT_CREDENTIALS} \
+             && echo snapshot > /base/cache/{IMAGE_CONFIG}"
         ),
     )
     .await?;
@@ -228,6 +237,27 @@ async fn old_snapshot(
         if code != 0 {
             return Err(format!(
                 "slot {slot} sees the old snapshot's credentials, or not its cache (exit {code}):\n{output}"
+            ));
+        }
+    }
+
+    // An image's own copy of a file the old snapshot also holds stays what a job sees, mount after mount.
+    let image_files = format!(
+        "mkdir -p /home/runner/.cache/cargo && echo image > /home/runner/.cache/{IMAGE_CONFIG};"
+    );
+    for _ in 0..2 {
+        let (code, output) = run(
+            docker,
+            names,
+            1,
+            Snapshot::ReadOnly,
+            &image_files,
+            &format!("test \"$(cat /home/runner/.cache/{IMAGE_CONFIG})\" = image"),
+        )
+        .await?;
+        if code != 0 {
+            return Err(format!(
+                "slot 1 does not see the image's {IMAGE_CONFIG} over the old snapshot's (exit {code}):\n{output}"
             ));
         }
     }

@@ -31,7 +31,8 @@ so a Rust or Go job downloaded its toolchain and dependencies again in every new
   the slot's changes before it mounts the layer, then through the mounted layer the ones the snapshot holds, and
   `seed.sh` drops them from a new snapshot. A snapshot seeded by an older image may hold one (Gradle's home was
   already in the cache layer) and is only replaced at the next reseed, which may not come for a while: hiding its
-  copies at every mount covers it without a migration. A layer whose path the image lacks, such as the Android
+  copies at every mount covers it without a migration. An image's own copy of such a file is put back over
+  the hiding whiteout, so a custom image's cargo config still applies. A layer whose path the image lacks, such as the Android
   SDK on `base`, is not mounted.
 - `images.yml` publishes the stages the tag's `image/Dockerfile` has, so publishing a release from before
   `android` existed still works.
