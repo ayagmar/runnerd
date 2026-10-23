@@ -7,6 +7,7 @@
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
+use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 
@@ -216,6 +217,8 @@ pub struct Store {
     reader: Arc<Mutex<Connection>>,
     /// Taken with `try_lock`, so one prune runs at a time; one that panicked midway left rows the next one deletes.
     pruner: Arc<Mutex<Connection>>,
+    /// Set by `close`: a running prune stops after its batch, and none starts.
+    closed: Arc<AtomicBool>,
     /// Host samples sent and not yet stored, oldest first; reads include them. The writer removes them once stored.
     // Locked with `sync::lock`: every critical section is a push, a copy or a drain.
     held: Arc<Mutex<Vec<api::HostSample>>>,
@@ -261,6 +264,7 @@ impl Store {
             writes,
             reader: Arc::new(Mutex::new(reader)),
             pruner: Arc::new(Mutex::new(pruner)),
+            closed: Arc::new(AtomicBool::new(false)),
             held,
             events,
             backlog: Arc::new(Semaphore::new(
@@ -405,6 +409,7 @@ impl Store {
     /// it lets it run.
     pub fn prune(&self, now: u64, history: &History) -> tokio::task::JoinHandle<()> {
         let pruner = self.pruner.clone();
+        let closed = self.closed.clone();
         let history = history.clone();
         tokio::task::spawn_blocking(move || {
             let db = match pruner.try_lock() {
@@ -412,8 +417,20 @@ impl Store {
                 Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
                 Err(TryLockError::WouldBlock) => return,
             };
-            prune::run(&db, now, &history);
+            let db = prune::Db {
+                connection: &db,
+                stop: &closed,
+            };
+            if !db.stop.load(Ordering::Relaxed) {
+                prune::run(&db, now, &history);
+            }
         })
+    }
+
+    /// Stops a running prune after its batch, and any later one before it starts, so a shutdown does not wait for
+    /// one. What a stopped prune left, the next daemon's deletes. Writes go on as before.
+    pub fn close(&self) {
+        self.closed.store(true, Ordering::Relaxed);
     }
 
     /// Waits until every write sent before is done.

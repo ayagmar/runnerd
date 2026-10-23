@@ -363,6 +363,7 @@ async fn serve(
     let engine_done = engine.await;
     let _ = web_stopped.send(());
     let _ = stopped.send(());
+    store.close();
     store.flush().await;
     let server_done = server.await;
     if let Some(web) = web {

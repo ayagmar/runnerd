@@ -13,7 +13,8 @@ a 525,000-event history, 200 ms after a day off, while log lines, events and sam
 
 - Pruning runs on Tokio's blocking pool on its own connection. It deletes at most 2,000 rows per transaction and
   pauses after each as long as the batch took, so the writer, waiting on SQLite's busy timeout, gets the lock in
-  between. It writes nothing but deletions. One prune runs at a time.
+  between. It writes nothing but deletions. One prune runs at a time, and a shutdown stops it after its batch;
+  the next prune deletes the rest.
 - Migration 4 adds `announced`, each repository's latest `repository.*` event, which the writer keeps in step in
   the event's transaction. Pruning keeps those events, and a restarted daemon reads only them.
 - Samples are pruned by runner through the primary key, and `samples_by_at` is dropped.

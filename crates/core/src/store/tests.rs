@@ -540,6 +540,30 @@ async fn pruning_drops_samples_and_logs_then_finished_jobs_past_their_ages_and_k
 }
 
 #[tokio::test]
+async fn a_closed_store_stops_a_prune_after_its_batch() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    for at in 1..=10_000 {
+        store.host_sample(HostSample {
+            at,
+            cpu: 1,
+            memory: 1,
+        });
+    }
+    store.flush().await;
+    // Holds the write lock, so the prune's first batch waits for it.
+    let holder = Connection::open(&path).unwrap();
+    holder.execute_batch("BEGIN IMMEDIATE").unwrap();
+    let prune = store.prune(400 * DAY_MS, &crate::config::History::default());
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    store.close();
+    holder.execute_batch("COMMIT").unwrap();
+    prune.await.unwrap();
+    assert_eq!(store.host_samples(0).await.unwrap().len(), 8_000);
+}
+
+#[tokio::test]
 async fn a_history_from_before_version_4_keeps_the_latest_event_of_each_repository_through_pruning()
 {
     let dir = TestDir::new("store");
