@@ -77,7 +77,9 @@ struct GithubState {
     calls: Vec<String>,
     /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
     held: tokio::sync::watch::Sender<bool>,
-    /// Listings waiting for an answer.
+    /// While true, `GET /actions/jobs/{id}` does not answer.
+    held_jobs: tokio::sync::watch::Sender<bool>,
+    /// Listings and job reads waiting for an answer.
     waiting: usize,
 }
 
@@ -98,12 +100,25 @@ impl FakeGithub {
         self.0.lock().unwrap().held.send_replace(false);
     }
 
+    /// Holds job reads until `release_jobs`.
+    fn hold_jobs(&self) {
+        self.0.lock().unwrap().held_jobs.send_replace(true);
+    }
+
+    fn release_jobs(&self) {
+        self.0.lock().unwrap().held_jobs.send_replace(false);
+    }
+
     /// Waits while the listings are held.
     async fn answer(&self) {
+        self.wait(|state| &state.held).await;
+    }
+
+    async fn wait(&self, held: fn(&GithubState) -> &tokio::sync::watch::Sender<bool>) {
         let mut held = {
             let mut state = self.0.lock().unwrap();
             state.waiting += 1;
-            state.held.subscribe()
+            held(&state).subscribe()
         };
         let _ = held.wait_for(|held| !held).await;
         self.0.lock().unwrap().waiting -= 1;
@@ -191,6 +206,7 @@ impl GithubApi for FakeGithub {
     }
 
     async fn job(&self, _repository: &str, id: u64) -> Result<JobDetails, github::Error> {
+        self.wait(|state| &state.held_jobs).await;
         let state = self.0.lock().unwrap();
         state
             .jobs
@@ -1198,6 +1214,74 @@ async fn a_pause_answers_and_shows_while_a_tick_waits_for_github() {
 
     github.release();
     until_polled(&github, 1).await;
+}
+
+#[tokio::test]
+async fn a_resume_answers_while_a_tick_reads_a_running_jobs_progress() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    github.hold_jobs();
+    let control = handle.control.clone();
+    tokio::join!(engine.tick(Shutdown::No), async {
+        github.until_waiting(1).await;
+        let answered =
+            tokio::time::timeout(Duration::from_secs(5), control.resume(one("o/r"))).await;
+        github.release_jobs();
+        answered.expect("the resume answers").unwrap();
+    });
+}
+
+#[tokio::test]
+async fn a_listing_finishes_while_a_long_command_runs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_in(&github, &docker, &dir);
+    github.hold();
+    tokio::spawn(engine.run());
+    github.until_waiting(1).await;
+
+    // A config whose file takes until `written` to write.
+    let (written, writing) = std::sync::mpsc::channel::<()>();
+    let (started, writes) = tokio::sync::oneshot::channel::<()>();
+    let control = handle.control.clone();
+    let replaced = tokio::spawn(async move {
+        let commit = Commit::new(move || {
+            let _ = started.send(());
+            let _ = writing.recv();
+            Ok(None)
+        });
+        control
+            .replace_config(other_repository(), None, commit)
+            .await
+    });
+    writes.await.unwrap();
+    github.release();
+    for _ in 0..500 {
+        if github
+            .calls()
+            .iter()
+            .any(|call| call.starts_with("runners "))
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    let listed = github
+        .calls()
+        .iter()
+        .any(|call| call.starts_with("runners "));
+    written.send(()).unwrap();
+    replaced.await.unwrap().unwrap();
+    assert!(
+        listed,
+        "the runners listing finished while the config was written"
+    );
 }
 
 #[tokio::test]

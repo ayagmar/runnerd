@@ -252,7 +252,7 @@ fn unix_secs(time: SystemTime) -> u64 {
         .as_secs()
 }
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// An engine for a validated config. `identity` names this machine's runners, so a restarted daemon recognizes
     /// them; `memory_max` is the slice's.
     pub fn new(config: Config, github: G, docker: D, setup: Setup) -> (Engine<G, D>, Handle) {
@@ -405,14 +405,24 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         info!("stopped");
     }
 
-    /// Runs `work`, answering commands and publishing after each until it is done, so a command waits for a slow
-    /// GitHub no longer than for the command before it.
-    async fn serving<T>(&mut self, work: impl Future<Output = T>) -> T {
-        let mut work = std::pin::pin!(work);
+    /// Runs `work` as a task of its own, answering commands and publishing after each until it is done, so a command
+    /// waits for a slow GitHub no longer than for the command before it. The task goes on while a command runs: a
+    /// request's timeout runs on the clock, not on polls.
+    async fn serving<T: Send + 'static>(
+        &mut self,
+        work: impl Future<Output = T> + Send + 'static,
+    ) -> T {
+        let mut task = tokio::spawn(work);
         loop {
             tokio::select! {
                 biased;
-                output = &mut work => return output,
+                done = &mut task => match done.map_err(tokio::task::JoinError::try_into_panic) {
+                    Ok(output) => return output,
+                    // As if it had panicked here.
+                    Err(Ok(panic)) => std::panic::resume_unwind(panic),
+                    // Only while the runtime shuts down, which drops this task too.
+                    Err(Err(_)) => std::future::pending::<()>().await,
+                },
                 Some(command) = self.commands.recv() => {
                     self.command(command).await;
                     self.publish();

@@ -28,7 +28,7 @@ pub(super) enum ImageState {
     },
 }
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Collects finished pulls and starts the pulls of images the config's profiles need and Docker lacks.
     pub(super) async fn pull_images(&mut self) {
         let finished: Vec<String> = self

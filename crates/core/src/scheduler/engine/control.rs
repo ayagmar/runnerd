@@ -374,7 +374,7 @@ fn list(jobs: &[api::RunningJob]) -> String {
         .join(", ")
 }
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Carries out a command from the API.
     pub(super) async fn command(&mut self, command: Command) {
         match command {

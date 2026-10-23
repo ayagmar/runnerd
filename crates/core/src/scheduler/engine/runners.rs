@@ -27,7 +27,7 @@ pub(super) fn backoff(failures: u32) -> Duration {
     Duration::from_secs(30 << failures.saturating_sub(1).min(5)).min(Duration::from_secs(600))
 }
 
-impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
+impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Frees the slots whose container stopped: the runner took its job and exited, or it never started.
     pub(super) async fn collect_finished(&mut self) {
         let occupied: Vec<(SlotRef, Occupant)> = self

@@ -37,7 +37,7 @@ client → transport → principal → handler → core
 4. The engine ([`crates/core/src/scheduler/engine.rs`](crates/core/src/scheduler/engine.rs)) owns all slot state.
    It publishes `api::Status` after every tick and command and takes commands only through `Control`: a command
    that needs slot state is a `Command` on a channel the engine answers between ticks, or while a tick waits for
-   GitHub's listings, never in the middle of applying them
+   GitHub's listings and job reads, never in the middle of applying them
    ([ADR 0026](docs/adr/0026-commands-answered-while-a-tick-waits-for-github.md)).
    `engine.rs` holds `Engine`'s state, its construction and its loop; each submodule of
    [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
