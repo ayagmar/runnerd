@@ -109,6 +109,8 @@ body {
   font-family: var(--font);
   font-size: 1rem;
   line-height: 1.45;
+  /* For the fallback fonts: Libre Franklin has no tabular figures, so a figure that ticks gets a box wider than its
+     text instead (`.elapsed`, `.reading`, `.figure.ongoing`), and its digits' widths move nothing else. */
   font-variant-numeric: tabular-nums;
   overflow-x: clip;
 }
@@ -627,6 +629,8 @@ html {
   color: var(--muted);
   font-size: 0.9375rem;
   white-space: nowrap;
+  min-width: 7.5ch;
+  text-align: end;
 }
 
 .slot-job .job-name {
@@ -715,6 +719,8 @@ html {
 .reading {
   font-weight: 500;
   color: var(--muted);
+  min-width: 15ch;
+  text-align: end;
 }
 
 .chart {
@@ -1136,6 +1142,11 @@ html {
 
 .figure {
   font-weight: 700;
+}
+
+/* A phase that lasts counts up to "59m 59s…" in this box, so the legend never rewraps as it does. */
+.figure.ongoing {
+  min-width: 7.5ch;
 }
 
 .marks {

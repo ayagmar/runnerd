@@ -192,7 +192,9 @@ pub(crate) fn timeline(view: &JobView, parts: &Parts) -> Markup {
                         span { (label) }
                         @let id = format!("phase-{class}-time");
                         (parts.html(&id, html! {
-                            span.figure #(id) { (format::duration(to.unwrap_or(now).saturating_sub(*from))) @if to.is_none() { "…" } }
+                            span #(id) class=(if to.is_none() { "figure ongoing" } else { "figure" }) {
+                                (format::duration(to.unwrap_or(now).saturating_sub(*from))) @if to.is_none() { "…" }
+                            }
                         }))
                     }
                 }
