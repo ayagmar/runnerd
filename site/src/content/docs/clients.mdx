@@ -95,7 +95,7 @@ It talks to the socket (`--socket` picks another), prints aligned text, coloured
 
 ```console wrap=false
 $ runnerctl status
-runnerd 0.0.7  23.5G of 33G reserved in runnerd.slice
+runnerd 0.0.8  23.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
 jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792741296   7m 12s
@@ -184,7 +184,7 @@ older jobs: --before 120055991489
 One frame of `runnerctl watch`:
 
 ```console wrap=false
-runnerd 0.0.7  23.5G of 33G reserved  runnerd.slice uses 5.75 cores, 11.04G
+runnerd 0.0.8  23.5G of 33G reserved  runnerd.slice uses 5.75 cores, 11.04G
 
 SLOT    JOB                                      STEP                                         RAN   CPU    MEM
 jvm 1   halyard/ledger CI / build                Integration tests (Testcontainers) (7/9)  7m 13s  2.51  4.26G
@@ -245,7 +245,7 @@ runnerctl tui
 
 <Tui
   name="overview-96"
-  label="The overview at 96 by 26: the budget bar with jvm slot 1 at 4.23G and node slot 1 at 2.69G used, node slot 2's idle runner and the mirror, one line per slot, the slice's memory and CPU charts, the repositories and the latest jobs."
+  label="The overview at 96 by 26: the budget bar with jvm slot 1 at 3.89G and node slot 1 at 2.47G used, node slot 2's idle runner and the mirror, one line per slot, the slice's memory and CPU charts, the repositories and the latest jobs."
 />
 
 Profiles take the dashboard's colours in config order, mint first and pink second. `NO_COLOR` leaves bold, dim and block glyphs. On a narrow terminal, as here, the slots become one line each; at 80×24 the charts drop out first.
