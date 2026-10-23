@@ -181,7 +181,7 @@ bytes, CPU millicores.
 
 | Request | Response |
 |---|---|
-| `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs, the memory budget with the mirror's and each seed container's share |
+| `GET /v1/status` | profiles and their slots, running runners, repositories with how many jobs are queued for them, those jobs (ID, repository, workflow, name, branch, link, when queued), the memory budget with the mirror's and each seed container's share |
 | `POST /v1/repositories/{owner}/{name}/pause?force=` | the repository gets no new runners; `409` naming the job while it runs one, unless `force=true`, which cancels the job's run |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
 | `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every configured repository at once; a pause while any of them runs a job is refused with `409` naming the jobs, and pauses none, unless `force=true` |

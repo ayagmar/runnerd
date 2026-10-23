@@ -301,6 +301,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             profiles: Vec::new(),
             // What clients resuming after the last run's events have, so the first publish announces the difference.
             repositories: announced.repositories,
+            queued: Vec::new(),
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         // Unknown: an earlier run may have left the mirror up, with the configured cap at best.

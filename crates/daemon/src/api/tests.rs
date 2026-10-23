@@ -122,6 +122,7 @@ fn status() -> Status {
             slots: Vec::new(),
         }],
         repositories: Vec::new(),
+        queued: Vec::new(),
     }
 }
 

@@ -66,6 +66,7 @@ fn serve(socket: &Path) {
         },
         profiles: Vec::new(),
         repositories: Vec::new(),
+        queued: Vec::new(),
     };
     let app = Router::new()
         .route(

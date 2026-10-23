@@ -27,8 +27,8 @@ use runnerd_core::api::{
     Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
     CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, HostSample,
     HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery,
-    LogSummary, PauseQuery, Paused, ProfileStatus, RepositoryStatus, RunnerStatus, RunningJob,
-    Sample, SampleSeries, SlotStatus, Stats, StatsRow, Status, Step, Timeline,
+    LogSummary, PauseQuery, Paused, ProfileStatus, QueuedJob, RepositoryStatus, RunnerStatus,
+    RunningJob, Sample, SampleSeries, SlotStatus, Stats, StatsRow, Status, Step, Timeline,
 };
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -558,6 +558,20 @@ impl Fixtures {
                     queued_jobs: 1,
                 },
             ],
+            queued: vec![QueuedJob {
+                id: 120_055_991_710,
+                repository: "halyard/storefront".to_owned(),
+                run_id: 120_055_991_710 / 3,
+                run_attempt: 1,
+                workflow: Some("E2E".to_owned()),
+                name: "visual-diff".to_owned(),
+                branch: Some("feat/checkout-v2".to_owned()),
+                url: Some(
+                    "https://github.com/halyard/storefront/actions/runs/40018663903/job/120055991710"
+                        .to_owned(),
+                ),
+                queued_at: now - 41,
+            }],
         };
         jobs.sort_by_key(|job| std::cmp::Reverse(job.summary.id));
         Fixtures {

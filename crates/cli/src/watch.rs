@@ -475,6 +475,7 @@ mod tests {
                     }],
                 }],
                 repositories: Vec::new(),
+                queued: Vec::new(),
             },
             queued: BTreeMap::default(),
             running: BTreeMap::default(),

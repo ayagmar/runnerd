@@ -2436,6 +2436,69 @@ async fn a_restart_without_a_profile_leaves_clients_resuming_after_the_last_run_
 }
 
 #[tokio::test]
+async fn the_status_lists_the_queued_jobs_runners_can_take_and_none_holds_oldest_first() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    // Job 1 is queued at GitHub still, but the runner in slot 1 holds it.
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    // Paused, so no runner takes the others.
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![
+        QueuedJob {
+            run_attempt: 2,
+            workflow: Some("CI".to_owned()),
+            branch: Some("main".to_owned()),
+            url: Some("https://github.com/o/r/actions/runs/1/job/5".to_owned()),
+            created_at: 1_700_000_000_900,
+            ..job(5)
+        },
+        QueuedJob {
+            labels: vec!["self-hosted".to_owned(), "gpu".to_owned()],
+            ..job(4)
+        },
+        job(3),
+        job(1),
+    ];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let status = handle.status.borrow().clone();
+    let queued = |id,
+                  run_attempt,
+                  workflow: Option<&str>,
+                  branch: Option<&str>,
+                  url: Option<&str>,
+                  queued_at| {
+        api::QueuedJob {
+            id,
+            repository: "o/r".to_owned(),
+            run_id: 1,
+            run_attempt,
+            workflow: workflow.map(str::to_owned),
+            name: "build".to_owned(),
+            branch: branch.map(str::to_owned),
+            url: url.map(str::to_owned),
+            queued_at,
+        }
+    };
+    assert_eq!(
+        status.queued,
+        [
+            queued(3, 0, None, None, None, 0),
+            queued(
+                5,
+                2,
+                Some("CI"),
+                Some("main"),
+                Some("https://github.com/o/r/actions/runs/1/job/5"),
+                1_700_000_000
+            ),
+        ]
+    );
+}
+
+#[tokio::test]
 async fn a_pause_undone_before_it_is_published_leaves_clients_where_the_status_is() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

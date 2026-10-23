@@ -90,6 +90,7 @@ fn status() -> Status {
             paused: false,
             queued_jobs: 1,
         }],
+        queued: Vec::new(),
     }
 }
 

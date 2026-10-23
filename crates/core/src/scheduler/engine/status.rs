@@ -1,6 +1,8 @@
 //! Publishes `api::Status` after each tick and command, and records the profiles, slots, budget and repositories
 //! that changed as events. It reads engine state and must not change it, besides the status channel.
 
+use std::collections::BTreeSet;
+
 use super::{Engine, Shutdown, unix_secs};
 use crate::api;
 use crate::docker::DockerApi;
@@ -73,6 +75,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             budget: self.budget(),
             profiles,
             repositories,
+            queued: self.queued(),
         };
         self.announce_changes(&previous, announced.as_deref(), &status);
         self.status.send_replace(status);
@@ -94,6 +97,42 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .collect(),
         }
+    }
+
+    /// The queued jobs the repositories' runners can take and none holds, oldest first.
+    fn queued(&self) -> Vec<api::QueuedJob> {
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
+        let mut queued: Vec<api::QueuedJob> = self
+            .config
+            .repositories
+            .iter()
+            .flat_map(|repository| {
+                self.repositories[&repository.name]
+                    .queued
+                    .iter()
+                    .filter(|job| {
+                        crate::scheduler::matches(job, &repository.labels)
+                            && !taken.contains(&job.id)
+                    })
+                    .map(|job| api::QueuedJob {
+                        id: job.id,
+                        repository: repository.name.clone(),
+                        run_id: job.run_id,
+                        run_attempt: job.run_attempt,
+                        workflow: job.workflow.clone(),
+                        name: job.name.clone(),
+                        branch: job.branch.clone(),
+                        url: job.url.clone(),
+                        queued_at: job.created_at / 1000,
+                    })
+            })
+            .collect();
+        // IDs grow with time.
+        queued.sort_by_key(|job| job.id);
+        queued
     }
 
     /// Announces the profiles, slots, budget and repositories that changed between two statuses. The events carry

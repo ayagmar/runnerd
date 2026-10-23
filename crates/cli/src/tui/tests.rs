@@ -84,6 +84,7 @@ fn app() -> App {
                 repository("halyard/ledger", "jvm"),
                 repository("halyard/storefront", "node"),
             ],
+            queued: Vec::new(),
         },
         queued: BTreeMap::new(),
         running: BTreeMap::new(),

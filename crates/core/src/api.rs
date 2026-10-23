@@ -71,6 +71,10 @@ pub struct Status {
     pub profiles: Vec<ProfileStatus>,
     /// Every configured repository.
     pub repositories: Vec<RepositoryStatus>,
+    /// Queued jobs the repositories' runners can take and none holds yet, at the last poll, oldest first. No event
+    /// carries the list: `job.queued` announces a job, `job.started` and `job.finished` its leaving the queue.
+    #[serde(default)]
+    pub queued: Vec<QueuedJob>,
 }
 
 /// The memory budget runners and the mirror share, in bytes.
@@ -155,6 +159,29 @@ pub struct RepositoryStatus {
     pub paused: bool,
     /// Queued jobs whose labels these runners match, at the last poll.
     pub queued_jobs: usize,
+}
+
+/// A queued job runners of this daemon can take, as GitHub listed it at the last poll.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct QueuedJob {
+    /// GitHub's job ID.
+    pub id: u64,
+    /// The repository whose runners can take it, `owner/name`.
+    pub repository: String,
+    /// The workflow run it belongs to.
+    pub run_id: u64,
+    /// 1 for the first attempt of the run, higher for re-runs.
+    pub run_attempt: u32,
+    /// The workflow's name.
+    pub workflow: Option<String>,
+    /// The job's name in the workflow.
+    pub name: String,
+    /// The branch the run is for.
+    pub branch: Option<String>,
+    /// The job's page on GitHub.
+    pub url: Option<String>,
+    /// When GitHub queued it, in seconds since the Unix epoch; 0 if GitHub did not say.
+    pub queued_at: u64,
 }
 
 /// `POST /v1/shutdown`.
