@@ -27,3 +27,8 @@ was down.
 A client that applies `profile.*` and `slot.changed` to the profiles of a status keeps them equal to `/v1/status`,
 across reloads and restarts. Each start sends one `slot.changed` per slot, as it did before. Clients that do not
 know the new events skip them, since they skip events that do not parse.
+
+The first start after the upgrade to migration 5 has no stored profiles to compare with: it sends `profile.changed`
+for every configured profile, but no `profile.removed` for a profile removed in the same restart. A client resuming
+then keeps that profile until it reads `/v1/status` again. This happens once per machine, as it did for
+repositories when `announced` came.
