@@ -929,6 +929,32 @@ async fn a_running_jobs_stream_appends_new_log_lines_and_updates_its_charts() {
 }
 
 #[tokio::test]
+async fn a_job_stream_the_daemon_refuses_shows_why_and_ends_without_retrying() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/jobs/999").await;
+    let mut text = String::new();
+    let end = tokio::time::timeout(Duration::from_secs(5), async {
+        loop {
+            match stream.frame().await {
+                Some(Ok(frame)) => {
+                    text.push_str(&String::from_utf8_lossy(
+                        &frame.into_data().unwrap_or_default(),
+                    ));
+                }
+                Some(Err(_)) => return "failed",
+                None => return "ended",
+            }
+        }
+    })
+    .await
+    .unwrap();
+    assert!(text.contains("toast failed"), "{text}");
+    // A retry would fail the same way and replace the notice.
+    assert_eq!(end, "ended", "{text}");
+}
+
+#[tokio::test]
 async fn a_job_stream_that_misses_log_lines_fails_so_the_page_connects_again() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

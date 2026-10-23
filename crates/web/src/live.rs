@@ -4,8 +4,9 @@
 //! lacks is sent: a region whose HTML differs, or when only some of its parts (`views::Parts`) do, those parts. On
 //! connecting, the stream skips the regions the page already has, which the page names by digest in its `shown`
 //! signal; after each update the stream sets that signal to what the page shows now, and the time, which live
-//! charts follow. The stream ends when the page closes, its job finishes, or the dashboard stops. When the
-//! daemon's events end or have a gap, it fails instead, so the page connects again and reads the daemon afresh.
+//! charts follow. The stream ends when the page closes, its job finishes, the daemon answers with an error (shown as
+//! a notice), or the dashboard stops. When the daemon's events end or have a gap, it fails instead, so the page
+//! connects again and reads the daemon afresh.
 
 use std::collections::{HashMap, HashSet};
 use std::future::Future;
@@ -47,7 +48,7 @@ enum End {
     Lost,
 }
 
-/// The page's SSE response. Unless the task ended it as `Done`, the body ends in an error rather than cleanly: Datastar
+/// The page's SSE response. Unless the task marked it done, the body ends in an error rather than cleanly: Datastar
 /// retries a stream that fails, not one that finishes, and so the page connects again.
 fn respond(
     receiver: mpsc::Receiver<SseEvent>,
@@ -77,9 +78,11 @@ async fn run_page(
     match run.await {
         Ok(End::Done) => done.store(true, Ordering::Release),
         Ok(End::Lost) => debug!("{what} stream lost the daemon's events"),
+        // A retry would most likely fail the same way and replace the notice, so the stream ends with it shown.
         Err(error) => {
             debug!("{what} stream ended: {error}");
             notice(&patches, &error).await;
+            done.store(true, Ordering::Release);
         }
     }
 }
