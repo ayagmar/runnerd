@@ -6,7 +6,7 @@ Where things live and which rules hold them together. The why behind each rule i
 
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
-| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
+| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, the Unix-socket API | `runnerd-core` with `host`; hyper for a shell's upgraded connection |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
@@ -16,7 +16,8 @@ Where things live and which rules hold them together. The why behind each rule i
 - `api`, `config`: build without `host`. Every client reads these.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `docker`, `github`, `cache`, `isolation`, `record`, `scheduler`, `observe`, `store`: `host` only ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)).
+- `docker`, `github`, `cache`, `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host` only
+  ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)).
 
 The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and
 writes only through the API on the Unix socket ([ADR 0020](docs/adr/0020-dashboard-is-an-api-client-on-loopback.md)).
@@ -127,6 +128,9 @@ nothing until Docker has listed them.
 - `Control` records the paused repositories in the store, under the lock that changes them, and answers a pause or
   resume once the record commits, or fails it (`ControlError::NotRecorded`, 500) if it does not; the engine starts
   with the recorded ones paused, minus those its config lacks, so a paused repository gets no runner after a restart.
+- Sizing advice (`GET /v1/sizing`, `sizing::advise`) is computed from the job history and never written by the
+  daemon: a client applies it on request, after a confirmation, through `PUT /v1/config`
+  ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)).
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the

@@ -1,7 +1,8 @@
-//! What `runnerctl tui` draws: the overview (budget, slots, the slice, repositories, latest jobs), the history and
-//! one job (timeline, steps on one time axis, memory and CPU, its log). Reads `App` and the time only; panes that do
-//! not fit a small terminal are left out or drawn one line each. Colours follow the web dashboard: profiles in
-//! config order take its palette, mint first and pink second; without colour, glyphs and bold carry the meaning.
+//! What `runnerctl tui` draws: the overview (budget, slots, the slice, repositories, latest jobs), the history, the
+//! records, sizing and one job (timeline, steps on one time axis, memory and CPU, its log). Reads `App` and the time
+//! only; panes that do not fit a small terminal are left out or drawn one line each. Colours follow the web dashboard:
+//! profiles in config order take its palette, mint first and pink second; without colour, glyphs and bold carry the
+//! meaning.
 
 use std::fmt::Write as _;
 
@@ -10,11 +11,13 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{
-    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState,
+    Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    Job, JobSummary, ProfileStatus, RepositoryStatus, Sample, SlotStatus, Status, Step,
+    Advice, Job, JobSummary, ProfileSizing, ProfileStatus, RepositoryStatus, Sample, Sizing,
+    SlotStatus, Status, Step,
 };
+use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Connection, JobView, LatestRow, Outcome, Pane, Removal, View};
@@ -103,6 +106,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) {
         View::Overview => overview(frame, body, app, now, theme),
         View::History => history(frame, body, app, now, theme),
         View::Records => records(frame, body, app, now, theme),
+        View::Sizing => sizing(frame, body, app, theme),
         View::Job => {
             if let Some(open) = &app.job {
                 job(frame, body, app, open, now, theme);
@@ -124,6 +128,7 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         ("1", "Overview", View::Overview),
         ("2", "History", View::History),
         ("3", "Records", View::Records),
+        ("4", "Sizing", View::Sizing),
     ] {
         let style = if app.view == view {
             selected()
@@ -177,6 +182,16 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Removal::All => " y removes every record, any other key keeps them".to_owned(),
         };
         Line::styled(ask, bold())
+    } else if let Some(resizing) = &app.resize {
+        Line::styled(
+            format!(
+                " y writes memory = \"{}\", slots = {} for {} into the daemon's config, any other key keeps it",
+                ByteSize(resizing.resize.memory),
+                resizing.resize.slots,
+                resizing.profile
+            ),
+            bold(),
+        )
     } else if let Some(flash) = &app.flash {
         let style = if flash.outcome == Outcome::Failed {
             theme.tone(Tone::Bad)
@@ -193,6 +208,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
                 "j/k move  enter open  c outcome  s repository  ] next  [ back  ? help  q quit"
             }
             View::Records => "j/k move  enter open  d remove  D remove all  ? help  q quit",
+            View::Sizing => "j/k move  a apply the advice  ? help  q quit",
             View::Job => {
                 "j/k scroll  G follow  p pause  r resume  R reseed  esc back  ? help  q quit"
             }
@@ -203,10 +219,11 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 }
 
 fn help(frame: &mut Frame<'_>, area: Rect) {
-    const KEYS: [(&str, &str); 22] = [
+    const KEYS: [(&str, &str); 24] = [
         ("1 o", "overview"),
         ("2 h", "history"),
         ("3", "records of failed jobs"),
+        ("4", "sizing: what each profile's jobs use"),
         ("tab", "next pane of the overview"),
         ("j k ↓ ↑", "move, or scroll the log"),
         ("PgDn PgUp", "move by ten"),
@@ -223,6 +240,7 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
         ("] [", "history: next and previous page"),
         ("d", "records: remove the record"),
         ("D", "records: remove every record"),
+        ("a", "sizing: write the advice into the config"),
         ("?", "this help; any key closes it"),
         ("ctrl-z", "suspend; the shell's fg brings it back"),
         ("q ctrl-c", "quit"),
@@ -1163,6 +1181,219 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
             ),
             hint,
         );
+    }
+}
+
+/// What each profile's jobs use and what to set its memory and slots to; the selected profile's jobs below. Under
+/// 100 columns the medians, the jobs at their cap and the largest peaks are left out.
+fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let Some(sizing) = &app.sizing else {
+        let [title, rest] =
+            Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+        heading(frame, title, "Sizing", String::new(), theme);
+        frame.render_widget(Line::styled("reading…", theme.dim()), rest);
+        return;
+    };
+    let wide = area.width >= 100;
+    let profiles = u16::try_from(sizing.profiles.len()).unwrap_or(u16::MAX);
+    let [title, profiles_area, advice_area, jobs_area] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(profiles.saturating_add(1)),
+        Constraint::Length(3),
+        Constraint::Min(0),
+    ])
+    .areas(area);
+    heading(
+        frame,
+        title,
+        "Sizing",
+        format!(
+            "{} of history · peaks every {} s +{}% · advice after {} jobs",
+            duration(sizing.until.saturating_sub(sizing.since)),
+            sizing.sample_interval,
+            sizing.margin,
+            sizing.min_jobs
+        ),
+        theme,
+    );
+    sizing_profiles(frame, profiles_area, app, sizing, theme);
+    let Some(profile) = sizing.profiles.get(app.sized) else {
+        return;
+    };
+    let width = usize::from(advice_area.width);
+    // The advice wraps onto a second line rather than lose its end; the hint below it is cut.
+    let mut lines = vec![Line::styled(
+        format!("{}: {}", profile.name, sizing.advice_line(profile)),
+        theme.tone(advice_tone(profile.advice)),
+    )];
+    if let Some(change) = profile.advice.change() {
+        lines.push(Line::styled(
+            fit(
+                &format!(
+                    "a writes memory = \"{}\", slots = {} into the config; the daemon checks it first",
+                    ByteSize(change.memory),
+                    change.slots
+                ),
+                width,
+            ),
+            theme.dim(),
+        ));
+    }
+    frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), advice_area);
+    sizing_jobs(frame, jobs_area, profile, wide, theme);
+}
+
+/// A row per profile: its memory and slots, its jobs' peaks, how busy and how long waited, the advice.
+fn sizing_profiles(
+    frame: &mut Frame<'_>,
+    profiles_area: Rect,
+    app: &App,
+    sizing: &Sizing,
+    theme: Theme,
+) {
+    let wide = profiles_area.width >= 100;
+    let mut columns = vec![("PROFILE", 0), ("MEMORY", 10), ("JOBS", 5)];
+    // Narrow, the largest peak advice is sized for stays and the percentiles go.
+    if wide {
+        columns.push(("P50", 6));
+    }
+    columns.push(("P95", 6));
+    if wide {
+        columns.push(("P99", 6));
+    }
+    columns.push(("MAX", 6));
+    if wide {
+        columns.push(("AT CAP", 6));
+    }
+    columns.extend([("CPU P99", 7), ("BUSY", 5), ("WAIT P95", 8), ("ADVICE", 11)]);
+    let rows = sizing.profiles.iter().map(|profile| {
+        let peaks = &profile.peaks;
+        let mut cells = vec![
+            Cell::from(Span::styled(
+                profile.name.clone(),
+                theme.profile(app.profile_index(&profile.name)),
+            )),
+            Cell::from(format!("{} × {}", bytes(profile.memory), profile.slots)),
+            Cell::from(peaks.jobs.to_string()),
+        ];
+        if wide {
+            cells.push(Cell::from(bytes(peaks.memory.p50)));
+        }
+        cells.push(Cell::from(bytes(peaks.memory.p95)));
+        if wide {
+            cells.push(Cell::from(bytes(peaks.memory.p99)));
+        }
+        cells.push(Cell::from(bytes(peaks.memory.max)));
+        if wide {
+            cells.push(Cell::from(if peaks.at_cap > 0 {
+                Span::styled(peaks.at_cap.to_string(), theme.tone(Tone::Bad))
+            } else {
+                Span::raw("")
+            }));
+        }
+        cells.extend([
+            Cell::from(cores(peaks.cpu.p99)),
+            Cell::from(format!("{}%", profile.busy)),
+            Cell::from(duration(profile.wait.p95)),
+            Cell::from(Span::styled(
+                advice_word(profile.advice),
+                theme.tone(advice_tone(profile.advice)),
+            )),
+        ]);
+        Row::new(cells)
+    });
+    let table = Table::new(rows, widths(&columns))
+        .header(Row::new(columns.iter().map(|(name, _)| *name)).style(theme.dim()))
+        .row_highlight_style(selected());
+    let mut state = TableState::default().with_selected(Some(app.sized));
+    frame.render_stateful_widget(table, profiles_area, &mut state);
+}
+
+/// The selected profile's jobs, a row each.
+fn sizing_jobs(
+    frame: &mut Frame<'_>,
+    jobs_area: Rect,
+    profile: &ProfileSizing,
+    wide: bool,
+    theme: Theme,
+) {
+    let mut columns = vec![("REPOSITORY", 0), ("JOB", 0), ("RUNS", 5)];
+    columns.push(("P95", 6));
+    if wide {
+        columns.push(("P99", 6));
+    }
+    columns.extend([("MAX", 6), ("CPU P99", 7), ("WAIT P95", 8), ("NEEDS", 11)]);
+    // The repository and the job share what the other columns and the spaces between them leave.
+    let fixed: usize = columns.iter().map(|(_, width)| width + 1).sum::<usize>() - 1;
+    let shared = usize::from(jobs_area.width).saturating_sub(fixed);
+    let repository_width = shared / 2;
+    let rows = profile.jobs.iter().map(|job| {
+        let needs = match job.advice {
+            Advice::TooFew { .. } => {
+                Span::styled(format!("max {}", bytes(job.peaks.memory.max)), theme.dim())
+            }
+            Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
+                Span::styled(format!("{} > cap", bytes(memory)), theme.tone(Tone::Bad))
+            }
+            Advice::Keep { memory } | Advice::Lower { memory, .. } => Span::raw(bytes(memory)),
+        };
+        let name = match &job.workflow {
+            Some(workflow) => format!("{workflow} / {}", job.name),
+            None => job.name.clone(),
+        };
+        let mut cells = vec![
+            Cell::from(fit(&job.repository, repository_width)),
+            Cell::from(fit(&name, shared - repository_width)),
+            Cell::from(job.peaks.jobs.to_string()),
+            Cell::from(bytes(job.peaks.memory.p95)),
+        ];
+        if wide {
+            cells.push(Cell::from(bytes(job.peaks.memory.p99)));
+        }
+        cells.extend([
+            Cell::from(bytes(job.peaks.memory.max)),
+            Cell::from(cores(job.peaks.cpu.p99)),
+            Cell::from(duration(job.wait.p95)),
+            Cell::from(needs),
+        ]);
+        Row::new(cells)
+    });
+    let mut constraints = widths(&columns);
+    constraints[0] = Constraint::Length(u16::try_from(repository_width).unwrap_or(0));
+    let table = Table::new(rows, constraints)
+        .header(Row::new(columns.iter().map(|(name, _)| *name)).style(theme.dim()));
+    frame.render_widget(table, jobs_area);
+}
+
+/// A table's column widths: 0 fills what the others leave.
+fn widths(columns: &[(&str, usize)]) -> Vec<Constraint> {
+    columns
+        .iter()
+        .map(|(_, width)| match width {
+            0 => Constraint::Fill(1),
+            width => Constraint::Length(u16::try_from(*width).unwrap_or(u16::MAX)),
+        })
+        .collect()
+}
+
+fn advice_tone(advice: Advice) -> Tone {
+    match advice {
+        Advice::Raise { .. } | Advice::SliceTooSmall { .. } => Tone::Bad,
+        Advice::Lower { .. } => Tone::Busy,
+        Advice::Keep { .. } => Tone::Good,
+        Advice::TooFew { .. } => Tone::Plain,
+    }
+}
+
+/// The advice as a word or two, for a table cell.
+fn advice_word(advice: Advice) -> String {
+    match advice {
+        Advice::TooFew { .. } => "too few".to_owned(),
+        Advice::Keep { .. } => "keep".to_owned(),
+        Advice::SliceTooSmall { .. } => "grow slice".to_owned(),
+        Advice::Lower { memory, slots } | Advice::Raise { memory, slots } => {
+            format!("{} × {slots}", bytes(memory))
+        }
     }
 }
 

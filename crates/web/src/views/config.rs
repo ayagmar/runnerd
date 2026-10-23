@@ -1,32 +1,84 @@
 //! `/config`: the daemon's `runnerd.toml` in an editor, checked against the slice's `MemoryMax` as it is typed and
-//! drawn as the budget it asks for; saving writes it and has the daemon reload it. Also the doctor's checks.
+//! drawn as the budget it asks for; saving writes it and has the daemon reload it. From the sizing page, the editor
+//! starts with a profile's advised memory and slots in the file, unsaved. Also the doctor's checks.
 
 use maud::{Markup, html};
-use runnerd_core::api::{Check, CheckStatus, ConfigCheck, ConfigFile, Doctor};
+use runnerd_core::api::{Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, Resize, Sizing};
 use runnerd_core::client::{Client, ClientError};
-use runnerd_core::config::Config;
+use runnerd_core::config::{ByteSize, Config, resize_profile};
+use serde::Deserialize;
 
 use super::{Page, page};
 use crate::chart::ratio;
 use crate::format;
 
+/// `/config` query parameters.
+#[derive(Debug, Default, Deserialize)]
+pub(crate) struct ConfigQuery {
+    /// A profile whose sizing advice the editor starts with, from the sizing page.
+    pub(crate) resize: Option<String>,
+}
+
 /// Everything the config page shows.
 #[derive(Debug, Clone)]
 pub(crate) struct ConfigView {
     pub(crate) file: ConfigFile,
+    /// What the editor holds: the file, or the file with a profile's sizing advice in it.
+    pub(crate) text: String,
+    /// The advice the editor holds, or why it holds none.
+    pub(crate) resized: Option<Resized>,
     pub(crate) check: ConfigCheck,
     pub(crate) doctor: Doctor,
 }
 
+/// A profile's advised `memory` and `slots`, written into the editor's text and not saved yet.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) enum Resized {
+    /// In the editor.
+    Applied { profile: String, resize: Resize },
+    /// Not applied, and why.
+    Not(String),
+}
+
 impl ConfigView {
-    pub(crate) async fn load(daemon: &Client) -> Result<ConfigView, ClientError> {
+    pub(crate) async fn load(
+        daemon: &Client,
+        resize: Option<String>,
+    ) -> Result<ConfigView, ClientError> {
         let file: ConfigFile = daemon.get("/v1/config").await?;
-        let check = daemon
-            .post_toml("/v1/config/check", file.text.clone())
-            .await?;
+        let (text, resized) = match resize {
+            None => (file.text.clone(), None),
+            Some(profile) => {
+                let sizing: Sizing = daemon.get("/v1/sizing").await?;
+                let change = sizing
+                    .profiles
+                    .iter()
+                    .find(|advised| advised.name == profile)
+                    .map(|advised| advised.advice.change());
+                match change {
+                    None => (
+                        file.text.clone(),
+                        Some(Resized::Not(format!("There is no profile {profile}."))),
+                    ),
+                    Some(None) => (
+                        file.text.clone(),
+                        Some(Resized::Not(format!(
+                            "{profile} has no sizing advice to apply."
+                        ))),
+                    ),
+                    Some(Some(resize)) => match resize_profile(&file.text, &profile, resize) {
+                        Ok(text) => (text, Some(Resized::Applied { profile, resize })),
+                        Err(error) => (file.text.clone(), Some(Resized::Not(error.to_string()))),
+                    },
+                }
+            }
+        };
+        let check = daemon.post_toml("/v1/config/check", text.clone()).await?;
         Ok(ConfigView {
             doctor: daemon.get("/v1/doctor").await?,
             file,
+            text,
+            resized,
             check,
         })
     }
@@ -56,7 +108,7 @@ pub(crate) fn render(view: &ConfigView) -> Markup {
                 label.visually-hidden for="toml" { "runnerd.toml" }
                 textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"
                     data-bind:toml=""
-                    "data-on:input__debounce.400ms"="@post('/config/check')" { (view.file.text) }
+                    "data-on:input__debounce.400ms"="@post('/config/check')" { (view.text) }
                 div.editor-actions {
                     button.button type="button" data-indicator:_saving=""
                         data-attr:aria-busy="$_saving && 'true'" data-attr:disabled="$_saving"
@@ -66,7 +118,18 @@ pub(crate) fn render(view: &ConfigView) -> Markup {
                 }
             }
             div.config-side {
-                (result(&view.check, &view.file.text, &Outcome::Checked))
+                @match &view.resized {
+                    Some(Resized::Applied { profile, resize }) => {
+                        p.notice-box {
+                            "The editor holds the sizing advice for " strong { (profile) } ": "
+                            code { "memory = \"" (ByteSize(resize.memory)) "\"" } " and " code { "slots = " (resize.slots) }
+                            ". Nothing is written until you save it."
+                        }
+                    }
+                    Some(Resized::Not(why)) => { p.notice-box { (why) } }
+                    None => {}
+                }
+                (result(&view.check, &view.text, &Outcome::Checked))
                 (doctor(&view.doctor))
             }
         }

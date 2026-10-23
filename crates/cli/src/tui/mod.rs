@@ -11,9 +11,10 @@ use std::time::Duration;
 use ratatui::crossterm::event::{self as terminal, Event as TerminalEvent};
 use runnerd_core::api::{
     EventQuery, HostSampleQuery, HostSamples, Job, JobPage, PauseQuery, Paused, Records,
-    SampleSeries, Status,
+    SampleSeries, Sizing, Status,
 };
 use runnerd_core::client::{Client, ClientError, Events, StatusCode};
+use runnerd_core::config::ByteSize;
 use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -26,7 +27,7 @@ mod draw;
 #[cfg(test)]
 mod tests;
 
-use app::{App, Effect, LOG_LINES, Msg, Refused, Removal};
+use app::{App, Effect, LOG_LINES, Msg, Refused, Removal, Resizing};
 use draw::Theme;
 
 /// The shortest time between two frames, about 30 a second.
@@ -417,6 +418,14 @@ impl Requests {
                     );
                 });
             }
+            Effect::Sizing => {
+                tokio::spawn(async move {
+                    answer(&send, client.get::<Sizing>("/v1/sizing").await, Msg::Sizing);
+                });
+            }
+            Effect::Resize(resizing) => {
+                tokio::spawn(write_resize(client, send, resizing));
+            }
             Effect::Reseed { profile } => {
                 tokio::spawn(async move {
                     let requested = client
@@ -452,6 +461,21 @@ fn answer<T>(send: &UnboundedSender<Msg>, answer: Result<T, ClientError>, msg: f
 /// A profile's reseeding flag comes with the status only, so it is read again after a reseed request.
 async fn status(client: &Client, send: &UnboundedSender<Msg>) {
     answer(send, client.get::<Status>("/v1/status").await, Msg::Status);
+}
+
+/// Writes a profile's advised memory and slots into the daemon's config, says how that went, and reads the advice
+/// again.
+async fn write_resize(client: Client, send: UnboundedSender<Msg>, resizing: Resizing) {
+    let Resizing { profile, resize } = resizing;
+    let _ = send.send(match crate::write_resize(&client, &profile, resize).await {
+        Ok(_) => Msg::Done(format!(
+            "{profile}: memory {}, {} slots written; the daemon runs with them",
+            ByteSize(resize.memory),
+            resize.slots
+        )),
+        Err(error) => Msg::Failed(error.to_string()),
+    });
+    answer(&send, client.get::<Sizing>("/v1/sizing").await, Msg::Sizing);
 }
 
 /// Pauses `repository`, or every one when `None`.

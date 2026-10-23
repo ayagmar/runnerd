@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
@@ -18,6 +18,7 @@ use tracing::warn;
 use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
+use crate::sizing;
 use crate::sync::lock;
 
 mod prune;
@@ -68,6 +69,14 @@ pub enum StoreError {
     /// A blocking read did not finish.
     #[error("a database read stopped: {0}")]
     Join(#[from] tokio::task::JoinError),
+    /// The database's `-wal` file holds changes not yet in it, and this user cannot open the database the way that
+    /// reads them.
+    #[error(
+        "{} holds changes not yet in the job history, which this user cannot read; run runnerd doctor as the user \
+         the daemon runs as",
+        .0.display()
+    )]
+    Unread(PathBuf),
 }
 
 /// A runner container as the history records it.
@@ -174,6 +183,10 @@ enum Write {
     RunnerStarted(RunnerRecord),
     RunnerRemoved {
         runner: String,
+        at: u64,
+    },
+    RunnersGone {
+        running: Vec<String>,
         at: u64,
     },
     Claimed {
@@ -319,6 +332,12 @@ impl Store {
             runner: runner.to_owned(),
             at,
         });
+    }
+
+    /// Records every runner the history holds open, except the `running` ones, removed at `at` (ms): what recovery
+    /// found gone, so it stops counting as holding a slot.
+    pub fn runners_gone(&self, running: Vec<String>, at: u64) {
+        self.send(Write::RunnersGone { running, at });
     }
 
     /// Records that a runner took a job at `at` (ms).
@@ -563,6 +582,11 @@ impl Store {
         self.read(move |db| read::stats(db, &query, now)).await
     }
 
+    /// What sizing reads: the finished jobs queued at or after `since` (ms) and the runners since.
+    pub async fn sizing(&self, since: u64) -> Result<sizing::History, StoreError> {
+        self.read(move |db| read::sizing(db, since)).await
+    }
+
     /// The last measurement of every volume, with its time (seconds), by name.
     pub async fn cache_sizes_now(&self) -> Result<Measured, StoreError> {
         self.read(read::latest_cache_sizes).await
@@ -593,6 +617,69 @@ impl Store {
     pub async fn mirror_log_until(&self) -> Result<MirrorPosition, StoreError> {
         self.read(read::mirror_log_until).await
     }
+}
+
+/// What sizing reads from the database at `path`, opened read-only and not migrated, as `runnerd doctor` reads it
+/// while no daemon runs; `None` when there is no database yet. In a directory it may write, SQLite keeps the
+/// `-wal` and `-shm` files a read of a WAL database needs next to it; in one it may not, it reads the file as it is,
+/// or refuses when the `-wal` holds changes the file does not have yet.
+pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, StoreError> {
+    if !path.exists() {
+        return Ok(None);
+    }
+    let read = |path: &str, flags| -> Result<sizing::History, StoreError> {
+        let db = Connection::open_with_flags(path, flags)?;
+        db.busy_timeout(Duration::from_secs(5))?;
+        sizing_of(&db, since)
+    };
+    let name = path.to_string_lossy();
+    match read(&name, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Err(StoreError::Sqlite(error))
+            if matches!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen)
+            ) =>
+        {
+            // No `-shm` can be made: read the file alone, unless the `-wal` holds what it lacks.
+            let mut wal = path.as_os_str().to_owned();
+            wal.push("-wal");
+            let wal = PathBuf::from(wal);
+            if std::fs::metadata(&wal).is_ok_and(|wal| wal.len() > 0) {
+                return Err(StoreError::Unread(wal));
+            }
+            let uri = format!(
+                "file:{}?mode=ro&immutable=1",
+                name.replace('%', "%25")
+                    .replace('?', "%3f")
+                    .replace('#', "%23")
+            );
+            read(
+                &uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )
+        }
+        history => history,
+    }
+    .map(Some)
+}
+
+/// What sizing reads from a database of any version this build knows, without migrating it.
+fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError> {
+    let found: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    let supported = u32::try_from(MIGRATIONS.len()).unwrap_or(u32::MAX);
+    if found > supported {
+        return Err(StoreError::Newer { found, supported });
+    }
+    if found == 0 {
+        return Ok(sizing::History::default());
+    }
+    if found < 2 {
+        // Version 2 added the runners' caps: before it, a temporary view gives each runner none.
+        db.execute_batch(
+            "CREATE TEMP VIEW runners AS SELECT *, NULL AS memory_cap, NULL AS cpu_cap FROM main.runners",
+        )?;
+    }
+    Ok(read::sizing(db, since)?)
 }
 
 /// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error.

@@ -3,13 +3,15 @@
 
 use std::path::Path;
 use std::sync::Arc;
+use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::Duration;
 
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use runnerd_core::api::{
-    Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
-    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, RunningJob, Status,
+    Advice, Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
+    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, RunningJob, Sizing,
+    Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::docker::Tty;
@@ -18,12 +20,12 @@ use runnerd_core::scheduler::engine::{
     Command, Commands, Control, ControlError, Handle, RecordSelection, RunningJobs, Shutdown,
     Target,
 };
-use runnerd_core::store::{LogPosition, RunnerRecord, Store};
+use runnerd_core::store::{LogPosition, RunnerRecord, SampleRecord, Store};
 use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::testdir::Dir;
 
-use super::{ConfigSource, SyncDir, bind, serve, serve_for, sync_dir};
+use super::{ConfigSource, MemoryMax, SyncDir, bind, serve, serve_for, sync_dir};
 
 const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
 
@@ -217,7 +219,7 @@ impl Daemon {
 }
 
 async fn start(dir: &Path, owner: Option<u32>) -> Daemon {
-    start_with(dir, owner, true, sync_dir).await
+    start_with(dir, owner, true, sync_dir, memory_max).await
 }
 
 /// Fails as flushing a directory does on an I/O error.
@@ -227,7 +229,13 @@ fn failing_sync(_dir: &Path) -> std::io::Result<()> {
 
 /// `start`; without `engine`, nothing answers the engine's commands, as once it stopped. Directories are flushed
 /// with `sync_dir`.
-async fn start_with(dir: &Path, owner: Option<u32>, engine: bool, sync_dir: SyncDir) -> Daemon {
+async fn start_with(
+    dir: &Path,
+    owner: Option<u32>,
+    engine: bool,
+    sync_dir: SyncDir,
+    memory_max: MemoryMax,
+) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
     let (control, commands) =
@@ -303,6 +311,121 @@ async fn status_lists_the_configured_profiles() {
     assert_eq!(response.status(), StatusCode::OK);
     let body: Status = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
     assert_eq!(body, status());
+}
+
+#[tokio::test]
+async fn sizing_advises_on_every_profile_of_the_config_within_the_slices_budget() {
+    let (client, _, _dir) = daemon().await;
+    let response = client.get("http://runnerd/v1/sizing").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let sizing: Sizing = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let profiles: Vec<_> = sizing
+        .profiles
+        .iter()
+        .map(|profile| (profile.name.as_str(), profile.memory, profile.advice))
+        .collect();
+    assert_eq!(
+        profiles,
+        [
+            ("jvm", 9 << 30, Advice::TooFew { jobs: 0 }),
+            ("node", 7 << 30, Advice::TooFew { jobs: 0 })
+        ]
+    );
+    assert_eq!(
+        (sizing.memory_max, sizing.margin, sizing.min_jobs),
+        (Some(33 << 30), 15, 10)
+    );
+}
+
+/// The slice's `MemoryMax` in GiB for `rising_memory_max`, which one test raises as `systemctl daemon-reload` would.
+static SLICE_GIB: AtomicU64 = AtomicU64::new(24);
+
+#[allow(
+    clippy::unnecessary_wraps,
+    reason = "it stands in for config::slice_memory_max"
+)]
+fn rising_memory_max(_slice: &str) -> std::io::Result<Option<ByteSize>> {
+    Ok(Some(ByteSize(SLICE_GIB.load(Ordering::SeqCst) << 30)))
+}
+
+#[tokio::test]
+async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
+    let dir = Dir::new();
+    let daemon = start_with(&dir.0, None, true, sync_dir, rising_memory_max).await;
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    // Ten jvm jobs at their 9G cap: they need 10.5G a slot.
+    for id in 1..=10 {
+        let runner = format!("runner-{id}");
+        daemon.store.queued(
+            "o/app",
+            &QueuedJob {
+                id,
+                run_id: 2,
+                name: "test".to_owned(),
+                created_at: now - 60_000,
+                ..QueuedJob::default()
+            },
+        );
+        daemon.store.runner_started(RunnerRecord {
+            name: runner.clone(),
+            repository: "o/app".to_owned(),
+            profile: "jvm".to_owned(),
+            slot: 1,
+            container: format!("c{id}"),
+            started_at: now - 50_000,
+            memory_cap: Some(9 << 30),
+            cpu_cap: Some(8000),
+        });
+        daemon.store.claimed(id, 2, &runner, now - 40_000);
+        daemon.store.samples(vec![SampleRecord {
+            runner: runner.clone(),
+            at: now - 30_000,
+            cpu: 0,
+            cpu_usage: 0,
+            memory: 9 << 30,
+            network_received: 0,
+            network_sent: 0,
+        }]);
+        daemon.store.lost(id, now - 20_000);
+    }
+    daemon.store.flush().await;
+    let jvm = async || -> Advice {
+        let response = daemon
+            .client
+            .get("http://runnerd/v1/sizing")
+            .send()
+            .await
+            .unwrap();
+        let sizing: Sizing = serde_json::from_slice(&body(response).await).unwrap();
+        sizing
+            .profiles
+            .iter()
+            .find(|p| p.name == "jvm")
+            .unwrap()
+            .advice
+    };
+    // 24G less node's 14G and the mirror's 0.5G leaves 9.5G: not one slot.
+    assert_eq!(
+        jvm().await,
+        Advice::SliceTooSmall {
+            memory: 10752 << 20
+        }
+    );
+    SLICE_GIB.store(36, Ordering::SeqCst);
+    assert_eq!(
+        jvm().await,
+        Advice::Raise {
+            memory: 10752 << 20,
+            slots: 2
+        }
+    );
+    daemon.stop().await;
 }
 
 #[tokio::test]
@@ -427,6 +550,7 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/jobs/1/logs"),
         client.get("http://runnerd/v1/host/samples"),
         client.get("http://runnerd/v1/stats"),
+        client.get("http://runnerd/v1/sizing"),
         client.get("http://runnerd/v1/caches"),
         client.get("http://runnerd/v1/caches/history"),
         client.get("http://runnerd/v1/events"),
@@ -535,7 +659,7 @@ async fn a_config_over_the_budget_is_refused_with_both_numbers_and_the_file_is_u
 #[tokio::test]
 async fn a_config_the_engine_cannot_take_leaves_the_file_unchanged() {
     let dir = Dir::new();
-    let daemon = start_with(&dir.0, None, false, sync_dir).await;
+    let daemon = start_with(&dir.0, None, false, sync_dir, memory_max).await;
     let before = std::fs::read_to_string(&daemon.config).unwrap();
     let response = daemon
         .client
@@ -602,7 +726,7 @@ async fn a_config_whose_file_cannot_be_written_is_refused_and_not_run() {
 #[tokio::test]
 async fn a_config_in_place_whose_directory_cannot_be_flushed_is_run_and_shown_with_a_warning() {
     let dir = Dir::new();
-    let mut daemon = start_with(&dir.0, None, true, failing_sync).await;
+    let mut daemon = start_with(&dir.0, None, true, failing_sync, memory_max).await;
     let new = EXAMPLE.replacen("slots = 2", "slots = 1", 1);
     let response = daemon
         .client

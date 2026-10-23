@@ -2,6 +2,7 @@
 //! to API calls here; the transport is `runnerd_core::client`, text for people `human`, the live view `watch`, the
 //! full-screen dashboard `tui`, printing `output`.
 
+use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
@@ -10,8 +11,9 @@ use clap::{Parser, Subcommand};
 use runnerd_core::api::{
     Caches, CheckStatus, ConfigCheck, ConfigFile, Doctor, Event, EventQuery, Job, JobPage,
     JobQuery, JobState, LogQuery, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
-    ShellQuery, Status,
+    Resize, ShellQuery, Sizing, SizingQuery, Status,
 };
+use runnerd_core::config::{ByteSize, resize_profile};
 use serde::Serialize;
 
 mod human;
@@ -23,7 +25,7 @@ mod tui;
 mod watch;
 
 use output::fail;
-use runnerd_core::client::{Client, ClientError, Method, StatusCode};
+use runnerd_core::client::{Body, Client, ClientError, Method, StatusCode};
 
 /// Command-line client for the runnerd daemon.
 #[derive(Parser)]
@@ -135,6 +137,15 @@ enum Command {
         #[command(subcommand)]
         command: Option<RecordsCommand>,
     },
+    /// Show what each profile's jobs use: percentiles of their sampled memory and CPU peaks, how long they waited
+    /// and how busy the slots were, and what to set each profile's memory and slots to.
+    Sizing {
+        /// Only jobs queued in the last 30m, 12h, 7d, 2w, … [default: 30d].
+        #[arg(long, value_parser = parse_age)]
+        since: Option<u64>,
+        #[command(subcommand)]
+        command: Option<SizingCommand>,
+    },
     /// Show the cache volumes, their sizes and limits.
     Caches {
         /// Empty this volume (a slot layer or a shared cache) instead; refused while a runner uses it.
@@ -169,6 +180,24 @@ enum RecordsCommand {
         /// Remove the records older than this, such as 2d or 12h.
         #[arg(long, value_name = "AGE", conflicts_with = "job")]
         older_than: Option<String>,
+    },
+}
+
+#[derive(Subcommand)]
+#[allow(
+    clippy::doc_markdown,
+    reason = "clap prints these comments as --help, where backticks would show"
+)]
+enum SizingCommand {
+    /// Write a profile's advised memory and slots into the daemon's config, after showing the change and asking.
+    ///
+    /// The daemon checks the new config against the slice's MemoryMax before it writes and reloads it, as for any
+    /// other config.
+    Apply {
+        profile: String,
+        /// Write it without asking.
+        #[arg(long)]
+        yes: bool,
     },
 }
 
@@ -386,6 +415,7 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         }
         Command::Shell { job, step } => return shell(client, job, step).await,
         Command::Records { command } => return records(client, json, command).await,
+        Command::Sizing { since, command } => return sizing(client, json, since, command).await,
         Command::Caches {
             clean: Some(volume),
         } => {
@@ -599,6 +629,99 @@ async fn reseed(
             };
         }
         return Ok(exit(error.is_none()));
+    }
+}
+
+/// `runnerctl sizing`: shows the advice, or writes one profile's into the config.
+async fn sizing(
+    client: &Client,
+    json: bool,
+    since: Option<u64>,
+    command: Option<SizingCommand>,
+) -> Result<ExitCode, Error> {
+    let query = SizingQuery {
+        since: since.map(|age| now().saturating_sub(age)),
+    };
+    let sizing: Sizing = client.get_query("/v1/sizing", &query).await?;
+    let Some(SizingCommand::Apply { profile, yes }) = command else {
+        if json {
+            return print_json(&sizing);
+        }
+        output::text(&human::sizing(&sizing, now(), output::paint()));
+        return Ok(ExitCode::SUCCESS);
+    };
+    let Some(advised) = sizing.profiles.iter().find(|p| p.name == profile) else {
+        let names: Vec<_> = sizing.profiles.iter().map(|p| p.name.as_str()).collect();
+        return Err(Error::Local(format!(
+            "no profile {profile:?}; the config has {}",
+            names.join(", ")
+        )));
+    };
+    let line = format!("{profile}: {}", sizing.advice_line(advised));
+    let Some(resize) = advised.advice.change() else {
+        if !json {
+            output::line(format_args!("{line}; nothing to change"));
+        }
+        return Ok(ExitCode::SUCCESS);
+    };
+    if !yes {
+        if json || !std::io::stdin().is_terminal() {
+            return Err(Error::Local(
+                "no terminal to ask on; pass --yes to write the advice".to_owned(),
+            ));
+        }
+        output::line(&line);
+        output::text(&format!(
+            "[profiles.{profile}]\n  memory = \"{}\" -> \"{}\"\n  slots = {} -> {}\nWrite it into the daemon's config? [y/N] ",
+            ByteSize(advised.memory),
+            ByteSize(resize.memory),
+            advised.slots,
+            resize.slots
+        ));
+        let mut answer = String::new();
+        std::io::stdin()
+            .read_line(&mut answer)
+            .map_err(|error| Error::Local(error.to_string()))?;
+        if !matches!(answer.trim(), "y" | "Y" | "yes") {
+            output::line("not written");
+            return Ok(ExitCode::FAILURE);
+        }
+    }
+    let checked = write_resize(client, &profile, resize).await?;
+    if json {
+        return print_json(&checked);
+    }
+    for warning in &checked.warnings {
+        output::line(format_args!("warning: {warning}"));
+    }
+    output::line(format_args!(
+        "{profile}: memory {}, {} slots written; the daemon runs with them",
+        ByteSize(resize.memory),
+        resize.slots
+    ));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// Writes a profile's new memory and slots into the daemon's config through `PUT /v1/config`, which checks it
+/// against the slice's budget first; the rest of the file stays as written.
+pub(crate) async fn write_resize(
+    client: &Client,
+    profile: &str,
+    resize: Resize,
+) -> Result<ConfigCheck, Error> {
+    let file: ConfigFile = client.get("/v1/config").await?;
+    let text = resize_profile(&file.text, profile, resize)
+        .map_err(|error| Error::Local(error.to_string()))?;
+    let reply = client
+        .request(Method::PUT, "/v1/config", Some(Body::toml(text)))
+        .await?;
+    match serde_json::from_slice::<ConfigCheck>(&reply.body) {
+        Ok(checked) if reply.status.is_success() => Ok(checked),
+        Ok(checked) => Err(Error::Local(format!(
+            "the daemon refused the new config: {}",
+            checked.message
+        ))),
+        Err(_) => Err(Error::Local(reply.message())),
     }
 }
 

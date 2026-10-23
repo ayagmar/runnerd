@@ -31,6 +31,9 @@ pub struct Config {
     /// How much the records of failed jobs may keep.
     #[serde(default)]
     pub records: Records,
+    /// How sizing advice reads the job history.
+    #[serde(default)]
+    pub sizing: Sizing,
 }
 
 /// `[host]`: where runner containers run and how they are isolated.
@@ -260,6 +263,27 @@ impl Default for Records {
     }
 }
 
+/// `[sizing]`: how `runnerctl sizing` turns the job history's peaks into advice. Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Sizing {
+    /// The percent added to the largest sampled memory peak: a container is sampled every 2 s, so a spike between
+    /// two samples goes unseen. Default 15.
+    pub margin: u32,
+    /// The fewest jobs a profile, or a job of a repository's workflow, needs before its peaks become advice.
+    /// Default 10.
+    pub min_jobs: u32,
+}
+
+impl Default for Sizing {
+    fn default() -> Sizing {
+        Sizing {
+            margin: 15,
+            min_jobs: 10,
+        }
+    }
+}
+
 /// Why a config cannot be used.
 #[derive(Debug, thiserror::Error)]
 pub enum ConfigError {
@@ -459,6 +483,7 @@ impl Config {
                 "host.poll_interval".to_owned(),
             ),
             (self.records.max_count == 0, "records.max_count".to_owned()),
+            (self.sizing.min_jobs == 0, "sizing.min_jobs".to_owned()),
             (
                 self.records.max_total.0 == 0,
                 "records.max_total".to_owned(),
@@ -499,6 +524,47 @@ impl Config {
             }]),
         }
     }
+}
+
+/// Why `resize_profile` cannot change a config.
+#[derive(Debug, thiserror::Error)]
+pub enum ResizeError {
+    /// The text is not valid TOML.
+    #[error(transparent)]
+    Parse(#[from] toml_edit::TomlError),
+    /// `[profiles]` does not define the profile.
+    #[error("the config has no profile {0:?} under [profiles]")]
+    NoProfile(String),
+}
+
+/// `text` with the profile's `memory` and `slots` replaced, everything else as written, comments included: what
+/// applying a sizing suggestion sends to `PUT /v1/config`, which validates it.
+pub fn resize_profile(
+    text: &str,
+    profile: &str,
+    resize: api::Resize,
+) -> Result<String, ResizeError> {
+    let mut document: toml_edit::DocumentMut = text.parse()?;
+    let table = document
+        .get_mut("profiles")
+        .and_then(|profiles| profiles.get_mut(profile))
+        .and_then(toml_edit::Item::as_table_like_mut)
+        .ok_or_else(|| ResizeError::NoProfile(profile.to_owned()))?;
+    let values = [
+        (
+            "memory",
+            toml_edit::Value::from(ByteSize(resize.memory).to_string()),
+        ),
+        ("slots", toml_edit::Value::from(i64::from(resize.slots))),
+    ];
+    for (key, mut value) in values {
+        // The comment after the old value stays after the new one.
+        if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
+            *value.decor_mut() = old.decor().clone();
+        }
+        table.insert(key, toml_edit::Item::Value(value));
+    }
+    Ok(document.to_string())
 }
 
 /// Reads a slice's `MemoryMax` from systemd; `None` when it is unlimited.

@@ -659,3 +659,135 @@ async fn a_repository_event_that_does_not_read_fails_the_startup_read() {
         "an incomplete list would keep a removed repository in resuming clients"
     );
 }
+
+#[tokio::test]
+async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    for (id, name) in [(1, "r1"), (2, "r2")] {
+        store.queued("o/r", &queued(id));
+        store.runner_started(runner(name, 1_000_100));
+        store.claimed(id, 10, name, 1_000_200);
+    }
+    let memory = |runner: &str, at, memory| SampleRecord {
+        memory,
+        ..sample(runner, at, 0, 0)
+    };
+    store.samples(vec![
+        memory("r1", 1_000_250, 1 << 30),
+        memory("r1", 1_000_300, 3 << 30),
+        memory("r2", 1_000_300, 2 << 30),
+    ]);
+    store.lost(1, 1_000_400);
+    store.details(crate::github::JobDetails {
+        id: 2,
+        run_id: 10,
+        run_attempt: 1,
+        name: "job 2".to_owned(),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some("cancelled".to_owned()),
+        started_at: None,
+        completed_at: None,
+        runner_name: Some("r2".to_owned()),
+        steps: Vec::new(),
+    });
+    store.runner_removed("r2", 1_000_500);
+    store.flush().await;
+    let history = store.sizing(0).await.unwrap();
+    let peaks: Vec<_> = history
+        .jobs
+        .iter()
+        .map(|job| (job.name.as_str(), job.memory_peak, job.memory_cap))
+        .collect();
+    assert_eq!(peaks, [("job 1", 3 << 30, Some(4 << 30))]);
+    assert_eq!(history.runners.len(), 2, "both runners held a slot");
+    // `runnerd doctor` reads the same without a daemon.
+    assert_eq!(super::sizing_at(&path, 0).unwrap(), Some(history));
+    assert_eq!(super::sizing_at(&dir.0.join("none.db"), 0).unwrap(), None);
+}
+
+/// A database at `path` written by a runnerd that knew the first `version` migrations, in WAL mode as the daemon
+/// leaves it, with one finished job that peaked at 3G in a runner of `node`.
+fn database_of_version(path: &std::path::Path, version: usize) {
+    let db = Connection::open(path).unwrap();
+    db.pragma_update(None, "journal_mode", "wal").unwrap();
+    for migration in &MIGRATIONS[..version] {
+        db.execute_batch(migration).unwrap();
+    }
+    db.pragma_update(None, "user_version", version).unwrap();
+    db.execute_batch(
+        "INSERT INTO runners (name, repository, profile, slot, container, started_at, removed_at) \
+         VALUES ('r1', 'o/r', 'node', 1, 'c1', 1000, 9000); \
+         INSERT INTO jobs (id, repository, run_id, run_attempt, name, labels, state, conclusion, runner, \
+         queued_at, started_at, finished_at, memory_peak, cpu_peak) \
+         VALUES (1, 'o/r', 10, 1, 'build', '[]', 'completed', 'success', 'r1', 1000, 2000, 8000, 3221225472, 900);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn doctor_reads_the_history_in_a_directory_it_cannot_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    database_of_version(&path, MIGRATIONS.len());
+    std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let history = super::sizing_at(&path, 0);
+    std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let peaks: Vec<_> = history
+        .unwrap()
+        .unwrap()
+        .jobs
+        .iter()
+        .map(|job| job.memory_peak)
+        .collect();
+    assert_eq!(peaks, [3 << 30]);
+}
+
+#[test]
+fn doctor_refuses_a_history_it_cannot_write_beside_while_its_wal_holds_changes() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (written, copied) = (TestDir::new("store"), TestDir::new("store"));
+    database_of_version(&written.0.join("runnerd.db"), MIGRATIONS.len());
+    // A daemon still running, or killed before a checkpoint: its last change is in the -wal only.
+    let open = Connection::open(written.0.join("runnerd.db")).unwrap();
+    open.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    open.execute("UPDATE jobs SET memory_peak = memory_peak + 1", [])
+        .unwrap();
+    for file in ["runnerd.db", "runnerd.db-wal"] {
+        std::fs::copy(written.0.join(file), copied.0.join(file)).unwrap();
+    }
+    std::fs::set_permissions(&copied.0, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let history = super::sizing_at(&copied.0.join("runnerd.db"), 0);
+    std::fs::set_permissions(&copied.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let error = history.unwrap_err().to_string();
+    assert!(
+        error.contains("runnerd.db-wal") && error.contains("as the user the daemon runs as"),
+        "{error}"
+    );
+}
+
+#[test]
+fn doctor_reads_the_peaks_of_a_history_from_before_runners_had_caps() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    database_of_version(&path, 1);
+    let history = super::sizing_at(&path, 0).unwrap().unwrap();
+    let peaks: Vec<_> = history
+        .jobs
+        .iter()
+        .map(|job| (job.memory_peak, job.memory_cap))
+        .collect();
+    assert_eq!(peaks, [(3 << 30, None)]);
+    let version: u32 = Connection::open(&path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 1, "doctor does not migrate it");
+}

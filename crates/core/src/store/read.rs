@@ -10,6 +10,7 @@ use tracing::warn;
 
 use super::{LogPosition, OpenJob};
 use crate::api::{self, EventEnvelope, JobState};
+use crate::sizing;
 
 const DEFAULT_PAGE: u32 = 50;
 const MAX_PAGE: u32 = 500;
@@ -513,6 +514,46 @@ pub(super) fn stats(
         bucket: query.bucket,
         rows,
     })
+}
+
+/// The finished jobs queued at or after `since` (ms) with their peaks, and the runners that held a slot after it.
+pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::History> {
+    let jobs = db
+        .prepare_cached(
+            "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, j.memory_peak, \
+             coalesce(j.cpu_peak, 0), j.queued_at, j.started_at \
+             FROM jobs j JOIN runners r ON r.name = j.runner \
+             WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
+             AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
+        )?
+        .query_map([since], |row| {
+            Ok(sizing::Ran {
+                repository: row.get(0)?,
+                workflow: row.get(1)?,
+                name: row.get(2)?,
+                profile: row.get(3)?,
+                memory_cap: row.get(4)?,
+                memory_peak: row.get(5)?,
+                cpu_peak: row.get(6)?,
+                queued_at: row.get(7)?,
+                started_at: row.get(8)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let runners = db
+        .prepare_cached(
+            "SELECT profile, started_at, removed_at FROM runners \
+             WHERE removed_at IS NULL OR removed_at >= ?1",
+        )?
+        .query_map([since], |row| {
+            Ok(sizing::Held {
+                profile: row.get(0)?,
+                started_at: row.get(1)?,
+                removed_at: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(sizing::History { jobs, runners })
 }
 
 pub(super) fn latest_cache_sizes(db: &Connection) -> rusqlite::Result<super::Measured> {

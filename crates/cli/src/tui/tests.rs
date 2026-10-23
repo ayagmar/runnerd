@@ -1,8 +1,8 @@
 //! The TUI through its reducer and `TestBackend` frames: a job moving through its slot, steps and the latest jobs;
 //! every pane at 80×24; text at 80 to 136 columns that drops whole fields or ends in `…` rather than being cut
-//! mid-word; no colour with `NO_COLOR`; a refused pause, and a removed record, only on `y`; repositories changed
-//! elsewhere; the history's filters; and, against a fake daemon, an event stream that drops, shows "reconnecting"
-//! and resumes after the last event ID.
+//! mid-word; no colour with `NO_COLOR`; a refused pause, a removed record and written sizing advice only on `y`;
+//! repositories changed elsewhere; the history's filters; and, against a fake daemon, an event stream that drops, shows
+//! "reconnecting" and resumes after the last event ID.
 
 #![allow(
     clippy::unwrap_used,
@@ -27,6 +27,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
+use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread};
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
     LogSummary, ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus,
@@ -35,7 +36,7 @@ use runnerd_core::api::{
 
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, Effect, Msg, Refused, Removal, View};
+use super::app::{App, Connection, Effect, Msg, Refused, Removal, Resizing, View};
 use super::draw::{Theme, draw};
 use super::feed;
 use crate::testing::Fake;
@@ -486,6 +487,112 @@ fn a_record_is_removed_only_after_y_and_the_list_follows_new_ones() {
         record: records(&[44]).records.remove(0),
     };
     assert_eq!(app.update(event(Some(9), created)), vec![Effect::Records]);
+}
+
+/// jvm keeps its 9G; node's builds peak at 2.1G, so 2.5G caps fit 5 of node's 2 × 7G.
+fn sizing() -> Sizing {
+    let spread = |p50, p95, p99, max| Spread { p50, p95, p99, max };
+    let advised = |name: &str, memory: u64, peak: u64, advice| {
+        let peaks = Peaks {
+            jobs: 40,
+            at_cap: 0,
+            memory: spread(peak / 2, peak, peak, peak),
+            cpu: spread(2000, 6000, 7000, 7000),
+        };
+        ProfileSizing {
+            name: name.to_owned(),
+            memory,
+            cpus: 8,
+            slots: 2,
+            peaks: peaks.clone(),
+            wait: spread(20, 300, 400, 400),
+            busy: 70,
+            advice,
+            jobs: vec![JobSizing {
+                repository: "halyard/storefront".to_owned(),
+                workflow: Some("CI".to_owned()),
+                name: "build".to_owned(),
+                peaks,
+                wait: spread(20, 300, 400, 400),
+                advice,
+            }],
+        }
+    };
+    Sizing {
+        since: NOW - 600,
+        until: NOW,
+        margin: 15,
+        sample_interval: 2,
+        min_jobs: 10,
+        memory_max: Some(33 << 30),
+        profiles: vec![
+            advised("jvm", 9 << 30, 7800 << 20, Advice::Keep { memory: 9 << 30 }),
+            advised(
+                "node",
+                7 << 30,
+                2150 << 20,
+                Advice::Lower {
+                    memory: 2560 << 20,
+                    slots: 5,
+                },
+            ),
+        ],
+    }
+}
+
+#[test]
+fn sizing_advice_is_written_into_the_config_only_after_y() {
+    let mut app = app();
+    assert_eq!(app.update(key(KeyCode::Char('4'))), vec![Effect::Sizing]);
+    app.update(Msg::Sizing(sizing()));
+    assert_eq!(
+        app.update(key(KeyCode::Char('a'))),
+        Vec::new(),
+        "jvm has nothing to apply"
+    );
+    assert_eq!(app.resize, None);
+    app.update(key(KeyCode::Char('j')));
+    let shown = screen(&app, 120, 24, false);
+    for expected in [
+        "Sizing",
+        "node: lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G",
+        "halyard/storefront",
+        "CI / build",
+        "a writes memory = \"2.5G\", slots = 5",
+    ] {
+        assert!(shown.contains(expected), "{expected}: {shown}");
+    }
+
+    app.update(key(KeyCode::Char('a')));
+    assert!(
+        screen(&app, 120, 24, false).contains("y writes memory = \"2.5G\", slots = 5 for node"),
+        "a asks first"
+    );
+    assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
+    app.update(key(KeyCode::Char('a')));
+    assert_eq!(
+        app.update(key(KeyCode::Char('y'))),
+        vec![Effect::Resize(Resizing {
+            profile: "node".to_owned(),
+            resize: Resize {
+                memory: 2560 << 20,
+                slots: 5
+            }
+        })]
+    );
+    // A finished job changes the percentiles: the view reads them again.
+    let finished = Event::JobFinished {
+        job: summary(42, JobState::Completed),
+    };
+    assert!(
+        app.update(event(Some(9), finished))
+            .contains(&Effect::Sizing)
+    );
+    let narrow = screen(&app, 80, 24, false);
+    assert!(
+        narrow.contains("WAIT P95") && narrow.contains("same 14G"),
+        "the sizing view fits 80 columns, the advice on two lines: {narrow}"
+    );
 }
 
 #[test]

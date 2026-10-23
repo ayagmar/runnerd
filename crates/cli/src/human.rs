@@ -7,8 +7,8 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobState, JobSummary,
-    QueuedJob, Record, RecordNote, Records, RemovedRecords, Status, Step,
+    Advice, CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobSizing, JobState,
+    JobSummary, QueuedJob, Record, RecordNote, Records, RemovedRecords, Sizing, Status, Step,
 };
 use runnerd_core::config::ByteSize;
 
@@ -681,6 +681,126 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
         let _ = writeln!(out, "  {}", paint.paint(Tone::Dim, SAMPLED_NOTE));
     }
     out
+}
+
+/// `runnerctl sizing`: per profile its limits, its jobs' peaks and waits, how busy its slots were and the advice,
+/// then a row per job of each repository's workflows.
+pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
+    let mut out = format!(
+        "{}\n",
+        paint.paint(
+            Tone::Dim,
+            &format!(
+                "from the last {} of history; peaks are sampled every {} s, so advice adds {}% to the largest \
+                 and waits for {} jobs",
+                duration(now.saturating_sub(sizing.since)),
+                sizing.sample_interval,
+                sizing.margin,
+                sizing.min_jobs
+            )
+        )
+    );
+    for profile in &sizing.profiles {
+        let peaks = &profile.peaks;
+        let _ = writeln!(
+            out,
+            "\n{}  {} × {}, {} CPUs; {} jobs, slots busy {}%, waited p50 {} p95 {}",
+            paint.paint(Tone::Bold, &profile.name),
+            bytes(profile.memory),
+            profile.slots,
+            profile.cpus,
+            peaks.jobs,
+            profile.busy,
+            duration(profile.wait.p50),
+            duration(profile.wait.p95),
+        );
+        if peaks.jobs > 0 {
+            let at_cap = if peaks.at_cap > 0 {
+                paint.paint(Tone::Bad, &format!(", {} at the cap", peaks.at_cap))
+            } else {
+                String::new()
+            };
+            let _ = writeln!(
+                out,
+                "  memory p50 {} p95 {} p99 {} max {}{at_cap}",
+                bytes(peaks.memory.p50),
+                bytes(peaks.memory.p95),
+                bytes(peaks.memory.p99),
+                bytes(peaks.memory.max),
+            );
+            let _ = writeln!(
+                out,
+                "  cpu    p50 {} p95 {} p99 {} max {}",
+                cores(peaks.cpu.p50),
+                cores(peaks.cpu.p95),
+                cores(peaks.cpu.p99),
+                cores(peaks.cpu.max),
+            );
+        }
+        let tone = match profile.advice {
+            Advice::Raise { .. } | Advice::SliceTooSmall { .. } => Tone::Bad,
+            Advice::Lower { .. } => Tone::Busy,
+            Advice::Keep { .. } => Tone::Good,
+            Advice::TooFew { .. } => Tone::Dim,
+        };
+        let _ = writeln!(out, "  {}", paint.paint(tone, &sizing.advice_line(profile)));
+        if profile.advice.change().is_some() {
+            let _ = writeln!(
+                out,
+                "  {}",
+                paint.paint(
+                    Tone::Dim,
+                    &format!("runnerctl sizing apply {}", profile.name)
+                )
+            );
+        }
+        if !profile.jobs.is_empty() {
+            out.push('\n');
+            out.push_str(&sizing_jobs(&profile.jobs, paint));
+        }
+    }
+    out
+}
+
+/// A row per job of a profile: its runs, peaks, wait and what it needs.
+fn sizing_jobs(jobs: &[JobSizing], paint: Paint) -> String {
+    let mut table = Table::new(&[
+        "REPOSITORY",
+        "JOB",
+        "RUNS",
+        "P50",
+        "P95",
+        "P99",
+        "MAX",
+        "CPU P99",
+        "WAIT P95",
+        "NEEDS",
+    ])
+    .right(&[2, 3, 4, 5, 6, 7, 8]);
+    for job in jobs {
+        let needs = match job.advice {
+            Advice::TooFew { .. } => {
+                cell(format!("max {}", bytes(job.peaks.memory.max)), Tone::Dim)
+            }
+            Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
+                cell(format!("{} > cap", bytes(memory)), Tone::Bad)
+            }
+            Advice::Keep { memory } | Advice::Lower { memory, .. } => plain(bytes(memory)),
+        };
+        table.row(vec![
+            plain(&job.repository),
+            cell(named(job.workflow.as_deref(), &job.name, 0), Tone::Dim),
+            plain(job.peaks.jobs.to_string()),
+            plain(bytes(job.peaks.memory.p50)),
+            plain(bytes(job.peaks.memory.p95)),
+            plain(bytes(job.peaks.memory.p99)),
+            plain(bytes(job.peaks.memory.max)),
+            plain(cores(job.peaks.cpu.p99)),
+            plain(duration(job.wait.p95)),
+            needs,
+        ]);
+    }
+    table.render(paint, "  ")
 }
 
 /// `runnerctl caches`.

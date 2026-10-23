@@ -37,6 +37,8 @@ tar = { version = "0.4.46", default-features = false }
 thiserror = "2.0.21"
 tokio = "1.54.1"
 toml = "1.1.8"
+# Writes a sizing suggestion into runnerd.toml and keeps its comments and layout; toml rewrites the whole file.
+toml_edit = "0.25.17"
 tracing = "0.1.44"
 tracing-subscriber = { version = "0.3.23", default-features = false, features = ["ansi", "fmt", "std"] }
 # Terminal cell widths, as ratatui measures them: runnerctl tui fits text to cells, not characters.

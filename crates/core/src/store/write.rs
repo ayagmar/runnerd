@@ -73,6 +73,11 @@ impl Writer<'_> {
                     self.runner_removed(&runner, at, announced)
                 });
             }
+            Write::RunnersGone { running, at } => {
+                self.change("record removed runners", |announced| {
+                    self.runners_gone(&running, at, announced)
+                });
+            }
             Write::Claimed {
                 job,
                 run_id,
@@ -458,6 +463,23 @@ impl Writer<'_> {
             Some(job) => self.close_if_done(job, announced),
             None => Ok(()),
         }
+    }
+
+    fn runners_gone(
+        &self,
+        running: &[String],
+        at: u64,
+        announced: &mut Announced,
+    ) -> rusqlite::Result<()> {
+        let open: Vec<String> = self
+            .db
+            .prepare_cached("SELECT name FROM runners WHERE removed_at IS NULL")?
+            .query_map([], |row| row.get(0))?
+            .collect::<rusqlite::Result<_>>()?;
+        for runner in open.iter().filter(|runner| !running.contains(runner)) {
+            self.runner_removed(runner, at, announced)?;
+        }
+        Ok(())
     }
 
     /// Closes a running job once GitHub reports it completed and its runner is removed.

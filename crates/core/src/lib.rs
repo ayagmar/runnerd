@@ -1,8 +1,8 @@
 //! Domain logic and API types shared by the runnerd daemon and its clients.
 //!
-//! `api` and `config` build everywhere. The `host` feature (on by default) adds what only the daemon runs: Docker,
-//! the GitHub client, the caches, the scheduler, the job history store and what observes running jobs. Clients
-//! depend on this crate without it, and with the `client` feature for `client`, their connection to the daemon.
+//! `api` and `config` build everywhere. The `host` feature (on by default) adds what only the daemon runs: Docker, the
+//! GitHub client, the caches, the scheduler, sizing advice, the job history store and what observes running jobs.
+//! Clients depend on this crate without it, and with the `client` feature for `client`, their connection to the daemon.
 
 #![warn(missing_docs)]
 
@@ -24,6 +24,8 @@ pub mod observe;
 pub mod record;
 #[cfg(feature = "host")]
 pub mod scheduler;
+#[cfg(feature = "host")]
+pub mod sizing;
 #[cfg(feature = "host")]
 pub mod store;
 #[cfg(feature = "host")]

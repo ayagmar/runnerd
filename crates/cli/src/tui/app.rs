@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, VecDeque};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use runnerd_core::api::{
     Event, EventEnvelope, HostSample, Job, JobMetrics, JobPage, JobQuery, JobState, JobSummary,
-    LogSummary, QueuedJob, Records, Sample, SampleSeries, Status, Timeline,
+    LogSummary, QueuedJob, Records, Resize, Sample, SampleSeries, Sizing, Status, Timeline,
 };
 
 use crate::watch;
@@ -49,6 +49,7 @@ pub(crate) enum Msg {
     },
     Status(Status),
     Records(Records),
+    Sizing(Sizing),
     /// A request succeeded; the text says what it did.
     Done(String),
     /// A request failed.
@@ -143,9 +144,20 @@ pub(crate) enum Effect {
     /// Read the records of failed jobs.
     Records,
     RemoveRecords(Removal),
+    /// Read the sizing advice.
+    Sizing,
+    /// Write a profile's new memory and slots into the daemon's config.
+    Resize(Resizing),
     /// Give the terminal back and stop, as Ctrl-Z does in a shell.
     Suspend,
     Quit,
+}
+
+/// A profile's advised memory and slots, as the sizing view showed them when `a` asked.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Resizing {
+    pub(crate) profile: String,
+    pub(crate) resize: Resize,
 }
 
 /// Records `d` or `D` asks to remove, waiting for `y`.
@@ -162,6 +174,7 @@ pub(crate) enum View {
     Overview,
     History,
     Records,
+    Sizing,
     Job,
 }
 
@@ -285,6 +298,12 @@ pub(crate) struct App {
     pub(crate) records: Option<Records>,
     pub(crate) record: usize,
     pub(crate) removal: Option<Removal>,
+    /// The sizing advice, once read.
+    pub(crate) sizing: Option<Sizing>,
+    /// The selected profile of the sizing view.
+    pub(crate) sized: usize,
+    /// The change `a` asks to write, waiting for `y`.
+    pub(crate) resize: Option<Resizing>,
     pub(crate) help: bool,
 }
 
@@ -308,6 +327,9 @@ impl App {
             records: None,
             record: 0,
             removal: None,
+            sizing: None,
+            sized: 0,
+            resize: None,
             help: false,
         };
         for sample in host {
@@ -407,6 +429,10 @@ impl App {
                 self.record = self.record.min(records.records.len().saturating_sub(1));
                 self.records = Some(records);
             }
+            Msg::Sizing(sizing) => {
+                self.sized = self.sized.min(sizing.profiles.len().saturating_sub(1));
+                self.sizing = Some(sizing);
+            }
             Msg::Done(text) => self.flash(text, Outcome::Done),
             Msg::Failed(text) => self.flash(text, Outcome::Failed),
             Msg::Busy(refused) => self.confirm = Some(refused),
@@ -439,6 +465,9 @@ impl App {
                 if self.view == View::History && self.history.before.is_none() {
                     effects.push(self.history.request(Rows::Keep));
                 }
+                if self.view == View::Sizing {
+                    effects.push(Effect::Sizing);
+                }
             }
             Event::CacheReseeded {
                 profile,
@@ -465,6 +494,9 @@ impl App {
             Event::ProfileChanged { .. } | Event::ProfileRemoved { .. } => {
                 // A reload can take away the selected slot; the selection stays on one that is there.
                 self.slot = self.slot.min(self.slots().count().saturating_sub(1));
+                if self.view == View::Sizing {
+                    effects.push(Effect::Sizing);
+                }
             }
             _ => {}
         }
@@ -508,20 +540,8 @@ impl App {
             }
         }
         self.flash = None;
-        if let Some(refused) = self.confirm.take() {
-            return match key.code {
-                KeyCode::Char('y') => vec![Effect::Pause {
-                    repository: refused.repository,
-                    force: true,
-                }],
-                _ => Vec::new(),
-            };
-        }
-        if let Some(removal) = self.removal.take() {
-            return match key.code {
-                KeyCode::Char('y') => vec![Effect::RemoveRecords(removal)],
-                _ => Vec::new(),
-            };
+        if let Some(effects) = self.answer(key.code) {
+            return effects;
         }
         if self.help {
             self.help = false;
@@ -536,6 +556,7 @@ impl App {
             KeyCode::Char('1' | 'o') => return self.show(View::Overview),
             KeyCode::Char('2' | 'h') => return self.show(View::History),
             KeyCode::Char('3') => return self.show(View::Records),
+            KeyCode::Char('4') => return self.show(View::Sizing),
             KeyCode::Esc if self.view == View::Job => return self.show(self.back),
             KeyCode::Tab => self.pane = next_pane(self.pane, Direction::Forward),
             KeyCode::BackTab => self.pane = next_pane(self.pane, Direction::Backward),
@@ -587,9 +608,37 @@ impl App {
             }
             code if self.view == View::History => return self.history_key(code),
             code if self.view == View::Records => self.records_key(code),
+            KeyCode::Char('a') if self.view == View::Sizing => {
+                self.resize = self.selected_resize();
+            }
             _ => {}
         }
         Vec::new()
+    }
+
+    /// The answer to a question in the footer, which any key ends: `y` does what it asked. `None` when none was asked.
+    fn answer(&mut self, code: KeyCode) -> Option<Vec<Effect>> {
+        let yes = code == KeyCode::Char('y');
+        let effect = if let Some(refused) = self.confirm.take() {
+            Effect::Pause {
+                repository: refused.repository,
+                force: true,
+            }
+        } else if let Some(removal) = self.removal.take() {
+            Effect::RemoveRecords(removal)
+        } else {
+            Effect::Resize(self.resize.take()?)
+        };
+        Some(if yes { vec![effect] } else { Vec::new() })
+    }
+
+    /// The selected profile's advised memory and slots, when they differ from its own.
+    fn selected_resize(&self) -> Option<Resizing> {
+        let profile = self.sizing.as_ref()?.profiles.get(self.sized)?;
+        Some(Resizing {
+            profile: profile.name.clone(),
+            resize: profile.advice.change()?,
+        })
     }
 
     /// The keys only the records take: `d` and `D` ask to remove them.
@@ -651,6 +700,9 @@ impl App {
         }
         if view == View::Records && self.view != View::Records {
             effects.push(Effect::Records);
+        }
+        if view == View::Sizing && self.view != View::Sizing {
+            effects.push(Effect::Sizing);
         }
         self.view = view;
         effects
@@ -731,6 +783,10 @@ impl App {
                 &mut self.record,
                 self.records.as_ref().map_or(0, |r| r.records.len()),
             ),
+            (View::Sizing, _) => (
+                &mut self.sized,
+                self.sizing.as_ref().map_or(0, |s| s.profiles.len()),
+            ),
             (View::Overview, Pane::Slots) => (&mut self.slot, slots),
             (View::Overview, Pane::Repositories) => {
                 (&mut self.repository, self.live.status.repositories.len())
@@ -802,7 +858,7 @@ impl App {
                 .job
                 .as_ref()
                 .map(|open| open.job.summary.repository.clone()),
-            (View::History | View::Records, _) => None,
+            (View::History | View::Records | View::Sizing, _) => None,
             (View::Overview, Pane::Repositories) => self
                 .live
                 .status

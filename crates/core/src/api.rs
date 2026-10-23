@@ -23,6 +23,7 @@
 //! | `GET /v1/jobs/{id}/logs?`[`LogQuery`] | `text/plain`, one line per log line |
 //! | `GET /v1/host/samples?`[`HostSampleQuery`] | [`HostSamples`] |
 //! | `GET /v1/stats?`[`StatsQuery`] | [`Stats`] |
+//! | `GET /v1/sizing?`[`SizingQuery`] | [`Sizing`] |
 //! | `GET /v1/caches` | [`Caches`] |
 //! | `GET /v1/caches/history?`[`CacheHistoryQuery`] | [`CacheHistory`] |
 //! | `GET /v1/events?`[`EventQuery`] | `text/event-stream` of [`EventEnvelope`] |
@@ -39,6 +40,7 @@ mod control;
 mod events;
 mod jobs;
 mod records;
+mod sizing;
 
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, RunningJob,
@@ -54,6 +56,7 @@ pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
 };
+pub use sizing::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingQuery, Spread};
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
 /// has to produce one.

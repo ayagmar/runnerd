@@ -155,8 +155,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Reads what the history left open: queued jobs to watch, and jobs to close. A job whose runner's container
     /// is still `running` is left to run: `forget` closes it once its container is gone. Any other lost its
-    /// container while no daemon watched: its runner is recorded removed now, unless it was before.
+    /// container while no daemon watched: its runner is recorded removed now, unless it was before, as is every
+    /// other runner the history holds open whose container is not running, with a job or idle.
     async fn recover_history(&mut self, running: &BTreeSet<String>) {
+        self.store
+            .runners_gone(running.iter().cloned().collect(), time::now_ms());
         match self.store.open_jobs().await {
             Ok(open) => {
                 for job in open {

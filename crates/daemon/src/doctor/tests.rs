@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
+use runnerd_core::api::Sizing;
 use runnerd_core::config::{ByteSize, Config};
+use runnerd_core::sizing;
 
 use super::{Check, DockerFacts, Host, ImageFound, SYSBOX_SERVICES, Slice, Status, checks};
 
@@ -51,6 +53,7 @@ fn ready_host(os_release: &str) -> Host {
             })
             .into(),
         records: Some(Ok(0)),
+        sizing: None,
         os_release: os_release.to_owned(),
         slice: Some(Ok(Slice {
             unit_file: Some("/etc/systemd/system/runnerd.slice".to_owned()),
@@ -331,4 +334,66 @@ fn records_near_their_size_limit_warn_with_how_to_free_them() {
         warned.fix.unwrap().contains("runnerctl records rm"),
         "the fix says how to free them"
     );
+}
+
+/// `count` jobs of `repository` in `profile`, peaking at `peak` bytes, each queued a minute before it started.
+fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ran> {
+    (0..count)
+        .map(|i| sizing::Ran {
+            repository: repository.to_owned(),
+            workflow: Some("CI".to_owned()),
+            name: "build".to_owned(),
+            profile: profile.to_owned(),
+            memory_cap: Some(config("sysbox").profiles[profile].memory.0),
+            memory_peak: peak,
+            cpu_peak: 4000,
+            queued_at: 1_000_000 + i,
+            started_at: Some(1_000_000 + i + 120_000),
+        })
+        .collect()
+}
+
+fn sizing_of(jobs: Vec<sizing::Ran>) -> Sizing {
+    sizing::advise(
+        &config("sysbox"),
+        Some(33 << 30),
+        &sizing::History {
+            jobs,
+            runners: Vec::new(),
+        },
+        sizing::Window::new(Some(0), 2_000_000),
+    )
+}
+
+fn sizing_check(sizing: Sizing) -> Check {
+    let mut host = ready_host(ARCH);
+    host.sizing = Some(Ok(sizing));
+    checks(&host, Some(&config("sysbox")))
+        .into_iter()
+        .find(|check| check.name == "sizing")
+        .unwrap()
+}
+
+#[test]
+fn jobs_at_their_cap_warn_and_name_the_command_that_raises_it() {
+    let mut jobs = ran("halyard/ledger", "jvm", 12, 8900 << 20);
+    jobs.extend(ran("halyard/storefront", "node", 12, 2 << 30));
+    let check = sizing_check(sizing_of(jobs));
+    assert_eq!(check.status, Status::Warn, "{check}");
+    assert!(check.detail.contains("jvm: raise memory to"), "{check}");
+    assert!(
+        check.detail.contains("node: lower memory to 2.5G"),
+        "{check}"
+    );
+    assert_eq!(
+        check.fix.as_deref(),
+        Some("runnerctl sizing apply jvm\nrunnerctl sizing apply node")
+    );
+}
+
+#[test]
+fn a_history_too_short_to_advise_on_is_only_information() {
+    let check = sizing_check(sizing_of(ran("halyard/ledger", "jvm", 3, 8 << 30)));
+    assert_eq!(check.status, Status::Info, "{check}");
+    assert_eq!(check.fix, None);
 }

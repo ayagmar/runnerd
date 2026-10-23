@@ -94,6 +94,31 @@ min_free = "10G"    # left free on Docker's disk after a new record
 
 A new record pushes out the oldest past `max_count` or `max_total`; without room under `min_free`, the job gets no record, and its page says why. `runnerd doctor` warns once the records take 80% of `max_total`.
 
+## Sizing
+
+runnerd keeps each job's sampled memory and CPU peaks. `runnerctl sizing`, the dashboard's Sizing page and the TUI turn the last 30 days of them into advice for each profile's `memory` and `slots`:
+
+- The need is the largest peak plus a margin, rounded up to 256M. Samples are 2 s apart, so a shorter spike goes unseen. The cap kills a job that goes over it, so the need follows the heaviest run, not a percentile: a profile whose builds fit in 2G but whose end-to-end job takes 6G keeps room for the 6G. The percentiles are shown to say how rare that run is.
+- Below `min_jobs` jobs there is no advice, only the peaks.
+- A peak within 5% of its cap counts as at the cap: the job may have been held back or killed there and need more than it shows. A profile with such a run is never lowered, even when the run was at a smaller cap it had before.
+- When the need is a tenth or more under `memory`, the advice is to lower it. If jobs waited a minute or more for a slot (p95), or the slots were busy half the time, it also adds as many slots as the profile's memory now holds.
+- When the need is over `memory`, the advice is to raise it. Slots go down only if `MemoryMax` cannot hold them. When it cannot hold even one, the advice is to grow the slice first, and there is nothing to apply.
+
+`[sizing]` changes the rules; these are the defaults:
+
+```toml
+[sizing]
+margin = 15     # percent added to a sampled peak
+min_jobs = 10   # runs before peaks become advice
+```
+
+What sizing cannot see:
+
+- A job killed for memory between two samples. The history has no out-of-memory signal: a job that idles at 3G and is killed within one 2 s interval shows a 3G peak, and its failure counts as an ordinary run. Failed jobs count like passing ones. Only cancelled jobs are left out, since a cancel stops a job before its peak.
+- Time the daemon was not running. Jobs queued while it was down show long waits, which can make the advice add slots.
+
+Advice is only written when you apply it: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button, which opens the change in the config editor. Each goes through the same check as any config, so a change `MemoryMax` cannot hold is refused. Lowering never asks for more than the profile's slots take now, and raising takes only what `MemoryMax` has spare, so two raises applied one after the other can be refused. `runnerd doctor` warns when a profile's jobs need more than its `memory`. Run without a daemon, it reads the history database read-only and does not migrate it. SQLite still leaves the `-wal` and `-shm` files a WAL database needs next to it when it may write there, so run it as the user who runs the daemon. Where it may not write, it reads the database file alone, and skips the sizing check while the `-wal` holds changes the file lacks. Sizing reads the slice's `MemoryMax` on each request, so one raised after `systemctl daemon-reload` counts without restarting runnerd.
+
 ## The budget check
 
 `runnerd check-config [file]`, by default on `~/.config/runnerd/runnerd.toml`, reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:

@@ -213,6 +213,7 @@ async fn without_the_session_cookie_every_page_and_write_is_401() {
     for (method, path) in [
         ("GET", "/"),
         ("GET", "/jobs/1"),
+        ("GET", "/sizing"),
         ("GET", "/live/overview"),
         ("POST", "/v1/repositories/x/pause"),
         ("POST", "/v1/repositories/halyard/ledger/pause"),
@@ -1342,6 +1343,61 @@ async fn the_config_page_shows_the_file_its_budget_and_the_doctor() {
             "config page lacks {expected:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let sizing = dashboard.page(&cookie, "/sizing").await;
+    assert_eq!(sizing.status, StatusCode::OK);
+    for expected in [
+        "lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G",
+        "keep 9G: its largest peak + 15% is 9G",
+        r#"href="/config?resize=node""#,
+        "Review memory 2.5G, 5 slots in the config",
+        "integration tests",
+        "halyard/storefront · CI",
+        "waits for 10 jobs",
+    ] {
+        assert!(
+            sizing.body.contains(expected),
+            "sizing page lacks {expected:?}"
+        );
+    }
+    assert!(
+        !sizing.body.contains("/config?resize=jvm"),
+        "jvm has nothing to apply"
+    );
+
+    let before = dashboard.fake.fixtures.lock().unwrap().config.clone();
+    let editor = dashboard.page(&cookie, "/config?resize=node").await;
+    assert_eq!(editor.status, StatusCode::OK);
+    let advised = before.replace("memory = \"7G\"\nslots = 2", "memory = \"2.5G\"\nslots = 5");
+    assert_ne!(advised, before);
+    for expected in [
+        "memory = &quot;2.5G&quot;\nslots = 5",
+        "Nothing is written until you save it.",
+        // 2 × 9G + 5 × 2.5G + 512M.
+        "31G",
+    ] {
+        assert!(editor.body.contains(expected), "editor lacks {expected:?}");
+    }
+    assert_eq!(
+        dashboard.fake.fixtures.lock().unwrap().config,
+        before,
+        "opening the editor writes nothing"
+    );
+    let saved = dashboard
+        .write(
+            &cookie,
+            "PUT",
+            "/config",
+            &serde_json::json!({ "toml": advised }),
+        )
+        .await;
+    assert!(saved.body.contains("Saved and reloaded"), "{}", saved.body);
+    assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, advised);
 }
 
 #[tokio::test]

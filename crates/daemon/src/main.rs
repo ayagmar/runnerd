@@ -177,7 +177,20 @@ fn doctor(path: Option<&Path>) -> ExitCode {
         Ok(config) => config,
         Err(error) => return fail(&error),
     };
-    let host = doctor::Host::read(config.as_ref());
+    let mut host = doctor::Host::read(config.as_ref());
+    if let Some(config) = &config
+        && let Some(database) = config.history.database.clone().or_else(default_database)
+    {
+        let memory_max = match &host.slice {
+            Some(Ok(slice)) => slice.memory_max.map(|max| max.0),
+            _ => None,
+        };
+        let now = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs();
+        host.sizing = doctor::read_sizing(config, &database, memory_max, now);
+    }
     let checks = doctor::checks(&host, config.as_ref());
     for check in &checks {
         output::line(check);
