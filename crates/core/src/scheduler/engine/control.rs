@@ -98,6 +98,13 @@ pub enum Command {
         /// The answer.
         reply: oneshot::Sender<Result<api::Paused, ControlError>>,
     },
+    /// Resume one repository or all.
+    Resume {
+        /// What to resume.
+        target: Target,
+        /// The answer.
+        reply: oneshot::Sender<Result<(), ControlError>>,
+    },
     /// Make slot 1's layers the profile's snapshot once its slots are free.
     Reseed {
         /// The profile.
@@ -209,7 +216,9 @@ impl Control {
 
     /// Pauses or resumes one repository or all, whatever they run, and records it in the store before it answers,
     /// so a restarted daemon starts with the same ones paused. `NotFound` for a repository the config does not have.
-    /// If the record fails, the change holds until a restart and the answer is `NotRecorded`.
+    /// If the record fails, the change holds until a restart and the answer is `NotRecorded`. The status shows it
+    /// at the engine's next publish: the API pauses and resumes through `pause` and `resume`, which publish before
+    /// they answer.
     pub async fn set_paused(&self, target: &Target, paused: bool) -> Result<(), ControlError> {
         let recorded = {
             let repositories = lock(&self.repositories);
@@ -310,6 +319,12 @@ impl Control {
         .await?
     }
 
+    /// Resumes one repository or all, and publishes the status before it answers, so a client that reads the status
+    /// or the events after the answer sees them resumed. Fails as `set_paused` does.
+    pub async fn resume(&self, target: Target) -> Result<(), ControlError> {
+        self.send(|reply| Command::Resume { target, reply }).await?
+    }
+
     /// Reseeds a profile as soon as its slots are free; none of them starts a runner until then.
     pub async fn reseed(&self, profile: &str) -> Result<(), ControlError> {
         self.send(|reply| Command::Reseed {
@@ -369,6 +384,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 reply,
             } => {
                 let _ = reply.send(self.pause(&target, jobs).await);
+            }
+            Command::Resume { target, reply } => {
+                let _ = reply.send(self.control.set_paused(&target, false).await);
             }
             Command::Reseed { profile, reply } => {
                 let _ = reply.send(self.request_reseed(&profile));

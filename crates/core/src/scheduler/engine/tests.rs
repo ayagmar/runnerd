@@ -75,6 +75,8 @@ struct GithubState {
     /// What `GET /actions/jobs/{id}` answers.
     jobs: HashMap<u64, JobDetails>,
     calls: Vec<String>,
+    /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
+    held: tokio::sync::watch::Sender<bool>,
 }
 
 #[derive(Clone, Default)]
@@ -83,6 +85,21 @@ struct FakeGithub(Arc<Mutex<GithubState>>);
 impl FakeGithub {
     fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap().calls.clone()
+    }
+
+    /// Holds the runners and queued jobs listings until `release`.
+    fn hold(&self) {
+        self.0.lock().unwrap().held.send_replace(true);
+    }
+
+    fn release(&self) {
+        self.0.lock().unwrap().held.send_replace(false);
+    }
+
+    /// Waits while the listings are held.
+    async fn answer(&self) {
+        let mut held = self.0.lock().unwrap().held.subscribe();
+        let _ = held.wait_for(|held| !held).await;
     }
 
     fn polled(state: &mut GithubState) {
@@ -99,6 +116,7 @@ impl FakeGithub {
 
 impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
+        self.answer().await;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("queued {repository}"));
         let queued = state.queued.clone();
@@ -107,6 +125,7 @@ impl GithubApi for FakeGithub {
     }
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
+        self.answer().await;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("runners {repository}"));
         let runners = state
@@ -1085,6 +1104,42 @@ async fn a_paused_repository_gets_no_runner_after_a_restart_until_it_is_resumed(
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 1);
+}
+
+#[tokio::test]
+async fn a_resumed_repository_shows_active_in_the_status_once_the_resume_answers() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_in(&github, &docker, &dir);
+    tokio::spawn(engine.run());
+    until_polled(&github, 1).await;
+    handle
+        .control
+        .pause(Target::All, RunningJobs::Keep)
+        .await
+        .unwrap();
+    assert!(
+        handle.status.borrow().repositories[0].paused,
+        "o/r shows paused"
+    );
+
+    // The tick the resume wakes waits on GitHub; the status must not.
+    github.hold();
+    handle.control.resume(Target::All).await.unwrap();
+    assert!(
+        !handle.status.borrow().repositories[0].paused,
+        "o/r shows active"
+    );
+    let mut after = 0;
+    let events = repository_events(&handle, &mut after).await;
+    assert_eq!(
+        events.last(),
+        Some(&api::Event::RepositoryChanged {
+            repository: repository_status(false, 0)
+        })
+    );
+    github.release();
 }
 
 #[tokio::test]

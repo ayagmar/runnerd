@@ -77,6 +77,9 @@ async fn fake_engine(
                     })
                 });
             }
+            Command::Resume { target, reply } => {
+                let _ = reply.send(control.set_paused(&target, false).await);
+            }
             Command::Reseed { reply, .. } => {
                 let _ = reply.send(Err(ControlError::Conflict("reseeding already".to_owned())));
             }
