@@ -43,6 +43,7 @@ FAIL  slice: runnerd.slice has no unit file with a MemoryMax, so nothing holds r
            sudo systemctl daemon-reload
 ok    config: valid, with warnings: the slice runnerd.slice has no MemoryMax, so nothing holds runners to their 40.5G of caps; install a unit file for it
 ok    image: ghcr.io/ayagmar/runnerd-runner:base-0.0.6: not pulled yet; runnerd pulls it before the first runner
+info  records: the records of failed jobs take 0B of [records] max_total = 20G
 ok    gh: logged in to github.com with the repo scope
 info  /dev/kvm: present, for a future Kata Containers backend
 
