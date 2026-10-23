@@ -67,25 +67,53 @@ fn the_starter_config_fits_the_memory_max_of_an_existing_slice() {
 }
 
 #[test]
-fn every_sizing_fits_its_budget() {
+fn every_sizing_fits_its_budget_and_three_quarters_of_the_host() {
     for memory_gib in 1..=256 {
         for cpus in [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64, 128] {
-            let machine = machine(memory_gib, cpus, None);
-            let Ok(sizing) = size(&machine) else {
-                assert!(memory_gib < 4, "a {memory_gib}G host gets a config");
-                continue;
-            };
-            let room = sizing.budget.0 - super::MIRROR_MEMORY.0;
-            assert!(
-                u64::from(sizing.slots) * sizing.memory.0 <= room,
-                "{memory_gib}G, {cpus} CPUs: {sizing:?}"
-            );
-            assert!(
-                sizing.slots >= 1 && sizing.cpus >= 1,
-                "{memory_gib}G, {cpus} CPUs: {sizing:?}"
-            );
+            for slice_gib in [None, Some(4), Some(33), Some(1024)] {
+                let machine = machine(memory_gib, cpus, slice_gib.map(|gib| ByteSize(gib * GIB)));
+                let Ok(sizing) = size(&machine) else {
+                    assert!(
+                        memory_gib < 4,
+                        "a {memory_gib}G host in a {slice_gib:?}G slice gets a config"
+                    );
+                    continue;
+                };
+                let room = sizing.budget.0 - super::MIRROR_MEMORY.0;
+                assert!(
+                    sizing.budget.0 <= machine.memory.0 / 4 * 3,
+                    "{memory_gib}G, slice {slice_gib:?}G: {sizing:?}"
+                );
+                assert!(
+                    u64::from(sizing.slots) * sizing.memory.0 <= room,
+                    "{memory_gib}G, {cpus} CPUs: {sizing:?}"
+                );
+                assert!(
+                    sizing.slots >= 1 && sizing.cpus >= 1,
+                    "{memory_gib}G, {cpus} CPUs: {sizing:?}"
+                );
+            }
         }
     }
+}
+
+#[test]
+fn a_slice_larger_than_the_host_does_not_size_past_the_host() {
+    let sizing = size(&machine(4, 32, Some(ByteSize(64 * GIB)))).unwrap();
+    assert_eq!(sizing.budget, ByteSize(3 * GIB), "three quarters of 4G");
+    assert_eq!(sizing.slots, 1);
+}
+
+#[test]
+fn a_nominal_4g_vm_gets_a_runner() {
+    let machine = Machine {
+        memory: ByteSize(3_900_000 << 10),
+        cpus: 2,
+        slice_memory_max: None,
+    };
+    let sizing = size(&machine).unwrap();
+    assert_eq!(sizing.memory, ByteSize(2 * GIB));
+    assert_eq!(sizing.budget, ByteSize(5 << 29), "2.5G");
 }
 
 #[test]
@@ -138,7 +166,7 @@ fn the_unit_serves_the_written_config_with_this_binary() {
     assert_eq!(
         exec_start,
         format!(
-            "\"/opt/run nerd/bin/runnerd\" serve --config {}/100%%/runnerd.toml",
+            "\"/opt/run nerd/bin/runnerd\" serve --config \"{}/100%%/runnerd.toml\"",
             dir.0.display()
         )
     );
@@ -176,4 +204,62 @@ fn the_slice_fix_adds_a_drop_in_rather_than_replace_an_existing_slice_unit() {
         "{fix}"
     );
     assert!(fix.contains("MemoryMax=33G"), "{fix}");
+}
+
+#[test]
+fn an_apostrophe_in_a_path_stays_inside_the_quotes() {
+    let dir = Dir::new();
+    let request = Request {
+        config: dir.0.join("o'neal/runnerd.toml"),
+        ..request(&dir.0, Overwrite::Refuse)
+    };
+    init(&request, &machine(64, 16, None)).unwrap();
+    let unit = std::fs::read_to_string(&request.unit).unwrap();
+    assert!(
+        unit.contains(&format!(
+            "--config \"{}/o'neal/runnerd.toml\"\n",
+            dir.0.display()
+        )),
+        "{unit}"
+    );
+}
+
+#[test]
+fn a_unit_that_cannot_be_written_leaves_no_config() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    // The unit's parent directory cannot be created: `systemd` is a file.
+    std::fs::write(dir.0.join("systemd"), "").unwrap();
+    let error = init(&request, &machine(64, 16, None)).unwrap_err();
+    assert!(error.contains("runnerd.service"), "{error}");
+    let left: Vec<_> = std::fs::read_dir(dir.0.join("runnerd")).unwrap().collect();
+    assert!(left.is_empty(), "no config or temp file is left: {left:?}");
+}
+
+#[test]
+fn a_failed_forced_init_keeps_the_old_config() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Replace);
+    std::fs::create_dir_all(request.config.parent().unwrap()).unwrap();
+    std::fs::write(&request.config, "mine").unwrap();
+    // Publishing the unit fails after the config is in place: its path is a directory that is not empty.
+    std::fs::create_dir_all(request.unit.join("x")).unwrap();
+    init(&request, &machine(64, 16, None)).unwrap_err();
+    assert_eq!(std::fs::read_to_string(&request.config).unwrap(), "mine");
+    let left: Vec<_> = std::fs::read_dir(request.config.parent().unwrap())
+        .unwrap()
+        .map(|entry| entry.unwrap().file_name())
+        .collect();
+    assert_eq!(left, ["runnerd.toml"], "no temp or backup file is left");
+}
+
+#[test]
+fn a_dangling_symlink_counts_as_an_existing_file() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    std::fs::create_dir_all(request.unit.parent().unwrap()).unwrap();
+    std::os::unix::fs::symlink(dir.0.join("nowhere"), &request.unit).unwrap();
+    let error = init(&request, &machine(64, 16, None)).unwrap_err();
+    assert!(error.contains("--force"), "{error}");
+    assert!(!request.config.exists(), "the config is not written either");
 }

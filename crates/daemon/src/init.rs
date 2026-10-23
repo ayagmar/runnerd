@@ -60,7 +60,8 @@ impl Machine {
 /// The starter profile and the budget it fits in.
 #[derive(Debug, PartialEq, Eq)]
 pub(crate) struct Sizing {
-    /// The slice's `MemoryMax`, or the one to give it: three quarters of the host's memory.
+    /// What the profile and the mirror fit in: three quarters of the host's memory, or the slice's `MemoryMax` when
+    /// that is smaller. A slice without one should get this as its `MemoryMax`.
     pub budget: ByteSize,
     pub slots: u32,
     /// CPUs per slot.
@@ -71,9 +72,13 @@ pub(crate) struct Sizing {
 
 /// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs.
 pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
-    let budget = machine
-        .slice_memory_max
-        .unwrap_or(ByteSize(machine.memory.0 / 4 * 3 / GIB * GIB));
+    // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
+    let host = machine.memory.0 / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
+    let budget = ByteSize(
+        machine
+            .slice_memory_max
+            .map_or(host, |memory_max| memory_max.0.min(host)),
+    );
     let room = budget.0.saturating_sub(MIRROR_MEMORY.0);
     let memory = SLOT_MEMORY.min(room / MEMORY_STEP * MEMORY_STEP);
     if memory < MIN_SLOT_MEMORY {
@@ -157,7 +162,7 @@ pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, Strin
     if request.overwrite == Overwrite::Refuse {
         let existing: Vec<String> = [&request.config, &request.unit]
             .iter()
-            .filter(|path| path.exists())
+            .filter(|path| path.symlink_metadata().is_ok())
             .map(|path| path.display().to_string())
             .collect();
         if !existing.is_empty() {
@@ -173,26 +178,79 @@ pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, Strin
             ));
         }
     }
-    write(&request.config, &config, request.overwrite)?;
-    write(&request.unit, &unit, request.overwrite)?;
+    let mut config = Staged::write(&request.config, &config)?;
+    let mut unit = Staged::write(&request.unit, &unit)?;
+    config.publish(request.overwrite)?;
+    if let Err(error) = unit.publish(request.overwrite) {
+        config.undo();
+        return Err(error);
+    }
     Ok(sizing)
 }
 
-fn write(path: &Path, text: &str, overwrite: Overwrite) -> Result<(), String> {
-    let fail = |error: std::io::Error| format!("cannot write {}: {error}", path.display());
-    if let Some(dir) = path.parent() {
+/// A file written in full next to its destination, so a failure before `publish` leaves the destination as it was.
+struct Staged<'path> {
+    path: &'path Path,
+    temp: PathBuf,
+    /// A link to the file `publish` replaced, kept until `undo` or drop.
+    backup: Option<PathBuf>,
+}
+
+impl Staged<'_> {
+    fn write<'path>(path: &'path Path, text: &str) -> Result<Staged<'path>, String> {
+        let fail = |error: std::io::Error| format!("cannot write {}: {error}", path.display());
+        let dir = path
+            .parent()
+            .ok_or_else(|| fail(std::io::ErrorKind::InvalidInput.into()))?;
+        let name = path.file_name().unwrap_or_default().to_string_lossy();
         std::fs::create_dir_all(dir).map_err(fail)?;
+        let temp = dir.join(format!(".{name}.runnerd-init-{}", std::process::id()));
+        let staged = Staged {
+            path,
+            temp,
+            backup: None,
+        };
+        OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&staged.temp)
+            .and_then(|mut file| file.write_all(text.as_bytes()))
+            .map_err(fail)?;
+        Ok(staged)
     }
-    let mut options = OpenOptions::new();
-    options.write(true);
-    match overwrite {
-        Overwrite::Refuse => options.create_new(true),
-        Overwrite::Replace => options.create(true).truncate(true),
-    };
-    options
-        .open(path)
-        .and_then(|mut file| file.write_all(text.as_bytes()))
-        .map_err(fail)
+
+    /// Moves the file into place: with `Overwrite::Refuse` only where nothing is, with `Replace` in one rename.
+    fn publish(&mut self, overwrite: Overwrite) -> Result<(), String> {
+        let fail = |error: std::io::Error| format!("cannot write {}: {error}", self.path.display());
+        match overwrite {
+            Overwrite::Refuse => std::fs::hard_link(&self.temp, self.path).map_err(fail),
+            Overwrite::Replace => {
+                if self.path.is_file() {
+                    let backup = self.temp.with_extension("old");
+                    std::fs::hard_link(self.path, &backup).map_err(fail)?;
+                    self.backup = Some(backup);
+                }
+                std::fs::rename(&self.temp, self.path).map_err(fail)
+            }
+        }
+    }
+
+    /// Puts back what `publish` replaced, or removes what it created.
+    fn undo(&mut self) {
+        let _ = match self.backup.take() {
+            Some(backup) => std::fs::rename(backup, self.path),
+            None => std::fs::remove_file(self.path),
+        };
+    }
+}
+
+impl Drop for Staged<'_> {
+    fn drop(&mut self) {
+        let _ = std::fs::remove_file(&self.temp);
+        if let Some(backup) = &self.backup {
+            let _ = std::fs::remove_file(backup);
+        }
+    }
 }
 
 fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String {
@@ -234,7 +292,8 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          pnpm = {{ max_size = \"5G\" }}\n\
          maven = {{ max_size = \"5G\" }}\n\
          \n\
-         # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}, the slice's MemoryMax.\n\
+         # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of the host's\n\
+         # memory, or the slice's MemoryMax if that is smaller.\n\
          [profiles.default]\n\
          image_stage = \"{IMAGE_STAGE}\"\n\
          cpus = {cpus}\n\
@@ -268,7 +327,7 @@ fn unit_text(runnerd: &Path, config: &Path) -> Result<String, String> {
     ))
 }
 
-/// `path` as one argument of `ExecStart=`: specifiers and variables escaped, quoted when it has spaces.
+/// `path` as one quoted argument of `ExecStart=`, with specifiers and variables escaped.
 fn exec_arg(path: &Path) -> Result<String, String> {
     let text = path
         .to_str()
@@ -278,12 +337,10 @@ fn exec_arg(path: &Path) -> Result<String, String> {
             "{text} cannot go in a systemd unit: it needs an absolute path without quotes, backslashes or newlines"
         ));
     }
-    let escaped = text.replace('%', "%%").replace('$', "$$");
-    Ok(if escaped.contains(char::is_whitespace) {
-        format!("\"{escaped}\"")
-    } else {
-        escaped
-    })
+    Ok(format!(
+        "\"{}\"",
+        text.replace('%', "%%").replace('$', "$$")
+    ))
 }
 
 /// Runs `runnerd init`: writes the files, then prints the doctor's checks and the steps left.
@@ -306,6 +363,12 @@ pub(crate) fn run(request: &Request) -> ExitCode {
         sizing.budget
     ));
     output::line(format_args!("wrote {}", request.unit.display()));
+    if std::env::consts::ARCH != "x86_64" {
+        output::warning(format_args!(
+            "the runner image is built for linux/amd64 only today, so runners do not start on this {} host",
+            std::env::consts::ARCH
+        ));
+    }
     let config = match Config::load(&request.config) {
         Ok(config) => config,
         Err(error) => return output::fail(&error),
