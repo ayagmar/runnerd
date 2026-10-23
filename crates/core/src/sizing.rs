@@ -53,6 +53,8 @@ pub struct Ran {
     pub hit_cap: Option<bool>,
     /// What its sampled memory counts.
     pub measure: Measure,
+    /// Whether it completed with success: a failed or lost run may have stopped before its heaviest step.
+    pub succeeded: bool,
     /// What measured admission reserved for it; `None` under caps or for an adopted runner.
     pub reserved: Option<u64>,
 }

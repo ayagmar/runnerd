@@ -2,16 +2,20 @@
 //! replayed through admission by caps and by predictions (`simulate`), to show what each would have done with the
 //! same jobs. Pure: no I/O, no clock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 
-use crate::api::Basis;
 use crate::api::Spread;
+use crate::api::{Basis, JobPeak};
 use crate::config::{self, Config};
 use crate::sizing::{GRANULE, Ran, spread};
 
 /// For this long after a run at its cap or killed for memory, in milliseconds, its job is admitted at its cap: 7
 /// days. After a run past what it reserved, its job reserves its largest peak for as long.
 pub const UNPREDICTABLE_FOR: u64 = 7 * 24 * 3600 * 1000;
+
+/// From this many successful runs of its own, fewer than `[sizing] min_jobs` runs, a job reserves its own largest
+/// peak while no other copy of it is queued or running; otherwise the larger of that and its profile's p95.
+pub const OWN_RUNS: u64 = 2;
 
 /// While the slice uses this percent of its `MemoryMax` or more, measured admission starts nothing.
 pub const HIGH_WATER: u64 = 90;
@@ -38,6 +42,16 @@ impl Key {
     }
 }
 
+/// Whether other copies of a job may run beside the one predicted: queued with it, or running. A few light runs
+/// say little about a burst of copies, after a cache was invalidated, so only one copy at a time goes by them.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Copies {
+    /// No other copy is queued or running.
+    Alone,
+    /// Another copy is queued or running.
+    Several,
+}
+
 /// The memory admission reserves for a job, at most its cap, and what it goes by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct Prediction {
@@ -52,6 +66,8 @@ pub struct Prediction {
 #[derive(Debug, Clone, Default)]
 struct Peaks {
     sorted: Vec<u64>,
+    /// How many of those runs succeeded.
+    succeeded: u64,
     unpredictable_until: u64,
     overran_until: u64,
     /// The largest peak of a run past what it reserved, cancelled runs' included.
@@ -103,6 +119,7 @@ impl Predictor {
         let peak = run.memory_peak;
         if let Some(job) = self.jobs.get_mut(&Key::of(run)) {
             job.add(peak);
+            job.succeeded += u64::from(run.succeeded);
         }
         self.profiles
             .entry(profile.to_owned())
@@ -125,8 +142,16 @@ impl Predictor {
         }
     }
 
-    /// The memory to reserve for a run of `key` in `profile`, whose cap is `cap`, at `now` (ms).
-    pub fn predict(&self, key: &Key, profile: &str, cap: u64, now: u64) -> Prediction {
+    /// The memory to reserve for a run of `key` in `profile`, whose cap is `cap`, at `now` (ms), with `copies`
+    /// of it beside.
+    pub fn predict(
+        &self,
+        key: &Key,
+        profile: &str,
+        cap: u64,
+        now: u64,
+        copies: Copies,
+    ) -> Prediction {
         let job = self.jobs.get(key);
         if let Some(until) = job
             .map(|job| job.unpredictable_until)
@@ -149,8 +174,25 @@ impl Predictor {
                     until: job.overran_until / 1000,
                 },
             ),
-            (Some(job), _) if job.runs() >= min_jobs => {
-                (self.with_margin(job.p95()), Basis::Job { runs: job.runs() })
+            (Some(job), _) if job.runs() >= min_jobs => (
+                self.with_margin(job.p95()),
+                Basis::Job {
+                    runs: job.runs(),
+                    peak: JobPeak::P95,
+                },
+            ),
+            (Some(job), Some(peers))
+                if peers.runs() >= min_jobs
+                    && job.succeeded >= OWN_RUNS
+                    && copies == Copies::Alone =>
+            {
+                (
+                    self.with_margin(job.max()),
+                    Basis::Job {
+                        runs: job.runs(),
+                        peak: JobPeak::Largest,
+                    },
+                )
             }
             (Some(job), Some(peers)) if peers.runs() >= min_jobs => (
                 self.with_margin(job.max().max(peers.p95())),
@@ -210,7 +252,7 @@ pub struct Replay {
     pub worst_overlap: u64,
     /// Seconds from the first job queued to the last one finished.
     pub makespan: u64,
-    /// Jobs whose peak was above what admission reserved for them.
+    /// Jobs whose peak was above what admission reserved for them when they ended.
     pub under_predicted: u64,
     /// How many times the high-water mark held a job back that the predictions had room for.
     pub held_back: u64,
@@ -229,7 +271,11 @@ struct Running<'run> {
 /// `slots` (by name; the config's where absent) under the slice's `memory_max`. Jobs start as soon as the policy
 /// admits them, oldest first, a job that does not fit letting a later one past, as `scheduler::plan` does.
 /// Measured admission predicts from the runs finished before it decides, as the daemon would, and holds each
-/// running job at its peak for its whole run, which the daemon does not see.
+/// running job at its peak for its whole run, which the daemon does not see. A job with copies waiting or running
+/// beside it is predicted as one with `Copies::Several`. Each moment, the running jobs are predicted again, the
+/// first running copy of a job going by its own runs, as the daemon does each tick. Unlike the daemon, the replay
+/// knows a job from its start: it never sees a runner whose job is not known yet, and the order jobs started
+/// stands for the daemon's slot order.
 pub fn simulate(
     config: &Config,
     memory_max: Option<u64>,
@@ -268,6 +314,7 @@ pub fn simulate(
             break;
         };
         replayer.finish(now);
+        replayer.rereserve(now);
         while let Some(run) = queue.get(next).filter(|run| run.queued_at <= now) {
             waiting.push(run);
             next += 1;
@@ -324,6 +371,7 @@ impl<'run> Replayer<'run> {
         self.running = running;
         for ended in ended {
             let cap = self.config.profiles[ended.profile].memory.0;
+            self.under_predicted += u64::from(ended.peak > ended.reserved);
             let reserved = (self.policy == Policy::Measured).then_some(ended.reserved);
             let run = Ran {
                 reserved,
@@ -331,6 +379,29 @@ impl<'run> Replayer<'run> {
             };
             self.predictor.learn(&run, ended.profile, cap, ended.ends);
             self.last_end = self.last_end.max(ended.ends);
+        }
+    }
+
+    /// Under measured admission, predicts each running job again, as the daemon's runners follow their job's
+    /// prediction every tick: the first running copy of a job, in the order they started, goes by its own runs, and
+    /// the others have it beside them.
+    fn rereserve(&mut self, now: u64) {
+        if self.policy != Policy::Measured {
+            return;
+        }
+        let mut seen = BTreeSet::new();
+        for running in &mut self.running {
+            let key = Key::of(running.run);
+            let copies = if seen.insert(key.clone()) {
+                Copies::Alone
+            } else {
+                Copies::Several
+            };
+            let cap = self.config.profiles[running.profile].memory.0;
+            running.reserved = self
+                .predictor
+                .predict(&key, running.profile, cap, now, copies)
+                .memory;
         }
     }
 
@@ -363,9 +434,34 @@ impl<'run> Replayer<'run> {
             return false;
         }
         let cap = limits.memory.0;
-        let predict = |job: &Ran| {
+        let running = |key: &Key| {
+            self.running
+                .iter()
+                .any(|running| Key::of(running.run) == *key)
+        };
+        // A waiting job with a copy waiting or running beside it, as the daemon sees its queue.
+        let queued = |job: &Ran| {
+            let key = Key::of(job);
+            let waiting = waiting.iter().filter(|other| Key::of(other) == key).count();
+            let copies = if waiting > 1 || running(&key) {
+                Copies::Several
+            } else {
+                Copies::Alone
+            };
             self.predictor
-                .predict(&Key::of(job), profile, cap, now)
+                .predict(&key, profile, cap, now, copies)
+                .memory
+        };
+        // The started job, once known: the first of its copies to run goes by its own runs.
+        let started = || {
+            let key = Key::of(run);
+            let copies = if running(&key) {
+                Copies::Several
+            } else {
+                Copies::Alone
+            };
+            self.predictor
+                .predict(&key, profile, cap, now, copies)
                 .memory
         };
         let (starting, reserved) = match self.policy {
@@ -374,11 +470,11 @@ impl<'run> Replayer<'run> {
                 waiting
                     .iter()
                     .filter(|job| job.repository == run.repository)
-                    .map(|job| predict(job))
+                    .map(|job| queued(job))
                     .max()
                     .unwrap_or(0)
-                    .max(predict(run)),
-                predict(run),
+                    .max(started()),
+                started(),
             ),
         };
         if let Some(budget) = self.budget {
@@ -395,7 +491,6 @@ impl<'run> Replayer<'run> {
         }
         // A job over its cap is killed at it.
         let peak = run.memory_peak.min(cap);
-        self.under_predicted += u64::from(peak > reserved);
         let ran_for = run
             .finished_at
             .unwrap_or_default()

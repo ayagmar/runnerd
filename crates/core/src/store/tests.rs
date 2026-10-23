@@ -782,7 +782,10 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
         admission: Some(crate::api::Admission {
             policy: crate::api::AdmissionPolicy::Measured,
             reserved: 1 << 30,
-            basis: crate::api::Basis::Job { runs: 10 },
+            basis: crate::api::Basis::Job {
+                runs: 10,
+                peak: crate::api::JobPeak::P95,
+            },
             free: Some(8 << 30),
             slice: Some(1 << 30),
         }),

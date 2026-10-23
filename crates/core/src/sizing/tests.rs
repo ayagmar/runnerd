@@ -64,6 +64,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         reserved: None,
         hit_cap: None,
         measure: Measure::Unreclaimable,
+        succeeded: true,
     }
 }
 

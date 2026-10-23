@@ -3,7 +3,7 @@
 //! and the decision in each runner's record.
 
 use super::*;
-use crate::api::{AdmissionPolicy, Basis};
+use crate::api::{AdmissionPolicy, Basis, JobPeak};
 use crate::observe::metrics::Events;
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
@@ -26,8 +26,30 @@ async fn history(store: &Store, peak: u64, oom_kills: u64) {
 
 /// Ten finished `name` jobs of o/r from ID `first`, as `history`.
 async fn history_of(store: &Store, name: &str, first: u64, peak: u64, oom_kills: u64) {
+    runs_of(store, name, first, 10, peak, oom_kills, Ended::Lost).await;
+}
+
+/// How a run in `runs_of` ended.
+#[derive(Clone, Copy, PartialEq)]
+enum Ended {
+    /// Its container was gone before GitHub reported it.
+    Lost,
+    /// GitHub reported it completed with success.
+    Succeeded,
+}
+
+/// `count` finished `name` jobs of o/r from ID `first`, as `history`.
+async fn runs_of(
+    store: &Store,
+    name: &str,
+    first: u64,
+    count: u64,
+    peak: u64,
+    oom_kills: u64,
+    ended: Ended,
+) {
     let at = time::now_ms() - 3600 * 1000;
-    for i in 0..10 {
+    for i in 0..count {
         let id = first + i;
         let runner = format!("earlier-{id}");
         store.queued(
@@ -60,10 +82,30 @@ async fn history_of(store: &Store, name: &str, first: u64, peak: u64, oom_kills:
             network_sent: 0,
             events: Some(Events {
                 oom: 0,
-                oom_kill: if i == 9 { oom_kills } else { 0 },
+                oom_kill: if i == count - 1 { oom_kills } else { 0 },
             }),
         }]);
-        store.lost(id, at + 60_000);
+        match ended {
+            Ended::Lost => store.lost(id, at + 60_000),
+            // No times: the job keeps the ones it was queued and claimed at.
+            Ended::Succeeded => store.details(JobDetails {
+                id,
+                run_id: 1,
+                run_attempt: 1,
+                name: name.to_owned(),
+                workflow_name: None,
+                head_branch: None,
+                html_url: None,
+                labels: Vec::new(),
+                created_at: None,
+                status: "completed".to_owned(),
+                conclusion: Some("success".to_owned()),
+                started_at: None,
+                completed_at: None,
+                runner_name: Some(runner.clone()),
+                steps: Vec::new(),
+            }),
+        }
         store.runner_removed(&runner, at + 60_000);
     }
     store.flush().await;
@@ -220,7 +262,10 @@ async fn a_jobs_record_says_how_its_runner_was_admitted() {
         Some(api::Admission {
             policy: AdmissionPolicy::Measured,
             reserved: 1280 * M,
-            basis: Basis::Job { runs: 10 },
+            basis: Basis::Job {
+                runs: 10,
+                peak: JobPeak::P95
+            },
             free: Some(10 * G),
             slice: Some(2 * G),
         })
@@ -345,7 +390,13 @@ async fn once_its_job_is_known_a_runner_reserves_that_jobs_prediction() {
     let admission = handle.store.job(9).await.unwrap().unwrap().admission;
     assert_eq!(
         admission.map(|admission| (admission.reserved, admission.basis)),
-        Some((3584 * M, Basis::Job { runs: 10 }))
+        Some((
+            3584 * M,
+            Basis::Job {
+                runs: 10,
+                peak: JobPeak::P95
+            }
+        ))
     );
 }
 
@@ -453,4 +504,114 @@ async fn a_runner_whose_own_sample_is_old_counts_at_its_cap() {
     slice_at(&handle.store, 2 * G);
     engine.publish();
     assert_eq!(handle.status.borrow().budget.memory_in_use, 4 * G);
+}
+
+#[tokio::test]
+async fn two_light_runs_then_a_burst_of_heavy_copies_with_warm_up_never_overlap_past_memory_max() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    // The profile's p95 is 3G; the build's two runs hit a warm cache and peaked at 200M.
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    runs_of(
+        &handle.store,
+        "build",
+        1000,
+        2,
+        200 * M,
+        0,
+        Ended::Succeeded,
+    )
+    .await;
+    engine.recover().await.unwrap();
+    // The runners of slots 1 and 2 take builds 1 and 2.
+    docker.0.lock().unwrap().slot_captures =
+        HashMap::from([(1, "@@job 1 1\n".to_owned()), (2, "@@job 2 1\n".to_owned())]);
+    // The cache is gone: four builds queue at once, each needing 3G once warmed up.
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    slice_at(&handle.store, G);
+    engine.tick(Shutdown::No).await;
+    // Copies of a job queued together reserve 3G + 15%, rounded up to 3.5G: two fit the 10G slice, not four at
+    // 200M + 15%, rounded up to 256M.
+    assert_eq!(registered(&github.calls()).len(), 2);
+    // Their captures report their jobs.
+    github.0.lock().unwrap().queued = Vec::new();
+    slice_at(&handle.store, G);
+    engine.tick(Shutdown::No).await;
+    // Still warming up at 300M, both busy with known jobs. The first copy reserves its own 256M, the second 3.5G,
+    // and the copies still queued 3.5G: one more fits, not two.
+    {
+        let mut state = github.0.lock().unwrap();
+        for runner in &mut state.runners {
+            (runner.status, runner.busy) = ("online".to_owned(), true);
+        }
+        state.queued = (3..=4).map(job).collect();
+    }
+    runners_use(&github, &handle.store, 300 * M);
+    slice_at(&handle.store, G);
+    engine.tick(Shutdown::No).await;
+    let started = registered(&github.calls()).len() as u64;
+    assert_eq!(started, 3);
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.memory_in_use,
+        300 * M + 2 * 3584 * M
+    );
+    // Warmed up, the three copies' 3G peaks fit the 10G slice together; four would not.
+    assert!(
+        started * 3 * G <= 10 * G,
+        "{started} copies at 3G fit the 10G slice"
+    );
+}
+
+#[tokio::test]
+async fn copies_arriving_one_by_one_beside_busy_runners_whose_job_is_unknown_take_their_profiles_p95()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    // The profile's p95 is 3G; the build's two runs hit a warm cache and peaked at 200M.
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    runs_of(
+        &handle.store,
+        "build",
+        1000,
+        2,
+        200 * M,
+        0,
+        Ended::Succeeded,
+    )
+    .await;
+    engine.recover().await.unwrap();
+    // No log capture tells which job a runner took.
+    docker.0.lock().unwrap().fail_execs = u32::MAX;
+    let mut started = Vec::new();
+    for copy in 1..=4 {
+        // One build queues per poll; the runners before took theirs and warm up at 300M, sampled just now.
+        {
+            let mut state = github.0.lock().unwrap();
+            for runner in &mut state.runners {
+                (runner.status, runner.busy) = ("online".to_owned(), true);
+            }
+            state.queued = vec![job(copy)];
+        }
+        runners_use(&github, &handle.store, 300 * M);
+        slice_at(&handle.store, G);
+        engine.tick(Shutdown::No).await;
+        started.push(registered(&github.calls()).len());
+    }
+    // The first reserves 256M, alone. The second may be a copy of the busy runner's build, so it reserves
+    // 3G + 15%, rounded up to 3.5G, and so does the first once a build queues beside it: the 10G slice holds no
+    // third, where 256M each would let all four start.
+    assert_eq!(started, [1, 2, 2, 2]);
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 2 * 3584 * M);
 }

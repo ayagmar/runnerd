@@ -581,6 +581,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             reserved: None,
             hit_cap: Some(false),
             measure: sizing::Measure::Unreclaimable,
+            succeeded: true,
         })
         .collect()
 }
