@@ -33,4 +33,5 @@ custom image or pin a digest.
 A new user runs jobs with only the release binaries and a config. Upgrading the daemon means editing the tag in each
 profile's `image`; doctor's version warning is the reminder. Any image works, including a user's own stage on top of
 ours or a reference pinned by digest. aarch64 hosts still build their own image, once the Dockerfile supports them. A
-new ghcr.io package is private until its owner makes it public, once.
+new ghcr.io package should come out public, as the repository is (0.0.5's did); the release checklist in
+CONTRIBUTING.md checks it.

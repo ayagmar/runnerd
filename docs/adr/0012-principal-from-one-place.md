@@ -2,7 +2,7 @@
 
 ## Context
 
-Remote hosts (plan 011) add SSH and Tailscale transports. Each must not need its own copy of the API.
+Remote hosts, later, add SSH and Tailscale transports. Each must not need its own copy of the API.
 
 ## Decision
 

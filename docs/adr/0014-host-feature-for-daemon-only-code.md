@@ -6,7 +6,7 @@ Clients need `api` and `config` from `runnerd-core`, but the crate also holds th
 
 ## Decision
 
-`runnerd-core` has a `host` feature, on by default, that gates `docker`, `github`, `cache`, `isolation` and `scheduler`. The workspace dependency turns default features off; only the daemon turns `host` on. `.github/scripts/check-boundaries.sh` fails CI when a client builds `bollard`, `reqwest` or `host`.
+`runnerd-core` has a `host` feature, on by default, that gates `docker`, `github`, `cache`, `isolation`, `observe`, `scheduler` and `store`. The workspace dependency turns default features off; only the daemon turns `host` on. `.github/scripts/check-boundaries.sh` fails CI when a client builds `bollard`, `reqwest` or `host`.
 
 ## Consequences
 
