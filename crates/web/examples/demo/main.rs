@@ -59,6 +59,10 @@ async fn main() {
                 let line = fixtures.logs.get(&id).map_or(0, Vec::len) as u64;
                 let text = format!("[{n:>4}] progress of the running step");
                 fixtures.logs.entry(id).or_default().push(text.clone());
+                if let Some(job) = fixtures.jobs.iter_mut().find(|job| job.summary.id == id) {
+                    job.summary.log.lines += 1;
+                    job.summary.log.bytes += text.len() as u64 + 1;
+                }
                 events.push(Event::LogLine {
                     job: id,
                     line,
