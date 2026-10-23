@@ -137,10 +137,10 @@ slots = 8       # how many run at once; 8 × 7G may exceed MemoryMax
 ```
 
 - A job is predicted from its own runs (repository, workflow and job name): with `[sizing] min_jobs` of them, their p95 peak plus `[sizing] margin`, rounded up to 256M.
-- With fewer, the larger of its profile's p95 and its own largest peak, plus the margin. A job with no runs yet gets its profile's largest peak plus the margin, since a new workflow may be the heaviest. With too few runs of the profile as well, the cap.
-- A run that peaked within 5% of its cap, or in which the kernel killed a process for memory, puts its job back on its cap for 7 days, cancelled runs included. A run that went past what it reserved has its job reserve its largest peak for 7 days.
-- A runner may take any of its repository's queued jobs, so it reserves the largest of their predictions, and more if a heavier job queues while it waits. Once its job is known, it reserves that job's prediction.
-- A running runner counts at the larger of what it reserved and what it last used, so a job past its prediction leaves less for the next starts.
+- With fewer, the larger of its profile's p95 and its own largest peak, plus the margin. A job with no runs yet gets its profile's largest peak plus the margin, since a new workflow may be the heaviest. With too few runs of the profile as well, or when every run of the job was cancelled, the cap.
+- A run that peaked within 5% of its cap, or in which the kernel killed a process for memory, puts its job back on its cap for 7 days, cancelled runs included. A run that went past what it reserved, cancelled or not, has its job reserve the larger of its largest peak and that run's for 7 days.
+- A runner may take any of its repository's queued jobs, so it reserves the largest of their predictions, and more if a heavier job queues while it waits; when that no longer fits, the runner is stopped and the job waits for one that fits. Once its job is known, it reserves that job's prediction.
+- A running runner counts at the larger of what it reserved and what it last used, so a job past its prediction leaves less for the next starts. Without a sample of it or of the slice from the last few seconds, it counts at its cap.
 - Nothing starts while the slice uses 90% of `MemoryMax` or more. Without a sample of the slice from the last few seconds, runners reserve their caps. Switching back to `admission = "caps"` counts every running runner at its cap.
 - The check asks only that one runner of each profile, with the mirror, fits `MemoryMax`, and that the slice has one.
 

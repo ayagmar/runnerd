@@ -24,21 +24,27 @@ Under measured admission a runner reserves a prediction instead of its cap (`adm
   not predicted at its light neighbours' size.
 - With no run of its own, its profile's largest peak plus the margin: a new workflow, or a matrix job whose name
   changes, may be the profile's heaviest.
-- With too few runs of the profile as well, the cap.
+- With too few runs of the profile as well, or when every run of the job was cancelled, the cap.
 - A run of the job that peaked within 5% of its cap, or in whose container the kernel killed a process for memory
   (`memory.events` `oom_kill`, sampled with the container's memory, and Docker's `OOMKilled` when the container
   stops), makes the job unpredictable: its cap, for 7 days. Cancelled runs count for this, not for their peaks.
-- A run that peaked past what its runner reserved has its job reserve its own largest peak plus the margin, for 7
-  days: the job that filled the slice is learned, not only the one the kernel killed.
+- A run that peaked past what its runner reserved has its job reserve the larger of its own largest peak and that
+  run's peak, plus the margin, for 7 days, a cancelled run's peak included: the job that filled the slice is
+  learned, not only the one the kernel killed.
 - A prediction is never above the cap.
 
 A runner is registered before GitHub gives it a job, and GitHub may give it any of its repository's queued jobs, so
-it starts reserving the largest prediction among them, and while it waits it follows that largest one up. Once its
-log capture finds its job, it reserves that job's prediction. The engine reads the history into a new predictor at
-most once a minute.
+it starts reserving the largest prediction among them, and while it waits it follows that largest one up. A waiting
+runner raised past what the budget has free is stopped, as one that waited `IDLE_TIMEOUT` is, until the rest fits:
+the heavier job waits for a runner that fits. Once its log capture finds its job, it reserves that job's prediction.
+The engine reads the history into a new predictor at most once a minute.
+
+GitHub assigns a job between two ticks: until the next one, its runner counts at what it reserved before. A heavier
+job taken that way is counted only afterwards, which the cap of its container bounds.
 
 A running runner counts against the budget at the larger of what it reserves and its last sampled memory, so a job
-past its prediction leaves less for the next starts. Under `admission = "caps"` every runner counts at its cap,
+past its prediction leaves less for the next starts. When that sample, or the slice's, is older than three sampling
+intervals, the runner counts at its cap: what it uses is not known. Under `admission = "caps"` every runner counts at its cap,
 also one admitted by its prediction before a reload.
 
 Two checks guard the slice beside the predictions. While the slice's sampled memory is at 90% of `MemoryMax` or

@@ -139,8 +139,9 @@ nothing until Docker has listed them.
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under
   `admission = "measured"` a runner reserves its predicted peak, at most its cap, and counts at the larger of that
-  and its last sampled memory; the reservation follows its repository's queue until its job is known, then that
-  job's prediction. The config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing
+  and its last sampled memory, or at its cap when its own or the slice's sample is older than three intervals; the
+  reservation follows its repository's queue until its job is known, then that job's prediction, and a waiting
+  runner raised past what is free is stopped. The config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing
   starts while the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample,
   after a run of its job at its cap or killed for memory, or when a restart adopted it
   ([ADR 0033](docs/adr/0033-measured-admission.md)). Each runner's record keeps what it reserves and why.
