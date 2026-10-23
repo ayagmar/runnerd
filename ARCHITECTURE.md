@@ -48,7 +48,7 @@ flowchart TB
 
 The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and
 writes only through the API on the Unix socket ([ADR 0020](docs/adr/0020-dashboard-is-an-api-client-on-loopback.md)).
-The desktop app (`crates/desktop`) will be another.
+The optional tray client (`crates/desktop`, [ADR 0034](docs/adr/0034-desktop-framework.md)) will be another.
 [`.github/scripts/check-boundaries.sh`](.github/scripts/check-boundaries.sh) fails CI when any workspace crate other
 than `runnerd` and `runnerd-core` builds `bollard`, `reqwest` or core's `host` feature.
 
