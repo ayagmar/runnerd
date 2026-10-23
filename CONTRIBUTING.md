@@ -53,13 +53,20 @@ cache.
 The tests never reach Docker or GitHub; the ignored ones (README, "Building") start containers but serve no
 repository. To run jobs end to end, point a daemon at a sandbox repository of your own.
 
-On a host that already runs runnerd, stop that one first. Both daemons would name their runners with the same
-machine prefix and share the host's Docker, its cache volumes and its slice, and at start `Engine::recover` adopts
-or removes every runner container on the local Docker, whoever started it:
+On a host that already runs runnerd, the two daemons collide in two ways. Both name their runners
+with the same machine prefix, and at start `Engine::recover` adopts or removes every runner container on the local
+Docker, whoever started it, so the two must not run at once. Stopping the service is not enough on its own: cache
+volumes are named for the profile, not the daemon (`runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`,
+`runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror`), so a test profile named like one of the owner's runs on the
+owner's slot layers and can reseed the owner's snapshot, and smaller shared-cache limits empty the owner's caches.
 
 1. `systemctl --user stop runnerd`, and wait for it to exit; it waits for running jobs.
 2. Write a config that serves only the sandbox repository, with its own `[history] database` under a scratch
-   directory, and check it: `runnerd check-config <scratch>/runnerd.toml`.
+   directory ([`examples/sandbox.toml`](examples/sandbox.toml) is one, without the history line):
+   - name its profiles so that none matches a profile in the owner's config (`sandbox`, not `jvm`);
+   - copy the owner's `[caches]` table unchanged, so the shared pnpm, Maven and mirror volumes keep their limits.
+
+   Check it: `runnerd check-config <scratch>/runnerd.toml`.
 3. `runnerd serve --config <scratch>/runnerd.toml --socket <scratch>/runnerd.sock --web off`, and in another
    terminal `runnerctl --socket <scratch>/runnerd.sock status` (or `watch`, `tui`).
 4. Push to the sandbox repository and watch its jobs run.
@@ -99,7 +106,8 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
      with [trusted publishing](https://crates.io/docs/trusted-publishing): a token that lasts 30 minutes, minted
      from the run's OIDC identity, so no crates.io token is stored.
 5. Check the result: the images are public
-   (`docker logout ghcr.io; docker pull ghcr.io/ayagmar/runnerd-runner:base-<version>`), `install.sh` installs the
+   (an anonymous pull, with an empty Docker config so the host's login stays:
+   `docker --config "$(mktemp -d)" pull ghcr.io/ayagmar/runnerd-runner:base-<version>`), `install.sh` installs the
    new version, and crates.io lists it.
 
 A new package on ghcr.io has so far come out public, as the repository is. If one does not, make it public once:
