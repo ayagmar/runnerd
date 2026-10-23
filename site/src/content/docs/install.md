@@ -6,7 +6,7 @@ description: Install runnerd, write a starter config and a user unit with runner
 ## What the host needs
 
 - Linux with cgroup v2, and Docker with the systemd cgroup driver.
-- [Sysbox](https://github.com/nestybox/sysbox), so runner containers run Docker unprivileged: `.deb` packages, the AUR package `sysbox-ce-bin` on Arch Linux, or a source build.
+- [Sysbox](https://github.com/nestybox/sysbox), so runner containers run Docker unprivileged. When it is missing, `runnerd doctor` prints the install for this distribution: Nestybox's `.deb` on Ubuntu and Debian, the AUR package `sysbox-ce-bin` on Arch, a source build on Fedora, CentOS Stream, Rocky, Alma and Amazon Linux, and Nestybox's support table elsewhere. Nestybox supports Red Hat Enterprise Linux with Sysbox-EE only.
 - A systemd slice whose `MemoryMax` is the budget for all runners. `runnerd init` prints one sized for the host.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 
@@ -53,6 +53,10 @@ Start runnerd and have it start at login; it pulls ghcr.io/ayagmar/runnerd-runne
   systemctl --user enable --now runnerd
   runnerctl status
 To keep it running while you are logged out: loginctl enable-linger "$USER"
+
+Send a workflow job here with:
+  runs-on: [self-hosted, linux, x64]
+A job runs here only when every label in its runs-on is in its repository's labels in runnerd.toml; other jobs, such as runs-on: ubuntu-latest, stay on GitHub's runners.
 ```
 
 Run the root commands your `init` printed, then:
@@ -61,6 +65,14 @@ Run the root commands your `init` printed, then:
 systemctl --user daemon-reload
 systemctl --user enable --now runnerd
 runnerctl status
+```
+
+Then point a job at the runners. `init` gives each repository the labels GitHub gives its own self-hosted runners, so a workflow written for those runs here unchanged:
+
+```yaml
+jobs:
+  build:
+    runs-on: [self-hosted, linux, x64]
 ```
 
 | Flag | |

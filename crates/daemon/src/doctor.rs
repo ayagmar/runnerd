@@ -28,13 +28,32 @@ pub(crate) struct Host {
     pub slice: Option<Result<Slice, String>>,
     /// The scopes of `gh`'s token for github.com.
     pub gh_scopes: Result<Vec<String>, String>,
-    /// Whether each of `SYSBOX_SERVICES` runs: Docker keeps the runtime registered without them.
-    pub sysbox_services: [(&'static str, bool); 2],
+    /// How each of `SYSBOX_DAEMONS` runs: Docker keeps the runtime registered without them.
+    pub sysbox_daemons: [SysboxDaemon; 2],
+    /// Whether systemd has `sysbox.service`, which Sysbox's packages install and a source build does not.
+    pub sysbox_unit: bool,
     pub kvm: bool,
 }
 
-/// The services sysbox-runc needs; `sysbox.service` starts both.
-pub(crate) const SYSBOX_SERVICES: [&str; 2] = ["sysbox-mgr", "sysbox-fs"];
+/// The daemons sysbox-runc needs; `sysbox.service` starts both, a source build's `scr/sysbox` too.
+pub(crate) const SYSBOX_DAEMONS: [&str; 2] = ["sysbox-mgr", "sysbox-fs"];
+
+/// One of `SYSBOX_DAEMONS` and how it runs.
+#[derive(Clone, Copy)]
+pub(crate) struct SysboxDaemon {
+    pub name: &'static str,
+    pub state: DaemonState,
+}
+
+/// How one of `SYSBOX_DAEMONS` runs.
+#[derive(Clone, Copy, PartialEq, Eq)]
+pub(crate) enum DaemonState {
+    /// Its systemd unit is active.
+    Unit,
+    /// A process runs without its unit, as a source build's `scr/sysbox` starts it.
+    Process,
+    Stopped,
+}
 
 pub(crate) struct DockerFacts {
     pub version: String,
@@ -82,17 +101,62 @@ impl Host {
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
             gh_scopes: read_gh_scopes(),
-            // One unit per call: `systemctl is-active` with several units succeeds when any one runs.
-            sysbox_services: SYSBOX_SERVICES.map(|unit| {
-                let active = Command::new("systemctl")
-                    .args(["is-active", "--quiet", unit])
-                    .status()
-                    .is_ok_and(|status| status.success());
-                (unit, active)
+            sysbox_daemons: SYSBOX_DAEMONS.map(|name| SysboxDaemon {
+                name,
+                state: read_daemon(name),
             }),
+            sysbox_unit: Command::new("systemctl")
+                .args(["show", "sysbox.service", "--property=LoadState", "--value"])
+                .output()
+                .is_ok_and(|output| {
+                    output.status.success() && output.stdout.trim_ascii() == b"loaded"
+                }),
             kvm: Path::new("/dev/kvm").exists(),
         }
     }
+}
+
+/// Whether `name` runs as its systemd unit or, as a source build starts it, as a bare process.
+fn read_daemon(name: &str) -> DaemonState {
+    // One unit per call: `systemctl is-active` with several units succeeds when any one runs.
+    let unit = Command::new("systemctl")
+        .args(["is-active", "--quiet", name])
+        .status()
+        .is_ok_and(|status| status.success());
+    if unit {
+        return DaemonState::Unit;
+    }
+    if process_runs(Path::new("/proc"), name) {
+        DaemonState::Process
+    } else {
+        DaemonState::Stopped
+    }
+}
+
+/// Whether a live process named `name` is in `proc`, a procfs such as `/proc`. Any user may read a process's `stat`,
+/// so this sees root's daemons too. A name is not proof of what runs: it only tells a source build's daemons from
+/// none. Zombies and dead processes do not count, nor do processes that exit while this reads.
+fn process_runs(proc: &Path, name: &str) -> bool {
+    let Ok(entries) = std::fs::read_dir(proc) else {
+        return false;
+    };
+    entries.flatten().any(|entry| {
+        let is_pid = entry
+            .file_name()
+            .to_str()
+            .is_some_and(|pid| !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()));
+        // `<pid> (<comm>) <state> ...`; the comm may hold spaces and parentheses, the state follows the last `)`.
+        is_pid
+            && std::fs::read_to_string(entry.path().join("stat")).is_ok_and(|stat| {
+                let (Some(open), Some(close)) = (stat.find('('), stat.rfind(')')) else {
+                    return false;
+                };
+                let state = stat[close + 1..].trim_start().chars().next();
+                open < close
+                    && &stat[open + 1..close] == name
+                    && state.is_some_and(|state| !matches!(state, 'Z' | 'X' | 'x'))
+            })
+    })
 }
 
 /// The advice from the job history at `database`, read-only, while no daemon runs; `None` when it does not exist.
@@ -273,10 +337,10 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             checks.push(fail(
                 "Docker",
                 format!("unreachable: {error}"),
-                "start Docker and let your user reach its socket:\n\
+                "start Docker and let your user reach its socket; runnerd reaches Docker only through a unix:// \
+                 socket, so unset DOCKER_HOST or point it at one:\n\
                  sudo systemctl enable --now docker\n\
-                 sudo usermod -aG docker \"$USER\"   (then log in again)\n\
-                 runnerd reaches Docker only through a unix:// socket: unset DOCKER_HOST or point it at one",
+                 sudo usermod -aG docker \"$USER\"   # then log in again",
             ));
             None
         }
@@ -326,14 +390,19 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         Some(docker) if !docker.runtimes.iter().any(|r| r == "sysbox-runc") => fail(
             "sysbox",
             "Docker has no sysbox-runc runtime, which isolation = \"sysbox\" needs".to_owned(),
-            &sysbox_fix(&host.os_release),
+            &sysbox_fix(&host.os_release, &docker.platform),
         ),
-        Some(_) if host.sysbox_services.iter().any(|(_, active)| !active) => {
-            let stopped: Vec<_> = host
-                .sysbox_services
+        Some(_)
+            if host
+                .sysbox_daemons
                 .iter()
-                .filter(|(_, active)| !active)
-                .map(|(unit, _)| *unit)
+                .any(|daemon| daemon.state == DaemonState::Stopped) =>
+        {
+            let stopped: Vec<_> = host
+                .sysbox_daemons
+                .iter()
+                .filter(|daemon| daemon.state == DaemonState::Stopped)
+                .map(|daemon| daemon.name)
                 .collect();
             fail(
                 "sysbox",
@@ -341,7 +410,27 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
                     "Docker has the sysbox-runc runtime, but not running: {}; runner containers fail to start",
                     stopped.join(", ")
                 ),
-                "sudo systemctl enable --now sysbox",
+                if host.sysbox_unit {
+                    "start sysbox's service:\nsudo systemctl enable --now sysbox"
+                } else {
+                    "Sysbox has no systemd unit here, as after a source build; start its daemons from the clone you \
+                     built it in:\n\
+                     cd sysbox\n\
+                     sudo ./scr/sysbox"
+                },
+            )
+        }
+        Some(_)
+            if host
+                .sysbox_daemons
+                .iter()
+                .any(|daemon| daemon.state == DaemonState::Process) =>
+        {
+            pass(
+            "sysbox",
+            "Docker has the sysbox-runc runtime and sysbox's daemons run without systemd, so start them again \
+             after a reboot: sudo ./scr/sysbox in the clone you built it in"
+                .to_owned(),
             )
         }
         Some(_) => pass(
@@ -550,37 +639,71 @@ fn image_checks(host: &Host, config: Option<&Config>, docker: Option<&DockerFact
 /// Where the release workflow publishes the runner images.
 const PUBLISHED: &str = "ghcr.io/ayagmar/runnerd-runner";
 
-/// Sysbox ships `.deb` packages only; Arch has it in the AUR; elsewhere it is built from source.
-fn sysbox_fix(os_release: &str) -> String {
-    let family: Vec<&str> = os_release
-        .lines()
-        .filter_map(|line| {
-            line.strip_prefix("ID=")
-                .or_else(|| line.strip_prefix("ID_LIKE="))
+/// The Sysbox release whose packages the fix names; newer ones are at <https://github.com/nestybox/sysbox/releases>.
+const SYSBOX_VERSION: &str = "0.7.1";
+
+/// How to install Sysbox on the distribution `os_release` describes, for Docker's `platform`, such as `linux/amd64`.
+/// The first line says what to do; every line after it is a shell command, pasteable as printed. Nestybox packages
+/// `.deb`s for Ubuntu and Debian, supports Fedora, `CentOS` Stream, Rocky, Alma and Amazon Linux built from source, and
+/// Red Hat Enterprise Linux with Sysbox-EE only (docs/distro-compat.md); Arch has the `.deb` repackaged in the AUR.
+fn sysbox_fix(os_release: &str, platform: &str) -> String {
+    let value = |key: &str| {
+        os_release.lines().find_map(|line| {
+            let value = line.strip_prefix(key)?.strip_prefix('=')?.trim();
+            Some(
+                ['"', '\'']
+                    .iter()
+                    .find_map(|quote| value.strip_prefix(*quote)?.strip_suffix(*quote))
+                    .unwrap_or(value),
+            )
         })
-        .flat_map(|value| value.trim_matches('"').split_whitespace())
+    };
+    let id = value("ID").unwrap_or_default();
+    let like: Vec<&str> = value("ID_LIKE")
+        .unwrap_or_default()
+        .split_whitespace()
         .collect();
-    let restart = "sudo systemctl restart docker   (stops running containers)";
-    if family.iter().any(|id| matches!(*id, "debian" | "ubuntu")) {
-        "install the .deb from https://github.com/nestybox/sysbox/releases; it registers the runtime and \
-         restarts Docker, which stops running containers:\n\
-         sudo apt-get install ./sysbox-ce_<version>.linux_amd64.deb"
-            .to_owned()
-    } else if family.contains(&"arch") {
+    let is = |ids: &[&str]| ids.contains(&id) || like.iter().any(|like| ids.contains(like));
+    let arch = platform.strip_prefix("linux/").unwrap_or(platform);
+    let support = "https://github.com/nestybox/sysbox/blob/master/docs/distro-compat.md";
+    if is(&["debian", "ubuntu"]) && matches!(arch, "amd64" | "arm64") {
+        let deb = format!("sysbox-ce_{SYSBOX_VERSION}.linux_{arch}.deb");
         format!(
-            "install the AUR package sysbox-ce-bin, for example: paru -S sysbox-ce-bin\n\
-             sudo systemctl enable --now sysbox\n\
-             add to /etc/docker/daemon.json (Arch kernels are not on sysbox's allow-list):\n\
-             {{\"runtimes\": {{\"sysbox-runc\": {{\"path\": \"/usr/bin/sysbox-runc\", \"runtimeArgs\": [\"--no-kernel-check\"]}}}}}}\n\
-             {restart}"
+            "install Nestybox's package; it registers the runtime with Docker and restarts it, which stops \
+             running containers:\n\
+             curl -fLO https://github.com/nestybox/sysbox/releases/download/v{SYSBOX_VERSION}/{deb}\n\
+             sudo apt-get install jq ./{deb}"
+        )
+    } else if is(&["arch"]) {
+        "install the AUR package sysbox-ce-bin and register its runtime with Docker; Sysbox does not support Arch \
+         officially, so the runtime skips its kernel check:\n\
+         paru -S sysbox-ce-bin\n\
+         sudo systemctl enable --now sysbox\n\
+         # add to /etc/docker/daemon.json, merged with what it has:\n\
+         #   {\"runtimes\": {\"sysbox-runc\": {\"path\": \"/usr/bin/sysbox-runc\", \"runtimeArgs\": [\"--no-kernel-check\"]}}}\n\
+         sudo systemctl restart docker   # stops running containers"
+            .to_owned()
+    } else if id == "rhel" {
+        format!(
+            "Nestybox supports Red Hat Enterprise Linux with Sysbox-EE only, not the Sysbox CE that runnerd \
+             uses: {support}"
+        )
+    } else if is(&["fedora", "centos", "rocky", "almalinux", "amzn", "rhel"]) {
+        // Amazon Linux 2 has yum only; every other one has dnf, and Amazon Linux 2023 both.
+        let install = if id == "amzn" { "yum" } else { "dnf" };
+        format!(
+            "Nestybox has no package for this distribution; build Sysbox from source \
+             (https://github.com/nestybox/sysbox/blob/master/docs/developers-guide/build.md). The build runs in \
+             Docker; the scripts need jq:\n\
+             sudo {install} install -y git make jq\n\
+             git clone --recursive https://github.com/nestybox/sysbox.git && cd sysbox\n\
+             make sysbox-static\n\
+             sudo make install\n\
+             sudo ./scr/sysbox   # starts sysbox-mgr and sysbox-fs; a source build has no systemd unit\n\
+             sudo ./scr/docker-cfg --sysbox-runtime=enable   # registers the runtime and restarts Docker"
         )
     } else {
-        format!(
-            "build sysbox from source: \
-             https://github.com/nestybox/sysbox/blob/master/docs/developers-guide/build.md\n\
-             register sysbox-runc as a runtime in /etc/docker/daemon.json\n\
-             {restart}"
-        )
+        format!("see which distributions Sysbox supports and how to install it on each: {support}")
     }
 }
 
