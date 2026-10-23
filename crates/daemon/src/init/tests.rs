@@ -4,7 +4,7 @@ use std::path::Path;
 
 use runnerd_core::config::{ByteSize, Config, Image};
 
-use super::{Machine, Overwrite, Request, init, size};
+use super::{Machine, Overwrite, Request, init, labels, runs_on, size};
 use crate::testdir::Dir;
 
 const GIB: u64 = 1 << 30;
@@ -312,4 +312,23 @@ fn a_staging_name_that_exists_is_skipped_not_reused() {
     })
     .unwrap();
     assert!(!taken.contains(&path), "{path:?} was taken");
+}
+
+#[test]
+fn the_printed_runs_on_line_asks_for_exactly_the_labels_init_wrote() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    init(&request, &machine(64, 16, None)).unwrap();
+    let config = Config::load(&request.config).unwrap();
+    let hint = runs_on(&labels());
+    let asked: Vec<&str> = hint
+        .lines()
+        .find_map(|line| line.trim().strip_prefix("runs-on: ["))
+        .and_then(|list| list.strip_suffix(']'))
+        .unwrap()
+        .split(", ")
+        .collect();
+    for repository in &config.repositories {
+        assert_eq!(asked, repository.labels, "{}", repository.name);
+    }
 }

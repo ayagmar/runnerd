@@ -66,6 +66,15 @@ systemctl --user enable --now runnerd
 runnerctl status
 ```
 
+Last, `init` prints the line that sends a workflow job to these runners:
+
+```yaml
+runs-on: [self-hosted, linux, x64]
+```
+
+A job runs here only when every label in its `runs-on` is in its repository's `labels` in `runnerd.toml`; jobs on
+`ubuntu-latest` stay on GitHub's runners.
+
 `init` never replaces a file unless given `--force`. `--slice` names another slice, `--config` writes the config
 elsewhere.
 
