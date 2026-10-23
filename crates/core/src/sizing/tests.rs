@@ -341,3 +341,113 @@ fn a_start_in_the_future_reads_from_now() {
         "SQLite binds it as an integer"
     );
 }
+
+/// The owner's host: `admission = "measured"`, `node` 4 × 5.5G beside `jvm` 2 × 9G and the mirror. Its caps sum to
+/// 40.5G, over the 33G slice, which measured admission allows.
+fn measured() -> String {
+    CONFIG
+        .replace(
+            "isolation = \"sysbox\"",
+            "isolation = \"sysbox\"\nadmission = \"measured\"",
+        )
+        .replace("memory = \"7G\"\nslots = 2", "memory = \"5.5G\"\nslots = 4")
+}
+
+fn measured_sizing(history: &History, memory_max: u64) -> Sizing {
+    advise(
+        &Config::parse(&measured()).unwrap(),
+        Some(memory_max),
+        history,
+        Window::new(None, NOW / 1000),
+    )
+}
+
+/// `count` storefront builds at a 5.5G cap peaking at `peak`, each waiting `wait_secs`.
+fn capped_builds(count: u64, peak: u64, wait_secs: u64) -> Vec<Ran> {
+    (0..count)
+        .map(|_| Ran {
+            memory_cap: Some(5632 * M),
+            ..job("halyard/storefront", "build", "node", peak, wait_secs)
+        })
+        .collect()
+}
+
+#[test]
+fn applying_memory_advice_under_measured_admission_keeps_the_profiles_slots() {
+    // Builds reach 5.4G of 5.5G: 6.21G with the margin, 6.25G rounded. Four of them at their caps would not fit
+    // beside jvm's caps, but measured admission never reserves caps, so the slots stay.
+    let sizing = measured_sizing(
+        &History {
+            jobs: capped_builds(20, 5400 * M, 0),
+            cancelled: Vec::new(),
+            runners: Vec::new(),
+        },
+        33 * G,
+    );
+    let node = profile(&sizing, "node");
+    assert_eq!(
+        node.advice,
+        Advice::Raise {
+            memory: 6400 * M,
+            slots: 4
+        }
+    );
+    let text = resize_profile(&measured(), "node", node.advice.change().unwrap()).unwrap();
+    let (_, checked) = Config::check(&text, |_| Ok(Some(ByteSize(33 * G))));
+    assert!(checked.valid, "the raise applies: {}", checked.message);
+    assert!(
+        !sizing.advice_line(node).contains("slots fit"),
+        "the line does not talk of cutting slots: {}",
+        sizing.advice_line(node)
+    );
+}
+
+#[test]
+fn under_measured_admission_a_raise_is_refused_only_when_one_runner_and_the_mirror_overflow_the_slice()
+ {
+    // 6.25G and the 512M mirror need 6.75G: a 6.5G slice holds no runner of it.
+    let sizing = measured_sizing(
+        &History {
+            jobs: capped_builds(20, 5400 * M, 0),
+            cancelled: Vec::new(),
+            runners: Vec::new(),
+        },
+        6656 * M,
+    );
+    assert_eq!(
+        profile(&sizing, "node").advice,
+        Advice::SliceTooSmall { memory: 6400 * M }
+    );
+}
+
+#[test]
+fn under_measured_admission_waiting_jobs_are_told_about_slots_without_changing_them() {
+    // Builds peak at 2G of 5.5G and waited 5 minutes for a slot: lower the cap, keep the slots, and say so.
+    let jobs = (0..20)
+        .map(|_| Ran {
+            memory_cap: Some(5632 * M),
+            ..job("halyard/storefront", "build", "node", 2 * G, 300)
+        })
+        .collect();
+    let sizing = measured_sizing(
+        &History {
+            jobs,
+            cancelled: Vec::new(),
+            runners: Vec::new(),
+        },
+        33 * G,
+    );
+    let node = profile(&sizing, "node");
+    assert_eq!(
+        node.advice,
+        Advice::Lower {
+            memory: 2560 * M,
+            slots: 4
+        }
+    );
+    let line = sizing.advice_line(node);
+    assert!(
+        line.contains("slots"),
+        "the line suggests more slots: {line}"
+    );
+}
