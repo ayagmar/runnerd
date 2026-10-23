@@ -1,8 +1,8 @@
 //! The TUI through its reducer and `TestBackend` frames: a job moving through its slot, steps and the latest jobs;
 //! every pane at 80×24; text at 80 to 136 columns that drops whole fields or ends in `…` rather than being cut
-//! mid-word; no colour with `NO_COLOR`; a refused pause forced only on `y`; repositories changed elsewhere; the
-//! history's filters; and, against a fake daemon, an event stream that drops, shows "reconnecting" and resumes
-//! after the last event ID.
+//! mid-word; no colour with `NO_COLOR`; a refused pause, and a removed record, only on `y`; repositories changed
+//! elsewhere; the history's filters; and, against a fake daemon, an event stream that drops, shows "reconnecting"
+//! and resumes after the last event ID.
 
 #![allow(
     clippy::unwrap_used,
@@ -29,13 +29,13 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
-    LogSummary, ProfileStatus, QueuedJob, RepositoryStatus, RunnerStatus, Sample, SeedMemory,
-    SlotStatus, Status, Step, Timeline,
+    LogSummary, ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus,
+    RunnerStatus, Sample, SeedMemory, SlotStatus, Status, Step, Timeline,
 };
 
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, Effect, Msg, Refused, View};
+use super::app::{App, Connection, Effect, Msg, Refused, Removal, View};
 use super::draw::{Theme, draw};
 use super::feed;
 use crate::testing::Fake;
@@ -420,6 +420,72 @@ fn a_refused_pause_is_forced_only_after_y() {
             force: true
         }]
     );
+}
+
+fn records(jobs: &[u64]) -> Records {
+    Records {
+        records: jobs
+            .iter()
+            .map(|job| Record {
+                job: *job,
+                repository: "halyard/ledger".to_owned(),
+                profile: "jvm".to_owned(),
+                workflow: Some("build".to_owned()),
+                name: Some("test".to_owned()),
+                created_at: NOW - 60,
+                bytes: 300 << 20,
+                image: format!("runnerd-record:{job}"),
+            })
+            .collect(),
+        limits: RecordLimits {
+            max_total: 20 << 30,
+            max_count: 10,
+            max_age: 7 * 24 * 3600,
+            min_free: 10 << 30,
+        },
+        shells: vec![43],
+    }
+}
+
+#[test]
+fn a_record_is_removed_only_after_y_and_the_list_follows_new_ones() {
+    let mut app = app();
+    assert_eq!(app.update(key(KeyCode::Char('3'))), vec![Effect::Records]);
+    app.update(Msg::Records(records(&[42, 43])));
+    app.update(key(KeyCode::Char('j')));
+    let listed = screen(&app, 80, 24, false);
+    for expected in [
+        "halyard/ledger",
+        "build / test",
+        "300M",
+        "shell open",
+        "runnerctl shell 43",
+    ] {
+        assert!(listed.contains(expected), "{expected}: {listed}");
+    }
+
+    assert_eq!(app.update(key(KeyCode::Char('d'))), Vec::new());
+    assert!(
+        screen(&app, 120, 24, false).contains("y removes the record of job 43"),
+        "d asks first"
+    );
+    assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
+    assert_eq!(app.removal, None);
+    app.update(key(KeyCode::Char('d')));
+    assert_eq!(
+        app.update(key(KeyCode::Char('y'))),
+        vec![Effect::RemoveRecords(Removal::Job(43))]
+    );
+    app.update(key(KeyCode::Char('D')));
+    assert_eq!(
+        app.update(key(KeyCode::Char('y'))),
+        vec![Effect::RemoveRecords(Removal::All)]
+    );
+
+    let created = Event::RecordCreated {
+        record: records(&[44]).records.remove(0),
+    };
+    assert_eq!(app.update(event(Some(9), created)), vec![Effect::Records]);
 }
 
 #[test]

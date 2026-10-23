@@ -433,24 +433,21 @@ async fn records(
         Some(job) => format!("/v1/records/{job}"),
         None => with_query("/v1/records", &RemoveRecordsQuery { all, older_than })?,
     };
-    let reply = client.request(Method::DELETE, &path, None).await?;
-    if !reply.status.is_success() {
-        return Err(Error::Local(reply.message()));
-    }
-    let removed: RemovedRecords =
-        serde_json::from_slice(&reply.body).map_err(|error| Error::Local(error.to_string()))?;
+    let removed = remove_records(client, &path).await?;
     if json {
         return print_json(&removed);
     }
-    output::line(match removed.jobs.len() {
-        0 => "no record removed".to_owned(),
-        1 => format!("removed 1 record, {} freed", human::bytes(removed.bytes)),
-        count => format!(
-            "removed {count} records, {} freed",
-            human::bytes(removed.bytes)
-        ),
-    });
+    output::line(human::removed(&removed));
     Ok(ExitCode::SUCCESS)
+}
+
+/// Removes the records `path` names, `/v1/records/{job}` or `/v1/records?…`.
+async fn remove_records(client: &Client, path: &str) -> Result<RemovedRecords, Error> {
+    let reply = client.request(Method::DELETE, path, None).await?;
+    if !reply.status.is_success() {
+        return Err(Error::Local(reply.message()));
+    }
+    serde_json::from_slice(&reply.body).map_err(|error| Error::Local(error.to_string()))
 }
 
 /// `path?query`, as the API reads it.

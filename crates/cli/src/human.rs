@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use runnerd_core::api::{
     CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobState, JobSummary,
-    QueuedJob, RecordNote, Records, Status, Step,
+    QueuedJob, Record, RecordNote, Records, RemovedRecords, Status, Step,
 };
 use runnerd_core::config::ByteSize;
 
@@ -203,6 +203,15 @@ pub(crate) fn outcome(job: &JobSummary) -> (String, Tone) {
 /// took before the daemon saw it queued.
 pub(crate) fn title(job: &JobSummary) -> String {
     named(job.workflow.as_deref(), &job.name, job.id)
+}
+
+/// A record's job as [`title`] names a job.
+pub(crate) fn record_title(record: &Record) -> String {
+    named(
+        record.workflow.as_deref(),
+        record.name.as_deref().unwrap_or(""),
+        record.job,
+    )
 }
 
 /// A queued job as [`title`] names a job.
@@ -521,6 +530,15 @@ fn record_note(job: u64, note: &RecordNote, now: u64, paint: Paint) -> String {
     }
 }
 
+/// What a removal of records freed.
+pub(crate) fn removed(removed: &RemovedRecords) -> String {
+    match removed.jobs.len() {
+        0 => "no record removed".to_owned(),
+        1 => format!("removed 1 record, {} freed", bytes(removed.bytes)),
+        count => format!("removed {count} records, {} freed", bytes(removed.bytes)),
+    }
+}
+
 /// `runnerctl records`.
 pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
     let limits = &records.limits;
@@ -548,14 +566,7 @@ pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
         table.row(vec![
             plain(record.job.to_string()),
             plain(&record.repository),
-            cell(
-                named(
-                    record.workflow.as_deref(),
-                    record.name.as_deref().unwrap_or(""),
-                    record.job,
-                ),
-                Tone::Dim,
-            ),
+            cell(record_title(record), Tone::Dim),
             plain(bytes(record.bytes)),
             cell(made, Tone::Dim),
         ]);
