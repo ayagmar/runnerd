@@ -183,8 +183,9 @@ impl Predictor {
 pub enum Policy {
     /// When a slot is free and the caps of the running jobs and its own fit the budget: what runnerd does now.
     Caps,
-    /// When a slot is free, the predictions of the running jobs and its own fit the budget, and the running jobs'
-    /// peaks are under `HIGH_WATER` percent of it.
+    /// As the daemon admits: when a slot is free, the running jobs (each at the larger of its prediction and its
+    /// peak) and the largest prediction among the repository's waiting jobs fit the budget, and the running jobs'
+    /// peaks are under `HIGH_WATER` percent of it. A started job then reserves its own prediction.
     Measured,
 }
 
@@ -202,7 +203,9 @@ pub struct Replay {
     /// The most jobs that ran at once.
     pub most_running: u64,
     /// The most memory, in bytes, the running jobs' peaks and the mirror add up to at one moment: as if every
-    /// running job peaked at once, which is more than the slice ever holds.
+    /// running job peaked at once, which is more than the slice ever holds. Not a bound on the daemon, which can
+    /// overlap more: it sees what jobs use, less than their peaks while they warm up, and the replay leaves out
+    /// start latency, seeds, shells and cancelled jobs.
     pub worst_overlap: u64,
     /// Seconds from the first job queued to the last one finished.
     pub makespan: u64,
@@ -224,7 +227,8 @@ struct Running<'run> {
 /// Replays `jobs` through `policy`: each arrives when it was queued and runs as long as it ran, in a profile with
 /// `slots` (by name; the config's where absent) under the slice's `memory_max`. Jobs start as soon as the policy
 /// admits them, oldest first, a job that does not fit letting a later one past, as `scheduler::plan` does.
-/// Measured admission predicts from the runs finished before it decides, as the daemon would.
+/// Measured admission predicts from the runs finished before it decides, as the daemon would, and holds each
+/// running job at its peak for its whole run, which the daemon does not see.
 pub fn simulate(
     config: &Config,
     memory_max: Option<u64>,
@@ -271,7 +275,14 @@ pub fn simulate(
             waiting.push(run);
             next += 1;
         }
-        waiting.retain(|run| !replayer.admit(run, now));
+        let mut index = 0;
+        while let Some(run) = waiting.get(index).copied() {
+            if replayer.admit(run, &waiting, now) {
+                waiting.remove(index);
+            } else {
+                index += 1;
+            }
+        }
         replayer.most_running = replayer.most_running.max(replayer.running.len() as u64);
         let peaks: u64 = replayer.running.iter().map(|running| running.peak).sum();
         replayer.worst_overlap = replayer.worst_overlap.max(peaks + mirror);
@@ -316,14 +327,32 @@ impl<'run> Replayer<'run> {
         self.running = running;
         for ended in ended {
             let cap = self.config.profiles[ended.profile].memory.0;
-            self.predictor
-                .learn(ended.run, ended.profile, cap, ended.ends);
+            let reserved = (self.policy == Policy::Measured).then_some(ended.reserved);
+            let run = Ran {
+                reserved,
+                ..ended.run.clone()
+            };
+            self.predictor.learn(&run, ended.profile, cap, ended.ends);
             self.last_end = self.last_end.max(ended.ends);
         }
     }
 
-    /// Starts `run` at `now` if the policy admits it; whether it did.
-    fn admit(&mut self, run: &'run Ran, now: u64) -> bool {
+    /// What a running job takes of the budget: under measured admission, as the daemon counts it, the larger of
+    /// what it reserved and what it uses, here its peak for the whole run.
+    fn taken(&self) -> u64 {
+        self.running
+            .iter()
+            .map(|running| match self.policy {
+                Policy::Caps => running.reserved,
+                Policy::Measured => running.reserved.max(running.peak),
+            })
+            .sum()
+    }
+
+    /// Starts `run` at `now` if the policy admits it, `waiting` being every job not started yet; whether it did.
+    /// As in the daemon, the runner starts reserving the largest prediction among its repository's waiting jobs,
+    /// then its job's own.
+    fn admit(&mut self, run: &'run Ran, waiting: &[&Ran], now: u64) -> bool {
         let Some((profile, limits)) = self.config.profiles.get_key_value(&run.profile) else {
             return false;
         };
@@ -337,17 +366,26 @@ impl<'run> Replayer<'run> {
             return false;
         }
         let cap = limits.memory.0;
-        let reserved = match self.policy {
-            Policy::Caps => cap,
-            Policy::Measured => {
-                self.predictor
-                    .predict(&Key::of(run), profile, cap, now)
-                    .memory
-            }
+        let predict = |job: &Ran| {
+            self.predictor
+                .predict(&Key::of(job), profile, cap, now)
+                .memory
+        };
+        let (starting, reserved) = match self.policy {
+            Policy::Caps => (cap, cap),
+            Policy::Measured => (
+                waiting
+                    .iter()
+                    .filter(|job| job.repository == run.repository)
+                    .map(|job| predict(job))
+                    .max()
+                    .unwrap_or(0)
+                    .max(predict(run)),
+                predict(run),
+            ),
         };
         if let Some(budget) = self.budget {
-            let taken: u64 = self.running.iter().map(|running| running.reserved).sum();
-            if taken + reserved > budget {
+            if self.taken() + starting > budget {
                 return false;
             }
             let peaks: u64 = self.running.iter().map(|running| running.peak).sum();

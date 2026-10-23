@@ -320,3 +320,57 @@ fn the_high_water_mark_holds_back_what_the_predictions_have_room_for() {
         "{measured:?}"
     );
 }
+
+#[test]
+fn a_runner_starts_reserving_the_largest_prediction_among_the_waiting_jobs_of_its_repository() {
+    let config = config();
+    // Ten builds at 1G and ten e2e at 5G, one at a time, long before: 1.25G and 5.75G predicted.
+    let mut jobs: Vec<Ran> = (0..20)
+        .map(|i| {
+            let (name, peak) = if i % 2 == 0 {
+                ("build", G)
+            } else {
+                ("e2e", 5 * G)
+            };
+            run(
+                "halyard/storefront",
+                name,
+                "node",
+                NOW + i * 10 * MINUTE,
+                1,
+                peak,
+            )
+        })
+        .collect();
+    let start = NOW + 300 * MINUTE;
+    // An e2e runs for half an hour; a build and another e2e queue a minute in.
+    jobs.push(run("halyard/storefront", "e2e", "node", start, 30, 5 * G));
+    jobs.push(run(
+        "halyard/storefront",
+        "build",
+        "node",
+        start + MINUTE,
+        5,
+        G,
+    ));
+    jobs.push(run(
+        "halyard/storefront",
+        "e2e",
+        "node",
+        start + MINUTE,
+        5,
+        5 * G,
+    ));
+    let slots = BTreeMap::from([("node".to_owned(), 3)]);
+    // An 8G budget beside the mirror: the build's runner may get the e2e, so it waits for 5.75G with the first.
+    let replay = simulate(
+        &config,
+        Some(8 * G + 512 * M),
+        &jobs,
+        Policy::Measured,
+        &slots,
+    );
+    assert_eq!(replay.never_started, 0);
+    // Both waited the 29 minutes; nearest-rank p95 of 23 waits is the 22nd.
+    assert_eq!(replay.wait.p95, 29 * 60);
+}

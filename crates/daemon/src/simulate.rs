@@ -78,7 +78,9 @@ pub(crate) fn report(
     let _ = writeln!(
         out,
         "PEAKS is every running job's peak added up at the busiest moment, with the mirror: more than the slice \
-         ever held.\n"
+         ever held, but a lower bound on what the daemon could overlap. The replay holds each running job at its \
+         peak, where the daemon admits against what jobs use while they warm up, and it leaves out start latency, \
+         seeds, shells and cancelled jobs.\n"
     );
     let _ = writeln!(
         out,
