@@ -23,6 +23,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
+use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Sizing, Spread};
 use runnerd_core::api::{
     Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
     CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, EventQuery,
@@ -707,6 +708,129 @@ fn find_job(fake: &Fake, id: u64) -> Option<Job> {
 }
 
 /// The slice the fixtures' config names has a `MemoryMax` of 33G.
+/// What the history says of the config's profiles: jvm's tests peak near 7.8G of 9G, so 9G stays; node's builds
+/// peak at 2.1G of 7G and wait for a slot, so 2.5G caps fit 5 in its 2 × 7G. The end-to-end job has too few runs.
+fn sizing(fixtures: &Fixtures) -> Sizing {
+    let config = runnerd_core::config::Config::parse(&fixtures.config).unwrap();
+    let spread = |p50, p95, p99, max| Spread { p50, p95, p99, max };
+    let gib = |tenths: u64| tenths * GIB / 10;
+    let job =
+        |repository: &str, name: &str, jobs, memory: Spread, wait: Spread, advice| JobSizing {
+            repository: repository.to_owned(),
+            workflow: Some("CI".to_owned()),
+            name: name.to_owned(),
+            peaks: Peaks {
+                jobs,
+                at_cap: 0,
+                memory,
+                cpu: spread(3100, 6900, 7600, 7900),
+            },
+            wait,
+            advice,
+        };
+    let profiles = config
+        .profiles
+        .iter()
+        .map(|(name, profile)| {
+            let (busy, wait, memory, advice, jobs) = if name == "jvm" {
+                let memory = spread(gib(52), gib(74), gib(78), gib(79));
+                let wait = spread(8, 35, 70, 95);
+                (
+                    41,
+                    wait,
+                    memory,
+                    Advice::Keep { memory: 9 * GIB },
+                    vec![
+                        job(
+                            "halyard/ledger",
+                            "build",
+                            212,
+                            spread(gib(31), gib(42), gib(45), gib(46)),
+                            spread(7, 30, 66, 90),
+                            Advice::Lower {
+                                memory: 5376 * MIB,
+                                slots: 2,
+                            },
+                        ),
+                        job(
+                            "halyard/ledger",
+                            "integration tests",
+                            188,
+                            memory,
+                            wait,
+                            Advice::Keep { memory: 9 * GIB },
+                        ),
+                    ],
+                )
+            } else {
+                let memory = spread(gib(14), gib(19), gib(21), gib(22));
+                let wait = spread(12, 260, 430, 610);
+                (
+                    78,
+                    wait,
+                    memory,
+                    Advice::Lower {
+                        memory: 2560 * MIB,
+                        slots: 5,
+                    },
+                    vec![
+                        job(
+                            "halyard/storefront",
+                            "build",
+                            236,
+                            memory,
+                            wait,
+                            Advice::Lower {
+                                memory: 2560 * MIB,
+                                slots: 5,
+                            },
+                        ),
+                        job(
+                            "halyard/storefront",
+                            "e2e",
+                            6,
+                            spread(gib(18), gib(20), gib(20), gib(20)),
+                            spread(15, 280, 280, 280),
+                            Advice::TooFew { jobs: 6 },
+                        ),
+                    ],
+                )
+            };
+            let advice = match advice {
+                Advice::Lower { memory, .. } if profile.memory.0 <= memory => {
+                    Advice::Keep { memory }
+                }
+                advice => advice,
+            };
+            ProfileSizing {
+                name: name.clone(),
+                memory: profile.memory.0,
+                cpus: profile.cpus,
+                slots: profile.slots,
+                peaks: Peaks {
+                    jobs: jobs.iter().map(|job| job.peaks.jobs).sum(),
+                    at_cap: 0,
+                    memory,
+                    cpu: spread(3100, 6900, 7600, 7900),
+                },
+                wait,
+                busy,
+                advice,
+                jobs,
+            }
+        })
+        .collect();
+    Sizing {
+        since: fixtures.now - 30 * 86_400,
+        until: fixtures.now,
+        margin: 15,
+        sample_interval: 2,
+        min_jobs: 10,
+        memory_max: Some(33 * GIB),
+        profiles,
+    }
+}
+
 fn check(text: &str) -> (Option<runnerd_core::config::Config>, ConfigCheck) {
     runnerd_core::config::Config::check(text, |_| {
         Ok(Some(runnerd_core::config::ByteSize(33 * GIB)))
@@ -1021,6 +1145,10 @@ fn router(fake: Fake) -> Router {
             }),
         )
         .route("/v1/config/check", post(|text: String| async move { Json(check(&text).1) }))
+        .route(
+            "/v1/sizing",
+            get(|State(fake): State<Fake>| async move { Json(sizing(&fake.fixtures.lock().unwrap())) }),
+        )
         .route(
             "/v1/doctor",
             get(|| async {

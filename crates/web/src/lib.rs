@@ -34,10 +34,11 @@ mod views;
 
 pub use auth::login_file;
 use views::caches::CachesView;
-use views::config::ConfigView;
+use views::config::{ConfigQuery, ConfigView};
 use views::history::{Filter, History};
 use views::job::JobView;
 use views::overview::Overview;
+use views::sizing::SizingView;
 
 /// The dashboard's default address.
 pub const DEFAULT_ADDR: &str = "127.0.0.1:7477";
@@ -125,6 +126,7 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .route("/", get(overview))
         .route("/history", get(history))
         .route("/caches", get(caches))
+        .route("/sizing", get(sizing))
         .route("/jobs/{id}", get(job))
         .route("/jobs/{id}/log", get(job_log))
         .route("/live/overview", get(live::overview))
@@ -232,9 +234,17 @@ async fn caches(State(app): State<App>) -> Response {
     )
 }
 
-async fn config(State(app): State<App>) -> Response {
+async fn sizing(State(app): State<App>) -> Response {
     page(
-        ConfigView::load(&app.daemon)
+        SizingView::load(&app.daemon)
+            .await
+            .map(|sizing| views::sizing::render(&sizing)),
+    )
+}
+
+async fn config(State(app): State<App>, Query(query): Query<ConfigQuery>) -> Response {
+    page(
+        ConfigView::load(&app.daemon, query.resize)
             .await
             .map(|config| views::config::render(&config)),
     )

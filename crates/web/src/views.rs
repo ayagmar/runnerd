@@ -17,6 +17,7 @@ pub(crate) mod config;
 pub(crate) mod history;
 pub(crate) mod job;
 pub(crate) mod overview;
+pub(crate) mod sizing;
 
 /// The pages in the navigation.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -24,6 +25,7 @@ pub(crate) enum Page {
     Overview,
     History,
     Caches,
+    Sizing,
     Config,
 }
 
@@ -126,6 +128,7 @@ pub(crate) fn page(
         (Page::Overview, "/", "Overview"),
         (Page::History, "/history", "History"),
         (Page::Caches, "/caches", "Caches"),
+        (Page::Sizing, "/sizing", "Sizing"),
         (Page::Config, "/config", "Config"),
     ];
     html! {
