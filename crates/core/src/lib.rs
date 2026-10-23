@@ -6,6 +6,8 @@
 
 #![warn(missing_docs)]
 
+#[cfg(feature = "host")]
+pub mod admission;
 pub mod api;
 #[cfg(feature = "host")]
 pub mod cache;

@@ -59,6 +59,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         cpu_peak: 3000,
         queued_at: NOW - 2 * HOUR,
         started_at: Some(NOW - 2 * HOUR + wait_secs * 1000),
+        finished_at: Some(NOW - HOUR),
     }
 }
 
