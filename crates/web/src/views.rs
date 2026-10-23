@@ -238,23 +238,24 @@ pub(crate) fn js(text: &str) -> String {
     literal
 }
 
-/// The id of a slot's card, which its budget block and its job's rows point at: `jvm` slot 1 → `slot-6a766d-1`.
-/// The profile's name is in hex, so no two names share an id, as `node-js` and `node_js` would as a slug.
-pub(crate) fn slot_id(profile: &str, slot: usize) -> String {
-    let mut id = String::with_capacity(8 + profile.len() * 2);
-    id.push_str("slot-");
-    for byte in profile.bytes() {
-        let _ = write!(id, "{byte:02x}");
+/// `text`'s bytes in hex: an id or signal name no two texts share, as `node-js` and `node_js` would as a slug.
+fn hex(text: &str) -> String {
+    let mut hex = String::with_capacity(text.len() * 2);
+    for byte in text.bytes() {
+        let _ = write!(hex, "{byte:02x}");
     }
-    let _ = write!(id, "-{slot}");
-    id
+    hex
 }
 
-/// The path of a repository's row, for the ids live updates use: `halyard/ledger` → `halyard-ledger`.
-pub(crate) fn slug(name: &str) -> String {
-    name.chars()
-        .map(|c| if c.is_ascii_alphanumeric() { c } else { '-' })
-        .collect()
+/// The id of a slot's card, which its budget block and its job's rows point at: `jvm` slot 1 → `slot-6a766d-1`.
+pub(crate) fn slot_id(profile: &str, slot: usize) -> String {
+    format!("slot-{}-{slot}", hex(profile))
+}
+
+/// The id of a repository's row, which a pause or resume replaces: `a/b` → `repo-612f62`. Also a signal name's
+/// suffix, so it has only letters and digits after its dash.
+pub(crate) fn repository_id(name: &str) -> String {
+    format!("repo-{}", hex(name))
 }
 
 #[cfg(test)]
@@ -262,9 +263,10 @@ mod tests {
     use super::*;
 
     #[test]
-    fn profiles_whose_slugs_match_get_their_own_slot_ids() {
+    fn names_whose_slugs_match_get_their_own_ids() {
         assert_ne!(slot_id("node-js", 1), slot_id("node_js", 1));
         assert_ne!(slot_id("a", 11), slot_id("a1", 1));
+        assert_ne!(repository_id("halyard/b-c"), repository_id("halyard/b_c"));
     }
 
     #[test]

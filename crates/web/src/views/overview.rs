@@ -9,7 +9,7 @@ use runnerd_core::api::{
     RepositoryStatus, Sample, SampleSeries, SlotStatus, Status,
 };
 
-use super::{Page, badge, js, page, profile_class, slot_id, slug, time_ago};
+use super::{Page, badge, js, page, profile_class, repository_id, slot_id, time_ago};
 use crate::chart::{Base, Series, TimeChart, nice_top, sparkline};
 use crate::daemon::{Daemon, Error};
 use crate::format;
@@ -696,7 +696,7 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
         held.join(", ")
     );
     html! {
-        li #(format!("repo-{}", slug(&repository.name))) class=(format!("repository {class}"))
+        li #(repository_id(&repository.name)) class=(format!("repository {class}"))
             data-on:pointerenter=(enter) data-on:focusin=(enter)
             data-on:pointerleave="evt.pointerType == 'mouse' && ($_repo = '')" data-on:focusout="$_repo = ''" data-class:linked=(linked) {
             div.repo-name {
@@ -709,7 +709,7 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
                 @if repository.paused { span.badge.neutral { "paused" } }
             }
             // One busy signal per row, so a pending pause greys out only its own button.
-            @let busy = format!("_busy_{}", slug(&repository.name).replace('-', "_"));
+            @let busy = format!("_busy_{}", repository_id(&repository.name).replace('-', "_"));
             button.button-quiet type="button"
                 data-indicator=(busy)
                 data-attr:aria-busy=(format!("${busy} && 'true'"))

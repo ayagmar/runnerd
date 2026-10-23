@@ -37,7 +37,7 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{Event, EventEnvelope, HostSample, Sample};
 
-use crate::views::slot_id;
+use crate::views::{repository_id, slot_id};
 
 /// 2026-10-22T14:03:07Z.
 const NOW: u64 = 1_792_677_787;
@@ -271,7 +271,9 @@ async fn a_resume_from_the_dashboard_reaches_the_daemon_and_returns_the_row_with
     assert_eq!(reply.status, StatusCode::OK);
     assert!(!dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused);
     assert!(
-        reply.body.contains(r#"id="repo-halyard-ledger""#),
+        reply
+            .body
+            .contains(&format!(r#"id="{}""#, repository_id("halyard/ledger"))),
         "{}",
         reply.body
     );
@@ -291,6 +293,51 @@ async fn a_resume_from_the_dashboard_reaches_the_daemon_and_returns_the_row_with
     assert!(
         unknown.body.contains(r#"id="notice""#)
             && unknown.body.contains("not a configured repository")
+    );
+}
+
+#[tokio::test]
+async fn repositories_whose_names_differ_only_in_punctuation_keep_their_own_rows() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let mut dash = fixtures.status.repositories[0].clone();
+        dash.name = "halyard/b-c".to_owned();
+        dash.paused = true;
+        let mut underscore = dash.clone();
+        underscore.name = "halyard/b_c".to_owned();
+        fixtures.status.repositories = vec![dash, underscore];
+    }
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let (dash, underscore) = (repository_id("halyard/b-c"), repository_id("halyard/b_c"));
+    for id in [&dash, &underscore] {
+        assert_eq!(
+            overview.matches(&format!(r#"id="{id}""#)).count(),
+            1,
+            "one row has the id {id}"
+        );
+        let busy = format!(r#"data-indicator="_busy_{}""#, id.replace('-', "_"));
+        assert_eq!(
+            overview.matches(&busy).count(),
+            1,
+            "{id}'s pause button has its own busy signal"
+        );
+    }
+    // The resume's reply replaces the row with its id: it must be that repository's.
+    let origin = format!("http://{}", dashboard.addr);
+    let reply = dashboard
+        .request(
+            "POST",
+            "/v1/repositories/halyard/b_c/resume",
+            &[("cookie", &cookie), ("origin", &origin)],
+        )
+        .await;
+    assert!(
+        reply.body.contains(&format!(r#"id="{underscore}""#))
+            && !reply.body.contains(&format!(r#"id="{dash}""#)),
+        "{}",
+        reply.body
     );
 }
 
@@ -671,7 +718,8 @@ async fn the_overview_shows_a_repository_resumed_from_another_client() {
     assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
     let update = read_until(&mut stream, |text| text.contains(r#"id="repositories""#)).await;
     assert!(
-        update.contains(r#"id="repo-halyard-ledger""#) && !update.contains("badge neutral"),
+        update.contains(&format!(r#"id="{}""#, repository_id("halyard/ledger")))
+            && !update.contains("badge neutral"),
         "{update}"
     );
 }
@@ -1039,7 +1087,10 @@ async fn pausing_a_repository_with_a_running_job_asks_first_and_cancels_only_whe
         )
         .await;
     assert!(
-        forced.body.contains(r#"id="repo-halyard-ledger""#) && forced.body.contains("stopped job"),
+        forced
+            .body
+            .contains(&format!(r#"id="{}""#, repository_id("halyard/ledger")))
+            && forced.body.contains("stopped job"),
         "{}",
         forced.body
     );
