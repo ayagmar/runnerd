@@ -158,6 +158,8 @@ fn status() -> Status {
         version: "0.1.0".to_owned(),
         shutting_down: false,
         budget: Budget {
+            admission: runnerd_core::api::AdmissionPolicy::Caps,
+            held: false,
             slice: "ci.slice".to_owned(),
             memory_max: Some(33 << 30),
             memory_in_use: 0,
@@ -373,6 +375,7 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
             },
         );
         daemon.store.runner_started(RunnerRecord {
+            admission: None,
             name: runner.clone(),
             repository: "o/app".to_owned(),
             profile: "jvm".to_owned(),
@@ -384,6 +387,7 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
         });
         daemon.store.claimed(id, 2, &runner, now - 40_000);
         daemon.store.samples(vec![SampleRecord {
+            oom_kills: 0,
             runner: runner.clone(),
             at: now - 30_000,
             cpu: 0,
@@ -814,6 +818,8 @@ async fn a_second_daemon_does_not_take_over_a_live_socket() {
 fn budget(memory_in_use: u64) -> Event {
     Event::BudgetChanged {
         budget: Budget {
+            admission: runnerd_core::api::AdmissionPolicy::Caps,
+            held: false,
             slice: "ci.slice".to_owned(),
             memory_max: None,
             memory_in_use,
@@ -942,6 +948,7 @@ async fn a_followed_log_sends_stored_and_new_lines_and_ends_when_the_job_finishe
         },
     );
     store.runner_started(RunnerRecord {
+        admission: None,
         name: "runner-1".to_owned(),
         repository: "o/app".to_owned(),
         profile: "app".to_owned(),
@@ -1062,6 +1069,7 @@ fn failed_job(store: &Store, id: u64) {
     );
     let runner = format!("runner-{id}");
     store.runner_started(RunnerRecord {
+        admission: None,
         name: runner.clone(),
         repository: "o/app".to_owned(),
         profile: "app".to_owned(),

@@ -50,6 +50,21 @@ pub struct Host {
     /// How often GitHub is asked for queued jobs.
     #[serde(default = "default_poll_interval", deserialize_with = "duration")]
     pub poll_interval: Duration,
+    /// What a runner must fit in before it starts. Default `caps`.
+    #[serde(default)]
+    pub admission: Admission,
+}
+
+/// `admission` under `[host]`: what a new runner must fit in the slice's `MemoryMax` beside the running ones.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Admission {
+    /// Every runner's memory cap: `slots × memory` over all profiles, with the mirror, must fit `MemoryMax`.
+    #[default]
+    Caps,
+    /// Every runner's predicted peak, from the job history; `slots` only bounds how many run at once, and one
+    /// runner of each profile with the mirror must fit `MemoryMax`. Nothing starts while the slice is at 90% of it.
+    Measured,
 }
 
 fn default_poll_interval() -> Duration {
@@ -332,6 +347,30 @@ pub enum ConfigError {
     /// The caps add up past `u64::MAX` bytes.
     #[error("slots × memory over all profiles plus the mirror is too large to add up")]
     BudgetOverflow,
+    /// `admission = "measured"` with a slice that has no `MemoryMax` to admit against.
+    #[error(
+        "admission = \"measured\" admits runners against the slice {slice}'s MemoryMax, and it has none; install \
+         a unit file for it (`runnerd doctor` prints one)"
+    )]
+    MeasuredWithoutMemoryMax {
+        /// The slice runners run in.
+        slice: String,
+    },
+    /// Under `admission = "measured"`, one runner of a profile and the mirror do not fit `MemoryMax`.
+    #[error(
+        "one runner of {profile} and the mirror take {needs}, the slice {slice}'s MemoryMax is {memory_max}; lower \
+         its `memory` or raise the slice's MemoryMax"
+    )]
+    ProfileOverBudget {
+        /// The profile.
+        profile: String,
+        /// Its `memory` and the mirror's.
+        needs: ByteSize,
+        /// The slice runners run in.
+        slice: String,
+        /// The slice's `MemoryMax`.
+        memory_max: ByteSize,
+    },
     /// The caps add up to more than the slice's `MemoryMax`.
     #[error(
         "slots × memory over all profiles plus the mirror is {total}, \
@@ -424,9 +463,16 @@ impl Config {
             .and_then(|warnings| Ok((warnings, config.memory_caps()?)))
         {
             Ok((warnings, total)) => {
+                let message = match (config.host.admission, max) {
+                    (Admission::Measured, Some(max)) if total > max => format!(
+                        "valid, memory caps sum to {total}, over the {max} MemoryMax: admission = \"measured\" \
+                         starts what the predicted peaks fit"
+                    ),
+                    _ => format!("valid, memory caps sum to {total}"),
+                };
                 let check = api::ConfigCheck {
                     valid: true,
-                    message: format!("valid, memory caps sum to {total}"),
+                    message,
                     warnings: warnings.iter().map(ToString::to_string).collect(),
                     memory_caps: Some(total.0),
                     memory_max: max.map(|max| max.0),
@@ -511,6 +557,32 @@ impl Config {
             }
         }
         let total = self.memory_caps()?;
+        if self.host.admission == Admission::Measured {
+            let Some(memory_max) = memory_max else {
+                return Err(ConfigError::MeasuredWithoutMemoryMax {
+                    slice: self.host.slice.clone(),
+                });
+            };
+            let mirror = if self.caches.mirror.enabled {
+                self.caches.mirror.memory.0
+            } else {
+                0
+            };
+            if let Some((profile, needs)) = self
+                .profiles
+                .iter()
+                .map(|(name, profile)| (name, profile.memory.0.saturating_add(mirror)))
+                .find(|(_, needs)| *needs > memory_max.0)
+            {
+                return Err(ConfigError::ProfileOverBudget {
+                    profile: profile.clone(),
+                    needs: ByteSize(needs),
+                    slice: self.host.slice.clone(),
+                    memory_max,
+                });
+            }
+            return Ok(Vec::new());
+        }
         match memory_max {
             Some(memory_max) if total > memory_max => Err(ConfigError::OverBudget {
                 total,

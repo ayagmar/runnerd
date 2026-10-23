@@ -1,0 +1,118 @@
+---
+// The memory budget of the example config: what check-config adds up, and what a tick admits. Widths are to scale.
+import Diagram from '../Diagram.astro';
+
+const memoryMax = 33;
+const gap = 2;
+
+interface Block {
+  label: string;
+  size: number;
+  className: string;
+}
+
+// Lays blocks out left to right across the 480-unit width, `gap` apart, each as wide as its share of `memoryMax`.
+const layout = (blocks: Block[]) => {
+  const scale = (480 - gap * (blocks.length - 1)) / memoryMax;
+  let x = 0;
+  return blocks.map((block) => {
+    const placed = { ...block, x, width: block.size * scale };
+    x += placed.width + gap;
+    return placed;
+  });
+};
+
+const caps = layout([
+  { label: 'jvm 1', size: 9, className: 'jvm' },
+  { label: 'jvm 2', size: 9, className: 'jvm' },
+  { label: 'node 1', size: 7, className: 'node' },
+  { label: 'node 2', size: 7, className: 'node' },
+  { label: '', size: 0.5, className: 'box-2' },
+]);
+
+const tick = layout([
+  { label: 'jvm 1', size: 9, className: 'jvm' },
+  { label: 'node 1', size: 7, className: 'node' },
+  { label: 'jvm shell', size: 9, className: 'box-2' },
+  { label: '', size: 0.5, className: 'box-2' },
+  { label: '7.5G free', size: 7.5, className: 'free' },
+]);
+
+// The queued jobs' blocks, at the bars' scale.
+const scale = (480 - gap * 4) / memoryMax;
+---
+
+<Diagram
+  name="budget"
+  caption="The example config in a slice with MemoryMax=33G, to scale. A shell in a record and a reseed take memory too, so a free slot is not always room."
+>
+  <svg viewBox="0 0 480 404" role="img" aria-labelledby="budget-title" aria-describedby="budget-desc">
+    <title id="budget-title">The memory budget</title>
+    <desc id="budget-desc">
+      runnerd check-config adds every slot's memory cap and the mirror's: two jvm slots of 9G, two node slots of 7G and
+      512M for the mirror make 32.5G, which fits a MemoryMax of 33G. Each tick, what runs takes its cap: here jvm 1,
+      node 1, a shell in a jvm record at 9G and the mirror use 25.5G, leaving 7.5G. A queued node job needs 7G, which
+      fits, so it starts in node 2. A queued jvm job needs 9G, which does not fit, so it waits in GitHub's queue though
+      jvm 2 is free.
+    </desc>
+
+    <text class="t" x="0" y="17">runnerd check-config</text>
+    <text class="m" x="0" y="40">every slot's cap and the mirror: 32.5G of 33G</text>
+    {
+      caps.map((block) =>
+        block.className === 'free' ? (
+          <rect class="frame" x={block.x + 0.75} y="56.75" width={block.width - 1.5} height="46.5" />
+        ) : (
+          <rect class={block.className} x={block.x} y="56" width={block.width} height="48" />
+        ),
+      )
+    }
+    {
+      caps
+        .filter((block) => block.label)
+        .map((block) => (
+          <>
+            <text class="on-block" x={block.x + 12} y="77">{block.label}</text>
+            <text class="on-block" x={block.x + 12} y="96">{block.size}G</text>
+          </>
+        ))
+    }
+    <text class="m" x="480" y="126" text-anchor="end">mirror 512M, 512M free</text>
+
+    <text class="t" x="0" y="177">each tick</text>
+    <text class="m" x="0" y="200">what runs takes its cap; a job starts if its cap</text>
+    <text class="m" x="0" y="220">fits what is left</text>
+    {
+      tick.map((block) =>
+        block.className === 'free' ? (
+          <rect class="frame" x={block.x + 0.75} y="236.75" width={block.width - 1.5} height="46.5" />
+        ) : (
+          <rect class={block.className} x={block.x} y="236" width={block.width} height="48" />
+        ),
+      )
+    }
+    {
+      tick
+        .filter((block) => block.label)
+        .map((block) => (
+          <>
+            <text class={{ free: 'm', 'box-2': '' }[block.className] ?? 'on-block'} x={block.x + 12} y="257">
+              {block.label}
+            </text>
+            {block.className !== 'free' && (
+              <text class={block.className === 'box-2' ? '' : 'on-block'} x={block.x + 12} y="276">
+                {block.size}G
+              </text>
+            )}
+          </>
+        ))
+    }
+
+    <rect class="node" x="0" y="312" width={7 * scale} height="36"></rect>
+    <text class="on-block" x="12" y="336">7G</text>
+    <text x={7 * scale + 12} y="336">a node job fits: it starts in node 2</text>
+    <rect class="jvm" x="0" y="360" width={9 * scale} height="36"></rect>
+    <text class="on-block" x="12" y="384">9G</text>
+    <text x={9 * scale + 12} y="384">a jvm job waits, though jvm 2 is free</text>
+  </svg>
+</Diagram>

@@ -1,8 +1,37 @@
 # runnerd
 
+[![CI](https://github.com/ayagmar/runnerd/actions/workflows/ci.yml/badge.svg?branch=main)](https://github.com/ayagmar/runnerd/actions/workflows/ci.yml)
+[![Release](https://img.shields.io/github/v/release/ayagmar/runnerd)](https://github.com/ayagmar/runnerd/releases/latest)
+[![crates.io](https://img.shields.io/crates/v/runnerd)](https://crates.io/crates/runnerd)
+[![MSRV](https://img.shields.io/crates/msrv/runnerd)](rust-toolchain.toml)
+[![License: MIT](https://img.shields.io/github/license/ayagmar/runnerd)](LICENSE)
+[![Docs](https://img.shields.io/badge/docs-ayagmar.github.io%2Frunnerd-1f6b3a)](https://ayagmar.github.io/runnerd/)
+
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development: the daemon schedules runners, records every job, can keep a failed job's runner to open a shell in, advises on each profile's memory and slots from past jobs' peaks, serves a JSON API and a web dashboard, and `runnerctl` reads and controls it from a terminal.
+It is in early development: the daemon schedules runners, records every job, can keep a failed job's runner to open a shell in, advises on each profile's memory and slots from past jobs' peaks, can admit runners by those peaks instead of their caps, serves a JSON API and a web dashboard, and `runnerctl` reads and controls it from a terminal.
+
+```mermaid
+flowchart TB
+    github["GitHub<br/>queued jobs, JIT runners, steps"]
+    subgraph daemon["runnerd serve"]
+        engine["engine"] --- history[("job history<br/>SQLite")]
+        api["API: JSON and events<br/>on a Unix socket"]
+        web["dashboard<br/>127.0.0.1:7477"]
+    end
+    subgraph slice["runnerd.slice: MemoryMax is the budget"]
+        jvm1["jvm 1"]
+        jvm2["jvm 2"]
+        node1["node 1"]
+        mirror["Docker Hub mirror"]
+    end
+    github <-->|"HTTPS, the gh CLI's token"| engine
+    engine -->|"Docker API: one container per job"| slice
+    runnerctl["runnerctl, runnerctl tui"] --> api
+    browser["browser"] --> web
+    web --> api
+    api --> engine
+```
 
 ## First run
 
@@ -81,7 +110,7 @@ cargo binstall runnerd runnerd-cli
 The site, <https://ayagmar.github.io/runnerd/>, has the guides:
 
 - [Install](https://ayagmar.github.io/runnerd/install/): requirements, `runnerd init`'s output, verifying a release.
-- [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, profiles, runner images, records of failed jobs, sizing advice from the job history, the budget check, isolation.
+- [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, profiles, runner images, records of failed jobs, sizing advice from the job history, measured admission, the budget check, isolation.
 - [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled and caches kept warm, records of failed jobs and their shells, the job history, and the JSON API and its events.
 - [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/): the web dashboard, every `runnerctl` command, and `runnerctl tui` with its keys.
 

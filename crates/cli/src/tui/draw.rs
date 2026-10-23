@@ -14,8 +14,8 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    Advice, Job, JobSummary, ProfileSizing, ProfileStatus, RepositoryStatus, Sample, Sizing,
-    SlotStatus, Status, Step,
+    AdmissionPolicy, Advice, Job, JobSummary, ProfileSizing, ProfileStatus, RepositoryStatus,
+    Sample, Sizing, SlotStatus, Status, Step,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -321,11 +321,9 @@ fn scale(part: u64, whole: u64, width: u16) -> u16 {
     u16::try_from(cells).unwrap_or(width).min(width)
 }
 
-/// The budget as one bar: a block per slot as wide as its memory, filled as far as its job uses it; then the
-/// mirror and each seed container, then what is free.
-fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let status = &app.live.status;
-    let budget = &status.budget;
+/// The budget's heading: what is reserved of what, how runners are admitted, and what the slice uses.
+fn budget_note(app: &App) -> String {
+    let budget = &app.live.status.budget;
     let mut note = match budget.memory_max {
         Some(max) => format!(
             "{} of {} reserved in {}",
@@ -339,22 +337,45 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             budget.slice
         ),
     };
+    if let Some(by) = budget.admission_note() {
+        let _ = write!(note, " {by}");
+    }
     if let Some(host) = &app.live.host {
         let _ = write!(note, " · {} in use, sampled", bytes(host.memory));
     }
+    note
+}
+
+/// The budget as one bar: a block per slot as wide as its memory (under measured admission, a block per runner as
+/// wide as what it reserves), filled as far as its job uses it; then the mirror and each seed container, then what
+/// is free.
+fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
+    let status = &app.live.status;
+    let budget = &status.budget;
+    let mut note = budget_note(app);
     let [title, bar, labels] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
 
-    let caps: u64 = app.slots().map(|(_, profile, _)| profile.memory).sum();
+    let blocks: Vec<_> = app
+        .slots()
+        .filter_map(|(index, profile, slot)| {
+            let memory = match budget.admission {
+                AdmissionPolicy::Caps => Some(profile.memory),
+                AdmissionPolicy::Measured => slot.runner.as_ref().map(|runner| runner.reserved),
+            }?;
+            Some((index, profile, slot, memory))
+        })
+        .collect();
+    let caps: u64 = blocks.iter().map(|(_, _, _, memory)| memory).sum();
     let whole = budget.memory_max.unwrap_or(caps).max(caps);
     let mut cells = Vec::new();
     let mut names = Vec::new();
     let mut drawn = 0;
-    for (index, profile, slot) in app.slots() {
-        let width = scale(profile.memory, whole, bar.width).max(1);
+    for (index, profile, slot, memory) in blocks {
+        let width = scale(memory, whole, bar.width).max(1);
         let style = theme.profile(Some(index));
         let sample =
             slot_job(app, profile, slot).and_then(|job| app.live.samples.get(&job.summary.id));
-        let used = sample.map_or(0, |sample| scale(sample.memory, profile.memory, width));
+        let used = sample.map_or(0, |sample| scale(sample.memory, memory, width));
         let (text, label) = if slot.runner.is_some() {
             (
                 format!(
@@ -363,7 +384,7 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
                     "▓".repeat(usize::from(width - used))
                 ),
                 sample.map_or_else(
-                    || format!("{} {} {}", profile.name, slot.slot, bytes(profile.memory)),
+                    || format!("{} {} {}", profile.name, slot.slot, bytes(memory)),
                     |sample| {
                         format!(
                             "{} {} {} used",

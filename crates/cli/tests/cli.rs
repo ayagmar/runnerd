@@ -55,6 +55,8 @@ fn status() -> Status {
         version: "0.0.1".to_owned(),
         shutting_down: false,
         budget: Budget {
+            admission: runnerd_core::api::AdmissionPolicy::Caps,
+            held: false,
             slice: "runnerd.slice".to_owned(),
             memory_max: Some(16 << 30),
             memory_in_use: 6 << 30,
@@ -78,6 +80,7 @@ fn status() -> Status {
                         container: "4e1d".to_owned(),
                         busy: true,
                         started_at: 1_700_000_000,
+                        reserved: 9 << 30,
                     }),
                 },
                 SlotStatus {
@@ -109,6 +112,7 @@ fn status() -> Status {
 
 fn job(state: JobState) -> Job {
     Job {
+        admission: None,
         summary: JobSummary {
             id: 9001,
             repository: "halyard/ledger".to_owned(),

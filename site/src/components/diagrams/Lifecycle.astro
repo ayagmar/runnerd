@@ -1,0 +1,71 @@
+---
+// A job from GitHub's queue to its removed container, with the record a failed job may leave.
+import Diagram from '../Diagram.astro';
+
+// Each step: its name, what happens, and its box's top.
+const steps = [
+  { name: 'queued', what: 'GitHub lists it; its labels match', y: 0 },
+  { name: 'slot', what: "the profile's lowest free slot", y: 84 },
+  { name: 'JIT runner', what: 'registers for one job', y: 168 },
+  { name: 'container', what: 'slot volume over the snapshot', y: 252 },
+  { name: 'running', what: 'steps, log, samples every 2 s', y: 336 },
+  { name: 'finished', what: 'runner exits, scrubs its secrets', y: 420 },
+  { name: 'removed', what: 'container and runner; slot free', y: 552 },
+];
+---
+
+<Diagram name="lifecycle" caption="A job's way through runnerd. Only a failed job of a profile with record_failures leaves a record.">
+  <svg viewBox="0 0 480 608" role="img" aria-labelledby="lifecycle-title" aria-describedby="lifecycle-desc">
+    <title id="lifecycle-title">A job's lifecycle</title>
+    <desc id="lifecycle-desc">
+      A job is queued on GitHub with labels a repository's labels match. runnerd takes the lowest free slot of the
+      repository's profile; with no slot or no memory free, the job stays queued on GitHub until the next poll. It
+      registers a just-in-time runner for one job, removed if it gets no job in 5 minutes, and starts a container with
+      the slot's volume over the profile's snapshot. While the job runs, the job history records its steps, log and samples every 2 seconds. When it
+      finishes, the runner exits and the image deletes its secrets. If the job failed and the profile has
+      record_failures, the container is first committed to an image, runnerd-record:job, that runnerctl shell opens.
+      Then the container and the runner's registration are removed and the slot is free.
+    </desc>
+    <defs>
+      <marker id="lifecycle-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path class="head" d="M0 1L10 5L0 9z"></path>
+      </marker>
+    </defs>
+
+    {
+      steps.map((step, i) => (
+        <g>
+          <rect class={step.name === 'removed' ? 'ink' : 'box'} x="0" y={step.y} width="290" height="56" />
+          <text class:list={['t', { 'on-ink': step.name === 'removed' }]} x="16" y={step.y + 24}>
+            {step.name}
+          </text>
+          <text class={step.name === 'removed' ? 'on-ink' : 'm'} x="16" y={step.y + 45}>
+            {step.what}
+          </text>
+          {i < steps.length - 1 && step.name !== 'finished' && (
+            <path class="line" d={`M40 ${step.y + 58}V${steps[i + 1].y - 2}`} marker-end="url(#lifecycle-arrow)" />
+          )}
+        </g>
+      ))
+    }
+
+    <path class="line" d="M292 112H316V28H294" stroke-dasharray="4 4" marker-end="url(#lifecycle-arrow)"></path>
+    <text class="m" x="330" y="64">no slot or memory</text>
+    <text class="m" x="330" y="84">free: it stays queued</text>
+    <text class="m" x="330" y="104">until the next poll</text>
+
+    <text class="m" x="56" y="244">no job in 5 min: removed</text>
+
+    <path class="line" d="M40 478V550" marker-end="url(#lifecycle-arrow)"></path>
+    <text class="m" x="56" y="520">passed, or not recorded</text>
+
+    <text class="m" x="330" y="384">failed, with</text>
+    <text class="m" x="330" y="404">record_failures</text>
+    <path class="line" d="M292 448H318" marker-end="url(#lifecycle-arrow)"></path>
+    <rect class="frame" x="322" y="420" width="157" height="76"></rect>
+    <text class="t" x="336" y="444">record</text>
+    <text class="m" x="336" y="465">an image to open</text>
+    <text class="m" x="336" y="484">a shell in</text>
+    <path class="line" d="M400 498V580H294" marker-end="url(#lifecycle-arrow)"></path>
+  </svg>
+</Diagram>

@@ -100,6 +100,26 @@ fn a_container_that_disappears_ends_its_series_and_the_others_go_on() {
     assert_eq!(names, ["runner-b"]);
 }
 
+#[test]
+fn a_process_killed_for_memory_in_a_container_shows_in_its_samples() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    container(&paths, "a", 10, 4_000, 0, 0);
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let runners = [tracked("runner-a", "a", 10)];
+    assert_eq!(
+        state.sample(&runners, 1_000).0[0].oom_kills,
+        0,
+        "no memory.events yet"
+    );
+    std::fs::write(
+        paths.container("ci.slice", "a").join("memory.events"),
+        "low 0\nhigh 0\nmax 3\noom 1\noom_kill 1\noom_group_kill 0\n",
+    )
+    .unwrap();
+    assert_eq!(state.sample(&runners, 3_000).0[0].oom_kills, 1);
+}
+
 fn feed_all(chunks: &[&[u8]]) -> Vec<Captured> {
     let mut parser = Parser::default();
     chunks.iter().flat_map(|chunk| parser.feed(chunk)).collect()

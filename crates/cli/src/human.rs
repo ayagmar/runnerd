@@ -263,9 +263,12 @@ const SAMPLED_NOTE: &str =
 /// The memory line of a status: what is in use of what.
 fn budget_line(status: &Status) -> String {
     let budget = &status.budget;
+    let by = budget
+        .admission_note()
+        .map_or_else(String::new, |note| format!(" {note}"));
     match budget.memory_max {
         Some(max) => format!(
-            "{} of {} reserved in {}",
+            "{} of {} reserved in {}{by}",
             bytes(budget.memory_in_use),
             bytes(max),
             budget.slice
@@ -490,6 +493,9 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
                 )
             )
         );
+    }
+    if let Some(admission) = &job.admission {
+        let _ = writeln!(out, "{}", paint.paint(Tone::Dim, &admission.line()));
     }
     out.push_str(&timeline(summary, now, paint));
     out.push_str(&steps(&job.steps, now, paint));

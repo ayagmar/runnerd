@@ -10,10 +10,14 @@ use std::time::SystemTime;
 use futures_util::StreamExt;
 use tracing::{info, warn};
 
-use super::{Engine, RunningJobs, Shutdown};
+use super::admission::Admitting;
+use super::{Engine, Occupant, RunningJobs, Shutdown};
+use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
+use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{Decision, Profile, Repository, RunnerSlot, Slot, plan};
+use crate::time;
 
 /// GitHub requests a tick has in flight at most. GitHub asks clients not to flood it with concurrent requests;
 /// a few keep a tick over many repositories short.
@@ -94,15 +98,20 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.count_mirror_bytes().await;
         if mode == Shutdown::No {
             self.pull_images().await;
+            self.refresh_predictor().await;
+            self.rereserve().await;
         }
-        let decisions = match mode {
+        let (decisions, mut admitting) = match mode {
             Shutdown::No => self.plan(),
-            Shutdown::Graceful | Shutdown::Force => self
-                .occupied()
-                .filter(|(_, occupant)| mode == Shutdown::Force || !occupant.busy)
-                .map(|(slot, _)| Decision::Stop { slot })
-                .collect(),
+            Shutdown::Graceful | Shutdown::Force => (
+                self.occupied()
+                    .filter(|(_, occupant)| mode == Shutdown::Force || !occupant.busy)
+                    .map(|(slot, _)| Decision::Stop { slot })
+                    .collect(),
+                self.admitting(&mut [], None),
+            ),
         };
+        self.note_high_water(&admitting);
         for decision in decisions {
             match decision {
                 Decision::Stop { slot } => {
@@ -112,7 +121,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     };
                     self.stop(&slot, jobs).await;
                 }
-                Decision::Start { slot, repository } => self.start(&slot, &repository).await,
+                Decision::Start {
+                    slot,
+                    repository,
+                    memory,
+                } => {
+                    let admission = admitting.admit(&repository, memory);
+                    self.start(&slot, &repository, admission).await;
+                }
             }
         }
         self.idle_caches(mode).await;
@@ -124,12 +140,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.prune();
     }
 
-    fn plan(&self) -> Vec<Decision> {
+    fn plan(&self) -> (Vec<Decision>, Admitting) {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
-        let repositories: Vec<Repository> = self
+        let mut repositories: Vec<Repository> = self
             .config
             .repositories
             .iter()
@@ -149,6 +165,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .filter(|job| !taken.contains(&job.id))
                         .cloned()
                         .collect(),
+                    runner_memory: None,
                 }
             })
             .collect();
@@ -187,7 +204,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let free_memory = self
             .memory_max
             .map(|max| max.saturating_sub(self.memory_in_use()));
-        let mut decisions = plan(&repositories, &profiles, free_memory, SystemTime::now());
+        let admitting = self.admitting(&mut repositories, free_memory);
+        let mut decisions = plan(&repositories, &profiles, admitting.free, SystemTime::now());
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
         decisions.extend(
             self.occupied()
@@ -201,15 +219,51 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .map(|(slot, _)| Decision::Stop { slot }),
         );
-        decisions
+        let stops = self.over_budget(&decisions);
+        decisions.extend(stops);
+        (decisions, admitting)
     }
 
-    /// Memory caps of the runners, the seed containers (which run with their profile's limits), the shells and the
-    /// mirror.
+    /// What the runners take (`takes`), and the memory
+    /// caps of the seed containers (which run with their profile's limits), the shells and the mirror.
     pub(super) fn memory_in_use(&self) -> u64 {
-        let runners: u64 = self.occupied().map(|(_, occupant)| occupant.memory).sum();
+        let runners: u64 = self
+            .occupied()
+            .map(|(_, occupant)| self.takes(occupant))
+            .sum();
         let reseeds: u64 = self.reseed_memory.values().sum();
         runners + reseeds + self.shell_memory() + self.mirror_memory_in_use()
+    }
+
+    /// What a runner takes of the budget.
+    pub(super) fn takes(&self, occupant: &Occupant) -> u64 {
+        match self.config.host.admission {
+            // Whatever it reserved under measured admission before a reload.
+            Admission::Caps => occupant.memory,
+            // What it uses when that is more: a job past its prediction, or one in a burst of starts. Its cap when
+            // that is not known: the slice's or its own last sample is older than three intervals, as when the
+            // sampler stalls or cannot read its container.
+            Admission::Measured => {
+                let now = time::now_ms();
+                let fresh = 3 * u64::try_from(SAMPLE_INTERVAL.as_millis()).unwrap_or(u64::MAX);
+                let slice_sampled = self
+                    .store
+                    .latest_host_sample()
+                    .is_some_and(|sample| sample.at.saturating_mul(1000) + fresh >= now);
+                let own = self.store.latest_sample(&occupant.runner_name);
+                // Before its first sample, a runner is as fresh as its start.
+                let sampled_at = own
+                    .as_ref()
+                    .map_or_else(|| time::ms(occupant.started_at), |sample| sample.at);
+                if !slice_sampled || sampled_at + fresh < now {
+                    occupant.memory
+                } else {
+                    occupant
+                        .reserved()
+                        .max(own.map_or(0, |sample| sample.memory))
+                }
+            }
+        }
     }
 
     /// The mirror's part of `memory_in_use`.

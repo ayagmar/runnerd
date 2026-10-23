@@ -104,6 +104,15 @@ pub fn read_usage(cgroup: &Path) -> io::Result<Usage> {
     })
 }
 
+/// Processes the kernel killed in a cgroup and the cgroups under it for memory (`memory.events` `oom_kill`); 0
+/// when the file says nothing of it.
+pub fn read_oom_kills(cgroup: &Path) -> u64 {
+    read(&cgroup.join("memory.events"))
+        .ok()
+        .and_then(|events| field(&events, "oom_kill"))
+        .unwrap_or(0)
+}
+
 /// Bytes received and sent by a process's network namespace on its `eth*` interfaces: the container's own
 /// traffic, without its loopback or the bridge of the Docker Engine inside it, whose traffic also crosses `eth0`.
 pub fn read_network(paths: &Paths, pid: u32) -> io::Result<(u64, u64)> {
@@ -204,6 +213,7 @@ impl Sampler {
                 memory: usage.memory,
                 network_received: received,
                 network_sent: sent,
+                oom_kills: read_oom_kills(&cgroup),
             });
         }
         self.previous = seen;

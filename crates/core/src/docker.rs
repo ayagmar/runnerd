@@ -79,6 +79,8 @@ pub struct RunnerState {
     pub running: bool,
     /// Its exit code, once it stopped.
     pub exit_code: Option<i64>,
+    /// Whether the kernel killed a process in it for memory, as Docker saw.
+    pub oom_killed: bool,
     /// True under `unsafe-dind`: a job in the container can take over the host.
     pub privileged: bool,
     /// The runtime Docker runs it with, such as `sysbox-runc`.
@@ -361,6 +363,7 @@ impl DockerApi for Docker {
         Ok(RunnerState {
             running: state.running.unwrap_or(false),
             exit_code: state.exit_code,
+            oom_killed: state.oom_killed.unwrap_or(false),
             privileged: host_config.privileged.unwrap_or(false),
             runtime: host_config.runtime,
             pid: state

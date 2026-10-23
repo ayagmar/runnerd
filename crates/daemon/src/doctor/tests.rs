@@ -349,6 +349,9 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             cpu_peak: 4000,
             queued_at: 1_000_000 + i,
             started_at: Some(1_000_000 + i + 120_000),
+            finished_at: Some(1_000_000 + i + 720_000),
+            oom_killed: false,
+            reserved: None,
         })
         .collect()
 }
@@ -359,6 +362,7 @@ fn sizing_of(jobs: Vec<sizing::Ran>) -> Sizing {
         Some(33 << 30),
         &sizing::History {
             jobs,
+            cancelled: Vec::new(),
             runners: Vec::new(),
         },
         sizing::Window::new(Some(0), 2_000_000),

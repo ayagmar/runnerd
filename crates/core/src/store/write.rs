@@ -3,6 +3,7 @@
 //! one transaction and are broadcast only after, so a subscriber that reads the stored events after subscribing
 //! misses none, and a crash never keeps a change without its event.
 
+use std::collections::BTreeMap;
 use std::sync::{Arc, Mutex};
 
 use rusqlite::{Connection, OptionalExtension, Transaction, TransactionBehavior, params};
@@ -68,6 +69,8 @@ impl Writer<'_> {
                 });
             }
             Write::RunnerStarted(runner) => self.runner_started(&runner),
+            Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
+            Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
                     self.runner_removed(&runner, at, announced)
@@ -133,17 +136,7 @@ impl Writer<'_> {
             Write::MirrorBytes { bytes, until, done } => {
                 let _ = done.send(self.mirror_bytes(&bytes, until));
             }
-            Write::CacheSizes { at, sizes } => {
-                for (name, bytes) in sizes {
-                    logged(
-                        "record a cache size",
-                        self.db.execute(
-                            "INSERT OR REPLACE INTO cache_sizes (at, name, bytes) VALUES (?1, ?2, ?3)",
-                            params![at, name, bytes],
-                        ),
-                    );
-                }
-            }
+            Write::CacheSizes { at, sizes } => self.cache_sizes(at, sizes),
             Write::Event(event) => {
                 self.change("store an event", |announced| {
                     announced.push(event);
@@ -230,7 +223,7 @@ impl Writer<'_> {
             "record a runner",
             self.db.execute(
                 "INSERT OR IGNORE INTO runners (name, repository, profile, slot, container, started_at, \
-                 memory_cap, cpu_cap) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 memory_cap, cpu_cap, admission) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     runner.name,
                     runner.repository,
@@ -239,8 +232,43 @@ impl Writer<'_> {
                     runner.container,
                     runner.started_at,
                     runner.memory_cap,
-                    runner.cpu_cap
+                    runner.cpu_cap,
+                    runner
+                        .admission
+                        .and_then(|admission| serde_json::to_string(&admission).ok())
                 ],
+            ),
+        );
+    }
+
+    fn cache_sizes(&self, at: u64, sizes: BTreeMap<String, u64>) {
+        for (name, bytes) in sizes {
+            logged(
+                "record a cache size",
+                self.db.execute(
+                    "INSERT OR REPLACE INTO cache_sizes (at, name, bytes) VALUES (?1, ?2, ?3)",
+                    params![at, name, bytes],
+                ),
+            );
+        }
+    }
+
+    fn admission(&self, runner: &str, admission: api::Admission) {
+        logged(
+            "record what a runner reserves",
+            self.db.execute(
+                "UPDATE runners SET admission = ?2 WHERE name = ?1",
+                params![runner, serde_json::to_string(&admission).ok()],
+            ),
+        );
+    }
+
+    fn runner_oom_killed(&self, runner: &str) {
+        logged(
+            "record a kill for memory",
+            self.db.execute(
+                "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), 1) WHERE name = ?1",
+                [runner],
             ),
         );
     }
@@ -616,6 +644,12 @@ impl Writer<'_> {
                     sample.network_sent
                 ],
             )?;
+            if sample.oom_kills > 0 {
+                self.db.execute(
+                    "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), ?2) WHERE name = ?1",
+                    params![sample.runner, sample.oom_kills],
+                )?;
+            }
             let job: Option<u64> = self
                 .db
                 .query_row(

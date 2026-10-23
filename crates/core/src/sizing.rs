@@ -10,7 +10,7 @@ use crate::config::Config;
 use crate::observe::metrics::SAMPLE_INTERVAL;
 
 /// Advice rounds memory up to a multiple of this: 256M.
-const GRANULE: u64 = 256 << 20;
+pub(crate) const GRANULE: u64 = 256 << 20;
 
 /// A peak at or above this share of its container's cap, in percent, likely met the cap.
 const AT_CAP: u64 = 95;
@@ -44,6 +44,12 @@ pub struct Ran {
     pub queued_at: u64,
     /// When it started; `None` for a job lost before.
     pub started_at: Option<u64>,
+    /// When it finished, or was found lost.
+    pub finished_at: Option<u64>,
+    /// Whether the kernel killed a process in its container for memory.
+    pub oom_killed: bool,
+    /// What measured admission reserved for it; `None` under caps or for an adopted runner.
+    pub reserved: Option<u64>,
 }
 
 /// One runner container's time in a slot. Times in milliseconds.
@@ -62,6 +68,9 @@ pub struct Held {
 pub struct History {
     /// Finished jobs with a recorded peak, cancelled ones left out.
     pub jobs: Vec<Ran>,
+    /// Cancelled jobs, for what admission learns from how they ended: a kill for memory, a peak at the cap or past
+    /// what was reserved. Their peaks (0 when never sampled) are not read as a job's size.
+    pub cancelled: Vec<Ran>,
     /// Runners that held a slot at some point after the history's start.
     pub runners: Vec<Held>,
 }
@@ -275,7 +284,7 @@ fn waits(jobs: &[&Ran]) -> Spread {
 }
 
 /// Nearest-rank percentiles; all zero for no values.
-fn spread(mut values: Vec<u64>) -> Spread {
+pub(crate) fn spread(mut values: Vec<u64>) -> Spread {
     values.sort_unstable();
     let rank = |percent: usize| {
         let index = (values.len() * percent).div_ceil(100).saturating_sub(1);

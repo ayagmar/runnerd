@@ -46,6 +46,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             container: occupant.container.clone(),
                             busy: occupant.busy,
                             started_at: unix_secs(occupant.started_at),
+                            reserved: self.takes(occupant),
                         }),
                     })
                     .collect(),
@@ -88,6 +89,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice: self.config.host.slice.clone(),
             memory_max: self.memory_max,
             memory_in_use: self.memory_in_use(),
+            admission: match self.config.host.admission {
+                crate::config::Admission::Caps => api::AdmissionPolicy::Caps,
+                crate::config::Admission::Measured => api::AdmissionPolicy::Measured,
+            },
+            held: self.measured.high_water,
             mirror_memory: self.mirror_memory_in_use(),
             seed_memory: self
                 .reseed_memory

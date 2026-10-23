@@ -153,6 +153,7 @@ async fn cache_sizes_now_are_the_last_measurement_of_each_volume() {
 
 fn runner(name: &str, started_at: u64) -> RunnerRecord {
     RunnerRecord {
+        admission: None,
         name: name.to_owned(),
         repository: "o/r".to_owned(),
         profile: "app".to_owned(),
@@ -241,6 +242,7 @@ async fn a_host_sample_reads_back_at_once_and_is_kept_from_a_flush_on() {
 
 fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord {
     SampleRecord {
+        oom_kills: 0,
         runner: runner.to_owned(),
         at,
         cpu: 0,
@@ -477,6 +479,8 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
     });
     store.event(Event::BudgetChanged {
         budget: crate::api::Budget {
+            admission: crate::api::AdmissionPolicy::Caps,
+            held: false,
             slice: "ci.slice".to_owned(),
             memory_max: None,
             memory_in_use: 0,
@@ -710,6 +714,84 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
     // `runnerd doctor` reads the same without a daemon.
     assert_eq!(super::sizing_at(&path, 0).unwrap(), Some(history));
     assert_eq!(super::sizing_at(&dir.0.join("none.db"), 0).unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    for (id, name, kills) in [(1, "r1", 0), (2, "r2", 2)] {
+        store.queued("o/r", &queued(id));
+        store.runner_started(runner(name, 1_000_100));
+        store.claimed(id, 10, name, 1_000_200);
+        store.samples(vec![SampleRecord {
+            oom_kills: kills,
+            ..sample(name, 1_000_300, 0, 0)
+        }]);
+        store.lost(id, 1_000_400);
+    }
+    store.flush().await;
+    let history = store.sizing(0).await.unwrap();
+    let killed: Vec<(&str, bool)> = history
+        .jobs
+        .iter()
+        .map(|job| (job.name.as_str(), job.oom_killed))
+        .collect();
+    assert_eq!(killed, [("job 1", false), ("job 2", true)]);
+}
+
+#[tokio::test]
+async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.queued("o/r", &queued(1));
+    store.runner_started(RunnerRecord {
+        admission: Some(crate::api::Admission {
+            policy: crate::api::AdmissionPolicy::Measured,
+            reserved: 1 << 30,
+            basis: crate::api::Basis::Job { runs: 10 },
+            free: Some(8 << 30),
+            slice: Some(1 << 30),
+        }),
+        ..runner("r1", 1_000_100)
+    });
+    store.claimed(1, 10, "r1", 1_000_200);
+    // Its build hung after the kill, and someone cancelled it.
+    store.samples(vec![SampleRecord {
+        memory: 2 << 30,
+        oom_kills: 1,
+        ..sample("r1", 1_000_300, 0, 0)
+    }]);
+    store.details(crate::github::JobDetails {
+        id: 1,
+        run_id: 10,
+        run_attempt: 1,
+        name: "job 1".to_owned(),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some("cancelled".to_owned()),
+        started_at: None,
+        completed_at: None,
+        runner_name: Some("r1".to_owned()),
+        steps: Vec::new(),
+    });
+    store.runner_removed("r1", 1_000_500);
+    store.flush().await;
+    let history = store.sizing(0).await.unwrap();
+    assert!(
+        history.jobs.is_empty(),
+        "a cancelled job says nothing of its size"
+    );
+    let ended: Vec<(&str, bool, Option<u64>)> = history
+        .cancelled
+        .iter()
+        .map(|job| (job.name.as_str(), job.oom_killed, job.reserved))
+        .collect();
+    assert_eq!(ended, [("job 1", true, Some(1 << 30))]);
 }
 
 /// A database at `path` written by a runnerd that knew the first `version` migrations, in WAL mode as the daemon
