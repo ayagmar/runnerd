@@ -3,7 +3,7 @@
 //! while it runs.
 
 use maud::{Markup, html};
-use runnerd_core::api::{Job, Sample, SampleSeries, Status, Step};
+use runnerd_core::api::{Job, JobSummary, Sample, SampleSeries, Status, Step};
 
 use super::{Live, Parts, badge, digest, page};
 use crate::chart::{Band, Base, Series, TimeChart, nice_top};
@@ -106,7 +106,17 @@ pub(crate) fn render(view: &JobView) -> Markup {
         (metrics.1)
         (log(view))
     };
-    page(&summary.name, None, live.as_ref(), &main)
+    page(&title(summary), None, live.as_ref(), &main)
+}
+
+/// The page's title: `workflow / job`, as the terminal clients write a job, or the job's name alone; `job <id>`
+/// until the daemon knows its name.
+fn title(summary: &JobSummary) -> String {
+    match &summary.workflow {
+        Some(workflow) => format!("{workflow} / {}", summary.name),
+        None if summary.name.is_empty() => format!("job {}", summary.id),
+        None => summary.name.clone(),
+    }
 }
 
 /// The title, outcome and where the job came from.
