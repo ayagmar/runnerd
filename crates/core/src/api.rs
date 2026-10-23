@@ -8,6 +8,8 @@
 //! | `GET /v1/status` | [`Status`] |
 //! | `POST /v1/repositories/{owner}/{name}/pause?`[`PauseQuery`] | [`Paused`]; 409 [`Busy`] while it runs a job |
 //! | `POST /v1/repositories/{owner}/{name}/resume` | none, 204 |
+//! | `POST /v1/repositories/pause?`[`PauseQuery`] | [`Paused`]; 409 [`Busy`] while any runs a job, pausing none |
+//! | `POST /v1/repositories/resume` | none, 204: every repository resumed |
 //! | `POST /v1/profiles/{name}/reseed` | none, 202; 409 while it reseeds; `cache.reseeded` when done |
 //! | `POST /v1/caches/{name}/clean` | none, 204; 409 [`Busy`] while a runner uses it |
 //! | `GET /v1/config` | [`ConfigFile`] |

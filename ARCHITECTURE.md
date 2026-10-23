@@ -75,13 +75,13 @@ nothing until Docker has listed them.
 | What | Where |
 |---|---|
 | Config | `runnerd.toml`, default `$XDG_CONFIG_HOME/runnerd/runnerd.toml` ([`crates/core/src/config.rs`](crates/core/src/config.rs)) |
-| Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart |
+| Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart, except paused repositories, which the job history keeps |
 | Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
 | Dashboard session | in memory, new each daemon run; the one-time login URL in `runnerd.web` next to the socket (0600) |
 
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories; times in ms |
 
 ## Invariants
 
@@ -101,7 +101,10 @@ nothing until Docker has listed them.
 - The engine does not start a runner for a queued job one of its runners holds, whatever GitHub's queue says.
 - A reload never stops a running job: slots a new config removes go once their runners finish, and a profile starts
   no runner while it runs as many as its configured `slots` (`scheduler::Slot::Closed`).
-- A forced pause cancels runs only of jobs this daemon's runners hold, and only of the paused repository.
+- A forced pause cancels runs only of jobs this daemon's runners hold, and only of the paused repositories.
+- `Control` records the paused repositories in the store, under the lock that changes them, and answers a pause or
+  resume once the record commits; the engine starts with the recorded ones paused, minus those its config lacks, so
+  a paused repository gets no runner after a restart.
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the

@@ -1,6 +1,7 @@
-//! The control routes: pause (forced or not), reseed, cache clean, the config file (show, check, replace and
-//! reload) and the doctor. Every handler takes the authenticated principal. The engine carries out what changes
-//! scheduling through `Control`; this module only writes the config file, atomically, after it validated it.
+//! The control routes: pause (of one repository or all, forced or not) and resume, reseed, cache clean, the config
+//! file (show, check, replace and reload) and the doctor. Every handler takes the authenticated principal. The
+//! engine carries out what changes scheduling through `Control`; this module only writes the config file,
+//! atomically, after it validated it.
 
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -12,7 +13,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery};
 use runnerd_core::config::Config;
-use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs};
+use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs, Target};
 use tracing::info;
 
 use super::{AppState, Authenticated, MemoryMax, SyncDir, error};
@@ -49,13 +50,58 @@ pub(super) async fn pause(
         "{repository}: pause (force: {}) requested by {principal:?}",
         query.force
     );
+    pause_target(&state, Target::Repository(repository), &query).await
+}
+
+pub(super) async fn pause_all(
+    Authenticated(principal): Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<PauseQuery>,
+) -> Response {
+    info!(
+        "pause of every repository (force: {}) requested by {principal:?}",
+        query.force
+    );
+    pause_target(&state, Target::All, &query).await
+}
+
+async fn pause_target(state: &AppState, target: Target, query: &PauseQuery) -> Response {
     let jobs = if query.force {
         RunningJobs::Kill
     } else {
         RunningJobs::Keep
     };
-    match state.handle.control.pause(&repository, jobs).await {
+    match state.handle.control.pause(target, jobs).await {
         Ok(paused) => Json(paused).into_response(),
+        Err(control_error) => refused(&control_error),
+    }
+}
+
+pub(super) async fn resume(
+    Authenticated(principal): Authenticated,
+    State(state): State<AppState>,
+    UrlPath((owner, name)): UrlPath<(String, String)>,
+) -> Response {
+    let repository = format!("{owner}/{name}");
+    let target = Target::Repository(repository.clone());
+    match state.handle.control.set_paused(&target, false).await {
+        Ok(()) => {
+            info!("{repository} resumed by {principal:?}");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(control_error) => refused(&control_error),
+    }
+}
+
+pub(super) async fn resume_all(
+    Authenticated(principal): Authenticated,
+    State(state): State<AppState>,
+) -> Response {
+    match state.handle.control.set_paused(&Target::All, false).await {
+        Ok(()) => {
+            info!("every repository resumed by {principal:?}");
+            StatusCode::NO_CONTENT.into_response()
+        }
         Err(control_error) => refused(&control_error),
     }
 }

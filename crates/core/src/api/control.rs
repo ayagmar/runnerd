@@ -35,7 +35,7 @@ pub struct Busy {
     pub jobs: Vec<RunningJob>,
 }
 
-/// `POST /v1/repositories/{owner}/{name}/pause` query parameters.
+/// `POST /v1/repositories/{owner}/{name}/pause` and `POST /v1/repositories/pause` query parameters.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct PauseQuery {
     /// Cancel the repository's running jobs and remove their runners. Without it, a pause while the repository
@@ -44,7 +44,8 @@ pub struct PauseQuery {
     pub force: bool,
 }
 
-/// `POST /v1/repositories/{owner}/{name}/pause`: the repository is paused.
+/// `POST /v1/repositories/{owner}/{name}/pause` and `POST /v1/repositories/pause`: the repository, or every one,
+/// is paused, and stays paused when the daemon restarts.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Paused {
     /// The runners a forced pause stopped: those whose runs it cancelled go once they report the job cancelled,

@@ -162,6 +162,7 @@ bytes, CPU millicores.
 | `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs, the memory budget |
 | `POST /v1/repositories/{owner}/{name}/pause?force=` | the repository gets no new runners; `409` naming the job while it runs one, unless `force=true`, which cancels the job's run |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
+| `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every configured repository at once; a pause while any of them runs a job is refused with `409` naming the jobs, and pauses none, unless `force=true` |
 | `POST /v1/profiles/{name}/reseed` | `202`; the profile starts no runner until its slots are free and slot 1 became its snapshot; `409` while it reseeds |
 | `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache; `409` naming the jobs that use it |
 | `GET /v1/config` | the config file's path and text |
@@ -181,6 +182,10 @@ bytes, CPU millicores.
 A forced pause cancels the run of each of the repository's running jobs (GitHub cancels runs, not single jobs, so
 the run's other jobs are cancelled too) and lets the runner report it cancelled, which takes under a minute; a runner
 still running 90 s later is removed. Its runner registration is deleted once GitHub lets go of it.
+
+A pause lasts until a resume, across daemon restarts: the job history records the paused repositories, and a
+restarted daemon starts no runner for them. A reload that removes a paused repository forgets its pause; added back,
+it starts active.
 
 A new config takes effect without a restart, and running jobs keep running. A removed profile, or slots past a lowered
 `slots`, stay until their runners finish, and no runner starts in a profile while it runs as many as its `slots`.
@@ -257,7 +262,8 @@ halyard/storefront  node     paused       2  self-hosted,linux,x64,node
 | `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |
 | `runnerctl watch` | slots, running jobs with their current step and last sample, queued and finished jobs, redrawn as events arrive; one line per event when not on a terminal, one JSON event per line with `--json` |
 | `runnerctl tui` | the full-screen dashboard below |
-| `runnerctl pause <repo> [--force]`, `resume <repo>` | the repository gets no new runners; refused while it runs a job, naming the job, unless `--force` cancels the job's run and removes its runner; and back |
+| `runnerctl pause <repo> [--force]`, `resume <repo>` | the repository gets no new runners, also after a restart; refused while it runs a job, naming the job, unless `--force` cancels the job's run and removes its runner; and back |
+| `runnerctl pause --all [--force]`, `resume --all` | the same for every configured repository; refused while any runs a job, pausing none |
 | `runnerctl reseed <profile>` | makes slot 1's layers the profile's snapshot once its slots are free, and waits for it (`--no-wait`) |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
@@ -287,6 +293,7 @@ block glyphs. At 80×24 the slots become one line each and the charts drop out f
 | `tab`, `j` `k` (or arrows) | the overview's pane (slots, repositories, latest jobs); move in it, or scroll a log |
 | `enter`, `esc` | open the selected job; back |
 | `p` `r` | pause or resume the selected repository; a pause refused while it runs a job asks before forcing it |
+| `P` `U` | pause or resume every repository, asking the same way |
 | `R` | reseed the selected slot's profile |
 | `c` `s` `]` `[` | history: cycle the outcome and repository filters, next and previous page |
 | `G` `g` | follow the log, or go to its start |

@@ -26,7 +26,9 @@ use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-pub use self::control::{Command, Commands, Commit, Control, ControlError, RunningJobs, Shutdown};
+pub use self::control::{
+    Command, Commands, Commit, Control, ControlError, RunningJobs, Shutdown, Target,
+};
 use self::history::{Closing, Found};
 use super::SlotRef;
 use crate::api;
@@ -146,6 +148,8 @@ pub struct Setup {
     /// The repositories as the last run announced them (`Store::announced_repositories`), so the first publish
     /// announces only the difference, including the repositories the config no longer has.
     pub announced: Vec<api::RepositoryStatus>,
+    /// The repositories recorded paused (`Store::paused_repositories`): they stay paused from the first tick.
+    pub paused: Vec<String>,
     /// Where the cgroup and proc file systems are.
     pub paths: Paths,
 }
@@ -258,6 +262,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             memory_max,
             store,
             announced,
+            paused,
             paths,
         } = setup;
         let slots = config
@@ -275,6 +280,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 .repositories
                 .iter()
                 .map(|repository| repository.name.clone()),
+            paused,
+            store.clone(),
         );
         let control = Arc::new(control);
         let isolation = isolation::backend(config.host.isolation);
