@@ -116,8 +116,9 @@ jobs:
           save-if: ${{ github.ref == 'refs/heads/main' }}
       - run: cargo fmt --check
       - run: cargo clippy --workspace --all-targets --locked -- -D warnings
-      # What clients build: runnerd-core without the host feature.
+      # What clients build: runnerd-core without the host feature, alone and with the socket client.
       - run: cargo clippy -p runnerd-core --no-default-features --all-targets --locked -- -D warnings
+      - run: cargo clippy -p runnerd-core --no-default-features --features client --all-targets --locked -- -D warnings
       - run: cargo test --workspace --locked
       # Broken intra-doc links and other rustdoc warnings.
       - run: cargo doc --workspace --no-deps --locked
