@@ -448,8 +448,7 @@ html {
   color: var(--muted);
 }
 
-/* The readout above the bar: the slice's total, and the selected block's line beside it. The line keeps its height
-   while empty, so selecting a block moves nothing. */
+/* The readout above the bar: the slice's total, and the selected block's line beside it. */
 .budget .figures {
   display: flex;
   flex-wrap: wrap;
@@ -466,9 +465,20 @@ html {
   gap: 0 0.35rem;
 }
 
+/* The lines share one grid cell: the readout keeps the height of the longest, whichever is shown. */
 .lens {
+  display: grid;
   min-height: 1.45em;
   color: var(--muted);
+}
+
+.lens > span {
+  grid-area: 1 / 1;
+  visibility: hidden;
+}
+
+.lens > span.on {
+  visibility: visible;
 }
 
 .lens strong {

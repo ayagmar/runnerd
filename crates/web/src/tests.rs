@@ -442,6 +442,23 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
             "{profile} {slot}'s card exists and lights up with its block"
         );
     }
+    // Every block's line is in the readout, toggled by a class: hiding one with `display: none` would let the
+    // readout shrink and grow, and move the bar under the pointer.
+    let lens = &overview[overview.find(r#"<p class="lens""#).unwrap()..];
+    let lens = &lens[..lens.find("</p>").unwrap()];
+    for (profile, slot) in [("jvm", 1), ("jvm", 2), ("node", 1), ("node", 2)] {
+        assert!(
+            lens.contains(&format!(
+                "data-class:on=\"$_slot == '{}'\"",
+                slot_id(profile, slot)
+            )),
+            "the readout has a line for {profile} {slot}"
+        );
+    }
+    assert!(
+        !lens.contains("display: none") && !lens.contains("data-show"),
+        "the readout's lines keep their place while hidden"
+    );
     // A name ends its `aria-label`; the readout's lines end in a tag.
     for name in [
         "of 9G in jvm 1, build on halyard/ledger",
@@ -508,7 +525,7 @@ async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
         .unwrap();
     // The page keeps only which block is selected; its line comes in the patch, rendered from the new sample.
     let line = format!(
-        "data-show=\"$_slot == '{}'\"><strong>5G</strong> of 9G in jvm 1",
+        "data-class:on=\"$_slot == '{}'\"><strong>5G</strong> of 9G in jvm 1",
         slot_id("jvm", 1)
     );
     let update = read_until(&mut stream, |text| text.contains(&line)).await;

@@ -361,7 +361,9 @@ fn readout(overview: &Overview, used_now: Option<u64>, lenses: &[(String, Lens)]
             }
             p.lens aria-hidden="true" {
                 @for (key, lens) in lenses {
-                    span style="display: none" data-show=(format!("$_slot == {}", js(key))) {
+                    // Every line takes its place, hidden but for the selected one, so the readout is as tall as its
+                    // longest line and selecting a block never moves the bar.
+                    span data-class:on=(format!("$_slot == {}", js(key))) {
                         strong { (lens.figure) } " " (lens.text)
                     }
                 }
