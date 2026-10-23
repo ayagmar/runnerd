@@ -17,7 +17,7 @@ use runnerd_core::api::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, JobView, Outcome, Pane, View};
+use super::app::{App, Connection, JobView, LatestRow, Outcome, Pane, View};
 use crate::human::{self, Tone, bytes, cores, duration};
 use crate::watch;
 
@@ -473,7 +473,7 @@ fn step_label(job: &Job) -> Option<(String, String)> {
 
 fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let running = app.live.running.len();
-    let queued = app.live.queued.len();
+    let queued = app.live.status.queued.len();
     let [title, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
     heading(
         frame,
@@ -555,7 +555,7 @@ fn slot_cards(
         format!(
             "{} running · {} queued",
             app.live.running.len(),
-            app.live.queued.len()
+            app.live.status.queued.len()
         ),
         theme,
     );
@@ -863,23 +863,34 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     let focused = app.pane == Pane::Latest;
     let width = usize::from(area.width);
     let rows: Vec<_> = app
-        .live
-        .recent
-        .iter()
-        .map(|job| {
-            let ran = human::ran(job, now).map_or_else(String::new, duration);
-            (job, ran, finished_ago(job, now))
+        .latest_rows()
+        .map(|row| match row {
+            LatestRow::Queued(job) => (
+                Span::styled(
+                    format!("{:<9}", "QUEUED"),
+                    theme.tone(Tone::Busy).add_modifier(Modifier::BOLD),
+                ),
+                format!("{} {}", human::queued_title(job), job.repository),
+                String::new(),
+                human::queued_ago(job, now),
+            ),
+            LatestRow::Finished(job) => (
+                badge(job, theme),
+                format!("{} {}", human::title(job), job.repository),
+                human::ran(job, now).map_or_else(String::new, duration),
+                finished_ago(job, now),
+            ),
         })
         .collect();
     // The times are as wide as the widest of them; the job's name takes what is left.
     let ran_width = rows
         .iter()
-        .map(|(_, ran, _)| ran.width())
+        .map(|(_, _, ran, _)| ran.width())
         .max()
         .unwrap_or(0);
     let ago_width = rows
         .iter()
-        .map(|(_, _, ago)| ago.width())
+        .map(|(_, _, _, ago)| ago.width())
         .max()
         .unwrap_or(0);
     let name_width = width
@@ -888,14 +899,11 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     let lines: Vec<Line<'_>> = rows
         .into_iter()
         .enumerate()
-        .map(|(position, (job, ran, ago))| {
+        .map(|(position, (badge, name, ran, ago))| {
             let line = Line::from(vec![
-                badge(job, theme),
+                badge,
                 Span::raw(" "),
-                Span::raw(fit(
-                    &format!("{} {}", human::title(job), job.repository),
-                    name_width,
-                )),
+                Span::raw(fit(&name, name_width)),
                 Span::raw(format!(" {ran:>ran_width$} ")),
                 Span::styled(format!("{ago:>ago_width$}"), theme.dim()),
             ]);

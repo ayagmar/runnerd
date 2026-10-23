@@ -1,5 +1,5 @@
-//! `runnerctl watch`: the daemon's state kept current from `/v1/events`. A snapshot (status, queued and running
-//! jobs, the last finished ones) read after the stream is open, then each event applied to it. Draws nothing
+//! `runnerctl watch`: the daemon's state kept current from `/v1/events`. A snapshot (status with its queued jobs,
+//! running jobs, the last finished ones) read after the stream is open, then each event applied to it. Draws nothing
 //! itself: `run` hands the state to a drawing function, and `frame` turns it into text for `output::redraw`.
 //! `runnerctl tui` keeps the same `State` under its own.
 
@@ -8,7 +8,8 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use runnerd_core::api::{
-    Event, EventEnvelope, HostSample, Job, JobQuery, JobState, JobSummary, Sample, Status, Step,
+    Event, EventEnvelope, HostSample, Job, JobQuery, JobState, JobSummary, QueuedJob, Sample,
+    Status, Step,
 };
 
 use crate::human::{self, Paint, Table, Tone, bytes, cores, duration};
@@ -20,8 +21,8 @@ const RECENT: usize = 5;
 /// What the screen shows.
 #[derive(Debug)]
 pub(crate) struct State {
+    /// Its `queued` jobs are kept current from `job.*` events, oldest first.
     pub(crate) status: Status,
-    pub(crate) queued: BTreeMap<u64, JobSummary>,
     pub(crate) running: BTreeMap<u64, Job>,
     /// Each running job's last sample.
     pub(crate) samples: BTreeMap<u64, Sample>,
@@ -39,9 +40,6 @@ impl State {
             limit: Some(100),
             ..JobQuery::default()
         };
-        let queued: runnerd_core::api::JobPage = client
-            .get_query("/v1/jobs", &page(Some(JobState::Queued)))
-            .await?;
         let running: runnerd_core::api::JobPage = client
             .get_query("/v1/jobs", &page(Some(JobState::Running)))
             .await?;
@@ -61,7 +59,6 @@ impl State {
             .await?;
         Ok(State {
             status,
-            queued: queued.jobs.into_iter().map(|job| (job.id, job)).collect(),
             running: running_jobs,
             samples: BTreeMap::new(),
             host: None,
@@ -79,10 +76,15 @@ impl State {
     pub(crate) fn apply(&mut self, envelope: &EventEnvelope) -> Option<u64> {
         match &envelope.event {
             Event::JobQueued { job } => {
-                self.queued.insert(job.id, job.clone());
+                let queued = &mut self.status.queued;
+                if !queued.iter().any(|known| known.id == job.id) {
+                    queued.push(queued_job(job));
+                    // As the status orders them: IDs grow with time.
+                    queued.sort_by_key(|known| known.id);
+                }
             }
             Event::JobStarted { job } => {
-                self.queued.remove(&job.id);
+                self.status.queued.retain(|known| known.id != job.id);
                 let steps = self
                     .running
                     .remove(&job.id)
@@ -105,7 +107,7 @@ impl State {
                 }
             }
             Event::JobFinished { job } => {
-                self.queued.remove(&job.id);
+                self.status.queued.retain(|known| known.id != job.id);
                 self.running.remove(&job.id);
                 self.samples.remove(&job.id);
                 self.recent.retain(|known| known.id != job.id);
@@ -178,6 +180,21 @@ impl State {
                 .as_ref()
                 .is_some_and(|runner| runner.profile == profile && runner.slot == slot)
         })
+    }
+}
+
+/// A queued job as the status lists it, from the job `job.queued` announces.
+fn queued_job(job: &JobSummary) -> QueuedJob {
+    QueuedJob {
+        id: job.id,
+        repository: job.repository.clone(),
+        run_id: job.run_id,
+        run_attempt: job.run_attempt,
+        workflow: job.workflow.clone(),
+        name: job.name.clone(),
+        branch: job.branch.clone(),
+        url: job.url.clone(),
+        queued_at: job.timeline.queued_at,
     }
 }
 
@@ -346,14 +363,14 @@ fn slots(state: &State, now: u64, paint: Paint) -> String {
 /// Queued and finished jobs.
 fn jobs(state: &State, now: u64, paint: Paint) -> String {
     let mut out = String::new();
-    if !state.queued.is_empty() {
+    if !state.status.queued.is_empty() {
         let _ = writeln!(out, "\n{}", paint.paint(Tone::Bold, "Queued"));
         let mut queued = Table::default().right(&[2]);
-        for job in state.queued.values() {
+        for job in &state.status.queued {
             queued.row(vec![
                 (job.repository.clone(), Tone::Plain),
-                (human::title(job), Tone::Plain),
-                (human::ago(job.timeline.queued_at, now), Tone::Dim),
+                (human::queued_title(job), Tone::Plain),
+                (human::queued_ago(job, now), Tone::Dim),
             ]);
         }
         out.push_str(&queued.render(paint, "  "));
@@ -477,7 +494,6 @@ mod tests {
                 repositories: Vec::new(),
                 queued: Vec::new(),
             },
-            queued: BTreeMap::default(),
             running: BTreeMap::default(),
             samples: BTreeMap::default(),
             host: None,
@@ -549,6 +565,49 @@ mod tests {
             "{done}"
         );
         assert!(state.running.is_empty());
+    }
+
+    #[test]
+    fn queued_jobs_show_oldest_first_and_leave_the_queue_when_they_start() {
+        let mut state = state();
+        let queued = |id, name: &str, at| {
+            let mut job = summary(JobState::Queued);
+            job.id = id;
+            job.name = name.to_owned();
+            job.runner = None;
+            job.timeline = Timeline {
+                queued_at: at,
+                ..Timeline::default()
+            };
+            job
+        };
+        let newer = queued(8, "lint", 1020);
+        let older = queued(7, "test", 1000);
+        state.apply(&event(Event::JobQueued { job: newer }));
+        state.apply(&event(Event::JobQueued { job: older }));
+        let ids: Vec<u64> = state.status.queued.iter().map(|job| job.id).collect();
+        assert_eq!(ids, [7, 8], "oldest first");
+        let shown = screen(&state);
+        let rows: Vec<&str> = shown
+            .lines()
+            .skip_while(|line| *line != "Queued")
+            .skip(1)
+            .take(2)
+            .collect();
+        assert_eq!(
+            rows,
+            [
+                "  halyard/ledger  build / test  30s ago",
+                "  halyard/ledger  build / lint  10s ago"
+            ],
+            "{shown}"
+        );
+
+        let mut started = summary(JobState::Running);
+        started.id = 7;
+        state.apply(&event(Event::JobStarted { job: started }));
+        let ids: Vec<u64> = state.status.queued.iter().map(|job| job.id).collect();
+        assert_eq!(ids, [8], "the started job left the queue");
     }
 
     #[test]

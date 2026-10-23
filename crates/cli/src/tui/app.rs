@@ -6,8 +6,8 @@ use std::collections::{BTreeMap, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use runnerd_core::api::{
-    Event, EventEnvelope, HostSample, Job, JobPage, JobQuery, JobSummary, Sample, SampleSeries,
-    Status,
+    Event, EventEnvelope, HostSample, Job, JobMetrics, JobPage, JobQuery, JobState, JobSummary,
+    LogSummary, QueuedJob, Sample, SampleSeries, Status, Timeline,
 };
 
 use crate::watch;
@@ -54,6 +54,53 @@ pub(crate) enum Msg {
     Failed(String),
     /// A pause was refused because the repository, or one of them in a pause of all, runs a job.
     Busy(Refused),
+}
+
+/// What the job's page shows of a queued job until its record arrives.
+fn queued_summary(job: &QueuedJob) -> JobSummary {
+    JobSummary {
+        id: job.id,
+        repository: job.repository.clone(),
+        run_id: job.run_id,
+        run_attempt: job.run_attempt,
+        workflow: job.workflow.clone(),
+        name: job.name.clone(),
+        branch: job.branch.clone(),
+        url: job.url.clone(),
+        labels: Vec::new(),
+        state: JobState::Queued,
+        conclusion: None,
+        runner: None,
+        timeline: Timeline {
+            queued_at: job.queued_at,
+            ..Timeline::default()
+        },
+        metrics: JobMetrics::default(),
+        log: LogSummary::default(),
+    }
+}
+
+/// A row of the latest jobs pane.
+#[derive(Debug, Clone, Copy)]
+pub(crate) enum LatestRow<'app> {
+    Queued(&'app QueuedJob),
+    Finished(&'app JobSummary),
+}
+
+impl LatestRow<'_> {
+    fn id(self) -> u64 {
+        match self {
+            LatestRow::Queued(job) => job.id,
+            LatestRow::Finished(job) => job.id,
+        }
+    }
+
+    fn repository(&self) -> &str {
+        match self {
+            LatestRow::Queued(job) => &job.repository,
+            LatestRow::Finished(job) => &job.repository,
+        }
+    }
 }
 
 /// A pause the daemon refused because jobs run, waiting for `y` to force it.
@@ -551,7 +598,11 @@ impl App {
             .running
             .get(&id)
             .map(|job| job.summary.clone())
-            .or_else(|| self.jobs_listed().find(|job| job.id == id).cloned());
+            .or_else(|| self.jobs_listed().find(|job| job.id == id).cloned())
+            .or_else(|| {
+                let queued = self.live.status.queued.iter().find(|job| job.id == id)?;
+                Some(queued_summary(queued))
+            });
         let Some(summary) = summary else {
             return Vec::new();
         };
@@ -589,6 +640,7 @@ impl App {
 
     fn step(&mut self, by: isize) {
         let slots = self.slots().count();
+        let latest = self.latest_rows().count();
         let (selected, len) = match (self.view, self.pane) {
             (View::Job, _) => {
                 if let Some(open) = &mut self.job {
@@ -604,11 +656,17 @@ impl App {
             (View::Overview, Pane::Repositories) => {
                 (&mut self.repository, self.live.status.repositories.len())
             }
-            (View::Overview, Pane::Latest) => (&mut self.latest, self.live.recent.len()),
+            (View::Overview, Pane::Latest) => (&mut self.latest, latest),
         };
         *selected = selected
             .saturating_add_signed(by)
             .min(len.saturating_sub(1));
+    }
+
+    /// The latest jobs pane's rows: the queued jobs, oldest first, then the last finished ones.
+    pub(crate) fn latest_rows(&self) -> impl Iterator<Item = LatestRow<'_>> {
+        let queued = self.live.status.queued.iter().map(LatestRow::Queued);
+        queued.chain(self.live.recent.iter().map(LatestRow::Finished))
     }
 
     /// Every slot in config order, with its profile's position.
@@ -646,7 +704,9 @@ impl App {
                     .job_in(&profile.name, slot.slot)
                     .map(|job| job.summary.id)
             }
-            (View::Overview, Pane::Latest) => self.live.recent.get(self.latest).map(|job| job.id),
+            (View::Overview, Pane::Latest) => {
+                self.latest_rows().nth(self.latest).map(LatestRow::id)
+            }
             _ => None,
         }
     }
@@ -670,10 +730,9 @@ impl App {
                 slot.runner.as_ref().map(|runner| runner.repository.clone())
             }
             (View::Overview, Pane::Latest) => self
-                .live
-                .recent
-                .get(self.latest)
-                .map(|job| job.repository.clone()),
+                .latest_rows()
+                .nth(self.latest)
+                .map(|row| row.repository().to_owned()),
         }
     }
 

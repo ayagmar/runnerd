@@ -282,11 +282,15 @@ jvm         2  free
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
 halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
 halyard/storefront  node     paused       2  self-hosted,linux,x64,node
+
+JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
+120055991710  halyard/storefront  E2E / visual-diff  3m 12s ago
+120055991714  halyard/storefront  E2E / a11y         41s ago
 ```
 
 | Command | What it shows or does |
 |---|---|
-| `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queues |
+| `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queued jobs |
 | `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
 | `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
 | `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |

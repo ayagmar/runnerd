@@ -7,8 +7,8 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobState, JobSummary, Status,
-    Step,
+    CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobState, JobSummary,
+    QueuedJob, Status, Step,
 };
 use runnerd_core::config::ByteSize;
 
@@ -202,10 +202,28 @@ pub(crate) fn outcome(job: &JobSummary) -> (String, Tone) {
 /// `workflow / job`, or the job's name alone; `job <id>` until the daemon knows its name, as for a job its runner
 /// took before the daemon saw it queued.
 pub(crate) fn title(job: &JobSummary) -> String {
-    match &job.workflow {
-        Some(workflow) => format!("{workflow} / {}", job.name),
-        None if job.name.is_empty() => format!("job {}", job.id),
-        None => job.name.clone(),
+    named(job.workflow.as_deref(), &job.name, job.id)
+}
+
+/// A queued job as [`title`] names a job.
+pub(crate) fn queued_title(job: &QueuedJob) -> String {
+    named(job.workflow.as_deref(), &job.name, job.id)
+}
+
+fn named(workflow: Option<&str>, name: &str, id: u64) -> String {
+    match workflow {
+        Some(workflow) => format!("{workflow} / {name}"),
+        None if name.is_empty() => format!("job {id}"),
+        None => name.to_owned(),
+    }
+}
+
+/// How long ago a queued job was queued; nothing when GitHub did not say.
+pub(crate) fn queued_ago(job: &QueuedJob, now: u64) -> String {
+    if job.queued_at == 0 {
+        String::new()
+    } else {
+        ago(job.queued_at, now)
     }
 }
 
@@ -320,6 +338,19 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
         ]);
     }
     out.push_str(&repositories.render(paint, ""));
+    if !status.queued.is_empty() {
+        out.push('\n');
+        let mut queued = Table::new(&["JOB", "REPOSITORY", "WORKFLOW / NAME", "QUEUED"]);
+        for job in &status.queued {
+            queued.row(vec![
+                plain(job.id.to_string()),
+                plain(&job.repository),
+                plain(queued_title(job)),
+                cell(queued_ago(job, now), Tone::Dim),
+            ]);
+        }
+        out.push_str(&queued.render(paint, ""));
+    }
     out
 }
 

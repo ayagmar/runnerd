@@ -29,8 +29,8 @@ use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
-    LogSummary, ProfileStatus, RepositoryStatus, RunnerStatus, Sample, SlotStatus, Status, Step,
-    Timeline,
+    LogSummary, ProfileStatus, QueuedJob, RepositoryStatus, RunnerStatus, Sample, SlotStatus,
+    Status, Step, Timeline,
 };
 
 use unicode_width::UnicodeWidthStr;
@@ -86,7 +86,6 @@ fn app() -> App {
             ],
             queued: Vec::new(),
         },
-        queued: BTreeMap::new(),
         running: BTreeMap::new(),
         samples: BTreeMap::new(),
         host: None,
@@ -419,6 +418,58 @@ fn a_refused_pause_is_forced_only_after_y() {
             repository: Some("halyard/ledger".to_owned()),
             force: true
         }]
+    );
+}
+
+#[test]
+fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_others() {
+    let mut app = app();
+    let queued = |id, name: &str, at| QueuedJob {
+        id,
+        repository: "halyard/storefront".to_owned(),
+        run_id: 4002,
+        run_attempt: 1,
+        workflow: Some("E2E".to_owned()),
+        name: name.to_owned(),
+        branch: Some("main".to_owned()),
+        url: None,
+        queued_at: at,
+    };
+    app.live.status.queued = vec![queued(51, "visual-diff", 1041), queued(52, "a11y", 1090)];
+    app.live.recent = vec![summary(42, JobState::Completed)];
+    let shown = screen(&app, 120, 40, false);
+    let rows: Vec<&str> = shown
+        .lines()
+        .filter_map(|line| {
+            let at = line.find("QUEUED").or_else(|| line.find("COMPLETED"))?;
+            Some(line[at..].trim_end())
+        })
+        .collect();
+    assert_eq!(rows.len(), 3, "{shown}");
+    assert!(
+        rows[0].starts_with("QUEUED    E2E / visual-diff halyard/storefront")
+            && rows[0].ends_with("59s ago"),
+        "{rows:?}"
+    );
+    assert!(rows[1].starts_with("QUEUED    E2E / a11y"), "{rows:?}");
+    assert!(rows[2].contains("CI / build halyard/ledger"), "{rows:?}");
+
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Tab));
+    assert_eq!(
+        app.update(key(KeyCode::Char('p'))),
+        vec![Effect::Pause {
+            repository: Some("halyard/storefront".to_owned()),
+            force: false
+        }]
+    );
+    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenJob(51)]);
+    let job = screen(&app, 120, 40, false);
+    let head: Vec<&str> = job.lines().skip(1).take(2).map(str::trim_end).collect();
+    assert_eq!(
+        head,
+        ["■ halyard/storefront", "E2E / visual-diff  QUEUED"],
+        "{job}"
     );
 }
 

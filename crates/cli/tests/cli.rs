@@ -21,7 +21,7 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{get, post};
 use runnerd_core::api::{
     Budget, Busy, Check, CheckStatus, ConfigCheck, Doctor, ErrorResponse, Event, EventEnvelope,
-    Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary, Paused, ProfileStatus,
+    Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary, Paused, ProfileStatus, QueuedJob,
     RepositoryStatus, RunnerStatus, RunningJob, SlotStatus, Status, Timeline,
 };
 
@@ -90,7 +90,17 @@ fn status() -> Status {
             paused: false,
             queued_jobs: 1,
         }],
-        queued: Vec::new(),
+        queued: vec![QueuedJob {
+            id: 9002,
+            repository: "halyard/ledger".to_owned(),
+            run_id: 78,
+            run_attempt: 1,
+            workflow: Some("build".to_owned()),
+            name: "lint".to_owned(),
+            branch: Some("main".to_owned()),
+            url: None,
+            queued_at: 1_000_000,
+        }],
     }
 }
 
@@ -426,6 +436,13 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
         slots[0].find("busy"),
         slots[1].find("free"),
         "the state column lines up:\n{text}"
+    );
+    assert!(
+        text.lines().any(
+            |line| line.starts_with("9002  halyard/ledger  build / lint  ")
+                && line.ends_with(" ago")
+        ),
+        "the queued job is listed under the repositories:\n{text}"
     );
 }
 
