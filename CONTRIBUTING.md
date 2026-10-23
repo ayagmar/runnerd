@@ -91,7 +91,9 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    - the site: `install.md`, `configuration.mdx`, `clients.mdx`, `src/pages/index.astro` and the TUI frames in
      `src/assets/tui/`, which are recaptured rather than edited.
 
-   Tests that use a version only as an example, such as `store/tests.rs`'s "as runnerd 0.0.5 stored it", stay.
+   Tests that use a version only as an example, such as `store/tests.rs`'s "as runnerd 0.0.5 stored it", stay, and
+   so does the site's `upgrading.md`, which names the versions each section is about. Give it a section for the new
+   release when an upgrade asks anything of the owner: a migration, a changed image, a new default.
 3. Merge the pull request, then tag the merge commit on `main` and push the tag:
    `git tag v0.0.6 && git push origin v0.0.6`.
 4. The release run then:
