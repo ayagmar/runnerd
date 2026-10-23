@@ -711,3 +711,60 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
     assert_eq!(super::sizing_at(&path, 0).unwrap(), Some(history));
     assert_eq!(super::sizing_at(&dir.0.join("none.db"), 0).unwrap(), None);
 }
+
+/// A database at `path` written by a runnerd that knew the first `version` migrations, in WAL mode as the daemon
+/// leaves it, with one finished job that peaked at 3G in a runner of `node`.
+fn database_of_version(path: &std::path::Path, version: usize) {
+    let db = Connection::open(path).unwrap();
+    db.pragma_update(None, "journal_mode", "wal").unwrap();
+    for migration in &MIGRATIONS[..version] {
+        db.execute_batch(migration).unwrap();
+    }
+    db.pragma_update(None, "user_version", version).unwrap();
+    db.execute_batch(
+        "INSERT INTO runners (name, repository, profile, slot, container, started_at, removed_at) \
+         VALUES ('r1', 'o/r', 'node', 1, 'c1', 1000, 9000); \
+         INSERT INTO jobs (id, repository, run_id, run_attempt, name, labels, state, conclusion, runner, \
+         queued_at, started_at, finished_at, memory_peak, cpu_peak) \
+         VALUES (1, 'o/r', 10, 1, 'build', '[]', 'completed', 'success', 'r1', 1000, 2000, 8000, 3221225472, 900);",
+    )
+    .unwrap();
+}
+
+#[test]
+fn doctor_reads_the_history_in_a_directory_it_cannot_write() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    database_of_version(&path, MIGRATIONS.len());
+    std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let history = super::sizing_at(&path, 0);
+    std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let peaks: Vec<_> = history
+        .unwrap()
+        .unwrap()
+        .jobs
+        .iter()
+        .map(|job| job.memory_peak)
+        .collect();
+    assert_eq!(peaks, [3 << 30]);
+}
+
+#[test]
+fn doctor_reads_the_peaks_of_a_history_from_before_runners_had_caps() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    database_of_version(&path, 1);
+    let history = super::sizing_at(&path, 0).unwrap().unwrap();
+    let peaks: Vec<_> = history
+        .jobs
+        .iter()
+        .map(|job| (job.memory_peak, job.memory_cap))
+        .collect();
+    assert_eq!(peaks, [(3 << 30, None)]);
+    let version: u32 = Connection::open(&path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap();
+    assert_eq!(version, 1, "doctor does not migrate it");
+}

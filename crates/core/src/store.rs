@@ -602,23 +602,59 @@ impl Store {
 }
 
 /// What sizing reads from the database at `path`, opened read-only and not migrated, as `runnerd doctor` reads it
-/// while no daemon runs; `None` when there is no database yet.
+/// while no daemon runs; `None` when there is no database yet. In a directory it may write, SQLite keeps the
+/// `-wal` and `-shm` files a read of a WAL database needs next to it; in one it may not, it reads the file as it is.
 pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, StoreError> {
     if !path.exists() {
         return Ok(None);
     }
-    let db = Connection::open_with_flags(path, OpenFlags::SQLITE_OPEN_READ_ONLY)?;
-    db.busy_timeout(Duration::from_secs(5))?;
+    let read = |path: &str, flags| -> Result<sizing::History, StoreError> {
+        let db = Connection::open_with_flags(path, flags)?;
+        db.busy_timeout(Duration::from_secs(5))?;
+        sizing_of(&db, since)
+    };
+    let name = path.to_string_lossy();
+    match read(&name, OpenFlags::SQLITE_OPEN_READ_ONLY) {
+        Err(StoreError::Sqlite(error))
+            if matches!(
+                error.sqlite_error_code(),
+                Some(rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen)
+            ) =>
+        {
+            // No `-shm` can be made: read the file alone, without what a running daemon has not checkpointed.
+            let uri = format!(
+                "file:{}?mode=ro&immutable=1",
+                name.replace('%', "%25")
+                    .replace('?', "%3f")
+                    .replace('#', "%23")
+            );
+            read(
+                &uri,
+                OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_URI,
+            )
+        }
+        history => history,
+    }
+    .map(Some)
+}
+
+/// What sizing reads from a database of any version this build knows, without migrating it.
+fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError> {
     let found: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     let supported = u32::try_from(MIGRATIONS.len()).unwrap_or(u32::MAX);
     if found > supported {
         return Err(StoreError::Newer { found, supported });
     }
-    // Version 2 added the runners' caps sizing reads; a database before it has no job of a runner with one.
-    if found < 2 {
-        return Ok(Some(sizing::History::default()));
+    if found == 0 {
+        return Ok(sizing::History::default());
     }
-    Ok(Some(read::sizing(&db, since)?))
+    if found < 2 {
+        // Version 2 added the runners' caps: before it, a temporary view gives each runner none.
+        db.execute_batch(
+            "CREATE TEMP VIEW runners AS SELECT *, NULL AS memory_cap, NULL AS cpu_cap FROM main.runners",
+        )?;
+    }
+    Ok(read::sizing(db, since)?)
 }
 
 /// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error.
