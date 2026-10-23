@@ -689,6 +689,20 @@ async fn until_state(handle: &Handle, job: u64, state: JobState) -> api::Job {
     panic!("job {job} never got to {state:?}");
 }
 
+/// Waits until the history holds `lines` lines of the job's log.
+async fn until_log_lines(handle: &Handle, job: u64, lines: u64) {
+    for _ in 0..200 {
+        handle.store.flush().await;
+        if let Some(found) = handle.store.job(job).await.unwrap()
+            && found.summary.log.lines == lines
+        {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("job {job} never stored {lines} log lines");
+}
+
 #[tokio::test]
 async fn a_job_github_still_lists_queued_after_its_runner_took_it_gets_no_twin() {
     let github = FakeGithub::default();
@@ -758,29 +772,16 @@ async fn a_finished_job_keeps_its_timeline_steps_and_log_across_a_restart() {
     let mut events = handle.store.subscribe();
     engine.recover().await.unwrap();
     until_state(&handle, 1, JobState::Running).await;
+    until_log_lines(&handle, 1, 1).await;
     engine.tick(Shutdown::No).await;
+    // A restarted daemon writes nothing more, but a dropped engine's capture and writes go on: let them finish.
+    handle.store.flush().await;
     drop((engine, handle));
 
     // The daemon restarts mid-job: the capture resumes after the stored line, then the job ends.
     let (mut engine, handle) = engine_in(&github, &docker, &dir);
     engine.recover().await.unwrap();
-    for _ in 0..100 {
-        handle.store.flush().await;
-        if handle
-            .store
-            .job(1)
-            .await
-            .unwrap()
-            .unwrap()
-            .summary
-            .log
-            .lines
-            == 2
-        {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    until_log_lines(&handle, 1, 2).await;
     github
         .0
         .lock()
