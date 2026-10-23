@@ -1274,6 +1274,34 @@ async fn the_overview_offers_pause_all_until_every_repository_is_paused_then_res
 }
 
 #[tokio::test]
+async fn every_buttons_name_starts_with_the_label_it_shows() {
+    let dashboard = Dashboard::start().await;
+    // One repository paused, so the overview offers both pause all and resume all.
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let buttons: Vec<&str> = overview.split("<button").skip(1).collect();
+    assert!(buttons.len() > 3, "{} buttons", buttons.len());
+    for button in buttons {
+        let (tag, rest) = button.split_once('>').unwrap();
+        let Some(name) = tag.split(r#"aria-label=""#).nth(1) else {
+            continue;
+        };
+        let name = &name[..name.find('"').unwrap()];
+        let label: String = rest[..rest.find("</button>").unwrap()]
+            .split('<')
+            .map(|text| text.split_once('>').map_or(text, |(_, text)| text))
+            .collect();
+        if !label.trim().is_empty() {
+            assert!(
+                name.starts_with(label.trim()),
+                "a button showing {label:?} is named {name:?}"
+            );
+        }
+    }
+}
+
+#[tokio::test]
 async fn a_single_repository_has_only_its_own_pause() {
     let dashboard = Dashboard::start().await;
     dashboard

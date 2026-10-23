@@ -749,10 +749,10 @@ pub(crate) fn repositories(status: &Status) -> Markup {
     let mut every = Vec::new();
     if status.repositories.len() > 1 {
         if paused < status.repositories.len() {
-            every.push(("pause", "Pause all", "Pause every repository"));
+            every.push(("pause", "Pause all", "Pause all repositories"));
         }
         if paused > 0 {
-            every.push(("resume", "Resume all", "Resume every repository"));
+            every.push(("resume", "Resume all", "Resume all repositories"));
         }
     }
     html! {
@@ -773,6 +773,7 @@ pub(crate) fn repositories(status: &Status) -> Markup {
                                 data-attr:aria-busy="$_busy_all && 'true'"
                                 data-attr:disabled="$_busy_all"
                                 data-on:click=(format!("@post('/v1/repositories/{action}')"))
+                                // The name starts with the label, so voice control finds it by what it shows.
                                 aria-label=(name) { (label) }
                         }
                     }
