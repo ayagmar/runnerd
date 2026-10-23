@@ -107,6 +107,9 @@ nothing until Docker has listed them.
 - A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored in the same transaction as
   the change it announces and broadcast only after it commits, so its ID is a position a client can resume from
   with `Last-Event-ID`.
+- The store keeps each profile's and repository's latest `profile.*` and `repository.*` event through pruning. A
+  started engine announces what differs from them and every slot, so a client resuming after the last run's events
+  ends where `/v1/status` is ([ADR 0029](docs/adr/0029-profile-events-and-what-a-restart-announces.md)).
 - The engine does not start a runner for a queued job one of its runners holds, whatever GitHub's queue says.
 - A reload never stops a running job: slots a new config removes go once their runners finish, and a profile starts
   no runner while it runs as many as its configured `slots` (`scheduler::Slot::Closed`).

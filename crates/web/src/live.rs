@@ -138,6 +138,8 @@ async fn run_overview(app: &App, patches: &Patches) -> Result<(), Error> {
                 Event::LogLine { .. }
                 | Event::CacheReseeded { .. }
                 | Event::BudgetChanged { .. }
+                | Event::ProfileChanged { .. }
+                | Event::ProfileRemoved { .. }
                 | Event::RepositoryChanged { .. }
                 | Event::RepositoryRemoved { .. } => {}
                 Event::JobQueued { .. }
@@ -147,8 +149,7 @@ async fn run_overview(app: &App, patches: &Patches) -> Result<(), Error> {
                 | Event::SlotChanged { .. } => jobs_changed = true,
             }
         }
-        // The budget and repositories come with it, and a profile starting to reseed has no event; the status is
-        // cheap to read on every update.
+        // The budget, profiles and repositories come with it; the status is cheap to read on every update.
         data.status = app.daemon.get("/v1/status").await?;
         if jobs_changed {
             data.reload_running(&app.daemon).await?;

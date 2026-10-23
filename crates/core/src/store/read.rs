@@ -374,18 +374,24 @@ pub(super) fn events_after(
 }
 
 /// The repositories as each one's latest stored `repository.*` event announced them, by name.
-pub(super) fn announced_repositories(
-    db: &Connection,
-) -> rusqlite::Result<Vec<api::RepositoryStatus>> {
+pub(super) fn announced(db: &Connection) -> rusqlite::Result<super::Announced> {
     let bodies: Vec<String> = db
         .prepare_cached(
-            "SELECT body FROM events WHERE id IN (SELECT event FROM announced) ORDER BY id",
+            "SELECT body FROM events WHERE id IN (SELECT event FROM announced) \
+             OR id IN (SELECT event FROM announced_profiles) ORDER BY id",
         )?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    let mut profiles = std::collections::BTreeMap::new();
     let mut repositories = std::collections::BTreeMap::new();
     for body in bodies {
         match serde_json::from_str(&body) {
+            Ok(api::Event::ProfileChanged { profile }) => {
+                profiles.insert(profile.name.clone(), profile);
+            }
+            Ok(api::Event::ProfileRemoved { profile }) => {
+                profiles.remove(&profile);
+            }
             Ok(api::Event::RepositoryChanged { repository }) => {
                 repositories.insert(repository.name.clone(), repository);
             }
@@ -393,7 +399,8 @@ pub(super) fn announced_repositories(
                 repositories.remove(&repository);
             }
             Ok(_) => {}
-            // Skipping it would leave a repository out, and a client resuming after it would keep that one.
+            // Skipping it would leave a repository or profile out, and a client resuming after it would keep that
+            // one.
             Err(error) => {
                 return Err(rusqlite::Error::FromSqlConversionFailure(
                     0,
@@ -403,7 +410,10 @@ pub(super) fn announced_repositories(
             }
         }
     }
-    Ok(repositories.into_values().collect())
+    Ok(super::Announced {
+        profiles: profiles.into_values().collect(),
+        repositories: repositories.into_values().collect(),
+    })
 }
 
 pub(super) fn paused(db: &Connection) -> rusqlite::Result<Vec<String>> {

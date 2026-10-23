@@ -1,5 +1,5 @@
-//! Publishes `api::Status` after each tick and command, and records the slots, budget and repositories that
-//! changed as events. It reads engine state and must not change it, besides the status channel.
+//! Publishes `api::Status` after each tick and command, and records the profiles, slots, budget and repositories
+//! that changed as events. It reads engine state and must not change it, besides the status channel.
 
 use super::{Engine, Shutdown, unix_secs};
 use crate::api;
@@ -66,6 +66,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             })
             .collect();
         let previous = self.status.borrow().clone();
+        let announced = self.announced_profiles.take();
         let status = api::Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: mode != Shutdown::No,
@@ -77,15 +78,31 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             profiles,
             repositories,
         };
-        self.announce_changes(&previous, &status);
+        self.announce_changes(&previous, announced.as_deref(), &status);
         self.status.send_replace(status);
     }
 
-    /// Announces the slots, the budget and the repositories that changed between two statuses. The events carry
+    /// Announces the profiles, slots, budget and repositories that changed between two statuses. The events carry
     /// state, not transitions: a pause undone before the next publish announces nothing, and a client that applies
-    /// the events still ends where the status is.
-    fn announce_changes(&self, previous: &api::Status, status: &api::Status) {
+    /// the events still ends where the status is. `announced` replaces the previous profiles on the first publish;
+    /// their slots are compared with nothing then, so every slot is announced.
+    fn announce_changes(
+        &self,
+        previous: &api::Status,
+        announced: Option<&[api::ProfileStatus]>,
+        status: &api::Status,
+    ) {
+        let profiles_before = announced.unwrap_or(&previous.profiles);
         for profile in &status.profiles {
+            let outline_unchanged = profiles_before
+                .iter()
+                .find(|candidate| candidate.name == profile.name)
+                .is_some_and(|before| same_outline(before, profile));
+            if !outline_unchanged {
+                self.store.event(api::Event::ProfileChanged {
+                    profile: profile.clone(),
+                });
+            }
             let before = previous
                 .profiles
                 .iter()
@@ -100,6 +117,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         slot: slot.clone(),
                     });
                 }
+            }
+        }
+        for before in profiles_before {
+            if !status
+                .profiles
+                .iter()
+                .any(|profile| profile.name == before.name)
+            {
+                self.store.event(api::Event::ProfileRemoved {
+                    profile: before.name.clone(),
+                });
             }
         }
         if previous.budget != status.budget {
@@ -126,4 +154,25 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
     }
+}
+
+/// Whether two statuses of a profile agree on everything but the runners in its slots, which `slot.changed` announces.
+fn same_outline(before: &api::ProfileStatus, now: &api::ProfileStatus) -> bool {
+    let api::ProfileStatus {
+        name,
+        image,
+        cpus,
+        memory,
+        reseeding,
+        slots,
+    } = now;
+    *name == before.name
+        && *image == before.image
+        && *cpus == before.cpus
+        && *memory == before.memory
+        && *reseeding == before.reseeding
+        && slots
+            .iter()
+            .map(|slot| slot.slot)
+            .eq(before.slots.iter().map(|slot| slot.slot))
 }

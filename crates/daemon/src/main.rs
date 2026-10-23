@@ -5,14 +5,13 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
 use clap::{Parser, Subcommand};
-use runnerd_core::api::RepositoryStatus;
 use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, slice_memory_max};
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
 use runnerd_core::scheduler::engine::{Engine, HostIdentity, RunningJobs, Setup};
-use runnerd_core::store::Store;
+use runnerd_core::store::{Announced, Store};
 use tracing::{info, warn};
 
 mod api;
@@ -228,13 +227,13 @@ fn config_or_default(config: Option<PathBuf>) -> Result<PathBuf, ExitCode> {
 /// What the engine starts from in the job history.
 struct History {
     store: Store,
-    /// The repositories its events last announced.
-    announced: Vec<RepositoryStatus>,
+    /// The profiles and repositories its events last announced.
+    announced: Announced,
     /// The repositories recorded paused.
     paused: Vec<String>,
 }
 
-/// The job history, the repositories its events last announced and the ones recorded paused.
+/// The job history, the profiles and repositories its events last announced and the ones recorded paused.
 fn open_history(config: &Config) -> Result<History, ExitCode> {
     let database = config
         .history
@@ -249,9 +248,9 @@ fn open_history(config: &Config) -> Result<History, ExitCode> {
         ))
     })?;
     info!("job history in {}", database.display());
-    let announced = store.announced_repositories().map_err(|error| {
+    let announced = store.announced().map_err(|error| {
         fail(&format_args!(
-            "cannot read the repositories in the job history {}: {error}",
+            "cannot read the profiles and repositories in the job history {}: {error}",
             database.display()
         ))
     })?;

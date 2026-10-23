@@ -41,7 +41,7 @@ use crate::github::{Github, GithubApi, QueuedJob};
 use crate::isolation::{self, Isolation};
 use crate::observe::metrics::{self, Paths, Sampler, Tracked};
 use crate::observe::mirror::Leases;
-use crate::store::{MirrorPosition, Store};
+use crate::store::{Announced, MirrorPosition, Store};
 
 /// This machine as its runner names carry it: `runnerd-<id>-<host>-<profile>-<slot>-<secs>`. Only `runnerd-<id>-`
 /// identifies the machine, so a changed host name still matches the runners started before the change, and two
@@ -142,9 +142,9 @@ pub struct Setup {
     pub memory_max: Option<u64>,
     /// The job history.
     pub store: Store,
-    /// The repositories as the last run announced them (`Store::announced_repositories`), so the first publish
-    /// announces only the difference, including the repositories the config no longer has.
-    pub announced: Vec<api::RepositoryStatus>,
+    /// The profiles and repositories as the last run announced them (`Store::announced`), so the first publish
+    /// announces only the difference, including what the config no longer has.
+    pub announced: Announced,
     /// The repositories recorded paused (`Store::paused_repositories`): they stay paused from the first tick.
     pub paused: Vec<String>,
     /// Where the cgroup and proc file systems are.
@@ -224,6 +224,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// Runners without a container that GitHub still holds busy, already logged.
     busy_orphans: BTreeSet<u64>,
     status: watch::Sender<api::Status>,
+    /// The profiles as the last run announced them, until the first publish compares the profiles with them. Their
+    /// slots are older than the `slot.changed` events clients have, so that publish announces every slot instead.
+    announced_profiles: Option<Vec<api::ProfileStatus>>,
     control: Arc<Control>,
     commands: Commands,
     caches: watch::Sender<Vec<api::CacheVolume>>,
@@ -295,7 +298,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             },
             profiles: Vec::new(),
             // What clients resuming after the last run's events have, so the first publish announces the difference.
-            repositories: announced,
+            repositories: announced.repositories,
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
@@ -331,6 +334,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             rate_limit_logged: false,
             busy_orphans: BTreeSet::new(),
             status,
+            announced_profiles: Some(announced.profiles),
             control: control.clone(),
             commands,
             caches,

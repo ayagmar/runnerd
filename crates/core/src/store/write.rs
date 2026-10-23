@@ -17,6 +17,13 @@ use crate::github::{JobDetails, JobStep, QueuedJob};
 use crate::sync::lock;
 use crate::time;
 
+/// Makes an event its repository's latest in `announced`.
+const ANNOUNCE_REPOSITORY: &str =
+    "INSERT OR REPLACE INTO announced (repository, event) VALUES (?1, ?2)";
+/// Makes an event its profile's latest in `announced_profiles`.
+const ANNOUNCE_PROFILE: &str =
+    "INSERT OR REPLACE INTO announced_profiles (profile, event) VALUES (?1, ?2)";
+
 pub(super) fn run(
     db: Connection,
     mut queue: mpsc::UnboundedReceiver<Write>,
@@ -215,7 +222,8 @@ impl Writer<'_> {
         true
     }
 
-    /// Stores an event if it is durable, giving it its ID. A repository's event becomes its latest in `announced`.
+    /// Stores an event if it is durable, giving it its ID. A repository's or profile's event becomes
+    /// its latest in `announced` or `announced_profiles`.
     fn store_event(&self, event: Event) -> rusqlite::Result<EventEnvelope> {
         let at = time::now_ms();
         let id = if event.is_durable() {
@@ -226,16 +234,17 @@ impl Writer<'_> {
                 params![at, body],
             )?;
             let id = self.db.last_insert_rowid();
-            let repository = match &event {
-                Event::RepositoryChanged { repository } => Some(&repository.name),
-                Event::RepositoryRemoved { repository } => Some(repository),
+            let latest = match &event {
+                Event::RepositoryChanged { repository } => {
+                    Some((ANNOUNCE_REPOSITORY, &repository.name))
+                }
+                Event::RepositoryRemoved { repository } => Some((ANNOUNCE_REPOSITORY, repository)),
+                Event::ProfileChanged { profile } => Some((ANNOUNCE_PROFILE, &profile.name)),
+                Event::ProfileRemoved { profile } => Some((ANNOUNCE_PROFILE, profile)),
                 _ => None,
             };
-            if let Some(repository) = repository {
-                self.db.execute(
-                    "INSERT OR REPLACE INTO announced (repository, event) VALUES (?1, ?2)",
-                    params![repository, id],
-                )?;
+            if let Some((upsert, name)) = latest {
+                self.db.execute(upsert, params![name, id])?;
             }
             u64::try_from(id).ok()
         } else {
