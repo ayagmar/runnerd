@@ -5,6 +5,7 @@
 
 use serde::{Deserialize, Serialize};
 
+use crate::api::AdmissionPolicy;
 use crate::config::ByteSize;
 
 /// `GET /v1/sizing` query parameters.
@@ -30,6 +31,9 @@ pub struct Sizing {
     pub min_jobs: u32,
     /// The slice's `MemoryMax`; `None` when it is unlimited.
     pub memory_max: Option<u64>,
+    /// `[host] admission`, which the advice budgets `MemoryMax` by.
+    #[serde(default)]
+    pub admission: AdmissionPolicy,
     /// Every configured profile, by name.
     pub profiles: Vec<ProfileSizing>,
 }
@@ -51,6 +55,10 @@ pub struct ProfileSizing {
     pub wait: Spread,
     /// The percent of the time since `since` its slots held a runner, over its `slots` now.
     pub busy: u32,
+    /// Whether its jobs waited a minute or more for a slot at p95, or its slots were busy half the time: more slots
+    /// would help.
+    #[serde(default)]
+    pub wants_slots: bool,
     /// What to set `memory` and `slots` to. Sized for its largest peak, so no job gets less than it used.
     pub advice: Advice,
     /// Each job that ran in it, by repository, workflow and name.
@@ -122,19 +130,19 @@ pub enum Advice {
     Lower {
         /// The new `memory`.
         memory: u64,
-        /// The new `slots`: as many as fit in the memory the slots take now when jobs waited for one, else the
-        /// same.
+        /// The new `slots`: under `caps` admission, as many as fit in the memory the slots take now when jobs waited
+        /// for one; else the same.
         slots: u32,
     },
     /// The jobs need more than the cap.
     Raise {
         /// The new `memory`.
         memory: u64,
-        /// The new `slots`: the same, or as many as the slice's `MemoryMax` still holds.
+        /// The new `slots`: the same, or under `caps` admission as many as the slice's `MemoryMax` still holds.
         slots: u32,
     },
-    /// The jobs need more than the cap, and the slice's `MemoryMax` does not hold one slot of what they need: the
-    /// slice has to grow first.
+    /// The jobs need more than the cap, and the slice's `MemoryMax` does not hold one slot of what they need (under
+    /// `measured` admission, one runner beside the mirror): the slice has to grow first.
     SliceTooSmall {
         /// What the jobs need.
         memory: u64,
@@ -165,7 +173,24 @@ pub struct Resize {
 impl Sizing {
     /// One line on what to do with a profile and why, as `runnerctl sizing`, the dashboard and `runnerd doctor`
     /// say it, such as `lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G`.
+    /// Under `measured` admission, when jobs wanted more slots, it adds that `slots` is not bought with caps there.
     pub fn advice_line(&self, profile: &ProfileSizing) -> String {
+        let line = self.memory_line(profile);
+        if self.admission == AdmissionPolicy::Measured
+            && profile.wants_slots
+            && !matches!(profile.advice, Advice::TooFew { .. })
+        {
+            format!(
+                "{line}; jobs waited {}s for a slot (p95) and slots were busy {}%: measured admission reserves \
+                 predicted peaks, not caps, so more slots may fit: raise slots by hand",
+                profile.wait.p95, profile.busy
+            )
+        } else {
+            line
+        }
+    }
+
+    fn memory_line(&self, profile: &ProfileSizing) -> String {
         let size = |bytes: u64| ByteSize(bytes).to_string();
         let peaks = &profile.peaks;
         let need = format!("its largest peak + {}%", self.margin);
@@ -189,6 +214,13 @@ impl Sizing {
             }
             Advice::Lower { memory, slots } => {
                 let share = profile.memory * u64::from(profile.slots);
+                if self.admission == AdmissionPolicy::Measured {
+                    return format!(
+                        "lower memory to {} from {}, {need}",
+                        size(memory),
+                        size(profile.memory)
+                    );
+                }
                 let then = if slots > profile.slots {
                     format!("{slots} slots fit in the same {}", size(share))
                 } else {

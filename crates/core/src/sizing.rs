@@ -6,7 +6,7 @@
 use std::collections::BTreeMap;
 
 use crate::api::{self, Advice, Peaks, Spread};
-use crate::config::Config;
+use crate::config::{Admission, Config};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 
 /// Advice rounds memory up to a multiple of this: 256M.
@@ -101,7 +101,8 @@ impl Window {
     }
 }
 
-/// The advice for every profile of `config` from `history`, against the slice's `memory_max`.
+/// The advice for every profile of `config` from `history`, against the slice's `memory_max` as `config`'s
+/// admission policy budgets it.
 pub fn advise(
     config: &Config,
     memory_max: Option<u64>,
@@ -116,6 +117,7 @@ pub fn advise(
         .map_or(window.since, |first| first.max(window.since));
     let span = window.now.saturating_sub(since).max(1);
     let caps = config.memory_caps().map_or(u64::MAX, |caps| caps.0);
+    let mirror = config.mirror_memory();
     let rules = &config.sizing;
     let profiles = config
         .profiles
@@ -147,12 +149,20 @@ pub fn advise(
                     .or_default()
                     .push(job);
             }
+            let wait = waits(&jobs);
             let sized = Sized {
                 cap: profile.memory.0,
                 slots: profile.slots,
                 share,
-                // What the slice leaves this profile once the other profiles and the mirror took theirs.
-                room: memory_max.map(|max| max.saturating_sub(caps.saturating_sub(share))),
+                admission: config.host.admission,
+                room: memory_max.map(|max| match config.host.admission {
+                    // What the slice leaves this profile once the other profiles and the mirror took theirs.
+                    Admission::Caps => max.saturating_sub(caps.saturating_sub(share)),
+                    // Measured admission reserves predicted peaks, not caps: the config check only holds one
+                    // runner of each profile beside the mirror.
+                    Admission::Measured => max.saturating_sub(mirror),
+                }),
+                wants_slots: wait.p95 >= WAITED || busy >= BUSY,
                 margin: rules.margin,
                 min_jobs: rules.min_jobs,
             };
@@ -165,23 +175,23 @@ pub fn advise(
                         repository: repository.to_owned(),
                         workflow: workflow.map(str::to_owned),
                         name: job_name.to_owned(),
-                        advice: sized.advice(&peaks, &wait, busy),
+                        advice: sized.advice(&peaks, wait.p95 >= WAITED || busy >= BUSY),
                         peaks,
                         wait,
                     }
                 })
                 .collect();
             let peaks = peaks(&jobs);
-            let wait = waits(&jobs);
             api::ProfileSizing {
                 name: name.clone(),
                 memory: profile.memory.0,
                 cpus: profile.cpus,
                 slots: profile.slots,
-                advice: sized.advice(&peaks, &wait, busy),
+                advice: sized.advice(&peaks, sized.wants_slots),
                 peaks,
                 wait,
                 busy,
+                wants_slots: sized.wants_slots,
                 jobs: job_sizings,
             }
         })
@@ -193,6 +203,10 @@ pub fn advise(
         sample_interval: window.sample_interval,
         min_jobs: rules.min_jobs,
         memory_max,
+        admission: match config.host.admission {
+            Admission::Caps => api::AdmissionPolicy::Caps,
+            Admission::Measured => api::AdmissionPolicy::Measured,
+        },
         profiles,
     }
 }
@@ -203,8 +217,12 @@ struct Sized {
     slots: u32,
     /// What its slots take of the budget now: `memory × slots`.
     share: u64,
-    /// The memory its slots may take of the slice; `None` for an unlimited slice.
+    admission: Admission,
+    /// The memory the slice holds for it, as `admission` budgets it: all its slots at their caps under `caps`, one
+    /// runner under `measured`; `None` for an unlimited slice.
     room: Option<u64>,
+    /// Whether its jobs waited for a slot at p95, or its slots were busy, enough to want more.
+    wants_slots: bool,
     margin: u32,
     min_jobs: u32,
 }
@@ -218,16 +236,17 @@ impl Sized {
         need.div_ceil(GRANULE).saturating_mul(GRANULE).max(GRANULE)
     }
 
-    fn advice(&self, peaks: &Peaks, wait: &Spread, busy: u32) -> Advice {
+    fn advice(&self, peaks: &Peaks, wants_slots: bool) -> Advice {
         if peaks.jobs < u64::from(self.min_jobs) {
             return Advice::TooFew { jobs: peaks.jobs };
         }
         let need = self.need(peaks);
         let fit = |memory: u64| u32::try_from(memory / need).unwrap_or(u32::MAX);
         if need > self.cap {
-            let slots = match self.room {
-                Some(room) => fit(room).min(self.slots),
-                None => self.slots,
+            let slots = match (self.admission, self.room) {
+                (Admission::Caps, Some(room)) => fit(room).min(self.slots),
+                (Admission::Measured, Some(room)) if room < need => 0,
+                (_, _) => self.slots,
             };
             if slots == 0 {
                 return Advice::SliceTooSmall { memory: need };
@@ -240,10 +259,10 @@ impl Sized {
         // A run at its cap, this one or a smaller one it had then, may have been held back or killed by it: its
         // peak is a floor, not what it needs, so the cap is never lowered under it.
         if peaks.at_cap == 0 && self.cap - need >= self.cap * WORTH_LOWERING / 100 {
-            let wanted = wait.p95 >= WAITED || busy >= BUSY;
+            // Under measured admission slots are not bought with caps: the advice line says when more may help.
             return Advice::Lower {
                 memory: need,
-                slots: if wanted {
+                slots: if wants_slots && self.admission == Admission::Caps {
                     fit(self.share).max(self.slots)
                 } else {
                     self.slots

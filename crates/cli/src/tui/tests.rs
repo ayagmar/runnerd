@@ -510,6 +510,7 @@ fn sizing() -> Sizing {
             peaks: peaks.clone(),
             wait: spread(20, 300, 400, 400),
             busy: 70,
+            wants_slots: true,
             advice,
             jobs: vec![JobSizing {
                 repository: "halyard/storefront".to_owned(),
@@ -528,6 +529,7 @@ fn sizing() -> Sizing {
         sample_interval: 2,
         min_jobs: 10,
         memory_max: Some(33 << 30),
+        admission: runnerd_core::api::AdmissionPolicy::Caps,
         profiles: vec![
             advised("jvm", 9 << 30, 7800 << 20, Advice::Keep { memory: 9 << 30 }),
             advised(

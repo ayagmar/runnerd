@@ -819,6 +819,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                 },
                 wait,
                 busy,
+                wants_slots: busy >= 50,
                 advice,
                 jobs,
             }
@@ -831,6 +832,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
         sample_interval: 2,
         min_jobs: 10,
         memory_max: Some(33 * GIB),
+        admission: runnerd_core::api::AdmissionPolicy::Caps,
         profiles,
     }
 }
