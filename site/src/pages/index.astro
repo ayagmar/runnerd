@@ -13,19 +13,19 @@ const description =
 const url = new URL(base, Astro.site).href;
 const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
 
-// A made-up setup, the same on every page: halyard/ledger on the jvm profile, halyard/storefront on node,
-// and the Docker Hub mirror, in GiB, inside ci.slice.
+// The calculator's starting config, the example on every page: two jvm and two node slots and the Docker Hub mirror,
+// in GiB, inside ci.slice.
 const example = {
   max: 33,
   profiles: [
-    { kind: 'jvm', repo: 'halyard/ledger', memory: 9, slots: 2 },
-    { kind: 'node', repo: 'halyard/storefront', memory: 7, slots: 2 },
+    { kind: 'jvm', memory: 9, slots: 2 },
+    { kind: 'node', memory: 7, slots: 2 },
   ],
   mirror: 0.5,
 };
 const blocks = [
-  ...example.profiles.flatMap((p) => Array.from({ length: p.slots }, () => ({ kind: p.kind, repo: p.repo, size: p.memory }))),
-  { kind: 'mirror', repo: '', size: example.mirror },
+  ...example.profiles.flatMap((p) => Array.from({ length: p.slots }, () => ({ kind: p.kind, size: p.memory }))),
+  { kind: 'mirror', size: example.mirror },
 ];
 const used = blocks.reduce((sum, block) => sum + block.size, 0);
 
@@ -123,40 +123,13 @@ const clients = [
           </div>
         </div>
 
-        <figure class="budget budget-hero">
-          <div
-            class="bar"
-            role="img"
-            aria-label={`Memory budget of ci.slice: two jvm runners at 9G for halyard/ledger, two node runners at 7G for halyard/storefront and a 512M Docker Hub mirror, ${used}G of ${example.max}G.`}
-          >
-            <div class="slice" style="--share: 1"></div>
-            <div class="blocks">
-              {
-                blocks.map((block, i) => (
-                  <div class={`block ${block.kind}`} style={`--size: ${block.size}; --i: ${i}`}>
-                    {block.kind !== 'mirror' && (
-                      <>
-                        <span class="size">{block.size}G</span>
-                        <span class="name">{block.kind}</span>
-                        <span class="repo">{block.repo}</span>
-                      </>
-                    )}
-                  </div>
-                ))
-              }
-              <div class="free" style={`--size: ${example.max - used}`}></div>
-            </div>
-          </div>
-          <figcaption>ci.slice, MemoryMax=33G</figcaption>
-        </figure>
-      </section>
-
-      <section class="live wrap" id="live" aria-labelledby="live-title">
-        <h2 id="live-title">The same bar, live</h2>
-        <figure class="live-shot">
+        <figure class="hero-live">
           <figcaption class="prompt-line"><code>$ runnerctl web</code></figcaption>
           <Overview />
         </figure>
+      </section>
+
+      <section class="live wrap" id="live" aria-label="runnerctl">
         <figure class="live-tui">
           <figcaption class="prompt-line"><code>$ runnerctl tui</code></figcaption>
           <Tui
@@ -514,7 +487,7 @@ $ runnerd check-config runnerd.toml</span>
     display: none;
   }
 
-  /* Hero: the title, then the budget bar as the one large shape. */
+  /* Hero: the title, then the dashboard's overview replaying as the one large shape. */
   .hero {
     display: grid;
     grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
@@ -523,8 +496,11 @@ $ runnerd check-config runnerd.toml</span>
     padding-top: clamp(2rem, 6vh, 5rem);
   }
 
-  .hero .budget {
+  .hero-live {
     grid-column: 1 / -1;
+    display: grid;
+    gap: 0.6rem;
+    margin: 0;
   }
 
   .hero h1 {
@@ -633,46 +609,11 @@ $ runnerd check-config runnerd.toml</span>
     flex-basis: 3px;
   }
 
-  .block .size {
-    font-size: clamp(1.75rem, 0.6rem + 4.6vw, 5.5rem);
-    font-weight: 700;
-    letter-spacing: -0.05em;
-    line-height: 0.9;
-  }
-
-  .block .name {
-    font-size: clamp(0.8125rem, 0.7rem + 0.4vw, 1.0625rem);
-    font-weight: 600;
-    margin-top: 0.4rem;
-  }
-
-  .block .repo {
-    font-size: 0.9375rem;
-    font-weight: 500;
-  }
-
-  .budget {
-    margin: 0;
-  }
-
-  .budget figcaption {
-    padding-top: 0.85rem;
-    font-family: var(--font-display);
-    font-size: var(--step-small);
-    font-weight: 600;
-  }
-
-  /* The clients, live: the dashboard's screenshot under the hero's bar, then runnerctl's real output and a frame of its TUI. */
+  /* The terminal clients: a frame of the TUI, then runnerctl's real output. */
   .live {
     padding-top: var(--section);
     display: grid;
     gap: clamp(1.5rem, 3vw, 2.5rem);
-  }
-
-  .live-shot {
-    display: grid;
-    gap: 0.6rem;
-    margin: 0;
   }
 
   /* Each client under the command that opens it. */
@@ -1170,23 +1111,6 @@ $ runnerd check-config runnerd.toml</span>
     transform: none;
   }
 
-  .js .budget-hero .block,
-  .js .budget-hero .slice {
-    animation: grow 900ms var(--ease) both;
-    animation-delay: calc(200ms + var(--i, 0) * 90ms);
-  }
-
-  @keyframes grow {
-    from {
-      transform: scaleY(0);
-      transform-origin: bottom;
-    }
-    to {
-      transform: scaleY(1);
-      transform-origin: bottom;
-    }
-  }
-
   @media (prefers-reduced-motion: reduce) {
     *,
     *::before,
@@ -1256,11 +1180,6 @@ $ runnerd check-config runnerd.toml</span>
 
   }
 
-  @media (max-width: 1100px) {
-    .block .repo {
-      display: none;
-    }
-  }
 
   @media (max-width: 480px) {
     .nav nav a[href='#install'] {
