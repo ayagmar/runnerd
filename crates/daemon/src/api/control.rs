@@ -1,7 +1,7 @@
 //! The control routes: pause (of one repository or all, forced or not) and resume, reseed, cache clean, the config
-//! file (show, check, replace and reload) and the doctor. Every handler takes the authenticated principal. The
-//! engine carries out what changes scheduling through `Control`; this module only writes the config file,
-//! atomically, after it validated it.
+//! file (show, check, replace and reload) and the doctor, with the sizing advice. Every handler takes the
+//! authenticated principal. The engine carries out what changes scheduling through `Control`; this module only
+//! writes the config file, atomically, after it validated it.
 
 use std::io::{self, Write};
 use std::os::unix::fs::{OpenOptionsExt, PermissionsExt};
@@ -14,6 +14,7 @@ use axum::response::{IntoResponse, Response};
 use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery};
 use runnerd_core::config::Config;
 use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs, Target};
+use runnerd_core::sizing::Window;
 use tracing::info;
 
 use super::{AppState, Authenticated, MemoryMax, SyncDir, error};
@@ -249,10 +250,12 @@ fn write_atomically(path: &Path, text: &str, sync_dir: SyncDir) -> io::Result<Op
 }
 
 pub(super) async fn doctor(_: Authenticated, State(state): State<AppState>) -> Response {
+    let sizing = super::history::sizing_now(&state, Window::new(None, super::history::now())).await;
     let text = state.config.lock().await.text.clone();
     let checked = tokio::task::spawn_blocking(move || {
         let config = Config::parse(&text).ok();
-        let host = crate::doctor::Host::read(config.as_ref());
+        let mut host = crate::doctor::Host::read(config.as_ref());
+        host.sizing = Some(sizing);
         crate::doctor::checks(&host, config.as_ref())
     })
     .await;

@@ -8,8 +8,9 @@ use std::time::Duration;
 use futures_util::StreamExt;
 use reqwest::StatusCode;
 use runnerd_core::api::{
-    Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
-    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, RunningJob, Status,
+    Advice, Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
+    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, RunningJob, Sizing,
+    Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::docker::Tty;
@@ -306,6 +307,30 @@ async fn status_lists_the_configured_profiles() {
 }
 
 #[tokio::test]
+async fn sizing_advises_on_every_profile_of_the_config_within_the_slices_budget() {
+    let (client, _, _dir) = daemon().await;
+    let response = client.get("http://runnerd/v1/sizing").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let sizing: Sizing = serde_json::from_slice(&response.bytes().await.unwrap()).unwrap();
+    let profiles: Vec<_> = sizing
+        .profiles
+        .iter()
+        .map(|profile| (profile.name.as_str(), profile.memory, profile.advice))
+        .collect();
+    assert_eq!(
+        profiles,
+        [
+            ("jvm", 9 << 30, Advice::TooFew { jobs: 0 }),
+            ("node", 7 << 30, Advice::TooFew { jobs: 0 })
+        ]
+    );
+    assert_eq!(
+        (sizing.memory_max, sizing.margin, sizing.min_jobs),
+        (Some(33 << 30), 15, 10)
+    );
+}
+
+#[tokio::test]
 async fn repositories_pause_and_resume_by_owner_and_name() {
     let (client, control, _dir) = daemon().await;
     let post = async |path: &str| {
@@ -427,6 +452,7 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/jobs/1/logs"),
         client.get("http://runnerd/v1/host/samples"),
         client.get("http://runnerd/v1/stats"),
+        client.get("http://runnerd/v1/sizing"),
         client.get("http://runnerd/v1/caches"),
         client.get("http://runnerd/v1/caches/history"),
         client.get("http://runnerd/v1/events"),

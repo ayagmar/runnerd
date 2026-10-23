@@ -1,6 +1,6 @@
-//! The job history routes: jobs, their samples and logs, the slice's samples, stats and cache sizes, read from the
-//! store. Every handler takes the authenticated principal. Reads only; a log with `follow` streams until its job's
-//! record is final or the server stops.
+//! The job history routes: jobs, their samples and logs, the slice's samples, stats, sizing advice and cache sizes,
+//! read from the store. Every handler takes the authenticated principal. Reads only; a log with `follow` streams
+//! until its job's record is final or the server stops.
 
 use std::time::{SystemTime, UNIX_EPOCH};
 
@@ -12,9 +12,11 @@ use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use runnerd_core::api::{
     CacheHistory, CacheHistoryQuery, Caches, Event, HostSampleQuery, HostSamples, JobQuery,
-    LogQuery, StatsQuery,
+    LogQuery, Sizing, SizingQuery, StatsQuery,
 };
+use runnerd_core::config::Config;
 use runnerd_core::observe::metrics::SAMPLE_INTERVAL;
+use runnerd_core::sizing::{Window, advise};
 use runnerd_core::store::{Store, StoreError};
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{broadcast, watch};
@@ -27,7 +29,7 @@ const LOG_BATCH: u64 = 2000;
 /// How far back `/v1/host/samples` goes: 43,200 samples, about 2 MB of JSON. Seven days of them were 15 MB.
 const HOST_SAMPLES_WINDOW: u64 = 24 * 3600;
 
-fn now() -> u64 {
+pub(super) fn now() -> u64 {
     SystemTime::now()
         .duration_since(UNIX_EPOCH)
         .unwrap_or_default()
@@ -109,6 +111,32 @@ pub(super) async fn stats(
         Ok(rows) => Json(rows).into_response(),
         Err(store_error) => failed(&store_error),
     }
+}
+
+pub(super) async fn sizing(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<SizingQuery>,
+) -> Response {
+    let window = Window::new(query.since, now());
+    match sizing_now(&state, window).await {
+        Ok(sizing) => Json(sizing).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    }
+}
+
+/// The advice for the config the daemon runs with, from the history in `window`.
+pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizing, String> {
+    let history = state
+        .handle
+        .store
+        .sizing(window.since)
+        .await
+        .map_err(|store_error| store_error.to_string())?;
+    let memory_max = state.handle.status.borrow().budget.memory_max;
+    let text = state.config.lock().await.text.clone();
+    let config = Config::parse(&text).map_err(|parse_error| parse_error.to_string())?;
+    Ok(advise(&config, memory_max, &history, window))
 }
 
 pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> Response {

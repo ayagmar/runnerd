@@ -5,10 +5,12 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use runnerd_core::api::{Check, CheckStatus as Status};
+use runnerd_core::api::{Advice, Check, CheckStatus as Status, Sizing};
 use runnerd_core::config::{self, ByteSize, Config, Image, Isolation};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::record;
+use runnerd_core::sizing::{Window, advise};
+use runnerd_core::store;
 
 /// What doctor reads from the host, gathered before any check so the checks can be tested without one.
 pub(crate) struct Host {
@@ -17,6 +19,9 @@ pub(crate) struct Host {
     pub images: BTreeMap<String, Result<ImageFound, String>>,
     /// The disk the records of failed jobs take; `None` without a config or Docker.
     pub records: Option<Result<u64, String>>,
+    /// Sizing advice from the job history; `None` without a config or a history. `read` leaves it out: the daemon
+    /// reads its own store, `runnerd doctor` the database with `read_sizing`.
+    pub sizing: Option<Result<Sizing, String>>,
     /// `/etc/os-release`, empty when missing.
     pub os_release: String,
     /// `None` without a config, which names the slice.
@@ -72,6 +77,7 @@ impl Host {
                 _ => BTreeMap::new(),
             },
             records: (config.is_some() && docker.is_ok()).then(read_records),
+            sizing: None,
             docker,
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
@@ -86,6 +92,20 @@ impl Host {
             }),
             kvm: Path::new("/dev/kvm").exists(),
         }
+    }
+}
+
+/// The advice from the job history at `database`, read-only, while no daemon runs; `None` when it does not exist.
+pub(crate) fn read_sizing(
+    config: &Config,
+    database: &Path,
+    memory_max: Option<u64>,
+    now: u64,
+) -> Option<Result<Sizing, String>> {
+    let window = Window::new(None, now);
+    match store::sizing_at(database, window.since) {
+        Ok(history) => history.map(|history| Ok(advise(config, memory_max, &history, window))),
+        Err(error) => Some(Err(error.to_string())),
     }
 }
 
@@ -334,6 +354,9 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     if let (Some(config), Some(records)) = (config, &host.records) {
         checks.push(records_check(records, config));
     }
+    if let Some(sizing) = &host.sizing {
+        checks.push(sizing_check(sizing));
+    }
     checks.push(match &host.gh_scopes {
         Ok(scopes) if scopes.iter().any(|s| s == "repo") => pass(
             "gh",
@@ -575,6 +598,57 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
             ),
             fix: None,
         },
+    }
+}
+
+/// Warns when a profile's jobs need more than its cap; says which caps could be lowered.
+fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
+    let sizing = match sizing {
+        Ok(sizing) => sizing,
+        Err(error) => return skip("sizing", &format!("cannot read the job history: {error}")),
+    };
+    let changes: Vec<_> = sizing
+        .profiles
+        .iter()
+        .filter(|profile| profile.advice.change().is_some())
+        .collect();
+    let raise = changes
+        .iter()
+        .any(|profile| matches!(profile.advice, Advice::Raise { .. }));
+    let detail = if changes.is_empty() {
+        let too_few = sizing
+            .profiles
+            .iter()
+            .any(|profile| matches!(profile.advice, Advice::TooFew { .. }));
+        if too_few {
+            format!(
+                "some profiles ran fewer than {} jobs; runnerctl sizing shows their peaks",
+                sizing.min_jobs
+            )
+        } else {
+            format!(
+                "every profile's memory fits its jobs' p99 peak + {}%",
+                sizing.margin
+            )
+        }
+    } else {
+        changes
+            .iter()
+            .map(|profile| format!("{}: {}", profile.name, sizing.advice_line(profile)))
+            .collect::<Vec<_>>()
+            .join("; ")
+    };
+    Check {
+        name: "sizing".to_owned(),
+        status: if raise { Status::Warn } else { Status::Info },
+        detail,
+        fix: (!changes.is_empty()).then(|| {
+            changes
+                .iter()
+                .map(|profile| format!("runnerctl sizing apply {}", profile.name))
+                .collect::<Vec<_>>()
+                .join("\n")
+        }),
     }
 }
 
