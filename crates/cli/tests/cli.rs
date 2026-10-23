@@ -354,6 +354,20 @@ fn stderr(output: &Output) -> String {
 }
 
 #[test]
+fn the_version_is_reported_under_the_command_name() {
+    // The package is runnerd-cli; what people type and read is runnerctl.
+    let output = Command::new(env!("CARGO_BIN_EXE_runnerctl"))
+        .arg("--version")
+        .output()
+        .unwrap();
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(
+        stdout(&output),
+        format!("runnerctl {}\n", env!("CARGO_PKG_VERSION"))
+    );
+}
+
+#[test]
 fn status_json_is_the_api_type_unchanged() {
     let dir = TempDir::new();
     let socket = dir.0.join("runnerd.sock");
