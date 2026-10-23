@@ -19,7 +19,7 @@ use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{Decision, Repository, matches};
-use crate::sizing::Ran;
+use crate::sizing::{Measure, Ran};
 use crate::time;
 
 /// How often the predictor reads the job history again.
@@ -157,10 +157,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .or_else(|| self.config.profiles.get(&run.profile).map(|p| p.memory.0))
                 .unwrap_or(u64::MAX);
             let at = run.finished_at.unwrap_or(run.queued_at);
-            // A cancelled run's peak may be cut short, so only how it ended counts.
-            if *finished {
+            if run.measure == Measure::WithActiveFile {
+                // Its peak counted page cache read twice, so neither it nor a peak near the cap says what the job
+                // needs; a kill for memory still does.
+                if run.oom_killed {
+                    predictor.mark(
+                        &Ran {
+                            reserved: None,
+                            ..run.clone()
+                        },
+                        cap,
+                        at,
+                    );
+                }
+            } else if *finished {
                 predictor.learn(run, &run.profile, cap, at);
             } else {
+                // A cancelled run's peak may be cut short, so only how it ended counts.
                 predictor.mark(run, cap, at);
             }
         }

@@ -13,6 +13,8 @@ use super::{
 };
 use crate::api::{Bucket, HostSample, JobQuery, JobState, StatsQuery};
 use crate::github::QueuedJob;
+use crate::observe::metrics::Events;
+use crate::sizing::Measure;
 use crate::testdir::TestDir;
 
 fn queued(id: u64) -> QueuedJob {
@@ -242,7 +244,7 @@ async fn a_host_sample_reads_back_at_once_and_is_kept_from_a_flush_on() {
 
 fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord {
     SampleRecord {
-        oom_kills: 0,
+        events: Events::default(),
         runner: runner.to_owned(),
         at,
         cpu: 0,
@@ -753,7 +755,10 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
-            oom_kills: kills,
+            events: Events {
+                oom: Some(kills),
+                oom_kill: Some(kills),
+            },
             ..sample(name, 1_000_300, 0, 0)
         }]);
         store.lost(id, 1_000_400);
@@ -790,7 +795,10 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
     // Its build hung after the kill, and someone cancelled it.
     store.samples(vec![SampleRecord {
         memory: 2 << 30,
-        oom_kills: 1,
+        events: Events {
+            oom: Some(1),
+            oom_kill: Some(1),
+        },
         ..sample("r1", 1_000_300, 0, 0)
     }]);
     store.details(crate::github::JobDetails {
@@ -883,6 +891,49 @@ fn doctor_refuses_a_history_it_cannot_write_beside_while_its_wal_holds_changes()
     assert!(
         error.contains("runnerd.db-wal") && error.contains("as the user the daemon runs as"),
         "{error}"
+    );
+}
+
+#[tokio::test]
+async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    database_of_version(&path, 7);
+    let measures = |history: &crate::sizing::History| -> Vec<(Measure, Option<bool>)> {
+        history
+            .jobs
+            .iter()
+            .map(|job| (job.measure, job.hit_cap))
+            .collect()
+    };
+    // `runnerd doctor` reads a version 7 history as it is.
+    let before = super::sizing_at(&path, 0).unwrap().unwrap();
+    assert_eq!(measures(&before), [(Measure::WithActiveFile, None)]);
+    let store = Store::open(&path).unwrap();
+    // r4's memory.events had no `oom` counter: unknown, not "never ran out".
+    for (id, name, oom) in [(2, "r2", Some(0)), (3, "r3", Some(1)), (4, "r4", None)] {
+        store.queued("o/r", &queued(id));
+        store.runner_started(runner(name, 1_000_100));
+        store.claimed(id, 10, name, 1_000_200);
+        store.samples(vec![SampleRecord {
+            events: Events {
+                oom,
+                oom_kill: Some(0),
+            },
+            ..sample(name, 1_000_300, 0, 0)
+        }]);
+        store.lost(id, 1_000_400);
+    }
+    store.flush().await;
+    let after = store.sizing(0).await.unwrap();
+    assert_eq!(
+        measures(&after),
+        [
+            (Measure::WithActiveFile, None),
+            (Measure::WithoutPageCache, Some(false)),
+            (Measure::WithoutPageCache, Some(true)),
+            (Measure::WithoutPageCache, None),
+        ]
     );
 }
 

@@ -88,8 +88,9 @@ pub struct JobSizing {
 pub struct Peaks {
     /// How many jobs: the number of peaks the percentiles are taken over.
     pub jobs: u64,
-    /// Of those, how many peaked within 5% of their container's memory cap: likely held back or killed by it, so
-    /// they may need more than they show.
+    /// Of those, how many met their container's memory cap: killed for memory, or out of memory at it with
+    /// nothing left to reclaim (for a run whose container's events were not recorded, a peak within 5% of it). They
+    /// may need more than they show.
     pub at_cap: u64,
     /// Memory without page cache, in bytes.
     pub memory: Spread,
@@ -121,12 +122,12 @@ pub enum Advice {
         /// How many there are.
         jobs: u64,
     },
-    /// The cap fits, and lowering it would save less than a tenth or a run peaked at its cap.
+    /// The cap fits, and lowering it would save less than a tenth or a run met its cap.
     Keep {
         /// What the jobs need.
         memory: u64,
     },
-    /// The cap is a tenth or more above what the jobs need, and no run peaked at its cap.
+    /// The cap is a tenth or more above what the jobs need, and no run met its cap.
     Lower {
         /// The new `memory`.
         memory: u64,
@@ -195,7 +196,7 @@ impl Sizing {
         let peaks = &profile.peaks;
         let need = format!("its largest peak + {}%", self.margin);
         let at_cap = format!(
-            "{} of {} jobs peaked at their cap",
+            "{} of {} jobs ran out of memory at their cap",
             peaks.at_cap, peaks.jobs
         );
         match profile.advice {

@@ -9,9 +9,6 @@ use crate::api::{Basis, JobPeak};
 use crate::config::{self, Config};
 use crate::sizing::{GRANULE, Ran, spread};
 
-/// A run that peaked within this percent of its cap may have been held back or killed there.
-const AT_CAP: u64 = 95;
-
 /// For this long after a run at its cap or killed for memory, in milliseconds, its job is admitted at its cap: 7
 /// days. After a run past what it reserved, its job reserves its largest peak for as long.
 pub const UNPREDICTABLE_FOR: u64 = 7 * 24 * 3600 * 1000;
@@ -130,13 +127,13 @@ impl Predictor {
             .add(peak);
     }
 
-    /// Learns only how a run ended, not its peak, as for a cancelled one: a kill for memory or a peak at its cap
+    /// Learns only how a run ended, not its peak, as for a cancelled one: a run that met its cap (`Ran::met_cap`)
     /// makes its job unpredictable for `UNPREDICTABLE_FOR`, a peak past what it reserved makes its job reserve its
     /// largest peak for as long.
     pub fn mark(&mut self, run: &Ran, cap: u64, at: u64) {
         let peak = run.memory_peak;
         let job = self.jobs.entry(Key::of(run)).or_default();
-        if run.oom_killed || peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP) {
+        if run.met_cap(cap) {
             job.unpredictable_until = job.unpredictable_until.max(at + UNPREDICTABLE_FOR);
         }
         if run.reserved.is_some_and(|reserved| peak > reserved) {

@@ -3,6 +3,9 @@
 Amended by [0036](0036-young-jobs-predicted-from-their-own-runs.md): a job with 2 successful runs reserves its own
 largest peak, not its profile's p95, while no other copy of it is queued or running.
 
+Amended by [0037](0037-memory-without-page-cache.md): job samples leave out page cache, and a run
+met its cap when its container's `memory.events` say so, not when its peak came within 5% of it.
+
 ## Context
 
 A runner starts only when its profile's `memory` fits the slice's `MemoryMax` beside the caps of everything

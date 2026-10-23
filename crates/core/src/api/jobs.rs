@@ -234,7 +234,9 @@ pub struct HostSample {
     pub at: u64,
     /// CPU use of the slice since the previous sample, in millicores.
     pub cpu: u64,
-    /// Memory use of the slice without page cache.
+    /// Memory use of the slice less its inactive page cache, as `docker stats` counts it: a conservative number,
+    /// since active page cache still counts, which the high-water mark of measured admission compares to
+    /// `MemoryMax`.
     pub memory: u64,
 }
 
