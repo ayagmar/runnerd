@@ -1,4 +1,7 @@
-Google Inc.
+Copyright 2014 - 2021 Adobe (http://www.adobe.com/), with Reserved Font Name 'Source'.
+
+The files this site serves are a Modified Version: Source Serif 4 cut to the characters the site uses and renamed
+runnerd serif, as the Reserved Font Name requires.
 
 This Font Software is licensed under the SIL Open Font License, Version 1.1.
 This license is copied below, and is also available with a FAQ at:

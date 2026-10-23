@@ -18,17 +18,18 @@ export default defineConfig({
   trailingSlash: 'always',
   // Source Serif 4 and Libre Franklin (OFL, public/fonts), Fontsource's latin files cut to ASCII and the punctuation the
   // site uses: pyftsubset --unicodes=U+20-7E,U+A0,U+B7,U+D7,U+2013,U+2014,U+2018,U+2019,U+201C,U+201D,U+2026,U+2192,U+2212
-  // --layout-features='*' --flavor=woff2. Astro emits metric-matched fallbacks, so the swap moves nothing.
+  // --layout-features='*' --flavor=woff2. The serif's cut is renamed runnerd serif in its name table, since 'Source' is
+  // a Reserved Font Name. Astro emits metric-matched fallbacks, so the swap moves nothing.
   fonts: [
     {
       provider: fontProviders.local(),
-      name: 'Source Serif 4',
+      name: 'runnerd serif',
       cssVariable: '--font-text',
       fallbacks: ['Georgia', 'serif'],
       options: {
         variants: [
-          { src: ['./src/assets/fonts/source-serif-4-text-normal.woff2'], weight: '200 900', style: 'normal' },
-          { src: ['./src/assets/fonts/source-serif-4-text-italic.woff2'], weight: '200 900', style: 'italic' },
+          { src: ['./src/assets/fonts/runnerd-serif-normal.woff2'], weight: '200 900', style: 'normal' },
+          { src: ['./src/assets/fonts/runnerd-serif-italic.woff2'], weight: '200 900', style: 'italic' },
         ],
       },
     },
