@@ -212,8 +212,20 @@ struct RepositoryState {
     held_until: Option<SystemTime>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
-    /// Since when its next job waits for CPU that memory and a slot have room for.
-    cpu_held_since: Option<SystemTime>,
+    /// Its oldest job held for CPU that memory and a slot had room for, and since when, kept while that job stays
+    /// queued: a tick held by memory or slots in between does not make it younger.
+    cpu_wait: Option<CpuWait>,
+    /// Whether the last plan held its next job for CPU.
+    cpu_held: bool,
+}
+
+/// A job waiting for CPU, as `RepositoryState::cpu_wait` keeps it.
+#[derive(Debug, Clone, Copy)]
+struct CpuWait {
+    /// The job's ID.
+    job: u64,
+    /// When a plan first held it for CPU.
+    since: SystemTime,
 }
 
 /// The scheduler with its side effects, on the real GitHub and Docker unless a test passes fakes.

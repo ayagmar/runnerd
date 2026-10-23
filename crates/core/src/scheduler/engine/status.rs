@@ -111,10 +111,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     cpus,
                     budget,
                     in_use: self.cpu_in_use(),
-                    held: self
-                        .repositories
-                        .values()
-                        .any(|state| state.cpu_held_since.is_some()),
+                    held: self.repositories.values().any(|state| state.cpu_held),
                 }),
         }
     }

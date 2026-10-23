@@ -40,6 +40,9 @@ runner is admitted by CPU.
   says a job waits (`api::CpuBudget`), and the runner that starts next for that repository records how long it waited
   (`api::CpuAdmission::waited`). Once a held repository has waited `CPU_PRIORITY_AFTER` (2 minutes), `plan` starts
   no younger job until its own fits: otherwise a stream of lighter jobs takes every CPU that frees up before it.
+  The wait belongs to the job first held, the next one its waiting runners leave, and lasts until a runner of the
+  repository starts or, after a successful listing, that job is no longer queued: a tick that holds it for memory
+  (the high-water mark) or a slot instead does not make it younger.
   `runnerd simulate` does not model this priority. Both fields are optional and absent without a CPU budget, so released clients read
   the status and records as before.
 

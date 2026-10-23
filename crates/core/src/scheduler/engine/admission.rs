@@ -536,16 +536,49 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         stops
     }
 
-    /// Marks since when each repository in `held` waits for CPU, logging when it starts to, and forgets the wait
-    /// of every other one.
+    /// Notes which repositories this plan held for CPU (`held`). A held repository without a wait starts one for
+    /// its oldest queued job, logging it; a wait ends when its runner starts or, once a listing succeeded, its job
+    /// is no longer queued, not when a later plan holds the job for memory or a slot instead.
     pub(super) fn note_held_for_cpu(&mut self, held: &BTreeSet<String>) {
         let budget = self.cpu_budget();
         let in_use = self.cpu_in_use();
-        for (name, state) in &mut self.repositories {
-            if !held.contains(name) {
-                state.cpu_held_since = None;
-            } else if state.cpu_held_since.is_none() {
-                state.cpu_held_since = Some(SystemTime::now());
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
+        let mut idle: BTreeMap<String, usize> = BTreeMap::new();
+        for (_, occupant) in self.occupied() {
+            if !occupant.busy && occupant.job.is_none() {
+                *idle.entry(occupant.repository.clone()).or_default() += 1;
+            }
+        }
+        for repository in &self.config.repositories {
+            let name = &repository.name;
+            let Some(state) = self.repositories.get_mut(name) else {
+                continue;
+            };
+            let queued = state
+                .queued
+                .iter()
+                .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels));
+            if state.listed
+                && let Some(wait) = state.cpu_wait
+                && !queued.clone().any(|job| job.id == wait.job)
+            {
+                state.cpu_wait = None;
+            }
+            state.cpu_held = held.contains(name);
+            // As `plan` serves them: its waiting runners take the oldest jobs, the next one is held.
+            let mut ids: Vec<u64> = queued.map(|job| job.id).collect();
+            ids.sort_unstable();
+            if state.cpu_held
+                && state.cpu_wait.is_none()
+                && let Some(oldest) = ids.get(idle.get(name).copied().unwrap_or(0)).copied()
+            {
+                state.cpu_wait = Some(super::CpuWait {
+                    job: oldest,
+                    since: SystemTime::now(),
+                });
                 if let Some(budget) = budget {
                     info!(
                         "{name}: its next job waits for CPU: runners reserve {} of the budget's {}",

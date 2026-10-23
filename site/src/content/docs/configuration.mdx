@@ -220,7 +220,7 @@ cpu_overcommit = 1.0
 - A runner reserves the largest of its repository's queued jobs until it knows its job, then that job's; never more than the whole budget, so one runner can always start.
 - The mirror, seed containers and shells reserve no CPU.
 
-A job that had a slot and memory but not CPU waits. Once it has waited 2 minutes, no younger job starts until it fits, so a stream of light jobs cannot keep a heavy one waiting forever. The status line and the dashboard say so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`), the daemon logs it, and the job's record says how long it waited (`runnerctl job <id>`).
+A job that had a slot and memory but not CPU waits. Once it has waited 2 minutes, no younger job starts until it fits, so a stream of light jobs cannot keep a heavy one waiting forever. The wait counts from when the job was first held for CPU until it starts or leaves the queue, also through ticks that hold it for memory or a slot instead. The status line and the dashboard say so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`), the daemon logs it, and the job's record says how long it waited (`runnerctl job <id>`).
 
 It is off by default. A job's average is far under its peak: the image builds that peak at 6 CPUs average under one, so reserving peaks would leave most of the host idle, and averages admit nearly everything on a host with many CPUs. On one host's history at 32 CPUs, the running jobs' averages never added up past 8 CPUs, even with twice the node slots, so a budget at 1.0 held nothing back. It matters on a small host. The same history replayed against 8 CPUs:
 

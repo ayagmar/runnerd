@@ -5,6 +5,7 @@
 use super::*;
 use crate::api::{AdmissionPolicy, Basis, JobPeak};
 use crate::observe::metrics::Events;
+use crate::scheduler::CPU_PRIORITY_AFTER;
 use crate::store::{RunnerRecord, SampleRecord};
 use crate::time;
 
@@ -877,5 +878,168 @@ async fn a_reload_that_sets_cpu_overcommit_admits_by_the_slices_cpus_it_read() {
             in_use: 2000,
             held: true,
         })
+    );
+}
+
+/// How many runners of `repository` hold a slot.
+fn runners_of(
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    handle: &Handle,
+    repository: &str,
+) -> usize {
+    engine.publish();
+    handle
+        .status
+        .borrow()
+        .profiles
+        .iter()
+        .flat_map(|profile| &profile.slots)
+        .filter(|slot| {
+            slot.runner
+                .as_ref()
+                .is_some_and(|runner| runner.repository == repository)
+        })
+        .count()
+}
+
+/// A queued `lint` job of o/b.
+fn lint(id: u64) -> QueuedJob {
+    QueuedJob {
+        name: "lint".to_owned(),
+        labels: vec!["self-hosted".to_owned(), "light".to_owned()],
+        ..job(id)
+    }
+}
+
+#[tokio::test]
+async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts_once_the_cpu_drains()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    // o/r's build uses 4 CPUs over its run, o/b's lint 1, on a slice of 4 CPUs.
+    let config = format!(
+        "{}\n[[repositories]]\nname = \"o/b\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"light\"]\n",
+        cpu_measured()
+            .replace("cpus = 2", "cpus = 4")
+            .replace("slots = 6", "slots = 8")
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(10 * G);
+    engine.cpus = Some(4000);
+    history(&handle.store, G, 0).await;
+    history_of(&handle.store, "lint", 2000, G, 0).await;
+    let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    for statement in [
+        "UPDATE jobs SET cpu_average = 4000 WHERE name = 'build'",
+        "UPDATE jobs SET cpu_average = 1000, repository = 'o/b' WHERE name = 'lint'",
+        "UPDATE runners SET repository = 'o/b' WHERE name LIKE 'earlier-2%'",
+    ] {
+        db.execute(statement, []).unwrap();
+    }
+    engine.recover().await.unwrap();
+    slice_at(&handle.store, 2 * G);
+
+    // Three lints start and take their jobs: 3 of the 4 CPUs.
+    github.0.lock().unwrap().queued = (10..13).map(lint).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(runners_of(&mut engine, &handle, "o/b"), 3);
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued.clear();
+        for runner in &mut state.runners {
+            runner.busy = true;
+        }
+    }
+    // The build queues; it needs all 4 CPUs.
+    github.0.lock().unwrap().queued = vec![job(20)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    assert!(
+        budget.cpu.is_some_and(|cpu| cpu.held),
+        "the build waits for CPU: {budget:?}"
+    );
+    // As if it had waited past the limit already.
+    engine
+        .repositories
+        .get_mut("o/r")
+        .and_then(|state| state.cpu_wait.as_mut())
+        .expect("the build's wait is kept")
+        .since -= CPU_PRIORITY_AFTER;
+
+    // Every other tick the slice is at its high-water mark, and a lint queues every tick; one lint runner ends every
+    // second round, so CPU keeps freeing up.
+    let mut next = 30;
+    for round in 0..6 {
+        slice_at(&handle.store, 95 * G / 10);
+        github.0.lock().unwrap().queued.push(lint(next));
+        next += 1;
+        engine.tick(Shutdown::No).await;
+        slice_at(&handle.store, 2 * G);
+        github.0.lock().unwrap().queued.push(lint(next));
+        next += 1;
+        if round % 2 == 1 {
+            let mut state = docker.0.lock().unwrap();
+            if let Some(at) = state.containers.iter().position(|container| {
+                container
+                    .labels
+                    .get("runnerd.repository")
+                    .map(String::as_str)
+                    == Some("o/b")
+            }) {
+                state.containers.remove(at);
+            }
+        }
+        engine.tick(Shutdown::No).await;
+        if runners_of(&mut engine, &handle, "o/r") == 1 {
+            break;
+        }
+        assert!(
+            runners_of(&mut engine, &handle, "o/b") <= 3,
+            "no younger lint takes the CPU the build waits for (round {round})"
+        );
+    }
+    assert_eq!(
+        runners_of(&mut engine, &handle, "o/r"),
+        1,
+        "the build started once the lints it waited for drained"
+    );
+    assert_eq!(runners_of(&mut engine, &handle, "o/b"), 0);
+    assert!(
+        engine.repositories["o/r"].cpu_wait.is_none(),
+        "served, the build no longer waits"
+    );
+}
+
+#[tokio::test]
+async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let config = CONFIG.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\ncpu_overcommit = 1.0",
+    );
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    // Room for one runner at the profile's 2 CPUs.
+    engine.cpus = Some(2000);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine.repositories["o/r"].cpu_wait.map(|wait| wait.job),
+        Some(2)
+    );
+    // Its run is cancelled: GitHub lists it no more.
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.repositories["o/r"].cpu_wait.is_none(),
+        "a job gone from the queue no longer waits"
     );
 }
