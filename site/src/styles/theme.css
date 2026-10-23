@@ -185,16 +185,19 @@ h1#_top {
 }
 
 /* JetBrains Mono 2.304 (OFL, public/fonts/JetBrainsMono-OFL.txt, credited where frames show), cut to ASCII and the frames' glyphs: one font for every cell, so
-   box drawing and blocks keep the columns whatever monospace the reader has. */
+   box drawing and blocks keep the columns whatever monospace the reader has. Block, not swap: a fallback would
+   misalign the columns, and the file is 5 KB. */
 @font-face {
   font-family: 'runnerd tui';
   src: url('../assets/fonts/jetbrains-mono-tui-regular.woff2') format('woff2');
+  font-display: block;
   font-weight: 400;
 }
 
 @font-face {
   font-family: 'runnerd tui';
   src: url('../assets/fonts/jetbrains-mono-tui-bold.woff2') format('woff2');
+  font-display: block;
   font-weight: 700;
 }
 
