@@ -19,6 +19,10 @@ use crate::time;
 /// The public API's address.
 pub const API_URL: &str = "https://api.github.com";
 
+/// How long one request may take, connecting included. GitHub answers in well under a second; a request that hangs
+/// holds back the tick that made it.
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
 /// A GitHub token. Its `Debug` output never shows the value.
 #[derive(Clone)]
 pub struct Token(String);
@@ -330,7 +334,7 @@ impl Github {
         let http = reqwest::Client::builder()
             .user_agent(concat!("runnerd/", env!("CARGO_PKG_VERSION")))
             .default_headers(headers)
-            .timeout(Duration::from_secs(30))
+            .timeout(REQUEST_TIMEOUT)
             .build()
             .map_err(|source| Error::Http {
                 method: Method::GET,

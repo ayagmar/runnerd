@@ -10,9 +10,10 @@ use futures_util::StreamExt;
 use tokio::sync::mpsc;
 use tracing::warn;
 
+use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Occupant};
 use crate::docker::DockerApi;
-use crate::github::GithubApi;
+use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
 use crate::scheduler::SlotRef;
@@ -156,7 +157,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
-        let left: Vec<(u64, String)> = self
+        let left: Vec<(String, u64)> = self
             .queued_jobs
             .iter()
             .filter(|(id, repository)| {
@@ -165,10 +166,10 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                         state.listed && !state.queued.iter().any(|job| job.id == **id)
                     })
             })
-            .map(|(id, repository)| (*id, repository.clone()))
+            .map(|(id, repository)| (repository.clone(), *id))
             .collect();
-        for (id, repository) in left {
-            match self.github.job(&repository, id).await {
+        for (repository, id, answer) in self.read_jobs(left).await {
+            match answer {
                 // Still queued: the listing lags.
                 Ok(details) if details.status == "queued" || details.status == "waiting" => {}
                 // One of this machine's runners: its log capture reports it. If it never did by the time the job
@@ -190,27 +191,25 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
             .collect();
-        for (repository, id) in running {
-            match self.github.job(&repository, id).await {
+        for (repository, id, answer) in self.read_jobs(running).await {
+            match answer {
                 Ok(details) => self.store.details(details),
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
-        let closing: Vec<(u64, Closing)> = self
+        let closing: Vec<(String, u64)> = self
             .closing
             .iter()
-            .map(|(id, closing)| (*id, closing.clone()))
+            .map(|(id, closing)| (closing.repository.clone(), *id))
             .collect();
-        for (
-            id,
-            Closing {
-                repository,
-                since,
-                since_ms,
-            },
-        ) in closing
-        {
-            match self.github.job(&repository, id).await {
+        for (repository, id, answer) in self.read_jobs(closing).await {
+            let Some(Closing {
+                since, since_ms, ..
+            }) = self.closing.get(&id).cloned()
+            else {
+                continue;
+            };
+            match answer {
                 Ok(details) if details.status == "completed" => {
                     self.closing.remove(&id);
                     self.store.details(details);
@@ -224,6 +223,22 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
+    }
+
+    /// Asks GitHub for jobs, `CONCURRENT_REQUESTS` at a time; the answers come in the order asked.
+    async fn read_jobs(
+        &self,
+        jobs: Vec<(String, u64)>,
+    ) -> Vec<(String, u64, Result<JobDetails, github::Error>)> {
+        let github = &*self.github;
+        futures_util::stream::iter(jobs)
+            .map(|(repository, id)| async move {
+                let answer = github.job(&repository, id).await;
+                (repository, id, answer)
+            })
+            .buffered(CONCURRENT_REQUESTS)
+            .collect()
+            .await
     }
 
     pub(super) fn prune(&mut self) {

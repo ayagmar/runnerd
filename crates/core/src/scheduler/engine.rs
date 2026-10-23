@@ -190,7 +190,8 @@ struct RepositoryState {
 #[derive(Debug)]
 pub struct Engine<G = Github, D = Docker> {
     config: Config,
-    github: G,
+    /// Shared with the listings a tick reads while it answers commands.
+    github: Arc<G>,
     docker: Arc<D>,
     names: Names,
     isolation: &'static dyn Isolation,
@@ -305,7 +306,7 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         };
         let mut engine = Engine {
             config,
-            github,
+            github: Arc::new(github),
             docker: Arc::new(docker),
             names,
             isolation,
@@ -402,6 +403,22 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             warn!("cannot stop the mirror: {error}");
         }
         info!("stopped");
+    }
+
+    /// Runs `work`, answering commands and publishing after each until it is done, so a command waits for a slow
+    /// GitHub no longer than for the command before it.
+    async fn serving<T>(&mut self, work: impl Future<Output = T>) -> T {
+        let mut work = std::pin::pin!(work);
+        loop {
+            tokio::select! {
+                biased;
+                output = &mut work => return output,
+                Some(command) = self.commands.recv() => {
+                    self.command(command).await;
+                    self.publish();
+                }
+            }
+        }
     }
 
     fn occupied(&self) -> impl Iterator<Item = (SlotRef, &Occupant)> {

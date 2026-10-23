@@ -1,8 +1,8 @@
 //! Control from the API: the `Control` handle the daemon's API holds (pause flags, which it records in the store so
-//! a restart keeps them, shutdown, a channel of `Command`s) and the engine's side of each command: pause, of one
-//! repository or all, with or without cancelling their runs, reseed, cache clean and config replacement. Commands
-//! run between ticks, so they see the slot state a tick does (ADR 0019). It must not serve HTTP or write the config
-//! file: the daemon does, through `Commit`.
+//! a restart keeps them, shutdown, a channel of `Command`s) and the engine's side of each command: pause and resume,
+//! of one repository or all, with or without cancelling their runs, reseed, cache clean and config replacement.
+//! Commands run between ticks or while a tick waits for GitHub, so they see the slot state a tick does (ADRs 0019,
+//! 0026). It must not serve HTTP or write the config file: the daemon does, through `Commit`.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
@@ -86,7 +86,7 @@ pub enum ControlError {
     Stopped,
 }
 
-/// A command the engine carries out between ticks, with where its answer goes.
+/// A command the engine carries out between ticks or while a tick waits for GitHub, with where its answer goes.
 #[derive(Debug)]
 pub enum Command {
     /// Pause one repository or all; with `RunningJobs::Kill`, cancel their running jobs.
