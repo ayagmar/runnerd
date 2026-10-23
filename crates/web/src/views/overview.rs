@@ -268,8 +268,8 @@ fn slot_view<'overview>(
 }
 
 /// The budget: the slice as the ground, a block per slot sized by its memory cap, filled as high as the job's last
-/// sampled memory; whatever else holds memory (the mirror, a seed container); and what is free. A block opens its
-/// job, or its slot's card; hovering or focusing one says what it holds in the readout above the bar.
+/// sampled memory; the mirror and each seed container; and what is free. A block opens its job, or its slot's card;
+/// hovering or focusing one says what it holds in the readout above the bar.
 pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     let status = &overview.status;
     let budget = &status.budget;
@@ -278,22 +278,11 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
         .iter()
         .map(|profile| profile.memory * profile.slots.len() as u64)
         .sum();
-    let running_caps: u64 = status
-        .profiles
-        .iter()
-        .map(|profile| {
-            profile.memory
-                * profile
-                    .slots
-                    .iter()
-                    .filter(|slot| slot.runner.is_some())
-                    .count() as u64
-        })
-        .sum();
-    let other = budget.memory_in_use.saturating_sub(running_caps);
+    let held = held(status);
+    let held_total: u64 = held.iter().map(|part| part.memory).sum();
     let free = budget
         .memory_max
-        .map(|max| max.saturating_sub(reserved + other));
+        .map(|max| max.saturating_sub(reserved + held_total));
     let used_now = overview.host.samples.last().map(|sample| sample.memory);
     let max = budget
         .memory_max
@@ -304,10 +293,6 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
         budget.slice,
         format::bytes(budget.memory_in_use),
     );
-    let other_lens = Lens {
-        figure: format::bytes(other),
-        text: "held by the mirror and seed containers".to_owned(),
-    };
     let free = free.filter(|free| *free > 0);
     let free_lens = free.map(|free| Lens {
         figure: format::bytes(free),
@@ -323,9 +308,10 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
             })
         })
         .collect();
-    if other > 0 {
-        lenses.push(("other".to_owned(), other_lens.clone()));
-    }
+    lenses.extend(
+        held.iter()
+            .map(|part| (part.key.clone(), part.lens.clone())),
+    );
     if let Some(lens) = &free_lens {
         lenses.push(("free".to_owned(), lens.clone()));
     }
@@ -340,14 +326,15 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                         (block(overview, profile, slot, parts))
                     }
                 }
-                @if other > 0 {
-                    @let link = link("other", None);
-                    div.block.other tabindex="0" role="img" style=(format!("--size: {:.3}", gib(other)))
-                        aria-label=(format!("{} mirror and seed containers", other_lens.figure))
+                @for part in &held {
+                    @let link = link(&part.key, None);
+                    div class=(format!("block {}", part.class)) tabindex="0" role="img"
+                        style=(format!("--size: {:.3}", gib(part.memory)))
+                        aria-label=(format!("{} {}", part.lens.figure, part.lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
                         data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
-                        span.size { (other_lens.figure) }
-                        span.name { "mirror" }
+                        span.size { (part.lens.figure) }
+                        span.name { (part.name) }
                     }
                 }
                 @if let Some((free, lens)) = free.zip(free_lens.as_ref()) {
@@ -360,7 +347,7 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                     }
                 }
             }
-            (bar_keys(other, &other_lens, free_lens.as_ref()))
+            (bar_keys(&held, free_lens.as_ref()))
             @if status.shutting_down {
                 p.warning { "runnerd is shutting down: it starts no new runners and stops once running jobs finish." }
             }
@@ -410,16 +397,18 @@ fn lens_id(key: &str) -> String {
     format!("lens-{key}")
 }
 
-/// On a touch screen the mirror and the free remainder may be too thin to tap: keys under the bar select them
-/// instead, and say their sizes.
-fn bar_keys(other: u64, other_lens: &Lens, free_lens: Option<&Lens>) -> Markup {
+/// On a touch screen the mirror, a seed container and the free remainder may be too thin to tap: keys under the bar
+/// select them instead, and say their sizes.
+fn bar_keys(held: &[Held], free_lens: Option<&Lens>) -> Markup {
     html! {
-        @if other > 0 || free_lens.is_some() {
+        @if !held.is_empty() || free_lens.is_some() {
             div.bar-keys {
-                @if other > 0 {
-                    button.bar-key.key-mirror type="button" data-on:click="$_slot = $_slot == 'other' ? '' : 'other'"
-                        data-class:linked="$_slot == 'other'" {
-                        span.swatch aria-hidden="true" {} (other_lens.figure) " mirror"
+                @for part in held {
+                    @let key = js(&part.key);
+                    button class=(format!("bar-key {}", part.class)) type="button"
+                        data-on:click=(format!("$_slot = $_slot == {key} ? '' : {key}"))
+                        data-class:linked=(format!("$_slot == {key}")) {
+                        span.swatch aria-hidden="true" {} (part.lens.figure) " " (part.name)
                     }
                 }
                 @if let Some(lens) = free_lens {
@@ -431,6 +420,43 @@ fn bar_keys(other: u64, other_lens: &Lens, free_lens: Option<&Lens>) -> Markup {
             }
         }
     }
+}
+
+/// Memory the budget holds for something other than a slot: the mirror, or a profile's seed container.
+struct Held {
+    key: String,
+    /// The block's classes.
+    class: String,
+    /// What its block says under its size.
+    name: String,
+    memory: u64,
+    lens: Lens,
+}
+
+/// The mirror, then each seed container, in the colour of the profile it reseeds.
+fn held(status: &Status) -> Vec<Held> {
+    let budget = &status.budget;
+    let mirror = (budget.mirror_memory > 0).then(|| Held {
+        key: "mirror".to_owned(),
+        class: "mirror".to_owned(),
+        name: "mirror".to_owned(),
+        memory: budget.mirror_memory,
+        lens: Lens {
+            figure: format::bytes(budget.mirror_memory),
+            text: "held by the mirror".to_owned(),
+        },
+    });
+    let seeds = budget.seed_memory.iter().map(|seed| Held {
+        key: format!("seed-{}", slot_id(&seed.profile, 0)),
+        class: format!("seed {}", profile_class(status, &seed.profile)),
+        name: format!("{} seed", seed.profile),
+        memory: seed.memory,
+        lens: Lens {
+            figure: format::bytes(seed.memory),
+            text: format!("held by {}'s seed container", seed.profile),
+        },
+    });
+    mirror.into_iter().chain(seeds).collect()
 }
 
 fn block(overview: &Overview, profile: &ProfileStatus, slot: &SlotStatus, parts: &Parts) -> Markup {

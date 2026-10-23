@@ -35,7 +35,7 @@ use axum::body::Bytes;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
-use runnerd_core::api::{Event, EventEnvelope, HostSample, Sample};
+use runnerd_core::api::{Event, EventEnvelope, HostSample, Sample, SeedMemory};
 
 use crate::views::{repository_id, slot_id};
 
@@ -434,6 +434,33 @@ async fn every_page_renders_from_the_daemons_data() {
 
     let missing = dashboard.page(&cookie, "/jobs/7").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn the_budget_names_the_mirror_and_each_seed_container() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let budget = &mut fixtures.status.budget;
+        budget.seed_memory = vec![SeedMemory {
+            profile: "jvm".to_owned(),
+            memory: 9 << 30,
+        }];
+        budget.memory_in_use += 9 << 30;
+    }
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await;
+    for expected in [
+        "<strong>512M</strong> held by the mirror",
+        "<strong>9G</strong> held by jvm's seed container",
+        r#"<span class="name">jvm seed</span>"#,
+    ] {
+        assert!(
+            overview.body.contains(expected),
+            "{expected}: {}",
+            overview.body
+        );
+    }
 }
 
 /// The HTML from the start of the element whose `data-on:pointerenter` selects `key` to that attribute.

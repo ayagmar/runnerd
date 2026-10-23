@@ -100,7 +100,7 @@ fn blocks(text: &str) -> Vec<Block> {
         blocks.push(Block {
             label: "mirror".to_owned(),
             bytes: config.caches.mirror.memory.0,
-            class: "other".to_owned(),
+            class: "mirror".to_owned(),
         });
     }
     blocks
