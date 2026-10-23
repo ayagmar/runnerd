@@ -113,9 +113,22 @@ fn a_ready_host_passes_every_check() {
 fn missing_sysbox_fails_with_the_package_for_the_distribution() {
     let config = config("sysbox");
     for (os_release, package) in [
-        (ARCH, "sysbox-ce-bin"),
-        ("ID=ubuntu\nID_LIKE=debian\n", ".deb"),
-        ("ID=fedora\n", "build sysbox from source"),
+        (ARCH, "paru -S sysbox-ce-bin"),
+        (
+            "ID=ubuntu\nID_LIKE=debian\n",
+            "sudo apt-get install jq ./sysbox-ce_0.7.1.linux_amd64.deb",
+        ),
+        (
+            "ID=debian\n",
+            "releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb",
+        ),
+        ("ID=fedora\n", "make sysbox-static"),
+        (
+            "ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n",
+            "docker-cfg --sysbox-runtime=enable",
+        ),
+        ("ID=gentoo\n", "docs/distro-compat.md"),
+        ("", "docs/distro-compat.md"),
     ] {
         let checks = checks(&without_sysbox(ready_host(os_release)), Some(&config));
         assert_eq!(failed(&checks), ["sysbox"]);
@@ -125,6 +138,24 @@ fn missing_sysbox_fails_with_the_package_for_the_distribution() {
             "{os_release}: {sysbox}"
         );
     }
+}
+
+#[test]
+fn the_sysbox_package_matches_dockers_architecture() {
+    let mut host = without_sysbox(ready_host("ID=ubuntu\nID_LIKE=debian\n"));
+    if let Ok(docker) = &mut host.docker {
+        docker.platform = "linux/arm64".to_owned();
+    }
+    let checks = checks(&host, Some(&config("sysbox")));
+    let sysbox = checks.iter().find(|check| check.name == "sysbox").unwrap();
+    assert!(
+        sysbox
+            .fix
+            .as_deref()
+            .unwrap()
+            .contains("sysbox-ce_0.7.1.linux_arm64.deb"),
+        "{sysbox}"
+    );
 }
 
 #[test]

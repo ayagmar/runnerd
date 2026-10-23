@@ -108,7 +108,8 @@ cargo binstall runnerd runnerd-cli
 
 - Linux with cgroup v2, and Docker using the systemd cgroup driver.
 - [Sysbox](https://github.com/nestybox/sysbox), so each runner container can run its own Docker Engine without being
-  privileged.
+  privileged. When it is missing, `runnerd doctor` prints the install commands for Ubuntu, Debian, Arch, Fedora and
+  the RHEL family.
 - A systemd slice whose `MemoryMax` is the budget for all runners; `runnerd init` prints one sized for the host.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 

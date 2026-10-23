@@ -326,7 +326,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         Some(docker) if !docker.runtimes.iter().any(|r| r == "sysbox-runc") => fail(
             "sysbox",
             "Docker has no sysbox-runc runtime, which isolation = \"sysbox\" needs".to_owned(),
-            &sysbox_fix(&host.os_release),
+            &sysbox_fix(&host.os_release, &docker.platform),
         ),
         Some(_) if host.sysbox_services.iter().any(|(_, active)| !active) => {
             let stopped: Vec<_> = host
@@ -550,8 +550,13 @@ fn image_checks(host: &Host, config: Option<&Config>, docker: Option<&DockerFact
 /// Where the release workflow publishes the runner images.
 const PUBLISHED: &str = "ghcr.io/ayagmar/runnerd-runner";
 
-/// Sysbox ships `.deb` packages only; Arch has it in the AUR; elsewhere it is built from source.
-fn sysbox_fix(os_release: &str) -> String {
+/// The Sysbox release whose packages the fix names; newer ones are at <https://github.com/nestybox/sysbox/releases>.
+const SYSBOX_VERSION: &str = "0.7.1";
+
+/// How to install Sysbox on the distribution `os_release` describes, for Docker's `platform`, such as `linux/amd64`.
+/// Nestybox packages `.deb`s for Ubuntu and Debian and supports Fedora and the RHEL family built from
+/// source (docs/distro-compat.md); Arch has the `.deb` repackaged in the AUR.
+fn sysbox_fix(os_release: &str, platform: &str) -> String {
     let family: Vec<&str> = os_release
         .lines()
         .filter_map(|line| {
@@ -560,27 +565,39 @@ fn sysbox_fix(os_release: &str) -> String {
         })
         .flat_map(|value| value.trim_matches('"').split_whitespace())
         .collect();
+    let is = |ids: &[&str]| family.iter().any(|id| ids.contains(id));
     let restart = "sudo systemctl restart docker   (stops running containers)";
-    if family.iter().any(|id| matches!(*id, "debian" | "ubuntu")) {
-        "install the .deb from https://github.com/nestybox/sysbox/releases; it registers the runtime and \
-         restarts Docker, which stops running containers:\n\
-         sudo apt-get install ./sysbox-ce_<version>.linux_amd64.deb"
-            .to_owned()
-    } else if family.contains(&"arch") {
+    let arch = platform.strip_prefix("linux/").unwrap_or(platform);
+    if is(&["debian", "ubuntu"]) && matches!(arch, "amd64" | "arm64") {
+        let deb = format!("sysbox-ce_{SYSBOX_VERSION}.linux_{arch}.deb");
+        format!(
+            "install Nestybox's package; it registers the runtime with Docker and restarts it, which stops \
+             running containers:\n\
+             curl -fLO https://github.com/nestybox/sysbox/releases/download/v{SYSBOX_VERSION}/{deb}\n\
+             sudo apt-get install jq ./{deb}"
+        )
+    } else if is(&["arch"]) {
         format!(
             "install the AUR package sysbox-ce-bin, for example: paru -S sysbox-ce-bin\n\
              sudo systemctl enable --now sysbox\n\
-             add to /etc/docker/daemon.json (Arch kernels are not on sysbox's allow-list):\n\
+             add to /etc/docker/daemon.json (Sysbox does not support Arch officially, so skip its kernel check):\n\
              {{\"runtimes\": {{\"sysbox-runc\": {{\"path\": \"/usr/bin/sysbox-runc\", \"runtimeArgs\": [\"--no-kernel-check\"]}}}}}}\n\
              {restart}"
         )
+    } else if is(&["fedora", "rhel", "centos", "rocky", "almalinux"]) {
+        "Nestybox has no package for this distribution; build Sysbox from source \
+         (https://github.com/nestybox/sysbox/blob/master/docs/developers-guide/build.md), which needs Docker, make \
+         and git:\n\
+         git clone --recursive https://github.com/nestybox/sysbox.git && cd sysbox\n\
+         make sysbox-static\n\
+         sudo make install\n\
+         sudo ./scr/sysbox   (starts sysbox-mgr and sysbox-fs; a source install has no systemd units)\n\
+         sudo ./scr/docker-cfg --sysbox-runtime=enable   (registers the runtime and restarts Docker)"
+            .to_owned()
     } else {
-        format!(
-            "build sysbox from source: \
-             https://github.com/nestybox/sysbox/blob/master/docs/developers-guide/build.md\n\
-             register sysbox-runc as a runtime in /etc/docker/daemon.json\n\
-             {restart}"
-        )
+        "see which distributions Sysbox supports and how to install it on each: \
+         https://github.com/nestybox/sysbox/blob/master/docs/distro-compat.md"
+            .to_owned()
     }
 }
 
