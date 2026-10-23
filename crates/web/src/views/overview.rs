@@ -653,8 +653,23 @@ fn relative_clock(at: u64) -> String {
     format!("{} UTC", format::clock(at))
 }
 
-/// The configured repositories, with their queue and a pause or resume button.
+/// The configured repositories, with their queue and a pause or resume button, and below them a pause and a resume
+/// of every one, each while some repository is not yet in that state. A single repository has only its own button.
 pub(crate) fn repositories(status: &Status) -> Markup {
+    let paused = status
+        .repositories
+        .iter()
+        .filter(|repository| repository.paused)
+        .count();
+    let mut every = Vec::new();
+    if status.repositories.len() > 1 {
+        if paused < status.repositories.len() {
+            every.push(("pause", "Pause all", "Pause every repository"));
+        }
+        if paused > 0 {
+            every.push(("resume", "Resume all", "Resume every repository"));
+        }
+    }
     html! {
         section #repositories .repositories aria-labelledby="repositories-title" {
             h2 #repositories-title .visually-hidden { "Repositories" }
@@ -664,6 +679,18 @@ pub(crate) fn repositories(status: &Status) -> Markup {
             ul.repo-list {
                 @for repository in &status.repositories {
                     (repository_row(status, repository))
+                }
+                @if !every.is_empty() {
+                    li.all {
+                        @for (action, label, name) in every {
+                            button.button-quiet type="button"
+                                data-indicator:_busy_all=""
+                                data-attr:aria-busy="$_busy_all && 'true'"
+                                data-attr:disabled="$_busy_all"
+                                data-on:click=(format!("@post('/v1/repositories/{action}')"))
+                                aria-label=(name) { (label) }
+                        }
+                    }
                 }
             }
         }

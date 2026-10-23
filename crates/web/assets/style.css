@@ -883,6 +883,25 @@ html {
   grid-row: 1 / span 2;
 }
 
+/* Pause and resume of every repository: under the rows' buttons, quieter than they are. */
+.repo-list .all {
+  display: flex;
+  justify-content: flex-end;
+  gap: 0.5rem;
+  padding: 0.25rem 1rem 0 0;
+}
+
+.repo-list .all .button-quiet {
+  background: none;
+  color: var(--muted);
+  font-weight: 500;
+}
+
+.repo-list .all .button-quiet:hover {
+  background: var(--surface-2);
+  color: var(--ink);
+}
+
 .button,
 .button-quiet {
   display: inline-flex;

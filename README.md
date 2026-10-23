@@ -235,7 +235,8 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
   cache;
 - `runnerd.toml` in an editor that checks it against the slice's `MemoryMax` as you type and saves and reloads it
   only when it fits, next to the doctor's checks;
-- pause and resume for each repository; a pause while a job runs asks first, and confirming cancels the job.
+- pause and resume for each repository or all of them; a pause while a job runs asks first, and confirming cancels
+  the job.
 
 Views of the same thing are linked. On the overview, a slot's block opens its job, and pointing at a block, card,
 running job or repository, focusing it or tapping it lights up the others and says above the bar what the block
