@@ -1,16 +1,25 @@
 //! Charts as inline SVG, drawn on the server: time series (lines with optional areas and a limit), sparklines and
 //! stacked bars. The SVG holds only shapes, stretched to the box with `preserveAspectRatio="none"`; every label is
 //! HTML around it, so text keeps its size at any width. No data fetching here: callers pass the points.
+//!
+//! A time series is drawn in seconds since a fixed anchor, and a transform maps the chart's window onto the box, so
+//! the path data stays put as time passes. A live chart follows the page's clock, `$shown.at`, and draws each
+//! series in stretches of time, each a part of its region (`views::Parts`): a new sample changes only the latest
+//! stretch, which is all its stream sends.
 
 use std::fmt::Write as _;
 
 use maud::{Markup, html};
 
+use crate::views::Parts;
+
 /// The SVG's coordinate box. Shapes are drawn in it and stretched to the element.
 const WIDTH: f64 = 1000.0;
-const HEIGHT: f64 = 100.0;
-/// More points than this are reduced to the highest per pixel column, so peaks stay.
+const HEIGHT: f64 = 1000.0;
+/// A series with more points than this is reduced to the highest per stretch of time, so peaks stay.
 const MAX_POINTS: usize = 500;
+/// The points a live chart's stretch spans at most.
+const STRETCH: u64 = 32;
 
 /// `part / whole`, for shares shown as CSS lengths and weights.
 #[allow(
@@ -53,6 +62,10 @@ pub(crate) struct TimeChart {
     pub(crate) title: String,
     pub(crate) start: u64,
     pub(crate) end: u64,
+    /// Shows only the last this many seconds up to `end`, from `start` at the earliest.
+    pub(crate) window: Option<u64>,
+    /// A live chart's id, which names its parts. Its end follows the page's clock.
+    pub(crate) live: Option<String>,
     pub(crate) series: Vec<Series>,
     /// A horizontal line, such as a memory cap, with its label.
     pub(crate) limit: Option<(u64, String)>,
@@ -68,75 +81,241 @@ pub(crate) struct TimeChart {
     clippy::cast_precision_loss,
     reason = "coordinates in a 1000-unit box; values far below 2^52"
 )]
-fn x_of(at: u64, start: u64, end: u64) -> f64 {
-    let span = end.saturating_sub(start).max(1) as f64;
-    (at.saturating_sub(start) as f64 / span * WIDTH).clamp(0.0, WIDTH)
-}
-
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "coordinates in a 100-unit box; values far below 2^52"
-)]
 fn y_of(value: u64, top: u64) -> f64 {
     HEIGHT - (value as f64 / top.max(1) as f64 * HEIGHT).clamp(0.0, HEIGHT)
 }
 
-/// The highest value per pixel column, so a reduced series keeps its peaks.
-fn reduce(points: &[(u64, u64)], start: u64, end: u64) -> Vec<(u64, u64)> {
-    let mut reduced: Vec<(u64, u64)> = Vec::with_capacity(MAX_POINTS);
-    let mut column = None;
-    for &(at, value) in points {
-        #[allow(
-            clippy::cast_possible_truncation,
-            clippy::cast_sign_loss,
-            clippy::cast_precision_loss,
-            reason = "x is clamped to 0..=1000, and MAX_POINTS is small"
-        )]
-        let this = (x_of(at, start, end) / WIDTH * MAX_POINTS as f64) as usize;
-        match reduced.last_mut() {
-            Some(last) if column == Some(this) => {
-                if value > last.1 {
-                    *last = (at, value);
-                }
-            }
-            _ => {
-                reduced.push((at, value));
-                column = Some(this);
-            }
-        }
-    }
-    reduced
+/// The time a chart shows, and how its series are placed in it.
+#[derive(Debug, Clone, Copy)]
+struct Frame {
+    /// The first second shown, `from`, and the last, `end`.
+    from: u64,
+    end: u64,
+    /// The time drawn at x = 0: a day's start or the chart's start, so the coordinates stay small and change once a
+    /// day at most.
+    anchor: u64,
 }
 
-/// The line through the points, split where the samples are more than `gap` apart, and the area under each part.
-/// A long series is reduced after the split, so the points kept, further apart than the samples, stay joined.
-fn paths(points: &[(u64, u64)], chart: &TimeChart, top: u64) -> (String, String) {
-    let mut line = String::new();
-    let mut area = String::new();
-    let long = points.len() > MAX_POINTS;
-    let runs = points.chunk_by(|a, b| b.0.saturating_sub(a.0) <= chart.gap);
-    for run in runs {
-        let run = if long {
-            reduce(run, chart.start, chart.end)
-        } else {
-            run.to_vec()
-        };
-        let run: Vec<(f64, f64)> = run
-            .iter()
-            .map(|&(at, value)| (x_of(at, chart.start, chart.end), y_of(value, top)))
-            .collect();
-        if let (Some(first), Some(last)) = (run.first(), run.last()) {
-            for (i, (x, y)) in run.iter().enumerate() {
-                let _ = write!(line, "{}{x:.1},{y:.2}", if i == 0 { "M" } else { "L" });
-            }
-            let _ = write!(area, "M{:.1},{HEIGHT}", first.0);
-            for (x, y) in &run {
-                let _ = write!(area, "L{x:.1},{y:.2}");
-            }
-            let _ = write!(area, "L{:.1},{HEIGHT}Z", last.0);
+impl Frame {
+    fn new(start: u64, end: u64, window: Option<u64>) -> Frame {
+        let from = window.map_or(start, |window| end.saturating_sub(window).max(start));
+        Frame {
+            from,
+            end: end.max(from),
+            anchor: (from - from % 86_400).max(start),
         }
     }
+
+    fn span(self) -> u64 {
+        (self.end - self.from).max(1)
+    }
+
+    /// The transform from the series' coordinates to the box.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a scale of seconds to a 1000-unit box"
+    )]
+    fn transform(self) -> String {
+        format!(
+            "scale({:.6},1) translate(-{},0)",
+            WIDTH / self.span() as f64,
+            self.from - self.anchor
+        )
+    }
+}
+
+/// How a live chart's first second follows the page's clock, as a Datastar expression.
+fn live_from(start: u64, window: Option<u64>) -> String {
+    match window {
+        Some(window) => format!("Math.max($shown.at - {window}, {start})"),
+        None => start.to_string(),
+    }
+}
+
+/// The transform of a live chart, following `$shown.at`.
+fn live_transform(start: u64, window: Option<u64>, anchor: u64) -> String {
+    let from = live_from(start, window);
+    format!(
+        "'scale(' + {WIDTH} / Math.max(1, $shown.at - {from}) + ',1) translate(' + ({anchor} - {from}) + ',0)'"
+    )
+}
+
+/// A point as drawn: its time, its height in the box, and whether a line joins it to the point before.
+#[derive(Debug, Clone, Copy)]
+struct Drawn {
+    at: u64,
+    y: i64,
+    joined: bool,
+}
+
+/// The points to draw: split where the samples are more than `gap` apart, and with `bucket`, each part reduced to
+/// its highest point per `bucket` seconds of time. The buckets are counted from time 0, so a bucket that is full
+/// never changes.
+fn drawn(points: &[(u64, u64)], top: u64, gap: u64, bucket: Option<u64>) -> Vec<Drawn> {
+    let mut drawn: Vec<Drawn> = Vec::with_capacity(points.len().min(MAX_POINTS * 2));
+    let mut last: Option<u64> = None;
+    for &(at, value) in points {
+        let joined = last.is_some_and(|last| at.saturating_sub(last) <= gap);
+        last = Some(at);
+        #[allow(
+            clippy::cast_possible_truncation,
+            reason = "y is clamped to the 1000-unit box"
+        )]
+        let y = y_of(value, top).round() as i64;
+        match (bucket, drawn.last_mut()) {
+            (Some(bucket), Some(previous)) if joined && previous.at / bucket == at / bucket => {
+                if y < previous.y {
+                    *previous = Drawn {
+                        at,
+                        y,
+                        joined: previous.joined,
+                    };
+                }
+            }
+            _ => drawn.push(Drawn { at, y, joined }),
+        }
+    }
+    drawn
+}
+
+/// The line and the area of `points`, in seconds since `anchor`; a point not joined to the one before starts a new
+/// line.
+fn paths(points: &[Drawn], anchor: u64) -> (String, String) {
+    let mut line = String::new();
+    let mut area = String::new();
+    let runs = points.chunk_by(|_, b| b.joined);
+    for run in runs {
+        let Some(first) = run.first() else { continue };
+        #[allow(
+            clippy::cast_possible_wrap,
+            reason = "seconds since the anchor, which is at most a day before the window"
+        )]
+        let x = |point: &Drawn| point.at.wrapping_sub(anchor) as i64;
+        let _ = write!(line, "M{},{}", x(first), first.y);
+        let _ = write!(area, "M{},{HEIGHT}V{}", x(first), first.y);
+        if run.len() > 1 {
+            line.push('l');
+            area.push('l');
+        }
+        for (i, pair) in run.windows(2).enumerate() {
+            let separator = if i == 0 { "" } else { " " };
+            let step = format!(
+                "{separator}{},{}",
+                x(&pair[1]) - x(&pair[0]),
+                pair[1].y - pair[0].y
+            );
+            line.push_str(&step);
+            area.push_str(&step);
+        }
+        let _ = write!(area, "V{HEIGHT}Z");
+    }
     (line, area)
+}
+
+/// Whether a series is drawn as one path or in stretches of time, as a live chart's is.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Drawing {
+    Whole,
+    Stretches,
+}
+
+/// A stretch of a series: its number (time / its length) on a live chart, and its line and area.
+struct Stretch {
+    number: Option<u64>,
+    line: String,
+    area: String,
+}
+
+/// A series' stretches: one for the whole of a still chart, one per `STRETCH` points' time for a live one, each
+/// starting at the last point of the one before when they are joined. A live chart draws only the stretches that
+/// reach into its frame.
+fn stretches(
+    points: &[(u64, u64)],
+    top: u64,
+    gap: u64,
+    frame: Frame,
+    drawing: Drawing,
+) -> Vec<Stretch> {
+    let bucket = (points.len() > MAX_POINTS)
+        .then(|| frame.span().div_ceil(MAX_POINTS as u64).next_power_of_two());
+    if drawing == Drawing::Whole {
+        let (line, area) = paths(&drawn(points, top, gap, bucket), frame.anchor);
+        return vec![Stretch {
+            number: None,
+            line,
+            area,
+        }];
+    }
+    let length = bucket.unwrap_or(1) * STRETCH;
+    let first = frame.from / length;
+    // From the last point before the first stretch, which the first stretch starts at when they are joined.
+    let before = points.partition_point(|point| point.0 < first * length);
+    let points = drawn(&points[before.saturating_sub(1)..], top, gap, bucket);
+    let mut stretches = Vec::new();
+    let mut previous: Option<Drawn> = None;
+    for group in points.chunk_by(|a, b| a.at / length == b.at / length) {
+        let number = group[0].at / length;
+        if number >= first {
+            let mut run = Vec::with_capacity(group.len() + 1);
+            if let Some(previous) = previous.filter(|_| group[0].joined) {
+                run.push(Drawn {
+                    joined: false,
+                    ..previous
+                });
+            }
+            run.extend_from_slice(group);
+            let (line, area) = paths(&run, frame.anchor);
+            stretches.push(Stretch {
+                number: Some(number),
+                line,
+                area,
+            });
+        }
+        previous = group.last().copied();
+    }
+    stretches
+}
+
+/// A chart's series in its frame: an area group and a line group per series, with each stretch a part when `live`
+/// names the chart.
+fn series_group(
+    series: &[(&Series, Vec<Stretch>)],
+    frame: Frame,
+    live: Option<(&str, &str)>,
+    parts: &Parts,
+) -> Markup {
+    let path = |id: Option<String>, group: Option<&String>, d: &str| {
+        if let (Some(id), Some(group)) = (id, group) {
+            parts.stretch(&id, group, html! { path id=(id) d=(d) {} })
+        } else {
+            html! { path d=(d) {} }
+        }
+    };
+    let transform = match live {
+        Some(_) => parts.clocked(frame.transform()),
+        None => frame.transform(),
+    };
+    html! {
+        g transform=(transform) data-attr:transform=[live.map(|(_, transform)| transform)] {
+            @for (index, (series, stretches)) in series.iter().enumerate() {
+                @let id = live.map(|(id, _)| format!("{id}-{index}"));
+                @if series.area {
+                    @let group = id.as_ref().map(|id| format!("{id}a"));
+                    g class=(format!("area {}", series.class)) id=[group.as_ref()] {
+                        @for stretch in stretches {
+                            (path(group.as_ref().zip(stretch.number).map(|(group, n)| format!("{group}{n}")), group.as_ref(), &stretch.area))
+                        }
+                    }
+                }
+                @let group = id.as_ref().map(|id| format!("{id}l"));
+                g class=(format!("line {}", series.class)) id=[group.as_ref()] {
+                    @for stretch in stretches {
+                        (path(group.as_ref().zip(stretch.number).map(|(group, n)| format!("{group}{n}")), group.as_ref(), &stretch.line))
+                    }
+                }
+            }
+        }
+    }
 }
 
 /// The powers a chart's y axis rounds to.
@@ -173,7 +352,8 @@ pub(crate) fn nice_top(max: u64, base: Base) -> u64 {
 #[derive(Debug)]
 pub(crate) struct Band {
     pub(crate) from: u64,
-    pub(crate) to: u64,
+    /// Its end; none while it lasts, as a running step's does, so it reaches the chart's end.
+    pub(crate) to: Option<u64>,
     /// When to draw it, such as `$_step == 3`.
     pub(crate) shown: String,
     /// What the chart shows over the stretch, such as its peak.
@@ -181,13 +361,40 @@ pub(crate) struct Band {
 }
 
 impl Band {
-    /// The band from `left` to `right`, as shares of the chart's width.
-    fn render(&self, left: f64, right: f64) -> Markup {
-        let (left, width) = (left * 100.0, (right - left) * 100.0);
+    /// The band over a chart from `origin` to `end`, its place given in the chart's units as `--from` and `--to`
+    /// against the chart's `--span`. With `live`, the id of a live chart, a band that lasts follows the page's clock
+    /// to the chart's end, and its label is a part.
+    fn render(
+        &self,
+        index: usize,
+        origin: u64,
+        end: u64,
+        live: Option<&str>,
+        parts: &Parts,
+    ) -> Markup {
+        let from = self.from.clamp(origin, end) - origin;
+        let to = self.to.unwrap_or(end).clamp(origin, end).max(origin + from) - origin;
+        let label = html! { @if !self.label.is_empty() { (self.label) } };
+        let label = match live {
+            Some(id) if !self.label.is_empty() => {
+                let id = format!("{id}-band{index}");
+                parts.html(&id, html! { span.band-label #(id) { (label) } })
+            }
+            _ => html! { @if !self.label.is_empty() { span.band-label { (label) } } },
+        };
+        let follow = live
+            .filter(|_| self.to.is_none())
+            .map(|_| format!("$shown.at - {origin}"));
+        let style = format!("--from: {from}; --to: {to}");
+        let style = if follow.is_some() {
+            parts.clocked(style)
+        } else {
+            style
+        };
         html! {
-            span class=(if left > 50.0 { "band end" } else { "band" }) aria-hidden="true" data-class:on=(self.shown)
-                style=(format!("--left: {left:.2}%; --width: {width:.2}%")) {
-                @if !self.label.is_empty() { span.band-label { (self.label) } }
+            span class=(if from + to > end - origin { "band end" } else { "band" }) aria-hidden="true"
+                data-class:on=(self.shown) style=(style) data-style:--to=[follow] {
+                (label)
             }
         }
     }
@@ -195,17 +402,24 @@ impl Band {
 
 impl TimeChart {
     /// The chart, with its y axis topped at `top`.
-    pub(crate) fn render(&self, top: u64) -> Markup {
-        self.render_with(top, &[])
+    pub(crate) fn render(&self, top: u64, parts: &Parts) -> Markup {
+        self.render_with(top, &[], parts)
     }
 
-    /// The chart with bands over it, each drawn while its expression holds.
-    pub(crate) fn render_with(&self, top: u64, bands: &[Band]) -> Markup {
+    /// The chart with bands over it, each drawn while its expression holds. A band needs a chart without a window,
+    /// whose start stays put.
+    pub(crate) fn render_with(&self, top: u64, bands: &[Band], parts: &Parts) -> Markup {
+        let frame = Frame::new(self.start, self.end, self.window);
         let summary = self
             .series
             .iter()
             .map(|series| {
-                let peak = series.points.iter().map(|point| point.1).max();
+                let peak = series
+                    .points
+                    .iter()
+                    .filter(|point| point.0 >= frame.from)
+                    .map(|point| point.1)
+                    .max();
                 match peak {
                     Some(peak) => format!("{} up to {}", series.label, (self.value)(peak)),
                     None => format!("{}: no samples", series.label),
@@ -213,7 +427,44 @@ impl TimeChart {
             })
             .collect::<Vec<_>>()
             .join(", ");
+        let live = self.live.as_deref().map(|id| {
+            (
+                id,
+                live_transform(self.start, self.window, frame.anchor),
+                format!(
+                    "Math.max(1, $shown.at - {})",
+                    live_from(self.start, self.window)
+                ),
+            )
+        });
+        let series: Vec<(&Series, Vec<Stretch>)> = self
+            .series
+            .iter()
+            .map(|series| {
+                let drawing = if live.is_some() {
+                    Drawing::Stretches
+                } else {
+                    Drawing::Whole
+                };
+                let stretches = stretches(&series.points, top, self.gap, frame, drawing);
+                (series, stretches)
+            })
+            .collect();
         let limit_y = self.limit.as_ref().map(|(limit, _)| y_of(*limit, top));
+        let span_style = format!("--span: {}", frame.span());
+        let span_style = if live.is_some() {
+            parts.clocked(span_style)
+        } else {
+            span_style
+        };
+        let axis = |id: Option<String>| {
+            html! {
+                div.chart-x id=[id] aria-hidden="true" {
+                    span { ((self.time)(frame.from)) }
+                    span { ((self.time)(frame.end)) }
+                }
+            }
+        };
         html! {
             figure.chart {
                 div.chart-plot {
@@ -221,66 +472,70 @@ impl TimeChart {
                         span { (( self.value)(top)) }
                         span { "0" }
                     }
-                    div.chart-area {
+                    div.chart-area style=(span_style)
+                        data-style:--span=[live.as_ref().map(|(_, _, span)| span)] {
                         svg viewBox=(format!("0 0 {WIDTH} {HEIGHT}")) preserveAspectRatio="none"
                             role="img" aria-label=(format!("{}: {summary}", self.title)) {
-                            line.grid x1="0" x2=(WIDTH) y1="50" y2="50" vector-effect="non-scaling-stroke" {}
-                            @for series in &self.series {
-                                @let (line, area) = paths(&series.points, self, top);
-                                @if series.area {
-                                    path class=(format!("area {}", series.class)) d=(area) {}
-                                }
-                                path class=(format!("line {}", series.class)) d=(line)
-                                    vector-effect="non-scaling-stroke" {}
-                            }
+                            line.grid x1="0" x2=(WIDTH) y1=(HEIGHT / 2.0) y2=(HEIGHT / 2.0) vector-effect="non-scaling-stroke" {}
+                            (series_group(&series, frame, live.as_ref().map(|(id, transform, _)| (*id, transform.as_str())), parts))
                             @if let Some(y) = limit_y {
-                                line.limit x1="0" x2=(WIDTH) y1=(format!("{y:.2}")) y2=(format!("{y:.2}"))
+                                line.limit x1="0" x2=(WIDTH) y1=(format!("{y:.0}")) y2=(format!("{y:.0}"))
                                     vector-effect="non-scaling-stroke" {}
                             }
                         }
                         @if let (Some((_, label)), Some(y)) = (&self.limit, limit_y) {
                             span.limit-label style=(format!("--y: {:.1}%", y / HEIGHT * 100.0)) { (label) }
                         }
-                        @for band in bands {
-                            (band.render(
-                                x_of(band.from, self.start, self.end) / WIDTH,
-                                x_of(band.to.max(band.from), self.start, self.end) / WIDTH,
-                            ))
+                        @for (index, band) in bands.iter().enumerate() {
+                            (band.render(index, frame.from, frame.end, live.as_ref().map(|(id, _, _)| *id), parts))
                         }
                     }
                 }
-                div.chart-x aria-hidden="true" {
-                    span { ((self.time)(self.start)) }
-                    span { ((self.time)(self.end)) }
+                @match &live {
+                    Some((id, _, _)) => {
+                        @let id = format!("{id}-x");
+                        (parts.html(&id, axis(Some(id.clone()))))
+                    }
+                    None => (axis(None)),
                 }
             }
         }
     }
 }
 
-/// A small line with no axes, such as a slot's memory over the last minutes.
-pub(crate) fn sparkline(
-    points: &[(u64, u64)],
-    start: u64,
-    end: u64,
-    top: u64,
-    class: &str,
-) -> Markup {
-    let chart = TimeChart {
-        title: String::new(),
-        start,
-        end,
-        series: Vec::new(),
-        limit: None,
-        value: |_| String::new(),
-        time: |_| String::new(),
-        gap: u64::MAX,
-    };
-    let (line, area) = paths(points, &chart, top);
-    html! {
-        svg.sparkline viewBox=(format!("0 0 {WIDTH} {HEIGHT}")) preserveAspectRatio="none" aria-hidden="true" {
-            path class=(format!("area {class}")) d=(area) {}
-            path class=(format!("line {class}")) d=(line) vector-effect="non-scaling-stroke" {}
+/// A small line with no axes, such as a slot's memory over the last `window` seconds since `start`. With `live`, it
+/// is a live chart with that id.
+pub(crate) struct Sparkline<'points> {
+    pub(crate) points: &'points [(u64, u64)],
+    pub(crate) start: u64,
+    pub(crate) end: u64,
+    pub(crate) window: u64,
+    pub(crate) top: u64,
+    pub(crate) class: &'static str,
+    pub(crate) live: Option<String>,
+}
+
+impl Sparkline<'_> {
+    pub(crate) fn render(&self, parts: &Parts) -> Markup {
+        let frame = Frame::new(self.start, self.end, Some(self.window));
+        let series = Series {
+            label: String::new(),
+            class: self.class,
+            points: Vec::new(),
+            area: true,
+        };
+        let drawing = if self.live.is_some() {
+            Drawing::Stretches
+        } else {
+            Drawing::Whole
+        };
+        let stretches = stretches(self.points, self.top, u64::MAX, frame, drawing);
+        let transform = live_transform(self.start, Some(self.window), frame.anchor);
+        let live = self.live.as_deref().map(|id| (id, transform.as_str()));
+        html! {
+            svg.sparkline viewBox=(format!("0 0 {WIDTH} {HEIGHT}")) preserveAspectRatio="none" aria-hidden="true" {
+                (series_group(&[(&series, stretches)], frame, live, parts))
+            }
         }
     }
 }
@@ -324,8 +579,8 @@ pub(crate) fn stacked_bars(
             let height = HEIGHT - y_of(*part, top);
             base -= height;
             rects.push(html! {
-                rect class=(class) x=(format!("{x:.1}")) y=(format!("{base:.2}"))
-                    width=(format!("{:.1}", slot * 0.76)) height=(format!("{height:.2}")) {
+                rect class=(class) x=(format!("{x:.1}")) y=(format!("{base:.1}"))
+                    width=(format!("{:.1}", slot * 0.76)) height=(format!("{height:.1}")) {
                     title { (bar.label) ": " (value(*part)) }
                 }
             });
@@ -346,15 +601,15 @@ pub(crate) fn stacked_bars(
                     span { (value(top)) }
                     span { "0" }
                 }
-                div.chart-area {
+                div.chart-area style=(format!("--span: {}", bars.len().max(1))) {
                     svg viewBox=(format!("0 0 {WIDTH} {HEIGHT}")) preserveAspectRatio="none" role="img"
                         aria-label=(title) {
-                        line.grid x1="0" x2=(WIDTH) y1="50" y2="50" vector-effect="non-scaling-stroke" {}
+                        line.grid x1="0" x2=(WIDTH) y1=(HEIGHT / 2.0) y2=(HEIGHT / 2.0) vector-effect="non-scaling-stroke" {}
                         @for rect in rects { (rect) }
                     }
                     // A band's times are bar indexes here: bar `i` spans `i..i + 1`.
-                    @for band in bands {
-                        (band.render(ratio(band.from, bars.len() as u64), ratio(band.to, bars.len() as u64)))
+                    @for (index, band) in bands.iter().enumerate() {
+                        (band.render(index, 0, bars.len() as u64, None, &Parts::default()))
                     }
                 }
             }
@@ -369,49 +624,165 @@ pub(crate) fn stacked_bars(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::views::Part;
 
-    #[test]
-    fn a_long_series_drawn_with_fewer_points_keeps_its_peak() {
-        let mut points: Vec<(u64, u64)> = (0..5000).map(|at| (at, 100)).collect();
-        points[3333].1 = 9000;
-        let reduced = reduce(&points, 0, 4999);
-        assert!(reduced.len() <= MAX_POINTS + 1);
-        assert_eq!(reduced.iter().map(|point| point.1).max(), Some(9000));
+    /// The lines of a path written by `paths`, each as its points in seconds since the anchor and height.
+    fn lines(d: &str) -> Vec<Vec<(i64, i64)>> {
+        let mut lines: Vec<Vec<(i64, i64)>> = Vec::new();
+        for line in d.split('M').filter(|line| !line.is_empty()) {
+            let (first, rest) = line.split_once('l').unwrap_or((line, ""));
+            let pair = |text: &str| {
+                let (x, y) = text.split_once(',').unwrap();
+                (x.parse::<i64>().unwrap(), y.parse::<i64>().unwrap())
+            };
+            let mut point = pair(first);
+            let mut points = vec![point];
+            for step in rest.split(' ').filter(|step| !step.is_empty()) {
+                let (dx, dy) = pair(step);
+                point = (point.0 + dx, point.1 + dy);
+                points.push(point);
+            }
+            lines.push(points);
+        }
+        lines
     }
 
-    /// The `d` of the drawn line of a job's memory chart over `points`, sampled every 2 s.
-    fn drawn_line(points: Vec<(u64, u64)>) -> String {
-        let chart = TimeChart {
+    /// A job's memory chart over `points`, sampled every 2 s, from 0 to `end`.
+    fn memory_chart(points: Vec<(u64, u64)>, end: u64, live: bool) -> TimeChart {
+        TimeChart {
             title: "Memory".to_owned(),
             start: 0,
-            end: 7200,
+            end,
+            window: None,
+            live: live.then(|| "memory".to_owned()),
             series: vec![Series::line("memory", "memory", points)],
             limit: None,
             value: |_| String::new(),
             time: |_| String::new(),
             gap: 6,
-        };
-        let html = chart.render(2 << 30).into_string();
-        let from =
-            html.find(r#"class="line memory" d=""#).unwrap() + r#"class="line memory" d=""#.len();
-        html[from..from + html[from..].find('"').unwrap()].to_owned()
+        }
+    }
+
+    /// The `d` of each line path in `html`.
+    fn line_paths(html: &str) -> Vec<String> {
+        let group = html.find(r#"class="line memory""#).unwrap();
+        let end = group + html[group..].find("</g>").unwrap();
+        html[group..end]
+            .split(r#" d=""#)
+            .skip(1)
+            .map(|rest| rest[..rest.find('"').unwrap()].to_owned())
+            .collect()
+    }
+
+    fn rendered(chart: &TimeChart) -> (String, Vec<Part>) {
+        let parts = Parts::default();
+        let html = chart.render(2 << 30, &parts).into_string();
+        (html, parts.into_parts().0)
+    }
+
+    #[test]
+    #[allow(
+        clippy::cast_possible_truncation,
+        reason = "a height in the 1000-unit box"
+    )]
+    fn a_long_series_drawn_with_fewer_points_keeps_its_peak() {
+        let mut points: Vec<(u64, u64)> = (0..5000).map(|at| (at, 100)).collect();
+        points[3333].1 = 9000;
+        let (html, _) = rendered(&memory_chart(points, 4999, false));
+        let drawn: Vec<(i64, i64)> = lines(&line_paths(&html)[0]).concat();
+        assert!(
+            drawn.len() <= MAX_POINTS + 1,
+            "{} points drawn",
+            drawn.len()
+        );
+        let top = drawn.iter().map(|point| point.1).min().unwrap();
+        assert_eq!(top, y_of(9000, 2 << 30).round() as i64, "the peak is drawn");
     }
 
     #[test]
     fn a_two_hour_job_sampled_every_two_seconds_draws_one_connected_line() {
-        let line = drawn_line((0..=3600).map(|i| (i * 2, 1 << 30)).collect());
-        assert_eq!(line.matches('M').count(), 1, "{line}");
-        assert!(line.matches('L').count() > 100, "{line}");
+        let points: Vec<(u64, u64)> = (0..=3600).map(|i| (i * 2, 1 << 30)).collect();
+        let (still, _) = rendered(&memory_chart(points.clone(), 7200, false));
+        let still = line_paths(&still);
+        assert_eq!(still.len(), 1);
+        assert_eq!(lines(&still[0]).len(), 1, "{}", still[0]);
+        // Live, the line comes in stretches, each starting where the one before ends.
+        let (live, _) = rendered(&memory_chart(points, 7200, true));
+        let stretches: Vec<Vec<(i64, i64)>> = line_paths(&live)
+            .iter()
+            .map(|d| lines(d).concat())
+            .collect();
+        assert!(stretches.len() > 10, "{} stretches", stretches.len());
+        for pair in stretches.windows(2) {
+            assert_eq!(pair[0].last(), pair[1].first(), "the stretches join");
+        }
     }
 
     #[test]
     fn a_long_job_with_a_pause_in_its_samples_draws_two_lines() {
-        let line = drawn_line(
-            (0..=3600)
-                .filter(|i| !(1000..1100).contains(i))
-                .map(|i| (i * 2, 1 << 30))
-                .collect(),
+        let points: Vec<(u64, u64)> = (0..=3600)
+            .filter(|i| !(1000..1100).contains(i))
+            .map(|i| (i * 2, 1 << 30))
+            .collect();
+        let (html, _) = rendered(&memory_chart(points, 7200, false));
+        assert_eq!(lines(&line_paths(&html)[0]).len(), 2);
+    }
+
+    #[test]
+    fn a_new_sample_changes_only_the_latest_stretch_of_a_live_chart() {
+        let mut points: Vec<(u64, u64)> = (0..300).map(|i| (i * 2, (i % 7) << 28)).collect();
+        let (_, before) = rendered(&memory_chart(points.clone(), 598, true));
+        points.push((600, 3 << 28));
+        let (_, after) = rendered(&memory_chart(points, 601, true));
+        let changed: Vec<&str> = after
+            .iter()
+            .filter(|part| part.group.is_some() && !before.contains(part))
+            .map(|part| part.id.as_str())
+            .collect();
+        assert_eq!(
+            changed.len(),
+            1,
+            "one stretch of the line changes: {changed:?}"
         );
-        assert_eq!(line.matches('M').count(), 2, "{line}");
+    }
+
+    #[test]
+    fn a_live_charts_paths_stay_put_as_time_passes() {
+        let points: Vec<(u64, u64)> = (0..300).map(|i| (i * 2, (i % 7) << 28)).collect();
+        let (_, now) = rendered(&memory_chart(points.clone(), 600, true));
+        let (_, later) = rendered(&memory_chart(points, 601, true));
+        let stretches = |parts: &[Part]| -> Vec<Part> {
+            parts
+                .iter()
+                .filter(|part| part.group.is_some())
+                .cloned()
+                .collect()
+        };
+        assert_eq!(stretches(&now), stretches(&later));
+    }
+
+    #[test]
+    fn a_running_steps_band_on_a_live_chart_reaches_the_charts_end() {
+        let points: Vec<(u64, u64)> = (0..50).map(|i| (1000 + i * 2, 1 << 30)).collect();
+        let mut chart = memory_chart(points, 1100, true);
+        chart.start = 1000;
+        let band = Band {
+            from: 1040,
+            to: None,
+            shown: "$_step == 1".to_owned(),
+            label: String::new(),
+        };
+        let html = chart
+            .render_with(2 << 30, &[band], &Parts::default())
+            .into_string();
+        let attr = r#"data-style:--to=""#;
+        let rest = &html[html.find(attr).expect("the band follows the clock") + attr.len()..];
+        let follow = rest[..rest.find('"').unwrap()].replace("$shown.at", "1100");
+        let (at, origin) = follow.split_once(" - ").expect("a difference");
+        let to = at.parse::<u64>().unwrap() - origin.parse::<u64>().unwrap();
+        assert_eq!(
+            to, 100,
+            "at the page's clock the band ends at the chart's end: {follow}"
+        );
     }
 }

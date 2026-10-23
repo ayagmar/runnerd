@@ -12,3 +12,6 @@ Served from the binary (`include_bytes!` in `src/assets.rs`); nothing is fetched
 
 The Rust SDK `datastar` 0.4.1 supports Datastar 1.0.4. To update the bundle, change the file and its row here
 together: `sha256sum -c` against this table before committing.
+
+Each file is served at a URL versioned by a digest of its bytes (`assets::path`), cached for good. `style.css` names
+the font by that URL, so a new font file needs its `?v=` there too; the assets test prints the value.

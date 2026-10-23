@@ -235,6 +235,31 @@ async fn without_the_session_cookie_every_page_and_write_is_401() {
 }
 
 #[tokio::test]
+async fn an_asset_is_kept_until_it_changes_and_revalidates_without_its_body() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard.page(&cookie, "/").await.body;
+    let from = page.find("/assets/style.css?v=").unwrap();
+    let url = &page[from..from + page[from..].find('"').unwrap()];
+    let style = dashboard.request("GET", url, &[]).await;
+    assert_eq!(
+        style.headers[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    let etag = style.headers[header::ETAG].to_str().unwrap().to_owned();
+    let again = dashboard
+        .request("GET", url, &[("if-none-match", &etag)])
+        .await;
+    assert_eq!(again.status, StatusCode::NOT_MODIFIED);
+    assert!(again.body.is_empty(), "a 304 has no body");
+    // An older release's URL may name other bytes: checked each time.
+    let old = dashboard
+        .request("GET", "/assets/style.css?v=0.0.5", &[])
+        .await;
+    assert_eq!(old.headers[header::CACHE_CONTROL], "no-cache");
+}
+
+#[tokio::test]
 async fn a_write_from_another_origin_is_403_even_with_the_cookie() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
@@ -388,6 +413,8 @@ async fn every_page_renders_from_the_daemons_data() {
         "Waiting for a runner",
         "Set up job: line 1",
         "/live/jobs/",
+        // Named as every client names a job, so the tab says which workflow's build it is.
+        "<title>CI / build · runnerd</title>",
     ] {
         assert!(job.body.contains(expected), "job page lacks {expected:?}");
     }
@@ -459,17 +486,26 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
         !lens.contains("display: none") && !lens.contains("data-show"),
         "the readout's lines keep their place while hidden"
     );
-    // A name ends its `aria-label`; the readout's lines end in a tag.
-    for name in [
-        "of 9G in jvm 1, build on halyard/ledger",
-        "9G jvm 2, idle",
-        "of 33G free",
+    // A block is named by what it shows and described by its line of the readout.
+    for (key, line) in [
+        (&jvm_1, "of 9G in jvm 1, build on halyard/ledger"),
+        (&jvm_2, "9G jvm 2, idle"),
     ] {
         assert!(
-            overview.contains(&format!(r#"{name}""#)),
-            "a block is named {name:?} for screen readers"
+            selector_of(&overview, key, "<a ")
+                .contains(&format!(r#"aria-describedby="lens-{key}""#)),
+            "{key}'s block is described by its line"
         );
+        let described = &overview[overview.find(&format!(r#"<span id="lens-{key}""#)).unwrap()..];
+        let text = described[..described.find("</span>").unwrap()]
+            .replace("<strong>", "")
+            .replace("</strong>", "");
+        assert!(text.ends_with(line), "{key}'s line reads {line:?}");
     }
+    assert!(
+        overview.contains(r#"of 33G free""#),
+        "the free remainder is named for screen readers"
+    );
 }
 
 #[tokio::test]
@@ -528,8 +564,7 @@ async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
         "data-class:on=\"$_slot == '{}'\"><strong>5G</strong> of 9G in jvm 1",
         slot_id("jvm", 1)
     );
-    let update = read_until(&mut stream, |text| text.contains(&line)).await;
-    assert!(update.contains(r#"id="budget""#), "{update}");
+    read_until(&mut stream, |text| text.contains(&line)).await;
 }
 
 #[tokio::test]
@@ -563,7 +598,7 @@ async fn a_job_whose_samples_were_deleted_still_shows_its_memory_peak() {
 async fn a_step_marks_its_own_stretch_of_the_memory_and_cpu_charts() {
     let dashboard = Dashboard::start().await;
     // The first step loses its samples, so it gets no band and the bands are not one per step.
-    let (start, end, from, to) = {
+    let (start, from, to) = {
         let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
         let job = fixtures
             .jobs
@@ -582,7 +617,6 @@ async fn a_step_marks_its_own_stretch_of_the_memory_and_cpu_charts() {
             .unwrap();
         (
             samples.first().unwrap().at,
-            samples.last().unwrap().at,
             unit_tests.started_at.unwrap(),
             unit_tests.completed_at.unwrap(),
         )
@@ -607,12 +641,11 @@ async fn a_step_marks_its_own_stretch_of_the_memory_and_cpu_charts() {
         .parse()
         .unwrap();
     assert_eq!(number, 6, "Unit tests is the sixth step");
-    #[allow(clippy::cast_precision_loss, reason = "test times are far below 2^52")]
-    let share = |at: u64| (at - start) as f64 / (end - start) as f64 * 100.0;
-    let left = share(from);
+    // In seconds since the chart's start, its first sample.
     let stretch = format!(
-        r#"data-class:on="$_step == {number}" style="--left: {left:.2}%; --width: {:.2}%""#,
-        share(to) - left
+        r#"data-class:on="$_step == {number}" style="--from: {}; --to: {}""#,
+        from - start,
+        to - start
     );
     assert_eq!(
         job.matches(&stretch).count(),
@@ -709,8 +742,49 @@ async fn the_overview_stream_patches_the_slice_when_a_sample_arrives() {
             event: Event::HostSample { sample },
         })
         .unwrap();
-    let update = read_until(&mut stream, |text| text.contains(r#"id="host""#)).await;
+    let update = read_until(&mut stream, |text| text.contains(r#"id="host-cpu-now""#)).await;
     assert!(update.contains("31 cores"), "{update}");
+}
+
+/// The signals a page starts with, as the JSON Datastar sends them.
+fn page_signals(page: &str) -> serde_json::Value {
+    let from = page.find(r#"<body data-signals=""#).unwrap() + r#"<body data-signals=""#.len();
+    let signals = &page[from..from + page[from..].find('"').unwrap()];
+    // The page writes a JavaScript object.
+    let json = signals
+        .replace("{shown: {at:", r#"{"shown": {"at":"#)
+        .replace(", log:", r#", "log":"#)
+        .replace('\'', "\"");
+    serde_json::from_str(&json).unwrap()
+}
+
+/// The `datastar` query parameter of a stream request carrying `signals`.
+fn query(signals: &serde_json::Value) -> String {
+    serde_urlencoded::to_string([("datastar", signals.to_string())]).unwrap()
+}
+
+/// The `datastar` query parameter a page's stream request carries.
+fn signals_of(page: &str) -> String {
+    query(&page_signals(page))
+}
+
+#[tokio::test]
+async fn a_stream_opened_by_the_page_it_just_rendered_sends_none_of_its_regions_again() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard.page(&cookie, "/").await.body;
+    let mut stream = dashboard
+        .stream(&cookie, &format!("/live/overview?{}", signals_of(&page)))
+        .await;
+    let first = read_until(&mut stream, |text| text.contains("datastar-patch-signals")).await;
+    assert!(
+        !first.contains("<section"),
+        "the page has every region already: {first}"
+    );
+    // A page that names no regions gets them all.
+    let mut fresh = dashboard.stream(&cookie, "/live/overview").await;
+    let first = read_until(&mut fresh, |text| text.contains("datastar-patch-signals")).await;
+    assert_eq!(first.matches("<section").count(), 5, "{first}");
 }
 
 #[tokio::test]
@@ -802,7 +876,7 @@ impl ShownLog {
                 let (attributes, rest) = item.split_once('>').unwrap();
                 let number = attributes
                     .split_once("value=\"")
-                    .map(|(_, value)| value.trim_end_matches('"').parse().unwrap());
+                    .map(|(_, value)| value.split('"').next().unwrap().parse().unwrap());
                 (number, rest.split_once("</li>").unwrap().0.to_owned())
             })
             .collect()
@@ -973,6 +1047,49 @@ async fn a_job_stream_that_reconnects_shows_each_log_line_once() {
         shown.0.len(),
         "each line has its own number: {texts:?}"
     );
+}
+
+#[tokio::test]
+async fn a_job_stream_that_reconnects_with_the_pages_signals_sends_only_the_lines_after_its_last() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let (page, url) = dashboard.job_page(&cookie).await;
+    let mut shown = ShownLog::of_page(&page);
+    let signals = signals_of(&page);
+    let mut first = dashboard.stream(&cookie, &format!("{url}?{signals}")).await;
+    let connected = read_until(&mut first, |text| text.contains("datastar-patch-signals")).await;
+    assert!(
+        !connected.contains(r#"id="log-lines""#),
+        "the page has the tail already: {connected}"
+    );
+    for n in 0..5 {
+        dashboard.log(&format!("before the drop {n}"));
+    }
+    let lines = read_until(&mut first, |text| text.contains("before the drop 4")).await;
+    shown.apply(&lines);
+    drop(first);
+    // The last line appended set the page's `shown.log`, which Datastar sends when it retries.
+    let last = lines.rsplit(r#"data-signals:shown.log=""#).next().unwrap();
+    let last: u64 = last[..last.find('"').unwrap()].parse().unwrap();
+    let mut retried = page_signals(&page);
+    retried["shown"]["log"] = last.into();
+    dashboard.log("while away");
+    let mut second = dashboard
+        .stream(&cookie, &format!("{url}?{}", query(&retried)))
+        .await;
+    let again = read_until(&mut second, |text| text.contains("while away")).await;
+    assert!(!again.contains(r#"id="log-lines""#), "{again}");
+    shown.apply(&again);
+    let texts: Vec<&str> = shown.0.iter().map(|line| line.1.as_str()).collect();
+    for n in 0..5 {
+        let text = format!("before the drop {n}");
+        assert_eq!(
+            texts.iter().filter(|shown| **shown == text).count(),
+            1,
+            "{texts:?}"
+        );
+    }
+    assert_eq!(texts.last(), Some(&"while away"));
 }
 
 #[tokio::test]
@@ -1210,6 +1327,34 @@ async fn the_overview_offers_pause_all_until_every_repository_is_paused_then_res
         "every repository runs again"
     );
     assert_eq!(fixtures.controls, ["resume all force=false"]);
+}
+
+#[tokio::test]
+async fn every_buttons_name_starts_with_the_label_it_shows() {
+    let dashboard = Dashboard::start().await;
+    // One repository paused, so the overview offers both pause all and resume all.
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let buttons: Vec<&str> = overview.split("<button").skip(1).collect();
+    assert!(buttons.len() > 3, "{} buttons", buttons.len());
+    for button in buttons {
+        let (tag, rest) = button.split_once('>').unwrap();
+        let Some(name) = tag.split(r#"aria-label=""#).nth(1) else {
+            continue;
+        };
+        let name = &name[..name.find('"').unwrap()];
+        let label: String = rest[..rest.find("</button>").unwrap()]
+            .split('<')
+            .map(|text| text.split_once('>').map_or(text, |(_, text)| text))
+            .collect();
+        if !label.trim().is_empty() {
+            assert!(
+                name.starts_with(label.trim()),
+                "a button showing {label:?} is named {name:?}"
+            );
+        }
+    }
 }
 
 #[tokio::test]

@@ -2,7 +2,9 @@
 //! a struct of what it shows, a `load` that reads it from the daemon, and pure render functions: one per region a
 //! live update replaces by its `id`. Views never write to the daemon; `crate::actions` does.
 
+use std::cell::RefCell;
 use std::fmt::Write as _;
+use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 use runnerd_core::api::{JobState, JobSummary, Status};
@@ -27,8 +29,99 @@ pub(crate) enum Page {
 
 const MARK: &str = include_str!("../assets/mark.svg");
 
+/// The pieces of a live region that change on their own, such as a reading or the latest stretch of a chart. When
+/// the rest of a region is unchanged, its stream sends only the pieces that changed. Rendering records them here; a
+/// page ignores them.
+#[derive(Debug, Default)]
+pub(crate) struct Parts {
+    parts: RefCell<Vec<Part>>,
+    clocked: RefCell<Vec<String>>,
+}
+
+/// One piece of a region: an element with an `id`, as HTML.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(crate) struct Part {
+    pub(crate) id: String,
+    /// For a stretch of a chart, the SVG group it belongs to: stretches come and go as time passes, so the stream
+    /// adds a new one to the group and removes one that is no longer drawn.
+    pub(crate) group: Option<String>,
+    pub(crate) html: String,
+}
+
+impl Parts {
+    /// Records `markup`, an HTML element with `id`, as a part, and returns it.
+    pub(crate) fn html(&self, id: &str, markup: Markup) -> Markup {
+        self.push(id, None, markup)
+    }
+
+    /// Records `markup`, an SVG element with `id` in the group with id `group`, as a part, and returns it.
+    pub(crate) fn stretch(&self, id: &str, group: &str, markup: Markup) -> Markup {
+        self.push(id, Some(group), markup)
+    }
+
+    /// Records `value`, an attribute's value that follows the page's clock, such as a live chart's transform, and
+    /// returns it. A Datastar binding keeps it current on the page, so a change to it alone sends nothing; the value
+    /// is the page's until its script runs.
+    pub(crate) fn clocked(&self, value: String) -> String {
+        self.clocked.borrow_mut().push(value.clone());
+        value
+    }
+
+    fn push(&self, id: &str, group: Option<&str>, markup: Markup) -> Markup {
+        self.parts.borrow_mut().push(Part {
+            id: id.to_owned(),
+            group: group.map(str::to_owned),
+            html: markup.0.clone(),
+        });
+        markup
+    }
+
+    /// The parts, and the values that follow the clock.
+    pub(crate) fn into_parts(self) -> (Vec<Part>, Vec<String>) {
+        (self.parts.into_inner(), self.clocked.into_inner())
+    }
+}
+
+/// A short digest of a region's HTML. A page holds one per live region, which its stream reads on connecting to
+/// skip the regions the page has already.
+pub(crate) fn digest(html: &str) -> String {
+    let mut hasher = DefaultHasher::new();
+    html.hash(&mut hasher);
+    format!("{:016x}", hasher.finish())
+}
+
+/// The event stream of a live page, and what the page shows: the time it was rendered at and a digest of each
+/// region, by id. The stream keeps both current in the `shown` signal; live charts follow `$shown.at`.
+pub(crate) struct Live<'url> {
+    pub(crate) url: &'url str,
+    pub(crate) at: u64,
+    /// The number of the last log line the page shows, on a job's page.
+    pub(crate) log: Option<u64>,
+    pub(crate) regions: Vec<(&'static str, String)>,
+}
+
+impl Live<'_> {
+    /// The `shown` signal as a Datastar expression.
+    fn signals(&self) -> String {
+        let mut signals = format!("{{shown: {{at: {}", self.at);
+        if let Some(log) = self.log {
+            let _ = write!(signals, ", log: {log}");
+        }
+        for (id, digest) in &self.regions {
+            let _ = write!(signals, ", {}: {}", js(id), js(digest));
+        }
+        signals.push_str("}}");
+        signals
+    }
+}
+
 /// A full page: the navigation, `main`, and, with `live`, the event stream that keeps its regions current.
-pub(crate) fn page(title: &str, active: Option<Page>, live: Option<&str>, main: &Markup) -> Markup {
+pub(crate) fn page(
+    title: &str,
+    active: Option<Page>,
+    live: Option<&Live<'_>>,
+    main: &Markup,
+) -> Markup {
     let nav = [
         (Page::Overview, "/", "Overview"),
         (Page::History, "/history", "History"),
@@ -42,14 +135,15 @@ pub(crate) fn page(title: &str, active: Option<Page>, live: Option<&str>, main: 
                 meta charset="utf-8";
                 meta name="viewport" content="width=device-width, initial-scale=1";
                 meta name="color-scheme" content="light dark";
+                meta name="description" content="runnerd's dashboard: its slots, jobs, caches and config on this machine.";
                 title { (title) " · runnerd" }
                 link rel="icon" href=(assets::path("mark.svg")) type="image/svg+xml";
-                link rel="preload" href="/assets/libre-franklin.woff2" as="font" type="font/woff2" crossorigin;
+                link rel="preload" href=(assets::path("libre-franklin.woff2")) as="font" type="font/woff2" crossorigin;
                 link rel="stylesheet" href=(assets::path("style.css"));
                 script src=(assets::path("theme.js")) {}
                 script type="module" src=(assets::path("datastar.js")) {}
             }
-            body {
+            body data-signals=[live.map(Live::signals)] {
                 a.skip href="#main" { "Skip to content" }
                 header.top {
                     a.wordmark href="/" aria-label="runnerd overview" {
@@ -65,10 +159,10 @@ pub(crate) fn page(title: &str, active: Option<Page>, live: Option<&str>, main: 
                             }
                         }
                     }
-                    @if let Some(url) = live {
+                    @if let Some(live) = live {
                         // The indicator before the init: it has to listen when the request starts.
                         span.connection data-indicator:_live=""
-                            data-init=(format!("@get('{url}', {{retryMaxCount: 1000000, retryMaxWait: 10000}})"))
+                            data-init=(format!("@get('{}', {{retryMaxCount: 1000000, retryMaxWait: 10000}})", live.url))
                             data-class:online="$_live"
                             data-attr:title="$_live ? 'Updates as it happens' : 'Not connected; retrying'" {
                             span.dot aria-hidden="true" {}

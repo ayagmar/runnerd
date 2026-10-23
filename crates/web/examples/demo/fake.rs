@@ -25,10 +25,11 @@ use axum::{Json, Router};
 use futures_util::{Stream, stream};
 use runnerd_core::api::{
     Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
-    CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, HostSample,
-    HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery,
-    LogSummary, PauseQuery, Paused, ProfileStatus, QueuedJob, RepositoryStatus, RunnerStatus,
-    RunningJob, Sample, SampleSeries, SlotStatus, Stats, StatsRow, Status, Step, Timeline,
+    CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, EventQuery,
+    HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary,
+    LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus, QueuedJob, RepositoryStatus,
+    RunnerStatus, RunningJob, Sample, SampleSeries, SlotStatus, Stats, StatsRow, Status, Step,
+    Timeline,
 };
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -948,16 +949,21 @@ fn router(fake: Fake) -> Router {
         .with_state(fake)
 }
 
-async fn events(State(fake): State<Fake>) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
+/// The events the caller feeds, filtered by the query as the daemon does.
+async fn events(
+    State(fake): State<Fake>,
+    Query(query): Query<EventQuery>,
+) -> Sse<impl Stream<Item = Result<SseEvent, Infallible>>> {
     let receiver = fake.events.subscribe();
-    let stream = stream::unfold(receiver, |mut receiver| async move {
+    let stream = stream::unfold((receiver, query), |(mut receiver, query)| async move {
         loop {
             match receiver.recv().await {
+                Ok(envelope) if !query.matches(&envelope.event) => {}
                 Ok(envelope) => {
                     let event = SseEvent::default()
                         .event(envelope.event.kind())
                         .data(serde_json::to_string(&envelope).unwrap());
-                    return Some((Ok(event), receiver));
+                    return Some((Ok(event), (receiver, query)));
                 }
                 Err(broadcast::error::RecvError::Lagged(_)) => {}
                 Err(broadcast::error::RecvError::Closed) => return None,
