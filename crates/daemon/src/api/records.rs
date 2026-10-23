@@ -167,11 +167,16 @@ async fn carry(client: TokioIo<hyper::upgrade::Upgraded>, tty: Tty, banner: Stri
         _ = &mut shown => return,
         _ = tokio::io::copy(&mut from_client, &mut input) => {}
     }
-    // The client sent all it will, or went away: the shell's input ends, which ends a shell waiting for it, and what
-    // it still prints goes to a client that stayed.
+    // The client sent all it will, or went away: the shell's input ends, and what it still prints goes to a client
+    // that stayed. A terminal reads the end of its input as Ctrl-D, not as its stdin closing, so the shell gets one:
+    // it ends a shell waiting at its prompt.
+    let _ = input.write_all(&[EOT]).await;
     drop(input);
     let _ = tokio::time::timeout(DRAIN, shown).await;
 }
+
+/// Ctrl-D, which a terminal reads as the end of its input.
+const EOT: u8 = 0x04;
 
 /// How long a shell's output is still carried once its client sent all it will.
 const DRAIN: Duration = Duration::from_secs(30);

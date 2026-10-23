@@ -124,13 +124,15 @@ async fn fake_engine(
                         input: Box::pin(tokio::io::sink()),
                     }),
                     10 => {
-                        // Like bash, it reads its input until it ends, then exits.
+                        // Like bash at a terminal, it echoes what it reads and exits on Ctrl-D; its terminal's input
+                        // closing does not end it.
                         let (input, reader) = tokio::io::duplex(64);
                         let echo = futures_util::stream::unfold(reader, |mut reader| async move {
                             let mut buffer = [0; 64];
                             match tokio::io::AsyncReadExt::read(&mut reader, &mut buffer).await {
-                                Ok(0) | Err(_) => None,
-                                Ok(read) => Some((Ok(buffer[..read].to_vec()), reader)),
+                                Ok(read) if buffer[..read].contains(&0x04) => None,
+                                Ok(read) if read > 0 => Some((Ok(buffer[..read].to_vec()), reader)),
+                                _ => std::future::pending().await,
                             }
                         });
                         Ok(Tty {
