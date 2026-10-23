@@ -94,6 +94,26 @@ min_free = "10G"    # left free on Docker's disk after a new record
 
 A new record pushes out the oldest past `max_count` or `max_total`; without room under `min_free`, the job gets no record, and its page says why. `runnerd doctor` warns once the records take 80% of `max_total`.
 
+## Sizing
+
+runnerd keeps each job's sampled memory and CPU peaks. `runnerctl sizing`, the dashboard's Sizing page and the TUI turn the last 30 days of them into advice for each profile's `memory` and `slots`:
+
+- A job's need is its p99 peak plus a margin. Samples are 2 s apart, so a shorter spike goes unseen. With fewer than `min_jobs` runs, its largest peak counts instead.
+- A profile's need is the largest of its jobs' needs, rounded up to 256M. A profile whose builds fit in 2G but whose end-to-end job takes 6G keeps room for the 6G.
+- Below `min_jobs` jobs there is no advice, only the peaks.
+- When the need is a tenth or more under `memory`, the advice is to lower it. If jobs waited a minute or more for a slot (p95), or the slots were busy half the time, it also adds as many slots as the profile's memory now holds.
+- When the need is over `memory`, the advice is to raise it. Slots go down only if `MemoryMax` cannot hold them. A peak within 5% of its cap counts as at the cap: the job may need more than it shows.
+
+`[sizing]` changes the rules; these are the defaults:
+
+```toml
+[sizing]
+margin = 15     # percent added to a sampled peak
+min_jobs = 10   # runs before percentiles become advice
+```
+
+Advice is only written when you apply it: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button, which opens the change in the config editor. Each goes through the same check as any config, so a change `MemoryMax` cannot hold is refused. Lowering never asks for more than the profile's slots take now, and raising takes only what `MemoryMax` has spare, so two raises applied one after the other can be refused. `runnerd doctor` warns when a profile's jobs need more than its `memory`.
+
 ## The budget check
 
 `runnerd check-config [file]`, by default on `~/.config/runnerd/runnerd.toml`, reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:

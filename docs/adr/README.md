@@ -37,3 +37,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0029](0029-profile-events-and-what-a-restart-announces.md) | Profile events, and what a restart announces |
 | [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core |
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets |
+| [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check |

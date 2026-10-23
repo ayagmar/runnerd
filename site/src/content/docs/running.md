@@ -133,6 +133,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `GET /v1/jobs/{id}/logs?from=&follow=` | its log as text; with `follow=true`, open until the job's record is final |
 | `GET /v1/host/samples?since=` | the slice's CPU and memory, the last 24 hours at most |
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`), 744 buckets back at most: counts, queue and run time, CPU, memory, mirror bytes |
+| `GET /v1/sizing?since=` | per configured profile and per job (repository, workflow, name): percentiles of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../configuration/#sizing) for `memory` and `slots`; the last 30 days by default |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
 | `GET /v1/records` | every record of a failed job, oldest first, with the limits and the jobs whose record has a shell open |
 | `DELETE /v1/records/{job}`, `DELETE /v1/records?all=true`, `DELETE /v1/records?older_than=2d` | the jobs whose records went and the disk they took; records with a shell open stay, and removing one by its job is refused with `409` |
