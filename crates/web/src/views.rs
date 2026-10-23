@@ -132,7 +132,7 @@ pub(crate) fn page(
                 meta name="color-scheme" content="light dark";
                 title { (title) " · runnerd" }
                 link rel="icon" href=(assets::path("mark.svg")) type="image/svg+xml";
-                link rel="preload" href="/assets/libre-franklin.woff2" as="font" type="font/woff2" crossorigin;
+                link rel="preload" href=(assets::path("libre-franklin.woff2")) as="font" type="font/woff2" crossorigin;
                 link rel="stylesheet" href=(assets::path("style.css"));
                 script src=(assets::path("theme.js")) {}
                 script type="module" src=(assets::path("datastar.js")) {}

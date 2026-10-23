@@ -235,6 +235,31 @@ async fn without_the_session_cookie_every_page_and_write_is_401() {
 }
 
 #[tokio::test]
+async fn an_asset_is_kept_until_it_changes_and_revalidates_without_its_body() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard.page(&cookie, "/").await.body;
+    let from = page.find("/assets/style.css?v=").unwrap();
+    let url = &page[from..from + page[from..].find('"').unwrap()];
+    let style = dashboard.request("GET", url, &[]).await;
+    assert_eq!(
+        style.headers[header::CACHE_CONTROL],
+        "public, max-age=31536000, immutable"
+    );
+    let etag = style.headers[header::ETAG].to_str().unwrap().to_owned();
+    let again = dashboard
+        .request("GET", url, &[("if-none-match", &etag)])
+        .await;
+    assert_eq!(again.status, StatusCode::NOT_MODIFIED);
+    assert!(again.body.is_empty(), "a 304 has no body");
+    // An older release's URL may name other bytes: checked each time.
+    let old = dashboard
+        .request("GET", "/assets/style.css?v=0.0.5", &[])
+        .await;
+    assert_eq!(old.headers[header::CACHE_CONTROL], "no-cache");
+}
+
+#[tokio::test]
 async fn a_write_from_another_origin_is_403_even_with_the_cookie() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
