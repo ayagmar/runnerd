@@ -582,21 +582,17 @@ fn running_job(
         .timeline
         .started_at
         .unwrap_or(summary.timeline.queued_at);
+    // The running step, or the last one done, and its place among the job's steps, as `runnerctl watch` counts it.
     let current = job
         .steps
         .iter()
-        .find(|step| step.status == "in_progress")
+        .position(|step| step.status == "in_progress")
         .or_else(|| {
             job.steps
                 .iter()
-                .rev()
-                .find(|step| step.status == "completed")
-        });
-    let done = job
-        .steps
-        .iter()
-        .filter(|step| step.status == "completed")
-        .count();
+                .rposition(|step| step.status == "completed")
+        })
+        .map(|place| (place + 1, &job.steps[place]));
     let samples = overview
         .samples
         .get(&summary.id)
@@ -638,8 +634,8 @@ fn running_job(
             }))
         }
         p.step {
-            @if let Some(step) = current {
-                span.step-count { (done) "/" (job.steps.len()) }
+            @if let Some((place, step)) = current {
+                span.step-count { (place) "/" (job.steps.len()) }
                 " " (step.name)
             } @else {
                 "Setting up"

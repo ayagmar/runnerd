@@ -310,7 +310,7 @@ export function card(slot: Slot): string {
     return `<span class="repo">${r!.repo}</span><p class="slot-idle">Waiting for its job <span class="muted">${ago(slot.t - r!.container)}</span></p>`;
   const steps = r!.steps;
   const s = slot.sample!;
-  return `<div class="slot-title"><p class="slot-job"><span class="repo">${r!.repo}</span><span class="job-name">${r!.name}</span></p><p class="elapsed"><span class="visually-hidden">Running for </span>${duration(slot.t - r!.started)}</p></div><p class="step"><span class="step-count">${slot.step}/${steps.length}</span> ${escape(steps[slot.step!][0])}</p><dl class="slot-figures"><div><dt class="visually-hidden">Memory</dt><dd>${size(s.memory)}</dd>${spark(slot, 'memory', slot.profile.memory)}</div><div><dt class="visually-hidden">CPU</dt><dd>${cores(s.cpu)} cores</dd>${spark(slot, 'cpu', slot.profile.cpus * 1000)}</div></dl>`;
+  return `<div class="slot-title"><p class="slot-job"><span class="repo">${r!.repo}</span><span class="job-name">${r!.name}</span></p><p class="elapsed"><span class="visually-hidden">Running for </span>${duration(slot.t - r!.started)}</p></div><p class="step"><span class="step-count">${slot.step! + 1}/${steps.length}</span> ${escape(steps[slot.step!][0])}</p><dl class="slot-figures"><div><dt class="visually-hidden">Memory</dt><dd>${size(s.memory)}</dd>${spark(slot, 'memory', slot.profile.memory)}</div><div><dt class="visually-hidden">CPU</dt><dd>${cores(s.cpu)} cores</dd>${spark(slot, 'cpu', slot.profile.cpus * 1000)}</div></dl>`;
 }
 
 /** The steps of a slot's latest job, as its job page lists them: done with their time, the one running, those to
