@@ -16,7 +16,7 @@ use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
-use crate::scheduler::{Repository, matches};
+use crate::scheduler::{Decision, Repository, matches};
 use crate::sizing::Ran;
 use crate::time;
 
@@ -33,6 +33,8 @@ pub(super) struct Measured {
     predictor: Option<(Predictor, SystemTime)>,
     /// Whether the slice was at the high-water mark at the last plan, so the change is logged once.
     pub high_water: bool,
+    /// The waiting runners this tick's `rereserve` raised for a heavier queued job.
+    raised: Vec<String>,
 }
 
 /// What one plan admits by.
@@ -212,6 +214,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// queued jobs, since GitHub may still give it any of them. A runner a restart adopted keeps its cap. Each
     /// change goes into the runner's row.
     pub(super) async fn rereserve(&mut self) {
+        self.measured.raised.clear();
         if self.config.host.admission != Admission::Measured {
             return;
         }
@@ -247,6 +250,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
         let mut changed = Vec::new();
+        let mut raised = Vec::new();
         for (profile, slots) in &mut self.slots {
             for occupant in slots.iter_mut().flatten() {
                 let Some(admission) = &mut occupant.admission else {
@@ -286,12 +290,52 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     admission.reserved = prediction.memory;
                     admission.basis = prediction.basis;
                     changed.push((occupant.runner_name.clone(), *admission));
+                    if occupant.key.is_none() {
+                        raised.push(occupant.runner_name.clone());
+                    }
                 }
             }
         }
+        self.measured.raised = raised;
         for (runner, admission) in changed {
             self.store.runner_admission(&runner, admission);
         }
+    }
+
+    /// The waiting runners to stop, as one that waited `IDLE_TIMEOUT` is: those `rereserve` raised for a heavier
+    /// queued job while what the running containers take is past `MemoryMax`, until it fits again. GitHub could give
+    /// them that job, so it waits for a runner that fits. One assigned between two ticks keeps it, and counts at
+    /// its raised reservation from then.
+    pub(super) fn over_budget(&self, decisions: &[Decision]) -> Vec<Decision> {
+        let Some(max) = self.memory_max else {
+            return Vec::new();
+        };
+        let mut in_use = self.memory_in_use();
+        let mut stops = Vec::new();
+        for (slot, occupant) in self.occupied() {
+            if in_use <= max {
+                break;
+            }
+            let stopping = decisions.iter().any(
+                |decision| matches!(decision, Decision::Stop { slot: other } if *other == slot),
+            );
+            if occupant.busy
+                || occupant.job.is_some()
+                || stopping
+                || !self.measured.raised.contains(&occupant.runner_name)
+            {
+                continue;
+            }
+            info!(
+                "{}: stopping {}: raised to {} for a queued job, it does not fit the budget",
+                occupant.repository,
+                occupant.runner_name,
+                crate::config::ByteSize(occupant.reserved())
+            );
+            in_use = in_use.saturating_sub(self.takes(occupant));
+            stops.push(Decision::Stop { slot });
+        }
+        stops
     }
 
     /// Logs when the slice reaches the high-water mark and when it falls under it.

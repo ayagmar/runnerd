@@ -217,6 +217,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .map(|(slot, _)| Decision::Stop { slot }),
         );
+        let stops = self.over_budget(&decisions);
+        decisions.extend(stops);
         (decisions, admitting)
     }
 

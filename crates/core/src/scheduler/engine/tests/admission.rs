@@ -344,3 +344,36 @@ async fn an_idle_runner_reserves_the_largest_prediction_of_the_jobs_queued_since
         "both runners reserve the e2e's 3.5G"
     );
 }
+
+#[tokio::test]
+async fn waiting_runners_raised_past_the_budget_for_a_heavier_job_are_stopped_until_the_rest_fits()
+{
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        4,
+        "4 × 1.25G for the builds"
+    );
+    // An e2e queues: any of the four may get it, so each reserves its 3.5G, 14G of the 10G slice.
+    github.0.lock().unwrap().queued.push(QueuedJob {
+        name: "e2e".to_owned(),
+        ..job(5)
+    });
+    engine.tick(Shutdown::No).await;
+    let deleted: BTreeSet<String> = github
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with("delete "))
+        .collect();
+    assert_eq!(deleted.len(), 2, "two stop, so the other two's 7G fits");
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 2 * 3584 * M);
+}
