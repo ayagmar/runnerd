@@ -180,6 +180,9 @@ nothing until Docker has listed them.
   added or changed: the runner image deletes them when the runner exits, and
   the engine commits no container whose changes still hold one (`record::secrets_left`). Checking and committing a
   container run off the engine's loop.
+- A file in the cache layer that may hold a token (`CACHE_SECRETS` in `image/layers.sh`: cargo's credentials and
+  config, Gradle's `gradle.properties`) never reaches the next job in the slot or a snapshot
+  ([ADR 0035](docs/adr/0035-runner-image-stages.md)).
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It
   mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell
   exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.

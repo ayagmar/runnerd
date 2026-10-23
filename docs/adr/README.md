@@ -40,3 +40,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check |
 | [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag |
 | [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit |
+| [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage |

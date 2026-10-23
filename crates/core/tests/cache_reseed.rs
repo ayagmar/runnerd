@@ -4,6 +4,8 @@
 //! ```sh
 //! cargo test -p runnerd-core --test cache_reseed -- --ignored --nocapture
 //! ```
+//!
+//! `RUNNERD_TEST_IMAGE` runs another image.
 
 #![allow(
     clippy::print_stdout,
@@ -17,7 +19,13 @@ use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
 const PROFILE: &str = "cache";
-const IMAGE: &str = "runnerd-runner:base";
+/// The runner image the containers run.
+fn image() -> String {
+    std::env::var("RUNNERD_TEST_IMAGE").unwrap_or("runnerd-runner:base".to_owned())
+}
+
+/// A registry token a job leaves in cargo's home in the cache layer.
+const CREDENTIALS: &str = "/home/runner/.cache/cargo/credentials.toml";
 
 /// Runs `script` as root in a runner container of `slot` with its layers mounted; returns its exit code and output.
 async fn run_in_slot(
@@ -29,7 +37,7 @@ async fn run_in_slot(
     let name = format!("{}-slot-{slot}-job", names.network());
     let spec = RunnerSpec {
         name: name.clone(),
-        image: IMAGE.to_owned(),
+        image: image(),
         profile: PROFILE.to_owned(),
         slice: "system.slice".to_owned(),
         cpus: 1,
@@ -70,21 +78,27 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
             .map_err(|e| e.to_string())?;
     }
     let as_runner = "setpriv --reuid=runner --regid=runner --init-groups --";
+    let leave_credentials = format!(
+        "{as_runner} sh -c 'mkdir -p /home/runner/.cache/cargo && echo token > {CREDENTIALS}'"
+    );
     let (code, output) = run_in_slot(
         docker,
         names,
         1,
-        &format!("{as_runner} sh -c 'echo warm > /home/runner/.cache/runnerd-test'"),
+        &format!(
+            "{as_runner} sh -c 'echo warm > /home/runner/.cache/runnerd-test' && {leave_credentials}"
+        ),
     )
     .await?;
     if code != 0 {
         return Err(format!("the job in slot 1 exited {code}:\n{output}"));
     }
 
+    let image = image();
     let reseed = |min_changes: &str| Reseed {
         names,
         profile: PROFILE,
-        image: IMAGE,
+        image: &image,
         slots: 2,
         slice: "system.slice",
         cpus: 1,
@@ -110,20 +124,36 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
         return Err(format!("slot 1's cache layer was not seeded:\n{output}"));
     }
 
-    // Slot 2 sees the file through the snapshot, which it cannot change, and has no copy of its own.
+    // Slot 2 sees the file through the snapshot, which it cannot change, and has no copy of its own; the snapshot
+    // holds no credentials.
     let (code, output) = run_in_slot(
         docker,
         names,
         2,
-        "test \"$(cat /home/runner/.cache/runnerd-test)\" = warm \
-         && test -f /base/cache/runnerd-test \
-         && test ! -e /state/cache/upper/runnerd-test \
-         && ! touch /base/cache/runnerd-test 2> /dev/null",
+        &format!(
+            "test \"$(cat /home/runner/.cache/runnerd-test)\" = warm \
+             && test -f /base/cache/runnerd-test \
+             && test ! -e /state/cache/upper/runnerd-test \
+             && ! touch /base/cache/runnerd-test 2> /dev/null \
+             && test ! -e {CREDENTIALS}"
+        ),
     )
     .await?;
     if code != 0 {
         return Err(format!(
-            "slot 2 does not see the snapshot (exit {code}):\n{output}"
+            "slot 2 does not see the snapshot, or sees slot 1's credentials (exit {code}):\n{output}"
+        ));
+    }
+
+    // The next job in a slot does not see the credentials its last job left in the slot's layer.
+    let (code, output) = run_in_slot(docker, names, 1, &leave_credentials).await?;
+    if code != 0 {
+        return Err(format!("the job in slot 1 exited {code}:\n{output}"));
+    }
+    let (code, output) = run_in_slot(docker, names, 1, &format!("test ! -e {CREDENTIALS}")).await?;
+    if code != 0 {
+        return Err(format!(
+            "slot 1's next job sees its last job's credentials (exit {code}):\n{output}"
         ));
     }
     Ok(())

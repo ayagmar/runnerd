@@ -32,7 +32,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        stage: [base, jvm, node]
+        stage: [base, android, jvm, node]
     permissions:
       contents: read # check out the tag
       packages: write # push to ghcr.io

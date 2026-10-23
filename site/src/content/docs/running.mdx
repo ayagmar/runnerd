@@ -50,13 +50,14 @@ Runner containers live in Docker, not in the unit: a restarted runnerd adopts th
 
 ## Warm caches
 
-A slot is one concurrent job of a profile. Each job gets a new container, but the slot keeps a volume over the profile's read-only snapshot:
+A slot is one concurrent job of a profile. Each job gets a new container, but the slot keeps a volume over the profile's read-only snapshot. The images point every common toolchain's cache into `~/.cache`: rustup and cargo, Go modules and builds, Gradle, Maven, npm, Yarn, Bun, pip, uv, Poetry, pub, Deno and coursier.
 
 <Caches />
 
 | Cache | Kept |
 |---|---|
 | the slot's Docker images, `~/.cache`, tool cache, Android SDK | per slot, between jobs |
+| cargo's credentials and config, Gradle's `gradle.properties` in `~/.cache` | never: deleted before the slot's next job and from the snapshot |
 | the profile's snapshot | replaced by slot 1's changes once they reach `reseed_at` (`[caches]`, default `2G`) and the profile is idle |
 | pnpm store, Maven repository | shared by all slots, emptied above `max_size` when no job runs |
 | Docker Hub mirror | runs while any runner does |
@@ -87,11 +88,11 @@ runner@4be1c0d2a7e9:~/_work/ledger/ledger$
 |---|---|
 | the workspace, `_work/<repository>`, with build output and test reports | yes |
 | the runner's `_diag` logs, secrets masked as the runner masks them on GitHub | yes |
-| the Rust toolchain a job installed: `~/.rustup`, and `~/.cargo`'s `bin`, `registry` and `git` | yes |
-| anything else the job wrote outside volumes and the places below, such as `~/go` | yes |
+| a Rust toolchain in `~/.rustup` and `~/.cargo`'s `bin`, `registry` and `git`, for a job that sets `RUSTUP_HOME` and `CARGO_HOME` there (the images put both in `~/.cache`) | yes |
+| anything else the job wrote outside volumes and the places below, such as a tool unpacked in `/opt` | yes |
 | other dot-files and dot-directories the job added or changed in the runner's home: logins (`.gitconfig`, `.aws`, `.gnupg`, `.docker`, `~/.cargo/credentials.toml` and `config.toml`, the runner's `.credentials`) and tools installed there (`~/.local`, `~/.nvm`, `~/.dotnet`, `~/.bun`, `~/.sdkman`); what it added or changed in `/tmp` and `/var/tmp` | never |
 | the JIT config, `_work/_temp` (step scripts), the token `actions/checkout` puts in `.git/config` | never |
-| the slot's caches, tool cache, Android SDK, and the job's Docker images | no; volumes, which a shell sees as the profile's snapshot |
+| the slot's caches (rustup and cargo included), tool cache, Android SDK, and the job's Docker images | no; volumes, which a shell sees as the profile's snapshot |
 
 The runner image deletes the "never" rows when the runner exits, and runnerd refuses to keep a container whose changes still hold any of them. A step that saves a secret into the workspace or elsewhere outside those places leaves it in the record: runnerd does not read file contents.
 
