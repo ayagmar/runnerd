@@ -166,6 +166,7 @@ fn status() -> Status {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            cpu: None,
         },
         profiles: vec![ProfileStatus {
             name: "sandbox".to_owned(),
@@ -826,6 +827,7 @@ fn budget(memory_in_use: u64) -> Event {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            cpu: None,
         },
     }
 }

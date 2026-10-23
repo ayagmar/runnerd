@@ -574,6 +574,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             memory_cap: Some(config("sysbox").profiles[profile].memory.0),
             memory_peak: peak,
             cpu_peak: 4000,
+            cpu_average: Some(1000),
             queued_at: 1_000_000 + i,
             started_at: Some(1_000_000 + i + 120_000),
             finished_at: Some(1_000_000 + i + 720_000),

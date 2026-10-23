@@ -186,19 +186,55 @@ Try it on your own history before turning it on. `runnerd simulate` replays the 
 
 ```text
 $ runnerd simulate --memory-max 33G --slots node=8
-1555 finished jobs replayed against a MemoryMax of 33G, each queued when it was and running as long as it ran.
+196 finished jobs replayed against a MemoryMax of 33G, each queued when it was and running as long as it ran.
 PEAKS is every running job's peak added up at the busiest moment, with the mirror: more than the slice ever held, but a lower bound on what the daemon could overlap. The replay holds each running job at its peak, where the daemon admits against what jobs use while they warm up, and it leaves out start latency, seeds, shells and cancelled jobs.
 
-POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD
-caps      jvm 2, node 2                 0s    20m56s    55m35s     3m21s       4   21.45G       0     0
-caps*     jvm 3, node 8                 0s    13m34s    31m55s     1m41s       4   21.85G       0     0
-measured  jvm 3, node 8                 0s    10m37s    28m38s     1m09s       9   26.78G       2     0
+POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD    CPU CPU HELD
+caps      jvm 2, node 6                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -
+caps*     jvm 3, node 8                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -
+measured  jvm 3, node 8                 0s     1m55s     3m20s       18s       8   24.35G       4     0      7        -
+cpu ×1    jvm 3, node 8                 0s     1m55s     3m20s       18s       8   24.35G       4     0      7        0
 
 * more slots than the caps fit in MemoryMax, which the config check refuses with admission = "caps".
 UNDER: jobs that peaked above what admission reserved for them. HELD: times the high-water mark held back a job the predictions had room for.
+cpu ×N: measured admission, and each runner reserves its job's predicted average CPU of the slice's 32 CPUs times N. CPU: the most the running jobs' average CPUs added up to at once. CPU HELD: times the CPU budget held back a job memory and its slots had room for. The replay keeps each job's run time, so it shows what a CPU budget holds back, not how much sharing the CPUs slows the jobs.
 ```
 
-Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--since 7d` (or `12h`, `2w`) sets the window. A `PEAKS` over `MemoryMax` is marked `!`. A `PEAKS` well under `MemoryMax` is what the replay shows, not a promise: leave the daemon room for what it does not model.
+Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--since 7d` (or `12h`, `2w`) sets the window. A `PEAKS` over `MemoryMax` is marked `!`. A `PEAKS` well under `MemoryMax` is what the replay shows, not a promise: leave the daemon room for what it does not model. The `cpu ×N` rows replay [CPU admission](#cpu-admission).
+
+## CPU admission
+
+Memory admission does not see CPU: eight image builds that each fit in memory can still ask for more CPUs than the host has, and every job on it slows down. `cpu_overcommit` under `[host]` adds a CPU budget, the slice's CPUs times the factor, and a runner starts only when what it reserves of that fits too:
+
+```toml
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+admission = "measured"
+cpu_overcommit = 1.0
+```
+
+- The slice's CPUs are its `AllowedCPUs`, or the host's, and fewer when its `CPUQuota` allows less. runnerd reads them from systemd at start.
+- Under `admission = "measured"` a runner reserves its job's average CPU, its CPU time over its run time, predicted from the job history as memory is: with `[sizing] min_jobs` runs of the job, their p95; with fewer, its own largest once 2 succeeded, else the larger of that and its profile's p95; with none, its profile's largest. Without `min_jobs` runs of the profile, its `cpus`. There is no margin: the factor is the margin.
+- Under `admission = "caps"` every runner reserves its profile's `cpus`.
+- A runner reserves the largest of its repository's queued jobs until it knows its job, then that job's; never more than the whole budget, so one runner can always start.
+- The mirror, seed containers and shells reserve no CPU.
+
+A job that had a slot and memory but not CPU waits. The status line and the dashboard say so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`), the daemon logs it, and the job's record says how long it waited (`runnerctl job <id>`).
+
+It is off by default. A job's average is far under its peak: the image builds that peak at 6 CPUs average under one, so reserving peaks would leave most of the host idle, and averages admit nearly everything on a host with many CPUs. On one host's history at 32 CPUs, the running jobs' averages never added up past 8 CPUs, even with twice the node slots, so a budget at 1.0 held nothing back. It matters on a small host. The same history replayed against 8 CPUs:
+
+```text
+$ runnerd simulate --memory-max 33G --slots node=8 --cpus 8 --cpu-overcommit 1 --cpu-overcommit 1.5
+POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD    CPU CPU HELD
+caps      jvm 2, node 6                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -
+caps*     jvm 3, node 8                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -
+measured  jvm 3, node 8                 0s     1m55s     3m20s       18s       8   24.35G       4     0      7        -
+cpu ×1    jvm 3, node 8                 0s     2m30s     4m21s       32s       8   24.16G       4     0      7      281
+cpu ×1.5  jvm 3, node 8                 0s     2m08s     4m21s       21s       8   24.35G       4     0      7        8
+```
+
+Start at `1.0`: the running jobs' averages fill the CPUs, and peaks that land together cost a short slowdown, not a kill. Raise it when jobs wait for CPU the host shows idle; lower it to keep CPU free for the host itself. `--cpus` replays another number of CPUs, and `--cpu-overcommit`, repeated, compares factors.
 
 ## The budget check
 

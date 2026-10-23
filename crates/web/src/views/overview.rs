@@ -386,6 +386,9 @@ fn readout(
                     @if let Some(used) = used_now {
                         span.muted { " · " (format::bytes(used)) " in use" }
                     }
+                    @if let Some(cpu) = budget.cpu {
+                        span.muted { " · " (cpu.line()) }
+                    }
                 }
             }))
             // The blocks' descriptions, so a block's name stays what it shows.

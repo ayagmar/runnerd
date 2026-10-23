@@ -1,4 +1,4 @@
-//! Which runners to start and stop, as a pure function of queued jobs, slots and the memory budget (`plan`), and
+//! Which runners to start and stop, as a pure function of queued jobs, slots and the memory and CPU budgets (`plan`), and
 //! the loop that applies those decisions with GitHub and Docker (`engine`). `plan` does no I/O and reads no clock.
 
 use std::collections::BTreeMap;
@@ -30,6 +30,9 @@ pub struct Repository {
     /// What a new runner of it takes of the budget: `None`, its profile's `memory`. Under measured admission, the
     /// largest predicted peak of its queued jobs, since GitHub may give the runner any of them.
     pub runner_memory: Option<u64>,
+    /// What a new runner of it takes of the CPU budget, in millicores: `None`, its profile's `cpus`. Under measured
+    /// admission, the largest predicted average CPU of its queued jobs.
+    pub runner_cpu: Option<u64>,
 }
 
 /// A profile's slots: one concurrent job each.
@@ -37,6 +40,8 @@ pub struct Repository {
 pub struct Profile {
     /// Memory a slot's container may use.
     pub memory: u64,
+    /// CPU a slot's container may use, in millicores.
+    pub cpus: u64,
     /// While the profile's snapshot is rebuilt or its image pulled, none of its slots starts.
     pub preparing: bool,
     /// Index 0 is slot 1.
@@ -86,6 +91,13 @@ pub enum Decision {
         repository: String,
         /// What it takes of the budget.
         memory: u64,
+        /// What it takes of the CPU budget, in millicores.
+        cpu: u64,
+    },
+    /// Hold the repository's next job: a slot and memory had room for its runner, the CPU budget did not.
+    HeldForCpu {
+        /// `owner/name`.
+        repository: String,
     },
     /// Remove the slot's runner, which waited `IDLE_TIMEOUT` for a job no longer queued.
     Stop {
@@ -108,13 +120,15 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 ///
 /// Each repository gets a runner per matching queued job, less its runners still waiting for a job. Jobs are
 /// served oldest first across repositories, each in the lowest free slot of its repository's profile, while what
-/// the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `free_memory` (`None`: no
-/// budget). An idle runner stops once no queued job is left for it and
-/// it waited `IDLE_TIMEOUT`.
+/// the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `free_memory` and its CPU
+/// (`Repository::runner_cpu`, by default the slot's `cpus`) fits `free_cpu` (`None`: no budget). A repository whose
+/// job had a slot and memory but not CPU is held once (`Decision::HeldForCpu`). An idle runner stops once no queued
+/// job is left for it and it waited `IDLE_TIMEOUT`.
 pub fn plan(
     repositories: &[Repository],
     profiles: &BTreeMap<String, Profile>,
     free_memory: Option<u64>,
+    free_cpu: Option<u64>,
     now: SystemTime,
 ) -> Vec<Decision> {
     let mut decisions = Vec::new();
@@ -168,18 +182,9 @@ pub fn plan(
     }
     jobs.sort_by_key(|(id, _)| *id);
 
-    let mut taken: BTreeMap<&str, Vec<bool>> = profiles
-        .iter()
-        .map(|(name, profile)| {
-            let taken = profile
-                .slots
-                .iter()
-                .map(|slot| profile.preparing || *slot != Slot::Free)
-                .collect();
-            (name.as_str(), taken)
-        })
-        .collect();
+    let mut taken = taken_slots(profiles);
     let mut free_memory = free_memory;
+    let mut free_cpu = free_cpu;
     for (_, repository) in jobs {
         let Some(missing) = wanted.get_mut(repository.name.as_str()) else {
             continue;
@@ -200,9 +205,20 @@ pub fn plan(
         let Some(index) = taken.iter().position(|taken| !taken) else {
             continue;
         };
+        let cpu = repository.runner_cpu.unwrap_or(profile.cpus);
+        if free_cpu.is_some_and(|free| free < cpu) {
+            let held = Decision::HeldForCpu {
+                repository: repository.name.clone(),
+            };
+            if !decisions.contains(&held) {
+                decisions.push(held);
+            }
+            continue;
+        }
         taken[index] = true;
         *missing -= 1;
         free_memory = free_memory.map(|free| free - memory);
+        free_cpu = free_cpu.map(|free| free - cpu);
         decisions.push(Decision::Start {
             slot: SlotRef {
                 profile: repository.profile.clone(),
@@ -210,9 +226,25 @@ pub fn plan(
             },
             repository: repository.name.clone(),
             memory,
+            cpu,
         });
     }
     decisions
+}
+
+/// Whether each slot of each profile is taken, by profile name: by a runner, closed, or its profile preparing.
+fn taken_slots(profiles: &BTreeMap<String, Profile>) -> BTreeMap<&str, Vec<bool>> {
+    profiles
+        .iter()
+        .map(|(name, profile)| {
+            let taken = profile
+                .slots
+                .iter()
+                .map(|slot| profile.preparing || *slot != Slot::Free)
+                .collect();
+            (name.as_str(), taken)
+        })
+        .collect()
 }
 
 #[cfg(test)]

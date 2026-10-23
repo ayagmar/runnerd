@@ -11,11 +11,19 @@ use super::history::Closing;
 use super::{Engine, Occupant};
 use crate::api;
 use crate::cache;
-use crate::docker::{self, DockerApi, RunnerState, is_not_found};
+use crate::docker::{self, DockerApi, is_not_found};
 use crate::github::GithubApi;
 use crate::record;
 use crate::scheduler::SlotRef;
 use crate::time;
+
+/// The limits an adopted container runs with.
+struct Caps {
+    /// Bytes.
+    memory: u64,
+    /// Millicores.
+    cpus: u64,
+}
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Takes over the seed containers a previous daemon left: a running one counts as its profile's reseed, so no
@@ -32,7 +40,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             info!("{profile}: waiting for the reseed an earlier run started");
             let docker = self.docker.clone();
             let id = container.id.clone();
-            let memory = self.running_cap(&container.id, &profile).await;
+            let memory = self.running_caps(&container.id, &profile).await.memory;
             self.reseed_memory.insert(profile.clone(), memory);
             self.reseeds.insert(
                 profile,
@@ -41,19 +49,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// The memory cap a container left by an earlier daemon runs with, which a reload since may have changed in the
-    /// config; the profile's configured cap only when Docker cannot tell.
-    async fn running_cap(&self, container: &str, profile: &str) -> u64 {
-        match self.docker.inspect(container).await {
-            Ok(RunnerState {
-                memory: Some(memory),
-                ..
-            }) => memory,
-            _ => self
-                .config
-                .profiles
-                .get(profile)
-                .map_or(0, |settings| settings.memory.0),
+    /// The memory and CPU caps a container left by an earlier daemon runs with, which a reload since may have
+    /// changed in the config; the profile's configured caps only when Docker cannot tell.
+    async fn running_caps(&self, container: &str, profile: &str) -> Caps {
+        let state = self.docker.inspect(container).await.ok();
+        let configured = self.config.profiles.get(profile);
+        Caps {
+            memory: state
+                .as_ref()
+                .and_then(|state| state.memory)
+                .or_else(|| configured.map(|settings| settings.memory.0))
+                .unwrap_or(0),
+            cpus: state
+                .and_then(|state| state.cpus)
+                .or_else(|| configured.map(|settings| u64::from(settings.cpus) * 1000))
+                .unwrap_or(0),
         }
     }
 
@@ -97,6 +107,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .parse::<usize>()
                 .ok()
                 .and_then(|slot| slot.checked_sub(1));
+            let caps = self.running_caps(&container.id, &profile).await;
             let occupant = Occupant {
                 repository: label("runnerd.repository"),
                 runner_name: container.name.clone(),
@@ -104,7 +115,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 container: container.id.clone(),
                 busy: true,
                 started_at: SystemTime::now(),
-                memory: self.running_cap(&container.id, &profile).await,
+                memory: caps.memory,
+                cpus: caps.cpus,
                 admission: None,
                 // Its capture reports it again; until then, or if it cannot, the history knows it.
                 job: self.store.runner_job(&container.name).await.ok().flatten(),

@@ -675,6 +675,7 @@ mod tests {
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
+                    cpu: None,
                 },
             },
         };

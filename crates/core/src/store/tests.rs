@@ -489,6 +489,7 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            cpu: None,
         },
     });
     store.flush().await;
@@ -788,6 +789,7 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
             },
             free: Some(8 << 30),
             slice: Some(1 << 30),
+            cpu: None,
         }),
         ..runner("r1", 1_000_100)
     });

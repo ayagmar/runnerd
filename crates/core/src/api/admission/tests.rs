@@ -1,8 +1,10 @@
-//! The wire format of an admission against readers already released: 0.0.7's `Basis` reads what this one writes.
+//! The wire format of an admission and the budget against readers already released: 0.0.7's `Admission`,
+//! `Basis` and `Budget` read what this one writes.
 
 use serde::Deserialize;
 
-use super::{Admission, AdmissionPolicy, Basis, JobPeak};
+use super::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak};
+use crate::api::{Budget, CpuBudget};
 
 /// `Basis` as 0.0.7 shipped it.
 #[derive(Debug, PartialEq, Eq, Deserialize)]
@@ -35,6 +37,7 @@ fn admission(basis: Basis) -> Admission {
         basis,
         free: Some(20 << 30),
         slice: Some(8 << 30),
+        cpu: None,
     }
 }
 
@@ -61,4 +64,81 @@ fn a_p95_prediction_is_written_as_it_was_and_records_written_before_read_as_p95(
         }
     );
     assert_eq!(serde_json::to_string(&read).unwrap(), written);
+}
+
+/// `Budget` as 0.0.7 shipped it.
+#[derive(Debug, Deserialize)]
+#[expect(dead_code, reason = "only the memory is compared")]
+struct ReleasedBudget {
+    slice: String,
+    memory_max: Option<u64>,
+    memory_in_use: u64,
+    #[serde(default)]
+    admission: AdmissionPolicy,
+    #[serde(default)]
+    held: bool,
+}
+
+fn with_cpu(basis: Basis) -> Admission {
+    Admission {
+        cpu: Some(CpuAdmission {
+            reserved: 1500,
+            basis,
+            free: 20_000,
+            waited: Some(90),
+        }),
+        ..admission(Basis::Cap)
+    }
+}
+
+#[test]
+fn a_released_reader_reads_an_admission_and_a_budget_with_cpu_as_before() {
+    let payload = serde_json::to_string(&with_cpu(Basis::Job {
+        runs: 3,
+        peak: JobPeak::Largest,
+    }))
+    .unwrap();
+    let read: ReleasedAdmission = serde_json::from_str(&payload).unwrap();
+    assert_eq!(read.basis, ReleasedBasis::Cap);
+    let budget = Budget {
+        slice: "ci.slice".to_owned(),
+        memory_max: Some(33 << 30),
+        memory_in_use: 9 << 30,
+        cpu: Some(CpuBudget {
+            cpus: 32_000,
+            budget: 32_000,
+            in_use: 4500,
+            held: false,
+        }),
+        ..Budget::default()
+    };
+    let read: ReleasedBudget =
+        serde_json::from_str(&serde_json::to_string(&budget).unwrap()).unwrap();
+    assert_eq!(read.memory_in_use, 9 << 30);
+}
+
+#[test]
+fn an_admission_or_budget_without_cpu_is_written_as_before() {
+    let written = r#"{"policy":"measured","reserved":1610612736,"basis":{"kind":"cap"},"free":null,"slice":null}"#;
+    let read: Admission = serde_json::from_str(written).unwrap();
+    assert_eq!(read.cpu, None);
+    assert_eq!(serde_json::to_string(&read).unwrap(), written);
+    let budget = serde_json::to_value(Budget::default()).unwrap();
+    assert!(budget.get("cpu").is_none(), "{budget}");
+}
+
+#[test]
+fn a_record_says_what_cpu_its_runner_reserved_and_how_long_it_waited_for_it() {
+    let line = with_cpu(Basis::Job {
+        runs: 12,
+        peak: JobPeak::P95,
+    })
+    .line();
+    assert!(
+        line.ends_with(
+            ". Reserved 1.5 CPUs, the p95 average of 12 runs of its job; 20 CPUs of the budget were free; it waited \
+             1m30s for CPU"
+        ),
+        "{line}"
+    );
 }

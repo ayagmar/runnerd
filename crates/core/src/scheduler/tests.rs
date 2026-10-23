@@ -35,6 +35,7 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
         held_until: None,
         queued,
         runner_memory: None,
+        runner_cpu: None,
     }
 }
 
@@ -43,6 +44,7 @@ fn profiles(slots: Vec<Slot>) -> BTreeMap<String, Profile> {
         "app".to_owned(),
         Profile {
             memory: 4 * GIB,
+            cpus: 2000,
             preparing: false,
             slots,
         },
@@ -64,7 +66,7 @@ fn starts(decisions: &[Decision]) -> Vec<(usize, &str)> {
             Decision::Start {
                 slot, repository, ..
             } => Some((slot.index, repository.as_str())),
-            Decision::Stop { .. } => None,
+            Decision::Stop { .. } | Decision::HeldForCpu { .. } => None,
         })
         .collect()
 }
@@ -83,6 +85,7 @@ fn two_repositories_sharing_two_slots_start_two_of_three_jobs_oldest_first() {
         &repositories,
         &profiles(vec![Slot::Free, Slot::Free]),
         None,
+        None,
         now(),
     );
     assert_eq!(starts(&decisions), [(0, "o/b"), (1, "o/b")]);
@@ -95,7 +98,13 @@ fn a_job_whose_labels_match_no_repository_never_starts() {
         "app",
         vec![job(1, &["ubuntu-latest"]), job(2, &["self-hosted", "gpu"])],
     )];
-    let decisions = plan(&repositories, &profiles(vec![Slot::Free]), None, now());
+    let decisions = plan(
+        &repositories,
+        &profiles(vec![Slot::Free]),
+        None,
+        None,
+        now(),
+    );
     assert_eq!(decisions, []);
 }
 
@@ -106,7 +115,13 @@ fn labels_match_regardless_of_case() {
         "app",
         vec![job(1, &["Self-Hosted", "APP"])],
     )];
-    let decisions = plan(&repositories, &profiles(vec![Slot::Free]), None, now());
+    let decisions = plan(
+        &repositories,
+        &profiles(vec![Slot::Free]),
+        None,
+        None,
+        now(),
+    );
     assert_eq!(starts(&decisions), [(0, "o/a")]);
 }
 
@@ -117,6 +132,7 @@ fn a_full_budget_starts_nothing() {
         &repositories,
         &profiles(vec![Slot::Free]),
         Some(4 * GIB - 1),
+        None,
         now(),
     );
     assert_eq!(decisions, []);
@@ -133,6 +149,7 @@ fn the_budget_caps_starts_within_one_plan() {
         &repositories,
         &profiles(vec![Slot::Free, Slot::Free]),
         Some(5 * GIB),
+        None,
         now(),
     );
     assert_eq!(starts(&decisions), [(0, "o/a")]);
@@ -153,6 +170,7 @@ fn runners_that_reserve_their_predicted_peak_start_more_within_the_same_budget()
         &repositories,
         &profiles(vec![Slot::Free, Slot::Free, Slot::Free]),
         Some(5 * GIB),
+        None,
         now(),
     );
     assert_eq!(starts(&decisions), [(0, "o/a"), (1, "o/a")]);
@@ -171,6 +189,7 @@ fn a_runner_still_waiting_for_its_job_is_not_started_twice() {
         &repositories,
         &profiles(vec![idle_runner("o/a", now()), Slot::Free]),
         None,
+        None,
         now(),
     );
     assert_eq!(decisions, []);
@@ -182,7 +201,13 @@ fn an_idle_runner_stops_only_after_its_timeout_with_nothing_queued() {
     let nothing_queued = [repository("o/a", "app", Vec::new())];
     let just_started = now() - IDLE_TIMEOUT + Duration::from_secs(1);
     assert_eq!(
-        plan(&nothing_queued, &profiles_with(just_started), None, now()),
+        plan(
+            &nothing_queued,
+            &profiles_with(just_started),
+            None,
+            None,
+            now()
+        ),
         []
     );
     let long_ago = now() - IDLE_TIMEOUT;
@@ -193,12 +218,12 @@ fn an_idle_runner_stops_only_after_its_timeout_with_nothing_queued() {
         },
     };
     assert_eq!(
-        plan(&nothing_queued, &profiles_with(long_ago), None, now()),
+        plan(&nothing_queued, &profiles_with(long_ago), None, None, now()),
         [stop]
     );
     let still_queued = [repository("o/a", "app", vec![job(1, &["app"])])];
     assert_eq!(
-        plan(&still_queued, &profiles_with(long_ago), None, now()),
+        plan(&still_queued, &profiles_with(long_ago), None, None, now()),
         []
     );
 }
@@ -212,12 +237,74 @@ fn paused_held_and_reseeding_start_nothing() {
     held.held_until = Some(now() + Duration::from_secs(1));
     for repositories in [[paused], [held]] {
         assert_eq!(
-            plan(&repositories, &profiles(vec![Slot::Free]), None, now()),
+            plan(
+                &repositories,
+                &profiles(vec![Slot::Free]),
+                None,
+                None,
+                now()
+            ),
             []
         );
     }
     let mut reseeding = profiles(vec![Slot::Free]);
     reseeding.get_mut("app").unwrap().preparing = true;
     let repositories = [repository("o/a", "app", queued())];
-    assert_eq!(plan(&repositories, &reseeding, None, now()), []);
+    assert_eq!(plan(&repositories, &reseeding, None, None, now()), []);
+}
+
+#[test]
+fn a_job_with_a_slot_and_memory_but_no_cpu_waits_and_its_repository_is_held_for_cpu() {
+    // Each runner reserves 1.5 CPUs of 4: two start, the third waits, while a lighter job of o/b passes it.
+    let repositories = [
+        Repository {
+            runner_cpu: Some(1500),
+            ..repository(
+                "o/a",
+                "app",
+                vec![job(1, &["app"]), job(2, &["app"]), job(3, &["app"])],
+            )
+        },
+        Repository {
+            runner_cpu: Some(500),
+            ..repository("o/b", "app", vec![job(4, &["app"])])
+        },
+    ];
+    let decisions = plan(
+        &repositories,
+        &profiles(vec![Slot::Free; 4]),
+        None,
+        Some(4000),
+        now(),
+    );
+    assert_eq!(starts(&decisions), [(0, "o/a"), (1, "o/a"), (2, "o/b")]);
+    assert!(
+        decisions.contains(&Decision::HeldForCpu {
+            repository: "o/a".to_owned()
+        }),
+        "o/a is held for CPU"
+    );
+}
+
+#[test]
+fn a_runner_at_its_profiles_cpus_that_do_not_fit_holds_its_repository_once() {
+    let repositories = [repository(
+        "o/a",
+        "app",
+        vec![job(1, &["app"]), job(2, &["app"])],
+    )];
+    let decisions = plan(
+        &repositories,
+        &profiles(vec![Slot::Free, Slot::Free]),
+        None,
+        Some(1000),
+        now(),
+    );
+    // A runner reserves the slot's 2 CPUs by default, which do not fit 1: one hold, not one per job.
+    assert_eq!(
+        decisions,
+        [Decision::HeldForCpu {
+            repository: "o/a".to_owned()
+        }]
+    );
 }

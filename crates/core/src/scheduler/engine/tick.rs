@@ -112,6 +112,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             ),
         };
         self.note_high_water(&admitting);
+        let mut held_for_cpu = BTreeSet::new();
         for decision in decisions {
             match decision {
                 Decision::Stop { slot } => {
@@ -125,12 +126,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     slot,
                     repository,
                     memory,
+                    cpu,
                 } => {
-                    let admission = admitting.admit(&repository, memory);
+                    let mut admission = admitting.admit(&repository, memory, cpu);
+                    let held_since = self
+                        .repositories
+                        .get_mut(&repository)
+                        .and_then(|state| state.cpu_held_since.take());
+                    if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
+                        cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());
+                    }
                     self.start(&slot, &repository, admission).await;
+                }
+                Decision::HeldForCpu { repository } => {
+                    held_for_cpu.insert(repository);
                 }
             }
         }
+        self.note_held_for_cpu(&held_for_cpu);
         self.idle_caches(mode).await;
         if self.records.listed {
             self.expire_records().await;
@@ -166,6 +179,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .cloned()
                         .collect(),
                     runner_memory: None,
+                    runner_cpu: None,
                 }
             })
             .collect();
@@ -195,6 +209,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .collect();
                 let profile = Profile {
                     memory: profile.memory.0,
+                    cpus: u64::from(profile.cpus) * 1000,
                     preparing: self.is_reseeding(name) || self.awaits_image(&profile.image),
                     slots,
                 };
@@ -205,7 +220,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .memory_max
             .map(|max| max.saturating_sub(self.memory_in_use()));
         let admitting = self.admitting(&mut repositories, free_memory);
-        let mut decisions = plan(&repositories, &profiles, admitting.free, SystemTime::now());
+        let mut decisions = plan(
+            &repositories,
+            &profiles,
+            admitting.free,
+            admitting.cpu.as_ref().map(|cpu| cpu.free),
+            SystemTime::now(),
+        );
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
         decisions.extend(
             self.occupied()

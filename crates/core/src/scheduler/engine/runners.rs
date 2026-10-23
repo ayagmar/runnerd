@@ -295,6 +295,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     busy: false,
                     started_at: now,
                     memory: profile.memory.0,
+                    cpus: u64::from(profile.cpus) * 1000,
                     admission: Some(admission),
                     job: None,
                     key: None,

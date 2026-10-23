@@ -146,6 +146,8 @@ pub struct Setup {
     pub identity: HostIdentity,
     /// The slice's `MemoryMax`.
     pub memory_max: Option<u64>,
+    /// The CPUs the slice may use, in millicores (`config::slice_cpus`); `None` admits no runner by CPU.
+    pub cpus: Option<u64>,
     /// The job history.
     pub store: Store,
     /// The profiles and repositories as the last run announced them (`Store::announced`), so the first publish
@@ -168,6 +170,8 @@ struct Occupant {
     started_at: SystemTime,
     /// Its container's memory cap, which a reload does not change.
     memory: u64,
+    /// Its container's CPU limit in millicores, which a reload does not change.
+    cpus: u64,
     /// How it was admitted, with what it reserved of the budget; `None` for one a restart adopted, which reserves
     /// its cap.
     admission: Option<api::Admission>,
@@ -182,6 +186,13 @@ impl Occupant {
     fn reserved(&self) -> u64 {
         self.admission
             .map_or(self.memory, |admission| admission.reserved)
+    }
+
+    /// The CPU it reserves, in millicores: its CPU limit unless it was admitted by CPU.
+    fn reserved_cpu(&self) -> u64 {
+        self.admission
+            .and_then(|admission| admission.cpu)
+            .map_or(self.cpus, |cpu| cpu.reserved)
     }
 
     fn running_job(&self) -> api::RunningJob {
@@ -201,6 +212,8 @@ struct RepositoryState {
     held_until: Option<SystemTime>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
+    /// Since when its next job waits for CPU that memory and a slot have room for.
+    cpu_held_since: Option<SystemTime>,
 }
 
 /// The scheduler with its side effects, on the real GitHub and Docker unless a test passes fakes.
@@ -215,6 +228,8 @@ pub struct Engine<G = Github, D = Docker> {
     identity: HostIdentity,
     runner_prefix: String,
     memory_max: Option<u64>,
+    /// The CPUs the slice may use, in millicores, read at start.
+    cpus: Option<u64>,
     slots: BTreeMap<String, Vec<Option<Occupant>>>,
     repositories: BTreeMap<String, RepositoryState>,
     reseeds: BTreeMap<String, JoinHandle<Result<String, docker::Error>>>,
@@ -284,6 +299,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             names,
             identity,
             memory_max,
+            cpus,
             store,
             announced,
             paused,
@@ -335,6 +351,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             runner_prefix: identity.prefix(),
             identity,
             memory_max,
+            cpus,
             slots,
             repositories,
             reseeds: BTreeMap::new(),

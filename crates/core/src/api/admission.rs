@@ -98,6 +98,25 @@ pub struct Admission {
     pub free: Option<u64>,
     /// The slice's memory then, less its inactive page cache (`HostSample::memory`); `None` without a recent sample.
     pub slice: Option<u64>,
+    /// What it reserved of the CPU budget, under `[host] cpu_overcommit`. Absent without one, and from a daemon
+    /// before CPU admission.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu: Option<CpuAdmission>,
+}
+
+/// What a runner reserved of the CPU budget. CPU in millicores, times in seconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CpuAdmission {
+    /// The CPU it reserved: its profile's `cpus` under caps, its predicted average CPU under measured admission.
+    pub reserved: u64,
+    /// What that went by: `Basis::Job`, `Profile`, `ProfileMax` or `Cap`.
+    pub basis: Basis,
+    /// The CPU budget the other runners left before it started.
+    pub free: u64,
+    /// How long its repository's next job waited for CPU that memory and a slot had room for; absent when it
+    /// did not.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waited: Option<u64>,
 }
 
 impl Admission {
@@ -155,7 +174,73 @@ impl Admission {
         if let Some(slice) = self.slice {
             let _ = write!(line, ", the slice at {}", size(slice));
         }
+        if let Some(cpu) = self.cpu {
+            let _ = write!(line, ". {}", cpu.line());
+        }
         line
+    }
+}
+
+impl CpuAdmission {
+    /// One sentence on what the runner reserved of the CPU budget, as `Admission::line` ends, such as `Reserved 2.5
+    /// CPUs, the p95 average of 10 runs of its job; 20 CPUs of the budget were free; it waited 1m30s for CPU`.
+    pub fn line(&self) -> String {
+        let reserved = cpus(self.reserved);
+        let why = match self.basis {
+            Basis::Job {
+                runs,
+                peak: JobPeak::P95,
+            } => format!("the p95 average of {runs} runs of its job"),
+            Basis::Job {
+                runs,
+                peak: JobPeak::Largest,
+            } => format!("the largest average of {runs} runs of its job"),
+            Basis::Profile { runs } => {
+                format!("from {runs} runs of its profile: its job had too few of its own")
+            }
+            Basis::ProfileMax { runs } => format!(
+                "the largest average of {runs} runs of its profile: its job had no runs of its own"
+            ),
+            Basis::Cap
+            | Basis::Overran { .. }
+            | Basis::Unpredictable { .. }
+            | Basis::Unmeasured => "its profile's cpus".to_owned(),
+        };
+        let mut line = format!(
+            "Reserved {reserved}, {why}; {} of the budget were free",
+            cpus(self.free)
+        );
+        if let Some(waited) = self.waited {
+            let _ = write!(line, "; it waited {} for CPU", wait(waited));
+        }
+        line
+    }
+}
+
+/// Millicores as a number of CPUs to a tenth, rounded up: `2.5`, `32`.
+pub fn cores(millicores: u64) -> String {
+    let tenths = millicores.div_ceil(100);
+    if tenths.is_multiple_of(10) {
+        (tenths / 10).to_string()
+    } else {
+        format!("{}.{}", tenths / 10, tenths % 10)
+    }
+}
+
+/// Millicores as `2.5 CPUs` or `1 CPU`, to a tenth rounded up.
+pub fn cpus(millicores: u64) -> String {
+    match cores(millicores).as_str() {
+        "1" => "1 CPU".to_owned(),
+        number => format!("{number} CPUs"),
+    }
+}
+
+/// Seconds as `45s`, `1m30s` or `2h05m`.
+fn wait(secs: u64) -> String {
+    match secs {
+        0..60 => format!("{secs}s"),
+        60..3600 => format!("{}m{:02}s", secs / 60, secs % 60),
+        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
     }
 }
 

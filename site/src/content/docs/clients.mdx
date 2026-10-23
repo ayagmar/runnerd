@@ -32,7 +32,7 @@ Views of the same thing are linked. On the overview, pointing at, focusing or ta
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the queued jobs and the latest. A pause lasts until a resume, across restarts.
+Under [CPU admission](../configuration/#cpu-admission) the line above the budget bar adds the CPU the runners reserve of the budget, and says when a job waits for CPU. Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the queued jobs and the latest. A pause lasts until a resume, across restarts.
 
 ### A job
 
@@ -86,7 +86,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 
 | Command | What it shows or does |
 |---|---|
-| `runnerctl status` | the memory budget, every slot and its runner, the repositories and their queues |
+| `runnerctl status` | the memory budget, and the CPU budget under [CPU admission](../configuration/#cpu-admission), every slot and its runner, the repositories and their queues |
 | `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
 | `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network, log size |
 | `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |
@@ -195,7 +195,7 @@ every repository resumed
 
 The dashboard, for a host you reach over SSH. It shows what the web dashboard does:
 
-- the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container;
+- the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container; its heading adds the CPU budget under [CPU admission](../configuration/#cpu-admission);
 - a card per slot with the job, its step, run time, and memory and CPU sparklines;
 - the slice's memory and CPU, the repositories, and the queued and latest jobs;
 - the history, filtered by outcome and repository;

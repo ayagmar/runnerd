@@ -32,7 +32,7 @@ flowchart TB
 
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
-| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice, admission by measured peaks | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
+| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API | `runnerd-core` with `host`; hyper for a shell's upgraded connection |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
@@ -95,7 +95,8 @@ queued → slot → container → removed
    time.
 2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget: what each
    runner reserves is its cap, or under `admission = "measured"` its predicted peak (`engine/admission`,
-   [ADR 0033](docs/adr/0033-measured-admission.md)). A profile whose
+   [ADR 0033](docs/adr/0033-measured-admission.md)), and under `cpu_overcommit` within the CPU budget too
+   ([ADR 0038](docs/adr/0038-cpu-admission.md)). A profile whose
    `image` Docker lacks starts nothing until the engine pulled it in the background
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)).
 3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`) and starts its
@@ -172,6 +173,10 @@ nothing until Docker has listed them.
   after a run of its job out of memory at its cap or killed for memory, or when a restart adopted it
   ([ADR 0033](docs/adr/0033-measured-admission.md)). Job memory samples leave out page cache, and
   predictions learn peaks only from runners sampled that way ([ADR 0037](docs/adr/0037-memory-without-page-cache.md)). Each runner's record keeps what it reserves and why.
+- Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
+  times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
+  the whole budget. The mirror, seeds and shells reserve none, and no runner is stopped for CPU
+  ([ADR 0038](docs/adr/0038-cpu-admission.md)).
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the

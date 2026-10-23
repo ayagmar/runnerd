@@ -629,6 +629,7 @@ fn engine_with(
             names: Names::new("runnerd"),
             identity: identity("ci", ID_A),
             memory_max: None,
+            cpus: None,
             announced: store.announced().unwrap(),
             paused: store.paused_repositories().unwrap(),
             store,

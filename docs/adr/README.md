@@ -43,3 +43,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time |
 | [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |
+| [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |

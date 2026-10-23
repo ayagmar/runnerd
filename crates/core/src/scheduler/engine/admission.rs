@@ -4,6 +4,8 @@
 //! recent sample; and nothing starts while the slice is at `admission::HIGH_WATER` percent of its `MemoryMax`. A
 //! job queued twice, queued or running beside a copy, or in a repository with a busy runner whose job is not known
 //! yet, is predicted with `admission::Copies::Several`.
+//! Under `[host] cpu_overcommit`, a new runner also reserves CPU: its profile's `cpus`, or measured the largest
+//! predicted average CPU of its repository's queued jobs, then its own job's once known.
 //! It reads the store and the latest host sample; it never writes the config.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -53,17 +55,43 @@ pub(super) struct Admitting {
     pub slice: Option<u64>,
     /// Whether the slice is at the high-water mark, so nothing starts.
     pub held: bool,
+    /// Under `[host] cpu_overcommit`, what the plan admits by CPU.
+    pub cpu: Option<CpuAdmitting>,
+}
+
+/// What one plan admits by CPU.
+#[derive(Debug, Clone)]
+pub(super) struct CpuAdmitting {
+    /// What each repository's next runner reserves goes by; absent, its profile's `cpus`.
+    pub basis: BTreeMap<String, Basis>,
+    /// The CPU budget left, in millicores.
+    pub free: u64,
 }
 
 impl Admitting {
-    /// The record of a runner of `repository` started reserving `reserved`, which takes it from the budget left.
-    pub(super) fn admit(&mut self, repository: &str, reserved: u64) -> api::Admission {
+    /// The record of a runner of `repository` started reserving `reserved` and `cpu` millicores, which takes them
+    /// from the budgets left.
+    pub(super) fn admit(&mut self, repository: &str, reserved: u64, cpu: u64) -> api::Admission {
         let admission = api::Admission {
             policy: self.policy,
             reserved,
             basis: self.basis.get(repository).copied().unwrap_or(self.default),
             free: self.free,
             slice: self.slice,
+            cpu: self.cpu.as_mut().map(|admitting| {
+                let admission = api::CpuAdmission {
+                    reserved: cpu,
+                    basis: admitting
+                        .basis
+                        .get(repository)
+                        .copied()
+                        .unwrap_or(Basis::Cap),
+                    free: admitting.free,
+                    waited: None,
+                };
+                admitting.free = admitting.free.saturating_sub(cpu);
+                admission
+            }),
         };
         self.free = self.free.map(|free| free.saturating_sub(reserved));
         admission
@@ -116,6 +144,24 @@ fn largest<'job>(
         .max_by_key(|prediction| prediction.memory)
 }
 
+/// What a runner admitted by CPU (`reserved`) reserves once its job `key` in `profile`, whose `cpus` are `cap`
+/// millicores, is known: that job's predicted average CPU, at most the whole `budget`.
+fn job_cpu(
+    predictor: &Predictor,
+    key: &Key,
+    profile: &str,
+    cap: u64,
+    budget: Option<u64>,
+    reserved: api::CpuAdmission,
+) -> api::CpuAdmission {
+    let prediction = predictor.predict_cpu(key, profile, cap);
+    api::CpuAdmission {
+        reserved: budget.map_or(prediction.cpu, |budget| prediction.cpu.min(budget)),
+        basis: prediction.basis,
+        ..reserved
+    }
+}
+
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Under measured admission, reads the job history into a new predictor once the last is a minute old. A read
     /// that fails keeps the last one; without any, jobs are admitted at their caps.
@@ -159,7 +205,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let at = run.finished_at.unwrap_or(run.queued_at);
             if run.measure == Measure::WithActiveFile {
                 // Its peak counted page cache read twice, so neither it nor a peak near the cap says what the job
-                // needs; a kill for memory still does.
+                // needs; a kill for memory still does, and its CPU is counted as ever.
+                if *finished {
+                    predictor.learn_cpu(run, &run.profile);
+                }
                 if run.oom_killed {
                     predictor.mark(
                         &Ran {
@@ -194,6 +243,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             free,
             slice: None,
             held: false,
+            cpu: self.admitting_cpu(repositories),
         };
         if self.config.host.admission != Admission::Measured {
             return admitting;
@@ -251,15 +301,63 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         admitting
     }
 
-    /// Under measured admission, sets what each running runner reserves: once its job is known, that job's
-    /// prediction; until then, the larger of what it reserved and the largest prediction among its repository's
-    /// queued jobs, since GitHub may still give it any of them. A runner a restart adopted keeps its cap. Each
-    /// change goes into the runner's row.
-    pub(super) async fn rereserve(&mut self) {
-        self.measured.raised.clear();
-        if self.config.host.admission != Admission::Measured {
-            return;
+    /// The CPU budget, in millicores: the slice's CPUs times `[host] cpu_overcommit`; `None` without it.
+    pub(super) fn cpu_budget(&self) -> Option<u64> {
+        let overcommit = self.config.host.cpu_overcommit?;
+        Some(crate::config::cpu_budget(self.cpus?, overcommit))
+    }
+
+    /// What the runners reserve of the CPU budget, in millicores.
+    pub(super) fn cpu_in_use(&self) -> u64 {
+        self.occupied()
+            .map(|(_, occupant)| occupant.reserved_cpu())
+            .sum()
+    }
+
+    /// Under a CPU budget, sets what each repository's next runner reserves of it, at most the whole budget so a
+    /// runner can always start alone: its profile's `cpus`, or under measured admission the largest predicted
+    /// average CPU of its queued jobs. Says what the plan admits by CPU.
+    fn admitting_cpu(&self, repositories: &mut [Repository]) -> Option<CpuAdmitting> {
+        let budget = self.cpu_budget()?;
+        let mut admitting = CpuAdmitting {
+            basis: BTreeMap::new(),
+            free: budget.saturating_sub(self.cpu_in_use()),
+        };
+        for repository in repositories {
+            let Some(cap) = self
+                .config
+                .profiles
+                .get(&repository.profile)
+                .map(|p| u64::from(p.cpus) * 1000)
+            else {
+                continue;
+            };
+            let prediction = self.measured.predictor.as_ref().and_then(|(predictor, _)| {
+                repository
+                    .queued
+                    .iter()
+                    .filter(|job| matches(job, &repository.labels))
+                    .map(|job| {
+                        let key = Key {
+                            repository: repository.name.clone(),
+                            workflow: job.workflow.clone(),
+                            name: job.name.clone(),
+                        };
+                        predictor.predict_cpu(&key, &repository.profile, cap)
+                    })
+                    .max_by_key(|prediction| prediction.cpu)
+            });
+            let (cpu, basis) = prediction.map_or((cap, Basis::Cap), |prediction| {
+                (prediction.cpu, prediction.basis)
+            });
+            repository.runner_cpu = Some(cpu.min(budget));
+            admitting.basis.insert(repository.name.clone(), basis);
         }
+        Some(admitting)
+    }
+
+    /// Tells apart the jobs of the runners whose job the history now has a record of.
+    async fn find_keys(&mut self) {
         let unknown: Vec<(String, u64)> = self
             .occupied()
             .filter(|(_, occupant)| occupant.key.is_none())
@@ -283,6 +381,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 });
             }
         }
+    }
+
+    /// Under measured admission, sets what each running runner reserves: once its job is known, that job's
+    /// prediction; until then, the larger of what it reserved and the largest prediction among its repository's
+    /// queued jobs, since GitHub may still give it any of them. A runner a restart adopted keeps its cap. Each
+    /// change goes into the runner's row.
+    pub(super) async fn rereserve(&mut self) {
+        self.measured.raised.clear();
+        if self.config.host.admission != Admission::Measured {
+            return;
+        }
+        self.find_keys().await;
         let Some((predictor, _)) = &self.measured.predictor else {
             return;
         };
@@ -292,6 +402,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
         let running = self.running();
+        let cpu_budget = self.cpu_budget();
         // The first runner of each known job, in slot order, goes by its own runs; its copies have it beside them,
         // as does every runner of a repository with a busy runner whose job is not known yet.
         let mut seen = BTreeSet::new();
@@ -306,6 +417,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 let Some(admission) = &mut occupant.admission else {
                     continue;
                 };
+                // Its job's average CPU once known; until then what it started with, the largest of its queue's.
+                let cpu = admission.cpu.zip(occupant.key.as_ref()).map(|(cpu, key)| {
+                    job_cpu(predictor, key, profile, occupant.cpus, cpu_budget, cpu)
+                });
+                let mut dirty = cpu.is_some() && cpu != admission.cpu;
+                admission.cpu = cpu.or(admission.cpu);
                 let prediction = if let Some(key) = &occupant.key {
                     let copies = if first && !running.unknown.contains(&key.repository) {
                         Copies::Alone
@@ -345,10 +462,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 {
                     admission.reserved = prediction.memory;
                     admission.basis = prediction.basis;
-                    changed.push((occupant.runner_name.clone(), *admission));
+                    dirty = true;
                     if occupant.key.is_none() {
                         raised.push(occupant.runner_name.clone());
                     }
+                }
+                if dirty {
+                    changed.push((occupant.runner_name.clone(), *admission));
                 }
             }
         }
@@ -410,6 +530,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             stops.push(Decision::Stop { slot });
         }
         stops
+    }
+
+    /// Marks since when each repository in `held` waits for CPU, logging when it starts to, and forgets the wait
+    /// of every other one.
+    pub(super) fn note_held_for_cpu(&mut self, held: &BTreeSet<String>) {
+        let budget = self.cpu_budget();
+        let in_use = self.cpu_in_use();
+        for (name, state) in &mut self.repositories {
+            if !held.contains(name) {
+                state.cpu_held_since = None;
+            } else if state.cpu_held_since.is_none() {
+                state.cpu_held_since = Some(SystemTime::now());
+                if let Some(budget) = budget {
+                    info!(
+                        "{name}: its next job waits for CPU: runners reserve {} of the budget's {}",
+                        api::cpus(in_use),
+                        api::cpus(budget)
+                    );
+                }
+            }
+        }
     }
 
     /// Logs when the slice reaches the high-water mark and when it falls under it.

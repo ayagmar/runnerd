@@ -316,6 +316,7 @@ async fn a_jobs_record_says_how_its_runner_was_admitted() {
             },
             free: Some(10 * G),
             slice: Some(2 * G),
+            cpu: None,
         })
     );
 }
@@ -662,4 +663,92 @@ async fn copies_arriving_one_by_one_beside_busy_runners_whose_job_is_unknown_tak
     assert_eq!(started, [1, 2, 2, 2]);
     engine.publish();
     assert_eq!(handle.status.borrow().budget.memory_in_use, 2 * 3584 * M);
+}
+
+#[tokio::test]
+async fn jobs_wait_for_cpu_the_budget_lacks_and_their_records_say_what_they_reserved_and_waited() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let config = measured().replace(
+        "admission = \"measured\"",
+        "admission = \"measured\"\ncpu_overcommit = 1.0",
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(10 * G);
+    engine.cpus = Some(4000);
+    history(&handle.store, G, 0).await;
+    // Each build used 1.5 CPUs over its run.
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute("UPDATE jobs SET cpu_average = 1500", [])
+        .unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    slice_at(&handle.store, 2 * G);
+
+    engine.tick(Shutdown::No).await;
+    // Memory fits all 4 at 1.25G each; 4 CPUs fit 2 builds at 1.5.
+    let first = registered(&github.calls())
+        .iter()
+        .map(|call| call.trim_start_matches("register ").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(first.len(), 2);
+    engine.publish();
+    let cpu = handle.status.borrow().budget.cpu;
+    assert_eq!(
+        cpu,
+        Some(api::CpuBudget {
+            cpus: 4000,
+            budget: 4000,
+            in_use: 3000,
+            held: true,
+        })
+    );
+
+    handle.store.claimed(1, 1, &first[0], time::now_ms());
+    handle.store.flush().await;
+    let admission = handle.store.job(1).await.unwrap().unwrap().admission;
+    assert_eq!(
+        admission.and_then(|admission| admission.cpu),
+        Some(api::CpuAdmission {
+            reserved: 1500,
+            basis: Basis::Job {
+                runs: 10,
+                peak: JobPeak::P95,
+            },
+            free: 4000,
+            waited: None,
+        })
+    );
+
+    // The slice gets more CPUs: the other two start, and say they waited for CPU.
+    engine.cpus = Some(8000);
+    engine.tick(Shutdown::No).await;
+    let all = registered(&github.calls())
+        .iter()
+        .map(|call| call.trim_start_matches("register ").to_owned())
+        .collect::<Vec<_>>();
+    assert_eq!(all.len(), 4);
+    handle.store.claimed(3, 1, &all[2], time::now_ms());
+    handle.store.flush().await;
+    let admission = handle.store.job(3).await.unwrap().unwrap().admission;
+    assert!(
+        admission
+            .and_then(|admission| admission.cpu)
+            .is_some_and(|cpu| cpu.waited.is_some()),
+        "the third build's record says it waited for CPU: {admission:?}"
+    );
+    engine.publish();
+    assert!(
+        handle
+            .status
+            .borrow()
+            .budget
+            .cpu
+            .is_some_and(|cpu| !cpu.held),
+        "nothing waits for CPU any more"
+    );
 }

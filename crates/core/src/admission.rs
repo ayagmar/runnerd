@@ -1,6 +1,6 @@
-//! Admission by measured peaks: a job's memory peak predicted from the job history (`Predictor`), and the history
-//! replayed through admission by caps and by predictions (`simulate`), to show what each would have done with the
-//! same jobs. Pure: no I/O, no clock.
+//! Admission by measured peaks: a job's memory peak and average CPU predicted from the job history (`Predictor`),
+//! and the history replayed through admission by caps and by predictions, with or without a CPU budget
+//! (`simulate`), to show what each would have done with the same jobs. Pure: no I/O, no clock.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -19,6 +19,9 @@ pub const OWN_RUNS: u64 = 2;
 
 /// While the slice uses this percent of its `MemoryMax` or more, measured admission starts nothing.
 pub const HIGH_WATER: u64 = 90;
+
+/// CPU predictions round up to this many millicores: a tenth of a CPU.
+pub const CPU_GRANULE: u64 = 100;
 
 /// A job as admission tells jobs apart: its repository, workflow and name.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
@@ -61,6 +64,42 @@ pub struct Prediction {
     pub basis: Basis,
 }
 
+/// The CPU a runner reserves for a job, in millicores, at most its profile's `cpus`, and what it goes by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuPrediction {
+    /// Millicores.
+    pub cpu: u64,
+    /// Why that much: `Basis::Job`, `Profile`, `ProfileMax` or `Cap`.
+    pub basis: Basis,
+}
+
+/// The CPU averages of a set of runs, sorted, and how many of those runs succeeded.
+#[derive(Debug, Clone, Default)]
+struct Averages {
+    sorted: Vec<u64>,
+    succeeded: u64,
+}
+
+impl Averages {
+    fn add(&mut self, average: u64, succeeded: bool) {
+        let at = self.sorted.partition_point(|known| *known <= average);
+        self.sorted.insert(at, average);
+        self.succeeded += u64::from(succeeded);
+    }
+
+    fn runs(&self) -> u64 {
+        self.sorted.len() as u64
+    }
+
+    fn p95(&self) -> u64 {
+        spread(self.sorted.clone()).p95
+    }
+
+    fn max(&self) -> u64 {
+        self.sorted.last().copied().unwrap_or(0)
+    }
+}
+
 /// The peaks of a set of runs, sorted, until when a run at its cap makes them unpredictable, and until when a run
 /// past what it reserved makes the largest of them, or that run's peak if more, the prediction.
 #[derive(Debug, Clone, Default)]
@@ -72,6 +111,8 @@ struct Peaks {
     overran_until: u64,
     /// The largest peak of a run past what it reserved, cancelled runs' included.
     overran_peak: u64,
+    /// The runs' CPU averages, of those that have one.
+    cpu: Averages,
 }
 
 impl Peaks {
@@ -117,14 +158,78 @@ impl Predictor {
     pub fn learn(&mut self, run: &Ran, profile: &str, cap: u64, at: u64) {
         self.mark(run, cap, at);
         let peak = run.memory_peak;
+        let peers = self.profiles.entry(profile.to_owned()).or_default();
+        peers.add(peak);
+        if let Some(average) = run.cpu_average {
+            peers.cpu.add(average, run.succeeded);
+        }
         if let Some(job) = self.jobs.get_mut(&Key::of(run)) {
             job.add(peak);
             job.succeeded += u64::from(run.succeeded);
+            if let Some(average) = run.cpu_average {
+                job.cpu.add(average, run.succeeded);
+            }
         }
+    }
+
+    /// Learns only the CPU a run of `profile` used, for a run whose peak says nothing of its memory, as one sampled
+    /// with page cache counted.
+    pub fn learn_cpu(&mut self, run: &Ran, profile: &str) {
+        let Some(average) = run.cpu_average else {
+            return;
+        };
         self.profiles
             .entry(profile.to_owned())
             .or_default()
-            .add(peak);
+            .cpu
+            .add(average, run.succeeded);
+        self.jobs
+            .entry(Key::of(run))
+            .or_default()
+            .cpu
+            .add(average, run.succeeded);
+    }
+
+    /// The CPU to reserve for a run of `key` in `profile`, whose `cpus` are `cap` millicores: the job's average
+    /// CPU (its CPU time over its run time), by the same fallbacks as memory without the margin. CPU is shared, not
+    /// a kill limit, so neither a run at its cap nor copies of the job beside it change it.
+    pub fn predict_cpu(&self, key: &Key, profile: &str, cap: u64) -> CpuPrediction {
+        let job = self.jobs.get(key).map(|job| &job.cpu);
+        let min_jobs = u64::from(self.min_jobs);
+        let peers = self
+            .profiles
+            .get(profile)
+            .map(|peers| &peers.cpu)
+            .filter(|peers| peers.runs() >= min_jobs);
+        let (cpu, basis) = match (job.filter(|job| job.runs() > 0), peers) {
+            (Some(job), _) if job.runs() >= min_jobs => (
+                job.p95(),
+                Basis::Job {
+                    runs: job.runs(),
+                    peak: JobPeak::P95,
+                },
+            ),
+            (Some(job), Some(_)) if job.succeeded >= OWN_RUNS => (
+                job.max(),
+                Basis::Job {
+                    runs: job.runs(),
+                    peak: JobPeak::Largest,
+                },
+            ),
+            (Some(job), Some(peers)) => (
+                job.max().max(peers.p95()),
+                Basis::Profile { runs: peers.runs() },
+            ),
+            (None, Some(peers)) => (peers.max(), Basis::ProfileMax { runs: peers.runs() }),
+            _ => (cap, Basis::Cap),
+        };
+        CpuPrediction {
+            cpu: cpu
+                .div_ceil(CPU_GRANULE)
+                .saturating_mul(CPU_GRANULE)
+                .clamp(CPU_GRANULE, cap.max(CPU_GRANULE)),
+            basis,
+        }
     }
 
     /// Learns only how a run ended, not its peak, as for a cancelled one: a run that met its cap (`Ran::met_cap`)
@@ -256,6 +361,10 @@ pub struct Replay {
     pub under_predicted: u64,
     /// How many times the high-water mark held a job back that the predictions had room for.
     pub held_back: u64,
+    /// How many times the CPU budget held a job back that memory and its slots had room for.
+    pub cpu_held: u64,
+    /// The most CPU, in millicores, the running jobs' averages add up to at one moment.
+    pub worst_cpu: u64,
 }
 
 /// A job the replay started.
@@ -265,6 +374,8 @@ struct Running<'run> {
     ends: u64,
     reserved: u64,
     peak: u64,
+    /// The CPU it reserves, in millicores.
+    cpu: u64,
 }
 
 /// Replays `jobs` through `policy`: each arrives when it was queued and runs as long as it ran, in a profile with
@@ -276,9 +387,15 @@ struct Running<'run> {
 /// first running copy of a job going by its own runs, as the daemon does each tick. Unlike the daemon, the replay
 /// knows a job from its start: it never sees a runner whose job is not known yet, and the order jobs started
 /// stands for the daemon's slot order.
+///
+/// With a `cpu_budget` in millicores, a job also starts only when the CPU the running jobs reserve and its own fit
+/// it: by caps, each its profile's `cpus`; measured, each its predicted average (`Predictor::predict_cpu`), at most
+/// the budget. The replay holds each job's run time whatever the CPU it shares: it shows what admission holds back,
+/// not how much a busy CPU slows the jobs.
 pub fn simulate(
     config: &Config,
     memory_max: Option<u64>,
+    cpu_budget: Option<u64>,
     jobs: &[Ran],
     policy: Policy,
     slots: &BTreeMap<String, u32>,
@@ -294,6 +411,7 @@ pub fn simulate(
     let mut replayer = Replayer {
         config,
         budget,
+        cpu_budget,
         policy,
         slots,
         predictor: Predictor::new(&config.sizing),
@@ -304,6 +422,8 @@ pub fn simulate(
         last_end: 0,
         under_predicted: 0,
         held_back: 0,
+        cpu_held: 0,
+        worst_cpu: 0,
     };
     let mut waiting: Vec<&Ran> = Vec::new();
     let mut next = 0;
@@ -330,6 +450,12 @@ pub fn simulate(
         replayer.most_running = replayer.most_running.max(replayer.running.len() as u64);
         let peaks: u64 = replayer.running.iter().map(|running| running.peak).sum();
         replayer.worst_overlap = replayer.worst_overlap.max(peaks + mirror);
+        let cpu: u64 = replayer
+            .running
+            .iter()
+            .map(|running| running.run.cpu_average.unwrap_or(0))
+            .sum();
+        replayer.worst_cpu = replayer.worst_cpu.max(cpu);
     }
     let waits = replayer.waits;
     let first = queue.first().map_or(0, |run| run.queued_at);
@@ -343,6 +469,8 @@ pub fn simulate(
         makespan: replayer.last_end.saturating_sub(first) / 1000,
         under_predicted: replayer.under_predicted,
         held_back: replayer.held_back,
+        cpu_held: replayer.cpu_held,
+        worst_cpu: replayer.worst_cpu,
     }
 }
 
@@ -350,6 +478,7 @@ pub fn simulate(
 struct Replayer<'run> {
     config: &'run Config,
     budget: Option<u64>,
+    cpu_budget: Option<u64>,
     policy: Policy,
     slots: &'run BTreeMap<String, u32>,
     predictor: Predictor,
@@ -360,6 +489,8 @@ struct Replayer<'run> {
     last_end: u64,
     under_predicted: u64,
     held_back: u64,
+    cpu_held: u64,
+    worst_cpu: u64,
 }
 
 impl<'run> Replayer<'run> {
@@ -389,20 +520,37 @@ impl<'run> Replayer<'run> {
         if self.policy != Policy::Measured {
             return;
         }
+        let cpus: Vec<u64> = self
+            .running
+            .iter()
+            .map(|running| self.cpu(&Key::of(running.run), running.profile))
+            .collect();
         let mut seen = BTreeSet::new();
-        for running in &mut self.running {
+        for (running, cpu) in self.running.iter_mut().zip(cpus) {
             let key = Key::of(running.run);
             let copies = if seen.insert(key.clone()) {
                 Copies::Alone
             } else {
                 Copies::Several
             };
-            let cap = self.config.profiles[running.profile].memory.0;
+            let limits = &self.config.profiles[running.profile];
             running.reserved = self
                 .predictor
-                .predict(&key, running.profile, cap, now, copies)
+                .predict(&key, running.profile, limits.memory.0, now, copies)
                 .memory;
+            running.cpu = cpu;
         }
+    }
+
+    /// The CPU a run of `key` in `profile` reserves, in millicores: its profile's `cpus` by caps, its predicted
+    /// average measured, at most the CPU budget.
+    fn cpu(&self, key: &Key, profile: &str) -> u64 {
+        let cap = u64::from(self.config.profiles[profile].cpus).saturating_mul(1000);
+        let cpu = match self.policy {
+            Policy::Caps => cap,
+            Policy::Measured => self.predictor.predict_cpu(key, profile, cap).cpu,
+        };
+        self.cpu_budget.map_or(cpu, |budget| cpu.min(budget))
     }
 
     /// What a running job takes of the budget: under measured admission, as the daemon counts it, the larger of
@@ -489,6 +637,22 @@ impl<'run> Replayer<'run> {
                 return false;
             }
         }
+        let cpu = self.cpu(&Key::of(run), profile);
+        if let Some(cpu_budget) = self.cpu_budget {
+            // As the daemon starts a runner: at the most CPU any of its repository's waiting jobs reserves.
+            let starting = waiting
+                .iter()
+                .filter(|job| job.repository == run.repository)
+                .map(|job| self.cpu(&Key::of(job), profile))
+                .max()
+                .unwrap_or(0)
+                .max(cpu);
+            let taken: u64 = self.running.iter().map(|running| running.cpu).sum();
+            if taken + starting > cpu_budget {
+                self.cpu_held += 1;
+                return false;
+            }
+        }
         // A job over its cap is killed at it.
         let peak = run.memory_peak.min(cap);
         let ran_for = run
@@ -502,6 +666,7 @@ impl<'run> Replayer<'run> {
             ends: now + ran_for,
             reserved,
             peak,
+            cpu,
         });
         true
     }

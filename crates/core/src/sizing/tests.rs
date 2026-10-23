@@ -57,6 +57,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         memory_cap: Some(cap),
         memory_peak: peak,
         cpu_peak: 3000,
+        cpu_average: Some(1000),
         queued_at: NOW - 2 * HOUR,
         started_at: Some(NOW - 2 * HOUR + wait_secs * 1000),
         finished_at: Some(NOW - HOUR),
