@@ -1,13 +1,13 @@
 //! The job history: a SQLite database of jobs, their runners, steps, samples and logs, the events clients resume
 //! from, cache sizes and the paused repositories. Owns the schema and its migrations, the one writer and the event
-//! broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads run on Tokio's
-//! blocking pool. It decides nothing about scheduling and stores no secret: no token, no JIT config, no runner
-//! `_diag` log.
+//! broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads and pruning run
+//! on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about scheduling
+//! and stores no secret: no token, no JIT config, no runner `_diag` log.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
 use std::path::Path;
-use std::sync::{Arc, Mutex};
+use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
 
 use rusqlite::{Connection, OpenFlags};
@@ -19,6 +19,7 @@ use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
 use crate::sync::lock;
 
+mod prune;
 mod read;
 mod write;
 
@@ -27,6 +28,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0001_history.sql"),
     include_str!("store/migrations/0002_runner_caps.sql"),
     include_str!("store/migrations/0003_paused.sql"),
+    include_str!("store/migrations/0004_prune.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -204,10 +206,6 @@ enum Write {
         /// Whether it committed.
         done: oneshot::Sender<bool>,
     },
-    Prune {
-        now: u64,
-        history: History,
-    },
     Flush(oneshot::Sender<()>),
 }
 
@@ -216,6 +214,8 @@ enum Write {
 pub struct Store {
     writes: mpsc::UnboundedSender<Write>,
     reader: Arc<Mutex<Connection>>,
+    /// Taken with `try_lock`, so one prune runs at a time; one that panicked midway left rows the next one deletes.
+    pruner: Arc<Mutex<Connection>>,
     /// Host samples sent and not yet stored, oldest first; reads include them. The writer removes them once stored.
     // Locked with `sync::lock`: every critical section is a push, a copy or a drain.
     held: Arc<Mutex<Vec<api::HostSample>>>,
@@ -247,6 +247,8 @@ impl Store {
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
         )?;
         configure(&reader)?;
+        let pruner = Connection::open(path)?;
+        configure(&pruner)?;
         let (events, _) = broadcast::channel(EVENT_BUFFER);
         let (writes, receiver) = mpsc::unbounded_channel();
         let thread_events = events.clone();
@@ -258,6 +260,7 @@ impl Store {
         Ok(Store {
             writes,
             reader: Arc::new(Mutex::new(reader)),
+            pruner: Arc::new(Mutex::new(pruner)),
             held,
             events,
             backlog: Arc::new(Semaphore::new(
@@ -397,12 +400,20 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
-    /// Deletes what is older than `history` keeps.
-    pub fn prune(&self, now: u64, history: &History) {
-        self.send(Write::Prune {
-            now,
-            history: history.clone(),
-        });
+    /// Deletes what is older than `history` keeps, at `now` (ms), off the writer, in batches the writer's
+    /// transactions fit between. A prune while the last one runs does nothing. The handle finishes with it; dropping
+    /// it lets it run.
+    pub fn prune(&self, now: u64, history: &History) -> tokio::task::JoinHandle<()> {
+        let pruner = self.pruner.clone();
+        let history = history.clone();
+        tokio::task::spawn_blocking(move || {
+            let db = match pruner.try_lock() {
+                Ok(db) => db,
+                Err(TryLockError::Poisoned(poisoned)) => poisoned.into_inner(),
+                Err(TryLockError::WouldBlock) => return,
+            };
+            prune::run(&db, now, &history);
+        })
     }
 
     /// Waits until every write sent before is done.

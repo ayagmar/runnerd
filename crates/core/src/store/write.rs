@@ -133,7 +133,6 @@ impl Writer<'_> {
             Write::Paused { repositories, done } => {
                 let _ = done.send(self.paused(&repositories));
             }
-            Write::Prune { now, history } => self.prune(now, &history),
             Write::Flush(done) => {
                 self.store_host_samples();
                 let _ = done.send(());
@@ -216,7 +215,7 @@ impl Writer<'_> {
         true
     }
 
-    /// Stores an event if it is durable, giving it its ID.
+    /// Stores an event if it is durable, giving it its ID. A repository's event becomes its latest in `announced`.
     fn store_event(&self, event: Event) -> rusqlite::Result<EventEnvelope> {
         let at = time::now_ms();
         let id = if event.is_durable() {
@@ -226,7 +225,19 @@ impl Writer<'_> {
                 "INSERT INTO events (at, body) VALUES (?1, ?2)",
                 params![at, body],
             )?;
-            u64::try_from(self.db.last_insert_rowid()).ok()
+            let id = self.db.last_insert_rowid();
+            let repository = match &event {
+                Event::RepositoryChanged { repository } => Some(&repository.name),
+                Event::RepositoryRemoved { repository } => Some(repository),
+                _ => None,
+            };
+            if let Some(repository) = repository {
+                self.db.execute(
+                    "INSERT OR REPLACE INTO announced (repository, event) VALUES (?1, ?2)",
+                    params![repository, id],
+                )?;
+            }
+            u64::try_from(id).ok()
         } else {
             None
         };
@@ -579,45 +590,5 @@ impl Writer<'_> {
             )?;
             Ok(())
         })
-    }
-
-    fn prune(&self, now: u64, history: &crate::config::History) {
-        let before = |keep: std::time::Duration| {
-            now.saturating_sub(u64::try_from(keep.as_millis()).unwrap_or(u64::MAX))
-        };
-        for (what, sql, before) in [
-            (
-                "prune samples",
-                "DELETE FROM samples WHERE at < ?1",
-                before(history.samples),
-            ),
-            (
-                "prune host samples",
-                "DELETE FROM host_samples WHERE at < ?1",
-                before(history.samples),
-            ),
-            (
-                "prune logs",
-                "DELETE FROM log_lines WHERE job IN (SELECT id FROM jobs WHERE finished_at < ?1 \
-                 AND state IN ('completed', 'lost', 'elsewhere'))",
-                before(history.logs),
-            ),
-            (
-                "prune events",
-                // Each repository's latest event stays, whatever its age: it is what a restarted daemon compares
-                // its config with to announce a removal (`read::announced_repositories`).
-                "DELETE FROM events WHERE at < ?1 AND id NOT IN (SELECT max(id) FROM events \
-                 WHERE json_extract(body, '$.type') LIKE 'repository.%' \
-                 GROUP BY coalesce(json_extract(body, '$.repository.name'), json_extract(body, '$.repository')))",
-                before(history.events),
-            ),
-            (
-                "prune cache sizes",
-                "DELETE FROM cache_sizes WHERE at < ?1",
-                before(history.events),
-            ),
-        ] {
-            logged(what, self.db.execute(sql, [before]));
-        }
     }
 }

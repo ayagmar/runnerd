@@ -1,5 +1,7 @@
 # 0017. Job history in SQLite, written by one thread
 
+Amended by [0027](0027-pruning-runs-beside-the-writer.md): pruning runs beside the writer.
+
 ## Context
 
 Clients draw job timelines, step durations, CPU and memory graphs and trends over weeks, and must see the same

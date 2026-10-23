@@ -3,6 +3,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicU64, Ordering};
+use std::time::Duration;
 
 use rusqlite::Connection;
 
@@ -228,7 +229,10 @@ async fn a_host_sample_reads_back_at_once_and_is_kept_from_a_flush_on() {
         memory: 1 << 30,
     };
     store.host_sample(sample.clone());
-    assert_eq!(store.host_samples(0).await.unwrap(), std::slice::from_ref(&sample));
+    assert_eq!(
+        store.host_samples(0).await.unwrap(),
+        std::slice::from_ref(&sample)
+    );
     store.flush().await;
     drop(store);
     let store = Store::open(&path).unwrap();
@@ -379,7 +383,7 @@ async fn log_lines_wait_while_the_writer_is_behind_by_the_backlog() {
             }
         }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let queued_mib = sent.load(Ordering::SeqCst);
     holder.execute_batch("COMMIT").unwrap();
     producer.await.unwrap();
@@ -411,7 +415,7 @@ async fn a_log_batch_larger_than_the_backlog_waits_for_the_writer_too() {
                 .await;
         }
     });
-    tokio::time::sleep(std::time::Duration::from_millis(300)).await;
+    tokio::time::sleep(Duration::from_millis(300)).await;
     let waited = !producer.is_finished();
     holder.execute_batch("COMMIT").unwrap();
     producer.await.unwrap();
@@ -462,8 +466,10 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository() {
 
     // Long after: every event is older than the history keeps.
     let later = crate::time::now_ms() + 400 * 24 * 3600 * 1000;
-    store.prune(later, &crate::config::History::default());
-    store.flush().await;
+    store
+        .prune(later, &crate::config::History::default())
+        .await
+        .unwrap();
 
     assert_eq!(store.announced_repositories().unwrap(), [repository("o/r")]);
     let kept: Vec<_> = store
@@ -479,6 +485,84 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository() {
             .any(|event| matches!(event, Event::BudgetChanged { .. })),
         "other events are still pruned: {kept:?}"
     );
+}
+
+const DAY_MS: u64 = 24 * 3600 * 1000;
+
+#[tokio::test]
+async fn pruning_drops_samples_and_logs_past_their_ages() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.queued("o/r", &queued(1));
+    store.runner_started(runner("r1", 1_000_100));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.samples(vec![sample("r1", 1_000_250, 1, 1)]);
+    store
+        .log(
+            1,
+            vec!["built".to_owned()],
+            LogPosition { page: 1, offset: 6 },
+            u64::MAX,
+        )
+        .await;
+    store.runner_removed("r1", 1_000_290);
+    store.lost(1, 1_000_300);
+    store.flush().await;
+    let history = crate::config::History::default();
+    let samples = |store: Store| async move {
+        let series = store.job_samples(1, Duration::from_secs(2)).await.unwrap();
+        series.map(|series| series.samples.len())
+    };
+    assert_eq!(samples(store.clone()).await, Some(1));
+
+    // Past how long samples and logs are kept.
+    store
+        .prune(1_000_300 + 31 * DAY_MS, &history)
+        .await
+        .unwrap();
+    assert_eq!(samples(store.clone()).await, Some(0));
+    assert_eq!(store.log_lines(1, 0, 10).await.unwrap(), []);
+    assert!(
+        store.job(1).await.unwrap().is_some(),
+        "job 1's record stays"
+    );
+}
+
+#[tokio::test]
+async fn a_history_from_before_version_4_keeps_the_latest_event_of_each_repository_through_pruning()
+{
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    {
+        let db = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..3] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", 3).unwrap();
+        let event = |event: crate::api::Event| {
+            db.execute(
+                "INSERT INTO events (at, body) VALUES (1000, ?1)",
+                [serde_json::to_string(&event).unwrap()],
+            )
+            .unwrap();
+        };
+        event(crate::api::Event::RepositoryChanged {
+            repository: repository("o/r"),
+        });
+        event(crate::api::Event::RepositoryChanged {
+            repository: repository("o/s"),
+        });
+        event(crate::api::Event::RepositoryRemoved {
+            repository: "o/s".to_owned(),
+        });
+    }
+    let store = Store::open(&path).unwrap();
+    store
+        .prune(400 * DAY_MS, &crate::config::History::default())
+        .await
+        .unwrap();
+    assert_eq!(store.announced_repositories().unwrap(), [repository("o/r")]);
+    assert_eq!(store.events_after(0, 10).await.unwrap().len(), 2);
 }
 
 #[tokio::test]

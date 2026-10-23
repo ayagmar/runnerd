@@ -250,7 +250,8 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             return;
         }
         self.last_prune = Some(now);
-        self.store.prune(time::ms(now), &self.config.history);
+        // Runs on its own; the tick does not wait for it.
+        drop(self.store.prune(time::ms(now), &self.config.history));
     }
 
     /// Waits for a runner's log capture to end, which it does once the container stopped; stops it after

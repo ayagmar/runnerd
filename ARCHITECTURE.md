@@ -99,7 +99,9 @@ nothing until Docker has listed them.
   (`HostIdentity::prefix`); other machines serve the same repositories. Runner containers on the local Docker are
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
 - `scheduler::plan` does no I/O and reads no clock.
-- Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order.
+- Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
+  exception is pruning, which only deletes, on its own connection, a batch per transaction
+  ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
 - Host samples reach subscribers when taken and the database a minute's worth at a time; reads include the ones not
   yet stored.
 - A durable event (every kind but `job.sample`, `host.sample` and `log.line`) is stored in the same transaction as

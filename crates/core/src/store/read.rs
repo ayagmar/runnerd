@@ -373,13 +373,13 @@ pub(super) fn events_after(
         .collect())
 }
 
-/// The repositories as the stored `repository.*` events last announced them, by name.
+/// The repositories as each one's latest stored `repository.*` event announced them, by name.
 pub(super) fn announced_repositories(
     db: &Connection,
 ) -> rusqlite::Result<Vec<api::RepositoryStatus>> {
     let bodies: Vec<String> = db
         .prepare_cached(
-            r#"SELECT body FROM events WHERE body LIKE '%"type":"repository.%' ORDER BY id"#,
+            "SELECT body FROM events WHERE id IN (SELECT event FROM announced) ORDER BY id",
         )?
         .query_map([], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
