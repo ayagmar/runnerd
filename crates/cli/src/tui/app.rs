@@ -7,7 +7,7 @@ use std::collections::{BTreeMap, VecDeque};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use runnerd_core::api::{
     Event, EventEnvelope, HostSample, Job, JobMetrics, JobPage, JobQuery, JobState, JobSummary,
-    LogSummary, QueuedJob, Sample, SampleSeries, Status, Timeline,
+    LogSummary, QueuedJob, Records, Sample, SampleSeries, Status, Timeline,
 };
 
 use crate::watch;
@@ -48,6 +48,7 @@ pub(crate) enum Msg {
         text: String,
     },
     Status(Status),
+    Records(Records),
     /// A request succeeded; the text says what it did.
     Done(String),
     /// A request failed.
@@ -139,9 +140,20 @@ pub(crate) enum Effect {
     Reseed {
         profile: String,
     },
+    /// Read the records of failed jobs.
+    Records,
+    RemoveRecords(Removal),
     /// Give the terminal back and stop, as Ctrl-Z does in a shell.
     Suspend,
     Quit,
+}
+
+/// Records `d` or `D` asks to remove, waiting for `y`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum Removal {
+    /// The record of this job.
+    Job(u64),
+    All,
 }
 
 /// The screen shown.
@@ -149,6 +161,7 @@ pub(crate) enum Effect {
 pub(crate) enum View {
     Overview,
     History,
+    Records,
     Job,
 }
 
@@ -268,6 +281,10 @@ pub(crate) struct App {
     pub(crate) job: Option<JobView>,
     pub(crate) flash: Option<Flash>,
     pub(crate) confirm: Option<Refused>,
+    /// The records of failed jobs, once read.
+    pub(crate) records: Option<Records>,
+    pub(crate) record: usize,
+    pub(crate) removal: Option<Removal>,
     pub(crate) help: bool,
 }
 
@@ -288,6 +305,9 @@ impl App {
             job: None,
             flash: None,
             confirm: None,
+            records: None,
+            record: 0,
+            removal: None,
             help: false,
         };
         for sample in host {
@@ -383,6 +403,10 @@ impl App {
                 }
             }
             Msg::Status(status) => self.live.status = status,
+            Msg::Records(records) => {
+                self.record = self.record.min(records.records.len().saturating_sub(1));
+                self.records = Some(records);
+            }
             Msg::Done(text) => self.flash(text, Outcome::Done),
             Msg::Failed(text) => self.flash(text, Outcome::Failed),
             Msg::Busy(refused) => self.confirm = Some(refused),
@@ -433,6 +457,11 @@ impl App {
                 };
                 self.flash(text, outcome);
             }
+            Event::RecordCreated { .. } | Event::RecordDeleted { .. }
+                if self.view == View::Records =>
+            {
+                effects.push(Effect::Records);
+            }
             Event::ProfileChanged { .. } | Event::ProfileRemoved { .. } => {
                 // A reload can take away the selected slot; the selection stays on one that is there.
                 self.slot = self.slot.min(self.slots().count().saturating_sub(1));
@@ -456,6 +485,11 @@ impl App {
             Event::JobSample { job, sample } if *job == id => {
                 push(&mut open.samples, sample.clone(), JOB_SAMPLES);
             }
+            // The job's page says what became of its record.
+            Event::RecordCreated { record } if record.job == id => {
+                effects.push(Effect::RefreshJob(id));
+            }
+            Event::RecordDeleted { job, .. } if *job == id => effects.push(Effect::RefreshJob(id)),
             _ => {}
         }
         effects
@@ -483,6 +517,12 @@ impl App {
                 _ => Vec::new(),
             };
         }
+        if let Some(removal) = self.removal.take() {
+            return match key.code {
+                KeyCode::Char('y') => vec![Effect::RemoveRecords(removal)],
+                _ => Vec::new(),
+            };
+        }
         if self.help {
             self.help = false;
             return match key.code {
@@ -495,6 +535,7 @@ impl App {
             KeyCode::Char('?') => self.help = true,
             KeyCode::Char('1' | 'o') => return self.show(View::Overview),
             KeyCode::Char('2' | 'h') => return self.show(View::History),
+            KeyCode::Char('3') => return self.show(View::Records),
             KeyCode::Esc if self.view == View::Job => return self.show(self.back),
             KeyCode::Tab => self.pane = next_pane(self.pane, Direction::Forward),
             KeyCode::BackTab => self.pane = next_pane(self.pane, Direction::Backward),
@@ -545,9 +586,20 @@ impl App {
                 }
             }
             code if self.view == View::History => return self.history_key(code),
+            code if self.view == View::Records => self.records_key(code),
             _ => {}
         }
         Vec::new()
+    }
+
+    /// The keys only the records take: `d` and `D` ask to remove them.
+    fn records_key(&mut self, code: KeyCode) {
+        let any = self.records.as_ref().is_some_and(|r| !r.records.is_empty());
+        match code {
+            KeyCode::Char('d') => self.removal = self.selected_job().map(Removal::Job),
+            KeyCode::Char('D') if any => self.removal = Some(Removal::All),
+            _ => {}
+        }
     }
 
     /// The keys only the history takes: its filters and pages.
@@ -597,6 +649,9 @@ impl App {
         if view == View::History && self.view != View::History {
             effects.push(self.history.request(Rows::Keep));
         }
+        if view == View::Records && self.view != View::Records {
+            effects.push(Effect::Records);
+        }
         self.view = view;
         effects
     }
@@ -633,7 +688,11 @@ impl App {
             .map(|job| job.steps.clone())
             .unwrap_or_default();
         self.job = Some(JobView {
-            job: Job { summary, steps },
+            job: Job {
+                summary,
+                steps,
+                record: None,
+            },
             samples: self.series.get(&id).cloned().unwrap_or_default(),
             log: VecDeque::new(),
             scroll: 0,
@@ -667,6 +726,10 @@ impl App {
             (View::History, _) => (
                 &mut self.history.selected,
                 self.history.page.as_ref().map_or(0, |page| page.jobs.len()),
+            ),
+            (View::Records, _) => (
+                &mut self.record,
+                self.records.as_ref().map_or(0, |r| r.records.len()),
             ),
             (View::Overview, Pane::Slots) => (&mut self.slot, slots),
             (View::Overview, Pane::Repositories) => {
@@ -714,6 +777,11 @@ impl App {
                 .as_ref()
                 .and_then(|page| page.jobs.get(self.history.selected))
                 .map(|job| job.id),
+            (View::Records, _) => self
+                .records
+                .as_ref()
+                .and_then(|records| records.records.get(self.record))
+                .map(|record| record.job),
             (View::Overview, Pane::Slots) => {
                 let (_, profile, slot) = self.slots().nth(self.slot)?;
                 self.live
@@ -734,7 +802,7 @@ impl App {
                 .job
                 .as_ref()
                 .map(|open| open.job.summary.repository.clone()),
-            (View::History, _) => None,
+            (View::History | View::Records, _) => None,
             (View::Overview, Pane::Repositories) => self
                 .live
                 .status

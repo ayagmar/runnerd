@@ -56,7 +56,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn tick(&mut self, mode: Shutdown) {
         self.collect_reseeds().await;
         self.collect_trim().await;
+        self.collect_recordings().await;
         self.collect_finished().await;
+        self.collect_shells().await;
         self.kill_cancelled().await;
         // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
         // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
@@ -114,6 +116,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         self.idle_caches(mode).await;
+        if self.records.listed {
+            self.expire_records().await;
+        } else {
+            self.list_records().await;
+        }
         self.prune();
     }
 
@@ -197,11 +204,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         decisions
     }
 
-    /// Memory caps of the runners, the seed containers (which run with their profile's limits) and the mirror.
+    /// Memory caps of the runners, the seed containers (which run with their profile's limits), the shells and the
+    /// mirror.
     pub(super) fn memory_in_use(&self) -> u64 {
         let runners: u64 = self.occupied().map(|(_, occupant)| occupant.memory).sum();
         let reseeds: u64 = self.reseed_memory.values().sum();
-        runners + reseeds + self.mirror_memory_in_use()
+        runners + reseeds + self.shell_memory() + self.mirror_memory_in_use()
     }
 
     /// The mirror's part of `memory_in_use`.

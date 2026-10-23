@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use runnerd_core::api::{
     CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobState, JobSummary,
-    QueuedJob, Status, Step,
+    QueuedJob, Record, RecordNote, Records, RemovedRecords, Status, Step,
 };
 use runnerd_core::config::ByteSize;
 
@@ -203,6 +203,15 @@ pub(crate) fn outcome(job: &JobSummary) -> (String, Tone) {
 /// took before the daemon saw it queued.
 pub(crate) fn title(job: &JobSummary) -> String {
     named(job.workflow.as_deref(), &job.name, job.id)
+}
+
+/// A record's job as [`title`] names a job.
+pub(crate) fn record_title(record: &Record) -> String {
+    named(
+        record.workflow.as_deref(),
+        record.name.as_deref().unwrap_or(""),
+        record.job,
+    )
 }
 
 /// A queued job as [`title`] names a job.
@@ -485,6 +494,84 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
     out.push_str(&timeline(summary, now, paint));
     out.push_str(&steps(&job.steps, now, paint));
     out.push_str(&usage(summary, paint));
+    if let Some(note) = &job.record {
+        let _ = writeln!(out, "{}", record_note(summary.id, note, now, paint));
+    }
+    out
+}
+
+/// What became of a failed job's record.
+fn record_note(job: u64, note: &RecordNote, now: u64, paint: Paint) -> String {
+    match (note, note.removed_at) {
+        (
+            RecordNote {
+                skipped: Some(why), ..
+            },
+            _,
+        ) => {
+            format!(
+                "record {}",
+                paint.paint(Tone::Dim, &format!("not kept: {why}"))
+            )
+        }
+        (RecordNote { removed_by, .. }, Some(at)) => {
+            let why = removed_by.map_or_else(|| "removed".to_owned(), |by| by.to_string());
+            format!(
+                "record {}",
+                paint.paint(Tone::Dim, &format!("{why}, {}", ago(at, now)))
+            )
+        }
+        (RecordNote { bytes, .. }, None) => format!(
+            "record kept{}: `runnerctl shell {job}` opens a shell in it",
+            bytes
+                .map(|bytes| format!(", {}", self::bytes(bytes)))
+                .unwrap_or_default()
+        ),
+    }
+}
+
+/// What a removal of records freed.
+pub(crate) fn removed(removed: &RemovedRecords) -> String {
+    match removed.jobs.len() {
+        0 => "no record removed".to_owned(),
+        1 => format!("removed 1 record, {} freed", bytes(removed.bytes)),
+        count => format!("removed {count} records, {} freed", bytes(removed.bytes)),
+    }
+}
+
+/// `runnerctl records`.
+pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
+    let limits = &records.limits;
+    let mut out = format!(
+        "{} records, {} of {}; at most {}, each for {}\n",
+        records.records.len(),
+        bytes(records.bytes()),
+        bytes(limits.max_total),
+        limits.max_count,
+        duration(limits.max_age)
+    );
+    if records.records.is_empty() {
+        out.push_str(&paint.paint(
+            Tone::Dim,
+            "none kept: set record_failures = true under a profile to keep its failed jobs' runners\n",
+        ));
+        return out;
+    }
+    let mut table = Table::new(&["JOB", "REPOSITORY", "NAME", "SIZE", "MADE"]).right(&[3]);
+    for record in &records.records {
+        let mut made = ago(record.created_at, now);
+        if records.shells.contains(&record.job) {
+            made.push_str(", shell open");
+        }
+        table.row(vec![
+            plain(record.job.to_string()),
+            plain(&record.repository),
+            cell(record_title(record), Tone::Dim),
+            plain(bytes(record.bytes)),
+            cell(made, Tone::Dim),
+        ]);
+    }
+    out.push_str(&table.render(paint, ""));
     out
 }
 
@@ -713,6 +800,14 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             ),
             None => format!("{profile} checked"),
         },
+        Event::RecordCreated { record } => format!(
+            "{} {} kept as {}, {}",
+            record.job,
+            record.repository,
+            record.image,
+            bytes(record.bytes)
+        ),
+        Event::RecordDeleted { job, removed_by } => format!("{job} record {removed_by}"),
         Event::JobSample { .. } | Event::HostSample { .. } | Event::LogLine { .. } => return None,
     };
     Some(format!(

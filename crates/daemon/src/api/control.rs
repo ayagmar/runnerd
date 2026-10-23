@@ -18,7 +18,7 @@ use tracing::info;
 
 use super::{AppState, Authenticated, MemoryMax, SyncDir, error};
 
-fn refused(control_error: &ControlError) -> Response {
+pub(super) fn refused(control_error: &ControlError) -> Response {
     let status = match control_error {
         ControlError::NotFound(_) => StatusCode::NOT_FOUND,
         ControlError::Busy { message, jobs } => {

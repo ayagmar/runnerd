@@ -1522,6 +1522,33 @@ html {
   justify-content: space-between;
 }
 
+/* Records of failed jobs: on the caches page, and the command that opens a shell on a job's page. */
+.records {
+  margin-top: 2.5rem;
+}
+
+.record-table td:last-child {
+  width: 1%;
+}
+
+.record {
+  margin-top: 1.5rem;
+}
+
+.copy-command {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 0.75rem;
+  margin-top: 0.5rem;
+}
+
+.copy-command code {
+  padding: 0.4rem 0.6rem;
+  background: var(--surface);
+  user-select: all;
+}
+
 /* The config editor: the file on the left, what it asks of the budget on the right. */
 .config-layout {
   display: grid;
@@ -1769,6 +1796,12 @@ html {
   .job-table th:nth-child(7),
   .job-table td:nth-child(7) {
     display: none;
+  }
+
+  /* A record's fourth column is its Remove button. */
+  .record-table td:nth-child(4),
+  .record-table th:nth-child(4) {
+    display: table-cell;
   }
 
   .filters label,

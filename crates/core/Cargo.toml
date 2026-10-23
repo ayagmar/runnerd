@@ -19,6 +19,7 @@ host = [
   "dep:futures-util",
   "dep:reqwest",
   "dep:rusqlite",
+  "dep:rustix",
   "dep:rustls",
   "dep:serde_json",
   "dep:tar",
@@ -45,6 +46,7 @@ hyper = { workspace = true, optional = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, optional = true, features = ["tokio"] }
 reqwest = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
+rustix = { workspace = true, optional = true, features = ["fs"] }
 rustls = { workspace = true, optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }

@@ -51,6 +51,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .get(*name)
                         .is_some_and(|slots| slots.iter().all(Option::is_none))
                 })
+                // A shell mounts the snapshot a reseed replaces.
+                .filter(|name| !self.shell_profiles().contains(name.as_str()))
                 // The seed container runs the profile's image: a reseed waits for its pull, still due.
                 .filter(|name| {
                     !self
@@ -67,7 +69,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.spawn_reseed(name, requested);
             }
         }
-        if self.occupied().next().is_some() {
+        // A shell mounts the shared caches.
+        if self.occupied().next().is_some() || !self.records.shells.is_empty() {
             return;
         }
         if self.mirror_up {

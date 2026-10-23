@@ -19,7 +19,13 @@ use tokio::net::UnixStream;
 
 pub use hyper::{Method, StatusCode};
 
-use crate::api::{Busy, ErrorResponse, EventEnvelope, EventQuery, LogQuery, RunningJob};
+use crate::api::{
+    Busy, ErrorResponse, EventEnvelope, EventQuery, LogQuery, RunningJob, SHELL_PROTOCOL,
+    ShellQuery,
+};
+
+/// A shell's terminal on the daemon's socket: raw bytes both ways until either side closes.
+pub type Terminal = TokioIo<hyper::upgrade::Upgraded>;
 
 /// How long the client waits for the daemon.
 #[derive(Debug, Clone, Copy)]
@@ -268,31 +274,38 @@ impl Client {
         if response.status().is_success() {
             return Ok(response);
         }
-        let status = response.status();
-        let body = response
-            .into_body()
-            .collect()
-            .await
-            .map(http_body_util::Collected::to_bytes)
-            .unwrap_or_default();
-        let jobs = serde_json::from_slice::<Busy>(&body)
-            .map(|busy| busy.jobs)
-            .unwrap_or_default();
-        Err(ClientError::Api {
-            status,
-            message: error_message(status, &body),
-            jobs,
-        })
+        Err(api_error(response).await)
     }
 
-    /// Sends one request and returns the response once its headers arrived, whatever its status.
-    async fn exchange(
+    /// `POST /v1/records/{job}/shell`: opens a shell in a job's record and returns its terminal once the daemon
+    /// switched the connection to it. The connection is the terminal: no timeout applies once it is open.
+    pub async fn shell(&self, job: u64, query: &ShellQuery) -> Result<Terminal, ClientError> {
+        let path = with_query(&format!("/v1/records/{job}/shell"), query)?;
+        let response = self
+            .in_time(async {
+                let mut sender = self.connect().await?;
+                let request = Request::builder()
+                    .method(Method::POST)
+                    .uri(path)
+                    .header(header::HOST, "runnerd")
+                    .header(header::CONNECTION, "upgrade")
+                    .header(header::UPGRADE, SHELL_PROTOCOL)
+                    .body(Full::new(Bytes::new()))
+                    .map_err(transport)?;
+                sender.send_request(request).await.map_err(transport)
+            })
+            .await?;
+        if response.status() != StatusCode::SWITCHING_PROTOCOLS {
+            return Err(api_error(response).await);
+        }
+        let upgraded = hyper::upgrade::on(response).await.map_err(transport)?;
+        Ok(TokioIo::new(upgraded))
+    }
+
+    /// Connects to the socket, ready for one request.
+    async fn connect(
         &self,
-        method: Method,
-        path: &str,
-        body: Option<Body>,
-        last_event_id: Option<u64>,
-    ) -> Result<Response<Incoming>, ClientError> {
+    ) -> Result<hyper::client::conn::http1::SendRequest<Full<Bytes>>, ClientError> {
         let stream =
             UnixStream::connect(&self.socket)
                 .await
@@ -302,11 +315,44 @@ impl Client {
                     }
                     _ => transport(format_args!("{}: {error}", self.socket.display())),
                 })?;
-        let (mut sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
+        let (sender, connection) = hyper::client::conn::http1::handshake(TokioIo::new(stream))
             .await
             .map_err(transport)?;
-        // Drives the connection until the response body is read or dropped.
-        tokio::spawn(connection);
+        // Drives the connection until the response body is read or dropped, or the terminal it became closes.
+        tokio::spawn(connection.with_upgrades());
+        Ok(sender)
+    }
+}
+
+/// The error a response with an error status carries.
+async fn api_error(response: Response<Incoming>) -> ClientError {
+    let status = response.status();
+    let body = response
+        .into_body()
+        .collect()
+        .await
+        .map(http_body_util::Collected::to_bytes)
+        .unwrap_or_default();
+    let jobs = serde_json::from_slice::<Busy>(&body)
+        .map(|busy| busy.jobs)
+        .unwrap_or_default();
+    ClientError::Api {
+        status,
+        message: error_message(status, &body),
+        jobs,
+    }
+}
+
+impl Client {
+    /// Sends one request and returns the response once its headers arrived, whatever its status.
+    async fn exchange(
+        &self,
+        method: Method,
+        path: &str,
+        body: Option<Body>,
+        last_event_id: Option<u64>,
+    ) -> Result<Response<Incoming>, ClientError> {
+        let mut sender = self.connect().await?;
         let mut request = Request::builder()
             .method(method)
             .uri(path)
@@ -626,6 +672,7 @@ mod tests {
                     memory_in_use: id,
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
+                    shell_memory: Vec::new(),
                 },
             },
         };

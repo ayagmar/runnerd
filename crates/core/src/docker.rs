@@ -7,14 +7,18 @@ use std::fmt;
 use std::time::{Duration, Instant};
 
 use bollard::exec::{CreateExecOptions, StartExecResults};
+use std::pin::Pin;
+
 use bollard::models::{
-    ContainerCreateBody, CreateImageInfo, HostConfig, Mount, NetworkCreateRequest, SystemInfo,
-    VolumeCreateRequest,
+    ChangeType, ContainerConfig, ContainerCreateBody, CreateImageInfo, HostConfig, Mount,
+    NetworkCreateRequest, SystemInfo, VolumeCreateRequest,
 };
 use bollard::query_parameters::{
-    CreateContainerOptionsBuilder, CreateImageOptionsBuilder, DataUsageOptionsBuilder,
-    ListContainersOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
-    RemoveVolumeOptionsBuilder, UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
+    AttachContainerOptionsBuilder, CommitContainerOptionsBuilder, CreateContainerOptionsBuilder,
+    CreateImageOptionsBuilder, DataUsageOptionsBuilder, InspectContainerOptionsBuilder,
+    ListContainersOptionsBuilder, ListImagesOptionsBuilder, LogsOptionsBuilder,
+    RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder,
+    ResizeContainerTTYOptionsBuilder, UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -93,6 +97,44 @@ pub struct RunnerState {
 
 /// What a command run in a container prints on stdout, as it prints it.
 pub type Output = BoxStream<'static, Result<Vec<u8>, Error>>;
+
+/// An image `images` found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Image {
+    /// Its first tag, such as `runnerd-record:42`; its ID when it has none.
+    pub reference: String,
+    /// Its labels.
+    pub labels: HashMap<String, String>,
+    /// The disk it takes beyond its parent image: what removing it frees.
+    pub bytes: u64,
+}
+
+/// A container's terminal, attached once it was created and before it started, so none of its output is missed.
+pub struct Tty {
+    /// The container's ID.
+    pub container: String,
+    /// What the terminal shows, as it shows it; it ends when the container's process exits.
+    pub output: BoxStream<'static, Result<Vec<u8>, Error>>,
+    /// What is typed into it.
+    pub input: Pin<Box<dyn tokio::io::AsyncWrite + Send>>,
+}
+
+impl fmt::Debug for Tty {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Tty")
+            .field("container", &self.container)
+            .finish_non_exhaustive()
+    }
+}
+
+/// A terminal's size.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TtySize {
+    /// Columns.
+    pub cols: u16,
+    /// Rows.
+    pub rows: u16,
+}
 
 /// The create-container request for a runner container under an isolation backend.
 pub fn create_body(spec: &RunnerSpec, isolation: &dyn Isolation) -> ContainerCreateBody {
@@ -198,6 +240,32 @@ pub trait DockerApi: Send + Sync {
     fn remove_volume(&self, name: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// The disk size of every volume Docker knows, by name. Slow: Docker measures each volume.
     fn volume_sizes(&self) -> impl Future<Output = Result<BTreeMap<String, u64>, Error>> + Send;
+    /// The paths a container's own layer added or changed, not those it deleted.
+    fn changes(&self, container: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
+    /// The bytes a container's own layer holds.
+    fn written(&self, container: &str) -> impl Future<Output = Result<u64, Error>> + Send;
+    /// Commits a stopped container's own layer as the image `reference` (`repository:tag`) with `labels`; returns
+    /// the disk the image takes beyond its parent.
+    fn commit(
+        &self,
+        container: &str,
+        reference: &str,
+        labels: BTreeMap<String, String>,
+    ) -> impl Future<Output = Result<u64, Error>> + Send;
+    /// Every image with the label.
+    fn images(&self, label: &str) -> impl Future<Output = Result<Vec<Image>, Error>> + Send;
+    /// Removes an image and the layers only it used; one that does not exist is not an error.
+    fn remove_image(&self, reference: &str) -> impl Future<Output = Result<(), Error>> + Send;
+    /// The free disk where Docker keeps its images and containers.
+    fn free_space(&self) -> impl Future<Output = Result<u64, Error>> + Send;
+    /// Creates a container with a terminal of `size`, attaches to it and starts it. The container's stdin closes
+    /// when `Tty::input` is dropped.
+    fn shell(
+        &self,
+        name: &str,
+        body: ContainerCreateBody,
+        size: TtySize,
+    ) -> impl Future<Output = Result<Tty, Error>> + Send;
 }
 
 /// The local Docker Engine.
@@ -313,7 +381,11 @@ impl DockerApi for Docker {
     }
 
     async fn remove(&self, container: &str) -> Result<(), Error> {
-        let options = RemoveContainerOptionsBuilder::new().force(true).build();
+        // With its anonymous volumes, such as a shell's /state.
+        let options = RemoveContainerOptionsBuilder::new()
+            .force(true)
+            .v(true)
+            .build();
         self.api.remove_container(container, Some(options)).await
     }
 
@@ -479,6 +551,143 @@ impl DockerApi for Docker {
                 Some((name, size))
             })
             .collect())
+    }
+
+    async fn changes(&self, container: &str) -> Result<Vec<String>, Error> {
+        Ok(self
+            .api
+            .container_changes(container)
+            .await?
+            .unwrap_or_default()
+            .into_iter()
+            .filter(|change| change.kind != ChangeType::_2)
+            .map(|change| change.path)
+            .collect())
+    }
+
+    async fn written(&self, container: &str) -> Result<u64, Error> {
+        let options = InspectContainerOptionsBuilder::new().size(true).build();
+        let response = self.api.inspect_container(container, Some(options)).await?;
+        Ok(response
+            .size_rw
+            .and_then(|bytes| u64::try_from(bytes).ok())
+            .unwrap_or(0))
+    }
+
+    async fn commit(
+        &self,
+        container: &str,
+        reference: &str,
+        labels: BTreeMap<String, String>,
+    ) -> Result<u64, Error> {
+        let (repository, tag) = reference.rsplit_once(':').unwrap_or((reference, "latest"));
+        let options = CommitContainerOptionsBuilder::new()
+            .container(container)
+            .repo(repository)
+            .tag(tag)
+            .pause(false)
+            .build();
+        let config = ContainerConfig {
+            labels: Some(labels.into_iter().collect()),
+            ..Default::default()
+        };
+        // The image the container runs is the record's parent.
+        let parent = match self.api.inspect_container(container, None).await?.image {
+            Some(parent) => self.api.inspect_image(&parent).await?.size.unwrap_or(0),
+            None => 0,
+        };
+        let id = self.api.commit_container(options, config).await?.id;
+        let size = self.api.inspect_image(&id).await?.size.unwrap_or(0);
+        Ok(u64::try_from(size - parent).unwrap_or(0))
+    }
+
+    async fn images(&self, label: &str) -> Result<Vec<Image>, Error> {
+        let options = ListImagesOptionsBuilder::new()
+            .filters(&HashMap::from([("label", vec![label])]))
+            .build();
+        let images = self.api.list_images(Some(options)).await?;
+        let mut parents: HashMap<String, i64> = HashMap::new();
+        let mut found = Vec::new();
+        for image in images {
+            let parent = if image.parent_id.is_empty() {
+                0
+            } else if let Some(size) = parents.get(&image.parent_id) {
+                *size
+            } else {
+                let size = self
+                    .api
+                    .inspect_image(&image.parent_id)
+                    .await
+                    .ok()
+                    .and_then(|parent| parent.size)
+                    .unwrap_or(0);
+                parents.insert(image.parent_id.clone(), size);
+                size
+            };
+            found.push(Image {
+                reference: image.repo_tags.into_iter().next().unwrap_or(image.id),
+                labels: image.labels,
+                bytes: u64::try_from(image.size - parent).unwrap_or(0),
+            });
+        }
+        Ok(found)
+    }
+
+    async fn remove_image(&self, reference: &str) -> Result<(), Error> {
+        let options = RemoveImageOptionsBuilder::new().build();
+        match self.api.remove_image(reference, Some(options), None).await {
+            Err(error) if is_not_found(&error) => Ok(()),
+            other => other.map(|_| ()),
+        }
+    }
+
+    async fn free_space(&self) -> Result<u64, Error> {
+        let root = self.api.info().await?.docker_root_dir.unwrap_or_default();
+        // Only the directories above Docker's root need to be searchable: the daemon's user cannot read the root.
+        let stat = rustix::fs::statvfs(root.as_str()).map_err(|error| Error::IOError {
+            err: std::io::Error::other(format!("cannot measure the disk of {root}: {error}")),
+        })?;
+        Ok(stat.f_bavail.saturating_mul(stat.f_frsize))
+    }
+
+    async fn shell(
+        &self,
+        name: &str,
+        body: ContainerCreateBody,
+        size: TtySize,
+    ) -> Result<Tty, Error> {
+        let options = CreateContainerOptionsBuilder::new().name(name).build();
+        let id = self.api.create_container(Some(options), body).await?.id;
+        let attached = async {
+            let options = AttachContainerOptionsBuilder::new()
+                .stream(true)
+                .stdin(true)
+                .stdout(true)
+                .stderr(true)
+                .build();
+            let attached = self.api.attach_container(&id, Some(options)).await?;
+            self.api.start_container(&id, None).await?;
+            let resize = ResizeContainerTTYOptionsBuilder::new()
+                .w(i32::from(size.cols))
+                .h(i32::from(size.rows))
+                .build();
+            self.api.resize_container_tty(&id, resize).await?;
+            Ok::<_, Error>(attached)
+        };
+        match attached.await {
+            Ok(attached) => Ok(Tty {
+                container: id,
+                output: attached
+                    .output
+                    .map_ok(|output| output.into_bytes().to_vec())
+                    .boxed(),
+                input: attached.input,
+            }),
+            Err(error) => {
+                let _ = self.remove(&id).await;
+                Err(error)
+            }
+        }
     }
 }
 

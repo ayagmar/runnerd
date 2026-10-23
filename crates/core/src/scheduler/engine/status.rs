@@ -79,6 +79,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         self.announce_changes(&previous, announced.as_deref(), &status);
         self.status.send_replace(status);
+        self.publish_records();
     }
 
     /// The memory caps in use, with the mirror's and each seed container's part.
@@ -96,6 +97,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     memory: *memory,
                 })
                 .collect(),
+            shell_memory: self.shell_budget(),
         }
     }
 

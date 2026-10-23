@@ -5,15 +5,18 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use futures_util::StreamExt;
 use reqwest::StatusCode;
 use runnerd_core::api::{
     Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
-    HostSamples, JobState, Paused, ProfileStatus, RunningJob, Status,
+    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, RunningJob, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
+use runnerd_core::docker::Tty;
 use runnerd_core::github::{JobDetails, QueuedJob};
 use runnerd_core::scheduler::engine::{
-    Command, Commands, Control, ControlError, Handle, RunningJobs, Shutdown, Target,
+    Command, Commands, Control, ControlError, Handle, RecordSelection, RunningJobs, Shutdown,
+    Target,
 };
 use runnerd_core::store::{LogPosition, RunnerRecord, Store};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -49,10 +52,13 @@ fn busy_job() -> RunningJob {
 
 /// Answers commands as an engine whose repository `o/busy` runs job 7, `o/app` nothing, and no other is configured; sends every config it
 /// is told to run with to `reloads`.
+/// A shell opens in job 9's record, whose shell prints a prompt and exits, and in job 10's, whose shell echoes its
+/// input until it ends; the budget has no room for any other. Every shell closed is sent to `closed`.
 async fn fake_engine(
     control: Arc<Control>,
     mut commands: Commands,
     reloads: mpsc::UnboundedSender<Config>,
+    closed: mpsc::UnboundedSender<String>,
 ) {
     while let Some(command) = commands.recv().await {
         match command {
@@ -98,6 +104,49 @@ async fn fake_engine(
                 }
                 let _ = reply.send(answer.map_err(ControlError::Failed));
             }
+            Command::RemoveRecords { selection, reply } => {
+                let _ = reply.send(match selection {
+                    RecordSelection::Job(7) => Err(ControlError::Conflict(
+                        "a shell is open in the record of job 7".to_owned(),
+                    )),
+                    _ => Ok(RemovedRecords {
+                        jobs: vec![8],
+                        bytes: 1 << 30,
+                    }),
+                });
+            }
+            Command::OpenShell { job, reply, .. } => {
+                let prompt = futures_util::stream::iter([Ok(b"$ ".to_vec())]);
+                let _ = reply.send(match job {
+                    9 => Ok(Tty {
+                        container: "shell-9".to_owned(),
+                        output: prompt.boxed(),
+                        input: Box::pin(tokio::io::sink()),
+                    }),
+                    10 => {
+                        // Like bash at a terminal, it echoes what it reads and exits on Ctrl-D; its terminal's input
+                        // closing does not end it.
+                        let (input, reader) = tokio::io::duplex(64);
+                        let echo = futures_util::stream::unfold(reader, |mut reader| async move {
+                            let mut buffer = [0; 64];
+                            match tokio::io::AsyncReadExt::read(&mut reader, &mut buffer).await {
+                                Ok(read) if buffer[..read].contains(&0x04) => None,
+                                Ok(read) if read > 0 => Some((Ok(buffer[..read].to_vec()), reader)),
+                                _ => std::future::pending().await,
+                            }
+                        });
+                        Ok(Tty {
+                            container: "shell-10".to_owned(),
+                            output: prompt.chain(echo).boxed(),
+                            input: Box::pin(input),
+                        })
+                    }
+                    _ => Err(ControlError::Conflict("the budget is full".to_owned())),
+                });
+            }
+            Command::CloseShell { container } => {
+                let _ = closed.send(container);
+            }
         }
     }
 }
@@ -112,6 +161,7 @@ fn status() -> Status {
             memory_in_use: 0,
             mirror_memory: 0,
             seed_memory: Vec::new(),
+            shell_memory: Vec::new(),
         },
         profiles: vec![ProfileStatus {
             name: "sandbox".to_owned(),
@@ -148,6 +198,8 @@ struct Daemon {
     /// `runnerd.toml`, a symlink to the file it serves.
     config: std::path::PathBuf,
     reloads: mpsc::UnboundedReceiver<Config>,
+    /// The shells the API closed.
+    closed: mpsc::UnboundedReceiver<String>,
     stop: oneshot::Sender<()>,
     served: tokio::task::JoinHandle<()>,
 }
@@ -182,8 +234,9 @@ async fn start_with(dir: &Path, owner: Option<u32>, engine: bool, sync_dir: Sync
         Control::new(["o/app".to_owned(), "o/busy".to_owned()], [], store.clone());
     let control = Arc::new(control);
     let (reloaded, reloads) = mpsc::unbounded_channel();
+    let (closing, closed) = mpsc::unbounded_channel();
     if engine {
-        tokio::spawn(fake_engine(control.clone(), commands, reloaded));
+        tokio::spawn(fake_engine(control.clone(), commands, reloaded, closing));
     } else {
         drop(commands);
     }
@@ -193,6 +246,7 @@ async fn start_with(dir: &Path, owner: Option<u32>, engine: bool, sync_dir: Sync
         control: control.clone(),
         store: store.clone(),
         caches: watch::channel(Vec::new()).1,
+        records: watch::channel(Records::default()).1,
     };
     let config = dir.join("runnerd.toml");
     let file = dir.join("config.toml");
@@ -236,6 +290,7 @@ async fn start_with(dir: &Path, owner: Option<u32>, engine: bool, sync_dir: Sync
         store,
         config,
         reloads,
+        closed,
         stop,
         served,
     }
@@ -640,6 +695,7 @@ fn budget(memory_in_use: u64) -> Event {
             memory_in_use,
             mirror_memory: 0,
             seed_memory: Vec::new(),
+            shell_memory: Vec::new(),
         },
     }
 }
@@ -824,4 +880,184 @@ async fn a_followed_log_sends_stored_and_new_lines_and_ends_when_the_job_finishe
     let job = store.job(1).await.unwrap().unwrap();
     assert_eq!(job.summary.state, JobState::Completed);
     daemon.stop().await;
+}
+
+#[tokio::test]
+async fn records_are_removed_one_by_one_or_by_a_selection_the_request_names() {
+    let (client, _, _dir) = daemon().await;
+    let delete = async |path: &str| {
+        client
+            .delete(format!("http://runnerd{path}"))
+            .send()
+            .await
+            .unwrap()
+    };
+    for unnamed in [
+        "/v1/records",
+        "/v1/records?older_than=soon",
+        "/v1/records?all=true&older_than=2d",
+    ] {
+        assert_eq!(
+            delete(unnamed).await.status(),
+            StatusCode::BAD_REQUEST,
+            "{unnamed}"
+        );
+    }
+    let removed = delete("/v1/records?older_than=2d").await;
+    assert_eq!(removed.status(), StatusCode::OK);
+    let removed: RemovedRecords = serde_json::from_slice(&body(removed).await).unwrap();
+    assert_eq!(removed.jobs, [8]);
+    assert_eq!(delete("/v1/records/7").await.status(), StatusCode::CONFLICT);
+    let listed = client
+        .get("http://runnerd/v1/records")
+        .send()
+        .await
+        .unwrap();
+    let listed: Records = serde_json::from_slice(&body(listed).await).unwrap();
+    assert_eq!(listed, Records::default());
+}
+
+/// Job `id` of o/app, failed at its step 2, in the history.
+fn failed_job(store: &Store, id: u64) {
+    let step = |number: u32, name: &str, conclusion: &str| runnerd_core::github::JobStep {
+        number,
+        name: name.to_owned(),
+        status: "completed".to_owned(),
+        conclusion: Some(conclusion.to_owned()),
+        started_at: None,
+        completed_at: None,
+    };
+    store.queued(
+        "o/app",
+        &QueuedJob {
+            id,
+            run_id: 2,
+            name: "build".to_owned(),
+            ..QueuedJob::default()
+        },
+    );
+    let runner = format!("runner-{id}");
+    store.runner_started(RunnerRecord {
+        name: runner.clone(),
+        repository: "o/app".to_owned(),
+        profile: "app".to_owned(),
+        slot: 1,
+        container: "c1".to_owned(),
+        started_at: 1_000,
+        memory_cap: Some(4 << 30),
+        cpu_cap: Some(2000),
+    });
+    store.claimed(id, 2, &runner, 2_000);
+    store.details(JobDetails {
+        id,
+        run_id: 2,
+        run_attempt: 1,
+        name: "build".to_owned(),
+        workflow_name: Some("ci".to_owned()),
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some("failure".to_owned()),
+        started_at: None,
+        completed_at: None,
+        runner_name: Some(runner),
+        steps: vec![
+            step(1, "Set up job", "success"),
+            step(2, "Run make", "failure"),
+        ],
+    });
+}
+
+/// Sends `POST /v1/records/{job}/shell` on its own connection, upgrading it unless `upgrade` is false, and returns
+/// the connection with what the daemon answered so far.
+async fn open_shell(socket: &Path, job: u64, upgrade: bool) -> (tokio::net::UnixStream, String) {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let mut stream = tokio::net::UnixStream::connect(socket).await.unwrap();
+    let headers = if upgrade {
+        "Connection: Upgrade\r\nUpgrade: runnerd-tty\r\n"
+    } else {
+        ""
+    };
+    let request = format!(
+        "POST /v1/records/{job}/shell?cols=100&rows=30 HTTP/1.1\r\nHost: runnerd\r\n{headers}Content-Length: 0\r\n\r\n"
+    );
+    stream.write_all(request.as_bytes()).await.unwrap();
+    let mut answer = Vec::new();
+    let mut buffer = [0; 4096];
+    while !String::from_utf8_lossy(&answer).contains("\r\n\r\n") {
+        let read = stream.read(&mut buffer).await.unwrap();
+        assert!(
+            read > 0,
+            "the daemon closed: {}",
+            String::from_utf8_lossy(&answer)
+        );
+        answer.extend_from_slice(&buffer[..read]);
+    }
+    (stream, String::from_utf8_lossy(&answer).into_owned())
+}
+
+async fn closed_shell(daemon: &mut Daemon) -> String {
+    tokio::time::timeout(Duration::from_secs(5), daemon.closed.recv())
+        .await
+        .expect("the shell was never closed")
+        .unwrap()
+}
+
+#[tokio::test]
+async fn a_shell_runs_over_the_socket_and_is_removed_once_it_exits() {
+    use tokio::io::AsyncReadExt;
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    failed_job(&daemon.store, 9);
+    daemon.store.flush().await;
+    let socket = dir.0.join("runnerd.sock");
+
+    let (_, refused) = open_shell(&socket, 9, false).await;
+    assert!(refused.starts_with("HTTP/1.1 426"), "{refused}");
+    let (_, refused) = open_shell(&socket, 11, true).await;
+    assert!(
+        refused.starts_with("HTTP/1.1 404"),
+        "a job the history lacks: {refused}"
+    );
+
+    let (mut stream, answer) = open_shell(&socket, 9, true).await;
+    assert!(answer.starts_with("HTTP/1.1 101"), "{answer}");
+    let mut terminal = answer.split_once("\r\n\r\n").unwrap().1.to_owned();
+    tokio::time::timeout(Duration::from_secs(5), async {
+        let mut rest = String::new();
+        stream.read_to_string(&mut rest).await.unwrap();
+        terminal.push_str(&rest);
+    })
+    .await
+    .expect("the terminal never ended with its shell");
+    assert!(
+        terminal.contains("It failed at step 2: Run make"),
+        "{terminal}"
+    );
+    assert!(
+        terminal.ends_with("$ "),
+        "the shell's output follows the banner: {terminal}"
+    );
+    assert_eq!(closed_shell(&mut daemon).await, "shell-9");
+}
+
+#[tokio::test]
+async fn a_shell_whose_client_goes_away_is_removed() {
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    failed_job(&daemon.store, 10);
+    failed_job(&daemon.store, 12);
+    daemon.store.flush().await;
+    let socket = dir.0.join("runnerd.sock");
+
+    let (_, refused) = open_shell(&socket, 12, true).await;
+    assert!(refused.starts_with("HTTP/1.1 409"), "{refused}");
+    assert!(refused.contains("the budget is full"), "{refused}");
+
+    let (stream, answer) = open_shell(&socket, 10, true).await;
+    assert!(answer.starts_with("HTTP/1.1 101"), "{answer}");
+    drop(stream);
+    assert_eq!(closed_shell(&mut daemon).await, "shell-10");
 }

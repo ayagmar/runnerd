@@ -233,8 +233,28 @@ pub(super) fn job(db: &Connection, id: u64) -> rusqlite::Result<Option<api::Job>
     };
     Ok(Some(api::Job {
         steps: steps(db, id)?,
+        record: record(db, id)?,
         summary,
     }))
+}
+
+fn record(db: &Connection, job: u64) -> rusqlite::Result<Option<api::RecordNote>> {
+    db.query_row(
+        "SELECT created_at, bytes, skipped, removed_at, removed_by FROM records WHERE job = ?1",
+        [job],
+        |row| {
+            let removed_by: Option<String> = row.get(4)?;
+            Ok(api::RecordNote {
+                created_at: row.get::<_, Option<u64>>(0)?.map(secs),
+                bytes: row.get(1)?,
+                skipped: row.get(2)?,
+                removed_at: row.get::<_, Option<u64>>(3)?.map(secs),
+                removed_by: removed_by
+                    .and_then(|name| serde_json::from_value(serde_json::Value::String(name)).ok()),
+            })
+        },
+    )
+    .optional()
 }
 
 pub(super) fn jobs(db: &Connection, query: &api::JobQuery) -> rusqlite::Result<api::JobPage> {

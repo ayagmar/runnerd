@@ -18,11 +18,12 @@ use axum::Router;
 use axum::extract::{Path as UrlPath, RawQuery, State};
 use axum::http::{HeaderMap, StatusCode, header};
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post};
+use axum::routing::{delete, get, post};
 use runnerd_core::api::{
     Budget, Busy, Check, CheckStatus, ConfigCheck, Doctor, ErrorResponse, Event, EventEnvelope,
     Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary, Paused, ProfileStatus, QueuedJob,
-    RepositoryStatus, RunnerStatus, RunningJob, SlotStatus, Status, Timeline,
+    Record, RecordLimits, Records, RemovedRecords, RepositoryStatus, RunnerStatus, RunningJob,
+    SlotStatus, Status, Timeline,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -58,6 +59,7 @@ fn status() -> Status {
             memory_in_use: 6 << 30,
             mirror_memory: 0,
             seed_memory: Vec::new(),
+            shell_memory: Vec::new(),
         },
         profiles: vec![ProfileStatus {
             name: "jvm".to_owned(),
@@ -134,6 +136,7 @@ fn job(state: JobState) -> Job {
             log: LogSummary::default(),
         },
         steps: Vec::new(),
+        record: None,
     }
 }
 
@@ -348,6 +351,18 @@ fn serve(socket: &Path) -> Shared {
         .route("/v1/config/check", post(check_config))
         .route("/v1/doctor", get(get_doctor))
         .route("/v1/events", get(events))
+        .route("/v1/records", get(get_records))
+        .route("/v1/records", delete(remove_records))
+        .route("/v1/records/{job}", delete(remove_record))
+        .route(
+            "/v1/records/{job}/shell",
+            post(async || {
+                refuse(
+                    StatusCode::CONFLICT,
+                    "the budget is full: 8G of the slice's 8G is held",
+                )
+            }),
+        )
         .with_state(fake.clone());
     let runtime = tokio::runtime::Runtime::new().unwrap();
     let listener = runtime
@@ -357,6 +372,60 @@ fn serve(socket: &Path) -> Shared {
         runtime.block_on(async { axum::serve(listener, app).await.unwrap() });
     });
     fake
+}
+
+fn refuse(status: StatusCode, message: &str) -> Response {
+    (
+        status,
+        axum::Json(ErrorResponse {
+            message: message.to_owned(),
+        }),
+    )
+        .into_response()
+}
+
+async fn get_records() -> axum::Json<Records> {
+    let record = |job: u64, gib: u64| Record {
+        job,
+        repository: "halyard/ledger".to_owned(),
+        profile: "app".to_owned(),
+        workflow: Some("build".to_owned()),
+        name: Some("test".to_owned()),
+        created_at: 1_792_000_000,
+        bytes: gib << 30,
+        image: format!("runnerd-record:{job}"),
+    };
+    axum::Json(Records {
+        records: vec![record(9001, 1), record(9002, 3)],
+        limits: RecordLimits {
+            max_total: 20 << 30,
+            max_count: 10,
+            max_age: 7 * 86_400,
+            min_free: 10 << 30,
+        },
+        shells: vec![9002],
+    })
+}
+
+async fn remove_records(
+    State(fake): State<Shared>,
+    RawQuery(query): RawQuery,
+) -> axum::Json<RemovedRecords> {
+    fake.lock()
+        .unwrap()
+        .requests
+        .push(format!("DELETE /v1/records?{}", query.unwrap_or_default()));
+    axum::Json(RemovedRecords {
+        jobs: vec![9001],
+        bytes: 1 << 30,
+    })
+}
+
+async fn remove_record(UrlPath(job): UrlPath<u64>) -> Response {
+    refuse(
+        StatusCode::CONFLICT,
+        &format!("a shell is open in the record of job {job}; remove it once the shell exits"),
+    )
 }
 
 /// Runs `runnerctl --socket socket args`, with stdout a pipe, failing the test after 10 s.
@@ -663,5 +732,55 @@ fn a_job_shows_the_caps_its_container_ran_with() {
         stdout(&output).contains("(profile jvm, slot 1, capped at 6G and 4 CPUs)"),
         "{}",
         stdout(&output)
+    );
+}
+
+#[test]
+fn records_list_their_sizes_and_limits_and_go_by_age_or_one_by_one() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let fake = serve(&socket);
+
+    let listed = runnerctl(&socket, &["records"]);
+    assert!(listed.status.success(), "{}", stderr(&listed));
+    let text = stdout(&listed);
+    assert!(
+        text.starts_with("2 records, 4G of 20G; at most 10, each for 7d"),
+        "{text}"
+    );
+    assert!(text.contains("9002"), "{text}");
+    assert!(text.contains("shell open"), "{text}");
+
+    let removed = runnerctl(&socket, &["records", "rm", "--older-than", "2d"]);
+    assert!(removed.status.success(), "{}", stderr(&removed));
+    assert_eq!(stdout(&removed), "removed 1 record, 1G freed\n");
+    assert_eq!(
+        fake.lock().unwrap().requests,
+        ["DELETE /v1/records?all=false&older_than=2d"]
+    );
+
+    let refused = runnerctl(&socket, &["records", "rm", "9002"]);
+    assert!(
+        !refused.status.success(),
+        "a record with a shell open stays"
+    );
+    assert!(
+        stderr(&refused).contains("a shell is open in the record of job 9002"),
+        "{}",
+        stderr(&refused)
+    );
+}
+
+#[test]
+fn a_shell_the_budget_has_no_room_for_says_so() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let refused = runnerctl(&socket, &["shell", "9001"]);
+    assert!(!refused.status.success(), "the shell is refused");
+    assert!(
+        stderr(&refused).contains("the budget is full"),
+        "{}",
+        stderr(&refused)
     );
 }

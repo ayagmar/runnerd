@@ -46,6 +46,72 @@ pub(crate) fn redraw(frame: &str) -> bool {
     text(&format!("\x1b[H{}\x1b[J", frame.replace('\n', "\x1b[K\n")))
 }
 
+/// Writes bytes to stdout as they come, such as a shell's output; false once stdout is closed.
+pub(crate) fn bytes(bytes: &[u8]) -> bool {
+    let mut stdout = std::io::stdout().lock();
+    stdout
+        .write_all(bytes)
+        .and_then(|()| stdout.flush())
+        .is_ok()
+}
+
+/// The terminal's size as columns and rows, when stdout is one.
+pub(crate) fn terminal_size() -> Option<(u16, u16)> {
+    let size = rustix::termios::tcgetwinsize(std::io::stdout()).ok()?;
+    (size.ws_col > 0 && size.ws_row > 0).then_some((size.ws_col, size.ws_row))
+}
+
+/// The keys typed on stdin, as they are typed, from a thread of their own: a blocked read there does not hold up
+/// the program's exit.
+pub(crate) fn stdin_chunks() -> tokio::sync::mpsc::Receiver<Vec<u8>> {
+    let (sender, receiver) = tokio::sync::mpsc::channel(16);
+    std::thread::spawn(move || {
+        let mut stdin = std::io::stdin().lock();
+        let mut buffer = [0; 4096];
+        loop {
+            match std::io::Read::read(&mut stdin, &mut buffer) {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if sender.blocking_send(buffer[..read].to_vec()).is_err() {
+                        break;
+                    }
+                }
+            }
+        }
+    });
+    receiver
+}
+
+/// Stdin in raw mode, while it is a terminal: every key goes to a shell as it is typed, Ctrl-C included. Dropping
+/// it puts the terminal back as it was.
+pub(crate) struct RawMode(Option<rustix::termios::Termios>);
+
+/// Puts stdin in raw mode, when it is a terminal.
+pub(crate) fn raw_mode() -> RawMode {
+    let stdin = std::io::stdin();
+    let Ok(before) = rustix::termios::tcgetattr(&stdin) else {
+        return RawMode(None);
+    };
+    let mut raw = before.clone();
+    raw.make_raw();
+    match rustix::termios::tcsetattr(&stdin, rustix::termios::OptionalActions::Now, &raw) {
+        Ok(()) => RawMode(Some(before)),
+        Err(_) => RawMode(None),
+    }
+}
+
+impl Drop for RawMode {
+    fn drop(&mut self) {
+        if let Some(before) = &self.0 {
+            let _ = rustix::termios::tcsetattr(
+                std::io::stdin(),
+                rustix::termios::OptionalActions::Now,
+                before,
+            );
+        }
+    }
+}
+
 /// Prints an error on stderr and returns the exit code for it.
 pub(crate) fn fail(error: &dyn Display) -> ExitCode {
     eprintln!("error: {error}");

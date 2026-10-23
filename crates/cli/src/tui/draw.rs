@@ -17,7 +17,7 @@ use runnerd_core::api::{
 };
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, JobView, LatestRow, Outcome, Pane, View};
+use super::app::{App, Connection, JobView, LatestRow, Outcome, Pane, Removal, View};
 use crate::human::{self, Tone, bytes, cores, duration};
 use crate::watch;
 
@@ -102,6 +102,7 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) {
     match app.view {
         View::Overview => overview(frame, body, app, now, theme),
         View::History => history(frame, body, app, now, theme),
+        View::Records => records(frame, body, app, now, theme),
         View::Job => {
             if let Some(open) = &app.job {
                 job(frame, body, app, open, now, theme);
@@ -122,6 +123,7 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     for (key, name, view) in [
         ("1", "Overview", View::Overview),
         ("2", "History", View::History),
+        ("3", "Records", View::Records),
     ] {
         let style = if app.view == view {
             selected()
@@ -167,6 +169,14 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             Span::styled(ask, bold()),
             Span::styled(fit(&refused.message, rest), theme.wait()),
         ])
+    } else if let Some(removal) = app.removal {
+        let ask = match removal {
+            Removal::Job(job) => {
+                format!(" y removes the record of job {job}, any other key keeps it")
+            }
+            Removal::All => " y removes every record, any other key keeps them".to_owned(),
+        };
+        Line::styled(ask, bold())
     } else if let Some(flash) = &app.flash {
         let style = if flash.outcome == Outcome::Failed {
             theme.tone(Tone::Bad)
@@ -182,6 +192,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             View::History => {
                 "j/k move  enter open  c outcome  s repository  ] next  [ back  ? help  q quit"
             }
+            View::Records => "j/k move  enter open  d remove  D remove all  ? help  q quit",
             View::Job => {
                 "j/k scroll  G follow  p pause  r resume  R reseed  esc back  ? help  q quit"
             }
@@ -192,9 +203,10 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 }
 
 fn help(frame: &mut Frame<'_>, area: Rect) {
-    const KEYS: [(&str, &str); 19] = [
+    const KEYS: [(&str, &str); 22] = [
         ("1 o", "overview"),
         ("2 h", "history"),
+        ("3", "records of failed jobs"),
         ("tab", "next pane of the overview"),
         ("j k ↓ ↑", "move, or scroll the log"),
         ("PgDn PgUp", "move by ten"),
@@ -209,6 +221,8 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
         ("c", "history: cycle the outcome filter"),
         ("s", "history: cycle the repository filter"),
         ("] [", "history: next and previous page"),
+        ("d", "records: remove the record"),
+        ("D", "records: remove every record"),
         ("?", "this help; any key closes it"),
         ("ctrl-z", "suspend; the shell's fg brings it back"),
         ("q ctrl-c", "quit"),
@@ -1059,6 +1073,99 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
     frame.render_stateful_widget(table, table_area, &mut state);
 }
 
+/// The records of failed jobs, each a stopped runner `runnerctl shell` opens a shell in.
+fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+    let [title, table_area, hint] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Min(0),
+        Constraint::Length(1),
+    ])
+    .areas(area);
+    let Some(records) = &app.records else {
+        heading(frame, title, "Records", String::new(), theme);
+        frame.render_widget(Line::styled("reading…", theme.dim()), table_area);
+        return;
+    };
+    let limits = &records.limits;
+    heading(
+        frame,
+        title,
+        "Records",
+        format!(
+            "{} of {} · {} of {} · each for {}",
+            records.records.len(),
+            limits.max_count,
+            bytes(records.bytes()),
+            bytes(limits.max_total),
+            duration(limits.max_age)
+        ),
+        theme,
+    );
+    if records.records.is_empty() {
+        frame.render_widget(
+            Line::styled(
+                "none kept: set record_failures = true under a profile to keep its failed jobs' runners",
+                theme.dim(),
+            ),
+            table_area,
+        );
+        return;
+    }
+    let made: Vec<String> = records
+        .records
+        .iter()
+        .map(|record| {
+            let mut made = human::ago(record.created_at, now);
+            if records.shells.contains(&record.job) {
+                made.push_str(", shell open");
+            }
+            made
+        })
+        .collect();
+    let made_width = made.iter().map(|made| made.width()).max().unwrap_or(0);
+    let fixed = [12, 6, made_width.max("MADE".len())];
+    // The repository and the job's name share what the other columns and the spaces between them leave.
+    let shared = usize::from(table_area.width).saturating_sub(fixed.iter().sum::<usize>() + 4);
+    let repository_width = shared / 2;
+    let name_width = shared - repository_width;
+    let rows = records.records.iter().zip(made).map(|(record, made)| {
+        Row::new(vec![
+            Cell::from(record.job.to_string()),
+            Cell::from(fit(&record.repository, repository_width)),
+            Cell::from(fit(&human::record_title(record), name_width)),
+            Cell::from(bytes(record.bytes)),
+            Cell::from(Span::styled(made, theme.dim())),
+        ])
+    });
+    let length = |width: usize| Constraint::Length(u16::try_from(width).unwrap_or(u16::MAX));
+    let table = Table::new(
+        rows,
+        [
+            length(fixed[0]),
+            length(repository_width),
+            Constraint::Fill(1),
+            length(fixed[1]),
+            length(fixed[2]),
+        ],
+    )
+    .header(Row::new(["JOB", "REPOSITORY", "JOB NAME", "SIZE", "MADE"]).style(theme.dim()))
+    .row_highlight_style(selected());
+    let mut state = TableState::default().with_selected(Some(app.record));
+    frame.render_stateful_widget(table, table_area, &mut state);
+    if let Some(record) = records.records.get(app.record) {
+        frame.render_widget(
+            Line::styled(
+                format!(
+                    "runnerctl shell {} opens a shell in its workspace",
+                    record.job
+                ),
+                theme.dim(),
+            ),
+            hint,
+        );
+    }
+}
+
 fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, theme: Theme) {
     let job = &open.job;
     let summary = &job.summary;
@@ -1114,6 +1221,13 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
     }
     if let Some(ran) = human::ran(summary, now) {
         details.push((0, format!("ran {}", duration(ran))));
+    }
+    if job
+        .record
+        .as_ref()
+        .is_some_and(|note| note.bytes.is_some() && note.removed_at.is_none())
+    {
+        details.push((1, format!("record kept: runnerctl shell {}", summary.id)));
     }
     let width = usize::from(head.width);
     let details = fit_details(details, width);

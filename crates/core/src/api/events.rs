@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::jobs::{HostSample, JobSummary, Sample, Step};
-use super::{Budget, ProfileStatus, RepositoryStatus, SlotStatus};
+use super::{Budget, ProfileStatus, Record, RecordRemoval, RepositoryStatus, SlotStatus};
 
 /// One event as `GET /v1/events` sends it: the SSE `data` field. The SSE `event` field is `event.kind()` and the
 /// SSE `id` field is `id`.
@@ -101,6 +101,20 @@ pub enum Event {
         /// Set when reseeding failed.
         error: Option<String>,
     },
+    /// A failed job's runner was kept as a record.
+    #[serde(rename = "record.created")]
+    RecordCreated {
+        /// The record.
+        record: Record,
+    },
+    /// A record was removed.
+    #[serde(rename = "record.deleted")]
+    RecordDeleted {
+        /// The job whose record it was.
+        job: u64,
+        /// Why.
+        removed_by: RecordRemoval,
+    },
     /// Live: a running job's container was sampled.
     #[serde(rename = "job.sample")]
     JobSample {
@@ -142,6 +156,8 @@ impl Event {
             Event::RepositoryChanged { .. } => "repository.changed",
             Event::RepositoryRemoved { .. } => "repository.removed",
             Event::CacheReseeded { .. } => "cache.reseeded",
+            Event::RecordCreated { .. } => "record.created",
+            Event::RecordDeleted { .. } => "record.deleted",
             Event::JobSample { .. } => "job.sample",
             Event::HostSample { .. } => "host.sample",
             Event::LogLine { .. } => "log.line",
@@ -164,7 +180,9 @@ impl Event {
             }
             Event::JobStep { job, .. }
             | Event::JobSample { job, .. }
-            | Event::LogLine { job, .. } => Some(*job),
+            | Event::LogLine { job, .. }
+            | Event::RecordDeleted { job, .. } => Some(*job),
+            Event::RecordCreated { record } => Some(record.job),
             Event::SlotChanged { .. }
             | Event::ProfileChanged { .. }
             | Event::ProfileRemoved { .. }

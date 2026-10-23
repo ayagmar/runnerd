@@ -354,7 +354,10 @@ async fn run_overview(
                     data.add_host_sample(sample);
                     status_changed |= status_read.elapsed() >= STATUS_AGE;
                 }
-                Event::LogLine { .. } | Event::CacheReseeded { .. } => {}
+                Event::LogLine { .. }
+                | Event::CacheReseeded { .. }
+                | Event::RecordCreated { .. }
+                | Event::RecordDeleted { .. } => {}
                 Event::BudgetChanged { .. }
                 | Event::ProfileChanged { .. }
                 | Event::ProfileRemoved { .. }

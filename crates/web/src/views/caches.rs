@@ -1,7 +1,8 @@
-//! `/caches`: every cache volume with its size against its bound, and each one's size over the last 30 days.
+//! `/caches`: every cache volume with its size against its bound, and each one's size over the last 30 days; then
+//! the records of failed jobs, the other disk runnerd keeps, with their limits.
 
 use maud::{Markup, html};
-use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Status};
+use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Records, Status};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, Parts, page, profile_class, time_ago};
@@ -17,6 +18,7 @@ pub(crate) struct CachesView {
     pub(crate) status: Status,
     pub(crate) caches: Caches,
     pub(crate) history: CacheHistory,
+    pub(crate) records: Records,
 }
 
 impl CachesView {
@@ -31,6 +33,7 @@ impl CachesView {
                     now.saturating_sub(WINDOW)
                 ))
                 .await?,
+            records: daemon.get("/v1/records").await?,
         })
     }
 }
@@ -90,6 +93,7 @@ pub(crate) fn render(view: &CachesView) -> Markup {
             }
         }
         (volumes(view))
+        (records(&view.status, &view.records, view.now))
     };
     page("Caches", Some(Page::Caches), None, &main)
 }
@@ -132,6 +136,70 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                         }.render(nice_top(peak.max(volume.limit.unwrap_or(0)), Base::Binary), &Parts::default()))
                     } @else {
                         p.muted { "One measurement so far." }
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// The records of failed jobs, each removable, and the limits they are kept within.
+pub(crate) fn records(status: &Status, records: &Records, now: u64) -> Markup {
+    let limits = &records.limits;
+    html! {
+        section #records .records aria-labelledby="records-title" {
+            div.section-head {
+                h2 #records-title { "Records of failed jobs" }
+                p.muted {
+                    (records.records.len()) " of " (limits.max_count) ", "
+                    (format::bytes(records.bytes())) " of " (format::bytes(limits.max_total))
+                    ", each kept " (format::duration(limits.max_age))
+                }
+                @if !records.records.is_empty() {
+                    button.button-quiet type="button"
+                        data-on:click="confirm('Remove every record? Their shells can no longer be opened.') && @delete('/v1/records?all=true')"
+                        { "Remove all" }
+                }
+            }
+            @if records.records.is_empty() {
+                p.muted {
+                    "None kept. A profile with " code { "record_failures = true" }
+                    " keeps each failed job's runner as a record, to open a shell where it failed."
+                }
+            } @else {
+                div.table-wrap {
+                    table.job-table.record-table {
+                        thead {
+                            tr {
+                                th scope="col" { "Job" }
+                                th scope="col" { "Made" }
+                                th scope="col" .number { "Size" }
+                                th scope="col" { span.visually-hidden { "Remove" } }
+                            }
+                        }
+                        tbody {
+                            @for record in records.records.iter().rev() {
+                                tr class=(profile_class(status, &record.profile)) {
+                                    th scope="row" {
+                                        a href=(format!("/jobs/{}", record.job)) {
+                                            span.swatch aria-hidden="true" {}
+                                            span.job-name { (record.name.clone().unwrap_or_else(|| format!("job {}", record.job))) }
+                                            span.repo { (record.repository) @if let Some(workflow) = &record.workflow { " · " (workflow) } }
+                                        }
+                                    }
+                                    td {
+                                        (time_ago(record.created_at, now))
+                                        @if records.shells.contains(&record.job) { span.muted { ", shell open" } }
+                                    }
+                                    td.number { (format::bytes(record.bytes)) }
+                                    td.number {
+                                        button.button-quiet type="button"
+                                            data-on:click=(format!("confirm('Remove the record of job {}?') && @delete('/v1/records/{}')", record.job, record.job))
+                                            aria-label=(format!("Remove the record of job {}", record.job)) { "Remove" }
+                                    }
+                                }
+                            }
+                        }
                     }
                 }
             }

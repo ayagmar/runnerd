@@ -13,6 +13,7 @@ use crate::api;
 use crate::cache;
 use crate::docker::{self, DockerApi, RunnerState, is_not_found};
 use crate::github::GithubApi;
+use crate::record;
 use crate::scheduler::SlotRef;
 use crate::time;
 
@@ -63,6 +64,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
         self.recover_reseeds(seeds).await;
+        // A shell's terminal does not outlive the daemon that served it. Shells carry their record's runner labels.
+        let (shells, containers): (Vec<_>, Vec<_>) = containers
+            .into_iter()
+            .partition(|container| container.labels.contains_key(record::SHELL_LABEL));
+        for shell in shells {
+            info!("removing {}, a shell an earlier run left", shell.name);
+            if let Err(error) = self.docker.remove(&shell.id).await {
+                warn!("cannot remove {}: {error}", shell.name);
+            }
+        }
+        self.list_records().await;
         // A reload may have lowered the configured cap since the mirror started.
         match self.docker.inspect(&self.names.mirror()).await {
             Ok(state) if state.running => {
@@ -126,6 +138,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     );
                 }
                 _ => {
+                    if !container.running {
+                        self.note_lost_record(&profile, occupant.job, &container.id)
+                            .await;
+                    }
                     info!("removing {}, left by an earlier run", container.name);
                     if let Err(error) = self.docker.remove(&container.id).await {
                         warn!("cannot remove {}: {error}", container.name);

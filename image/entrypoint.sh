@@ -1,7 +1,8 @@
 #!/bin/bash
 # Runs as root under `dind` (cgroup nesting): lays out this slot's state, starts the container's Docker Engine, then
 # runs the GitHub Actions runner as the unprivileged `runner` user from a just-in-time config. The runner takes one
-# job and exits, and runnerd removes the container.
+# job and exits; scrub.sh deletes its credentials and what the job left among the runner's dot-files and in /tmp, and
+# runnerd removes the container, or keeps it as the record of a failed job.
 set -euo pipefail
 
 # runnerd puts the runner's just-in-time config here before it starts the container: never in its environment, which
@@ -31,4 +32,28 @@ jitconfig=$(< "$jitconfig_file")
 rm -f "$jitconfig_file"
 export HOME=/home/runner USER=runner LOGNAME=runner
 cd "$HOME"
-exec setpriv --reuid=runner --regid=runner --init-groups -- ./run.sh --jitconfig "$jitconfig"
+# What the job changes from here on, runnerd-scrub deletes from the dot-files and temporary directories.
+touch /run/runnerd-since
+setpriv --reuid=runner --regid=runner --init-groups -- ./run.sh --jitconfig "$jitconfig" &
+runner=$!
+# docker stop's signal goes to the runner's listener, which cancels its job; run.sh passes on no signal. Before the
+# listener runs, run.sh takes it.
+trap 'pkill -TERM -x Runner.Listener || kill -TERM "$runner" 2> /dev/null' TERM INT
+status=0
+wait "$runner" || status=$?
+# A trapped signal ends the wait before the runner exits.
+while kill -0 "$runner" 2> /dev/null; do
+    status=0
+    wait "$runner" || status=$?
+done
+# Nothing of the runner's may write after the scrub: what it left running (a Gradle daemon) gets TERM, then 2 s to
+# end, then KILL, within docker stop's 10 s.
+if pkill -TERM -u runner 2> /dev/null; then
+    for _ in $(seq 10); do
+        pgrep -u runner > /dev/null || break
+        sleep 0.2
+    done
+    pkill -KILL -u runner 2> /dev/null || true
+fi
+runnerd-scrub
+exit "$status"

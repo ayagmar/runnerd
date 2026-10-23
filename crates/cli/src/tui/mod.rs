@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ratatui::crossterm::event::{self as terminal, Event as TerminalEvent};
 use runnerd_core::api::{
-    EventQuery, HostSampleQuery, HostSamples, Job, JobPage, PauseQuery, Paused, SampleSeries,
-    Status,
+    EventQuery, HostSampleQuery, HostSamples, Job, JobPage, PauseQuery, Paused, Records,
+    SampleSeries, Status,
 };
 use runnerd_core::client::{Client, ClientError, Events, StatusCode};
 use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
@@ -26,7 +26,7 @@ mod draw;
 #[cfg(test)]
 mod tests;
 
-use app::{App, Effect, LOG_LINES, Msg, Refused};
+use app::{App, Effect, LOG_LINES, Msg, Refused, Removal};
 use draw::Theme;
 
 /// The shortest time between two frames, about 30 a second.
@@ -388,6 +388,33 @@ impl Requests {
                         Ok(name) => Msg::Done(format!("{name} resumed")),
                         Err(error) => Msg::Failed(error),
                     });
+                });
+            }
+            Effect::Records => {
+                tokio::spawn(async move {
+                    answer(
+                        &send,
+                        client.get::<Records>("/v1/records").await,
+                        Msg::Records,
+                    );
+                });
+            }
+            Effect::RemoveRecords(removal) => {
+                tokio::spawn(async move {
+                    let path = match removal {
+                        Removal::Job(job) => format!("/v1/records/{job}"),
+                        Removal::All => "/v1/records?all=true".to_owned(),
+                    };
+                    let removed = crate::remove_records(&client, &path).await;
+                    let _ = send.send(match removed {
+                        Ok(removed) => Msg::Done(crate::human::removed(&removed)),
+                        Err(error) => Msg::Failed(error.to_string()),
+                    });
+                    answer(
+                        &send,
+                        client.get::<Records>("/v1/records").await,
+                        Msg::Records,
+                    );
                 });
             }
             Effect::Reseed { profile } => {

@@ -51,6 +51,14 @@ fn timestamp(text: Option<&str>) -> Option<u64> {
     text.and_then(time::parse_ms)
 }
 
+/// How `records.removed_by` stores a removal: its name in the API.
+fn removal_name(by: api::RecordRemoval) -> String {
+    serde_json::to_value(by)
+        .ok()
+        .and_then(|value| value.as_str().map(str::to_owned))
+        .unwrap_or_default()
+}
+
 impl Writer<'_> {
     fn apply(&self, write: Write) {
         match write {
@@ -137,6 +145,9 @@ impl Writer<'_> {
                     Ok(())
                 });
             }
+            Write::RecordMade(record) => self.record_made(record),
+            Write::RecordSkipped { job, why } => self.record_skipped(job, &why),
+            Write::RecordRemoved { job, at, by } => self.record_removed(job, at, by),
             Write::Paused { repositories, done } => {
                 let _ = done.send(self.paused(&repositories));
             }
@@ -145,6 +156,42 @@ impl Writer<'_> {
                 let _ = done.send(());
             }
         }
+    }
+
+    fn record_made(&self, record: api::Record) {
+        self.change("record a job's record", |announced| {
+            self.db.execute(
+                "INSERT OR REPLACE INTO records (job, created_at, bytes) VALUES (?1, ?2, ?3)",
+                params![record.job, record.created_at * 1000, record.bytes],
+            )?;
+            announced.push(Event::RecordCreated { record });
+            Ok(())
+        });
+    }
+
+    fn record_skipped(&self, job: u64, why: &str) {
+        logged(
+            "record a skipped record",
+            self.db.execute(
+                "INSERT OR REPLACE INTO records (job, skipped) VALUES (?1, ?2)",
+                params![job, why],
+            ),
+        );
+    }
+
+    fn record_removed(&self, job: u64, at: u64, by: api::RecordRemoval) {
+        self.change("record a removed record", |announced| {
+            self.db.execute(
+                "INSERT INTO records (job, removed_at, removed_by) VALUES (?1, ?2, ?3) \
+                 ON CONFLICT (job) DO UPDATE SET removed_at = ?2, removed_by = ?3",
+                params![job, at, removal_name(by)],
+            )?;
+            announced.push(Event::RecordDeleted {
+                job,
+                removed_by: by,
+            });
+            Ok(())
+        });
     }
 
     /// Stores the held host samples in one transaction, then lets go of them. If that fails they are held for the

@@ -1442,6 +1442,72 @@ async fn reseed_and_empty_from_the_caches_page_reach_the_daemon() {
 }
 
 #[tokio::test]
+async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_caches_page() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let (failed, others) = {
+        let fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let jobs: Vec<u64> = fixtures.records.records.iter().map(|r| r.job).collect();
+        (jobs[0], jobs.len() - 1)
+    };
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{failed}"))
+        .await
+        .body;
+    assert!(
+        job.contains("Open a shell") && job.contains(&format!("runnerctl shell {failed}")),
+        "{job}"
+    );
+    let caches = dashboard.page(&cookie, "/caches").await.body;
+    assert!(
+        caches.contains(&format!("@delete('/v1/records/{failed}')")),
+        "{caches}"
+    );
+
+    let removed = dashboard
+        .write(
+            &cookie,
+            "DELETE",
+            &format!("/v1/records/{failed}"),
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        removed.body.contains("Removed 1 record"),
+        "{}",
+        removed.body
+    );
+    assert!(
+        !removed.body.contains(&format!("/v1/records/{failed}'")),
+        "the section shows the record gone: {}",
+        removed.body
+    );
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{failed}"))
+        .await
+        .body;
+    assert!(
+        !job.contains("runnerctl shell") && job.contains("removed by hand"),
+        "{job}"
+    );
+
+    let all = dashboard
+        .write(
+            &cookie,
+            "DELETE",
+            "/v1/records?all=true",
+            &serde_json::json!({}),
+        )
+        .await;
+    assert!(
+        all.body.contains(&format!("Removed {others} records")),
+        "{}",
+        all.body
+    );
+    assert!(all.body.contains("None kept"), "{}", all.body);
+}
+
+#[tokio::test]
 async fn the_overview_offers_pause_all_until_every_repository_is_paused_then_resume_all() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

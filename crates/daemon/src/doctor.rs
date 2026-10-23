@@ -7,13 +7,16 @@ use std::process::Command;
 
 use runnerd_core::api::{Check, CheckStatus as Status};
 use runnerd_core::config::{self, ByteSize, Config, Image, Isolation};
-use runnerd_core::docker::Docker;
+use runnerd_core::docker::{Docker, DockerApi as _};
+use runnerd_core::record;
 
 /// What doctor reads from the host, gathered before any check so the checks can be tested without one.
 pub(crate) struct Host {
     pub docker: Result<DockerFacts, String>,
     /// What Docker has of each profile's image, by reference; empty without a config or Docker.
     pub images: BTreeMap<String, Result<ImageFound, String>>,
+    /// The disk the records of failed jobs take; `None` without a config or Docker.
+    pub records: Option<Result<u64, String>>,
     /// `/etc/os-release`, empty when missing.
     pub os_release: String,
     /// `None` without a config, which names the slice.
@@ -68,6 +71,7 @@ impl Host {
                 (Some(config), Ok(_)) => read_images(config),
                 _ => BTreeMap::new(),
             },
+            records: (config.is_some() && docker.is_ok()).then(read_records),
             docker,
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
@@ -156,6 +160,17 @@ fn read_images(config: &Config) -> BTreeMap<String, Result<ImageFound, String>> 
             .map(|reference| (reference.clone(), Err(error.clone())))
             .collect()
     })
+}
+
+fn read_records() -> Result<u64, String> {
+    let runtime = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .map_err(|error| error.to_string())?;
+    let images = runtime
+        .block_on(async { Docker::connect()?.images(record::LABEL).await })
+        .map_err(|error| error.to_string())?;
+    Ok(images.iter().map(|image| image.bytes).sum())
 }
 
 /// The config's distinct images, by reference.
@@ -316,6 +331,9 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     });
     checks.extend(slice_checks(host, config));
     checks.extend(image_checks(host, config, docker));
+    if let (Some(config), Some(records)) = (config, &host.records) {
+        checks.push(records_check(records, config));
+    }
     checks.push(match &host.gh_scopes {
         Ok(scopes) if scopes.iter().any(|s| s == "repo") => pass(
             "gh",
@@ -527,6 +545,36 @@ fn sysbox_fix(os_release: &str) -> String {
              register sysbox-runc as a runtime in /etc/docker/daemon.json\n\
              {restart}"
         )
+    }
+}
+
+/// Warns when the records take 80% of `[records] max_total`, past which new ones evict the oldest.
+fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
+    let max_total = config.records.max_total;
+    match records {
+        Err(error) => skip("records", &format!("cannot list them: {error}")),
+        Ok(bytes) if u128::from(*bytes) * 5 >= u128::from(max_total.0) * 4 => Check {
+            name: "records".to_owned(),
+            status: Status::Warn,
+            detail: format!(
+                "the records of failed jobs take {} of [records] max_total = {max_total}; \
+                 new ones remove the oldest to fit",
+                ByteSize(*bytes)
+            ),
+            fix: Some(
+                "runnerctl records rm --older-than 2d, or raise max_total under [records]"
+                    .to_owned(),
+            ),
+        },
+        Ok(bytes) => Check {
+            name: "records".to_owned(),
+            status: Status::Info,
+            detail: format!(
+                "the records of failed jobs take {} of [records] max_total = {max_total}",
+                ByteSize(*bytes)
+            ),
+            fix: None,
+        },
     }
 }
 

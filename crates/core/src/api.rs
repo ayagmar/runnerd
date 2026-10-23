@@ -26,6 +26,10 @@
 //! | `GET /v1/caches` | [`Caches`] |
 //! | `GET /v1/caches/history?`[`CacheHistoryQuery`] | [`CacheHistory`] |
 //! | `GET /v1/events?`[`EventQuery`] | `text/event-stream` of [`EventEnvelope`] |
+//! | `GET /v1/records` | [`Records`] |
+//! | `DELETE /v1/records/{job}` | [`RemovedRecords`]; 409 while a shell is open in it |
+//! | `DELETE /v1/records?`[`RemoveRecordsQuery`] | [`RemovedRecords`]; records with an open shell stay |
+//! | `POST /v1/records/{job}/shell?`[`ShellQuery`] | `Upgrade:` [`SHELL_PROTOCOL`], 101, then the shell's terminal; 409 when the budget is full |
 //!
 //! Errors carry an [`ErrorResponse`].
 
@@ -34,6 +38,7 @@ use serde::{Deserialize, Serialize};
 mod control;
 mod events;
 mod jobs;
+mod records;
 
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, RunningJob,
@@ -44,6 +49,10 @@ pub use jobs::{
     HostSampleQuery, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState,
     JobSummary, LogQuery, LogSummary, Sample, SampleSeries, Stats, StatsQuery, StatsRow, Step,
     Timeline,
+};
+pub use records::{
+    Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
+    SHELL_PROTOCOL, ShellQuery,
 };
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
@@ -80,13 +89,13 @@ pub struct Status {
 }
 
 /// The memory budget runners and the mirror share, in bytes.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Budget {
     /// The systemd slice runner containers run in.
     pub slice: String,
     /// The slice's `MemoryMax`; `None` when it is unlimited.
     pub memory_max: Option<u64>,
-    /// Memory caps of the running containers: runners, seed containers and the mirror.
+    /// Memory caps of the running containers: runners, seed containers, shells and the mirror.
     pub memory_in_use: u64,
     /// The mirror's part of `memory_in_use`: its cap while it is enabled or still running, else 0.
     #[serde(default)]
@@ -94,6 +103,18 @@ pub struct Budget {
     /// The seed containers' part of `memory_in_use`, one per profile that reseeds, by profile name.
     #[serde(default)]
     pub seed_memory: Vec<SeedMemory>,
+    /// The shells' part of `memory_in_use`, one per shell open in a record, by job.
+    #[serde(default)]
+    pub shell_memory: Vec<ShellMemory>,
+}
+
+/// A shell container's memory cap: its record's profile's limit when the shell opened.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShellMemory {
+    /// The job whose record the shell runs.
+    pub job: u64,
+    /// Its cap in bytes.
+    pub memory: u64,
 }
 
 /// A running seed container's memory cap: its profile's limit when the reseed started.

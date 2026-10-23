@@ -73,6 +73,9 @@ pub struct Job {
     pub summary: JobSummary,
     /// The steps as GitHub numbers them, including `Set up job` and `Complete job`.
     pub steps: Vec<Step>,
+    /// Its record, for a failed job of a profile that records failures.
+    #[serde(default)]
+    pub record: Option<super::RecordNote>,
 }
 
 /// The runner a job ran on.
