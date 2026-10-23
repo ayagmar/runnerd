@@ -371,17 +371,19 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         let width = scale(memory, whole, bar.width)
             .max(2)
             .min(bar.width.saturating_sub(drawn));
-        if width < 2 {
-            break;
+        let room = usize::from(width.saturating_sub(1));
+        if label.width() > room {
+            let _ = write!(note, " · {label}");
         }
-        let room = usize::from(width - 1);
+        if width < 2 {
+            continue;
+        }
         let mut text = "▒".repeat(room);
         text.push(' ');
         cells.push(Span::styled(text, style));
         let name = if label.width() <= room {
             label
         } else {
-            let _ = write!(note, " · {label}");
             String::new()
         };
         names.push(Span::styled(format!("{name:room$} "), style));

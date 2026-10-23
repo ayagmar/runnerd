@@ -549,6 +549,12 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     let (heading, bar) = (lines.next().unwrap(), lines.next().unwrap());
     assert!(heading.ends_with("· mirror 512M"), "{shown}");
     assert!(bar.contains("▒ "), "the mirror's block shows: {shown}");
+
+    // Without a MemoryMax the slots fill the bar, leaving no room for a block: the heading still names each.
+    app.live.status.budget.memory_max = None;
+    let shown = screen(&app, 120, 40, false);
+    let heading = shown.lines().nth(1).unwrap();
+    assert!(heading.contains("· mirror 512M · jvm seed 9G"), "{shown}");
 }
 
 #[test]
