@@ -749,6 +749,8 @@ html {
   width: 100%;
   height: 100%;
   overflow: visible;
+  /* A live chart draws a little before its window: cut it at the sides, not the strokes at the top and bottom. */
+  clip-path: inset(-0.5rem 0);
 }
 
 .chart-x {
@@ -770,11 +772,22 @@ html {
   fill: none;
   stroke-width: 2;
   stroke-linejoin: round;
+  /* A live chart's line comes in stretches: round ends join them without a notch. */
+  stroke-linecap: round;
 }
 
+.line path {
+  vector-effect: non-scaling-stroke;
+}
+
+/* The group is translucent, so stretches of an area meet without a seam; the line covers their jagged top. */
 .area {
   stroke: none;
   opacity: 0.22;
+}
+
+.area path {
+  shape-rendering: crispEdges;
 }
 
 .line.memory { stroke: var(--memory); }
@@ -1194,7 +1207,10 @@ html {
 }
 
 /* A step's stretch of a chart, drawn while the step is hovered or focused. */
+/* Its place is in the chart's units: `--from` and `--to` against the chart's `--span`. */
 .band {
+  --left: calc(var(--from) / var(--span) * 100%);
+  --width: calc((var(--to) - var(--from)) / var(--span) * 100%);
   position: absolute;
   inset-block: 0;
   left: var(--left);
@@ -1256,12 +1272,13 @@ html {
   height: 0.9rem;
 }
 
+/* Seconds since the job's start, `--from` and `--to`, against the step list's `--span`. */
 .step-bar {
   position: absolute;
   top: 0;
   bottom: 0;
-  left: var(--left);
-  width: max(3px, var(--width));
+  left: calc(var(--from) / var(--span) * 100%);
+  width: max(3px, calc((var(--to) - var(--from)) / var(--span) * 100%));
   background: var(--profile, var(--muted));
 }
 

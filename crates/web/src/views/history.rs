@@ -5,7 +5,7 @@ use maud::{Markup, html};
 use runnerd_core::api::{Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsRow, Status};
 use serde::{Deserialize, Serialize};
 
-use super::{Durations, Page, badge, durations, js, page, profile_class, time_ago};
+use super::{Durations, Page, Parts, badge, durations, js, page, profile_class, time_ago};
 use crate::chart::{Band, Bar, Base, Series, TimeChart, nice_top, stacked_bars};
 use crate::daemon::{Daemon, Error};
 use crate::format;
@@ -257,7 +257,7 @@ fn trends(history: &History) -> Markup {
     let mark = |from, to| {
         [Band {
             from,
-            to,
+            to: Some(to),
             shown: "$_day >= 0".to_owned(),
             label: String::new(),
         }]
@@ -289,7 +289,7 @@ fn trends(history: &History) -> Markup {
                 }
                 div.chart-card {
                     h3 { "Run time and wait" }
-                    (times.render_with(time_top, &day_marks))
+                    (times.render_with(time_top, &day_marks, &Parts::default()))
                     ul.legend {
                         li.run { span.swatch {} "average run" }
                         li.wait { span.swatch {} "average wait for a runner" }
@@ -297,7 +297,7 @@ fn trends(history: &History) -> Markup {
                 }
                 div.chart-card {
                     h3 { "Memory peak" }
-                    (memory.render_with(nice_top(peak, Base::Binary), &day_marks))
+                    (memory.render_with(nice_top(peak, Base::Binary), &day_marks, &Parts::default()))
                 }
             }
         }
@@ -326,6 +326,8 @@ fn per_day(title: &str, series: Vec<Series>, value: fn(u64) -> String, days: &[D
         title: title.to_owned(),
         start: days.first().map_or(0, |day| day.start),
         end: days.last().map_or(0, |day| day.start + 86_399),
+        window: None,
+        live: None,
         series,
         limit: None,
         value,

@@ -5,8 +5,8 @@
 use maud::{Markup, html};
 use runnerd_core::api::{Job, Sample, SampleSeries, Status, Step};
 
-use super::{badge, page};
-use crate::chart::{Band, Base, Series, TimeChart, nice_top, ratio};
+use super::{Live, Parts, badge, digest, page};
+use crate::chart::{Band, Base, Series, TimeChart, nice_top};
 use crate::daemon::{Daemon, Error};
 use crate::format;
 
@@ -64,18 +64,49 @@ pub(crate) fn limits(status: &Status, job: &Job) -> Option<(u64, u32)> {
         .map(|profile| (profile.memory, profile.cpus))
 }
 
+impl JobView {
+    /// Whether the job still runs, so its page is live.
+    fn live(&self) -> bool {
+        !self.job.summary.state.is_final()
+    }
+}
+
+/// The live regions, by id, in the order the page has them, with their parts.
+pub(crate) fn regions(view: &JobView) -> [(&'static str, Markup, Parts); 4] {
+    let region = |id, render: &dyn Fn(&Parts) -> Markup| {
+        let parts = Parts::default();
+        let markup = render(&parts);
+        (id, markup, parts)
+    };
+    [
+        region("job-head", &|_| head(view)),
+        region("timeline", &|parts| timeline(view, parts)),
+        region("steps", &|parts| steps(view, parts)),
+        region("metrics", &|parts| metrics(view, parts)),
+    ]
+}
+
 /// The whole page.
 pub(crate) fn render(view: &JobView) -> Markup {
     let summary = &view.job.summary;
-    let live = (!summary.state.is_final()).then(|| format!("/live/jobs/{}", summary.id));
+    let url = format!("/live/jobs/{}", summary.id);
+    let [head, timeline, steps, metrics] = regions(view);
+    let live = view.live().then(|| Live {
+        url: &url,
+        at: view.now,
+        regions: [&head, &timeline, &steps, &metrics]
+            .iter()
+            .map(|(id, markup, _)| (*id, digest(&markup.0)))
+            .collect(),
+    });
     let main = html! {
-        (head(view))
-        (timeline(view))
-        (steps(view))
-        (metrics(view))
+        (head.1)
+        (timeline.1)
+        (steps.1)
+        (metrics.1)
         (log(view))
     };
-    page(&summary.name, None, live.as_deref(), &main)
+    page(&summary.name, None, live.as_ref(), &main)
 }
 
 /// The title, outcome and where the job came from.
@@ -104,7 +135,7 @@ pub(crate) fn head(view: &JobView) -> Markup {
 }
 
 /// The phases from queued to cleaned up, as one bar.
-pub(crate) fn timeline(view: &JobView) -> Markup {
+pub(crate) fn timeline(view: &JobView, parts: &Parts) -> Markup {
     let timeline = &view.job.summary.timeline;
     let now = view.now;
     let marks = [
@@ -138,28 +169,31 @@ pub(crate) fn timeline(view: &JobView) -> Markup {
     .into_iter()
     .filter_map(|(label, class, from, to)| Some((label, class, from?, to)))
     .collect();
-    let end = timeline
-        .cleaned_at
-        .or(timeline.finished_at)
-        .unwrap_or(now)
-        .max(timeline.queued_at + 1);
-    let total = end.saturating_sub(timeline.queued_at).max(1);
+    let live = view.live();
     html! {
         section #timeline .timeline aria-labelledby="timeline-title" {
             h2 #timeline-title .visually-hidden { "Timeline" }
-            div.phases role="img" aria-label=(phases.iter().map(|(label, _, from, to)| format!("{label} {}", format::duration(to.unwrap_or(now).saturating_sub(*from)))).collect::<Vec<_>>().join(", ")) {
+            // Named by the legend, whose figures are parts that change on their own.
+            div.phases role="img" aria-labelledby="phase-legend" {
                 @for (_, class, from, to) in &phases {
+                    // Each phase grows by its seconds; an ongoing one follows the page's clock.
                     @let seconds = to.unwrap_or(now).saturating_sub(*from);
-                    @let share = ratio(seconds, total);
-                    div class=(format!("phase {class}{}", if to.is_none() { " ongoing" } else { "" })) style=(format!("--share: {share:.4}")) {}
+                    @let follows = live && to.is_none();
+                    @let share = format!("--share: {seconds}");
+                    div class=(format!("phase {class}{}", if to.is_none() { " ongoing" } else { "" }))
+                        style=(if follows { parts.clocked(share) } else { share })
+                        data-style:--share=[follows.then(|| format!("Math.max(0, $shown.at - {from})"))] {}
                 }
             }
-            ol.phase-legend {
+            ol #phase-legend .phase-legend {
                 @for (label, class, from, to) in &phases {
                     li class=(*class) {
                         span.swatch aria-hidden="true" {}
                         span { (label) }
-                        span.figure { (format::duration(to.unwrap_or(now).saturating_sub(*from))) @if to.is_none() { "…" } }
+                        @let id = format!("phase-{class}-time");
+                        (parts.html(&id, html! {
+                            span.figure #(id) { (format::duration(to.unwrap_or(now).saturating_sub(*from))) @if to.is_none() { "…" } }
+                        }))
                     }
                 }
             }
@@ -187,7 +221,7 @@ fn step_class(step: &Step) -> &'static str {
 }
 
 /// The steps on one axis from the job's start to its end, with their durations.
-pub(crate) fn steps(view: &JobView) -> Markup {
+pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
     let job = &view.job;
     let now = view.now;
     let start = job
@@ -196,6 +230,11 @@ pub(crate) fn steps(view: &JobView) -> Markup {
         .started_at
         .or_else(|| job.steps.iter().filter_map(|step| step.started_at).min());
     let end = job.summary.timeline.finished_at.unwrap_or(now);
+    let live = view.live();
+    // The bars' places are seconds since the start against the track's `--span`, which follows the page's clock
+    // while the job runs, as a running step's end does.
+    let span = start.map(|start| end.saturating_sub(start).max(1));
+    let follow = |start: u64| format!("Math.max(1, $shown.at - {start})");
     html! {
         section #steps .steps aria-labelledby="steps-title" {
             h2 #steps-title .visually-hidden { "Steps" }
@@ -203,7 +242,9 @@ pub(crate) fn steps(view: &JobView) -> Markup {
                 p.muted { "GitHub has not reported any steps yet." }
             } @else {
                 // A step that ran lights up its stretch of the memory and CPU charts on hover, focus or tap.
-                ol.step-list "data-signals:_step__ifmissing"="0" {
+                ol.step-list "data-signals:_step__ifmissing"="0"
+                    style=[span.map(|span| format!("--span: {span}")).map(|style| if live { parts.clocked(style) } else { style })]
+                    data-style:--span=[start.filter(|_| live).map(follow)] {
                     @for (index, step) in job.steps.iter().enumerate() {
                         @let class = step_class(step);
                         @let seconds = step.started_at.map(|from| step.completed_at.unwrap_or(now).saturating_sub(from));
@@ -218,27 +259,38 @@ pub(crate) fn steps(view: &JobView) -> Markup {
                             data-class:linked=[usage.is_some().then(|| format!("$_step == {number}"))] {
                             span.step-name {
                                 (step.name)
-                                @if let Some(usage) = &usage { span.visually-hidden { ", " (usage.describe()) } }
-                            }
-                            span.step-time {
-                                @match (seconds, class) {
-                                    (_, "skipped") => "skipped",
-                                    (Some(seconds), "running") => { (format::duration(seconds)) "…" },
-                                    (Some(seconds), _) => { (format::duration(seconds)) },
-                                    (None, _) => "–",
+                                @if let Some(usage) = &usage {
+                                    @let id = format!("step-{number}-usage");
+                                    (parts.html(&id, html! { span.visually-hidden #(id) { ", " (usage.describe()) } }))
                                 }
                             }
+                            @let id = format!("step-{number}-time");
+                            (parts.html(&id, html! {
+                                span.step-time #(id) {
+                                    @match (seconds, class) {
+                                        (_, "skipped") => "skipped",
+                                        (Some(seconds), "running") => { (format::duration(seconds)) "…" },
+                                        (Some(seconds), _) => { (format::duration(seconds)) },
+                                        (None, _) => "–",
+                                    }
+                                }
+                            }))
                             span.step-track aria-hidden="true" {
-                                @if let (Some(start), Some(from)) = (start, step.started_at) {
-                                    @let span = end.saturating_sub(start).max(1);
+                                @if let (Some(start), Some(span), Some(from)) = (start, span, step.started_at) {
                                     @let to = step.completed_at.unwrap_or(now).max(from);
-                                    @let left = ratio(from.saturating_sub(start), span) * 100.0;
-                                    @let width = ratio(to - from, span) * 100.0;
-                                    span.step-bar style=(format!("--left: {left:.2}%; --width: {width:.2}%")) {}
+                                    @let left = from.saturating_sub(start);
+                                    @let right = to.saturating_sub(start);
+                                    @let follows = live && step.completed_at.is_none();
+                                    @let style = format!("--from: {left}; --to: {right}");
+                                    span.step-bar style=(if follows { parts.clocked(style) } else { style })
+                                        data-style:--to=[follows.then(|| format!("$shown.at - {start}"))] {}
                                     // Shown on the side of the track away from the bar while the row is lit up:
                                     // the charts may be off screen.
                                     @if let Some(usage) = &usage {
-                                        span class=(if left + width / 2.0 > 50.0 { "step-usage start" } else { "step-usage end" }) { (usage.describe()) }
+                                        @let id = format!("step-{number}-note");
+                                        (parts.html(&id, html! {
+                                            span #(id) class=(if left + right > span { "step-usage start" } else { "step-usage end" }) { (usage.describe()) }
+                                        }))
                                     }
                                 }
                             }
@@ -252,7 +304,7 @@ pub(crate) fn steps(view: &JobView) -> Markup {
 
 /// CPU and memory over the job's life, against its container's caps or else its profile's limits as configured now,
 /// with the totals.
-pub(crate) fn metrics(view: &JobView) -> Markup {
+pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
     let summary = &view.job.summary;
     let metrics = &summary.metrics;
     let samples = &view.samples.samples;
@@ -261,10 +313,10 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
         .map(|sample| sample.at)
         .or(summary.timeline.container_started_at)
         .unwrap_or(summary.timeline.queued_at);
-    let end = samples
-        .last()
-        .map_or(view.now, |sample| sample.at)
-        .max(start + 1);
+    // A running job's charts reach the page's clock.
+    let live = view.live();
+    let last = samples.last().map_or(view.now, |sample| sample.at);
+    let end = if live { last.max(view.now) } else { last }.max(start + 1);
     let gap = view.samples.interval.max(1) * 3;
     let memory_peak = samples.iter().map(|s| s.memory).max().unwrap_or(0);
     let cpu_peak = samples.iter().map(|s| s.cpu).max().unwrap_or(0);
@@ -284,6 +336,8 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
         title: "Memory over the job".to_owned(),
         start,
         end,
+        window: None,
+        live: live.then(|| "metrics-memory".to_owned()),
         series: vec![Series {
             label: "memory".to_owned(),
             class: "memory",
@@ -299,6 +353,8 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
         title: "CPU over the job".to_owned(),
         start,
         end,
+        window: None,
+        live: live.then(|| "metrics-cpu".to_owned()),
         series: vec![Series {
             label: "CPU".to_owned(),
             class: "cpu",
@@ -324,12 +380,12 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
             } @else {
                 div.charts {
                     div.chart-card {
-                        h3 { "Memory" span.reading { "sampled peak " (format::bytes(memory_peak)) } }
-                        (memory.render_with(nice_top(memory_peak.max(memory_limit.unwrap_or(0)), Base::Binary), &bands.memory))
+                        h3 { "Memory" (parts.html("metrics-memory-peak", html! { span.reading #metrics-memory-peak { "sampled peak " (format::bytes(memory_peak)) } })) }
+                        (memory.render_with(nice_top(memory_peak.max(memory_limit.unwrap_or(0)), Base::Binary), &bands.memory, parts))
                     }
                     div.chart-card {
-                        h3 { "CPU" span.reading { "sampled peak " (format::cores(cpu_peak)) " cores" } }
-                        (cpu.render_with(nice_top(cpu_peak.max(cpu_limit.unwrap_or(0)), Base::Decimal), &bands.cpu))
+                        h3 { "CPU" (parts.html("metrics-cpu-peak", html! { span.reading #metrics-cpu-peak { "sampled peak " (format::cores(cpu_peak)) " cores" } })) }
+                        (cpu.render_with(nice_top(cpu_peak.max(cpu_limit.unwrap_or(0)), Base::Decimal), &bands.cpu, parts))
                     }
                 }
             }
@@ -395,10 +451,14 @@ fn step_bands(view: &JobView) -> StepBands {
         let Some(from) = step.started_at else {
             continue;
         };
-        let to = step.completed_at.unwrap_or(view.now);
-        let Some(usage) = usage(&view.samples.samples, from, to) else {
+        let Some(usage) = usage(
+            &view.samples.samples,
+            from,
+            step.completed_at.unwrap_or(view.now),
+        ) else {
             continue;
         };
+        let to = step.completed_at;
         let shown = format!("$_step == {}", index + 1);
         bands.memory.push(Band {
             from,

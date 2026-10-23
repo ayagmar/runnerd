@@ -3,7 +3,7 @@
 use maud::{Markup, html};
 use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Status};
 
-use super::{Page, page, profile_class, time_ago};
+use super::{Page, Parts, page, profile_class, time_ago};
 use crate::chart::{Base, Series, TimeChart, nice_top};
 use crate::daemon::{Daemon, Error};
 use crate::format;
@@ -122,12 +122,14 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                             title: format!("Size of {} over 30 days", volume.name),
                             start,
                             end: view.now,
+                            window: None,
+                            live: None,
                             series: vec![Series { label: "size".to_owned(), class: "memory", points, area: true }],
                             limit: volume.limit.map(|limit| (limit, format!("emptied above {}", format::bytes(limit)))),
                             value: format::bytes,
                             time: format::short_date,
                             gap: u64::MAX,
-                        }.render(nice_top(peak.max(volume.limit.unwrap_or(0)), Base::Binary)))
+                        }.render(nice_top(peak.max(volume.limit.unwrap_or(0)), Base::Binary), &Parts::default()))
                     } @else {
                         p.muted { "One measurement so far." }
                     }
