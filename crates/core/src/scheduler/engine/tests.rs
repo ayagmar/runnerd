@@ -230,6 +230,8 @@ struct DockerState {
     fail_lists: bool,
     /// The memory cap of each container that has one, by ID.
     memory: HashMap<String, u64>,
+    /// When `start` started each container, in milliseconds, by ID.
+    started: HashMap<String, u64>,
     /// The CPU limit in millicores of each container that has one, by ID.
     cpus: HashMap<String, u64>,
     /// How many `inspect`s of a container fail next, by ID, as when the Engine is busy.
@@ -304,6 +306,9 @@ impl DockerApi for FakeDocker {
         state.started_images.push(spec.image.clone());
         state.memory.insert(spec.name.clone(), spec.memory.0);
         state
+            .started
+            .insert(spec.name.clone(), crate::time::now_ms());
+        state
             .cpus
             .insert(spec.name.clone(), u64::from(spec.cpus) * 1000);
         let mut labels: HashMap<String, String> = spec.labels.clone().into_iter().collect();
@@ -341,7 +346,8 @@ impl DockerApi for FakeDocker {
             runtime: None,
             pid: Some(4242),
             address: Some("172.18.0.3".to_owned()),
-            started_at: Some(1_000),
+            // When `start` started it; the seeded containers ran since long before.
+            started_at: Some(state.started.get(&found.id).copied().unwrap_or(1_000)),
             memory: state.memory.get(&found.id).copied(),
             cpus: state.cpus.get(&found.id).copied(),
         })
