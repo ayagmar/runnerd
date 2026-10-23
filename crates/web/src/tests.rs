@@ -475,6 +475,32 @@ async fn queued_jobs_lead_the_overviews_jobs_oldest_first_once_each_linked_to_gi
 }
 
 #[tokio::test]
+async fn a_slot_card_counts_its_running_step_by_place_as_runnerctl_watch_does() {
+    let dashboard = Dashboard::start().await;
+    let (place, steps, name) = {
+        let fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        let place = job
+            .steps
+            .iter()
+            .position(|step| step.status == "in_progress")
+            .unwrap();
+        (place + 1, job.steps.len(), job.steps[place].name.clone())
+    };
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let expected = format!(r#"<span class="step-count">{place}/{steps}</span> {name}"#);
+    assert!(
+        overview.contains(&expected),
+        "the card reads {expected}: {overview}"
+    );
+}
+
+#[tokio::test]
 async fn the_budget_names_the_mirror_and_each_seed_container() {
     let dashboard = Dashboard::start().await;
     {
