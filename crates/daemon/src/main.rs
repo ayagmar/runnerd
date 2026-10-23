@@ -18,6 +18,7 @@ mod api;
 mod doctor;
 mod init;
 mod output;
+mod simulate;
 #[cfg(test)]
 mod testdir;
 
@@ -68,6 +69,24 @@ enum Command {
         /// when it exists].
         config: Option<PathBuf>,
     },
+    /// Replay the job history through admission by caps and by measured peaks, and print what each would have done.
+    ///
+    /// Reads the history database read-only; changes nothing.
+    Simulate {
+        /// The config to replay with [default: $XDG_CONFIG_HOME/runnerd/runnerd.toml].
+        #[arg(long)]
+        config: Option<PathBuf>,
+        /// Replay against this MemoryMax (such as 33G) instead of reading it from systemd.
+        #[arg(long)]
+        memory_max: Option<ByteSize>,
+        /// Replay the jobs queued in this many past days.
+        #[arg(long, default_value_t = 30)]
+        days: u64,
+        /// The slots a profile may use beyond its configured ones, as PROFILE=SLOTS [default: as many as the slice
+        /// holds of the profile alone at its cap].
+        #[arg(long, value_parser = simulate::slots)]
+        slots: Vec<(String, u32)>,
+    },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
     /// SIGTERM or SIGINT stops polling and waits for running jobs; a second one kills them.
@@ -109,6 +128,13 @@ fn main() -> ExitCode {
                 .or_else(|| default_config().filter(|path| path.exists()))
                 .as_deref(),
         )),
+        Some(Command::Simulate {
+            config,
+            memory_max,
+            days,
+            slots,
+        }) => config_or_default(config)
+            .and_then(|path| run_simulation(&path, memory_max, days, &slots.into_iter().collect())),
         Some(Command::Serve {
             config,
             socket,
@@ -170,6 +196,52 @@ fn check_config(path: &Path, memory_max: Option<ByteSize>) -> ExitCode {
     }
     output::line(format_args!("{}: {}", path.display(), check.message));
     ExitCode::SUCCESS
+}
+
+fn run_simulation(
+    path: &Path,
+    memory_max: Option<ByteSize>,
+    days: u64,
+    slots: &std::collections::BTreeMap<String, u32>,
+) -> Result<ExitCode, ExitCode> {
+    let config = Config::load(path).map_err(|error| fail(&error))?;
+    let memory_max = match memory_max {
+        Some(max) => Some(max),
+        None => slice_memory_max(&config.host.slice).map_err(|error| {
+            fail(&format_args!(
+                "cannot read {}'s MemoryMax: {error}; pass --memory-max",
+                config.host.slice
+            ))
+        })?,
+    };
+    let database = config
+        .history
+        .database
+        .clone()
+        .or_else(default_database)
+        .ok_or_else(|| fail(&"neither XDG_STATE_HOME nor HOME is set"))?;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap_or_default()
+        .as_millis();
+    let since = u64::try_from(now)
+        .unwrap_or(u64::MAX)
+        .saturating_sub(days.saturating_mul(24 * 3600 * 1000));
+    let history = runnerd_core::store::sizing_at(&database, since)
+        .map_err(|error| fail(&error))?
+        .ok_or_else(|| {
+            fail(&format_args!(
+                "there is no job history at {}",
+                database.display()
+            ))
+        })?;
+    output::line(simulate::report(
+        &config,
+        memory_max.map(|max| max.0),
+        &history.jobs,
+        slots,
+    ));
+    Ok(ExitCode::SUCCESS)
 }
 
 fn doctor(path: Option<&Path>) -> ExitCode {
