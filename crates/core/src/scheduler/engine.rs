@@ -415,6 +415,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.command(command).await;
                     self.publish();
                 }
+                Some(()) = self.records.finished.recv() => {
+                    self.collect_recordings().await;
+                    self.publish();
+                }
             }
         }
         self.close_shells().await;

@@ -390,3 +390,137 @@ async fn a_shell_whose_process_exited_is_removed_and_one_left_by_an_earlier_run_
             .contains(&"remove runnerd-shell-10-1".to_owned())
     );
 }
+
+#[tokio::test]
+async fn failures_committed_at_once_count_together_against_min_free() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    // Room for one record of 2G (twice the 1G its layer holds) above the 10G floor, not for two.
+    docker.0.lock().unwrap().free = Some(13 << 30);
+    let dir = TestDir::new("floor-together");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![runner_container(1, 7, true), runner_container(2, 8, true)];
+        for (container, job) in [("container-1", 1), ("container-2", 2)] {
+            state
+                .container_captures
+                .insert(container.to_owned(), format!("@@job {job} 1\n"));
+        }
+    }
+    {
+        let mut state = github.0.lock().unwrap();
+        state.runners = vec![
+            runner(7, &identity("ci", ID_A).runner_name("app", 1, 1), true),
+            runner(8, &identity("ci", ID_A).runner_name("app", 2, 1), true),
+        ];
+        for job in [1, 2] {
+            state
+                .jobs
+                .insert(job, details(job, "completed", Some("failure")));
+        }
+    }
+    engine.recover().await.unwrap();
+    until_state(&handle, 2, JobState::Running).await;
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.runner_log = Some(FAILED.to_owned());
+        state.written = 1 << 30;
+        state
+            .containers
+            .iter_mut()
+            .for_each(|container| container.running = false);
+    }
+    until_recorded(&mut engine).await;
+
+    let commits = docker
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("commit"))
+        .count();
+    assert_eq!(
+        commits, 1,
+        "the second failure finds the first's disk taken"
+    );
+    let skipped: Vec<String> = [note(&handle, 1).await, note(&handle, 2).await]
+        .into_iter()
+        .filter_map(|note| note?.skipped)
+        .collect();
+    assert_eq!(skipped.len(), 1, "{skipped:?}");
+    assert!(skipped[0].contains("records.min_free"), "{skipped:?}");
+}
+
+#[tokio::test(start_paused = true)]
+async fn shells_get_containers_of_their_own_read_only_caches_and_close_after_eight_hours() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60)];
+    let dir = TestDir::new("shell-caches");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+
+    let first = engine.open_shell(10, SIZE).await.unwrap();
+    let second = engine.open_shell(10, SIZE).await.unwrap();
+    assert_ne!(first.container, second.container);
+    let body = docker.0.lock().unwrap().shells[&first.container].clone();
+    for mount in body.host_config.unwrap().mounts.unwrap() {
+        let target = mount.target.unwrap();
+        assert_eq!(
+            mount.read_only == Some(true),
+            target != "/state",
+            "{target}: only the shell's own /state is writable"
+        );
+    }
+    let pnpm = engine.names.pnpm();
+    let refused = engine.clean_cache(&pnpm).await.unwrap_err();
+    assert!(
+        refused.to_string().contains("a shell"),
+        "a shared cache a shell mounts stays: {refused}"
+    );
+
+    tokio::time::advance(Duration::from_hours(8) + Duration::from_secs(1)).await;
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.records.shells.is_empty(),
+        "forgotten shells are closed"
+    );
+    let calls = docker.calls();
+    for tty in [&first, &second] {
+        assert!(
+            calls.contains(&format!("remove {}", tty.container)),
+            "{calls:?}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_daemon_that_stopped_mid_record_leaves_the_history_consistent() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("crash");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    drop((engine, handle));
+
+    // The earlier daemon stopped before it committed job 1's runner, and after it committed job 9's.
+    docker.0.lock().unwrap().images = vec![record_image(9, 60)];
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    let store = handle.store.clone();
+    store.queued(
+        "o/r",
+        &QueuedJob {
+            id: 9,
+            run_id: 9,
+            name: "build".to_owned(),
+            ..QueuedJob::default()
+        },
+    );
+    store.flush().await;
+    engine.recover().await.unwrap();
+
+    let skipped = note(&handle, 1).await.unwrap().skipped.unwrap();
+    assert!(skipped.contains("runnerd stopped"), "{skipped}");
+    let made = note(&handle, 9).await.unwrap();
+    assert_eq!(made.bytes, Some(1 << 30), "the record found is noted");
+    assert!(
+        docker.calls().contains(&"remove container-1".to_owned()),
+        "the stopped runner goes"
+    );
+}

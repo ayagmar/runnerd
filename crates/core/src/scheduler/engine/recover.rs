@@ -138,6 +138,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     );
                 }
                 _ => {
+                    if !container.running {
+                        self.note_lost_record(&profile, occupant.job, &container.id)
+                            .await;
+                    }
                     info!("removing {}, left by an earlier run", container.name);
                     if let Err(error) = self.docker.remove(&container.id).await {
                         warn!("cannot remove {}: {error}", container.name);

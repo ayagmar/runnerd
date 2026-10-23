@@ -7,8 +7,9 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::time::Duration;
 
 use bollard::models::{ContainerCreateBody, HostConfig, Mount, MountType};
-use tokio::sync::watch;
+use tokio::sync::{mpsc, watch};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 use tracing::{info, warn};
 
 use super::control::ControlError;
@@ -21,12 +22,41 @@ use crate::record;
 use crate::scheduler::SlotRef;
 use crate::time;
 
-/// A record being committed, with what its `api::Record` needs once the commit is done.
+/// A record being made: its container checked and measured, then committed and removed, each in a task of its own
+/// so the engine's loop does not wait for Docker's walk of the container's files.
 #[derive(Debug)]
 pub(super) struct Recording {
     record: api::Record,
+    container: String,
+    /// The disk its commit is expected to take, once measured: what the records made after it count against
+    /// `min_free` until it is done.
+    estimate: u64,
+    stage: Stage,
+}
+
+#[derive(Debug)]
+enum Stage {
+    /// Its changes checked for secrets, and its size and Docker's free disk measured.
+    Checking(JoinHandle<Result<Checked, String>>),
     /// The commit, then the container's removal; the record's size.
-    commit: JoinHandle<Result<u64, String>>,
+    Committing(JoinHandle<Result<u64, String>>),
+}
+
+impl Stage {
+    fn is_finished(&self) -> bool {
+        match self {
+            Stage::Checking(task) => task.is_finished(),
+            Stage::Committing(task) => task.is_finished(),
+        }
+    }
+}
+
+/// What checking a container found: it may be kept, at about `incoming` bytes, with `free` bytes on Docker's disk
+/// when known.
+#[derive(Debug)]
+struct Checked {
+    incoming: u64,
+    free: Option<u64>,
 }
 
 /// The records of failed jobs and the shells open in them.
@@ -36,24 +66,33 @@ pub(super) struct RecordState {
     list: Vec<api::Record>,
     /// Whether `list` is what Docker has: until Docker lists them, no record is made.
     pub(super) listed: bool,
-    /// Records being committed, by job.
+    /// Records being made, by job.
     pub(super) recordings: BTreeMap<u64, Recording>,
     /// Shells open in records, by container ID.
     pub(super) shells: BTreeMap<String, Shell>,
+    /// Shells opened by this engine, which tells their containers' names apart.
+    opened: u64,
     /// What `Handle::records` shows.
     status: watch::Sender<api::Records>,
+    /// A recording's tasks say here that they are done, so the loop moves them on without waiting for a tick.
+    done: mpsc::UnboundedSender<()>,
+    pub(super) finished: mpsc::UnboundedReceiver<()>,
 }
 
 impl RecordState {
     /// No record known yet, and the receiver of what `publish_records` shows.
     pub(super) fn new() -> (RecordState, watch::Receiver<api::Records>) {
         let (status, receiver) = watch::channel(api::Records::default());
+        let (done, finished) = mpsc::unbounded_channel();
         let state = RecordState {
             list: Vec::new(),
             listed: false,
             recordings: BTreeMap::new(),
             shells: BTreeMap::new(),
+            opened: 0,
             status,
+            done,
+            finished,
         };
         (state, receiver)
     }
@@ -63,9 +102,15 @@ impl RecordState {
 #[derive(Debug, Clone)]
 pub(super) struct Shell {
     job: u64,
+    /// The profile the record's job ran in, whose snapshot and shared caches the shell mounts.
+    pub(super) profile: String,
     /// Its container's memory cap, which counts against the budget.
     pub(super) memory: u64,
+    opened: Instant,
 }
+
+/// The longest a shell stays open: a forgotten one holds a slot's memory and keeps its record from going.
+const MAX_SHELL: Duration = Duration::from_hours(8);
 
 /// Which records a removal asks for.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -101,9 +146,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .is_some_and(|profile| profile.record_failures)
     }
 
-    /// Starts keeping a stopped runner container whose job failed as the job's record: makes room within the
-    /// limits, then commits and removes it in the background. Returns whether it took the container over; if not,
-    /// the caller removes it, and the history says why no record was made.
+    /// Starts keeping a stopped runner container whose job failed as the job's record: checks and measures it, makes
+    /// room within the limits, then commits and removes it, in the background. Returns whether it took the container
+    /// over; if not, the caller removes it.
     pub(super) async fn begin_record(&mut self, slot: &SlotRef, occupant: &Occupant) -> bool {
         // The capture's last report may have named the job after `occupant` was taken.
         let job = self
@@ -117,66 +162,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if !self.records_failures(&slot.profile) {
             return false;
         }
-        if let Err(why) = self.make_room_for(&occupant.container).await {
-            warn!("{}: no record of job {job}: {why}", occupant.repository);
-            self.store.record_skipped(job, why);
-            return false;
-        }
-        self.commit(job, slot, occupant).await;
-        true
-    }
-
-    /// Checks that a runner container may be kept, and removes the records in its way; or says why it is not kept.
-    async fn make_room_for(&mut self, container: &str) -> Result<(), String> {
         if !self.records.listed {
             self.list_records().await;
             if !self.records.listed {
-                return Err("Docker did not list the records kept".to_owned());
+                let why = "Docker did not list the records kept".to_owned();
+                self.skip_record(job, &occupant.repository, why);
+                return false;
             }
         }
-        let changed = self
-            .docker
-            .changes(container)
-            .await
-            .map_err(|error| format!("Docker did not list its files: {error}"))?;
-        let secrets = record::secrets_left(changed.iter().map(String::as_str));
-        if !secrets.is_empty() {
-            return Err(format!(
-                "its runner left secret files ({}); a runner image of this release deletes them",
-                secrets.join(", ")
-            ));
-        }
-        let incoming = self
-            .docker
-            .written(container)
-            .await
-            .map_err(|error| format!("Docker did not measure it: {error}"))?
-            .saturating_mul(COMMIT_FACTOR);
-        let free = match self.docker.free_space().await {
-            Ok(free) => Some(free),
-            Err(error) => {
-                warn!("cannot measure Docker's free disk: {error}");
-                None
-            }
-        };
-        let removals = record::make_room(
-            &self.records.list,
-            &self.shell_jobs(),
-            &self.config.records,
-            incoming,
-            free,
-            time::now_ms() / 1000,
-        )?;
-        for (old, why) in removals {
-            self.remove_record(old, why)
-                .await
-                .map_err(|error| error.to_string())?;
-        }
-        Ok(())
-    }
-
-    /// Commits a failed job's runner container as its record, then removes the container, in the background.
-    async fn commit(&mut self, job: u64, slot: &SlotRef, occupant: &Occupant) {
         let summary = self
             .store
             .job(job)
@@ -184,7 +177,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .ok()
             .flatten()
             .map(|job| job.summary);
-        let now = time::now_ms() / 1000;
         let record = api::Record {
             job,
             repository: occupant.repository.clone(),
@@ -193,100 +185,216 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .as_ref()
                 .and_then(|summary| summary.workflow.clone()),
             name: summary.map(|summary| summary.name),
-            created_at: now,
+            created_at: time::now_ms() / 1000,
             bytes: 0,
             image: record::image(job),
         };
-        let mut labels = BTreeMap::from([
-            (record::LABEL.to_owned(), job.to_string()),
-            ("runnerd.repository".to_owned(), record.repository.clone()),
-            ("runnerd.profile".to_owned(), record.profile.clone()),
-            ("runnerd.created-at".to_owned(), now.to_string()),
-        ]);
-        if let Some(workflow) = &record.workflow {
-            labels.insert("runnerd.workflow".to_owned(), workflow.clone());
-        }
-        if let Some(name) = &record.name {
-            labels.insert("runnerd.name".to_owned(), name.clone());
-        }
         info!(
             "{}: keeping job {job}'s runner as {}",
             occupant.repository, record.image
         );
         let docker = self.docker.clone();
         let container = occupant.container.clone();
+        let done = self.records.done.clone();
+        let check = tokio::spawn(async move {
+            let checked = check(&*docker, &container).await;
+            let _ = done.send(());
+            checked
+        });
+        self.records.recordings.insert(
+            job,
+            Recording {
+                record,
+                container: occupant.container.clone(),
+                estimate: 0,
+                stage: Stage::Checking(check),
+            },
+        );
+        true
+    }
+
+    /// Notes that a stopped runner container an earlier daemon left was not kept, if its profile keeps failed jobs'
+    /// runners, its job failed and no record of it was made: the daemon stopped while it made one.
+    pub(super) async fn note_lost_record(&self, profile: &str, job: Option<u64>, container: &str) {
+        let Some(job) = job else {
+            return;
+        };
+        if !self.records_failures(profile)
+            || self.records.list.iter().any(|record| record.job == job)
+        {
+            return;
+        }
+        if let Ok(log) = self.docker.logs(container).await
+            && record::failed(&log)
+        {
+            self.store.record_skipped(
+                job,
+                "runnerd stopped while it was keeping the runner".to_owned(),
+            );
+        }
+    }
+
+    /// Notes in the history why a failed job has no record.
+    fn skip_record(&self, job: u64, repository: &str, why: String) {
+        warn!("{repository}: no record of job {job}: {why}");
+        self.store.record_skipped(job, why);
+    }
+
+    /// Makes room for a checked container within the limits, removing the records in its way, then commits it in
+    /// the background; or notes why it is not kept and removes it.
+    async fn make_room_and_commit(
+        &mut self,
+        record: api::Record,
+        container: String,
+        checked: Checked,
+    ) {
+        let job = record.job;
+        // Records being committed take their disk too.
+        let pending: u64 = self
+            .records
+            .recordings
+            .values()
+            .map(|other| other.estimate)
+            .sum();
+        let room = record::make_room(
+            &self.records.list,
+            &self.shell_jobs(),
+            &self.config.records,
+            checked.incoming,
+            checked.free.map(|free| free.saturating_sub(pending)),
+            time::now_ms() / 1000,
+        );
+        let removed = match room {
+            Ok(removals) => {
+                let mut removed = Ok(());
+                for (old, why) in removals {
+                    if let Err(error) = self.remove_record(old, why).await {
+                        removed = Err(error.to_string());
+                        break;
+                    }
+                }
+                removed
+            }
+            Err(why) => Err(why),
+        };
+        if let Err(why) = removed {
+            self.skip_record(job, &record.repository, why);
+            self.remove_container(&container).await;
+            return;
+        }
+        let labels = labels(&record);
+        let docker = self.docker.clone();
         let image = record.image.clone();
+        let done = self.records.done.clone();
+        let committed_container = container.clone();
         let commit = tokio::spawn(async move {
+            let container = committed_container;
             let committed = docker.commit(&container, &image, labels).await;
             if let Err(error) = docker.remove(&container).await
                 && !is_not_found(&error)
             {
                 warn!("cannot remove {container}: {error}");
             }
+            let _ = done.send(());
             committed.map_err(|error| error.to_string())
         });
-        self.records
-            .recordings
-            .insert(job, Recording { record, commit });
+        self.records.recordings.insert(
+            job,
+            Recording {
+                record,
+                container,
+                estimate: checked.incoming,
+                stage: Stage::Committing(commit),
+            },
+        );
     }
 
-    /// Takes the records whose commit finished, and keeps the records within their limits with the real sizes.
+    async fn remove_container(&self, container: &str) {
+        if let Err(error) = self.docker.remove(container).await
+            && !is_not_found(&error)
+        {
+            warn!("cannot remove {container}: {error}");
+        }
+    }
+
+    /// Moves the recordings whose task finished on: a checked container to its commit, a committed one into the
+    /// records, kept within their limits with its real size.
     pub(super) async fn collect_recordings(&mut self) {
+        while self.records.finished.try_recv().is_ok() {}
         let done: Vec<u64> = self
             .records
             .recordings
             .iter()
-            .filter(|(_, recording)| recording.commit.is_finished())
+            .filter(|(_, recording)| recording.stage.is_finished())
             .map(|(job, _)| *job)
             .collect();
         for job in done {
-            let Some(Recording { mut record, commit }) = self.records.recordings.remove(&job)
-            else {
+            let Some(recording) = self.records.recordings.remove(&job) else {
                 continue;
             };
-            let bytes = match commit.await {
-                Ok(Ok(bytes)) => bytes,
-                Ok(Err(error)) => {
-                    warn!(
-                        "{}: cannot keep job {job}'s runner: {error}",
-                        record.repository
-                    );
-                    self.store
-                        .record_skipped(job, format!("Docker did not commit it: {error}"));
+            let Recording {
+                record,
+                container,
+                stage,
+                ..
+            } = recording;
+            let task = match stage {
+                Stage::Checking(task) => {
+                    let checked = task
+                        .await
+                        .map_err(|error| error.to_string())
+                        .and_then(|checked| checked);
+                    match checked {
+                        Ok(checked) => self.make_room_and_commit(record, container, checked).await,
+                        Err(why) => {
+                            self.skip_record(job, &record.repository, why);
+                            self.remove_container(&container).await;
+                        }
+                    }
                     continue;
                 }
-                Err(error) => {
-                    warn!(
-                        "{}: cannot keep job {job}'s runner: {error}",
-                        record.repository
-                    );
-                    self.store.record_skipped(job, error.to_string());
-                    continue;
-                }
+                Stage::Committing(task) => task,
             };
-            record.bytes = bytes;
-            self.name_from_history(&mut record).await;
-            info!(
-                "{}: kept job {job}'s runner as {} ({})",
-                record.repository,
-                record.image,
-                ByteSize(bytes)
-            );
-            let removals = record::make_room(
-                &self.records.list,
-                &self.shell_jobs(),
-                &self.config.records,
-                bytes,
-                None,
-                record.created_at,
-            );
-            self.store.record_made(record.clone());
-            self.records.list.push(record);
-            let removals = removals.unwrap_or_else(|_| vec![(job, api::RecordRemoval::Size)]);
-            for (old, why) in removals {
-                if let Err(error) = self.remove_record(old, why).await {
-                    warn!("{error}");
-                }
+            match task
+                .await
+                .map_err(|error| error.to_string())
+                .and_then(|committed| committed)
+            {
+                Ok(bytes) => self.keep_record(record, bytes).await,
+                Err(error) => self.skip_record(
+                    job,
+                    &record.repository,
+                    format!("Docker did not commit it: {error}"),
+                ),
+            }
+        }
+    }
+
+    /// Adds a committed record, and removes the records past the limits with its real size.
+    async fn keep_record(&mut self, mut record: api::Record, bytes: u64) {
+        let job = record.job;
+        record.bytes = bytes;
+        self.name_from_history(&mut record).await;
+        info!(
+            "{}: kept job {job}'s runner as {} ({})",
+            record.repository,
+            record.image,
+            ByteSize(bytes)
+        );
+        let removals = record::make_room(
+            &self.records.list,
+            &self.shell_jobs(),
+            &self.config.records,
+            bytes,
+            None,
+            record.created_at,
+        );
+        self.store.record_made(record.clone());
+        self.records.list.push(record);
+        let removals = removals.unwrap_or_else(|_| vec![(job, api::RecordRemoval::Size)]);
+        for (old, why) in removals {
+            if let Err(error) = self.remove_record(old, why).await {
+                warn!("{error}");
             }
         }
     }
@@ -328,6 +436,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 records.sort_by_key(|record| (record.created_at, record.job));
                 for record in &mut records {
                     self.name_from_history(record).await;
+                    // Committed before an earlier daemon stopped, which did not get to note it.
+                    let noted = self.store.job(record.job).await.ok().flatten();
+                    if noted
+                        .is_some_and(|job| job.record.is_none_or(|note| note.created_at.is_none()))
+                    {
+                        self.store.record_made(record.clone());
+                    }
                 }
                 self.records.list = records;
                 self.records.listed = true;
@@ -419,6 +534,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect()
     }
 
+    /// The profiles whose snapshot and shared caches a shell mounts.
+    pub(super) fn shell_profiles(&self) -> BTreeSet<&str> {
+        self.records
+            .shells
+            .values()
+            .map(|shell| shell.profile.as_str())
+            .collect()
+    }
+
     /// The shells' part of the memory in use.
     pub(super) fn shell_memory(&self) -> u64 {
         self.records.shells.values().map(|shell| shell.memory).sum()
@@ -487,6 +611,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             )));
         };
         let (memory, cpus) = (profile.memory.0, profile.cpus);
+        // A reseed replaces the snapshot the shell's layers sit on.
+        if self.reseeds.contains_key(&record.profile) {
+            return Err(ControlError::Conflict(format!(
+                "{} is reseeding its snapshot, which a shell mounts; open it once the reseed is done",
+                record.profile
+            )));
+        }
         if let Some(max) = self.memory_max {
             let in_use = self.memory_in_use();
             if in_use.saturating_add(memory) > max {
@@ -500,6 +631,34 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 )));
             }
         }
+        let body = self.shell_body(&record, memory, cpus);
+        self.records.opened += 1;
+        let name = format!(
+            "runnerd-shell-{job}-{}-{}",
+            time::now_ms() / 1000,
+            self.records.opened
+        );
+        let tty = self
+            .docker
+            .shell(&name, body, size)
+            .await
+            .map_err(|error| ControlError::Failed(format!("cannot start a shell: {error}")))?;
+        info!("opened a shell in the record of job {job}");
+        self.records.shells.insert(
+            tty.container.clone(),
+            Shell {
+                job,
+                profile: record.profile,
+                memory,
+                opened: Instant::now(),
+            },
+        );
+        Ok(tty)
+    }
+
+    /// The container of a shell in `record`: the record's image under the profile's caps, its snapshot and shared
+    /// caches mounted read-only, and a terminal.
+    fn shell_body(&self, record: &api::Record, memory: u64, cpus: u32) -> ContainerCreateBody {
         let workspace = record::workspace(&record.repository);
         let limit = i64::try_from(memory).unwrap_or(i64::MAX);
         let mut mounts = vec![Mount {
@@ -508,10 +667,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             ..Default::default()
         }];
         if self.config.profiles.contains_key(&record.profile) {
+            // The snapshot and the shared caches as the job saw them, read-only: running jobs share them.
             mounts.extend(
                 crate::cache::runner_mounts(&self.names, &record.profile, 1)
                     .into_iter()
-                    .filter(|mount| mount.target.as_deref() != Some("/state")),
+                    .filter(|mount| mount.target.as_deref() != Some("/state"))
+                    .map(|mount| Mount {
+                        read_only: Some(true),
+                        ..mount
+                    }),
             );
         }
         let mut host_config = HostConfig {
@@ -525,7 +689,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             ..Default::default()
         };
         self.isolation.configure(&mut host_config);
-        let body = ContainerCreateBody {
+        ContainerCreateBody {
             image: Some(record.image.clone()),
             entrypoint: Some(vec![
                 "bash".to_owned(),
@@ -542,22 +706,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             attach_stderr: Some(true),
             labels: Some(HashMap::from([(
                 record::SHELL_LABEL.to_owned(),
-                job.to_string(),
+                record.job.to_string(),
             )])),
             host_config: Some(host_config),
             ..Default::default()
-        };
-        let name = format!("runnerd-shell-{job}-{}", time::now_ms() / 1000);
-        let tty = self
-            .docker
-            .shell(&name, body, size)
-            .await
-            .map_err(|error| ControlError::Failed(format!("cannot start a shell: {error}")))?;
-        info!("opened a shell in the record of job {job}");
-        self.records
-            .shells
-            .insert(tty.container.clone(), Shell { job, memory });
-        Ok(tty)
+        }
     }
 
     /// Removes a shell's container and frees its memory. One Docker does not remove now goes at a later tick.
@@ -577,10 +730,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Removes the shells whose process exited, whatever became of their terminal.
+    /// Removes the shells whose process exited, whatever became of their terminal, and those open longer than
+    /// `MAX_SHELL`.
     pub(super) async fn collect_shells(&mut self) {
-        let containers: Vec<String> = self.records.shells.keys().cloned().collect();
-        for container in containers {
+        let shells: Vec<(String, Instant)> = self
+            .records
+            .shells
+            .iter()
+            .map(|(container, shell)| (container.clone(), shell.opened))
+            .collect();
+        for (container, opened) in shells {
+            if opened.elapsed() > MAX_SHELL {
+                info!("closing {container}: a shell is open for 8 hours at most");
+                self.close_shell(&container).await;
+                continue;
+            }
             let ended = match self.docker.inspect(&container).await {
                 Ok(state) => !state.running,
                 Err(error) => is_not_found(&error),
@@ -598,4 +762,54 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.close_shell(&container).await;
         }
     }
+}
+
+/// The labels a record's image carries, which `list_records` reads back.
+fn labels(record: &api::Record) -> BTreeMap<String, String> {
+    let mut labels = BTreeMap::from([
+        (record::LABEL.to_owned(), record.job.to_string()),
+        ("runnerd.repository".to_owned(), record.repository.clone()),
+        ("runnerd.profile".to_owned(), record.profile.clone()),
+        (
+            "runnerd.created-at".to_owned(),
+            record.created_at.to_string(),
+        ),
+    ]);
+    if let Some(workflow) = &record.workflow {
+        labels.insert("runnerd.workflow".to_owned(), workflow.clone());
+    }
+    if let Some(name) = &record.name {
+        labels.insert("runnerd.name".to_owned(), name.clone());
+    }
+    labels
+}
+
+/// Checks that a stopped runner container may be kept, and measures it: refuses one whose changes still hold a
+/// secret, and estimates the disk its commit takes. Docker walks the container's files for both, so it runs in a
+/// task.
+async fn check(docker: &impl DockerApi, container: &str) -> Result<Checked, String> {
+    let changed = docker
+        .changes(container)
+        .await
+        .map_err(|error| format!("Docker did not list its files: {error}"))?;
+    let secrets = record::secrets_left(changed.iter().map(String::as_str));
+    if !secrets.is_empty() {
+        return Err(format!(
+            "its runner left files a record must not keep ({}); a runner image of this release deletes them",
+            secrets.join(", ")
+        ));
+    }
+    let incoming = docker
+        .written(container)
+        .await
+        .map_err(|error| format!("Docker did not measure it: {error}"))?
+        .saturating_mul(COMMIT_FACTOR);
+    let free = match docker.free_space().await {
+        Ok(free) => Some(free),
+        Err(error) => {
+            warn!("cannot measure Docker's free disk: {error}");
+            None
+        }
+    };
+    Ok(Checked { incoming, free })
 }
