@@ -16,7 +16,8 @@ comments kept, edits never overwritten, every change visible and undoable.
 `[sizing] auto = true` turns it on; it is off by default. When the daemon starts and every 5 minutes after, it reads
 the advice for the config it runs with, and `sizing::auto::changes`, pure, picks what to change:
 
-- Only a profile whose advice is to lower or raise `memory`, which takes `[sizing] min_jobs` runs.
+- `memory` changes only when a profile's advice is to lower or raise it, which takes `[sizing] min_jobs` runs. Under
+  `measured` a profile can get a slot without a memory change, by the slot rule below, also after a run met its cap.
 - At most one change per profile per `[sizing] interval` (default 24 hours), counted from the profile's last change
   however old, pending or written.
 - A change moves `memory` by at most `[sizing] max_step` percent of it (default 25), in steps of 256M. A profile far
