@@ -101,18 +101,20 @@ running. A config saved from the dashboard or `PUT /v1/config` applies without a
 
 ## Runner image
 
-[`image/`](https://github.com/ayagmar/runnerd/tree/main/image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base (`base`, `jvm`, `node`). Each release publishes every stage to `ghcr.io/ayagmar/runnerd-runner:<stage>-<version>` for linux/amd64, with a build provenance attestation. A profile names the image its runners run:
+[`image/`](https://github.com/ayagmar/runnerd/tree/main/image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base (`base`, `jvm`, `node`). Each release publishes every stage to `ghcr.io/ayagmar/runnerd-runner:<stage>-<version>` for linux/amd64, with a build provenance attestation. A profile names the image its runners run with the `image` key (since 0.0.5):
 
 ```toml
 [profiles.jvm]
-image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4"
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5"
 ```
 
 runnerd pulls the image before the profile's first runner and logs the pull's progress; `runnerd doctor` says whether each image is present or can be pulled. Keep the tag at the daemon's version: the image's scripts and the daemon change together, and doctor warns when they differ. To check where an image came from:
 
 ```sh
-gh attestation verify oci://ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4 --repo ayagmar/runnerd
+gh attestation verify oci://ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5 --repo ayagmar/runnerd
 ```
+
+runnerd 0.0.4 does not know `image`; pull and retag the published image, then keep `image_stage = "jvm"`: `docker pull ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4 && docker tag ghcr.io/ayagmar/runnerd-runner:jvm-0.0.4 runnerd-runner:jvm`.
 
 To run your own changes to `image/`, build the stage from a clone and set `image_stage` instead of `image`; runners then run the local image `runnerd-runner:<image_stage>`, which runnerd never pulls:
 

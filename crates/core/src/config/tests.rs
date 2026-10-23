@@ -226,13 +226,27 @@ fn profile_needs_exactly_one_image() {
 }
 
 #[test]
-fn example_config_pulls_this_releases_images() {
-    let version = env!("CARGO_PKG_VERSION");
+fn example_config_pulls_published_images_no_older_than_this_release() {
+    let numbers = |version: &str| -> Vec<u32> {
+        version
+            .split('-')
+            .next()
+            .unwrap()
+            .split('.')
+            .map(|part| part.parse().unwrap())
+            .collect()
+    };
+    let release = numbers(env!("CARGO_PKG_VERSION"));
     for (name, profile) in example().profiles {
-        assert_eq!(
-            profile.image,
-            Image::Pulled(format!("ghcr.io/ayagmar/runnerd-runner:{name}-{version}")),
-            "examples/runnerd.toml's {name} profile"
+        let Image::Pulled(reference) = &profile.image else {
+            panic!("examples/runnerd.toml's {name} profile does not pull its image");
+        };
+        let tag = reference
+            .strip_prefix(&format!("ghcr.io/ayagmar/runnerd-runner:{name}-"))
+            .unwrap_or_else(|| panic!("{name} runs {reference}, not its published stage"));
+        assert!(
+            numbers(tag) >= release,
+            "{name} runs {reference}, older than this release; bump the example's tags"
         );
     }
 }
