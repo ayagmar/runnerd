@@ -1,6 +1,6 @@
-//! Queries: job records with their timelines and metrics, samples, logs, events, stats and cache sizes, turned into
-//! `api` types. Milliseconds in the database become seconds in the API. Shared by the API's reads and by the
-//! writer, which reads back what it announces.
+//! Queries: job records with their timelines and metrics, samples, logs, events, stats, cache sizes and paused
+//! repositories, turned into `api` types. Milliseconds in the database become seconds in the API. Shared by the
+//! API's reads and by the writer, which reads back what it announces.
 
 use std::time::Duration;
 
@@ -400,6 +400,12 @@ pub(super) fn announced_repositories(
         }
     }
     Ok(repositories.into_values().collect())
+}
+
+pub(super) fn paused(db: &Connection) -> rusqlite::Result<Vec<String>> {
+    db.prepare_cached("SELECT repository FROM paused ORDER BY repository")?
+        .query_map([], |row| row.get(0))?
+        .collect()
 }
 
 pub(super) fn host_samples(db: &Connection, since: u64) -> rusqlite::Result<Vec<api::HostSample>> {

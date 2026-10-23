@@ -185,7 +185,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 }
 
 fn help(frame: &mut Frame<'_>, area: Rect) {
-    const KEYS: [(&str, &str); 17] = [
+    const KEYS: [(&str, &str); 19] = [
         ("1 o", "overview"),
         ("2 h", "history"),
         ("tab", "next pane of the overview"),
@@ -196,6 +196,8 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
         ("G g", "follow the log, or go to its start"),
         ("p", "pause the repository: no new runners"),
         ("r", "resume the repository"),
+        ("P", "pause every repository"),
+        ("U", "resume every repository"),
         ("R", "reseed the profile's snapshot"),
         ("c", "history: cycle the outcome filter"),
         ("s", "history: cycle the repository filter"),

@@ -1,9 +1,10 @@
-//! Control from the API: the `Control` handle the daemon's API holds (pause flags, shutdown, a channel of
-//! `Command`s) and the engine's side of each command: pause, with or without cancelling the repository's runs,
-//! reseed, cache clean and config replacement. Commands run between ticks, so they see the slot state a tick does
-//! (ADR 0019). It must not serve HTTP or write the config file: the daemon does, through `Commit`.
+//! Control from the API: the `Control` handle the daemon's API holds (pause flags, which it records in the store so
+//! a restart keeps them, shutdown, a channel of `Command`s) and the engine's side of each command: pause, of one
+//! repository or all, with or without cancelling their runs, reseed, cache clean and config replacement. Commands
+//! run between ticks, so they see the slot state a tick does (ADR 0019). It must not serve HTTP or write the config
+//! file: the daemon does, through `Commit`.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -18,6 +19,7 @@ use crate::docker::DockerApi;
 use crate::github::GithubApi;
 use crate::isolation;
 use crate::scheduler::SlotRef;
+use crate::store::Store;
 use crate::sync::lock;
 
 /// How long the runner of a run a forced pause cancelled gets to report its job cancelled and exit, before it is
@@ -44,6 +46,15 @@ pub enum RunningJobs {
     Kill,
 }
 
+/// The repositories a pause or a resume applies to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum Target {
+    /// One repository, `owner/name`.
+    Repository(String),
+    /// Every configured repository.
+    All,
+}
+
 /// Why the engine refused or failed a command from the API.
 #[derive(Debug, Clone, PartialEq, Eq, thiserror::Error)]
 pub enum ControlError {
@@ -67,6 +78,9 @@ pub enum ControlError {
     /// Docker or GitHub failed.
     #[error("{0}")]
     Failed(String),
+    /// A pause or resume holds in memory, but the job history could not record it: a restart undoes it.
+    #[error("{0}")]
+    NotRecorded(String),
     /// The engine stopped.
     #[error("runnerd is stopping")]
     Stopped,
@@ -75,10 +89,10 @@ pub enum ControlError {
 /// A command the engine carries out between ticks, with where its answer goes.
 #[derive(Debug)]
 pub enum Command {
-    /// Pause a repository; with `RunningJobs::Kill`, cancel its running jobs.
+    /// Pause one repository or all; with `RunningJobs::Kill`, cancel their running jobs.
     Pause {
-        /// `owner/name`.
-        repository: String,
+        /// What to pause.
+        target: Target,
         /// Cancel running jobs, or refuse while there are any.
         jobs: RunningJobs,
         /// The answer.
@@ -153,18 +167,34 @@ pub struct Control {
     // remove or read.
     repositories: Mutex<BTreeSet<String>>,
     paused: Mutex<BTreeSet<String>>,
+    /// Where `paused` is recorded.
+    store: Store,
     shutdown: Mutex<Shutdown>,
     pub(super) wake: Notify,
     commands: mpsc::UnboundedSender<Command>,
 }
 
 impl Control {
-    /// Controls for the configured repositories, and the commands they send the engine.
-    pub fn new(repositories: impl IntoIterator<Item = String>) -> (Control, Commands) {
+    /// Controls for the configured repositories, of which those in `paused` start paused, and the commands they
+    /// send the engine. A paused repository the config no longer has is forgotten, in `store` too: one added back
+    /// starts active.
+    pub fn new(
+        repositories: impl IntoIterator<Item = String>,
+        paused: impl IntoIterator<Item = String>,
+        store: Store,
+    ) -> (Control, Commands) {
+        let repositories: BTreeSet<String> = repositories.into_iter().collect();
+        let paused: BTreeSet<String> = paused
+            .into_iter()
+            .filter(|repository| repositories.contains(repository))
+            .collect();
+        // Sent at once; a write that fails leaves rows the next start filters out the same way.
+        drop(store.paused(paused.iter().cloned().collect()));
         let (commands, receiver) = mpsc::unbounded_channel();
         let control = Control {
-            repositories: Mutex::new(repositories.into_iter().collect()),
-            paused: Mutex::new(BTreeSet::new()),
+            repositories: Mutex::new(repositories),
+            paused: Mutex::new(paused),
+            store,
             shutdown: Mutex::new(Shutdown::No),
             wake: Notify::new(),
             commands,
@@ -177,26 +207,63 @@ impl Control {
         *lock(&self.shutdown)
     }
 
-    /// Pauses or resumes a repository whatever it runs; `false` if it is not configured.
-    pub fn set_paused(&self, repository: &str, paused: bool) -> bool {
-        if !lock(&self.repositories).contains(repository) {
-            return false;
-        }
-        let mut set = lock(&self.paused);
-        if paused {
-            set.insert(repository.to_owned());
-        } else {
-            set.remove(repository);
-        }
-        drop(set);
+    /// Pauses or resumes one repository or all, whatever they run, and records it in the store before it answers,
+    /// so a restarted daemon starts with the same ones paused. `NotFound` for a repository the config does not have.
+    /// If the record fails, the change holds until a restart and the answer is `NotRecorded`.
+    pub async fn set_paused(&self, target: &Target, paused: bool) -> Result<(), ControlError> {
+        let recorded = {
+            let repositories = lock(&self.repositories);
+            let names: Vec<&String> = match target {
+                Target::Repository(repository) => {
+                    let Some(name) = repositories.get(repository) else {
+                        return Err(not_configured(repository));
+                    };
+                    vec![name]
+                }
+                Target::All => repositories.iter().collect(),
+            };
+            let mut set = lock(&self.paused);
+            for name in names {
+                if paused {
+                    set.insert(name.clone());
+                } else {
+                    set.remove(name);
+                }
+            }
+            // Sent under the lock, so the records change in the order the set does.
+            self.store.paused(set.iter().cloned().collect())
+        };
         self.wake.notify_one();
-        true
+        if recorded.await {
+            return Ok(());
+        }
+        let name = match target {
+            Target::Repository(repository) => repository.as_str(),
+            Target::All => "every repository",
+        };
+        let (done, undone) = if paused {
+            ("paused", "resumes it")
+        } else {
+            ("resumed", "pauses it again")
+        };
+        let message = format!(
+            "{name} is {done} until runnerd restarts, but the job history cannot record it, so a restart {undone}"
+        );
+        warn!("{message}");
+        Err(ControlError::NotRecorded(message))
     }
 
-    /// Replaces the configured repositories; the removed ones are no longer paused.
+    /// Replaces the configured repositories; the removed ones are no longer paused, in the store too.
     fn set_repositories(&self, repositories: BTreeSet<String>) {
-        lock(&self.paused).retain(|repository| repositories.contains(repository));
-        *lock(&self.repositories) = repositories;
+        let mut configured = lock(&self.repositories);
+        let mut paused = lock(&self.paused);
+        let before = paused.len();
+        paused.retain(|repository| repositories.contains(repository));
+        if paused.len() != before {
+            // Not waited for: a restart forgets a repository the config does not have anyway.
+            drop(self.store.paused(paused.iter().cloned().collect()));
+        }
+        *configured = repositories;
     }
 
     /// Asks the loop to stop; a forced request overrides a graceful one, never the other way.
@@ -227,16 +294,16 @@ impl Control {
         answer.await.map_err(|_| ControlError::Stopped)
     }
 
-    /// Pauses a repository. With `RunningJobs::Keep`, refuses while it runs a job; with `Kill`, cancels the runs of
-    /// its running jobs on GitHub, whose runners are removed once they report it or `CANCEL_GRACE` later, and
-    /// removes its other runners at once.
+    /// Pauses one repository or all. With `RunningJobs::Keep`, refuses while any of them runs a job, pausing none;
+    /// with `Kill`, cancels the runs of their running jobs on GitHub, whose runners are removed once they report it
+    /// or `CANCEL_GRACE` later, and removes their other runners at once.
     pub async fn pause(
         &self,
-        repository: &str,
+        target: Target,
         jobs: RunningJobs,
     ) -> Result<api::Paused, ControlError> {
         self.send(|reply| Command::Pause {
-            repository: repository.to_owned(),
+            target,
             jobs,
             reply,
         })
@@ -280,6 +347,10 @@ impl Control {
     }
 }
 
+fn not_configured(repository: &str) -> ControlError {
+    ControlError::NotFound(format!("{repository} is not a configured repository"))
+}
+
 /// `jobs` for people to read: `job 1 on runner-a, runner-b`.
 fn list(jobs: &[api::RunningJob]) -> String {
     jobs.iter()
@@ -293,11 +364,11 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn command(&mut self, command: Command) {
         match command {
             Command::Pause {
-                repository,
+                target,
                 jobs,
                 reply,
             } => {
-                let _ = reply.send(self.pause(&repository, jobs).await);
+                let _ = reply.send(self.pause(&target, jobs).await);
             }
             Command::Reseed { profile, reply } => {
                 let _ = reply.send(self.request_reseed(&profile));
@@ -323,23 +394,25 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Pauses a repository. A runner that holds a job, or that GitHub reports busy, refuses it with
-    /// `RunningJobs::Keep`; with `Kill`, the runs of the repository's jobs are cancelled, and its runners removed
-    /// once they exit or `CANCEL_GRACE` later; a runner whose run cannot be cancelled is removed at once.
+    /// Pauses one repository or all. A runner of theirs that holds a job, or that GitHub reports busy, refuses it
+    /// with `RunningJobs::Keep`; with `Kill`, the runs of their jobs are cancelled, and their runners removed once
+    /// they exit or `CANCEL_GRACE` later; a runner whose run cannot be cancelled is removed at once.
     pub(super) async fn pause(
         &mut self,
-        repository: &str,
+        target: &Target,
         running: RunningJobs,
     ) -> Result<api::Paused, ControlError> {
-        if !self.repositories.contains_key(repository) {
-            return Err(ControlError::NotFound(format!(
-                "{repository} is not a configured repository"
-            )));
-        }
+        let repositories: BTreeSet<String> = match target {
+            Target::Repository(repository) if !self.repositories.contains_key(repository) => {
+                return Err(not_configured(repository));
+            }
+            Target::Repository(repository) => BTreeSet::from([repository.clone()]),
+            Target::All => self.repositories.keys().cloned().collect(),
+        };
         self.take_found();
         let runners: Vec<(SlotRef, Occupant)> = self
             .occupied()
-            .filter(|(_, occupant)| occupant.repository == repository)
+            .filter(|(_, occupant)| repositories.contains(&occupant.repository))
             .map(|(slot, occupant)| (slot, occupant.clone()))
             .collect();
         let jobs: Vec<api::RunningJob> = runners
@@ -348,21 +421,38 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             .map(|(_, occupant)| occupant.running_job())
             .collect();
         if running == RunningJobs::Keep && !jobs.is_empty() {
+            let mut by_repository: BTreeMap<&str, Vec<api::RunningJob>> = BTreeMap::new();
+            for job in &jobs {
+                by_repository
+                    .entry(&job.repository)
+                    .or_default()
+                    .push(job.clone());
+            }
+            let runs: Vec<String> = by_repository
+                .iter()
+                .map(|(repository, jobs)| format!("{repository} runs {}", list(jobs)))
+                .collect();
             return Err(ControlError::Busy {
                 message: format!(
-                    "{repository} runs {}; pause with force to cancel it",
-                    list(&jobs)
+                    "{}; pause with force to cancel {}",
+                    runs.join("; "),
+                    if jobs.len() == 1 { "it" } else { "them" }
                 ),
                 jobs,
             });
         }
-        self.control.set_paused(repository, true);
-        info!("{repository}: paused");
+        // Paused in memory even if not recorded: a forced pause still cancels the runs it was asked to.
+        let recorded = self.control.set_paused(target, true).await;
+        match target {
+            Target::Repository(repository) => info!("{repository}: paused"),
+            Target::All => info!("paused every repository"),
+        }
         let mut stopped = Vec::new();
         if running == RunningJobs::Keep {
-            return Ok(api::Paused { stopped });
+            return recorded.map(|()| api::Paused { stopped });
         }
         for (slot, occupant) in runners {
+            let repository = &occupant.repository;
             let cancelled = if let Some(job) = occupant.job {
                 self.cancel(repository, job).await
             } else {
@@ -391,7 +481,13 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             }
             stopped.push(occupant.running_job());
         }
-        Ok(api::Paused { stopped })
+        match recorded {
+            Ok(()) => Ok(api::Paused { stopped }),
+            Err(ControlError::NotRecorded(message)) if !stopped.is_empty() => Err(
+                ControlError::NotRecorded(format!("{message}; stopped {}", list(&stopped))),
+            ),
+            Err(error) => Err(error),
+        }
     }
 
     /// Removes the runners of cancelled runs that did not exit within `CANCEL_GRACE`, every tick until they are gone.

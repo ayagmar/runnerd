@@ -52,9 +52,11 @@ pub(crate) enum Msg {
     Done(String),
     /// A request failed.
     Failed(String),
-    /// A pause was refused because the repository runs a job; the daemon's text names it.
+    /// A pause was refused because the repository, or one of them in a pause of all, runs a job; the daemon's text
+    /// names it.
     Busy {
-        repository: String,
+        /// `None` for every repository.
+        repository: Option<String>,
         message: String,
     },
 }
@@ -73,11 +75,13 @@ pub(crate) enum Effect {
         query: JobQuery,
     },
     Pause {
-        repository: String,
+        /// `None` for every repository.
+        repository: Option<String>,
         force: bool,
     },
     Resume {
-        repository: String,
+        /// `None` for every repository.
+        repository: Option<String>,
     },
     Reseed {
         profile: String,
@@ -210,8 +214,8 @@ pub(crate) struct App {
     pub(crate) history: History,
     pub(crate) job: Option<JobView>,
     pub(crate) flash: Option<Flash>,
-    /// A refused pause waiting for `y` to force it: the repository and the daemon's text.
-    pub(crate) confirm: Option<(String, String)>,
+    /// A refused pause waiting for `y` to force it: the repository (`None` for all) and the daemon's text.
+    pub(crate) confirm: Option<(Option<String>, String)>,
     pub(crate) help: bool,
 }
 
@@ -447,16 +451,25 @@ impl App {
             KeyCode::Char('p') => {
                 if let Some(repository) = self.selected_repository() {
                     return vec![Effect::Pause {
-                        repository,
+                        repository: Some(repository),
                         force: false,
                     }];
                 }
             }
             KeyCode::Char('r') => {
                 if let Some(repository) = self.selected_repository() {
-                    return vec![Effect::Resume { repository }];
+                    return vec![Effect::Resume {
+                        repository: Some(repository),
+                    }];
                 }
             }
+            KeyCode::Char('P') => {
+                return vec![Effect::Pause {
+                    repository: None,
+                    force: false,
+                }];
+            }
+            KeyCode::Char('U') => return vec![Effect::Resume { repository: None }],
             KeyCode::Char('R') => {
                 if let Some(profile) = self.selected_profile() {
                     return vec![Effect::Reseed { profile }];

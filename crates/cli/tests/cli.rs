@@ -163,22 +163,40 @@ async fn get_logs(State(fake): State<Shared>, RawQuery(query): RawQuery) -> Stri
     }
 }
 
-/// `halyard/ledger` runs a job: a pause without force is refused, a forced one stops it.
+/// `halyard/ledger` runs a job: a pause without force is refused, a forced one stops it. `halyard/wharf`'s pause
+/// holds, but the daemon's history cannot record it.
 async fn pause(
     UrlPath((owner, name)): UrlPath<(String, String)>,
     RawQuery(query): RawQuery,
 ) -> Response {
-    let repository = format!("{owner}/{name}");
+    paused(&format!("{owner}/{name}"), query.as_deref())
+}
+
+/// A pause of every repository: `halyard/ledger`'s job is in the way, as for its own pause.
+async fn pause_all(RawQuery(query): RawQuery) -> Response {
+    paused("halyard/ledger", query.as_deref())
+}
+
+fn paused(repository: &str, query: Option<&str>) -> Response {
     let running = RunningJob {
-        repository: repository.clone(),
+        repository: repository.to_owned(),
         runner: "runnerd-5f2a-jvm-1-k3j9".to_owned(),
         job: Some(9001),
     };
-    match (repository.as_str(), query.as_deref()) {
+    match (repository, query) {
         ("halyard/ledger", Some("force=true")) => axum::Json(Paused {
             stopped: vec![running],
         })
         .into_response(),
+        ("halyard/wharf", _) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(ErrorResponse {
+                message: "halyard/wharf is paused until runnerd restarts, but the job history cannot record it, \
+                          so a restart resumes it"
+                    .to_owned(),
+            }),
+        )
+            .into_response(),
         ("halyard/ledger", _) => (
             StatusCode::CONFLICT,
             axum::Json(Busy {
@@ -308,6 +326,11 @@ fn serve(socket: &Path) -> Shared {
         .route("/v1/jobs/{id}", get(get_job))
         .route("/v1/jobs/{id}/logs", get(get_logs))
         .route("/v1/repositories/{owner}/{name}/pause", post(pause))
+        .route("/v1/repositories/pause", post(pause_all))
+        .route(
+            "/v1/repositories/resume",
+            post(async || StatusCode::NO_CONTENT),
+        )
         .route("/v1/profiles/{name}/reseed", post(reseed))
         .route("/v1/config/check", post(check_config))
         .route("/v1/doctor", get(get_doctor))
@@ -493,6 +516,48 @@ fn a_pause_while_the_repository_runs_a_job_names_the_job_and_how_to_force_it() {
         "{}",
         stdout(&forced)
     );
+}
+
+#[test]
+fn a_pause_the_daemon_cannot_record_fails_saying_a_restart_resumes_it() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let output = runnerctl(&socket, &["pause", "halyard/wharf"]);
+    assert!(
+        !output.status.success(),
+        "a pause that is not durable fails"
+    );
+    assert!(
+        stderr(&output).contains("a restart resumes it"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!stdout(&output).contains("paused:"), "{}", stdout(&output));
+}
+
+#[test]
+fn pause_all_is_refused_while_a_job_runs_says_how_to_force_it_and_resume_all_resumes() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let refused = runnerctl(&socket, &["pause", "--all"]);
+    assert!(!refused.status.success(), "a pause while a job runs fails");
+    let error = stderr(&refused);
+    assert!(error.contains("job 9001"), "{error}");
+    assert!(error.contains("runnerctl pause --force --all"), "{error}");
+
+    let forced = runnerctl(&socket, &["pause", "--all", "--force"]);
+    assert!(forced.status.success(), "{}", stderr(&forced));
+    assert!(
+        stdout(&forced).contains("every repository paused"),
+        "{}",
+        stdout(&forced)
+    );
+
+    let resumed = runnerctl(&socket, &["resume", "--all"]);
+    assert!(resumed.status.success(), "{}", stderr(&resumed));
+    assert_eq!(stdout(&resumed), "every repository resumed\n");
 }
 
 #[test]

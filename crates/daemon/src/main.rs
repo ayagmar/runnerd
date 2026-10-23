@@ -215,8 +215,17 @@ fn config_or_default(config: Option<PathBuf>) -> Result<PathBuf, ExitCode> {
 }
 
 /// `$XDG_STATE_HOME/runnerd/runnerd.db`, or `~/.local/state/runnerd/runnerd.db`.
-/// The job history, and the repositories its events last announced, which the engine starts from.
-fn open_history(config: &Config) -> Result<(Store, Vec<RepositoryStatus>), ExitCode> {
+/// What the engine starts from in the job history.
+struct History {
+    store: Store,
+    /// The repositories its events last announced.
+    announced: Vec<RepositoryStatus>,
+    /// The repositories recorded paused.
+    paused: Vec<String>,
+}
+
+/// The job history, the repositories its events last announced and the ones recorded paused.
+fn open_history(config: &Config) -> Result<History, ExitCode> {
     let database = config
         .history
         .database
@@ -236,7 +245,17 @@ fn open_history(config: &Config) -> Result<(Store, Vec<RepositoryStatus>), ExitC
             database.display()
         ))
     })?;
-    Ok((store, announced))
+    let paused = store.paused_repositories().map_err(|error| {
+        fail(&format_args!(
+            "cannot read the paused repositories in the job history {}: {error}",
+            database.display()
+        ))
+    })?;
+    Ok(History {
+        store,
+        announced,
+        paused,
+    })
 }
 
 fn default_database() -> Option<PathBuf> {
@@ -276,7 +295,11 @@ async fn serve(
     let docker = Docker::connect().map_err(|error| fail(&error))?;
     docker.info().await.map_err(|error| fail(&error))?;
     let identity = HostIdentity::read().map_err(|error| fail(&error))?;
-    let (store, announced) = open_history(&config)?;
+    let History {
+        store,
+        announced,
+        paused,
+    } = open_history(&config)?;
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
     let web_listener = runnerd_web::listen(web)
@@ -292,6 +315,7 @@ async fn serve(
             memory_max: memory_max.map(|max| max.0),
             store: store.clone(),
             announced,
+            paused,
             paths: Paths::default(),
         },
     );

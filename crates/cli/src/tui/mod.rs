@@ -350,21 +350,22 @@ impl Requests {
             }
             Effect::Pause { repository, force } => {
                 tokio::spawn(async move {
-                    let msg = pause(&client, &repository, force).await;
+                    let msg = pause(&client, repository, force).await;
                     let _ = send.send(msg);
                 });
             }
             Effect::Resume { repository } => {
                 tokio::spawn(async move {
-                    let resumed = match crate::repository_path(&repository) {
-                        Ok(path) => client
-                            .post(&format!("{path}/resume"), &())
+                    let resumed = match crate::Target::new(repository) {
+                        Ok(target) => client
+                            .post(&format!("{}/resume", target.path), &())
                             .await
+                            .map(|_| target.name)
                             .map_err(|error| error.to_string()),
                         Err(error) => Err(error.to_string()),
                     };
                     let _ = send.send(match resumed {
-                        Ok(_) => Msg::Done(format!("{repository} resumed")),
+                        Ok(name) => Msg::Done(format!("{name} resumed")),
                         Err(error) => Msg::Failed(error),
                     });
                 });
@@ -406,20 +407,22 @@ async fn status(client: &Client, send: &UnboundedSender<Msg>) {
     answer(send, client.get::<Status>("/v1/status").await, Msg::Status);
 }
 
-async fn pause(client: &Client, repository: &str, force: bool) -> Msg {
-    let path = match crate::repository_path(repository) {
-        Ok(path) => format!("{path}/pause"),
+/// Pauses `repository`, or every one when `None`.
+async fn pause(client: &Client, repository: Option<String>, force: bool) -> Msg {
+    let target = match crate::Target::new(repository.clone()) {
+        Ok(target) => target,
         Err(error) => return Msg::Failed(error.to_string()),
     };
+    let name = &target.name;
     match client
-        .post_json::<Paused>(&path, &PauseQuery { force })
+        .post_json::<Paused>(&format!("{}/pause", target.path), &PauseQuery { force })
         .await
     {
         Ok(paused) if paused.stopped.is_empty() => {
-            Msg::Done(format!("{repository} paused: it gets no new runners"))
+            Msg::Done(format!("{name} paused: it gets no new runners"))
         }
         Ok(paused) => Msg::Done(format!(
-            "{repository} paused; stopped {}",
+            "{name} paused; stopped {}",
             paused
                 .stopped
                 .iter()
@@ -429,7 +432,7 @@ async fn pause(client: &Client, repository: &str, force: bool) -> Msg {
         )),
         Err(ClientError::Api { status, message }) if status == hyper::StatusCode::CONFLICT => {
             Msg::Busy {
-                repository: repository.to_owned(),
+                repository,
                 message,
             }
         }

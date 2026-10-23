@@ -1449,6 +1449,7 @@ dependencies = [
  "reqwest",
  "runnerd-core",
  "runnerd-web",
+ "rusqlite",
  "serde_json",
  "tokio",
  "tracing",

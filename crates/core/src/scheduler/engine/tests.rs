@@ -1,6 +1,6 @@
 //! Runner names, and the engine against fake GitHub and Docker: polling order, restart recovery, a Docker that
 //! does not answer, which runners it deletes, the job history it keeps across restarts, and the API's commands:
-//! forced pause, reseed, cache clean and reload.
+//! pause of one repository or all, forced or not and across restarts, reseed, cache clean and reload.
 
 use std::collections::{BTreeMap, HashMap};
 use std::sync::{Arc, Mutex};
@@ -11,6 +11,7 @@ use futures_util::StreamExt;
 
 use super::{
     Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, Setup, Shutdown,
+    Target,
 };
 use crate::api::{self, JobState};
 use crate::cache::Names;
@@ -397,6 +398,11 @@ profile = "app"
 labels = ["self-hosted", "app"]
 "#;
 
+/// A pause or resume of one repository.
+fn one(repository: &str) -> Target {
+    Target::Repository(repository.to_owned())
+}
+
 /// An engine on the fakes, with its history in `dir`.
 fn engine_in(
     github: &FakeGithub,
@@ -422,6 +428,7 @@ fn engine_with(
             identity: identity("ci", ID_A),
             memory_max: None,
             announced: store.announced_repositories().unwrap(),
+            paused: store.paused_repositories().unwrap(),
             store,
             paths: Paths {
                 cgroup: dir.0.join("cgroup"),
@@ -989,7 +996,8 @@ async fn a_pause_is_refused_while_the_repository_runs_a_job_and_forced_cancels_o
     until_state(&handle, 2, JobState::Running).await;
     engine.tick(Shutdown::No).await;
 
-    let Err(ControlError::Busy { jobs, .. }) = engine.pause("o/r", RunningJobs::Keep).await else {
+    let Err(ControlError::Busy { jobs, .. }) = engine.pause(&one("o/r"), RunningJobs::Keep).await
+    else {
         panic!("a pause while o/r runs a job went through");
     };
     assert_eq!(
@@ -998,7 +1006,7 @@ async fn a_pause_is_refused_while_the_repository_runs_a_job_and_forced_cancels_o
     );
     assert!(!handle.control.is_paused("o/r"));
 
-    let paused = engine.pause("o/r", RunningJobs::Kill).await.unwrap();
+    let paused = engine.pause(&one("o/r"), RunningJobs::Kill).await.unwrap();
     assert_eq!(
         paused.stopped.iter().map(|job| job.job).collect::<Vec<_>>(),
         [Some(1)]
@@ -1022,6 +1030,214 @@ async fn a_pause_is_refused_while_the_repository_runs_a_job_and_forced_cancels_o
 }
 
 #[tokio::test]
+async fn a_paused_repository_gets_no_runner_after_a_restart_until_it_is_resumed() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    drop(engine);
+
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    assert!(handle.control.is_paused("o/r"), "o/r is still paused");
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+
+    handle.control.set_paused(&one("o/r"), false).await.unwrap();
+    drop(engine);
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    assert!(!handle.control.is_paused("o/r"), "o/r stays resumed");
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+}
+
+#[tokio::test]
+async fn pausing_every_repository_is_refused_while_one_runs_a_job_and_forced_cancels_its_job() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+
+    let Err(ControlError::Busy { jobs, message }) =
+        engine.pause(&Target::All, RunningJobs::Keep).await
+    else {
+        panic!("a pause of every repository while o/r runs a job went through");
+    };
+    assert_eq!(
+        jobs.iter().map(|job| job.job).collect::<Vec<_>>(),
+        [Some(1)]
+    );
+    assert!(message.contains("o/r runs job 1"), "{message}");
+    assert!(
+        !handle.control.is_paused("o/r"),
+        "a refused pause pauses none"
+    );
+    assert!(
+        !handle.control.is_paused("o/s"),
+        "a refused pause pauses none"
+    );
+
+    let paused = engine.pause(&Target::All, RunningJobs::Kill).await.unwrap();
+    assert_eq!(
+        paused.stopped.iter().map(|job| job.job).collect::<Vec<_>>(),
+        [Some(1)]
+    );
+    assert!(handle.control.is_paused("o/r"), "o/r is paused");
+    assert!(handle.control.is_paused("o/s"), "o/s is paused");
+    let cancelled: Vec<String> = github
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with("cancel "))
+        .collect();
+    assert_eq!(cancelled, ["cancel o/r 1"]);
+}
+
+/// Makes the history refuse every change to the paused repositories, as a full disk would, until it is dropped.
+fn refuse_paused_records(dir: &TestDir) -> rusqlite::Connection {
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_insert BEFORE INSERT ON paused BEGIN SELECT RAISE(ABORT, 'full'); END; \
+             CREATE TRIGGER no_delete BEFORE DELETE ON paused BEGIN SELECT RAISE(ABORT, 'full'); END;",
+        )
+        .unwrap();
+    fault
+}
+
+#[tokio::test]
+async fn a_pause_the_history_cannot_record_says_so_and_holds_only_until_a_restart() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    let _fault = refuse_paused_records(&dir);
+    let Err(ControlError::NotRecorded(message)) =
+        engine.pause(&one("o/r"), RunningJobs::Keep).await
+    else {
+        panic!("a pause the history did not record reported success");
+    };
+    assert!(message.contains("a restart resumes it"), "{message}");
+    assert!(
+        handle.control.is_paused("o/r"),
+        "o/r is paused until the restart"
+    );
+    drop(engine);
+
+    let (_engine, handle) = engine_in(&github, &docker, &dir);
+    assert!(!handle.control.is_paused("o/r"), "the restart resumed o/r");
+}
+
+#[tokio::test]
+async fn a_forced_pause_the_history_cannot_record_still_cancels_the_run_and_says_so() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    let _fault = refuse_paused_records(&dir);
+    let Err(ControlError::NotRecorded(message)) =
+        engine.pause(&one("o/r"), RunningJobs::Kill).await
+    else {
+        panic!("a forced pause the history did not record reported success");
+    };
+    assert!(message.contains("stopped job 1"), "{message}");
+    assert!(
+        handle.control.is_paused("o/r"),
+        "o/r is paused until the restart"
+    );
+    let cancelled: Vec<String> = github
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with("cancel "))
+        .collect();
+    assert_eq!(cancelled, ["cancel o/r 1"]);
+}
+
+#[tokio::test]
+async fn a_resume_the_history_cannot_record_says_a_restart_pauses_it_again() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    let _fault = refuse_paused_records(&dir);
+    let Err(ControlError::NotRecorded(message)) =
+        handle.control.set_paused(&Target::All, false).await
+    else {
+        panic!("a resume the history did not record reported success");
+    };
+    assert!(message.contains("a restart pauses it again"), "{message}");
+    assert!(
+        !handle.control.is_paused("o/r"),
+        "o/r runs until the restart"
+    );
+    drop(engine);
+
+    let (_engine, handle) = engine_in(&github, &docker, &dir);
+    assert!(
+        handle.control.is_paused("o/r"),
+        "the restart paused o/r again"
+    );
+}
+
+#[tokio::test]
+async fn resuming_every_repository_resumes_them_across_a_restart() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.pause(&Target::All, RunningJobs::Keep).await.unwrap();
+    handle
+        .control
+        .set_paused(&Target::All, false)
+        .await
+        .unwrap();
+    assert!(!handle.control.is_paused("o/r"), "o/r runs again");
+    assert!(!handle.control.is_paused("o/s"), "o/s runs again");
+    drop(engine);
+
+    let (_engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    assert!(!handle.control.is_paused("o/r"), "o/r stays resumed");
+    assert!(!handle.control.is_paused("o/s"), "o/s stays resumed");
+}
+
+#[tokio::test]
+async fn a_paused_repository_a_reload_removes_comes_back_active_also_after_a_restart() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.pause(&Target::All, RunningJobs::Keep).await.unwrap();
+    engine.reload(Config::parse(CONFIG).unwrap(), None);
+    assert!(handle.control.is_paused("o/r"), "o/r stays paused");
+    assert_eq!(
+        handle.control.set_paused(&one("o/s"), false).await,
+        Err(ControlError::NotFound(
+            "o/s is not a configured repository".to_owned()
+        ))
+    );
+
+    engine.reload(Config::parse(&two_repositories()).unwrap(), None);
+    assert!(!handle.control.is_paused("o/s"), "o/s comes back active");
+    handle.store.flush().await;
+    drop(engine);
+    let (_engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    assert!(handle.control.is_paused("o/r"), "o/r is still paused");
+    assert!(!handle.control.is_paused("o/s"), "o/s stays active");
+}
+
+#[tokio::test]
 async fn the_runner_of_a_cancelled_run_that_does_not_exit_is_removed_after_a_while() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
@@ -1030,7 +1246,7 @@ async fn the_runner_of_a_cancelled_run_that_does_not_exit_is_removed_after_a_whi
     engine.recover().await.unwrap();
     until_state(&handle, 1, JobState::Running).await;
     engine.tick(Shutdown::No).await;
-    engine.pause("o/r", RunningJobs::Kill).await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Kill).await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
     tokio::time::pause();
@@ -1048,7 +1264,7 @@ async fn the_runner_of_a_cancelled_run_is_removed_on_a_later_tick_when_docker_fa
     engine.recover().await.unwrap();
     until_state(&handle, 1, JobState::Running).await;
     engine.tick(Shutdown::No).await;
-    engine.pause("o/r", RunningJobs::Kill).await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Kill).await.unwrap();
     tokio::time::pause();
     tokio::time::advance(super::control::CANCEL_GRACE).await;
     docker.0.lock().unwrap().fail_removes = 1;
@@ -1111,7 +1327,7 @@ async fn killing_the_runner_of_a_cancelled_run_trims_the_shared_caches_and_resee
     engine.tick(Shutdown::No).await;
 
     // Its run is cancelled, but the runner does not exit and is killed.
-    engine.pause("o/r", RunningJobs::Kill).await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Kill).await.unwrap();
     tokio::time::pause();
     tokio::time::advance(super::control::CANCEL_GRACE).await;
     engine.tick(Shutdown::No).await;
@@ -1587,7 +1803,7 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
     let docker = FakeDocker::default();
     let (mut engine, handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
-    engine.pause("o/r", RunningJobs::Keep).await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
     let (reply, answer) = tokio::sync::oneshot::channel();
     engine
         .command(Command::ReplaceConfig {
@@ -1701,7 +1917,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     engine.publish();
     assert_eq!(repository_events(&handle, &mut after).await, []);
 
-    engine.pause("o/r", RunningJobs::Keep).await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
     engine.publish();
     assert_eq!(
         repository_events(&handle, &mut after).await,
@@ -1723,7 +1939,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     engine.publish();
     assert_eq!(repository_events(&handle, &mut after).await, []);
 
-    assert!(handle.control.set_paused("o/r", false), "o/r is configured");
+    handle.control.set_paused(&one("o/r"), false).await.unwrap();
     engine.publish();
     assert_eq!(
         repository_events(&handle, &mut after).await,
@@ -1800,8 +2016,8 @@ async fn a_pause_undone_before_it_is_published_leaves_clients_where_the_status_i
     repository_events(&handle, &mut cursor).await;
     let mut shown = handle.status.borrow().repositories.clone();
 
-    engine.pause("o/r", RunningJobs::Keep).await.unwrap();
-    assert!(handle.control.set_paused("o/r", false), "o/r is configured");
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    handle.control.set_paused(&one("o/r"), false).await.unwrap();
     engine.publish();
     for event in repository_events(&handle, &mut cursor).await {
         match event {

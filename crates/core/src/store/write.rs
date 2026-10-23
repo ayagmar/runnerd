@@ -122,6 +122,9 @@ impl Writer<'_> {
                     Ok(())
                 });
             }
+            Write::Paused { repositories, done } => {
+                let _ = done.send(self.paused(&repositories));
+            }
             Write::Prune { now, history } => self.prune(now, &history),
             Write::Flush(done) => {
                 let _ = done.send(());
@@ -511,6 +514,18 @@ impl Writer<'_> {
             }
         }
         Ok(())
+    }
+
+    /// Replaces the paused repositories.
+    fn paused(&self, repositories: &[String]) -> bool {
+        self.change("record the paused repositories", |_| {
+            self.db.execute("DELETE FROM paused", [])?;
+            for repository in repositories {
+                self.db
+                    .execute("INSERT INTO paused (repository) VALUES (?1)", [repository])?;
+            }
+            Ok(())
+        })
     }
 
     /// Counts a batch of the mirror's log and where it ends, together: counting part of it, or counting it without

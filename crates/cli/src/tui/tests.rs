@@ -390,12 +390,12 @@ fn a_refused_pause_is_forced_only_after_y() {
     assert_eq!(
         app.update(key(KeyCode::Char('p'))),
         vec![Effect::Pause {
-            repository: "halyard/ledger".to_owned(),
+            repository: Some("halyard/ledger".to_owned()),
             force: false
         }]
     );
     app.update(Msg::Busy {
-        repository: "halyard/ledger".to_owned(),
+        repository: Some("halyard/ledger".to_owned()),
         message: "halyard/ledger runs job 42 on runnerd-ab12-jvm-1".to_owned(),
     });
     assert!(screen(&app, 120, 40, false).contains("runs job 42"));
@@ -403,15 +403,42 @@ fn a_refused_pause_is_forced_only_after_y() {
     assert!(app.confirm.is_none());
 
     app.update(Msg::Busy {
-        repository: "halyard/ledger".to_owned(),
+        repository: Some("halyard/ledger".to_owned()),
         message: "halyard/ledger runs job 42".to_owned(),
     });
     assert_eq!(
         app.update(key(KeyCode::Char('y'))),
         vec![Effect::Pause {
-            repository: "halyard/ledger".to_owned(),
+            repository: Some("halyard/ledger".to_owned()),
             force: true
         }]
+    );
+}
+
+#[test]
+fn shift_p_and_u_pause_and_resume_every_repository_and_a_refused_pause_of_all_is_forced_after_y() {
+    let mut app = app();
+    assert_eq!(
+        app.update(key(KeyCode::Char('P'))),
+        vec![Effect::Pause {
+            repository: None,
+            force: false
+        }]
+    );
+    app.update(Msg::Busy {
+        repository: None,
+        message: "halyard/ledger runs job 42".to_owned(),
+    });
+    assert_eq!(
+        app.update(key(KeyCode::Char('y'))),
+        vec![Effect::Pause {
+            repository: None,
+            force: true
+        }]
+    );
+    assert_eq!(
+        app.update(key(KeyCode::Char('U'))),
+        vec![Effect::Resume { repository: None }]
     );
 }
 

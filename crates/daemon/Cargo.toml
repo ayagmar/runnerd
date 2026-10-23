@@ -22,6 +22,10 @@ tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "sig
 tracing.workspace = true
 tracing-subscriber.workspace = true
 
+[dev-dependencies]
+# To make the job history fail a write, as a full disk would.
+rusqlite.workspace = true
+
 # cargo binstall downloads the release archive dist builds (named for the crate; the binary sits in a directory of the
 # same name) instead of compiling. Releases cover Linux x86_64 and aarch64 on musl.
 [package.metadata.binstall]

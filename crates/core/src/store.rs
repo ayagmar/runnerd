@@ -1,7 +1,8 @@
 //! The job history: a SQLite database of jobs, their runners, steps, samples and logs, the events clients resume
-//! from, and cache sizes. Owns the schema and its migrations, the one writer and the event broadcast. Writes are
-//! messages to a writer thread, so the engine never waits on the disk; reads run on Tokio's blocking pool. It
-//! decides nothing about scheduling and stores no secret: no token, no JIT config, no runner `_diag` log.
+//! from, cache sizes and the paused repositories. Owns the schema and its migrations, the one writer and the event
+//! broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads run on Tokio's
+//! blocking pool. It decides nothing about scheduling and stores no secret: no token, no JIT config, no runner
+//! `_diag` log.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -25,6 +26,7 @@ mod write;
 const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0001_history.sql"),
     include_str!("store/migrations/0002_runner_caps.sql"),
+    include_str!("store/migrations/0003_paused.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -193,6 +195,11 @@ enum Write {
         sizes: BTreeMap<String, u64>,
     },
     Event(Event),
+    Paused {
+        repositories: Vec<String>,
+        /// Whether it committed.
+        done: oneshot::Sender<bool>,
+    },
     Prune {
         now: u64,
         history: History,
@@ -370,6 +377,14 @@ impl Store {
         self.send(Write::Event(event));
     }
 
+    /// Records the paused repositories, all of them, in place of the ones recorded before. The write is sent at
+    /// once, in order with every other; the future says whether it committed.
+    pub fn paused(&self, repositories: Vec<String>) -> impl Future<Output = bool> + use<> {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::Paused { repositories, done });
+        async move { committed.await.unwrap_or(false) }
+    }
+
     /// Deletes what is older than `history` keeps.
     pub fn prune(&self, now: u64, history: &History) {
         self.send(Write::Prune {
@@ -445,6 +460,11 @@ impl Store {
     /// changed since, including the repositories its config no longer has. Blocks on the database: for startup.
     pub fn announced_repositories(&self) -> Result<Vec<api::RepositoryStatus>, StoreError> {
         Ok(read::announced_repositories(&lock(&self.reader))?)
+    }
+
+    /// The repositories recorded paused, for the engine to start with. Blocks on the database: for startup.
+    pub fn paused_repositories(&self) -> Result<Vec<String>, StoreError> {
+        Ok(read::paused(&lock(&self.reader))?)
     }
 
     /// The slice's samples since `since` (seconds), oldest first.

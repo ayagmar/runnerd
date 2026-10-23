@@ -92,18 +92,27 @@ enum Command {
     /// Keys: 1 overview, 2 history, tab and j/k to move, enter to open a job, p/r to pause or resume, ? for all.
     #[cfg(feature = "tui")]
     Tui,
-    /// Give a repository no new runners. Refused while it runs a job, unless --force.
+    /// Give a repository, or every one, no new runners, also after a restart. Refused while it runs a job, unless
+    /// --force.
     Pause {
         /// owner/name
-        repository: String,
+        #[arg(required_unless_present = "all")]
+        repository: Option<String>,
+        /// Pause every configured repository; refused while any of them runs a job, unless --force.
+        #[arg(long, conflicts_with = "repository")]
+        all: bool,
         /// Cancel its running jobs' workflow runs and remove their runners.
         #[arg(long)]
         force: bool,
     },
-    /// Let a paused repository get runners again.
+    /// Let a paused repository, or every one, get runners again.
     Resume {
         /// owner/name
-        repository: String,
+        #[arg(required_unless_present = "all")]
+        repository: Option<String>,
+        /// Resume every configured repository.
+        #[arg(long, conflicts_with = "repository")]
+        all: bool,
     },
     /// Make a profile's slot 1 layers its new snapshot, once its slots are free; waits until it is done.
     Reseed {
@@ -228,6 +237,34 @@ fn repository_path(repository: &str) -> Result<String, Error> {
     }
 }
 
+/// What a pause or resume names: one repository, or every one with `--all`.
+pub(crate) struct Target {
+    /// The route's path before `/pause` or `/resume`.
+    pub(crate) path: String,
+    /// For people to read.
+    pub(crate) name: String,
+    /// The arguments that name it, for a hint to run again.
+    arguments: String,
+}
+
+impl Target {
+    /// `repository`, or every one when `None`; clap requires it or `--all`.
+    pub(crate) fn new(repository: Option<String>) -> Result<Target, Error> {
+        Ok(match repository {
+            Some(repository) => Target {
+                path: repository_path(&repository)?,
+                arguments: repository.clone(),
+                name: repository,
+            },
+            None => Target {
+                path: "/v1/repositories".to_owned(),
+                name: "every repository".to_owned(),
+                arguments: "--all".to_owned(),
+            },
+        })
+    }
+}
+
 fn print_json(value: &impl Serialize) -> Result<ExitCode, Error> {
     let text =
         serde_json::to_string_pretty(value).map_err(|error| Error::Local(error.to_string()))?;
@@ -302,15 +339,16 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
             }
             tui::run(client, paint.colour).await?;
         }
-        Command::Pause { repository, force } => {
-            return pause(client, json, &repository, force).await;
+        Command::Pause {
+            repository, force, ..
+        } => {
+            return pause(client, json, &Target::new(repository)?, force).await;
         }
-        Command::Resume { repository } => {
-            client
-                .post(&format!("{}/resume", repository_path(&repository)?), &())
-                .await?;
+        Command::Resume { repository, .. } => {
+            let target = Target::new(repository)?;
+            client.post(&format!("{}/resume", target.path), &()).await?;
             if !json {
-                output::line(format_args!("{repository} resumed"));
+                output::line(format_args!("{} resumed", target.name));
             }
         }
         Command::Reseed { profile, no_wait } => {
@@ -343,15 +381,16 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
 async fn pause(
     client: &Client,
     json: bool,
-    repository: &str,
+    target: &Target,
     force: bool,
 ) -> Result<ExitCode, Error> {
-    let path = format!("{}/pause", repository_path(repository)?);
+    let path = format!("{}/pause", target.path);
     let paused: Paused = match client.post_json(&path, &PauseQuery { force }).await {
         Ok(paused) => paused,
         Err(ClientError::Api { status, message }) if status == hyper::StatusCode::CONFLICT => {
             return Err(Error::Local(format!(
-                "{message}\n`runnerctl pause --force {repository}` cancels its runs and removes their runners"
+                "{message}\n`runnerctl pause --force {}` cancels its runs and removes their runners",
+                target.arguments
             )));
         }
         Err(error) => return Err(error.into()),
@@ -359,7 +398,10 @@ async fn pause(
     if json {
         return print_json(&paused);
     }
-    output::line(format_args!("{repository} paused: it gets no new runners"));
+    output::line(format_args!(
+        "{} paused: it gets no new runners",
+        target.name
+    ));
     for stopped in &paused.stopped {
         output::line(format_args!("stopped {stopped}"));
     }

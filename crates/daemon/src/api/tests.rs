@@ -7,13 +7,13 @@ use std::time::Duration;
 
 use reqwest::StatusCode;
 use runnerd_core::api::{
-    Budget, Busy, ConfigCheck, ConfigFile, Event, EventEnvelope, JobState, Paused, ProfileStatus,
-    RunningJob, Status,
+    Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, JobState, Paused,
+    ProfileStatus, RunningJob, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::github::{JobDetails, QueuedJob};
 use runnerd_core::scheduler::engine::{
-    Command, Commands, Control, ControlError, Handle, RunningJobs, Shutdown,
+    Command, Commands, Control, ControlError, Handle, RunningJobs, Shutdown, Target,
 };
 use runnerd_core::store::{LogPosition, RunnerRecord, Store};
 use tokio::sync::{mpsc, oneshot, watch};
@@ -57,23 +57,22 @@ async fn fake_engine(
     while let Some(command) = commands.recv().await {
         match command {
             Command::Pause {
-                repository,
+                target,
                 jobs,
                 reply,
             } => {
-                let busy = repository == "o/busy";
-                let _ = reply.send(if !busy && repository != "o/app" {
-                    Err(ControlError::NotFound(format!(
-                        "{repository} is not configured"
-                    )))
-                } else if busy && jobs == RunningJobs::Keep {
+                let busy = match &target {
+                    Target::Repository(repository) => repository == "o/busy",
+                    Target::All => true,
+                };
+                let _ = reply.send(if busy && jobs == RunningJobs::Keep {
                     Err(ControlError::Busy {
                         message: "o/busy runs job 7 on runner-1".to_owned(),
                         jobs: vec![busy_job()],
                     })
                 } else {
-                    control.set_paused(&repository, true);
-                    Ok(Paused {
+                    // Refuses a repository the config does not have.
+                    control.set_paused(&target, true).await.map(|()| Paused {
                         stopped: if busy { vec![busy_job()] } else { Vec::new() },
                     })
                 });
@@ -173,7 +172,8 @@ fn failing_sync(_dir: &Path) -> std::io::Result<()> {
 async fn start_with(dir: &Path, owner: Option<u32>, engine: bool, sync_dir: SyncDir) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
-    let (control, commands) = Control::new(["o/app".to_owned(), "o/busy".to_owned()]);
+    let (control, commands) =
+        Control::new(["o/app".to_owned(), "o/busy".to_owned()], [], store.clone());
     let control = Arc::new(control);
     let (reloaded, reloads) = mpsc::unbounded_channel();
     if engine {
@@ -269,6 +269,69 @@ async fn repositories_pause_and_resume_by_owner_and_name() {
 }
 
 #[tokio::test]
+async fn every_repository_pauses_at_once_refused_while_one_runs_a_job_unless_forced_and_resumes_at_once()
+ {
+    let (client, control, _dir) = daemon().await;
+    let refused = client
+        .post("http://runnerd/v1/repositories/pause")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(refused.status(), StatusCode::CONFLICT);
+    let busy: Busy = serde_json::from_slice(&body(refused).await).unwrap();
+    assert_eq!(busy.jobs, [busy_job()]);
+    assert!(!control.is_paused("o/app"), "a refused pause pauses none");
+
+    let forced = client
+        .post("http://runnerd/v1/repositories/pause?force=true")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(forced.status(), StatusCode::OK);
+    let paused: Paused = serde_json::from_slice(&body(forced).await).unwrap();
+    assert_eq!(paused.stopped, [busy_job()]);
+    assert!(control.is_paused("o/app"), "o/app is paused");
+    assert!(control.is_paused("o/busy"), "o/busy is paused");
+
+    let resumed = client
+        .post("http://runnerd/v1/repositories/resume")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(resumed.status(), StatusCode::NO_CONTENT);
+    assert!(!control.is_paused("o/app"), "o/app runs again");
+    assert!(!control.is_paused("o/busy"), "o/busy runs again");
+}
+
+#[tokio::test]
+async fn a_pause_the_history_cannot_record_fails_saying_a_restart_undoes_it() {
+    let (client, control, dir) = daemon().await;
+    // As a full disk would.
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_insert BEFORE INSERT ON paused BEGIN SELECT RAISE(ABORT, 'full'); END;",
+        )
+        .unwrap();
+    let response = client
+        .post("http://runnerd/v1/repositories/o/app/pause")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error: ErrorResponse = serde_json::from_slice(&body(response).await).unwrap();
+    assert!(
+        error.message.contains("a restart resumes it"),
+        "{}",
+        error.message
+    );
+    assert!(
+        control.is_paused("o/app"),
+        "o/app is paused until a restart"
+    );
+}
+
+#[tokio::test]
 async fn shutdown_is_graceful_unless_forced() {
     let (client, control, _dir) = daemon().await;
     let response = client
@@ -307,6 +370,8 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/caches/history"),
         client.get("http://runnerd/v1/events"),
         client.post("http://runnerd/v1/repositories/o/busy/pause?force=true"),
+        client.post("http://runnerd/v1/repositories/pause?force=true"),
+        client.post("http://runnerd/v1/repositories/resume"),
         client.post("http://runnerd/v1/profiles/jvm/reseed"),
         client.post("http://runnerd/v1/caches/runnerd-pnpm/clean"),
         client.get("http://runnerd/v1/config"),
