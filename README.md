@@ -49,13 +49,13 @@ runnerd doctor runnerd.toml
 
 ## Runner image
 
-[`image/`](image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base. A profile's `image_stage` picks the stage:
+[`image/`](https://github.com/ayagmar/runnerd/tree/main/image) builds the container every job runs in: the GitHub Actions runner, its own Docker Engine, and one Dockerfile stage per profile on a common base. A profile's `image_stage` picks the stage:
 
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
 ```
 
-`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it. Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
+`runnerd` runs the image `runnerd-runner:<image_stage>`; build the stages your profiles use before starting it. Rebuilds install the same versions: Ubuntu packages come from one snapshot date and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)).
 
 Documentation: <https://ayagmar.github.io/runnerd/>
 
@@ -106,7 +106,7 @@ Where the data comes from:
 ### API
 
 runnerd serves JSON on `$XDG_RUNTIME_DIR/runnerd.sock` (mode 0600; only the user it runs as may connect). The types are
-in [`crates/core/src/api.rs`](crates/core/src/api.rs) and its modules. Times are seconds since the Unix epoch, sizes
+in [`crates/core/src/api.rs`](https://github.com/ayagmar/runnerd/blob/main/crates/core/src/api.rs) and its modules. Times are seconds since the Unix epoch, sizes
 bytes, CPU millicores.
 
 | Request | Response |
@@ -263,7 +263,7 @@ From the bash `ci` tool:
 
 ## Config
 
-One file, `runnerd.toml`, lists the repositories to serve, the runner profile each one uses, the shared caches and the systemd slice whose limits form the budget. [`examples/runnerd.toml`](examples/runnerd.toml) is a complete example.
+One file, `runnerd.toml`, lists the repositories to serve, the runner profile each one uses, the shared caches and the systemd slice whose limits form the budget. [`examples/runnerd.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/runnerd.toml) is a complete example.
 
 ```sh
 runnerd check-config runnerd.toml
@@ -282,8 +282,8 @@ cargo build --release
 ```
 
 The toolchain is pinned in `rust-toolchain.toml`. Before sending a change, run the checks listed under "The gate" in
-[AGENTS.md](AGENTS.md); CI runs the same. [CONTRIBUTING.md](CONTRIBUTING.md) explains which CI jobs a change triggers,
-and [ARCHITECTURE.md](ARCHITECTURE.md) where the code lives.
+[AGENTS.md](https://github.com/ayagmar/runnerd/blob/main/AGENTS.md); CI runs the same. [CONTRIBUTING.md](https://github.com/ayagmar/runnerd/blob/main/CONTRIBUTING.md) explains which CI jobs a change triggers,
+and [ARCHITECTURE.md](https://github.com/ayagmar/runnerd/blob/main/ARCHITECTURE.md) where the code lives.
 
 The tests that start real containers are ignored by default. They need Docker with sysbox and the images:
 
@@ -293,7 +293,7 @@ docker build --target base -t runnerd-runner:base image
 cargo test -p runnerd-core --test docker_smoke --test cache_reseed -- --ignored
 ```
 
-[`examples/sandbox.toml`](examples/sandbox.toml) is the setup for the end-to-end test against the throwaway repository `ayagmar/runnerd-sandbox`.
+[`examples/sandbox.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/sandbox.toml) is the setup for the end-to-end test against the throwaway repository `ayagmar/runnerd-sandbox`.
 
 ## License
 
