@@ -606,7 +606,9 @@ fn shift_p_and_u_pause_and_resume_every_repository_and_a_refused_pause_of_all_is
     let asked = screen(&app, 136, 40, false);
     let prompt = asked.lines().last().unwrap();
     assert!(
-        prompt.starts_with(" y cancels 2 runs and pauses, any other key keeps them running: "),
+        prompt.starts_with(
+            " y cancels the runs of 2 jobs and pauses, any other key keeps them running: "
+        ),
         "{prompt}"
     );
     assert!(

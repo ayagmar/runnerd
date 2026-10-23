@@ -154,10 +154,11 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let line = if let Some(refused) = &app.confirm {
         let ask = if refused.jobs == 1 {
-            " y cancels 1 run and pauses, any other key keeps it running: ".to_owned()
+            " y cancels the job's run and pauses, any other key keeps it running: ".to_owned()
         } else {
+            // Jobs of one workflow share a run, so the count is of jobs.
             format!(
-                " y cancels {} runs and pauses, any other key keeps them running: ",
+                " y cancels the runs of {} jobs and pauses, any other key keeps them running: ",
                 refused.jobs
             )
         };
