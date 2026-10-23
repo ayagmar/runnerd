@@ -73,6 +73,8 @@ await_holding_lock = "warn"
 [profile.dist]
 inherits = "release"
 lto = "thin"
+# Symbols are a quarter of each binary. A panic's backtrace shows addresses instead of function names.
+strip = "symbols"
 
 [workspace.metadata.dist]
 cargo-dist-version = "0.33.1"
