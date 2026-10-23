@@ -3,6 +3,8 @@ title: Configuration
 description: The runnerd.toml file, runner profiles, and the memory budget check.
 ---
 
+import Budget from '../../components/diagrams/Budget.astro';
+
 One file, `~/.config/runnerd/runnerd.toml`: the repositories to serve, the profile each one runs on, the shared caches, and the systemd slice whose `MemoryMax` is the budget. `runnerd init` writes a starter one.
 
 ## An example
@@ -165,6 +167,8 @@ UNDER: jobs that peaked above what admission reserved for them. HELD: times the 
 Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--days` sets the window. A `PEAKS` over `MemoryMax` is marked `!`. A `PEAKS` well under `MemoryMax` is what the replay shows, not a promise: leave the daemon room for what it does not model.
 
 ## The budget check
+
+<Budget />
 
 `runnerd check-config [file]`, by default on `~/.config/runnerd/runnerd.toml`, reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
 
