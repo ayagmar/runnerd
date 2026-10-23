@@ -1,37 +1,86 @@
 #!/bin/sh
-# Every `runnerd <command>` and `runnerctl <command>` the README and the site's docs show exists: each answers
-# `--help`, and so does the subcommand after a command that has them (`runnerctl config show`). Reads commands from
-# inline code, `sh` blocks (but not `cargo` lines), and the `$ ` lines of `console` blocks; output and prose are not
-# commands.
+# Every `runnerd …` and `runnerctl …` command line the README and the site's docs show exists: its command, its
+# subcommand when the command has them (`runnerctl config show`), and every option, each checked against `--help`.
+# Options before the command (`runnerctl --socket <path> status`) are checked against the program's own `--help`, and
+# their values skipped. Reads command lines from inline code, `sh`/`shell`/`bash` blocks (but not `cargo` lines),
+# and the `$ ` lines of `console` blocks; output and prose are not commands.
 # Usage: check-docs-commands.sh <directory with runnerd and runnerctl>, such as target/debug.
 set -eu
 
 bin=${1:?usage: check-docs-commands.sh <directory with runnerd and runnerctl>}
-commands=$(
+lines=$(
   awk '
     /^```/ { if (fence) { fence = "" } else { fence = substr($1, 4); if (fence == "") fence = "text" } next }
-    fence == "sh" || fence == "bash" { print; next }
+    fence == "sh" || fence == "shell" || fence == "bash" { print; next }
     fence == "console" { if (sub(/^\$ /, "")) print; next }
     fence { next }
     { while (match($0, /`[^`]+`/)) { print substr($0, RSTART + 1, RLENGTH - 2); $0 = substr($0, RSTART + RLENGTH) } }
   ' README.md site/src/content/docs/*.md site/src/content/docs/*.mdx |
     grep -v 'cargo ' |
-    grep -oE '(^|[^-/.a-z])runner(d|ctl)( --?[a-z-]+)*( [a-z][a-z-]*){1,2}' |
-    sed -E 's/^[^r]*//; s/ --?[a-z-]+//g' | sort -u
+    grep -oE '(^|[;&|(]) *runner(d|ctl)( [^ |;&#]+)+' |
+    sed -E 's/^[^r]*//; s/[][]//g' | sort -u
 )
-[ -n "$commands" ] || { echo "no commands found in the docs" >&2; exit 1; }
-echo "$commands" | {
+[ -n "$lines" ] || { echo "no commands found in the docs" >&2; exit 1; }
+
+# has_option HELP OPTION: whether the help text lists the option (`--name` or `-n`, before a space, comma or `=`).
+has_option() {
+  printf '%s\n' "$1" | grep -qE -- "(^|[ ,])$2([ ,=]|$)"
+}
+
+# takes_value HELP OPTION: whether the help text shows the option with a value (`--socket <SOCKET>`).
+takes_value() {
+  printf '%s\n' "$1" | grep -qE -- "(^|[ ,])$2 <"
+}
+
+echo "$lines" | {
   status=0
-  while read -r program command sub; do
-    if ! "$bin/$program" "$command" --help >/dev/null 2>&1; then
-      echo "the docs show \`$program $command\`, which $program does not have" >&2
-      status=1
-    elif [ -n "$sub" ] && "$bin/$program" "$command" --help | grep -q '^Usage: .*<COMMAND>' &&
-      ! "$bin/$program" "$command" "$sub" --help >/dev/null 2>&1; then
-      echo "the docs show \`$program $command $sub\`, which $program does not have" >&2
+  while read -r line; do
+    # shellcheck disable=SC2086 # splits the command line into words on purpose
+    set -- $line
+    program=$1
+    shift
+    help=$("$bin/$program" --help)
+    where=$program
+    problem=
+    # Options before the command, against the program's own help; a value after one is skipped.
+    while [ -z "$problem" ] && [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do
+      word=$1
+      option=${word%%=*}
+      shift
+      if ! has_option "$help" "$option"; then
+        problem="$where has no $option"
+      elif [ "$option" = "$word" ] && takes_value "$help" "$option" && [ $# -gt 0 ]; then
+        shift
+      fi
+    done
+    # The command, a subcommand when the command has them, and every option after them.
+    if [ -z "$problem" ] && [ $# -gt 0 ] && printf '%s' "$1" | grep -qE '^[a-z][a-z-]*$'; then
+      if help=$("$bin/$program" "$1" --help 2>/dev/null); then
+        where="$program $1"
+        shift
+        if [ $# -gt 0 ] && printf '%s\n' "$help" | grep -q '^Usage: .*<COMMAND>'; then
+          if help=$("$bin/$program" "${where#* }" "$1" --help 2>/dev/null); then
+            where="$where $1"
+            shift
+          else
+            problem="$where has no subcommand $1"
+          fi
+        fi
+      else
+        problem="$program has no command $1"
+      fi
+      for word in "$@"; do
+        [ -z "$problem" ] || break
+        case $word in
+          -*) has_option "$help" "${word%%=*}" || problem="$where has no ${word%%=*}" ;;
+        esac
+      done
+    fi
+    if [ -n "$problem" ]; then
+      echo "the docs show \`$line\`, but $problem" >&2
       status=1
     else
-      echo "$program $command${sub:+ $sub}: ok"
+      echo "$line: ok"
     fi
   done
   exit "$status"
