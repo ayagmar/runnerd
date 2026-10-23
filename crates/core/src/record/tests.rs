@@ -76,6 +76,10 @@ const SECRETS: &[(&str, &str)] = &[
     ),
     ("home/runner/.config/gcloud/credentials.db", "from-a-secret"),
     ("home/runner/.terraformrc", "token = \"from-a-secret\""),
+    (
+        "home/runner/.cargo/config.toml",
+        "[registries.internal]\ntoken = \"from-a-secret\"",
+    ),
     ("tmp/deploy.pem", "-----BEGIN RSA PRIVATE KEY-----"),
     ("var/tmp/kubeconfig", "token: from-a-secret"),
 ];
@@ -98,6 +102,23 @@ const WORKSPACE: &[(&str, &str)] = &[
     (
         "home/runner/_diag/pages/1_job_1.log",
         "##[group]Run cargo test",
+    ),
+];
+
+/// The Rust toolchain a job installed, which a shell needs to re-run its steps.
+const TOOLCHAIN: &[(&str, &str)] = &[
+    (
+        "home/runner/.rustup/toolchains/stable-x86_64-unknown-linux-gnu/bin/rustc",
+        "rustc",
+    ),
+    (
+        "home/runner/.rustup/settings.toml",
+        "default_toolchain = \"stable\"",
+    ),
+    ("home/runner/.cargo/bin/cargo", "cargo"),
+    (
+        "home/runner/.cargo/registry/cache/index.crates.io-1949cf8c6b5b557f/serde-1.0.0.crate",
+        "crate",
     ),
 ];
 
@@ -150,7 +171,7 @@ fn a_record_keeps_no_secret_of_the_runner_or_the_job() {
         write(root, path, text);
     }
     let started = runner_starts(root);
-    for (path, text) in SECRETS.iter().chain(WORKSPACE) {
+    for (path, text) in SECRETS.iter().chain(WORKSPACE).chain(TOOLCHAIN) {
         write(root, path, text);
     }
     write(root, "home/runner/_work/app/app/.git/config", GIT_CONFIG);
@@ -191,7 +212,7 @@ fn a_record_keeps_no_secret_of_the_runner_or_the_job() {
             );
         }
     }
-    for (path, text) in WORKSPACE.iter().chain(IMAGE) {
+    for (path, text) in WORKSPACE.iter().chain(IMAGE).chain(TOOLCHAIN) {
         assert_eq!(std::fs::read_to_string(root.join(path)).unwrap(), *text);
     }
     let config =
@@ -199,6 +220,23 @@ fn a_record_keeps_no_secret_of_the_runner_or_the_job() {
     assert!(
         config.contains("url = https://github.com/o/app"),
         "{config}"
+    );
+}
+
+#[test]
+fn a_file_where_a_kept_toolchain_directory_goes_is_caught() {
+    assert_eq!(
+        secrets_left(["/home/runner/.cargo", "/home/runner/.rustup"]),
+        ["/home/runner/.cargo", "/home/runner/.rustup"]
+    );
+    assert_eq!(
+        secrets_left([
+            "/home/runner/.cargo",
+            "/home/runner/.cargo/bin",
+            "/home/runner/.cargo/bin/cargo",
+            "/home/runner/.cargo/credentials.toml",
+        ]),
+        ["/home/runner/.cargo/credentials.toml"]
     );
 }
 

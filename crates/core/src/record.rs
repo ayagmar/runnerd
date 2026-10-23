@@ -51,17 +51,39 @@ const SECRET_DIRS: &[&str] = &[
     "/var/tmp",
 ];
 
-/// Changed paths the rules above catch that hold nothing of a job's. None so far: the runner image's scrub deletes
-/// all of them.
-const HARMLESS: &[&str] = &[];
+/// Directories among the runner's dot-files a record keeps, as the runner image's scrub does: the Rust toolchains
+/// rustup and cargo install (`dtolnay/rust-toolchain`), which a shell needs to re-run a step, and cargo's downloaded
+/// crates and git checkouts, which hold nothing a workspace's `Cargo.lock` does not name. Not `~/.cargo`'s
+/// `credentials.toml` or `config.toml`, which may hold a registry's token.
+const HARMLESS: &[&str] = &[
+    "/home/runner/.rustup",
+    "/home/runner/.cargo/bin",
+    "/home/runner/.cargo/registry",
+    "/home/runner/.cargo/git",
+];
+
+/// Whether `path` is in a `HARMLESS` directory, or is one of them or a parent of one that `changed` shows a path in:
+/// a directory's own entry holds nothing.
+fn harmless(path: &str, changed: &[&str]) -> bool {
+    let below = |dir: &str, path: &str| {
+        path.strip_prefix(dir)
+            .is_some_and(|rest| rest.starts_with('/'))
+    };
+    let on_the_way = HARMLESS.iter().any(|dir| *dir == path || below(path, dir));
+    HARMLESS.iter().any(|dir| below(dir, path))
+        || on_the_way && changed.iter().any(|other| below(path, other))
+}
 
 /// The changed paths of a runner container that a record must not hold: anything added or modified among the
-/// runner's dot-files, in the temporary directories, or where the runner keeps the JIT config and step scripts. A
-/// record of it must not be made. `changed` are the paths Docker reports added or modified.
+/// runner's dot-files but the `HARMLESS` toolchains, in the temporary directories, or where the runner keeps the
+/// JIT config and step scripts. A record of it must not be made. `changed` are the paths Docker reports added or
+/// modified.
 pub fn secrets_left<'path>(changed: impl IntoIterator<Item = &'path str>) -> Vec<String> {
+    let changed: Vec<&str> = changed.into_iter().collect();
     changed
-        .into_iter()
-        .filter(|path| !HARMLESS.contains(path))
+        .iter()
+        .copied()
+        .filter(|path| !harmless(path, &changed))
         .filter(|path| {
             path.strip_prefix(HOME)
                 .is_some_and(|rest| rest.starts_with('.'))
@@ -213,9 +235,10 @@ pub fn banner(job: &api::Job, log: &[String], step: Option<u32>) -> String {
     }
     writeln!(
         text,
-        "You are in {}, as the job left it. Not kept: the job's Docker containers and images, and what it changed \
-         in ~/.cache, the tool cache and the Android SDK, which show the profile's snapshot. Exit to remove this \
-         container.",
+        "You are in {}, as the job left it. Not kept: the job's Docker containers and images; what it changed \
+         in ~/.cache, the tool cache and the Android SDK, which show the profile's snapshot; and what it added or \
+         changed among your home's dot-files and in /tmp (logins, and tools in ~/.local or ~/.nvm), except \
+         ~/.rustup and ~/.cargo's bin, registry and git. Exit to remove this container.",
         workspace(&summary.repository)
     )
     .ok();

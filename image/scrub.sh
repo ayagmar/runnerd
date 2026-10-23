@@ -2,7 +2,9 @@
 # Runs as root when the runner exits (entrypoint.sh), before runnerd may keep the stopped container as a failed job's
 # record. Deletes what the job added or changed among the runner's dot-files and in the temporary directories, which
 # is where the runner keeps its registration and credentials and where tools keep logins and keys (~/.gitconfig,
-# ~/.aws, ~/.gnupg, /tmp/deploy.pem), whoever wrote them; then the other files known to hold a job's secrets.
+# ~/.aws, ~/.gnupg, /tmp/deploy.pem), whoever wrote them; then the other files known to hold a job's secrets. The
+# Rust toolchains stay, for a shell to re-run a step: ~/.rustup, and ~/.cargo's bin, registry and git, which hold no
+# credentials; ~/.cargo's credentials.toml and config.toml, which may, go.
 # runnerd refuses to keep a container whose changes still hold any of them (runnerd_core::record::secrets_left).
 # The entrypoint touches the marker before the runner starts. $1 is the root to scrub, for runnerd's test; `/` when
 # empty.
@@ -21,7 +23,15 @@ delete() {
         mountpoint -q "$path" || rm -rf --one-file-system "$path"
     done
 }
-find "$home" -xdev -mindepth 1 \( -path "$home/[!.]*" -prune \) -o \( "${since[@]}" -prune -print0 \) \
+# Kept only as directories: a job's file of either name goes.
+kept=()
+[ -d "$home/.rustup" ] && [ ! -L "$home/.rustup" ] && kept+=(-o -path "$home/.rustup")
+if [ -d "$home/.cargo" ] && [ ! -L "$home/.cargo" ]; then
+    kept+=(-o -path "$home/.cargo")
+    find "$home/.cargo" -xdev -mindepth 1 \( -path "$home/.cargo/bin" -o -path "$home/.cargo/registry" \
+        -o -path "$home/.cargo/git" \) -prune -o \( "${since[@]}" -prune -print0 \) 2> /dev/null | delete
+fi
+find "$home" -xdev -mindepth 1 \( -path "$home/[!.]*" "${kept[@]}" \) -prune -o \( "${since[@]}" -prune -print0 \) \
     2> /dev/null | delete
 find "$root/tmp" "$root/var/tmp" -xdev -mindepth 1 "${since[@]}" -prune -print0 2> /dev/null | delete
 
