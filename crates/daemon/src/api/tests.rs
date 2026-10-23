@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use reqwest::StatusCode;
 use runnerd_core::api::{
-    Budget, Busy, ConfigCheck, ConfigFile, Event, EventEnvelope, JobState, Paused, ProfileStatus,
-    RunningJob, Status,
+    Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, JobState, Paused,
+    ProfileStatus, RunningJob, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::github::{JobDetails, QueuedJob};
@@ -301,6 +301,34 @@ async fn every_repository_pauses_at_once_refused_while_one_runs_a_job_unless_for
     assert_eq!(resumed.status(), StatusCode::NO_CONTENT);
     assert!(!control.is_paused("o/app"), "o/app runs again");
     assert!(!control.is_paused("o/busy"), "o/busy runs again");
+}
+
+#[tokio::test]
+async fn a_pause_the_history_cannot_record_fails_saying_a_restart_undoes_it() {
+    let (client, control, dir) = daemon().await;
+    // As a full disk would.
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_insert BEFORE INSERT ON paused BEGIN SELECT RAISE(ABORT, 'full'); END;",
+        )
+        .unwrap();
+    let response = client
+        .post("http://runnerd/v1/repositories/o/app/pause")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::INTERNAL_SERVER_ERROR);
+    let error: ErrorResponse = serde_json::from_slice(&body(response).await).unwrap();
+    assert!(
+        error.message.contains("a restart resumes it"),
+        "{}",
+        error.message
+    );
+    assert!(
+        control.is_paused("o/app"),
+        "o/app is paused until a restart"
+    );
 }
 
 #[tokio::test]

@@ -33,7 +33,7 @@ fn refused(control_error: &ControlError) -> Response {
         }
         ControlError::Conflict(_) => StatusCode::CONFLICT,
         ControlError::Invalid(_) => StatusCode::UNPROCESSABLE_ENTITY,
-        ControlError::Failed(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        ControlError::Failed(_) | ControlError::NotRecorded(_) => StatusCode::INTERNAL_SERVER_ERROR,
         ControlError::Stopped => StatusCode::SERVICE_UNAVAILABLE,
     };
     error(status, &control_error.to_string())

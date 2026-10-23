@@ -11,9 +11,10 @@ also stops the API and the dashboard.
 
 The job history's SQLite database gets a `paused` table (migration 3), one row per paused repository. `Control`
 writes the whole set through the store's queue while it holds the lock that changes it, so the rows change in the
-same order as the set, and answers a pause or resume once that write commits. A failed write is logged and the
-pause holds until a restart. The daemon reads the table at startup and the engine starts with those repositories
-paused, before its first tick.
+same order as the set, and answers a pause or resume once that write commits. If the write fails, the change still
+holds in memory, and the API answers `500` saying so and that a restart undoes it, rather than claiming a durable
+pause; a forced pause still cancels the runs it was asked to, and its answer names the runners it stopped. The daemon
+reads the table at startup and the engine starts with those repositories paused, before its first tick.
 
 A repository the config no longer has loses its pause, at a reload and at startup: removing it is the owner telling
 runnerd to stop serving it, and a pause kept out of sight would surprise whoever adds it back later. Added back, it

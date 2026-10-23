@@ -1100,6 +1100,97 @@ async fn pausing_every_repository_is_refused_while_one_runs_a_job_and_forced_can
     assert_eq!(cancelled, ["cancel o/r 1"]);
 }
 
+/// Makes the history refuse every change to the paused repositories, as a full disk would, until it is dropped.
+fn refuse_paused_records(dir: &TestDir) -> rusqlite::Connection {
+    let fault = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    fault
+        .execute_batch(
+            "CREATE TRIGGER no_insert BEFORE INSERT ON paused BEGIN SELECT RAISE(ABORT, 'full'); END; \
+             CREATE TRIGGER no_delete BEFORE DELETE ON paused BEGIN SELECT RAISE(ABORT, 'full'); END;",
+        )
+        .unwrap();
+    fault
+}
+
+#[tokio::test]
+async fn a_pause_the_history_cannot_record_says_so_and_holds_only_until_a_restart() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    let _fault = refuse_paused_records(&dir);
+    let Err(ControlError::NotRecorded(message)) =
+        engine.pause(&one("o/r"), RunningJobs::Keep).await
+    else {
+        panic!("a pause the history did not record reported success");
+    };
+    assert!(message.contains("a restart resumes it"), "{message}");
+    assert!(
+        handle.control.is_paused("o/r"),
+        "o/r is paused until the restart"
+    );
+    drop(engine);
+
+    let (_engine, handle) = engine_in(&github, &docker, &dir);
+    assert!(!handle.control.is_paused("o/r"), "the restart resumed o/r");
+}
+
+#[tokio::test]
+async fn a_forced_pause_the_history_cannot_record_still_cancels_the_run_and_says_so() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, handle, dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    let _fault = refuse_paused_records(&dir);
+    let Err(ControlError::NotRecorded(message)) =
+        engine.pause(&one("o/r"), RunningJobs::Kill).await
+    else {
+        panic!("a forced pause the history did not record reported success");
+    };
+    assert!(message.contains("stopped job 1"), "{message}");
+    assert!(
+        handle.control.is_paused("o/r"),
+        "o/r is paused until the restart"
+    );
+    let cancelled: Vec<String> = github
+        .calls()
+        .into_iter()
+        .filter(|call| call.starts_with("cancel "))
+        .collect();
+    assert_eq!(cancelled, ["cancel o/r 1"]);
+}
+
+#[tokio::test]
+async fn a_resume_the_history_cannot_record_says_a_restart_pauses_it_again() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    let _fault = refuse_paused_records(&dir);
+    let Err(ControlError::NotRecorded(message)) =
+        handle.control.set_paused(&Target::All, false).await
+    else {
+        panic!("a resume the history did not record reported success");
+    };
+    assert!(message.contains("a restart pauses it again"), "{message}");
+    assert!(
+        !handle.control.is_paused("o/r"),
+        "o/r runs until the restart"
+    );
+    drop(engine);
+
+    let (_engine, handle) = engine_in(&github, &docker, &dir);
+    assert!(
+        handle.control.is_paused("o/r"),
+        "the restart paused o/r again"
+    );
+}
+
 #[tokio::test]
 async fn resuming_every_repository_resumes_them_across_a_restart() {
     let github = FakeGithub::default();

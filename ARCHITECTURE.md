@@ -103,8 +103,8 @@ nothing until Docker has listed them.
   no runner while it runs as many as its configured `slots` (`scheduler::Slot::Closed`).
 - A forced pause cancels runs only of jobs this daemon's runners hold, and only of the paused repositories.
 - `Control` records the paused repositories in the store, under the lock that changes them, and answers a pause or
-  resume once the record commits; the engine starts with the recorded ones paused, minus those its config lacks, so
-  a paused repository gets no runner after a restart.
+  resume once the record commits, or fails it (`ControlError::NotRecorded`, 500) if it does not; the engine starts
+  with the recorded ones paused, minus those its config lacks, so a paused repository gets no runner after a restart.
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the

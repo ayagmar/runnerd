@@ -163,7 +163,8 @@ async fn get_logs(State(fake): State<Shared>, RawQuery(query): RawQuery) -> Stri
     }
 }
 
-/// `halyard/ledger` runs a job: a pause without force is refused, a forced one stops it.
+/// `halyard/ledger` runs a job: a pause without force is refused, a forced one stops it. `halyard/wharf`'s pause
+/// holds, but the daemon's history cannot record it.
 async fn pause(
     UrlPath((owner, name)): UrlPath<(String, String)>,
     RawQuery(query): RawQuery,
@@ -187,6 +188,15 @@ fn paused(repository: &str, query: Option<&str>) -> Response {
             stopped: vec![running],
         })
         .into_response(),
+        ("halyard/wharf", _) => (
+            StatusCode::INTERNAL_SERVER_ERROR,
+            axum::Json(ErrorResponse {
+                message: "halyard/wharf is paused until runnerd restarts, but the job history cannot record it, \
+                          so a restart resumes it"
+                    .to_owned(),
+            }),
+        )
+            .into_response(),
         ("halyard/ledger", _) => (
             StatusCode::CONFLICT,
             axum::Json(Busy {
@@ -506,6 +516,24 @@ fn a_pause_while_the_repository_runs_a_job_names_the_job_and_how_to_force_it() {
         "{}",
         stdout(&forced)
     );
+}
+
+#[test]
+fn a_pause_the_daemon_cannot_record_fails_saying_a_restart_resumes_it() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let output = runnerctl(&socket, &["pause", "halyard/wharf"]);
+    assert!(
+        !output.status.success(),
+        "a pause that is not durable fails"
+    );
+    assert!(
+        stderr(&output).contains("a restart resumes it"),
+        "{}",
+        stderr(&output)
+    );
+    assert!(!stdout(&output).contains("paused:"), "{}", stdout(&output));
 }
 
 #[test]

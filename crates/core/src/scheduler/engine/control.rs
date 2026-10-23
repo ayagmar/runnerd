@@ -78,6 +78,9 @@ pub enum ControlError {
     /// Docker or GitHub failed.
     #[error("{0}")]
     Failed(String),
+    /// A pause or resume holds in memory, but the job history could not record it: a restart undoes it.
+    #[error("{0}")]
+    NotRecorded(String),
     /// The engine stopped.
     #[error("runnerd is stopping")]
     Stopped,
@@ -206,7 +209,7 @@ impl Control {
 
     /// Pauses or resumes one repository or all, whatever they run, and records it in the store before it answers,
     /// so a restarted daemon starts with the same ones paused. `NotFound` for a repository the config does not have.
-    /// A failed record is logged: the change holds until a restart.
+    /// If the record fails, the change holds until a restart and the answer is `NotRecorded`.
     pub async fn set_paused(&self, target: &Target, paused: bool) -> Result<(), ControlError> {
         let recorded = {
             let repositories = lock(&self.repositories);
@@ -231,12 +234,23 @@ impl Control {
             self.store.paused(set.iter().cloned().collect())
         };
         self.wake.notify_one();
-        if !recorded.await {
-            warn!(
-                "cannot record the paused repositories: a restart starts with the ones recorded before"
-            );
+        if recorded.await {
+            return Ok(());
         }
-        Ok(())
+        let name = match target {
+            Target::Repository(repository) => repository.as_str(),
+            Target::All => "every repository",
+        };
+        let (done, undone) = if paused {
+            ("paused", "resumes it")
+        } else {
+            ("resumed", "pauses it again")
+        };
+        let message = format!(
+            "{name} is {done} until runnerd restarts, but the job history cannot record it, so a restart {undone}"
+        );
+        warn!("{message}");
+        Err(ControlError::NotRecorded(message))
     }
 
     /// Replaces the configured repositories; the removed ones are no longer paused, in the store too.
@@ -427,14 +441,15 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
                 jobs,
             });
         }
-        self.control.set_paused(target, true).await?;
+        // Paused in memory even if not recorded: a forced pause still cancels the runs it was asked to.
+        let recorded = self.control.set_paused(target, true).await;
         match target {
             Target::Repository(repository) => info!("{repository}: paused"),
             Target::All => info!("paused every repository"),
         }
         let mut stopped = Vec::new();
         if running == RunningJobs::Keep {
-            return Ok(api::Paused { stopped });
+            return recorded.map(|()| api::Paused { stopped });
         }
         for (slot, occupant) in runners {
             let repository = &occupant.repository;
@@ -466,7 +481,13 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             }
             stopped.push(occupant.running_job());
         }
-        Ok(api::Paused { stopped })
+        match recorded {
+            Ok(()) => Ok(api::Paused { stopped }),
+            Err(ControlError::NotRecorded(message)) if !stopped.is_empty() => Err(
+                ControlError::NotRecorded(format!("{message}; stopped {}", list(&stopped))),
+            ),
+            Err(error) => Err(error),
+        }
     }
 
     /// Removes the runners of cancelled runs that did not exit within `CANCEL_GRACE`, every tick until they are gone.

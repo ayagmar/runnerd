@@ -184,7 +184,8 @@ the run's other jobs are cancelled too) and lets the runner report it cancelled,
 still running 90 s later is removed. Its runner registration is deleted once GitHub lets go of it.
 
 A pause lasts until a resume, across daemon restarts: the job history records the paused repositories, and a
-restarted daemon starts no runner for them. A reload that removes a paused repository forgets its pause; added back,
+restarted daemon starts no runner for them. If the history cannot record a pause or resume, it still holds until
+the daemon restarts, and the request fails with `500` saying a restart undoes it. A reload that removes a paused repository forgets its pause; added back,
 it starts active.
 
 A new config takes effect without a restart, and running jobs keep running. A removed profile, or slots past a lowered
