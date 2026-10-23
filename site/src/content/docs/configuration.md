@@ -3,7 +3,7 @@ title: Configuration
 description: The runnerd.toml file, runner profiles, and the memory budget check.
 ---
 
-One file, `runnerd.toml`: the repositories to serve, the profile each one runs on, the shared caches, and the systemd slice whose `MemoryMax` is the budget.
+One file, `~/.config/runnerd/runnerd.toml`: the repositories to serve, the profile each one runs on, the shared caches, and the systemd slice whose `MemoryMax` is the budget. `runnerd init` writes a starter one.
 
 ## An example
 
@@ -24,13 +24,13 @@ maven = { max_size = "5G" }
 reseed_at = "2G"
 
 [profiles.jvm]
-image_stage = "jvm"
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5"
 cpus = 8
 memory = "9G"
 slots = 2
 
 [profiles.node]
-image_stage = "node"
+image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.5"
 cpus = 8
 memory = "7G"
 slots = 2
@@ -48,16 +48,31 @@ labels = ["self-hosted", "linux", "x64", "node"]
 
 | Key | Means |
 |---|---|
-| `image_stage` | the stage of the [runner image](https://github.com/ayagmar/runnerd/tree/main/image) the profile runs |
+| `image` | the runner image the profile runs; see [below](#runner-images) |
 | `cpus`, `memory` | each runner's caps |
 | `slots` | how many runners of the profile may run at once |
 | `labels` | what the repository's workflows ask for in `runs-on` |
 
 Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them.
 
+## Runner images
+
+[`image/Dockerfile`](https://github.com/ayagmar/runnerd/tree/main/image) has a stage per profile on a common base: `base`, `jvm`, `node`. Each release publishes every stage, for linux/amd64. A profile sets one of:
+
+| Key | Runs | Pulled |
+|---|---|---|
+| `image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.5"` | the published stage | before the profile's first runner |
+| `image_stage = "jvm"` | `runnerd-runner:jvm`, built on this host | never |
+
+Keep the tag at the daemon's version: the image's scripts and the daemon change together, and `runnerd doctor` warns when they differ. To run your own changes to `image/`, build the stage from a clone and set `image_stage`:
+
+```sh
+docker build --target jvm -t runnerd-runner:jvm image
+```
+
 ## The budget check
 
-`check-config` reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
+`runnerd check-config [file]`, by default on `~/.config/runnerd/runnerd.toml`, reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
 
 ```text
 $ runnerd check-config runnerd.toml
