@@ -153,6 +153,7 @@ async fn cache_sizes_now_are_the_last_measurement_of_each_volume() {
 
 fn runner(name: &str, started_at: u64) -> RunnerRecord {
     RunnerRecord {
+        admission: None,
         name: name.to_owned(),
         repository: "o/r".to_owned(),
         profile: "app".to_owned(),
@@ -241,6 +242,7 @@ async fn a_host_sample_reads_back_at_once_and_is_kept_from_a_flush_on() {
 
 fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord {
     SampleRecord {
+        oom_kills: 0,
         runner: runner.to_owned(),
         at,
         cpu: 0,
@@ -477,6 +479,8 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
     });
     store.event(Event::BudgetChanged {
         budget: crate::api::Budget {
+            admission: crate::api::AdmissionPolicy::Caps,
+            held: false,
             slice: "ci.slice".to_owned(),
             memory_max: None,
             memory_in_use: 0,
@@ -710,6 +714,30 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
     // `runnerd doctor` reads the same without a daemon.
     assert_eq!(super::sizing_at(&path, 0).unwrap(), Some(history));
     assert_eq!(super::sizing_at(&dir.0.join("none.db"), 0).unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    for (id, name, kills) in [(1, "r1", 0), (2, "r2", 2)] {
+        store.queued("o/r", &queued(id));
+        store.runner_started(runner(name, 1_000_100));
+        store.claimed(id, 10, name, 1_000_200);
+        store.samples(vec![SampleRecord {
+            oom_kills: kills,
+            ..sample(name, 1_000_300, 0, 0)
+        }]);
+        store.lost(id, 1_000_400);
+    }
+    store.flush().await;
+    let history = store.sizing(0).await.unwrap();
+    let killed: Vec<(&str, bool)> = history
+        .jobs
+        .iter()
+        .map(|job| (job.name.as_str(), job.oom_killed))
+        .collect();
+    assert_eq!(killed, [("job 1", false), ("job 2", true)]);
 }
 
 /// A database at `path` written by a runnerd that knew the first `version` migrations, in WAL mode as the daemon

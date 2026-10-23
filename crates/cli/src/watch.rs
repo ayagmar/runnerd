@@ -93,6 +93,7 @@ impl State {
                 self.running.insert(
                     job.id,
                     Job {
+                        admission: None,
                         summary: job.clone(),
                         steps,
                         record: None,
@@ -478,6 +479,8 @@ mod tests {
                 version: "0.0.1".to_owned(),
                 shutting_down: false,
                 budget: Budget {
+                    admission: runnerd_core::api::AdmissionPolicy::Caps,
+                    held: false,
                     slice: "runnerd.slice".to_owned(),
                     memory_max: Some(8 << 30),
                     memory_in_use: 0,
@@ -673,6 +676,7 @@ mod tests {
         );
 
         state.refresh(runnerd_core::api::Job {
+            admission: None,
             summary: summary(JobState::Running),
             steps: vec![step(1, "Set up job", "completed")],
             record: None,
@@ -701,6 +705,8 @@ mod tests {
             at: 1030,
             event: Event::BudgetChanged {
                 budget: Budget {
+                    admission: runnerd_core::api::AdmissionPolicy::Caps,
+                    held: false,
                     slice: "runnerd.slice".to_owned(),
                     memory_max: None,
                     memory_in_use: 7,

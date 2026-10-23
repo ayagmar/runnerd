@@ -36,12 +36,14 @@
 
 use serde::{Deserialize, Serialize};
 
+mod admission;
 mod control;
 mod events;
 mod jobs;
 mod records;
 mod sizing;
 
+pub use admission::{Admission, AdmissionPolicy, Basis};
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, RunningJob,
 };
@@ -98,8 +100,15 @@ pub struct Budget {
     pub slice: String,
     /// The slice's `MemoryMax`; `None` when it is unlimited.
     pub memory_max: Option<u64>,
-    /// Memory caps of the running containers: runners, seed containers, shells and the mirror.
+    /// Memory the running containers reserve: the runners' caps, or under measured admission their predicted
+    /// peaks, and the caps of the seed containers, shells and the mirror.
     pub memory_in_use: u64,
+    /// What a new runner must fit in beside them.
+    #[serde(default)]
+    pub admission: AdmissionPolicy,
+    /// Under measured admission, whether the slice is at the high-water mark, so no runner starts.
+    #[serde(default)]
+    pub held: bool,
     /// The mirror's part of `memory_in_use`: its cap while it is enabled or still running, else 0.
     #[serde(default)]
     pub mirror_memory: u64,

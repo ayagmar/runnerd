@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 
+use crate::api::Basis;
 use crate::api::Spread;
 use crate::config::{self, Config};
 use crate::sizing::{GRANULE, Ran, spread};
@@ -11,7 +12,8 @@ use crate::sizing::{GRANULE, Ran, spread};
 /// A run that peaked within this percent of its cap may have been held back or killed there.
 const AT_CAP: u64 = 95;
 
-/// For this long after a run at its cap, in milliseconds, its job is admitted at its cap: 7 days.
+/// For this long after a run at its cap or killed for memory, in milliseconds, its job is admitted at its cap: 7
+/// days.
 pub const UNPREDICTABLE_FOR: u64 = 7 * 24 * 3600 * 1000;
 
 /// While the slice uses this percent of its `MemoryMax` or more, measured admission starts nothing.
@@ -37,29 +39,6 @@ impl Key {
             name: run.name.clone(),
         }
     }
-}
-
-/// What a prediction goes by, in the order it falls back.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub enum Basis {
-    /// The job's own runs, at least `min_jobs` of them: their p95 peak plus the margin.
-    Job {
-        /// How many.
-        runs: u64,
-    },
-    /// Too few runs of the job but enough of its profile: the larger of the profile's p95 peak and the job's own
-    /// largest, each plus the margin.
-    Profile {
-        /// How many runs of the profile.
-        runs: u64,
-    },
-    /// Too few runs of the job and of its profile: the cap.
-    Cap,
-    /// A run of the job peaked at its cap lately: the cap, until then (ms).
-    Unpredictable {
-        /// When the job may be predicted again.
-        until: u64,
-    },
 }
 
 /// The memory admission reserves for a job, at most its cap, and what it goes by.
@@ -122,7 +101,7 @@ impl Predictor {
         let peak = run.memory_peak;
         let job = self.jobs.entry(Key::of(run)).or_default();
         job.add(peak);
-        if peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP) {
+        if run.oom_killed || peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP) {
             job.unpredictable_until = job.unpredictable_until.max(at + UNPREDICTABLE_FOR);
         }
         self.profiles
@@ -140,7 +119,9 @@ impl Predictor {
         {
             return Prediction {
                 memory: cap,
-                basis: Basis::Unpredictable { until },
+                basis: Basis::Unpredictable {
+                    until: until / 1000,
+                },
             };
         }
         let min_jobs = u64::from(self.min_jobs);

@@ -62,6 +62,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         queued_at: queued,
         started_at: Some(queued),
         finished_at: Some(queued + minutes * MINUTE),
+        oom_killed: false,
     }
 }
 
@@ -136,12 +137,32 @@ fn a_run_at_its_cap_makes_its_job_unpredictable_for_a_week() {
     assert_eq!(
         prediction.basis,
         Basis::Unpredictable {
-            until: NOW + UNPREDICTABLE_FOR
+            until: (NOW + UNPREDICTABLE_FOR) / 1000
         }
     );
     assert_eq!(prediction.memory, 7 * G);
     let later = predictor.predict(&key("build"), "node", 7 * G, NOW + UNPREDICTABLE_FOR);
     assert_eq!(later.basis, Basis::Job { runs: 21 });
+}
+
+#[test]
+fn a_run_killed_for_memory_makes_its_job_unpredictable_whatever_its_sampled_peak() {
+    let mut predictor = predictor();
+    for _ in 0..20 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    // The kill came between two samples: the peak sampled before it is low.
+    let killed = Ran {
+        oom_killed: true,
+        ..build(2 * G)
+    };
+    predictor.learn(&killed, "node", 7 * G, NOW);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    assert!(
+        matches!(prediction.basis, Basis::Unpredictable { .. }),
+        "{prediction:?}"
+    );
+    assert_eq!(prediction.memory, 7 * G);
 }
 
 #[test]

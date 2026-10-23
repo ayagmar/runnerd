@@ -74,6 +74,8 @@ fn app() -> App {
             version: "0.0.1".to_owned(),
             shutting_down: false,
             budget: Budget {
+                admission: runnerd_core::api::AdmissionPolicy::Caps,
+                held: false,
                 slice: "ci.slice".to_owned(),
                 memory_max: Some(33 << 30),
                 memory_in_use: 0,
@@ -862,6 +864,8 @@ async fn dropping_then_back(
             at: NOW,
             event: Event::BudgetChanged {
                 budget: Budget {
+                    admission: runnerd_core::api::AdmissionPolicy::Caps,
+                    held: false,
                     slice: "ci.slice".to_owned(),
                     memory_max: None,
                     memory_in_use: in_use,
@@ -983,6 +987,7 @@ fn opening_a_job_from_the_latest_jobs_follows_only_its_log() {
         text: "##[error]Process completed with exit code 1.".to_owned(),
     });
     app.update(Msg::Job(Job {
+        admission: None,
         summary: app.job.as_ref().unwrap().job.summary.clone(),
         steps: vec![step(1, "Set up job", 1009, Some(1012))],
         record: None,
@@ -1196,6 +1201,7 @@ fn a_job_read_again_as_finished_leaves_the_slots() {
     let mut done = summary(42, JobState::Completed);
     done.conclusion = Some("success".to_owned());
     app.update(Msg::Job(Job {
+        admission: None,
         summary: done,
         steps: Vec::new(),
         record: None,

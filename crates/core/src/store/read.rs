@@ -232,9 +232,18 @@ pub(super) fn job(db: &Connection, id: u64) -> rusqlite::Result<Option<api::Job>
     let Some(summary) = summary(db, id)? else {
         return Ok(None);
     };
+    let admission: Option<String> = db
+        .query_row(
+            "SELECT r.admission FROM jobs j JOIN runners r ON r.name = j.runner WHERE j.id = ?1",
+            [id],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
     Ok(Some(api::Job {
         steps: steps(db, id)?,
         record: record(db, id)?,
+        admission: admission.and_then(|admission| serde_json::from_str(&admission).ok()),
         summary,
     }))
 }
@@ -521,7 +530,8 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
     let jobs = db
         .prepare_cached(
             "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, j.memory_peak, \
-             coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at \
+             coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
+             coalesce(r.oom_kills, 0) > 0 \
              FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
              AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
@@ -538,6 +548,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
                 queued_at: row.get(7)?,
                 started_at: row.get(8)?,
                 finished_at: row.get(9)?,
+                oom_killed: row.get(10)?,
             })
         })?
         .collect::<rusqlite::Result<_>>()?;

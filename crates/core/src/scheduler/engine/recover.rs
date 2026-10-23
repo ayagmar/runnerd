@@ -105,6 +105,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 busy: true,
                 started_at: SystemTime::now(),
                 memory: self.running_cap(&container.id, &profile).await,
+                admission: None,
                 // Its capture reports it again; until then, or if it cannot, the history knows it.
                 job: self.store.runner_job(&container.name).await.ok().flatten(),
             };

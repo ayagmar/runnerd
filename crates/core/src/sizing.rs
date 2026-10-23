@@ -46,6 +46,8 @@ pub struct Ran {
     pub started_at: Option<u64>,
     /// When it finished, or was found lost.
     pub finished_at: Option<u64>,
+    /// Whether the kernel killed a process in its container for memory.
+    pub oom_killed: bool,
 }
 
 /// One runner container's time in a slot. Times in milliseconds.

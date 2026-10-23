@@ -27,6 +27,9 @@ pub struct Repository {
     pub held_until: Option<SystemTime>,
     /// Its queued jobs at the last poll.
     pub queued: Vec<QueuedJob>,
+    /// What a new runner of it takes of the budget: `None`, its profile's `memory`. Under measured admission, the
+    /// largest predicted peak of its queued jobs, since GitHub may give the runner any of them.
+    pub runner_memory: Option<u64>,
 }
 
 /// A profile's slots: one concurrent job each.
@@ -81,6 +84,8 @@ pub enum Decision {
         slot: SlotRef,
         /// `owner/name` the runner registers on.
         repository: String,
+        /// What it takes of the budget.
+        memory: u64,
     },
     /// Remove the slot's runner, which waited `IDLE_TIMEOUT` for a job no longer queued.
     Stop {
@@ -102,8 +107,9 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 /// Decides which slots start a runner and which idle runners stop.
 ///
 /// Each repository gets a runner per matching queued job, less its runners still waiting for a job. Jobs are
-/// served oldest first across repositories, each in the lowest free slot of its repository's profile, while the
-/// slot's memory fits `free_memory` (`None`: no budget). An idle runner stops once no queued job is left for it and
+/// served oldest first across repositories, each in the lowest free slot of its repository's profile, while what
+/// the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `free_memory` (`None`: no
+/// budget). An idle runner stops once no queued job is left for it and
 /// it waited `IDLE_TIMEOUT`.
 pub fn plan(
     repositories: &[Repository],
@@ -187,7 +193,8 @@ pub fn plan(
         ) else {
             continue;
         };
-        if free_memory.is_some_and(|free| free < profile.memory) {
+        let memory = repository.runner_memory.unwrap_or(profile.memory);
+        if free_memory.is_some_and(|free| free < memory) {
             continue;
         }
         let Some(index) = taken.iter().position(|taken| !taken) else {
@@ -195,13 +202,14 @@ pub fn plan(
         };
         taken[index] = true;
         *missing -= 1;
-        free_memory = free_memory.map(|free| free - profile.memory);
+        free_memory = free_memory.map(|free| free - memory);
         decisions.push(Decision::Start {
             slot: SlotRef {
                 profile: repository.profile.clone(),
                 index,
             },
             repository: repository.name.clone(),
+            memory,
         });
     }
     decisions

@@ -269,6 +269,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
     };
     (
         Job {
+            admission: None,
             summary,
             steps,
             record: None,
@@ -508,6 +509,8 @@ impl Fixtures {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
             budget: Budget {
+                admission: runnerd_core::api::AdmissionPolicy::Caps,
+                held: false,
                 slice: "runnerd.slice".to_owned(),
                 memory_max: Some(33 * GIB),
                 memory_in_use: 9 * GIB + 7 * GIB + 7 * GIB + 512 * MIB,

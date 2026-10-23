@@ -7,8 +7,9 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    Advice, CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobSizing, JobState,
-    JobSummary, QueuedJob, Record, RecordNote, Records, RemovedRecords, Sizing, Status, Step,
+    AdmissionPolicy, Advice, CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner,
+    JobSizing, JobState, JobSummary, QueuedJob, Record, RecordNote, Records, RemovedRecords,
+    Sizing, Status, Step,
 };
 use runnerd_core::config::ByteSize;
 
@@ -263,9 +264,16 @@ const SAMPLED_NOTE: &str =
 /// The memory line of a status: what is in use of what.
 fn budget_line(status: &Status) -> String {
     let budget = &status.budget;
+    let by = match (budget.admission, budget.held) {
+        (AdmissionPolicy::Caps, _) => "",
+        (AdmissionPolicy::Measured, false) => " by predicted peaks",
+        (AdmissionPolicy::Measured, true) => {
+            " by predicted peaks; the slice is past 90% of its MemoryMax, so no runner starts"
+        }
+    };
     match budget.memory_max {
         Some(max) => format!(
-            "{} of {} reserved in {}",
+            "{} of {} reserved in {}{by}",
             bytes(budget.memory_in_use),
             bytes(max),
             budget.slice
@@ -490,6 +498,9 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
                 )
             )
         );
+    }
+    if let Some(admission) = &job.admission {
+        let _ = writeln!(out, "{}", paint.paint(Tone::Dim, &admission.line()));
     }
     out.push_str(&timeline(summary, now, paint));
     out.push_str(&steps(&job.steps, now, paint));

@@ -230,7 +230,7 @@ impl Writer<'_> {
             "record a runner",
             self.db.execute(
                 "INSERT OR IGNORE INTO runners (name, repository, profile, slot, container, started_at, \
-                 memory_cap, cpu_cap) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8)",
+                 memory_cap, cpu_cap, admission) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9)",
                 params![
                     runner.name,
                     runner.repository,
@@ -239,7 +239,10 @@ impl Writer<'_> {
                     runner.container,
                     runner.started_at,
                     runner.memory_cap,
-                    runner.cpu_cap
+                    runner.cpu_cap,
+                    runner
+                        .admission
+                        .and_then(|admission| serde_json::to_string(&admission).ok())
                 ],
             ),
         );
@@ -616,6 +619,12 @@ impl Writer<'_> {
                     sample.network_sent
                 ],
             )?;
+            if sample.oom_kills > 0 {
+                self.db.execute(
+                    "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), ?2) WHERE name = ?1",
+                    params![sample.runner, sample.oom_kills],
+                )?;
+            }
             let job: Option<u64> = self
                 .db
                 .query_row(

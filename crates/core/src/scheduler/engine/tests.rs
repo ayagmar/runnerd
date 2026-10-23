@@ -2755,4 +2755,5 @@ async fn a_requested_reseed_waits_for_the_profiles_image_and_then_runs() {
     assert_eq!(docker.0.lock().unwrap().started_images, [PUBLISHED]);
 }
 
+mod admission;
 mod records;

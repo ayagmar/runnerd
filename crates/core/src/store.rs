@@ -33,6 +33,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0004_prune.sql"),
     include_str!("store/migrations/0005_announced_profiles.sql"),
     include_str!("store/migrations/0006_records.sql"),
+    include_str!("store/migrations/0007_admission.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -98,6 +99,8 @@ pub struct RunnerRecord {
     pub memory_cap: Option<u64>,
     /// The container's CPU limit in millicores.
     pub cpu_cap: Option<u64>,
+    /// How it was admitted; `None` for one a restart adopted.
+    pub admission: Option<api::Admission>,
 }
 
 /// One sample of one runner's container.
@@ -117,6 +120,8 @@ pub struct SampleRecord {
     pub network_received: u64,
     /// Bytes sent since the container started.
     pub network_sent: u64,
+    /// Processes the kernel killed in the container for memory so far.
+    pub oom_kills: u64,
 }
 
 /// The last measurement of the cache volumes.
@@ -257,6 +262,8 @@ pub struct Store {
     /// Host samples sent and not yet stored, oldest first; reads include them. The writer removes them once stored.
     // Locked with `sync::lock`: every critical section is a push, a copy or a drain.
     held: Arc<Mutex<Vec<api::HostSample>>>,
+    /// The last host sample sent, for admission to read without a query.
+    latest_host: Arc<Mutex<Option<api::HostSample>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
     backlog: Arc<Semaphore>,
 }
@@ -301,6 +308,7 @@ impl Store {
             pruner: Arc::new(Mutex::new(pruner)),
             closed: Arc::new(AtomicBool::new(false)),
             held,
+            latest_host: Arc::new(Mutex::new(None)),
             events,
             backlog: Arc::new(Semaphore::new(
                 usize::try_from(LOG_BACKLOG).unwrap_or(usize::MAX),
@@ -415,8 +423,14 @@ impl Store {
     /// Records a sample of the slice and sends it to every subscriber at once; it is stored with the next ones, a
     /// minute's worth in one transaction, or at `flush`.
     pub fn host_sample(&self, sample: api::HostSample) {
+        *lock(&self.latest_host) = Some(sample.clone());
         lock(&self.held).push(sample.clone());
         self.send(Write::HostSample(sample));
+    }
+
+    /// The last host sample sent, stored or not; `None` before the first.
+    pub fn latest_host_sample(&self) -> Option<api::HostSample> {
+        lock(&self.latest_host).clone()
     }
 
     /// Adds bytes the mirror served to runners, counted from its log up to `until`, and says whether that was
@@ -673,11 +687,16 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
     if found == 0 {
         return Ok(sizing::History::default());
     }
-    if found < 2 {
-        // Version 2 added the runners' caps: before it, a temporary view gives each runner none.
-        db.execute_batch(
-            "CREATE TEMP VIEW runners AS SELECT *, NULL AS memory_cap, NULL AS cpu_cap FROM main.runners",
-        )?;
+    // Columns sizing reads that later versions added: before them, a temporary view gives each runner none.
+    let added = match found {
+        1 => "NULL AS memory_cap, NULL AS cpu_cap, NULL AS admission, NULL AS oom_kills",
+        2..=6 => "NULL AS admission, NULL AS oom_kills",
+        _ => "",
+    };
+    if !added.is_empty() {
+        db.execute_batch(&format!(
+            "CREATE TEMP VIEW runners AS SELECT *, {added} FROM main.runners"
+        ))?;
     }
     Ok(read::sizing(db, since)?)
 }

@@ -105,6 +105,9 @@ pub(crate) fn render(view: &JobView) -> Markup {
         (timeline.1)
         (steps.1)
         (metrics.1)
+        @if let Some(admission) = &view.job.admission {
+            p.muted.admission { (admission.line()) }
+        }
         (record(view))
         (log(view))
     };

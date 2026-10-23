@@ -10,6 +10,7 @@ use std::time::SystemTime;
 use futures_util::StreamExt;
 use tracing::{info, warn};
 
+use super::admission::Admitting;
 use super::{Engine, RunningJobs, Shutdown};
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
@@ -94,15 +95,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.count_mirror_bytes().await;
         if mode == Shutdown::No {
             self.pull_images().await;
+            self.refresh_predictor().await;
         }
-        let decisions = match mode {
+        let (decisions, mut admitting) = match mode {
             Shutdown::No => self.plan(),
-            Shutdown::Graceful | Shutdown::Force => self
-                .occupied()
-                .filter(|(_, occupant)| mode == Shutdown::Force || !occupant.busy)
-                .map(|(slot, _)| Decision::Stop { slot })
-                .collect(),
+            Shutdown::Graceful | Shutdown::Force => (
+                self.occupied()
+                    .filter(|(_, occupant)| mode == Shutdown::Force || !occupant.busy)
+                    .map(|(slot, _)| Decision::Stop { slot })
+                    .collect(),
+                self.admitting(&mut [], None),
+            ),
         };
+        self.note_high_water(&admitting);
         for decision in decisions {
             match decision {
                 Decision::Stop { slot } => {
@@ -112,7 +117,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     };
                     self.stop(&slot, jobs).await;
                 }
-                Decision::Start { slot, repository } => self.start(&slot, &repository).await,
+                Decision::Start {
+                    slot,
+                    repository,
+                    memory,
+                } => {
+                    let admission = admitting.admit(&repository, memory);
+                    self.start(&slot, &repository, admission).await;
+                }
             }
         }
         self.idle_caches(mode).await;
@@ -124,12 +136,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.prune();
     }
 
-    fn plan(&self) -> Vec<Decision> {
+    fn plan(&self) -> (Vec<Decision>, Admitting) {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
-        let repositories: Vec<Repository> = self
+        let mut repositories: Vec<Repository> = self
             .config
             .repositories
             .iter()
@@ -149,6 +161,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .filter(|job| !taken.contains(&job.id))
                         .cloned()
                         .collect(),
+                    runner_memory: None,
                 }
             })
             .collect();
@@ -187,7 +200,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let free_memory = self
             .memory_max
             .map(|max| max.saturating_sub(self.memory_in_use()));
-        let mut decisions = plan(&repositories, &profiles, free_memory, SystemTime::now());
+        let admitting = self.admitting(&mut repositories, free_memory);
+        let mut decisions = plan(&repositories, &profiles, admitting.free, SystemTime::now());
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
         decisions.extend(
             self.occupied()
@@ -201,13 +215,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .map(|(slot, _)| Decision::Stop { slot }),
         );
-        decisions
+        (decisions, admitting)
     }
 
-    /// Memory caps of the runners, the seed containers (which run with their profile's limits), the shells and the
-    /// mirror.
+    /// What the runners reserve (their caps, or under measured admission their predicted peaks), and the memory
+    /// caps of the seed containers (which run with their profile's limits), the shells and the mirror.
     pub(super) fn memory_in_use(&self) -> u64 {
-        let runners: u64 = self.occupied().map(|(_, occupant)| occupant.memory).sum();
+        let runners: u64 = self
+            .occupied()
+            .map(|(_, occupant)| occupant.reserved())
+            .sum();
         let reseeds: u64 = self.reseed_memory.values().sum();
         runners + reseeds + self.shell_memory() + self.mirror_memory_in_use()
     }
