@@ -48,6 +48,8 @@ pub struct Ran {
     pub finished_at: Option<u64>,
     /// Whether the kernel killed a process in its container for memory.
     pub oom_killed: bool,
+    /// Whether it completed with success: a failed or lost run may have stopped before its heaviest step.
+    pub succeeded: bool,
     /// What measured admission reserved for it; `None` under caps or for an adopted runner.
     pub reserved: Option<u64>,
 }

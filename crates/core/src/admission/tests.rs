@@ -2,7 +2,9 @@
 
 use std::collections::BTreeMap;
 
-use super::{Basis, HIGH_WATER, Key, Policy, Predictor, UNPREDICTABLE_FOR, simulate};
+use super::{
+    Basis, Copies, HIGH_WATER, JobPeak, Key, Policy, Predictor, UNPREDICTABLE_FOR, simulate,
+};
 use crate::config::Config;
 use crate::sizing::Ran;
 
@@ -64,6 +66,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         finished_at: Some(queued + minutes * MINUTE),
         oom_killed: false,
         reserved: None,
+        succeeded: true,
     }
 }
 
@@ -90,8 +93,14 @@ fn a_job_with_enough_runs_is_predicted_from_its_own_p95() {
         predictor.learn(&build(1500 * M + i * 25 * M), "node", 7 * G, NOW);
     }
     // p95 of 1500M … 1975M is 1950M; + 15% is 2242.5M, rounded up to 2304M.
-    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW);
-    assert_eq!(prediction.basis, Basis::Job { runs: 20 });
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW, Copies::Alone);
+    assert_eq!(
+        prediction.basis,
+        Basis::Job {
+            runs: 20,
+            peak: JobPeak::P95
+        }
+    );
     assert_eq!(prediction.memory, 2304 * M);
 }
 
@@ -114,11 +123,11 @@ fn a_job_with_one_run_takes_its_profiles_p95_or_its_peak_whichever_is_more() {
         NOW,
     );
     // The profile's p95 is 2G, but e2e reached 5G: 5.75G.
-    let e2e = predictor.predict(&key("e2e"), "node", 7 * G, NOW);
+    let e2e = predictor.predict(&key("e2e"), "node", 7 * G, NOW, Copies::Alone);
     assert_eq!(e2e.basis, Basis::Profile { runs: 62 });
     assert_eq!(e2e.memory, 5888 * M);
     // One light run may not be the job's heaviest: 2G + 15%, rounded up to 2.5G.
-    let lint = predictor.predict(&key("lint"), "node", 7 * G, NOW);
+    let lint = predictor.predict(&key("lint"), "node", 7 * G, NOW, Copies::Alone);
     assert_eq!(lint.basis, Basis::Profile { runs: 62 });
     assert_eq!(lint.memory, 2560 * M);
 }
@@ -138,15 +147,36 @@ fn a_job_with_a_few_runs_reserves_its_own_largest_peak_even_above_its_profiles_p
         );
     }
     // A rare heavy job is not predicted at its light neighbours' 2G: 5G + 15% is 5.75G.
-    let prediction = predictor.predict(&key("e2e"), "node", 7 * G, NOW);
-    assert_eq!(prediction.basis, Basis::JobMax { runs: 3 });
+    let prediction = predictor.predict(&key("e2e"), "node", 7 * G, NOW, Copies::Alone);
+    assert_eq!(
+        prediction.basis,
+        Basis::Job {
+            runs: 3,
+            peak: JobPeak::Largest
+        }
+    );
     assert_eq!(prediction.memory, 5888 * M);
 }
 
 #[test]
 fn a_job_whose_own_runs_all_peaked_far_below_its_profiles_p95_reserves_near_its_own_peak() {
-    let mut predictor = predictor();
     // A profile of 200M checks and 4.8G stacks: its p95 is 4.8G.
+    let predictor = young_build(&vec![build(1300 * M); 6]);
+    // 1300M + 15% is 1495M, rounded up to 1.5G, not the 5.5G of the profile's p95.
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW, Copies::Alone);
+    assert_eq!(
+        prediction.basis,
+        Basis::Job {
+            runs: 6,
+            peak: JobPeak::Largest
+        }
+    );
+    assert_eq!(prediction.memory, 1536 * M);
+}
+
+/// A predictor that learned 30 runs of a profile whose p95 is 4.8G, then `runs` of a 1.3G build.
+fn young_build(runs: &[Ran]) -> Predictor {
+    let mut predictor = predictor();
     for i in 0..30 {
         let (name, peak) = if i % 3 == 0 {
             ("e2e", 4800 * M)
@@ -160,13 +190,33 @@ fn a_job_whose_own_runs_all_peaked_far_below_its_profiles_p95_reserves_near_its_
             NOW,
         );
     }
-    for _ in 0..6 {
-        predictor.learn(&build(1300 * M), "node", 7 * G, NOW);
+    for run in runs {
+        predictor.learn(run, "node", 7 * G, NOW);
     }
-    // 1300M + 15% is 1495M, rounded up to 1.5G, not the 5.5G of the profile's p95.
-    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW);
-    assert_eq!(prediction.basis, Basis::JobMax { runs: 6 });
-    assert_eq!(prediction.memory, 1536 * M);
+    predictor
+}
+
+#[test]
+fn failed_runs_do_not_let_a_young_job_go_by_its_own_peaks() {
+    // Two runs that failed before their heaviest step, and one that succeeded.
+    let failed = Ran {
+        succeeded: false,
+        ..build(300 * M)
+    };
+    let predictor = young_build(&[failed.clone(), failed, build(1300 * M)]);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW, Copies::Alone);
+    // The profile's 4.8G + 15%, rounded up to 5.5G.
+    assert_eq!(prediction.basis, Basis::Profile { runs: 33 });
+    assert_eq!(prediction.memory, 5632 * M);
+}
+
+#[test]
+fn a_copy_of_a_young_job_beside_another_takes_its_profiles_p95() {
+    let predictor = young_build(&[build(1300 * M), build(1300 * M)]);
+    let alone = predictor.predict(&key("build"), "node", 7 * G, NOW, Copies::Alone);
+    let beside = predictor.predict(&key("build"), "node", 7 * G, NOW, Copies::Several);
+    assert_eq!((alone.memory, beside.memory), (1536 * M, 5632 * M));
+    assert_eq!(beside.basis, Basis::Profile { runs: 32 });
 }
 
 #[test]
@@ -182,7 +232,7 @@ fn a_job_never_seen_reserves_the_largest_peak_of_its_profile() {
         NOW,
     );
     // A new workflow may be the profile's heaviest: 5G + 15%, not the p95's 2G.
-    let prediction = predictor.predict(&key("lint"), "node", 7 * G, NOW);
+    let prediction = predictor.predict(&key("lint"), "node", 7 * G, NOW, Copies::Alone);
     assert_eq!(prediction.basis, Basis::ProfileMax { runs: 61 });
     assert_eq!(prediction.memory, 5888 * M);
 }
@@ -199,7 +249,7 @@ fn a_run_past_what_it_reserved_makes_its_job_reserve_its_largest_peak_for_a_week
         ..build(4 * G)
     };
     predictor.learn(&overran, "node", 7 * G, NOW);
-    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
     assert_eq!(
         prediction.basis,
         Basis::Overran {
@@ -210,9 +260,18 @@ fn a_run_past_what_it_reserved_makes_its_job_reserve_its_largest_peak_for_a_week
     assert_eq!(prediction.memory, 4864 * M);
     assert_eq!(
         predictor
-            .predict(&key("build"), "node", 7 * G, NOW + UNPREDICTABLE_FOR)
+            .predict(
+                &key("build"),
+                "node",
+                7 * G,
+                NOW + UNPREDICTABLE_FOR,
+                Copies::Alone
+            )
             .basis,
-        Basis::Job { runs: 20 }
+        Basis::Job {
+            runs: 20,
+            peak: JobPeak::P95
+        }
     );
 }
 
@@ -227,7 +286,7 @@ fn a_cancelled_run_killed_for_memory_makes_its_job_unpredictable_without_countin
         ..build(0)
     };
     predictor.mark(&killed, 7 * G, NOW);
-    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
     assert_eq!(
         prediction.basis,
         Basis::Unpredictable {
@@ -237,9 +296,18 @@ fn a_cancelled_run_killed_for_memory_makes_its_job_unpredictable_without_countin
     // Its peak of 0 did not join the job's runs.
     assert_eq!(
         predictor
-            .predict(&key("build"), "node", 7 * G, NOW + UNPREDICTABLE_FOR)
+            .predict(
+                &key("build"),
+                "node",
+                7 * G,
+                NOW + UNPREDICTABLE_FOR,
+                Copies::Alone
+            )
             .basis,
-        Basis::Job { runs: 20 }
+        Basis::Job {
+            runs: 20,
+            peak: JobPeak::P95
+        }
     );
 }
 
@@ -249,7 +317,7 @@ fn without_enough_runs_of_the_job_or_its_profile_a_job_is_admitted_at_its_cap() 
     for _ in 0..3 {
         predictor.learn(&build(G), "node", 7 * G, NOW);
     }
-    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW, Copies::Alone);
     assert_eq!(prediction.basis, Basis::Cap);
     assert_eq!(prediction.memory, 7 * G);
 }
@@ -261,7 +329,7 @@ fn a_run_at_its_cap_makes_its_job_unpredictable_for_a_week() {
         predictor.learn(&build(2 * G), "node", 7 * G, NOW);
     }
     predictor.learn(&build(6900 * M), "node", 7 * G, NOW);
-    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
     assert_eq!(
         prediction.basis,
         Basis::Unpredictable {
@@ -269,8 +337,20 @@ fn a_run_at_its_cap_makes_its_job_unpredictable_for_a_week() {
         }
     );
     assert_eq!(prediction.memory, 7 * G);
-    let later = predictor.predict(&key("build"), "node", 7 * G, NOW + UNPREDICTABLE_FOR);
-    assert_eq!(later.basis, Basis::Job { runs: 21 });
+    let later = predictor.predict(
+        &key("build"),
+        "node",
+        7 * G,
+        NOW + UNPREDICTABLE_FOR,
+        Copies::Alone,
+    );
+    assert_eq!(
+        later.basis,
+        Basis::Job {
+            runs: 21,
+            peak: JobPeak::P95
+        }
+    );
 }
 
 #[test]
@@ -285,7 +365,7 @@ fn a_run_killed_for_memory_makes_its_job_unpredictable_whatever_its_sampled_peak
         ..build(2 * G)
     };
     predictor.learn(&killed, "node", 7 * G, NOW);
-    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
     assert!(
         matches!(prediction.basis, Basis::Unpredictable { .. }),
         "{prediction:?}"
@@ -300,7 +380,9 @@ fn a_prediction_never_exceeds_the_cap() {
         predictor.learn(&build(6500 * M), "node", 9 * G, NOW);
     }
     assert_eq!(
-        predictor.predict(&key("build"), "node", 7 * G, NOW).memory,
+        predictor
+            .predict(&key("build"), "node", 7 * G, NOW, Copies::Alone)
+            .memory,
         7 * G
     );
 }
@@ -445,7 +527,7 @@ fn a_cancelled_run_past_what_it_reserved_makes_its_job_reserve_at_least_that_run
         ..build(5 * G)
     };
     predictor.mark(&cancelled, 7 * G, NOW);
-    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
     assert_eq!(
         prediction.basis,
         Basis::Overran {
@@ -467,7 +549,54 @@ fn a_job_seen_only_cancelled_reserves_its_cap() {
         7 * G,
         NOW,
     );
-    let prediction = predictor.predict(&key("e2e"), "node", 7 * G, NOW + MINUTE);
+    let prediction = predictor.predict(&key("e2e"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
     assert_eq!(prediction.basis, Basis::Cap);
     assert_eq!(prediction.memory, 7 * G);
+}
+
+#[test]
+fn a_replayed_burst_of_copies_of_a_young_job_starts_one_by_its_own_runs_and_the_rest_by_its_profile()
+ {
+    // A profile whose p95 is 4.8G, then two 1.3G builds, long before.
+    let mut jobs: Vec<Ran> = (0..30)
+        .map(|i| {
+            let (name, peak) = if i % 3 == 0 {
+                ("e2e", 4800 * M)
+            } else {
+                ("changes", 200 * M)
+            };
+            run(
+                "halyard/storefront",
+                name,
+                "node",
+                NOW + i * 10 * MINUTE,
+                1,
+                peak,
+            )
+        })
+        .collect();
+    for i in 0..2 {
+        jobs.push(run(
+            "halyard/storefront",
+            "build",
+            "node",
+            NOW + (300 + i * 10) * MINUTE,
+            1,
+            1300 * M,
+        ));
+    }
+    // Six builds queue at once.
+    let burst = NOW + 600 * MINUTE;
+    jobs.extend((0..6).map(|_| run("halyard/storefront", "build", "node", burst, 30, 1300 * M)));
+    let slots = BTreeMap::from([("node".to_owned(), 6)]);
+    let replay = simulate(
+        &config(),
+        Some(20 * G + 512 * M),
+        &jobs,
+        Policy::Measured,
+        &slots,
+    );
+    // The first reserves 1.5G, each other 5.5G: 4 of the 20G budget at once, not the 6 that 1.5G each would fit.
+    assert_eq!(replay.most_running, 4);
+    assert_eq!(replay.never_started, 0);
 }

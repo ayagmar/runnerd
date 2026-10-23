@@ -541,13 +541,15 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             finished_at: row.get(9)?,
             oom_killed: row.get(10)?,
             reserved: row.get(11)?,
+            succeeded: row.get(12)?,
         })
     };
     let jobs = db
         .prepare_cached(
             "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, j.memory_peak, \
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
-             coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved') \
+             coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), \
+             j.state = 'completed' AND j.conclusion IS 'success' \
              FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
              AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
@@ -558,7 +560,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
         .prepare_cached(
             "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, coalesce(j.memory_peak, 0), \
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
-             coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved') \
+             coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0 \
              FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id",
         )?

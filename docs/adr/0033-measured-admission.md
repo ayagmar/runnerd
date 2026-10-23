@@ -1,7 +1,7 @@
 # 0033. Admission by measured peaks, behind a flag
 
-Amended by [0036](0036-young-jobs-predicted-from-their-own-runs.md): a job with 2 runs or more reserves its own
-largest peak, not its profile's p95.
+Amended by [0036](0036-young-jobs-predicted-from-their-own-runs.md): a job with 2 successful runs reserves its own
+largest peak, not its profile's p95, while no other copy of it is queued or running.
 
 ## Context
 

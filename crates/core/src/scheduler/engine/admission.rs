@@ -1,7 +1,8 @@
 //! Admission: what a new runner reserves of the slice's budget. By caps, its profile's memory. Measured, the
 //! largest predicted peak of its repository's queued jobs (`admission::Predictor`, from the job history, read at
 //! most once a minute), since GitHub may give the runner any of them; the cap while the slice's memory has no
-//! recent sample; and nothing starts while the slice is at `admission::HIGH_WATER` percent of its `MemoryMax`.
+//! recent sample; and nothing starts while the slice is at `admission::HIGH_WATER` percent of its `MemoryMax`. A
+//! job queued twice, or queued or running beside a copy, is predicted with `admission::Copies::Several`.
 //! It reads the store and the latest host sample; it never writes the config.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -10,7 +11,7 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::Engine;
-use crate::admission::{HIGH_WATER, Key, Prediction, Predictor};
+use crate::admission::{Copies, HIGH_WATER, Key, Prediction, Predictor};
 use crate::api::{self, AdmissionPolicy, Basis};
 use crate::config::Admission;
 use crate::docker::DockerApi;
@@ -68,23 +69,33 @@ impl Admitting {
     }
 }
 
-/// The largest prediction among `queued`, jobs of `repository` in `profile` under `cap`.
+/// The largest prediction among `queued`, jobs of `repository` in `profile` under `cap`. A job queued twice, or
+/// with a copy among the `running` jobs, has copies beside it.
 fn largest<'job>(
     predictor: &Predictor,
     repository: &str,
     profile: &str,
     cap: u64,
     queued: impl Iterator<Item = &'job QueuedJob>,
+    running: &BTreeSet<Key>,
     now: u64,
 ) -> Option<Prediction> {
-    queued
-        .map(|job| {
-            let key = Key {
-                repository: repository.to_owned(),
-                workflow: job.workflow.clone(),
-                name: job.name.clone(),
+    let keys: Vec<Key> = queued
+        .map(|job| Key {
+            repository: repository.to_owned(),
+            workflow: job.workflow.clone(),
+            name: job.name.clone(),
+        })
+        .collect();
+    keys.iter()
+        .map(|key| {
+            let queued = keys.iter().filter(|other| *other == key).count();
+            let copies = if queued > 1 || running.contains(key) {
+                Copies::Several
+            } else {
+                Copies::Alone
             };
-            predictor.predict(&key, profile, cap, now)
+            predictor.predict(key, profile, cap, now, copies)
         })
         .max_by_key(|prediction| prediction.memory)
 }
@@ -179,6 +190,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let Some((predictor, _)) = &self.measured.predictor else {
             return admitting;
         };
+        let running = self.running_keys();
         for repository in repositories {
             let Some(cap) = self
                 .config
@@ -198,6 +210,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 &repository.profile,
                 cap,
                 queued,
+                &running,
                 now,
             ) {
                 repository.runner_memory = Some(prediction.memory);
@@ -249,15 +262,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
+        let running = self.running_keys();
+        // The first runner of each known job, in slot order, goes by its own runs; its copies have it beside them.
+        let mut seen = BTreeSet::new();
         let mut changed = Vec::new();
         let mut raised = Vec::new();
         for (profile, slots) in &mut self.slots {
             for occupant in slots.iter_mut().flatten() {
+                let first = occupant
+                    .key
+                    .as_ref()
+                    .is_some_and(|key| seen.insert(key.clone()));
                 let Some(admission) = &mut occupant.admission else {
                     continue;
                 };
                 let prediction = if let Some(key) = &occupant.key {
-                    Some(predictor.predict(key, profile, occupant.memory, now))
+                    let copies = if first {
+                        Copies::Alone
+                    } else {
+                        Copies::Several
+                    };
+                    Some(predictor.predict(key, profile, occupant.memory, now, copies))
                 } else {
                     let labels = self
                         .config
@@ -279,6 +304,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         profile,
                         occupant.memory,
                         queued,
+                        &running,
                         now,
                     )
                     .filter(|prediction| prediction.memory > admission.reserved)
@@ -300,6 +326,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for (runner, admission) in changed {
             self.store.runner_admission(&runner, admission);
         }
+    }
+
+    /// The jobs the running runners are known to run.
+    fn running_keys(&self) -> BTreeSet<Key> {
+        self.occupied()
+            .filter_map(|(_, occupant)| occupant.key.clone())
+            .collect()
     }
 
     /// The waiting runners to stop, as one that waited `IDLE_TIMEOUT` is: those `rereserve` raised for a heavier

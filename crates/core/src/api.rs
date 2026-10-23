@@ -43,7 +43,7 @@ mod jobs;
 mod records;
 mod sizing;
 
-pub use admission::{Admission, AdmissionPolicy, Basis};
+pub use admission::{Admission, AdmissionPolicy, Basis, JobPeak};
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, RunningJob,
 };
