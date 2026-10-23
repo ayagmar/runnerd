@@ -150,6 +150,7 @@ pub(crate) fn render(overview: &Overview) -> Markup {
     let live = Live {
         url: "/live/overview",
         at: overview.now,
+        log: None,
         regions: [&budget, &slots, &host, &repositories, &recent]
             .iter()
             .map(|(id, markup, _)| (*id, digest(&markup.0)))

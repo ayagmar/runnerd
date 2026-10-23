@@ -95,6 +95,8 @@ pub(crate) fn digest(html: &str) -> String {
 pub(crate) struct Live<'url> {
     pub(crate) url: &'url str,
     pub(crate) at: u64,
+    /// The number of the last log line the page shows, on a job's page.
+    pub(crate) log: Option<u64>,
     pub(crate) regions: Vec<(&'static str, String)>,
 }
 
@@ -102,6 +104,9 @@ impl Live<'_> {
     /// The `shown` signal as a Datastar expression.
     fn signals(&self) -> String {
         let mut signals = format!("{{shown: {{at: {}", self.at);
+        if let Some(log) = self.log {
+            let _ = write!(signals, ", log: {log}");
+        }
         for (id, digest) in &self.regions {
             let _ = write!(signals, ", {}: {}", js(id), js(digest));
         }

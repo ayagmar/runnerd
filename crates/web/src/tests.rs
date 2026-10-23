@@ -746,15 +746,26 @@ async fn the_overview_stream_patches_the_slice_when_a_sample_arrives() {
     assert!(update.contains("31 cores"), "{update}");
 }
 
-/// The `datastar` query parameter a page's stream request carries: the page's signals as JSON.
-fn signals_of(page: &str) -> String {
+/// The signals a page starts with, as the JSON Datastar sends them.
+fn page_signals(page: &str) -> serde_json::Value {
     let from = page.find(r#"<body data-signals=""#).unwrap() + r#"<body data-signals=""#.len();
     let signals = &page[from..from + page[from..].find('"').unwrap()];
-    // The page writes a JavaScript object; Datastar sends it as JSON.
+    // The page writes a JavaScript object.
     let json = signals
         .replace("{shown: {at:", r#"{"shown": {"at":"#)
+        .replace(", log:", r#", "log":"#)
         .replace('\'', "\"");
-    serde_urlencoded::to_string([("datastar", json)]).unwrap()
+    serde_json::from_str(&json).unwrap()
+}
+
+/// The `datastar` query parameter of a stream request carrying `signals`.
+fn query(signals: &serde_json::Value) -> String {
+    serde_urlencoded::to_string([("datastar", signals.to_string())]).unwrap()
+}
+
+/// The `datastar` query parameter a page's stream request carries.
+fn signals_of(page: &str) -> String {
+    query(&page_signals(page))
 }
 
 #[tokio::test]
@@ -865,7 +876,7 @@ impl ShownLog {
                 let (attributes, rest) = item.split_once('>').unwrap();
                 let number = attributes
                     .split_once("value=\"")
-                    .map(|(_, value)| value.trim_end_matches('"').parse().unwrap());
+                    .map(|(_, value)| value.split('"').next().unwrap().parse().unwrap());
                 (number, rest.split_once("</li>").unwrap().0.to_owned())
             })
             .collect()
@@ -1036,6 +1047,49 @@ async fn a_job_stream_that_reconnects_shows_each_log_line_once() {
         shown.0.len(),
         "each line has its own number: {texts:?}"
     );
+}
+
+#[tokio::test]
+async fn a_job_stream_that_reconnects_with_the_pages_signals_sends_only_the_lines_after_its_last() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let (page, url) = dashboard.job_page(&cookie).await;
+    let mut shown = ShownLog::of_page(&page);
+    let signals = signals_of(&page);
+    let mut first = dashboard.stream(&cookie, &format!("{url}?{signals}")).await;
+    let connected = read_until(&mut first, |text| text.contains("datastar-patch-signals")).await;
+    assert!(
+        !connected.contains(r#"id="log-lines""#),
+        "the page has the tail already: {connected}"
+    );
+    for n in 0..5 {
+        dashboard.log(&format!("before the drop {n}"));
+    }
+    let lines = read_until(&mut first, |text| text.contains("before the drop 4")).await;
+    shown.apply(&lines);
+    drop(first);
+    // The last line appended set the page's `shown.log`, which Datastar sends when it retries.
+    let last = lines.rsplit(r#"data-signals:shown.log=""#).next().unwrap();
+    let last: u64 = last[..last.find('"').unwrap()].parse().unwrap();
+    let mut retried = page_signals(&page);
+    retried["shown"]["log"] = last.into();
+    dashboard.log("while away");
+    let mut second = dashboard
+        .stream(&cookie, &format!("{url}?{}", query(&retried)))
+        .await;
+    let again = read_until(&mut second, |text| text.contains("while away")).await;
+    assert!(!again.contains(r#"id="log-lines""#), "{again}");
+    shown.apply(&again);
+    let texts: Vec<&str> = shown.0.iter().map(|line| line.1.as_str()).collect();
+    for n in 0..5 {
+        let text = format!("before the drop {n}");
+        assert_eq!(
+            texts.iter().filter(|shown| **shown == text).count(),
+            1,
+            "{texts:?}"
+        );
+    }
+    assert_eq!(texts.last(), Some(&"while away"));
 }
 
 #[tokio::test]

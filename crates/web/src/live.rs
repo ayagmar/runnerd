@@ -52,10 +52,12 @@ struct Page {
     shown: Shown,
 }
 
-/// The time a page was rendered at, and a digest of each region it had then, by id.
+/// The time a page was rendered at, and a digest of each region it had then, by id; on a job's page, also the
+/// number of its last log line.
 #[derive(Debug, Deserialize)]
 struct Shown {
     at: u64,
+    log: Option<u64>,
     #[serde(flatten)]
     regions: HashMap<String, String>,
 }
@@ -347,9 +349,16 @@ async fn append_lines(patches: &Patches, first: u64, lines: &[String], shown: &m
     if lines.is_empty() {
         return true;
     }
+    let last = first + lines.len() as u64;
     let html: String = (first + 1..)
         .zip(lines)
-        .map(|(number, line)| job::log_line(number, line).into_string())
+        .map(|(number, line)| {
+            if number == last {
+                job::last_log_line(number, line).into_string()
+            } else {
+                job::log_line(number, line).into_string()
+            }
+        })
         .collect();
     let append = PatchElements::new(html)
         .selector("#log-lines")
@@ -384,12 +393,25 @@ async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) ->
     let mut events = Box::pin(events);
     let mut stopping = app.stopping.clone();
     let mut data = JobView::load(&app.daemon, id, crate::now()).await?;
-    // The log's tail as it is now, in place of what the page has: whatever it got from the page's render or from
-    // an earlier connection this one retries, each line shows once.
     let mut next_line = data.log_from + data.log.len() as u64;
+    // The lines after the page's last, which the page names, so each line shows once whether the page got it from
+    // its render or from an earlier connection this one retries. A page that names none, or one too far behind,
+    // gets the log's tail as it is now in place of its own.
+    let page_end = shown
+        .as_ref()
+        .and_then(|shown| shown.log)
+        .filter(|end| (data.log_from..=next_line).contains(end));
     let mut shown_lines = data.log.len() as u64;
-    let tail = PatchElements::new(job::log_lines(&data).into_string()).write_as_axum_sse_event();
-    if patches.send(tail).await.is_err() {
+    let sent_log = if let Some(end) = page_end {
+        shown_lines = end.min(job::LOG_TAIL);
+        let from = usize::try_from(end - data.log_from).unwrap_or(usize::MAX);
+        let lines = data.log.get(from..).unwrap_or_default();
+        append_lines(patches, end, lines, &mut shown_lines).await
+    } else {
+        let tail = PatchElements::new(job::log_lines(&data).into_string());
+        patches.send(tail.write_as_axum_sse_event()).await.is_ok()
+    };
+    if !sent_log {
         return Ok(());
     }
     let mut sent = Sent::default();

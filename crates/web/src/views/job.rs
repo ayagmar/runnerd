@@ -94,6 +94,7 @@ pub(crate) fn render(view: &JobView) -> Markup {
     let live = view.live().then(|| Live {
         url: &url,
         at: view.now,
+        log: Some(view.log_from + view.log.len() as u64),
         regions: [&head, &timeline, &steps, &metrics]
             .iter()
             .map(|(id, markup, _)| (*id, digest(&markup.0)))
@@ -562,6 +563,12 @@ pub(crate) fn log_lines(view: &JobView) -> Markup {
 /// so the stream can drop the oldest from the page without renumbering the rest.
 pub(crate) fn log_line(number: u64, text: &str) -> Markup {
     html! { li value=(number) { (strip_escapes(text)) } }
+}
+
+/// The last of the log lines a stream appends: it also sets `shown.log` to its number, in the same patch as the
+/// lines, so what the page says it has stays what it has even if the stream drops before its next signal.
+pub(crate) fn last_log_line(number: u64, text: &str) -> Markup {
+    html! { li value=(number) "data-signals:shown.log"=(number) { (strip_escapes(text)) } }
 }
 
 /// `text` without ANSI escape sequences: `ESC [ … final byte` and lone escapes.
