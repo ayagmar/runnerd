@@ -15,7 +15,9 @@ use super::{Engine, Occupant, RunningJobs, Shutdown};
 use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
+use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{Decision, Profile, Repository, RunnerSlot, Slot, plan};
+use crate::time;
 
 /// GitHub requests a tick has in flight at most. GitHub asks clients not to flood it with concurrent requests;
 /// a few keep a tick over many repositories short.
@@ -238,10 +240,29 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         match self.config.host.admission {
             // Whatever it reserved under measured admission before a reload.
             Admission::Caps => occupant.memory,
-            // What it uses when that is more: a job past its prediction, or one in a burst of starts.
-            Admission::Measured => occupant
-                .reserved()
-                .max(self.store.latest_memory(&occupant.runner_name).unwrap_or(0)),
+            // What it uses when that is more: a job past its prediction, or one in a burst of starts. Its cap when
+            // that is not known: the slice's or its own last sample is older than three intervals, as when the
+            // sampler stalls or cannot read its container.
+            Admission::Measured => {
+                let now = time::now_ms();
+                let fresh = 3 * u64::try_from(SAMPLE_INTERVAL.as_millis()).unwrap_or(u64::MAX);
+                let slice_sampled = self
+                    .store
+                    .latest_host_sample()
+                    .is_some_and(|sample| sample.at.saturating_mul(1000) + fresh >= now);
+                let own = self.store.latest_sample(&occupant.runner_name);
+                // Before its first sample, a runner is as fresh as its start.
+                let sampled_at = own
+                    .as_ref()
+                    .map_or_else(|| time::ms(occupant.started_at), |sample| sample.at);
+                if !slice_sampled || sampled_at + fresh < now {
+                    occupant.memory
+                } else {
+                    occupant
+                        .reserved()
+                        .max(own.map_or(0, |sample| sample.memory))
+                }
+            }
         }
     }
 

@@ -269,8 +269,8 @@ pub struct Store {
     held: Arc<Mutex<Vec<api::HostSample>>>,
     /// The last host sample sent, for admission to read without a query.
     latest_host: Arc<Mutex<Option<api::HostSample>>>,
-    /// Each running runner's last sampled memory, for admission to read without a query.
-    latest_memory: Arc<Mutex<BTreeMap<String, u64>>>,
+    /// Each running runner's last sample, for admission to read without a query.
+    latest_samples: Arc<Mutex<BTreeMap<String, SampleRecord>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
     backlog: Arc<Semaphore>,
 }
@@ -316,7 +316,7 @@ impl Store {
             closed: Arc::new(AtomicBool::new(false)),
             held,
             latest_host: Arc::new(Mutex::new(None)),
-            latest_memory: Arc::new(Mutex::new(BTreeMap::new())),
+            latest_samples: Arc::new(Mutex::new(BTreeMap::new())),
             events,
             backlog: Arc::new(Semaphore::new(
                 usize::try_from(LOG_BACKLOG).unwrap_or(usize::MAX),
@@ -344,7 +344,7 @@ impl Store {
 
     /// Records that a runner's container and registration were removed at `at` (ms).
     pub fn runner_removed(&self, runner: &str, at: u64) {
-        lock(&self.latest_memory).remove(runner);
+        lock(&self.latest_samples).remove(runner);
         self.send(Write::RunnerRemoved {
             runner: runner.to_owned(),
             at,
@@ -354,7 +354,7 @@ impl Store {
     /// Records every runner the history holds open, except the `running` ones, removed at `at` (ms): what recovery
     /// found gone, so it stops counting as holding a slot.
     pub fn runners_gone(&self, running: Vec<String>, at: u64) {
-        lock(&self.latest_memory).retain(|runner, _| running.contains(runner));
+        lock(&self.latest_samples).retain(|runner, _| running.contains(runner));
         self.send(Write::RunnersGone { running, at });
     }
 
@@ -427,9 +427,9 @@ impl Store {
 
     /// Records samples of runner containers.
     pub fn samples(&self, samples: Vec<SampleRecord>) {
-        let mut latest = lock(&self.latest_memory);
+        let mut latest = lock(&self.latest_samples);
         for sample in &samples {
-            latest.insert(sample.runner.clone(), sample.memory);
+            latest.insert(sample.runner.clone(), sample.clone());
         }
         drop(latest);
         self.send(Write::Samples(samples));
@@ -443,9 +443,9 @@ impl Store {
         self.send(Write::HostSample(sample));
     }
 
-    /// A runner's last sampled memory, stored or not; `None` before its first sample or once it is removed.
-    pub fn latest_memory(&self, runner: &str) -> Option<u64> {
-        lock(&self.latest_memory).get(runner).copied()
+    /// A runner's last sample, stored or not; `None` before its first sample or once it is removed.
+    pub fn latest_sample(&self, runner: &str) -> Option<SampleRecord> {
+        lock(&self.latest_samples).get(runner).cloned()
     }
 
     /// Records what a runner reserves now, when measured admission changed it after the start.

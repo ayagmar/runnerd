@@ -199,11 +199,16 @@ async fn a_jobs_record_says_how_its_runner_was_admitted() {
 
 /// A sample of each runner the engine registered, using `memory`.
 fn runners_use(github: &FakeGithub, store: &Store, memory: u64) {
+    runners_used(github, store, memory, time::now_ms());
+}
+
+/// A sample of each runner the engine registered, using `memory` at `at` (ms).
+fn runners_used(github: &FakeGithub, store: &Store, memory: u64, at: u64) {
     let samples = registered(&github.calls())
         .iter()
         .map(|call| SampleRecord {
             runner: call.trim_start_matches("register ").to_owned(),
-            at: time::now_ms(),
+            at,
             cpu: 0,
             cpu_usage: 0,
             memory,
@@ -376,4 +381,46 @@ async fn waiting_runners_raised_past_the_budget_for_a_heavier_job_are_stopped_un
     assert_eq!(deleted.len(), 2, "two stop, so the other two's 7G fits");
     engine.publish();
     assert_eq!(handle.status.borrow().budget.memory_in_use, 2 * 3584 * M);
+}
+
+#[tokio::test]
+async fn running_runners_count_at_their_caps_once_the_slice_has_no_recent_sample() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    runners_use(&github, &handle.store, G);
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 2 * 1280 * M);
+    // The sampler stalled a minute ago: what the two use now is not known.
+    handle.store.host_sample(api::HostSample {
+        at: time::now_ms() / 1000 - 60,
+        cpu: 0,
+        memory: 2 * G,
+    });
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 2 * 4 * G);
+}
+
+#[tokio::test]
+async fn a_runner_whose_own_sample_is_old_counts_at_its_cap() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    github.0.lock().unwrap().queued = vec![job(1)];
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    // Its container's files could not be read for a minute; the slice is sampled now.
+    runners_used(&github, &handle.store, G, time::now_ms() - 60_000);
+    slice_at(&handle.store, 2 * G);
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 4 * G);
 }
