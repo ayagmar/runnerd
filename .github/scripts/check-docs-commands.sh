@@ -58,7 +58,9 @@ echo "$lines" | {
       if help=$("$bin/$program" "$1" --help 2>/dev/null); then
         where="$program $1"
         shift
-        if [ $# -gt 0 ] && printf '%s\n' "$help" | grep -q '^Usage: .*<COMMAND>'; then
+        # A subcommand is required (`<COMMAND>`) or optional (`[COMMAND]`, as `runnerctl sizing --since 7d`).
+        if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] &&
+          printf '%s\n' "$help" | grep -qE '^Usage: .*(<COMMAND>|\[COMMAND\])'; then
           if help=$("$bin/$program" "${where#* }" "$1" --help 2>/dev/null); then
             where="$where $1"
             shift
