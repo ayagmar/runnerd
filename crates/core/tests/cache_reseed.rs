@@ -269,6 +269,42 @@ async fn capped_snapshot(
             "slot 1's changes over the limit did not start the snapshot over from the image (exit {code}):\n{output}"
         ));
     }
+
+    // Slot 1 has no changes to a layer, slot 2 has some to the snapshot's: starting over drops both.
+    let (code, output) = run(
+        docker,
+        names,
+        2,
+        Snapshot::Writable,
+        "",
+        "mkdir -p /base/cache && head -c 4M /dev/zero > /base/cache/superseded",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "planting a large snapshot exited {code}:\n{output}"
+        ));
+    }
+    let (code, output) = run_in_slot(docker, names, 2, &write("slot-2", 1)).await?;
+    if code != 0 {
+        return Err(format!("the job in slot 2 exited {code}:\n{output}"));
+    }
+    let output = cache::reseed(docker, capped)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("{output}");
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        2,
+        "test ! -e /base/cache && test ! -e /home/runner/.cache/slot-2",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "slot 2 kept changes to a snapshot layer that started over (exit {code}):\n{output}"
+        ));
+    }
     Ok(())
 }
 

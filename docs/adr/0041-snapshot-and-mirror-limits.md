@@ -14,7 +14,9 @@ snapshot had no limit. The Docker Hub mirror expires content after its TTL, with
 
 - `[caches] snapshot_max` (default `10G`) bounds each profile's snapshot. A reseed measures the snapshot plus slot
   1's changes, an upper bound on the new snapshot; above the limit the snapshot starts over from slot 1's changes
-  alone, which drops whatever no job changed since the last reseed, such as a superseded tool version. When slot 1's
+  alone, which drops whatever no job changed since the last reseed, such as a superseded tool version. A layer
+  slot 1 has no changes to is dropped from the snapshot and from every slot, whose changes to it were made against
+  the snapshot that had it. When slot 1's
   changes alone are over the limit, the snapshot starts over from the image and slot 1's changes are dropped as
   every other slot's are. `image/seed.sh` does this, given the limit as its second argument; a seed script of an
   older image ignores it.

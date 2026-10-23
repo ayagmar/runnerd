@@ -43,7 +43,8 @@ for layer in "${LAYERS[@]}"; do
     name=${layer%%:*}
     upper=/workers/1/$name/upper
     if [ ! -d "$upper" ]; then
-        [ "$under" = /base ] || rm -rf "/base/$name"
+        # Starting over drops the layer: every slot's changes to it were made against the snapshot that had it.
+        [ "$under" = /base ] || rm -rf "/base/$name" /workers/*/"$name"
         continue
     fi
     lower=$under/$name
