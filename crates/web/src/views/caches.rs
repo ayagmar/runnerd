@@ -2,10 +2,10 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Status};
+use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, Parts, page, profile_class, time_ago};
 use crate::chart::{Base, Series, TimeChart, nice_top};
-use crate::daemon::{Daemon, Error};
 use crate::format;
 
 const WINDOW: u64 = 30 * 86_400;
@@ -20,7 +20,7 @@ pub(crate) struct CachesView {
 }
 
 impl CachesView {
-    pub(crate) async fn load(daemon: &Daemon, now: u64) -> Result<CachesView, Error> {
+    pub(crate) async fn load(daemon: &Client, now: u64) -> Result<CachesView, ClientError> {
         Ok(CachesView {
             now,
             status: daemon.get("/v1/status").await?,

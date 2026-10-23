@@ -8,12 +8,12 @@ use runnerd_core::api::{
     HostSample, HostSamples, Job, JobPage, JobQuery, JobState, JobSummary, ProfileStatus,
     RepositoryStatus, Sample, SampleSeries, SlotStatus, Status,
 };
+use runnerd_core::client::{Client, ClientError};
 
 use super::{
     Live, Page, Parts, badge, digest, js, page, profile_class, repository_id, slot_id, time_ago,
 };
 use crate::chart::{Base, Series, Sparkline, TimeChart, nice_top};
-use crate::daemon::{Daemon, Error};
 use crate::format;
 
 /// How far back the host charts reach.
@@ -39,7 +39,7 @@ pub(crate) struct Overview {
 }
 
 impl Overview {
-    pub(crate) async fn load(daemon: &Daemon, now: u64) -> Result<Overview, Error> {
+    pub(crate) async fn load(daemon: &Client, now: u64) -> Result<Overview, ClientError> {
         let status: Status = daemon.get("/v1/status").await?;
         let host = daemon
             .get(&format!(
@@ -69,7 +69,7 @@ impl Overview {
     }
 
     /// Reads the running jobs again, and the samples of those not seen before.
-    pub(crate) async fn reload_running(&mut self, daemon: &Daemon) -> Result<(), Error> {
+    pub(crate) async fn reload_running(&mut self, daemon: &Client) -> Result<(), ClientError> {
         let page: JobPage = daemon
             .get_query(
                 "/v1/jobs",

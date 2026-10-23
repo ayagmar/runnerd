@@ -6,14 +6,16 @@ Where things live and which rules hold them together. The why behind each rule i
 
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
-| `runnerd-core` | `crates/core` | config, API types, scheduling, Docker and GitHub clients, caches, job history | anything; Docker, GitHub and Tokio only behind the `host` feature |
+| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, the Unix-socket API | `runnerd-core` with `host` |
-| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `client` (socket, HTTP, event stream; reused by `runnerctl tui`), `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` without `host`; `hyper` for HTTP over the socket; `ratatui` and `rustix` for the TUI |
-| `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` without `host` |
+| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` and `rustix` for the TUI |
+| `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
 
 `runnerd-core` modules:
 
 - `api`, `config`: build without `host`. Every client reads these.
+- `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
+  client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
 - `docker`, `github`, `cache`, `isolation`, `scheduler`, `observe`, `store`: `host` only ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)).
 
 The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and

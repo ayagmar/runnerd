@@ -17,8 +17,8 @@ use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
 
-use crate::client::{Client, ClientError, Events};
 use crate::{Error, now, output, watch};
+use runnerd_core::client::{Client, ClientError, Events, StatusCode};
 
 mod app;
 mod draw;
@@ -430,12 +430,10 @@ async fn pause(client: &Client, repository: Option<String>, force: bool) -> Msg 
                 .collect::<Vec<_>>()
                 .join(", ")
         )),
-        Err(ClientError::Api { status, message }) if status == hyper::StatusCode::CONFLICT => {
-            Msg::Busy {
-                repository,
-                message,
-            }
-        }
+        Err(ClientError::Api { status, message }) if status == StatusCode::CONFLICT => Msg::Busy {
+            repository,
+            message,
+        },
         Err(error) => Msg::Failed(error.to_string()),
     }
 }

@@ -11,8 +11,8 @@ use runnerd_core::api::{
     Event, EventEnvelope, HostSample, Job, JobQuery, JobState, JobSummary, Sample, Status, Step,
 };
 
-use crate::client::{Client, ClientError, Events};
 use crate::human::{self, Paint, Table, Tone, bytes, cores, duration};
+use runnerd_core::client::{Client, ClientError, Events};
 
 /// Finished jobs kept on screen.
 const RECENT: usize = 5;

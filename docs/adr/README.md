@@ -35,3 +35,4 @@ with a line pointing to the record that replaces it.
 | [0027](0027-pruning-runs-beside-the-writer.md) | Pruning runs beside the writer, a batch at a time |
 | [0028](0028-job-records-expire.md) | Job records expire after `history.jobs` |
 | [0029](0029-profile-events-and-what-a-restart-announces.md) | Profile events, and what a restart announces |
+| [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core |

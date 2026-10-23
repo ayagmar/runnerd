@@ -9,10 +9,10 @@ use axum::http::{Method, StatusCode};
 use axum::response::{Html, IntoResponse, Response};
 use maud::Markup;
 use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, RunningJob, Status};
+use runnerd_core::client::{Body, Reply};
 use serde::Deserialize;
 
 use crate::App;
-use crate::daemon::{Body, Reply};
 use crate::views::config::{self, Outcome};
 use crate::views::{self, Tone, overview};
 
@@ -243,7 +243,11 @@ pub(crate) struct Edit {
 
 /// `POST /config/check`: the result region for the text in the editor.
 pub(crate) async fn check_config(State(app): State<App>, Json(edit): Json<Edit>) -> Response {
-    match app.daemon.check(edit.toml.clone()).await {
+    match app
+        .daemon
+        .post_toml::<ConfigCheck>("/v1/config/check", edit.toml.clone())
+        .await
+    {
         Ok(check) => html(&[config::result(&check, &edit.toml, &Outcome::Checked)]),
         Err(error) => refused(&error.to_string()),
     }

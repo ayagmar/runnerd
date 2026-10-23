@@ -1,6 +1,6 @@
 //! `runnerctl`: the command-line client. It talks to the daemon's API only, never to Docker or GitHub. Commands map
-//! to API calls here; the transport is `client`, text for people `human`, the live view `watch`, the full-screen
-//! dashboard `tui`, printing `output`.
+//! to API calls here; the transport is `runnerd_core::client`, text for people `human`, the live view `watch`, the
+//! full-screen dashboard `tui`, printing `output`.
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -13,7 +13,6 @@ use runnerd_core::api::{
 };
 use serde::Serialize;
 
-mod client;
 mod human;
 mod output;
 #[cfg(test)]
@@ -22,8 +21,8 @@ mod testing;
 mod tui;
 mod watch;
 
-use client::{Client, ClientError};
 use output::fail;
+use runnerd_core::client::{Client, ClientError, StatusCode};
 
 /// Command-line client for the runnerd daemon.
 #[derive(Parser)]
@@ -387,7 +386,7 @@ async fn pause(
     let path = format!("{}/pause", target.path);
     let paused: Paused = match client.post_json(&path, &PauseQuery { force }).await {
         Ok(paused) => paused,
-        Err(ClientError::Api { status, message }) if status == hyper::StatusCode::CONFLICT => {
+        Err(ClientError::Api { status, message }) if status == StatusCode::CONFLICT => {
             return Err(Error::Local(format!(
                 "{message}\n`runnerctl pause --force {}` cancels its runs and removes their runners",
                 target.arguments

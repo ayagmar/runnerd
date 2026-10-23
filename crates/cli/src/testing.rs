@@ -10,7 +10,7 @@ use std::path::PathBuf;
 use std::sync::atomic::{AtomicU32, Ordering};
 use std::time::Duration;
 
-use crate::client::{Client, Timeouts};
+use runnerd_core::client::{Client, Timeouts};
 
 /// A fake daemon serving until the test ends; its directory is removed on drop.
 #[derive(Debug)]

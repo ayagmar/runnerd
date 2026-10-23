@@ -2,13 +2,15 @@
 //!
 //! `api` and `config` build everywhere. The `host` feature (on by default) adds what only the daemon runs: Docker,
 //! the GitHub client, the caches, the scheduler, the job history store and what observes running jobs. Clients
-//! depend on this crate without it.
+//! depend on this crate without it, and with the `client` feature for `client`, their connection to the daemon.
 
 #![warn(missing_docs)]
 
 pub mod api;
 #[cfg(feature = "host")]
 pub mod cache;
+#[cfg(feature = "client")]
+pub mod client;
 pub mod config;
 #[cfg(feature = "host")]
 pub mod docker;
@@ -24,7 +26,7 @@ pub mod scheduler;
 pub mod store;
 #[cfg(feature = "host")]
 mod sync;
-#[cfg(all(test, feature = "host"))]
+#[cfg(all(test, any(feature = "host", feature = "client")))]
 mod testdir;
 #[cfg(feature = "host")]
 mod time;

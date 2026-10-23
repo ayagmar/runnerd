@@ -25,15 +25,30 @@ host = [
   "dep:tokio",
   "dep:tracing",
 ]
+# The client of the daemon's API over its socket, for `runnerctl` and the dashboard: hyper's HTTP/1 client, no TLS.
+client = [
+  "dep:http-body-util",
+  "dep:hyper",
+  "dep:hyper-util",
+  "dep:serde_json",
+  "dep:serde_urlencoded",
+  "dep:tokio",
+  "tokio/net",
+  "tokio/time",
+]
 
 [dependencies]
 bollard = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
+http-body-util = { workspace = true, optional = true }
+hyper = { workspace = true, optional = true, features = ["client", "http1"] }
+hyper-util = { workspace = true, optional = true, features = ["tokio"] }
 reqwest = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
 rustls = { workspace = true, optional = true }
 serde.workspace = true
 serde_json = { workspace = true, optional = true }
+serde_urlencoded = { workspace = true, optional = true }
 tar = { workspace = true, optional = true }
 thiserror.workspace = true
 tokio = { workspace = true, optional = true, features = ["macros", "rt", "sync", "time"] }
@@ -42,6 +57,7 @@ tracing = { workspace = true, optional = true }
 
 [dev-dependencies]
 axum.workspace = true
+futures-util.workspace = true
 log.workspace = true
 tokio = { workspace = true, features = ["io-util", "macros", "net", "rt-multi-thread", "test-util", "time"] }
 

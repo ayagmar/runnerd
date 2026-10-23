@@ -1,8 +1,8 @@
 //! `runnerd-web`: the dashboard the daemon serves on a loopback TCP port. It is a client of the daemon's API like
-//! `runnerctl`: it reads `runnerd_core::api` types over the daemon's Unix socket (`daemon`), renders HTML on the
-//! server (`views`, `chart`), and keeps open pages current over SSE with Datastar (`live`). Writes (pause, reseed,
-//! the config) are passed on to the same API (`actions`). It holds no state of its own beyond the session (`auth`), and never talks to
-//! Docker or GitHub.
+//! `runnerctl`: it reads `runnerd_core::api` types over the daemon's Unix socket (`runnerd_core::client`), renders
+//! HTML on the server (`views`, `chart`), and keeps open pages current over SSE with Datastar (`live`). Writes
+//! (pause, reseed, the config) are passed on to the same API (`actions`). It holds no state of its own beyond the
+//! session (`auth`), and never talks to Docker or GitHub.
 
 use std::future::Future;
 use std::io;
@@ -18,6 +18,7 @@ use axum::middleware::{self, Next};
 use axum::response::{Html, IntoResponse, Response};
 use axum::routing::{get, post};
 use maud::Markup;
+use runnerd_core::client::{Client, ClientError};
 use tokio::net::TcpListener;
 use tokio::sync::watch;
 use tokio::task::JoinHandle;
@@ -27,13 +28,11 @@ mod actions;
 mod assets;
 mod auth;
 mod chart;
-mod daemon;
 mod format;
 mod live;
 mod views;
 
 pub use auth::login_file;
-use daemon::{Daemon, Error};
 use views::caches::CachesView;
 use views::config::ConfigView;
 use views::history::{Filter, History};
@@ -46,7 +45,7 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:7477";
 /// What every handler shares.
 #[derive(Clone)]
 pub(crate) struct App {
-    daemon: Daemon,
+    daemon: Client,
     /// Set when the dashboard stops, so live pages end.
     stopping: watch::Receiver<bool>,
 }
@@ -106,7 +105,11 @@ pub async fn serve(
         file.display()
     );
     let (stopping, stopping_receiver) = watch::channel(false);
-    let app = router(Daemon::new(socket), auth.clone(), stopping_receiver);
+    let app = router(
+        Client::new(socket.to_owned()),
+        auth.clone(),
+        stopping_receiver,
+    );
     let served = axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stop.await;
@@ -117,7 +120,7 @@ pub async fn serve(
     served
 }
 
-fn router(daemon: Daemon, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>) -> Router {
+fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>) -> Router {
     let pages = Router::new()
         .route("/", get(overview))
         .route("/history", get(history))
@@ -183,10 +186,13 @@ async fn security_headers(request: Request, next: Next) -> Response {
 }
 
 /// A page, or the daemon's error as one.
-fn page(rendered: Result<Markup, Error>) -> Response {
+fn page(rendered: Result<Markup, ClientError>) -> Response {
     match rendered {
         Ok(markup) => Html(markup.into_string()).into_response(),
-        Err(Error::Status(StatusCode::NOT_FOUND, message)) => (
+        Err(ClientError::Api {
+            status: StatusCode::NOT_FOUND,
+            message,
+        }) => (
             StatusCode::NOT_FOUND,
             views::error_page("Not found", &message),
         )
@@ -243,7 +249,7 @@ async fn job(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {
 async fn job_log(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {
     match app.daemon.text(&format!("/v1/jobs/{id}/logs")).await {
         Ok(text) => ([(header::CONTENT_TYPE, "text/plain; charset=utf-8")], text).into_response(),
-        Err(Error::Status(status, message)) => (status, message).into_response(),
+        Err(ClientError::Api { status, message }) => (status, message).into_response(),
         Err(error) => (StatusCode::BAD_GATEWAY, error.to_string()).into_response(),
     }
 }

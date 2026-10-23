@@ -4,7 +4,8 @@
 //! lacks is sent: a region whose HTML differs, or when only some of its parts (`views::Parts`) do, those parts. On
 //! connecting, the stream skips the regions the page already has, which the page names by digest in its `shown`
 //! signal; after each update the stream sets that signal to what the page shows now, and the time, which live
-//! charts follow. The stream ends when the page closes, the daemon's stream ends, or the dashboard stops.
+//! charts follow. The stream ends when the page closes, the daemon's stream ends for good, or the dashboard
+//! stops.
 
 use std::collections::{HashMap, HashSet};
 use std::convert::Infallible;
@@ -16,13 +17,13 @@ use datastar::consts::Namespace;
 use datastar::prelude::{ElementPatchMode, PatchElements, PatchSignals};
 use futures_util::{Stream, StreamExt, stream};
 use maud::Markup;
-use runnerd_core::api::{Event, EventQuery, Job};
+use runnerd_core::api::{Event, EventEnvelope, EventQuery, Job};
+use runnerd_core::client::{ClientError, Events};
 use serde::Deserialize;
 use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
 use crate::App;
-use crate::daemon::Error;
 use crate::views::job::{self, JobView};
 use crate::views::{self, Part, Parts, Tone, digest, overview};
 
@@ -206,15 +207,25 @@ impl Sent {
     }
 }
 
-async fn notice(patches: &Patches, error: &Error) {
+async fn notice(patches: &Patches, error: &ClientError) {
     let event = PatchElements::new(views::notice(&error.to_string(), Tone::Failed).into_string())
         .write_as_axum_sse_event();
     let _ = patches.send(event).await;
 }
 
+/// The daemon's events as a stream. The reader reconnects on its own and resumes after the last durable event; the
+/// stream ends when it cannot, or when it reconnected with nothing to resume after, so the page's own stream ends
+/// and the page connects again, reading the daemon afresh.
+fn envelopes(events: Events) -> impl Stream<Item = EventEnvelope> {
+    stream::unfold(events, |mut events| async move {
+        let envelope = events.next().await.ok()?;
+        (!events.missed_events()).then_some((envelope, events))
+    })
+}
+
 /// Waits `SETTLE` for more events, adding them to `batch`; `false` once the daemon's stream ended.
 async fn settle(
-    events: &mut (impl Stream<Item = runnerd_core::api::EventEnvelope> + Unpin),
+    events: &mut (impl Stream<Item = EventEnvelope> + Unpin),
     batch: &mut Vec<Event>,
 ) -> bool {
     let deadline = tokio::time::sleep(SETTLE);
@@ -232,7 +243,7 @@ async fn settle(
 
 /// Waits for the next event; `None` when the stream, the page or the dashboard ended.
 async fn next_event(
-    events: &mut (impl Stream<Item = runnerd_core::api::EventEnvelope> + Unpin),
+    events: &mut (impl Stream<Item = EventEnvelope> + Unpin),
     patches: &Patches,
     stopping: &mut watch::Receiver<bool>,
 ) -> Option<Event> {
@@ -258,10 +269,14 @@ pub(crate) async fn overview(
     respond(receiver)
 }
 
-async fn run_overview(app: &App, patches: &Patches, shown: Option<Shown>) -> Result<(), Error> {
+async fn run_overview(
+    app: &App,
+    patches: &Patches,
+    shown: Option<Shown>,
+) -> Result<(), ClientError> {
     // Subscribed before reading, so nothing that happens in between is missed.
-    let events = app.daemon.events(&EventQuery::default()).await?;
-    let mut events = Box::pin(events);
+    let events = app.daemon.events(EventQuery::default(), None).await?;
+    let mut events = Box::pin(envelopes(events));
     let mut stopping = app.stopping.clone();
     let mut data = overview::Overview::load(&app.daemon, crate::now()).await?;
     let mut sent = Sent::default();
@@ -380,15 +395,23 @@ async fn append_lines(patches: &Patches, first: u64, lines: &[String], shown: &m
     patches.send(trim).await.is_ok()
 }
 
-async fn run_job(app: &App, patches: &Patches, id: u64, shown: Option<Shown>) -> Result<(), Error> {
+async fn run_job(
+    app: &App,
+    patches: &Patches,
+    id: u64,
+    shown: Option<Shown>,
+) -> Result<(), ClientError> {
     let events = app
         .daemon
-        .events(&EventQuery {
-            job: Some(id),
-            logs: true,
-        })
+        .events(
+            EventQuery {
+                job: Some(id),
+                logs: true,
+            },
+            None,
+        )
         .await?;
-    let mut events = Box::pin(events);
+    let mut events = Box::pin(envelopes(events));
     let mut stopping = app.stopping.clone();
     let mut data = JobView::load(&app.daemon, id, crate::now()).await?;
     let mut next_line = data.log_from + data.log.len() as u64;
