@@ -36,6 +36,7 @@ use self::history::{Closing, Found};
 use self::images::ImageState;
 pub use self::records::RecordSelection;
 use super::SlotRef;
+use crate::admission::Key;
 use crate::api;
 use crate::cache::{self, Names, Trimmed};
 use crate::config::Config;
@@ -172,6 +173,8 @@ struct Occupant {
     admission: Option<api::Admission>,
     /// The job it took, once its log capture found it.
     job: Option<u64>,
+    /// That job as admission tells jobs apart, once the history had its record.
+    key: Option<Key>,
 }
 
 impl Occupant {

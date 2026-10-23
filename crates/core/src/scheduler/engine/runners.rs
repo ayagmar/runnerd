@@ -292,6 +292,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     memory: profile.memory.0,
                     admission: Some(admission),
                     job: None,
+                    key: None,
                 };
                 if let Some(entry) = self
                     .slots

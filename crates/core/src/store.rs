@@ -186,6 +186,10 @@ enum Write {
         job: QueuedJob,
     },
     RunnerStarted(RunnerRecord),
+    RunnerAdmission {
+        runner: String,
+        admission: api::Admission,
+    },
     RunnerRemoved {
         runner: String,
         at: u64,
@@ -441,6 +445,14 @@ impl Store {
     /// A runner's last sampled memory, stored or not; `None` before its first sample or once it is removed.
     pub fn latest_memory(&self, runner: &str) -> Option<u64> {
         lock(&self.latest_memory).get(runner).copied()
+    }
+
+    /// Records what a runner reserves now, when measured admission changed it after the start.
+    pub fn runner_admission(&self, runner: &str, admission: api::Admission) {
+        self.send(Write::RunnerAdmission {
+            runner: runner.to_owned(),
+            admission,
+        });
     }
 
     /// The last host sample sent, stored or not; `None` before the first.

@@ -108,6 +108,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 admission: None,
                 // Its capture reports it again; until then, or if it cannot, the history knows it.
                 job: self.store.runner_job(&container.name).await.ok().flatten(),
+                key: None,
             };
             let known_repository = self.repositories.contains_key(&occupant.repository);
             let free = index.and_then(|index| {

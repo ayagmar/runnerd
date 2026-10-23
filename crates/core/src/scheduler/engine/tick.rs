@@ -97,6 +97,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if mode == Shutdown::No {
             self.pull_images().await;
             self.refresh_predictor().await;
+            self.rereserve().await;
         }
         let (decisions, mut admitting) = match mode {
             Shutdown::No => self.plan(),

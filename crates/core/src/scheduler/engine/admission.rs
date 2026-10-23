@@ -4,19 +4,19 @@
 //! recent sample; and nothing starts while the slice is at `admission::HIGH_WATER` percent of its `MemoryMax`.
 //! It reads the store and the latest host sample; it never writes the config.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
 use super::Engine;
-use crate::admission::{HIGH_WATER, Key, Predictor};
+use crate::admission::{HIGH_WATER, Key, Prediction, Predictor};
 use crate::api::{self, AdmissionPolicy, Basis};
 use crate::config::Admission;
 use crate::docker::DockerApi;
-use crate::github::GithubApi;
+use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
-use crate::scheduler::Repository;
+use crate::scheduler::{Repository, matches};
 use crate::time;
 
 /// How often the predictor reads the job history again.
@@ -63,6 +63,27 @@ impl Admitting {
         self.free = self.free.map(|free| free.saturating_sub(reserved));
         admission
     }
+}
+
+/// The largest prediction among `queued`, jobs of `repository` in `profile` under `cap`.
+fn largest<'job>(
+    predictor: &Predictor,
+    repository: &str,
+    profile: &str,
+    cap: u64,
+    queued: impl Iterator<Item = &'job QueuedJob>,
+    now: u64,
+) -> Option<Prediction> {
+    queued
+        .map(|job| {
+            let key = Key {
+                repository: repository.to_owned(),
+                workflow: job.workflow.clone(),
+                name: job.name.clone(),
+            };
+            predictor.predict(&key, profile, cap, now)
+        })
+        .max_by_key(|prediction| prediction.memory)
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -158,19 +179,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             else {
                 continue;
             };
-            let largest = repository
+            let queued = repository
                 .queued
                 .iter()
-                .map(|job| {
-                    let key = Key {
-                        repository: repository.name.clone(),
-                        workflow: job.workflow.clone(),
-                        name: job.name.clone(),
-                    };
-                    predictor.predict(&key, &repository.profile, cap, now)
-                })
-                .max_by_key(|prediction| prediction.memory);
-            if let Some(prediction) = largest {
+                .filter(|job| matches(job, &repository.labels));
+            if let Some(prediction) = largest(
+                predictor,
+                &repository.name,
+                &repository.profile,
+                cap,
+                queued,
+                now,
+            ) {
                 repository.runner_memory = Some(prediction.memory);
                 admitting
                     .basis
@@ -178,6 +198,93 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         admitting
+    }
+
+    /// Under measured admission, sets what each running runner reserves: once its job is known, that job's
+    /// prediction; until then, the larger of what it reserved and the largest prediction among its repository's
+    /// queued jobs, since GitHub may still give it any of them. A runner a restart adopted keeps its cap. Each
+    /// change goes into the runner's row.
+    pub(super) async fn rereserve(&mut self) {
+        if self.config.host.admission != Admission::Measured {
+            return;
+        }
+        let unknown: Vec<(String, u64)> = self
+            .occupied()
+            .filter(|(_, occupant)| occupant.key.is_none())
+            .filter_map(|(_, occupant)| Some((occupant.runner_name.clone(), occupant.job?)))
+            .collect();
+        for (runner, job) in unknown {
+            let Ok(Some(record)) = self.store.job(job).await else {
+                continue;
+            };
+            if let Some(occupant) = self
+                .slots
+                .values_mut()
+                .flatten()
+                .flatten()
+                .find(|occupant| occupant.runner_name == runner)
+            {
+                occupant.key = Some(Key {
+                    repository: record.summary.repository,
+                    workflow: record.summary.workflow,
+                    name: record.summary.name,
+                });
+            }
+        }
+        let Some((predictor, _)) = &self.measured.predictor else {
+            return;
+        };
+        let now = time::now_ms();
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
+        let mut changed = Vec::new();
+        for (profile, slots) in &mut self.slots {
+            for occupant in slots.iter_mut().flatten() {
+                let Some(admission) = &mut occupant.admission else {
+                    continue;
+                };
+                let prediction = if let Some(key) = &occupant.key {
+                    Some(predictor.predict(key, profile, occupant.memory, now))
+                } else {
+                    let labels = self
+                        .config
+                        .repositories
+                        .iter()
+                        .find(|repository| repository.name == occupant.repository)
+                        .map(|repository| repository.labels.as_slice())
+                        .unwrap_or_default();
+                    let queued = self
+                        .repositories
+                        .get(&occupant.repository)
+                        .map(|state| state.queued.as_slice())
+                        .unwrap_or_default()
+                        .iter()
+                        .filter(|job| !taken.contains(&job.id) && matches(job, labels));
+                    largest(
+                        predictor,
+                        &occupant.repository,
+                        profile,
+                        occupant.memory,
+                        queued,
+                        now,
+                    )
+                    .filter(|prediction| prediction.memory > admission.reserved)
+                };
+                if let Some(prediction) = prediction
+                    && (prediction.memory, prediction.basis)
+                        != (admission.reserved, admission.basis)
+                {
+                    admission.reserved = prediction.memory;
+                    admission.basis = prediction.basis;
+                    changed.push((occupant.runner_name.clone(), *admission));
+                }
+            }
+        }
+        for (runner, admission) in changed {
+            self.store.runner_admission(&runner, admission);
+        }
     }
 
     /// Logs when the slice reaches the high-water mark and when it falls under it.
