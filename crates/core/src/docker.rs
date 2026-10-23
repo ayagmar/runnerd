@@ -267,6 +267,11 @@ pub trait DockerApi: Send + Sync {
     ) -> impl Future<Output = Result<u64, Error>> + Send;
     /// Every image with the label.
     fn images(&self, label: &str) -> impl Future<Output = Result<Vec<Image>, Error>> + Send;
+    /// The ID of the image a reference (tag, digest or ID) names; `None` when Docker does not have it.
+    fn image_id(
+        &self,
+        reference: &str,
+    ) -> impl Future<Output = Result<Option<String>, Error>> + Send;
     /// Every image Docker has a tag for.
     fn tagged_images(&self) -> impl Future<Output = Result<Vec<TaggedImage>, Error>> + Send;
     /// The image ID of every container, running or stopped.
@@ -649,6 +654,14 @@ impl DockerApi for Docker {
             });
         }
         Ok(found)
+    }
+
+    async fn image_id(&self, reference: &str) -> Result<Option<String>, Error> {
+        match self.api.inspect_image(reference).await {
+            Ok(inspect) => Ok(inspect.id),
+            Err(error) if is_not_found(&error) => Ok(None),
+            Err(error) => Err(error),
+        }
     }
 
     async fn tagged_images(&self) -> Result<Vec<TaggedImage>, Error> {

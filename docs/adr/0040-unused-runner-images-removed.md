@@ -17,7 +17,8 @@ stage and version. `docker system prune -af` on a timer would also delete the re
   an `image_stage` or a fork's image, is never removed: runnerd cannot tell whether someone still needs it, and
   cannot rebuild it.
 - It keeps every tag of an image that any profile names, retired profiles included while they still run, or that a
-  pull is fetching, and every tag of an image a container was made from, running or stopped. Docker refuses to
+  pull is fetching, and every tag of an image a container was made from, running or stopped. A wanted reference
+  Docker has is resolved to its image ID, whether it is a tag, a digest or an ID. Docker refuses to
   remove a container's image only when the tag is its last, so runnerd lists every container's image ID itself.
 - A profile's reference is compared as Docker normalises it, as `distribution/reference` does: `index.docker.io`
   is `docker.io`, a Docker Hub name without a namespace is under `library/`, a reference with neither tag nor
@@ -26,7 +27,8 @@ stage and version. `docker system prune -af` on a timer would also delete the re
 - The engine removes one tag at a time, at start, after a reload and after a pull, until none is left. It picks the
   next tag against the config and pulls of that moment, between the commands that change them, and removes it in
   the background, never forced. When the removal ends and the image is now wanted, because a reload asked for that
-  tag while it was being removed, the engine checks again whether Docker has it, and pulls it.
+  image while it was being removed, by any tag, digest or ID, the engine notices: after every removal it checks
+  again whether Docker has each image it had found, and pulls those it lost.
 - A removal Docker refuses is logged and not retried until the next start, reload or pull.
 
 ## Consequences

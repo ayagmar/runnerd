@@ -139,12 +139,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match task.await {
                 Ok(Ok(())) => {
                     info!("removed {tag}, which no profile runs");
-                    let removed = Reference::parse(&tag);
-                    // Present when a reload wanted it while it was being removed: checked again, and pulled.
-                    self.images.states.retain(|reference, state| {
-                        !matches!(state, ImageState::Present)
-                            || Reference::parse(reference).tag_ref() != removed.tag_ref()
-                    });
+                    // A reload may have wanted the image while it was being removed, by any tag, digest or ID:
+                    // every image Docker had is checked again, and pulled when it is gone.
+                    self.images
+                        .states
+                        .retain(|_, state| !matches!(state, ImageState::Present));
                 }
                 Ok(Err(error)) => {
                     warn!("cannot remove {tag}: {error}");
@@ -172,21 +171,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// The first tag of runnerd's published runner images that no profile, retired or not, names, no pull is
     /// fetching, no container was made from, and Docker did not refuse to remove since the removals were due.
-    /// `None` when there is none, or Docker did not list its images or containers.
+    /// `None` when there is none, or Docker did not list or resolve its images or containers.
     async fn next_stale_tag(&self) -> Option<String> {
-        let listed = async {
-            let images = self.docker.tagged_images().await?;
-            let used = self.docker.container_images().await?;
-            Ok::<_, docker::Error>((images, used))
-        };
-        let (images, used) = match listed.await {
-            Ok(listed) => listed,
-            Err(error) => {
-                warn!("cannot list Docker's images and containers: {error}");
-                return None;
-            }
-        };
-        let wanted: Vec<Reference> = self
+        let wanted: Vec<String> = self
             .config
             .profiles
             .values()
@@ -199,11 +186,31 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .filter(|(_, state)| matches!(state, ImageState::Pulling { .. }))
                     .map(|(reference, _)| reference.clone()),
             )
-            .map(|reference| Reference::parse(&reference))
+            .collect();
+        let listed = async {
+            let images = self.docker.tagged_images().await?;
+            let mut kept = self.docker.container_images().await?;
+            // What Docker resolves a wanted reference to, whatever its spelling: a tag, a digest or an image ID.
+            for reference in &wanted {
+                kept.extend(self.docker.image_id(reference).await?);
+            }
+            Ok::<_, docker::Error>((images, kept))
+        };
+        let (images, kept) = match listed.await {
+            Ok(listed) => listed,
+            Err(error) => {
+                warn!("cannot list Docker's images and containers: {error}");
+                return None;
+            }
+        };
+        // Matched by name too: a pull may publish a tag between the listing and the removal.
+        let wanted: Vec<Reference> = wanted
+            .iter()
+            .map(|reference| Reference::parse(reference))
             .collect();
         images
             .iter()
-            .filter(|image| !used.contains(&image.id))
+            .filter(|image| !kept.contains(&image.id))
             .filter(|image| !wanted.iter().any(|reference| reference.names(image)))
             .flat_map(|image| &image.tags)
             .find(|tag| {

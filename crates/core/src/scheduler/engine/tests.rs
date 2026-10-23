@@ -556,6 +556,19 @@ impl DockerApi for FakeDocker {
         Ok(self.0.lock().unwrap().tagged.clone())
     }
 
+    async fn image_id(&self, reference: &str) -> Result<Option<String>, docker::Error> {
+        let state = self.0.lock().unwrap();
+        Ok(state
+            .tagged
+            .iter()
+            .find(|image| {
+                image.id == reference
+                    || image.tags.iter().any(|tag| tag == reference)
+                    || image.digests.iter().any(|digest| digest == reference)
+            })
+            .map(|image| image.id.clone()))
+    }
+
     async fn container_images(&self) -> Result<BTreeSet<String>, docker::Error> {
         Ok(self.0.lock().unwrap().container_images.clone())
     }
@@ -580,6 +593,14 @@ impl DockerApi for FakeDocker {
         for image in &mut state.tagged {
             image.tags.retain(|tag| tag != reference);
         }
+        // Without its last tag, Docker deletes the image and its digests.
+        let deleted: Vec<String> = state
+            .tagged
+            .iter()
+            .filter(|image| image.tags.is_empty())
+            .flat_map(|image| image.digests.iter().chain([&image.id]).cloned())
+            .collect();
+        state.missing_images.extend(deleted);
         state.tagged.retain(|image| !image.tags.is_empty());
         state.missing_images.insert(reference.to_owned());
         Ok(())
@@ -3053,6 +3074,23 @@ async fn a_profile_naming_its_image_by_digest_keeps_its_tags() {
 }
 
 #[tokio::test]
+async fn a_profile_naming_its_image_by_id_keeps_it() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    has_images(&docker, &[PUBLISHED]);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .tagged
+        .push(tagged("sha256:pinned", OLD_PUBLISHED));
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_on(&github, &docker, &dir, "sha256:pinned");
+    engine.recover().await.unwrap();
+    until_stale_images_removed(&mut engine).await;
+    assert_eq!(images_left(&docker), [OLD_PUBLISHED]);
+}
+
+#[tokio::test]
 async fn a_refused_removal_does_not_stop_the_others_nor_repeat() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     has_images(
@@ -3105,6 +3143,40 @@ async fn an_image_a_reload_wants_while_its_tag_is_removed_is_pulled_again() {
     until_called(&mut engine, &docker, &format!("pull {OLD_PUBLISHED}")).await;
     until_stale_images_removed(&mut engine).await;
     assert_eq!(images_left(&docker), [OLD_PUBLISHED]);
+}
+
+#[tokio::test]
+async fn an_image_a_reload_wants_by_digest_while_its_last_tag_is_removed_is_pulled_again() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let by_digest = format!(
+        "ghcr.io/ayagmar/runnerd-runner@sha256:{}",
+        "0123456789abcdef".repeat(4)
+    );
+    has_images(&docker, &[PUBLISHED]);
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.tagged.push(docker::TaggedImage {
+            id: "sha256:old".to_owned(),
+            tags: vec![OLD_PUBLISHED.to_owned()],
+            digests: vec![by_digest.clone()],
+        });
+        state.held_removals = BTreeSet::from([OLD_PUBLISHED.to_owned()]);
+    }
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_on(&github, &docker, &dir, PUBLISHED);
+    engine.recover().await.unwrap();
+    until_called(
+        &mut engine,
+        &docker,
+        &format!("remove image {OLD_PUBLISHED}"),
+    )
+    .await;
+    let config = CONFIG.replace("image_stage = \"app\"", &format!("image = \"{by_digest}\""));
+    engine.reload(Config::parse(&config).unwrap(), None, None);
+    // Docker still has it: the removal waits, and the image counts as present.
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().held_removals.clear();
+    until_called(&mut engine, &docker, &format!("pull {by_digest}")).await;
 }
 
 #[tokio::test]
