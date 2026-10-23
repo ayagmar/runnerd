@@ -23,11 +23,11 @@ It then runs `runnerd doctor` and prints what is left as commands. It prints the
 them; on a fresh host they are usually the slice, sized for this host, and Sysbox. Run the commands your `init`
 printed, not a copy from elsewhere.
 
-Then build the runner image (published images are on the way; `init` will use them once they ship) and start the
-service. The image is built for linux/amd64 only today, so on aarch64 runners do not start yet.
+Then start the service. The config's profile runs this release's published image,
+`ghcr.io/ayagmar/runnerd-runner:base-<version>`, which runnerd pulls before the first runner. Published images are
+linux/amd64 only today, so on aarch64 runners do not start yet.
 
 ```sh
-docker build --target base -t runnerd-runner:base https://github.com/ayagmar/runnerd.git#v0.0.4:image
 systemctl --user daemon-reload
 systemctl --user enable --now runnerd
 runnerctl status

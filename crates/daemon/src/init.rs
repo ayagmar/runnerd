@@ -28,6 +28,14 @@ const CPUS_PER_SLOT: u32 = 4;
 /// The image stage the starter profile runs; every other stage builds on it.
 const IMAGE_STAGE: &str = "base";
 
+/// The published image of `IMAGE_STAGE` for this release, which runnerd pulls before the first runner.
+fn starter_image() -> String {
+    format!(
+        "ghcr.io/ayagmar/runnerd-runner:{IMAGE_STAGE}-{}",
+        env!("CARGO_PKG_VERSION")
+    )
+}
+
 /// What the starter profile is sized from.
 pub(crate) struct Machine {
     /// The host's memory.
@@ -336,13 +344,14 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          maven = {{ max_size = \"5G\" }}\n\
          \n\
          # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of the host's\n\
-         # memory, or the slice's MemoryMax if that is smaller.\n\
+         # memory, or the slice's MemoryMax if that is smaller. runnerd pulls the image before the first runner.\n\
          [profiles.default]\n\
-         image_stage = \"{IMAGE_STAGE}\"\n\
+         image = \"{image}\"\n\
          cpus = {cpus}\n\
          memory = \"{memory}\"\n\
          slots = {slots}\n\
          {repositories}",
+        image = starter_image(),
         host_memory = machine.memory,
         host_cpus = machine.cpus,
         slice = request.slice,
@@ -408,7 +417,7 @@ pub(crate) fn run(request: &Request) -> ExitCode {
     output::line(format_args!("wrote {}", request.unit.display()));
     if std::env::consts::ARCH != "x86_64" {
         output::warning(format_args!(
-            "the runner image is built for linux/amd64 only today, so runners do not start on this {} host",
+            "the published runner image is built for linux/amd64 only today, so runners do not start on this {} host",
             std::env::consts::ARCH
         ));
     }
@@ -472,13 +481,12 @@ fn next_steps(checks: &[Check]) -> String {
     };
     format!(
         "{fix_first}\n\
-         Build the runner image, then start runnerd and have it start at login:\n\
-         \x20 docker build --target {IMAGE_STAGE} -t runnerd-runner:{IMAGE_STAGE} https://github.com/ayagmar/runnerd.git#v{version}:image\n\
+         Start runnerd and have it start at login; it pulls {image} before the first runner:\n\
          \x20 systemctl --user daemon-reload\n\
          \x20 systemctl --user enable --now runnerd\n\
          \x20 runnerctl status\n\
          To keep it running while you are logged out: loginctl enable-linger \"$USER\"",
-        version = env!("CARGO_PKG_VERSION"),
+        image = starter_image(),
     )
 }
 

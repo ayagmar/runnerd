@@ -2,7 +2,7 @@
 
 use std::path::Path;
 
-use runnerd_core::config::{ByteSize, Config};
+use runnerd_core::config::{ByteSize, Config, Image};
 
 use super::{Machine, Overwrite, Request, init, size};
 use crate::testdir::Dir;
@@ -52,6 +52,14 @@ fn the_starter_config_passes_check_config_before_and_after_the_slice_exists() {
         .collect();
     assert_eq!(names, ["halyard/ledger", "halyard/storefront"]);
     assert_eq!(config.host.slice, "runnerd.slice");
+    assert_eq!(
+        config.profiles["default"].image,
+        Image::Pulled(format!(
+            "ghcr.io/ayagmar/runnerd-runner:base-{}",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "the starter profile pulls this release's published base stage"
+    );
 }
 
 #[test]
