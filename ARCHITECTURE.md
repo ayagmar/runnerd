@@ -87,7 +87,6 @@ nothing until Docker has listed them.
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
 | Dashboard session | in memory, new each daemon run; the one-time login URL in `runnerd.web` next to the socket (0600) |
-
 | Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories; times in ms |
 
 ## Invariants
