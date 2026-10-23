@@ -17,6 +17,7 @@ use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{Repository, matches};
+use crate::sizing::Ran;
 use crate::time;
 
 /// How often the predictor reads the job history again.
@@ -113,20 +114,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
         };
-        let mut jobs = history.jobs;
-        jobs.sort_by_key(|run| run.finished_at.unwrap_or(run.queued_at));
+        let mut runs: Vec<(Ran, bool)> = history
+            .jobs
+            .into_iter()
+            .map(|run| (run, true))
+            .chain(history.cancelled.into_iter().map(|run| (run, false)))
+            .collect();
+        runs.sort_by_key(|(run, _)| run.finished_at.unwrap_or(run.queued_at));
         let mut predictor = Predictor::new(&self.config.sizing);
-        for run in &jobs {
+        for (run, finished) in &runs {
             let cap = run
                 .memory_cap
                 .or_else(|| self.config.profiles.get(&run.profile).map(|p| p.memory.0))
                 .unwrap_or(u64::MAX);
-            predictor.learn(
-                run,
-                &run.profile,
-                cap,
-                run.finished_at.unwrap_or(run.queued_at),
-            );
+            let at = run.finished_at.unwrap_or(run.queued_at);
+            // A cancelled run's peak may be cut short, so only how it ended counts.
+            if *finished {
+                predictor.learn(run, &run.profile, cap, at);
+            } else {
+                predictor.mark(run, cap, at);
+            }
         }
         self.measured.predictor = Some((predictor, SystemTime::now()));
     }

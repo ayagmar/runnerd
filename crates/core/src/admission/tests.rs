@@ -63,6 +63,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         started_at: Some(queued),
         finished_at: Some(queued + minutes * MINUTE),
         oom_killed: false,
+        reserved: None,
     }
 }
 
@@ -108,10 +109,79 @@ fn a_job_with_few_runs_takes_its_profiles_p95_or_its_own_largest_peak_whichever_
     let prediction = predictor.predict(&key("e2e"), "node", 7 * G, NOW);
     assert_eq!(prediction.basis, Basis::Profile { runs: 63 });
     assert_eq!(prediction.memory, 5888 * M);
-    // A job never seen goes by the profile alone: 2G + 15%, rounded up to 2.5G.
+}
+
+#[test]
+fn a_job_never_seen_reserves_the_largest_peak_of_its_profile() {
+    let mut predictor = predictor();
+    for _ in 0..60 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    predictor.learn(
+        &run("halyard/storefront", "e2e", "node", NOW, 20, 5 * G),
+        "node",
+        7 * G,
+        NOW,
+    );
+    // A new workflow may be the profile's heaviest: 5G + 15%, not the p95's 2G.
+    let prediction = predictor.predict(&key("lint"), "node", 7 * G, NOW);
+    assert_eq!(prediction.basis, Basis::ProfileMax { runs: 61 });
+    assert_eq!(prediction.memory, 5888 * M);
+}
+
+#[test]
+fn a_run_past_what_it_reserved_makes_its_job_reserve_its_largest_peak_for_a_week() {
+    let mut predictor = predictor();
+    for _ in 0..19 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    // Reserved 2.5G, peaked at 4G: under the cap, so only what it reserved shows it ran over.
+    let overran = Ran {
+        reserved: Some(2560 * M),
+        ..build(4 * G)
+    };
+    predictor.learn(&overran, "node", 7 * G, NOW);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
     assert_eq!(
-        predictor.predict(&key("lint"), "node", 7 * G, NOW).memory,
-        2560 * M
+        prediction.basis,
+        Basis::Overran {
+            until: (NOW + UNPREDICTABLE_FOR) / 1000
+        }
+    );
+    // 4G + 15% is 4.6G, rounded up to 4.75G; its p95 alone would say 2.5G.
+    assert_eq!(prediction.memory, 4864 * M);
+    assert_eq!(
+        predictor
+            .predict(&key("build"), "node", 7 * G, NOW + UNPREDICTABLE_FOR)
+            .basis,
+        Basis::Job { runs: 20 }
+    );
+}
+
+#[test]
+fn a_cancelled_run_killed_for_memory_makes_its_job_unpredictable_without_counting_its_peak() {
+    let mut predictor = predictor();
+    for _ in 0..20 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    let killed = Ran {
+        oom_killed: true,
+        ..build(0)
+    };
+    predictor.mark(&killed, 7 * G, NOW);
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE);
+    assert_eq!(
+        prediction.basis,
+        Basis::Unpredictable {
+            until: (NOW + UNPREDICTABLE_FOR) / 1000
+        }
+    );
+    // Its peak of 0 did not join the job's runs.
+    assert_eq!(
+        predictor
+            .predict(&key("build"), "node", 7 * G, NOW + UNPREDICTABLE_FOR)
+            .basis,
+        Basis::Job { runs: 20 }
     );
 }
 

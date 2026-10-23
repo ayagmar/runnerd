@@ -740,6 +740,60 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
     assert_eq!(killed, [("job 1", false), ("job 2", true)]);
 }
 
+#[tokio::test]
+async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.queued("o/r", &queued(1));
+    store.runner_started(RunnerRecord {
+        admission: Some(crate::api::Admission {
+            policy: crate::api::AdmissionPolicy::Measured,
+            reserved: 1 << 30,
+            basis: crate::api::Basis::Job { runs: 10 },
+            free: Some(8 << 30),
+            slice: Some(1 << 30),
+        }),
+        ..runner("r1", 1_000_100)
+    });
+    store.claimed(1, 10, "r1", 1_000_200);
+    // Its build hung after the kill, and someone cancelled it.
+    store.samples(vec![SampleRecord {
+        memory: 2 << 30,
+        oom_kills: 1,
+        ..sample("r1", 1_000_300, 0, 0)
+    }]);
+    store.details(crate::github::JobDetails {
+        id: 1,
+        run_id: 10,
+        run_attempt: 1,
+        name: "job 1".to_owned(),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some("cancelled".to_owned()),
+        started_at: None,
+        completed_at: None,
+        runner_name: Some("r1".to_owned()),
+        steps: Vec::new(),
+    });
+    store.runner_removed("r1", 1_000_500);
+    store.flush().await;
+    let history = store.sizing(0).await.unwrap();
+    assert!(
+        history.jobs.is_empty(),
+        "a cancelled job says nothing of its size"
+    );
+    let ended: Vec<(&str, bool, Option<u64>)> = history
+        .cancelled
+        .iter()
+        .map(|job| (job.name.as_str(), job.oom_killed, job.reserved))
+        .collect();
+    assert_eq!(ended, [("job 1", true, Some(1 << 30))]);
+}
+
 /// A database at `path` written by a runnerd that knew the first `version` migrations, in WAL mode as the daemon
 /// leaves it, with one finished job that peaked at 3G in a runner of `node`.
 fn database_of_version(path: &std::path::Path, version: usize) {

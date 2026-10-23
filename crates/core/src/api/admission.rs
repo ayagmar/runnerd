@@ -29,10 +29,21 @@ pub enum Basis {
         runs: u64,
     },
     /// Too few runs of the job but enough of its profile: the larger of the profile's p95 peak and the job's own
-    /// largest, each plus the margin.
+    /// largest, plus the margin.
     Profile {
         /// How many runs of the profile.
         runs: u64,
+    },
+    /// No run of the job yet but enough of its profile: the profile's largest peak plus the margin, since a new
+    /// job may be its heaviest.
+    ProfileMax {
+        /// How many runs of the profile.
+        runs: u64,
+    },
+    /// A run of the job went past what it reserved lately: the job's largest peak plus the margin.
+    Overran {
+        /// When the job is predicted from its p95 again.
+        until: u64,
     },
     /// The cap: admission by caps, or too few runs of the job and of its profile.
     Cap,
@@ -75,6 +86,14 @@ impl Admission {
             }
             Basis::Profile { runs } => format!(
                 "reserved {reserved}, from {runs} runs of its profile: its job had too few of its own"
+            ),
+            Basis::ProfileMax { runs } => format!(
+                "reserved {reserved}, the largest peak of {runs} runs of its profile + the margin: its job had no \
+                 runs of its own"
+            ),
+            Basis::Overran { .. } => format!(
+                "reserved {reserved}, its job's largest peak + the margin: a run of it went past what it reserved \
+                 lately"
             ),
             Basis::Cap if self.policy == AdmissionPolicy::Caps => {
                 format!("reserved its {reserved} cap")

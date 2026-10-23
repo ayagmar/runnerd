@@ -13,7 +13,7 @@ use crate::sizing::{GRANULE, Ran, spread};
 const AT_CAP: u64 = 95;
 
 /// For this long after a run at its cap or killed for memory, in milliseconds, its job is admitted at its cap: 7
-/// days.
+/// days. After a run past what it reserved, its job reserves its largest peak for as long.
 pub const UNPREDICTABLE_FOR: u64 = 7 * 24 * 3600 * 1000;
 
 /// While the slice uses this percent of its `MemoryMax` or more, measured admission starts nothing.
@@ -50,11 +50,13 @@ pub struct Prediction {
     pub basis: Basis,
 }
 
-/// The peaks of a set of runs, sorted, and until when a run at its cap makes them unpredictable.
+/// The peaks of a set of runs, sorted, until when a run at its cap makes them unpredictable, and until when a run
+/// past what it reserved makes the largest of them the prediction.
 #[derive(Debug, Clone, Default)]
 struct Peaks {
     sorted: Vec<u64>,
     unpredictable_until: u64,
+    overran_until: u64,
 }
 
 impl Peaks {
@@ -96,18 +98,31 @@ impl Predictor {
         }
     }
 
-    /// Learns a run of `profile` that finished at `at` (ms), having run under `cap`.
+    /// Learns a run of `profile` that finished at `at` (ms), having run under `cap`: its peak, and how it ended.
     pub fn learn(&mut self, run: &Ran, profile: &str, cap: u64, at: u64) {
+        self.mark(run, cap, at);
         let peak = run.memory_peak;
-        let job = self.jobs.entry(Key::of(run)).or_default();
-        job.add(peak);
-        if run.oom_killed || peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP) {
-            job.unpredictable_until = job.unpredictable_until.max(at + UNPREDICTABLE_FOR);
+        if let Some(job) = self.jobs.get_mut(&Key::of(run)) {
+            job.add(peak);
         }
         self.profiles
             .entry(profile.to_owned())
             .or_default()
             .add(peak);
+    }
+
+    /// Learns only how a run ended, not its peak, as for a cancelled one: a kill for memory or a peak at its cap
+    /// makes its job unpredictable for `UNPREDICTABLE_FOR`, a peak past what it reserved makes its job reserve its
+    /// largest peak for as long.
+    pub fn mark(&mut self, run: &Ran, cap: u64, at: u64) {
+        let peak = run.memory_peak;
+        let job = self.jobs.entry(Key::of(run)).or_default();
+        if run.oom_killed || peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP) {
+            job.unpredictable_until = job.unpredictable_until.max(at + UNPREDICTABLE_FOR);
+        }
+        if run.reserved.is_some_and(|reserved| peak > reserved) {
+            job.overran_until = job.overran_until.max(at + UNPREDICTABLE_FOR);
+        }
     }
 
     /// The memory to reserve for a run of `key` in `profile`, whose cap is `cap`, at `now` (ms).
@@ -125,17 +140,26 @@ impl Predictor {
             };
         }
         let min_jobs = u64::from(self.min_jobs);
+        let job = job.filter(|job| job.runs() > 0);
         let (memory, basis) = match (job, self.profiles.get(profile)) {
+            (Some(job), _) if job.overran_until > now => (
+                self.with_margin(job.max()),
+                Basis::Overran {
+                    until: job.overran_until / 1000,
+                },
+            ),
             (Some(job), _) if job.runs() >= min_jobs => {
                 (self.with_margin(job.p95()), Basis::Job { runs: job.runs() })
             }
-            (job, Some(peers)) if peers.runs() >= min_jobs => {
-                let own = job.map_or(0, |job| self.with_margin(job.max()));
-                (
-                    own.max(self.with_margin(peers.p95())),
-                    Basis::Profile { runs: peers.runs() },
-                )
-            }
+            (Some(job), Some(peers)) if peers.runs() >= min_jobs => (
+                self.with_margin(job.max().max(peers.p95())),
+                Basis::Profile { runs: peers.runs() },
+            ),
+            // A job never seen may be the profile's heaviest.
+            (None, Some(peers)) if peers.runs() >= min_jobs => (
+                self.with_margin(peers.max()),
+                Basis::ProfileMax { runs: peers.runs() },
+            ),
             _ => (cap, Basis::Cap),
         };
         Prediction {

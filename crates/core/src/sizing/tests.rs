@@ -61,6 +61,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         started_at: Some(NOW - 2 * HOUR + wait_secs * 1000),
         finished_at: Some(NOW - HOUR),
         oom_killed: false,
+        reserved: None,
     }
 }
 
@@ -96,6 +97,7 @@ fn a_cap_far_above_the_peaks_is_lowered_and_waiting_jobs_get_the_slots_that_fit(
     // p99 2.1G, + 15% = 2.415G, rounded up to 2.5G; 2 × 7G = 14G holds 5 of them.
     let history = History {
         jobs: builds(100, 1200 * M, 2150 * M, 300),
+        cancelled: Vec::new(),
         runners: Vec::new(),
     };
     let node = profile(&sizing(&history), "node").clone();
@@ -113,6 +115,7 @@ fn a_cap_far_above_the_peaks_is_lowered_and_waiting_jobs_get_the_slots_that_fit(
 fn a_lowered_cap_keeps_its_slots_when_no_job_waited_for_one() {
     let history = History {
         jobs: builds(20, 1000 * M, 2000 * M, 5),
+        cancelled: Vec::new(),
         runners: Vec::new(),
     };
     // 2000M + 15% = 2300M, rounded up to 2304M.
@@ -132,6 +135,7 @@ fn a_rare_heavy_job_keeps_the_cap_above_its_largest_peak() {
     jobs.extend((0..3).map(|_| job("halyard/storefront", "e2e", "node", 6 * G, 0)));
     let sizing = sizing(&History {
         jobs,
+        cancelled: Vec::new(),
         runners: Vec::new(),
     });
     let node = profile(&sizing, "node");
@@ -150,6 +154,7 @@ fn jobs_that_reach_their_cap_raise_it_within_what_the_slice_holds() {
         .collect();
     let sizing = sizing(&History {
         jobs,
+        cancelled: Vec::new(),
         runners: Vec::new(),
     });
     let jvm = profile(&sizing, "jvm");
@@ -167,6 +172,7 @@ fn jobs_that_reach_their_cap_raise_it_within_what_the_slice_holds() {
 fn too_few_jobs_give_no_advice_but_still_show_their_peaks() {
     let sizing = sizing(&History {
         jobs: builds(4, G, 2 * G, 0),
+        cancelled: Vec::new(),
         runners: Vec::new(),
     });
     let node = profile(&sizing, "node");
@@ -184,6 +190,7 @@ fn percentiles_are_nearest_rank_over_the_jobs_peaks() {
     let node = profile(
         &sizing(&History {
             jobs,
+            cancelled: Vec::new(),
             runners: Vec::new(),
         }),
         "node",
@@ -218,6 +225,7 @@ fn busy_is_the_share_of_slot_time_runners_held_since_the_first_runner() {
     ];
     let sizing = sizing(&History {
         jobs: Vec::new(),
+        cancelled: Vec::new(),
         runners,
     });
     assert_eq!(sizing.since, (NOW - 10 * HOUR) / 1000);
@@ -233,6 +241,7 @@ fn each_advised_change_written_into_the_config_still_fits_the_slice() {
             jobs.extend((0..30).map(|i| job("halyard/ledger", "test", "jvm", high + i * M, wait)));
             let sizing = sizing(&History {
                 jobs,
+                cancelled: Vec::new(),
                 runners: Vec::new(),
             });
             for profile in &sizing.profiles {
@@ -263,6 +272,7 @@ fn runs_killed_at_an_older_smaller_cap_keep_the_raised_cap() {
         .collect();
     let sizing = sizing(&History {
         jobs,
+        cancelled: Vec::new(),
         runners: Vec::new(),
     });
     let node = profile(&sizing, "node");
@@ -286,6 +296,7 @@ fn the_heaviest_runs_of_a_job_with_hundreds_of_runs_keep_the_cap_they_need() {
     jobs.extend(builds(2, 6 * G, 6 * G, 0));
     let sizing = sizing(&History {
         jobs,
+        cancelled: Vec::new(),
         runners: Vec::new(),
     });
     let node = profile(&sizing, "node");
@@ -306,6 +317,7 @@ fn jobs_that_need_more_than_the_slice_holds_for_one_slot_ask_for_a_larger_slice(
         Some(9 * G),
         &History {
             jobs,
+            cancelled: Vec::new(),
             runners: Vec::new(),
         },
         Window::new(None, NOW / 1000),

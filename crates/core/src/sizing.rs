@@ -48,6 +48,8 @@ pub struct Ran {
     pub finished_at: Option<u64>,
     /// Whether the kernel killed a process in its container for memory.
     pub oom_killed: bool,
+    /// What measured admission reserved for it; `None` under caps or for an adopted runner.
+    pub reserved: Option<u64>,
 }
 
 /// One runner container's time in a slot. Times in milliseconds.
@@ -66,6 +68,9 @@ pub struct Held {
 pub struct History {
     /// Finished jobs with a recorded peak, cancelled ones left out.
     pub jobs: Vec<Ran>,
+    /// Cancelled jobs, for what admission learns from how they ended: a kill for memory, a peak at the cap or past
+    /// what was reserved. Their peaks (0 when never sampled) are not read as a job's size.
+    pub cancelled: Vec<Ran>,
     /// Runners that held a slot at some point after the history's start.
     pub runners: Vec<Held>,
 }
