@@ -524,6 +524,8 @@ fn sizing() -> Sizing {
         }
     };
     Sizing {
+        auto: false,
+        changes: Vec::new(),
         since: NOW - 600,
         until: NOW,
         margin: 15,

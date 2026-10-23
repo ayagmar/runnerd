@@ -64,7 +64,9 @@ client → transport → principal → handler → core
    the store's events as server-sent events. The config routes
    ([`crates/daemon/src/api/control.rs`](crates/daemon/src/api/control.rs)) validate a new config and hand the
    engine the parsed config with a `Commit` that writes the file; the engine runs the commit between ticks and runs
-   with the config before its next tick, only if the file was written.
+   with the config before its next tick, only if the file was written. Under `[sizing] auto`,
+   [`crates/daemon/src/api/auto.rs`](crates/daemon/src/api/auto.rs) applies sizing advice through the same function
+   every 5 minutes ([ADR 0039](docs/adr/0039-auto-sizing.md)).
    `POST /v1/records/{job}/shell` ([`crates/daemon/src/api/records.rs`](crates/daemon/src/api/records.rs)) answers
    `101 Switching Protocols` and carries the shell's terminal over the same connection
    ([ADR 0031](docs/adr/0031-records-of-failed-jobs.md)).
@@ -159,9 +161,12 @@ nothing until Docker has listed them.
 - `Control` records the paused repositories in the store, under the lock that changes them, and answers a pause or
   resume once the record commits, or fails it (`ControlError::NotRecorded`, 500) if it does not; the engine starts
   with the recorded ones paused, minus those its config lacks, so a paused repository gets no runner after a restart.
-- Sizing advice (`GET /v1/sizing`, `sizing::advise`) is computed from the job history and never written by the
-  daemon: a client applies it on request, after a confirmation, through `PUT /v1/config`
-  ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)).
+- Sizing advice (`GET /v1/sizing`, `sizing::advise`) is computed from the job history. A client applies it on
+  request, after a confirmation, through `PUT /v1/config`
+  ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)). Under `[sizing] auto` the daemon applies what
+  `sizing::auto::changes` picks through the same check and commit (`api::control::replace`), at most one change per
+  profile per `[sizing] interval`, never lowering a profile a run met the cap of or `slots` under what runs; each
+  change is a durable `sizing.changed` event holding the old values ([ADR 0039](docs/adr/0039-auto-sizing.md)).
 - What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`. Under
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under

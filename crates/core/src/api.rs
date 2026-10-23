@@ -58,7 +58,9 @@ pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
 };
-pub use sizing::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingQuery, Spread};
+pub use sizing::{
+    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingQuery, Spread,
+};
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
 /// has to produce one.

@@ -602,6 +602,11 @@ impl Store {
             .await
     }
 
+    /// The changes auto sizing made since `since` (ms), oldest first, as their events recorded them.
+    pub async fn sizing_changes(&self, since: u64) -> Result<Vec<api::SizingChange>, StoreError> {
+        self.read(move |db| read::sizing_changes(db, since)).await
+    }
+
     /// The profiles and repositories as the stored events last announced them, so a restarted daemon announces
     /// only what changed since, including what its config no longer has. Blocks on the database: for startup.
     pub fn announced(&self) -> Result<Announced, StoreError> {

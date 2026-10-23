@@ -376,6 +376,31 @@ pub(super) fn log_lines(
     .collect()
 }
 
+/// The changes auto sizing made since `since` (ms), oldest first, from their `sizing.changed` events.
+pub(super) fn sizing_changes(
+    db: &Connection,
+    since: u64,
+) -> rusqlite::Result<Vec<api::SizingChange>> {
+    let bodies: Vec<(u64, String)> = db
+        .prepare_cached(
+            "SELECT id, body FROM events WHERE at >= ?1 AND json_extract(body, '$.type') = 'sizing.changed' \
+             ORDER BY id",
+        )?
+        .query_map([since], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(bodies
+        .into_iter()
+        .filter_map(|(id, body)| match serde_json::from_str(&body) {
+            Ok(api::Event::SizingChanged { change }) => Some(change),
+            Ok(_) => None,
+            Err(error) => {
+                warn!("job history: skipping event {id}, which does not parse: {error}");
+                None
+            }
+        })
+        .collect())
+}
+
 pub(super) fn events_after(
     db: &Connection,
     after: u64,

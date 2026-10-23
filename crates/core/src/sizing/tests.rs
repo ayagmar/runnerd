@@ -475,3 +475,254 @@ fn under_measured_admission_waiting_jobs_are_told_about_slots_without_changing_t
         "the line suggests more slots: {line}"
     );
 }
+
+mod auto {
+    //! Auto sizing from the same histories: what the daemon writes into the config by itself.
+
+    use std::collections::BTreeMap;
+
+    use super::{
+        CONFIG, G, HOUR, History, M, NOW, Ran, Window, builds, capped_builds, job, measured,
+    };
+    use crate::api::{Resize, SizingChange};
+    use crate::config::Config;
+    use crate::sizing::auto::{Context, changes};
+
+    /// `text` with `[sizing] auto` on and `rules` added.
+    fn on(text: &str, rules: &str) -> Config {
+        Config::parse(&format!("{text}\n[sizing]\nauto = true\n{rules}")).unwrap()
+    }
+
+    fn window() -> Window {
+        Window {
+            since: NOW - 30 * 24 * HOUR,
+            now: NOW,
+            sample_interval: 2,
+        }
+    }
+
+    fn history(jobs: Vec<Ran>) -> History {
+        History {
+            jobs,
+            cancelled: Vec::new(),
+            runners: Vec::new(),
+        }
+    }
+
+    /// The changes due at `NOW` against a slice of `memory_max`, after `earlier`, with nothing running.
+    fn due(
+        config: &Config,
+        history: &History,
+        memory_max: u64,
+        earlier: &[SizingChange],
+    ) -> Vec<SizingChange> {
+        changes(
+            config,
+            history,
+            Context {
+                memory_max: Some(memory_max),
+                window: window(),
+                earlier,
+                running: &BTreeMap::new(),
+            },
+        )
+    }
+
+    fn resized(changes: &[SizingChange]) -> Vec<(&str, Resize)> {
+        changes
+            .iter()
+            .map(|change| (change.profile.as_str(), change.to))
+            .collect()
+    }
+
+    #[test]
+    fn auto_sizing_lowers_an_oversized_profile_once_it_has_enough_runs() {
+        let config = on(CONFIG, "");
+        // Peaks up to 2G need 2.25G of node's 7G, but a change moves memory by at most 25%: 5.25G.
+        let few = history(builds(9, 1000 * M, 2000 * M, 5));
+        assert_eq!(due(&config, &few, 33 * G, &[]), Vec::new());
+        let enough = history(builds(10, 1000 * M, 2000 * M, 5));
+        let lowered = due(&config, &enough, 33 * G, &[]);
+        assert_eq!(
+            resized(&lowered),
+            vec![(
+                "node",
+                Resize {
+                    memory: 5376 * M,
+                    slots: 2
+                }
+            )]
+        );
+        assert_eq!(
+            lowered[0].from,
+            Resize {
+                memory: 7 * G,
+                slots: 2
+            },
+            "the change keeps what it replaced, to undo it"
+        );
+        assert_eq!(lowered[0].at, NOW / 1000);
+    }
+
+    #[test]
+    fn auto_sizing_is_off_unless_the_config_turns_it_on() {
+        let config = Config::parse(CONFIG).unwrap();
+        let enough = history(builds(10, 1000 * M, 2000 * M, 5));
+        assert_eq!(due(&config, &enough, 33 * G, &[]), Vec::new());
+    }
+
+    #[test]
+    fn a_profile_lowered_step_by_step_stops_at_its_min_memory() {
+        let config = on(
+            &CONFIG.replace("memory = \"7G\"", "memory = \"7G\"\nmin_memory = \"6G\""),
+            "max_step = 100",
+        );
+        let enough = history(builds(10, 1000 * M, 2000 * M, 5));
+        assert_eq!(
+            resized(&due(&config, &enough, 33 * G, &[])),
+            vec![(
+                "node",
+                Resize {
+                    memory: 6 * G,
+                    slots: 2
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn waits_the_interval_between_changes() {
+        let config = on(CONFIG, "interval = \"12h\"");
+        let enough = history(builds(10, 1000 * M, 2000 * M, 5));
+        let change = |hours_ago: u64| SizingChange {
+            at: (NOW - hours_ago * HOUR) / 1000,
+            profile: "node".to_owned(),
+            from: Resize {
+                memory: 9 * G,
+                slots: 2,
+            },
+            to: Resize {
+                memory: 7 * G,
+                slots: 2,
+            },
+            reason: String::new(),
+        };
+        assert_eq!(due(&config, &enough, 33 * G, &[change(11)]), Vec::new());
+        assert_eq!(
+            resized(&due(&config, &enough, 33 * G, &[change(13), change(30)])),
+            vec![(
+                "node",
+                Resize {
+                    memory: 5376 * M,
+                    slots: 2
+                }
+            )]
+        );
+    }
+
+    /// Ten ledger tests at jvm's 9G cap: they need 10.5G a slot.
+    fn at_jvm_cap() -> History {
+        history(
+            (0..10)
+                .map(|_| job("halyard/ledger", "test", "jvm", 9 * G, 5))
+                .collect(),
+        )
+    }
+
+    #[test]
+    fn never_raises_past_memory_max() {
+        let config = on(CONFIG, "");
+        // 24G less node's 14G and the mirror's 0.5G leaves 9.5G: not one slot of 10.5G.
+        assert_eq!(due(&config, &at_jvm_cap(), 24 * G, &[]), Vec::new());
+        // 33G leaves 18.5G: one slot of 10.5G.
+        assert_eq!(
+            resized(&due(&config, &at_jvm_cap(), 33 * G, &[])),
+            vec![(
+                "jvm",
+                Resize {
+                    memory: 10752 * M,
+                    slots: 1
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_raise_stops_at_the_profiles_max_memory() {
+        let config = on(
+            &CONFIG.replace("memory = \"9G\"", "memory = \"9G\"\nmax_memory = \"10G\""),
+            "",
+        );
+        assert_eq!(
+            resized(&due(&config, &at_jvm_cap(), 36 * G, &[])),
+            vec![(
+                "jvm",
+                Resize {
+                    memory: 10 * G,
+                    slots: 2
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_raise_that_takes_a_slot_away_waits_while_every_slot_runs() {
+        let config = on(CONFIG, "");
+        let running = BTreeMap::from([("jvm".to_owned(), 2)]);
+        let raised = changes(
+            &config,
+            &at_jvm_cap(),
+            Context {
+                memory_max: Some(33 * G),
+                window: window(),
+                earlier: &[],
+                running: &running,
+            },
+        );
+        assert_eq!(raised, Vec::new());
+    }
+
+    #[test]
+    fn never_lowers_a_profile_a_cancelled_run_was_killed_for_memory_in() {
+        let config = on(CONFIG, "");
+        let mut killed = history(builds(10, 1000 * M, 2000 * M, 5));
+        killed.cancelled.push(Ran {
+            oom_killed: true,
+            succeeded: false,
+            ..job("halyard/storefront", "build", "node", 0, 5)
+        });
+        assert_eq!(due(&config, &killed, 33 * G, &[]), Vec::new());
+    }
+
+    #[test]
+    fn under_measured_admission_waiting_jobs_get_one_more_slot_up_to_max_slots_while_their_peaks_fit()
+     {
+        let text = measured().replace("slots = 4", "slots = 4\nmax_slots = 5");
+        let config = on(&text, "");
+        // Peaks of 4812M at a 5.5G cap: kept, and they waited 5 minutes.
+        let waited = history(capped_builds(10, 4812 * M, 300));
+        // jvm 2 × 9G (too few jobs: at its cap), node 5 × 4812M, the mirror 0.5G: 43004M.
+        assert_eq!(due(&config, &waited, 41 * G, &[]), Vec::new());
+        let raised = due(&config, &waited, 42 * G, &[]);
+        assert_eq!(
+            resized(&raised),
+            vec![(
+                "node",
+                Resize {
+                    memory: 5632 * M,
+                    slots: 5
+                }
+            )]
+        );
+        let at_max = on(
+            &measured().replace("slots = 4", "slots = 4\nmax_slots = 4"),
+            "",
+        );
+        assert_eq!(due(&at_max, &waited, 64 * G, &[]), Vec::new());
+        assert_eq!(
+            due(&on(&measured(), ""), &waited, 64 * G, &[]),
+            Vec::new(),
+            "without max_slots, slots stay the owner's"
+        );
+    }
+}

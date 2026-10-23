@@ -1371,6 +1371,31 @@ async fn the_config_page_shows_the_file_its_budget_and_the_doctor() {
 }
 
 #[tokio::test]
+async fn an_auto_sizing_change_is_listed_and_undoing_it_opens_what_it_replaced_in_the_editor() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let sizing = dashboard.page(&cookie, "/sizing").await;
+    for expected in ["memory 10G → 9G, slots 2", r#"href="/config?undo=jvm""#] {
+        assert!(
+            sizing.body.contains(expected),
+            "sizing page lacks {expected:?}"
+        );
+    }
+    let before = dashboard.fake.fixtures.lock().unwrap().config.clone();
+    let editor = dashboard.page(&cookie, "/config?undo=jvm").await;
+    assert_eq!(editor.status, StatusCode::OK);
+    assert!(
+        editor.body.contains("memory = &quot;10G&quot;\nslots = 2"),
+        "the editor holds jvm's memory from before the change"
+    );
+    assert_eq!(
+        dashboard.fake.fixtures.lock().unwrap().config,
+        before,
+        "opening the editor writes nothing"
+    );
+}
+
+#[tokio::test]
 async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

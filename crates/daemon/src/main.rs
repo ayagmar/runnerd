@@ -493,6 +493,7 @@ async fn serve(
         memory_max: slice_memory_max,
         cpus: slice_cpus,
         sync_dir: api::sync_dir,
+        auto_every: api::AUTO_SIZING_EVERY,
     };
     let server = tokio::spawn(api::serve(listener, handle, config, async {
         let _ = stop.await;

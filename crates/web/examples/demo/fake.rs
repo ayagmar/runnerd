@@ -23,7 +23,9 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
-use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Sizing, Spread};
+use runnerd_core::api::{
+    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread,
+};
 use runnerd_core::api::{
     Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
     CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, EventQuery,
@@ -827,6 +829,21 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
         })
         .collect();
     Sizing {
+        auto: false,
+        // Auto sizing, since turned off, lowered jvm two days ago.
+        changes: vec![SizingChange {
+            at: fixtures.now - 2 * 86_400,
+            profile: "jvm".to_owned(),
+            from: Resize {
+                memory: 10 * GIB,
+                slots: 2,
+            },
+            to: Resize {
+                memory: 9 * GIB,
+                slots: 2,
+            },
+            reason: "lower memory to 9G from 10G, its largest peak + 15%".to_owned(),
+        }],
         since: fixtures.now - 30 * 86_400,
         until: fixtures.now,
         margin: 15,

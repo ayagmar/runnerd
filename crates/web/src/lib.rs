@@ -244,7 +244,7 @@ async fn sizing(State(app): State<App>) -> Response {
 
 async fn config(State(app): State<App>, Query(query): Query<ConfigQuery>) -> Response {
     page(
-        ConfigView::load(&app.daemon, query.resize)
+        ConfigView::load(&app.daemon, query)
             .await
             .map(|config| views::config::render(&config)),
     )

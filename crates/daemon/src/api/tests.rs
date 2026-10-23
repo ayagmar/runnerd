@@ -10,8 +10,8 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 use runnerd_core::api::{
     Advice, Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
-    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, RunningJob, Sizing,
-    Status,
+    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, Resize, RunningJob,
+    Sizing, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::docker::Tty;
@@ -244,6 +244,18 @@ async fn start_with(
     sync_dir: SyncDir,
     memory_max: MemoryMax,
 ) -> Daemon {
+    start_serving(dir, owner, engine, sync_dir, memory_max, EXAMPLE).await
+}
+
+/// `start_with`, serving the config `text`.
+async fn start_serving(
+    dir: &Path,
+    owner: Option<u32>,
+    engine: bool,
+    sync_dir: SyncDir,
+    memory_max: MemoryMax,
+    text: &str,
+) -> Daemon {
     let socket = dir.join("runnerd.sock");
     let store = Store::open(&dir.join("history.db")).unwrap();
     let (control, commands) =
@@ -266,17 +278,18 @@ async fn start_with(
     };
     let config = dir.join("runnerd.toml");
     let file = dir.join("config.toml");
-    std::fs::write(&file, EXAMPLE).unwrap();
+    std::fs::write(&file, text).unwrap();
     std::fs::set_permissions(&file, std::os::unix::fs::PermissionsExt::from_mode(0o640)).unwrap();
     if !config.exists() {
         std::os::unix::fs::symlink(&file, &config).unwrap();
     }
     let source = ConfigSource {
         path: config.clone(),
-        text: EXAMPLE.to_owned(),
+        text: text.to_owned(),
         memory_max,
         cpus: unreadable_cpus,
         sync_dir,
+        auto_every: Duration::from_millis(20),
     };
     let listener = bind(&socket).await.unwrap();
     let mode = std::fs::metadata(&socket).unwrap();
@@ -436,6 +449,145 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
             slots: 2
         }
     );
+    daemon.stop().await;
+}
+
+/// Records ten finished `o/app` jobs of `profile` at a `cap`, each peaking at `peak`.
+async fn finished_jobs(store: &Store, profile: &str, cap: u64, peak: u64) {
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    for id in 1..=10 {
+        let runner = format!("runner-{id}");
+        store.queued(
+            "o/app",
+            &QueuedJob {
+                id,
+                run_id: 2,
+                name: "build".to_owned(),
+                created_at: now - 60_000,
+                ..QueuedJob::default()
+            },
+        );
+        store.runner_started(RunnerRecord {
+            admission: None,
+            name: runner.clone(),
+            repository: "o/app".to_owned(),
+            profile: profile.to_owned(),
+            slot: 1,
+            container: format!("c{id}"),
+            started_at: now - 50_000,
+            memory_cap: Some(cap),
+            cpu_cap: Some(8000),
+        });
+        store.claimed(id, 2, &runner, now - 40_000);
+        store.samples(vec![SampleRecord {
+            events: runnerd_core::observe::metrics::Events::default(),
+            runner: runner.clone(),
+            at: now - 30_000,
+            cpu: 0,
+            cpu_usage: 0,
+            memory: peak,
+            network_received: 0,
+            network_sent: 0,
+        }]);
+        store.lost(id, now - 20_000);
+    }
+    store.flush().await;
+}
+
+#[tokio::test]
+async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_the_interval() {
+    let dir = Dir::new();
+    let text = format!("{EXAMPLE}\n# Let runnerd follow the advice.\n[sizing]\nauto = true\n");
+    let mut daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &text).await;
+    let mut events = daemon
+        .client
+        .get("http://runnerd/v1/events")
+        .send()
+        .await
+        .unwrap();
+    // Ten node jobs at their 7G cap peaking at 2G: lowered, by at most 25% a change.
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    let sizing = async || -> Sizing {
+        let response = daemon
+            .client
+            .get("http://runnerd/v1/sizing")
+            .send()
+            .await
+            .unwrap();
+        serde_json::from_slice(&body(response).await).unwrap()
+    };
+    let changed = tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let sizing = sizing().await;
+            if !sizing.changes.is_empty() {
+                return sizing;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("auto sizing changes node within 10 s");
+    assert!(changed.auto, "the advice says auto sizing is on");
+    let resized = Resize {
+        memory: 5376 << 20,
+        slots: 2,
+    };
+    assert_eq!(
+        changed
+            .changes
+            .iter()
+            .map(|change| (change.profile.as_str(), change.from, change.to))
+            .collect::<Vec<_>>(),
+        vec![(
+            "node",
+            Resize {
+                memory: 7 << 30,
+                slots: 2
+            },
+            resized
+        )]
+    );
+    let written = std::fs::read_to_string(&daemon.config).unwrap();
+    let node = &Config::parse(&written).unwrap().profiles["node"];
+    assert_eq!((node.memory.0, node.slots), (resized.memory, resized.slots));
+    for comment in text
+        .lines()
+        .filter(|line| line.trim_start().starts_with('#'))
+    {
+        assert!(written.contains(comment), "the file keeps {comment:?}");
+    }
+    let reloaded = daemon.reloads.recv().await.unwrap();
+    assert_eq!(reloaded.profiles["node"].memory.0, resized.memory);
+    // Read until it, past the jobs' own events.
+    let announced = loop {
+        let [envelope] = &read_events(&mut events, 1).await[..] else {
+            unreachable!("one event read")
+        };
+        if let Event::SizingChanged { change } = &envelope.event {
+            break change.clone();
+        }
+    };
+    assert_eq!(announced, changed.changes[0]);
+    // Many looks later, the 24h interval still holds node where it is.
+    tokio::time::sleep(Duration::from_millis(300)).await;
+    assert_eq!(sizing().await.changes.len(), 1);
+    assert!(daemon.reloads.try_recv().is_err(), "no second reload");
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn auto_sizing_off_leaves_the_file_as_written() {
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), EXAMPLE);
     daemon.stop().await;
 }
 

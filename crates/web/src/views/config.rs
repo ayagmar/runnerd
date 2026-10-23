@@ -1,6 +1,7 @@
 //! `/config`: the daemon's `runnerd.toml` in an editor, checked against the slice's `MemoryMax` as it is typed and
 //! drawn as the budget it asks for; saving writes it and has the daemon reload it. From the sizing page, the editor
-//! starts with a profile's advised memory and slots in the file, unsaved. Also the doctor's checks.
+//! starts with a profile's advised memory and slots in the file, or those an auto sizing change replaced,
+//! unsaved. Also the doctor's checks.
 
 use maud::{Markup, html};
 use runnerd_core::api::{Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, Resize, Sizing};
@@ -17,6 +18,8 @@ use crate::format;
 pub(crate) struct ConfigQuery {
     /// A profile whose sizing advice the editor starts with, from the sizing page.
     pub(crate) resize: Option<String>,
+    /// A profile whose memory and slots from before auto sizing last changed them the editor starts with.
+    pub(crate) undo: Option<String>,
 }
 
 /// Everything the config page shows.
@@ -36,6 +39,8 @@ pub(crate) struct ConfigView {
 pub(crate) enum Resized {
     /// In the editor.
     Applied { profile: String, resize: Resize },
+    /// What auto sizing last replaced, in the editor.
+    Undone { profile: String, resize: Resize },
     /// Not applied, and why.
     Not(String),
 }
@@ -43,12 +48,37 @@ pub(crate) enum Resized {
 impl ConfigView {
     pub(crate) async fn load(
         daemon: &Client,
-        resize: Option<String>,
+        query: ConfigQuery,
     ) -> Result<ConfigView, ClientError> {
         let file: ConfigFile = daemon.get("/v1/config").await?;
-        let (text, resized) = match resize {
-            None => (file.text.clone(), None),
-            Some(profile) => {
+        let (text, resized) = match (query.resize, query.undo) {
+            (None, None) => (file.text.clone(), None),
+            (_, Some(profile)) => {
+                let sizing: Sizing = daemon.get("/v1/sizing").await?;
+                let last = sizing
+                    .changes
+                    .iter()
+                    .rfind(|change| change.profile == profile);
+                match last {
+                    None => (
+                        file.text.clone(),
+                        Some(Resized::Not(format!(
+                            "Auto sizing changed {profile} in none of the history read."
+                        ))),
+                    ),
+                    Some(change) => match resize_profile(&file.text, &profile, change.from) {
+                        Ok(text) => (
+                            text,
+                            Some(Resized::Undone {
+                                profile,
+                                resize: change.from,
+                            }),
+                        ),
+                        Err(error) => (file.text.clone(), Some(Resized::Not(error.to_string()))),
+                    },
+                }
+            }
+            (Some(profile), None) => {
                 let sizing: Sizing = daemon.get("/v1/sizing").await?;
                 let change = sizing
                     .profiles
@@ -122,6 +152,13 @@ pub(crate) fn render(view: &ConfigView) -> Markup {
                     Some(Resized::Applied { profile, resize }) => {
                         p.notice-box {
                             "The editor holds the sizing advice for " strong { (profile) } ": "
+                            code { "memory = \"" (ByteSize(resize.memory)) "\"" } " and " code { "slots = " (resize.slots) }
+                            ". Nothing is written until you save it."
+                        }
+                    }
+                    Some(Resized::Undone { profile, resize }) => {
+                        p.notice-box {
+                            "The editor holds " strong { (profile) } "'s values from before auto sizing last changed them: "
                             code { "memory = \"" (ByteSize(resize.memory)) "\"" } " and " code { "slots = " (resize.slots) }
                             ". Nothing is written until you save it."
                         }

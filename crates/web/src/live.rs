@@ -357,7 +357,8 @@ async fn run_overview(
                 Event::LogLine { .. }
                 | Event::CacheReseeded { .. }
                 | Event::RecordCreated { .. }
-                | Event::RecordDeleted { .. } => {}
+                | Event::RecordDeleted { .. }
+                | Event::SizingChanged { .. } => {}
                 Event::BudgetChanged { .. }
                 | Event::ProfileChanged { .. }
                 | Event::ProfileRemoved { .. }

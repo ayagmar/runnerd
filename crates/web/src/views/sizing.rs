@@ -1,6 +1,7 @@
 //! `/sizing`: per profile, what its jobs use of their memory cap (sampled peaks by percentile, and what the advice
 //! sizes for: the largest with the margin), how long they waited and how busy the slots were, the advice, and a row per job. Applying advice
 //! opens the config editor with the profile's new `memory` and `slots` in it; nothing is written until it is saved.
+//! What auto sizing changed is listed under each profile, with a link that opens the last change undone the same way.
 
 use maud::{Markup, html};
 use runnerd_core::api::{Advice, JobSizing, ProfileSizing, Sizing};
@@ -38,6 +39,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
             p.muted {
                 "Peaks are sampled every " (sizing.sample_interval) " s, so a shorter spike goes unseen:  advice adds "
                 (sizing.margin) "% to the largest, and waits for " (sizing.min_jobs) " jobs."
+                @if sizing.auto { " Auto sizing is on: runnerd writes the advice into the config itself, a step at a time." }
             }
         }
         @for (index, profile) in sizing.profiles.iter().enumerate() {
@@ -87,12 +89,13 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
             @if peaks.jobs > 0 { (scale(sizing, profile)) }
             div class=(advice_class(profile.advice)) {
                 p { (sizing.advice_line(profile)) }
-                @if let Some(change) = profile.advice.change() {
+                @if let Some(change) = profile.advice.change().filter(|_| !sizing.auto) {
                     a.button href=(format!("/config?{}", serde_urlencoded::to_string([("resize", &profile.name)]).unwrap_or_default())) {
                         "Review memory " (format::bytes(change.memory)) ", " (change.slots) " slots in the config"
                     }
                 }
             }
+            (changes(sizing, profile))
             @if !profile.jobs.is_empty() {
                 div.table-wrap {
                     table.job-table.sizing-table {
@@ -129,6 +132,35 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                             }
                         }
                     }
+                }
+            }
+        }
+    }
+}
+
+/// What auto sizing changed in the profile, newest first, with a link that undoes the last change in the editor.
+fn changes(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
+    let changes: Vec<_> = sizing
+        .changes
+        .iter()
+        .rev()
+        .filter(|change| change.profile == profile.name)
+        .collect();
+    html! {
+        @if !changes.is_empty() {
+            div.sizing-changes {
+                h3 { "Auto sizing" }
+                ol {
+                    @for change in &changes {
+                        li {
+                            time datetime=(format::rfc3339(change.at)) { (format::timestamp(change.at)) }
+                            " " strong { (change.line()) }
+                            " " span.muted { (change.reason) }
+                        }
+                    }
+                }
+                a.button-quiet href=(format!("/config?{}", serde_urlencoded::to_string([("undo", &profile.name)]).unwrap_or_default())) {
+                    "Review undoing the last change in the config"
                 }
             }
         }

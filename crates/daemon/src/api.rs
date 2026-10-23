@@ -2,7 +2,7 @@
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
 //! no scheduling state of its own and never returns secrets. History reads are in `history`, the event stream in
 //! `events`, pause, resume, reseed, cache clean, the config file and the doctor in `control`, records and the shells
-//! in them in `records`.
+//! in them in `records`. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -24,6 +24,7 @@ use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 use tracing::info;
 
+mod auto;
 mod control;
 mod events;
 mod history;
@@ -68,7 +69,11 @@ pub(crate) struct ConfigSource {
     /// Read when a new config sets `cpu_overcommit`.
     pub cpus: SliceCpus,
     pub sync_dir: SyncDir,
+    /// How often auto sizing looks at the advice: `auto::EVERY`, or a test's.
+    pub auto_every: std::time::Duration,
 }
+
+pub(crate) use auto::EVERY as AUTO_SIZING_EVERY;
 
 /// The config file as last read or written.
 struct ConfigText {
@@ -120,13 +125,8 @@ fn error(status: StatusCode, message: &str) -> Response {
         .into_response()
 }
 
-/// The API's routes, for a daemon running as `owner`.
-fn router(
-    handle: Handle,
-    owner: u32,
-    stopping: watch::Receiver<bool>,
-    config: ConfigSource,
-) -> Router {
+/// The API's routes.
+fn router(state: AppState) -> Router {
     Router::new()
         .route("/v1/status", get(status))
         .route("/v1/repositories/pause", post(control::pause_all))
@@ -161,18 +161,7 @@ fn router(
         .route("/v1/records/{job}", delete(records::remove))
         .route("/v1/records/{job}/shell", post(records::shell))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "no such endpoint") })
-        .with_state(AppState {
-            handle,
-            owner,
-            stopping,
-            config: Arc::new(Mutex::new(ConfigText {
-                path: config.path,
-                text: config.text,
-            })),
-            memory_max: config.memory_max,
-            cpus: config.cpus,
-            sync_dir: config.sync_dir,
-        })
+        .with_state(state)
 }
 
 async fn status(_: Authenticated, State(state): State<AppState>) -> Json<Status> {
@@ -233,8 +222,20 @@ async fn serve_for(
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let (stopping, stopping_receiver) = watch::channel(false);
-    let app = router(handle, owner, stopping_receiver, config)
-        .into_make_service_with_connect_info::<Peer>();
+    let state = AppState {
+        handle,
+        owner,
+        stopping: stopping_receiver,
+        config: Arc::new(Mutex::new(ConfigText {
+            path: config.path,
+            text: config.text,
+        })),
+        memory_max: config.memory_max,
+        cpus: config.cpus,
+        sync_dir: config.sync_dir,
+    };
+    tokio::spawn(auto::run(state.clone(), config.auto_every));
+    let app = router(state).into_make_service_with_connect_info::<Peer>();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {
             stop.await;

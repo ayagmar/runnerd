@@ -143,6 +143,18 @@ fn config_with_a_zero_limit_names_the_field() {
             "records.max_count",
             format!("{MINIMAL}\n[records]\nmax_count = 0"),
         ),
+        (
+            "sizing.interval",
+            format!("{MINIMAL}\n[sizing]\ninterval = \"0s\""),
+        ),
+        (
+            "sizing.max_step",
+            format!("{MINIMAL}\n[sizing]\nmax_step = 0"),
+        ),
+        (
+            "profiles.app.max_slots",
+            MINIMAL.replace("slots = 1", "slots = 1\nmax_slots = 0"),
+        ),
     ] {
         let error = Config::parse(&text)
             .unwrap()
@@ -151,6 +163,27 @@ fn config_with_a_zero_limit_names_the_field() {
             .to_string();
         assert!(error.contains(field), "{field}: {error}");
     }
+}
+
+#[test]
+fn auto_sizing_is_off_and_bounded_unless_configured() {
+    let config = Config::parse(MINIMAL).unwrap();
+    assert!(
+        !config.sizing.auto,
+        "auto sizing stays off unless asked for"
+    );
+    assert_eq!(config.sizing.interval, Duration::from_hours(24));
+    assert_eq!(config.sizing.max_step, 25);
+    let bounds = MINIMAL.replace(
+        "slots = 1",
+        "slots = 1\nmin_memory = \"6G\"\nmax_memory = \"5G\"",
+    );
+    let error = Config::parse(&bounds)
+        .unwrap()
+        .validate(Some(size("33G")))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("profiles.app.min_memory"), "{error}");
 }
 
 #[test]

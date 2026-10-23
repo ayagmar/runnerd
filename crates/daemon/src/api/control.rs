@@ -17,7 +17,7 @@ use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs, Target}
 use runnerd_core::sizing::Window;
 use tracing::info;
 
-use super::{AppState, Authenticated, MemoryMax, SyncDir, error};
+use super::{AppState, Authenticated, ConfigText, MemoryMax, SyncDir, error};
 
 pub(super) fn refused(control_error: &ControlError) -> Response {
     let status = match control_error {
@@ -171,12 +171,50 @@ pub(super) async fn replace_config(
 ) -> Response {
     // One replacement at a time, so the file and the engine end up with the same config.
     let mut file = state.config.lock().await;
-    let (config, mut checked) = match check(state.memory_max, text.clone()).await {
-        Ok(checked) => checked,
-        Err(join_error) => return failed(&join_error),
-    };
+    match replace(&state, &mut file, text).await {
+        Ok(checked) => {
+            info!("{} replaced by {principal:?}", file.path.display());
+            Json(checked).into_response()
+        }
+        Err(Refusal::Invalid(checked)) => {
+            (StatusCode::UNPROCESSABLE_ENTITY, Json(checked)).into_response()
+        }
+        Err(Refusal::Control(control_error)) => refused(&control_error),
+        Err(Refusal::Join(join_error)) => failed(&join_error),
+    }
+}
+
+/// Why `replace` left the config as it was.
+pub(super) enum Refusal {
+    /// The new config does not validate.
+    Invalid(ConfigCheck),
+    /// The engine did not run it, or its file was not written.
+    Control(ControlError),
+    Join(tokio::task::JoinError),
+}
+
+impl std::fmt::Display for Refusal {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Refusal::Invalid(checked) => f.write_str(&checked.message),
+            Refusal::Control(control_error) => control_error.fmt(f),
+            Refusal::Join(join_error) => join_error.fmt(f),
+        }
+    }
+}
+
+/// Validates `text` against the slice's budget; the engine writes it in place of `file` and runs with it, between
+/// its ticks. What `PUT /v1/config` and auto sizing do; the caller holds `file`'s lock.
+pub(super) async fn replace(
+    state: &AppState,
+    file: &mut ConfigText,
+    text: String,
+) -> Result<ConfigCheck, Refusal> {
+    let (config, mut checked) = check(state.memory_max, text.clone())
+        .await
+        .map_err(Refusal::Join)?;
     let Some(config) = config else {
-        return (StatusCode::UNPROCESSABLE_ENTITY, Json(checked)).into_response();
+        return Err(Refusal::Invalid(checked));
     };
     // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs.
     let cpus = if config.host.cpu_overcommit.is_some() {
@@ -189,9 +227,9 @@ pub(super) async fn replace_config(
                     "cpu_overcommit needs the slice {}'s CPUs, and they cannot be read: {io_error}",
                     config.host.slice
                 );
-                return (StatusCode::UNPROCESSABLE_ENTITY, Json(checked)).into_response();
+                return Err(Refusal::Invalid(checked));
             }
-            Err(join_error) => return failed(&join_error),
+            Err(join_error) => return Err(Refusal::Join(join_error)),
         }
     } else {
         None
@@ -214,20 +252,15 @@ pub(super) async fn replace_config(
         ))),
         Err(io_error) => Err(format!("cannot write {}: {io_error}", path.display())),
     });
-    match state
+    let warning = state
         .handle
         .control
         .replace_config(config, checked.memory_max, cpus, commit)
         .await
-    {
-        Ok(warning) => {
-            checked.warnings.extend(warning);
-            file.text = text;
-            info!("{} replaced by {principal:?}", file.path.display());
-            Json(checked).into_response()
-        }
-        Err(control_error) => refused(&control_error),
-    }
+        .map_err(Refusal::Control)?;
+    checked.warnings.extend(warning);
+    file.text = text;
+    Ok(checked)
 }
 
 /// Flushes a directory's entries, such as a rename in it, to disk.

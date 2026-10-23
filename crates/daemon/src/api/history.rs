@@ -146,12 +146,16 @@ pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizin
                 config.host.slice
             )
         })?;
-    Ok(advise(
-        &config,
-        memory_max.map(|max| max.0),
-        &history,
-        window,
-    ))
+    let changes = state
+        .handle
+        .store
+        .sizing_changes(window.since)
+        .await
+        .map_err(|store_error| store_error.to_string())?;
+    Ok(Sizing {
+        changes,
+        ..advise(&config, memory_max.map(|max| max.0), &history, window)
+    })
 }
 
 pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> Response {
