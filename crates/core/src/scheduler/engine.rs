@@ -14,6 +14,7 @@ mod caches;
 mod control;
 mod history;
 mod images;
+mod records;
 mod recover;
 mod runners;
 mod status;
@@ -32,6 +33,7 @@ pub use self::control::{
 };
 use self::history::{Closing, Found};
 use self::images::ImageState;
+pub use self::records::RecordSelection;
 use super::SlotRef;
 use crate::api;
 use crate::cache::{self, Names, Trimmed};
@@ -129,6 +131,8 @@ pub struct Handle {
     /// Every cache volume of the config, with size 0: the API fills in the sizes it measured. Replaced when the
     /// config is.
     pub caches: watch::Receiver<Vec<api::CacheVolume>>,
+    /// The records of failed jobs, replaced whenever one is made or removed.
+    pub records: watch::Receiver<api::Records>,
 }
 
 /// Where the engine runs, besides its config and its GitHub and Docker clients.
@@ -247,6 +251,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// Jobs whose runner is gone, waiting for GitHub to report them completed.
     closing: BTreeMap<u64, Closing>,
     last_prune: Option<SystemTime>,
+    /// The records of failed jobs and the shells open in them.
+    records: records::RecordState,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -287,16 +293,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             store.clone(),
         );
         let control = Arc::new(control);
-        let isolation = isolation::backend(config.host.isolation);
         let (status, receiver) = watch::channel(api::Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
             budget: api::Budget {
                 slice: config.host.slice.clone(),
                 memory_max,
-                memory_in_use: 0,
-                mirror_memory: 0,
-                seed_memory: Vec::new(),
+                ..api::Budget::default()
             },
             profiles: Vec::new(),
             // What clients resuming after the last run's events have, so the first publish announces the difference.
@@ -304,6 +307,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             queued: Vec::new(),
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
+        let (records, records_receiver) = records::RecordState::new();
         // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
         let mirror_memory = if config.caches.mirror.enabled {
             config.caches.mirror.memory.0
@@ -311,11 +315,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             0
         };
         let mut engine = Engine {
+            isolation: isolation::backend(config.host.isolation),
             config,
             github: Arc::new(github),
             docker: Arc::new(docker),
             names,
-            isolation,
             runner_prefix: identity.prefix(),
             identity,
             memory_max,
@@ -352,6 +356,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             cancelling: BTreeMap::new(),
             closing: BTreeMap::new(),
             last_prune: None,
+            records,
         };
         engine.publish();
         (
@@ -361,6 +366,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 control,
                 store,
                 caches: caches_receiver,
+                records: records_receiver,
             },
         )
     }
@@ -389,7 +395,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.tick(mode).await;
             self.publish();
             let idle = self.slots.values().flatten().all(Option::is_none);
-            if mode != Shutdown::No && idle && self.reseeds.is_empty() && self.trim.is_none() {
+            if mode != Shutdown::No
+                && idle
+                && self.reseeds.is_empty()
+                && self.trim.is_none()
+                && self.records.recordings.is_empty()
+            {
                 break;
             }
             let interval = if mode == Shutdown::No {
@@ -406,6 +417,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
+        self.close_shells().await;
         if let Err(error) = cache::mirror_down(&*self.docker, &self.names).await {
             warn!("cannot stop the mirror: {error}");
         }

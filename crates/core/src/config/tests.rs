@@ -1,6 +1,7 @@
 //! Parsing `runnerd.toml` and checking it against a slice's budget.
 
 use std::path::Path;
+use std::time::Duration;
 
 use super::{ByteSize, Config, Image, Warning, parse_memory_max};
 
@@ -110,6 +111,7 @@ fn config_rejects_unknown_fields_in_every_table() {
             "repository",
             MINIMAL.replace("profile = \"app\"", "profile = \"app\"\ntypo = 1"),
         ),
+        ("records", format!("{MINIMAL}\n[records]\ntypo = 1")),
     ] {
         let error = Config::parse(&with_typo).unwrap_err().to_string();
         assert!(error.contains("unknown field `typo`"), "{table}: {error}");
@@ -137,6 +139,10 @@ fn config_with_a_zero_limit_names_the_field() {
             "caches.mirror.cpus",
             mirror_enabled.replace("cpus = 1,", "cpus = 0,"),
         ),
+        (
+            "records.max_count",
+            format!("{MINIMAL}\n[records]\nmax_count = 0"),
+        ),
     ] {
         let error = Config::parse(&text)
             .unwrap()
@@ -145,6 +151,32 @@ fn config_with_a_zero_limit_names_the_field() {
             .to_string();
         assert!(error.contains(field), "{field}: {error}");
     }
+}
+
+#[test]
+fn records_are_off_and_bounded_unless_configured() {
+    let config = Config::parse(MINIMAL).unwrap();
+    assert!(
+        !config.profiles["app"].record_failures,
+        "a profile records no failures unless it asks to"
+    );
+    assert_eq!(config.records.max_total, size("20G"));
+    assert_eq!(config.records.max_count, 10);
+    assert_eq!(config.records.max_age, Duration::from_hours(7 * 24));
+
+    let text = MINIMAL.replace("slots = 1", "slots = 1\nrecord_failures = true")
+        + "\n[records]\nmax_total = \"5G\"\nmax_age = \"2d\"\n";
+    let config = Config::parse(&text).unwrap();
+    assert!(
+        config.profiles["app"].record_failures,
+        "app records failures"
+    );
+    assert_eq!(config.records.max_total, size("5G"));
+    assert_eq!(config.records.max_age, Duration::from_hours(48));
+    assert_eq!(
+        config.records.max_count, 10,
+        "unset limits keep their default"
+    );
 }
 
 #[test]

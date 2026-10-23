@@ -1,7 +1,8 @@
 //! Serves `runnerd_core::api` on the local Unix socket. Owns routing, the socket file and authentication: every
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
 //! no scheduling state of its own and never returns secrets. History reads are in `history`, the event stream in
-//! `events`, pause, resume, reseed, cache clean, the config file and the doctor in `control`.
+//! `events`, pause, resume, reseed, cache clean, the config file and the doctor in `control`, records and the shells
+//! in them in `records`.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -13,7 +14,7 @@ use axum::extract::{ConnectInfo, FromRequestParts, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
-use axum::routing::{get, post, put};
+use axum::routing::{delete, get, post, put};
 use axum::serve::IncomingStream;
 use axum::{Json, Router};
 use runnerd_core::api::{ErrorResponse, Principal, ShutdownRequest, Status};
@@ -26,6 +27,7 @@ use tracing::info;
 mod control;
 mod events;
 mod history;
+mod records;
 
 /// The socket's default path: `$XDG_RUNTIME_DIR/runnerd.sock`.
 pub(crate) fn default_socket() -> Option<PathBuf> {
@@ -147,6 +149,10 @@ fn router(
         .route("/v1/caches", get(history::caches))
         .route("/v1/caches/history", get(history::cache_history))
         .route("/v1/events", get(events::events))
+        .route("/v1/records", get(records::list))
+        .route("/v1/records", delete(records::remove_many))
+        .route("/v1/records/{job}", delete(records::remove))
+        .route("/v1/records/{job}/shell", post(records::shell))
         .fallback(|| async { error(StatusCode::NOT_FOUND, "no such endpoint") })
         .with_state(AppState {
             handle,

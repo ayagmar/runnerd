@@ -1,0 +1,392 @@
+//! Records of failed jobs on the fakes: which runners are kept, the limits that remove the oldest, removal by hand,
+//! and shells, which count against the budget like a slot.
+
+use std::collections::HashMap;
+use std::time::Duration;
+
+use super::*;
+use crate::docker::TtySize;
+use crate::record;
+use crate::scheduler::engine::RecordSelection;
+
+const FAILED: &str = "2026-10-23 01:08:55Z: Running job: build\n\
+                      2026-10-23 01:09:27Z: Job build completed with result: Failed\n";
+
+fn recording() -> String {
+    CONFIG.replace("slots = 2", "slots = 2\nrecord_failures = true")
+}
+
+const SIZE: TtySize = TtySize { cols: 80, rows: 24 };
+
+/// Job 1 runs in slot 1 and then fails: its runner prints `log` and exits.
+async fn job_ends(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    handle: &Handle,
+    log: &str,
+) {
+    running_runner(github, docker, "@@job 1 1\n");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "completed", Some("failure")));
+    engine.recover().await.unwrap();
+    until_state(handle, 1, JobState::Running).await;
+    let mut state = docker.0.lock().unwrap();
+    state.runner_log = Some(log.to_owned());
+    state.written = 1 << 30;
+    state.containers[0].running = false;
+}
+
+/// Ticks until the engine took the finished commits.
+async fn until_recorded(engine: &mut Engine<FakeGithub, FakeDocker>) {
+    for _ in 0..200 {
+        engine.tick(Shutdown::No).await;
+        if engine.records.recordings.is_empty() {
+            engine.publish();
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(5)).await;
+    }
+    panic!("a commit never finished");
+}
+
+/// A record image an earlier job left, made `age` seconds ago.
+fn record_image(job: u64, age: u64) -> docker::Image {
+    let created = crate::time::now_ms() / 1000 - age;
+    docker::Image {
+        reference: record::image(job),
+        labels: HashMap::from([
+            (record::LABEL.to_owned(), job.to_string()),
+            ("runnerd.repository".to_owned(), "o/r".to_owned()),
+            ("runnerd.profile".to_owned(), "app".to_owned()),
+            ("runnerd.created-at".to_owned(), created.to_string()),
+        ]),
+        bytes: 1 << 30,
+    }
+}
+
+async fn note(handle: &Handle, job: u64) -> Option<api::RecordNote> {
+    handle.store.flush().await;
+    handle.store.job(job).await.unwrap().unwrap().record
+}
+
+#[tokio::test]
+async fn a_failed_job_leaves_a_record_and_its_container_goes_once_committed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("record");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    let mut events = handle.store.subscribe();
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    until_recorded(&mut engine).await;
+
+    let calls = docker.calls();
+    let commit = calls
+        .iter()
+        .position(|call| call == "commit container-1 runnerd-record:1");
+    let remove = calls.iter().position(|call| call == "remove container-1");
+    assert!(
+        commit.is_some() && commit < remove,
+        "the container is committed, then removed: {calls:?}"
+    );
+    let records = handle.records.borrow().clone();
+    assert_eq!(records.records.len(), 1);
+    let kept = &records.records[0];
+    assert_eq!(
+        (kept.job, kept.repository.as_str(), kept.bytes),
+        (1, "o/r", 1 << 30)
+    );
+    assert_eq!(kept.workflow.as_deref(), Some("ci"));
+    let note = note(&handle, 1).await.unwrap();
+    assert_eq!(note.bytes, Some(1 << 30));
+    assert!(
+        note.created_at.is_some(),
+        "the history keeps that it was made"
+    );
+    let mut created = false;
+    while let Ok(event) = events.try_recv() {
+        created |= matches!(&event.event, api::Event::RecordCreated { record } if record.job == 1);
+    }
+    assert!(created, "record.created is announced");
+}
+
+#[tokio::test]
+async fn only_failed_jobs_of_a_profile_that_records_them_are_kept() {
+    let succeeded = FAILED.replace("Failed", "Succeeded");
+    for (config, log) in [
+        (recording(), succeeded.as_str()),
+        (CONFIG.to_owned(), FAILED),
+    ] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        let dir = TestDir::new("no-record");
+        let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+        job_ends(&github, &docker, &mut engine, &handle, log).await;
+        until_recorded(&mut engine).await;
+        let calls = docker.calls();
+        assert!(
+            !calls.iter().any(|call| call.starts_with("commit")),
+            "nothing is committed: {calls:?}"
+        );
+        assert!(
+            calls.contains(&"remove container-1".to_owned()),
+            "{calls:?}"
+        );
+        assert_eq!(note(&handle, 1).await, None);
+    }
+}
+
+#[tokio::test]
+async fn a_runner_that_left_its_credentials_is_not_kept_and_the_history_says_why() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("secrets");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    docker.0.lock().unwrap().changed = vec![
+        "/home/runner/_work/r/r/src/main.rs".to_owned(),
+        "/home/runner/.credentials".to_owned(),
+    ];
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    until_recorded(&mut engine).await;
+
+    let calls = docker.calls();
+    assert!(
+        !calls.iter().any(|call| call.starts_with("commit")),
+        "{calls:?}"
+    );
+    assert!(
+        calls.contains(&"remove container-1".to_owned()),
+        "{calls:?}"
+    );
+    let skipped = note(&handle, 1).await.unwrap().skipped.unwrap();
+    assert!(skipped.contains("/home/runner/.credentials"), "{skipped}");
+}
+
+#[tokio::test]
+async fn a_failure_past_max_count_removes_the_oldest_record_and_the_history_says_why() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 300), record_image(11, 200)];
+    let dir = TestDir::new("count");
+    let config = format!("{}\n[records]\nmax_count = 2\n", recording());
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    until_recorded(&mut engine).await;
+
+    let jobs: Vec<u64> = handle
+        .records
+        .borrow()
+        .records
+        .iter()
+        .map(|record| record.job)
+        .collect();
+    assert_eq!(jobs, [11, 1]);
+    assert!(
+        docker
+            .calls()
+            .contains(&"remove image runnerd-record:10".to_owned())
+    );
+    handle.store.flush().await;
+    let removals: Vec<api::Event> = handle
+        .store
+        .events_after(0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|event| event.event)
+        .filter(|event| event.kind() == "record.deleted")
+        .collect();
+    assert_eq!(
+        removals,
+        [api::Event::RecordDeleted {
+            job: 10,
+            removed_by: api::RecordRemoval::Count
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_failure_that_would_leave_docker_too_little_disk_is_not_kept() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().free = Some(11 << 30);
+    let dir = TestDir::new("floor");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    until_recorded(&mut engine).await;
+
+    assert!(!docker.calls().iter().any(|call| call.starts_with("commit")));
+    let skipped = note(&handle, 1).await.unwrap().skipped.unwrap();
+    assert!(skipped.contains("records.min_free"), "{skipped}");
+}
+
+#[tokio::test]
+async fn records_past_max_age_and_those_removed_by_hand_go_unless_a_shell_is_open() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![
+        record_image(10, 8 * 86_400),
+        record_image(11, 3 * 86_400),
+        record_image(12, 60),
+    ];
+    let dir = TestDir::new("trash");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let jobs = |handle: &Handle| -> Vec<u64> {
+        handle
+            .records
+            .borrow()
+            .records
+            .iter()
+            .map(|record| record.job)
+            .collect()
+    };
+    assert_eq!(jobs(&handle), [11, 12], "the record past 7 days went");
+
+    engine.open_shell(12, SIZE).await.unwrap();
+    let refused = engine.remove_records(&RecordSelection::Job(12)).await;
+    assert!(
+        matches!(refused, Err(ControlError::Conflict(_))),
+        "{refused:?}"
+    );
+    let removed = engine
+        .remove_records(&RecordSelection::OlderThan(Duration::from_hours(48)))
+        .await
+        .unwrap();
+    assert_eq!(removed.jobs, [11]);
+    let removed = engine.remove_records(&RecordSelection::All).await.unwrap();
+    assert_eq!(
+        removed.jobs,
+        Vec::<u64>::new(),
+        "the record with a shell open stays"
+    );
+    engine.publish();
+    assert_eq!(jobs(&handle), [12]);
+
+    handle.store.flush().await;
+    let events: Vec<(u64, api::RecordRemoval)> = handle
+        .store
+        .events_after(0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|event| match event.event {
+            api::Event::RecordDeleted { job, removed_by } => Some((job, removed_by)),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(
+        events,
+        [
+            (10, api::RecordRemoval::Age),
+            (11, api::RecordRemoval::User)
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_shell_holds_a_slots_memory_and_is_refused_while_the_budget_is_full() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60), record_image(11, 60)];
+    let dir = TestDir::new("shell");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.memory_max = Some(6 << 30);
+    engine.recover().await.unwrap();
+
+    let tty = engine.open_shell(10, SIZE).await.unwrap();
+    engine.publish();
+    let budget = handle.status.borrow().budget.clone();
+    assert_eq!(budget.memory_in_use, 4 << 30);
+    assert_eq!(
+        budget.shell_memory,
+        [api::ShellMemory {
+            job: 10,
+            memory: 4 << 30
+        }]
+    );
+    let body = docker.0.lock().unwrap().shells[&tty.container].clone();
+    assert_eq!(body.image.as_deref(), Some("runnerd-record:10"));
+    assert_eq!(body.cmd.unwrap()[1], "/home/runner/_work/r/r");
+    let mounts: Vec<(String, Option<String>)> = body
+        .host_config
+        .unwrap()
+        .mounts
+        .unwrap()
+        .into_iter()
+        .map(|mount| (mount.target.unwrap(), mount.source))
+        .collect();
+    assert!(
+        mounts.contains(&("/state".to_owned(), None)),
+        "the shell's changes go to a volume of its own, not a slot's: {mounts:?}"
+    );
+    assert!(
+        mounts.contains(&("/base".to_owned(), Some("runnerd-app-base".to_owned()))),
+        "{mounts:?}"
+    );
+
+    let refused = engine.open_shell(11, SIZE).await.unwrap_err();
+    assert!(
+        refused.to_string().starts_with("the budget is full"),
+        "{refused}"
+    );
+    // No runner starts in the memory the shell holds.
+    github.0.lock().unwrap().queued = vec![job(5)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+
+    engine.close_shell(&tty.container).await;
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 0);
+    assert!(
+        docker
+            .calls()
+            .contains(&format!("remove {}", tty.container))
+    );
+}
+
+#[tokio::test]
+async fn a_shell_whose_process_exited_is_removed_and_one_left_by_an_earlier_run_is_not_taken_for_a_runner()
+ {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60)];
+    let dir = TestDir::new("shell-gone");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    let tty = engine.open_shell(10, SIZE).await.unwrap();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .containers
+        .iter_mut()
+        .for_each(|container| container.running = false);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert!(
+        engine.records.shells.is_empty(),
+        "the exited shell is forgotten"
+    );
+    assert!(
+        docker
+            .calls()
+            .contains(&format!("remove {}", tty.container))
+    );
+    drop((engine, handle));
+
+    // A shell carries its record's runner labels, as a commit keeps the container's.
+    let mut left = runner_container(1, 7, true);
+    left.id = "runnerd-shell-10-1".to_owned();
+    left.name = left.id.clone();
+    left.labels
+        .insert(record::SHELL_LABEL.to_owned(), "10".to_owned());
+    docker.0.lock().unwrap().containers = vec![left];
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None);
+    assert!(
+        docker
+            .calls()
+            .contains(&"remove runnerd-shell-10-1".to_owned())
+    );
+}

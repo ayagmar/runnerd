@@ -21,6 +21,8 @@ pub mod isolation;
 #[cfg(feature = "host")]
 pub mod observe;
 #[cfg(feature = "host")]
+pub mod record;
+#[cfg(feature = "host")]
 pub mod scheduler;
 #[cfg(feature = "host")]
 pub mod store;

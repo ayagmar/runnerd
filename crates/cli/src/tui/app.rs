@@ -633,7 +633,11 @@ impl App {
             .map(|job| job.steps.clone())
             .unwrap_or_default();
         self.job = Some(JobView {
-            job: Job { summary, steps },
+            job: Job {
+                summary,
+                steps,
+                record: None,
+            },
             samples: self.series.get(&id).cloned().unwrap_or_default(),
             log: VecDeque::new(),
             scroll: 0,

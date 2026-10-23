@@ -482,6 +482,7 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
             memory_in_use: 0,
             mirror_memory: 0,
             seed_memory: Vec::new(),
+            shell_memory: Vec::new(),
         },
     });
     store.flush().await;

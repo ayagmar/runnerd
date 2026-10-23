@@ -95,6 +95,7 @@ impl State {
                     Job {
                         summary: job.clone(),
                         steps,
+                        record: None,
                     },
                 );
             }
@@ -160,7 +161,10 @@ impl State {
                 self.samples.insert(*job, sample.clone());
             }
             Event::HostSample { sample } => self.host = Some(sample.clone()),
-            Event::CacheReseeded { .. } | Event::LogLine { .. } => {}
+            Event::CacheReseeded { .. }
+            | Event::LogLine { .. }
+            | Event::RecordCreated { .. }
+            | Event::RecordDeleted { .. } => {}
         }
         None
     }
@@ -479,6 +483,7 @@ mod tests {
                     memory_in_use: 0,
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
+                    shell_memory: Vec::new(),
                 },
                 profiles: vec![ProfileStatus {
                     name: "jvm".to_owned(),
@@ -670,6 +675,7 @@ mod tests {
         state.refresh(runnerd_core::api::Job {
             summary: summary(JobState::Running),
             steps: vec![step(1, "Set up job", "completed")],
+            record: None,
         });
         assert!(
             screen(&state).contains("halyard/ledger build / test"),
@@ -700,6 +706,7 @@ mod tests {
                     memory_in_use: 7,
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
+                    shell_memory: Vec::new(),
                 },
             },
         };

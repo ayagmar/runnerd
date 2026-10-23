@@ -11,6 +11,7 @@ use super::{Engine, Occupant, RunningJobs, unix_secs};
 use crate::cache::{self, runner_mounts};
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
+use crate::record;
 use crate::scheduler::SlotRef;
 
 /// Why a slot's runner is removed.
@@ -53,10 +54,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Removes a slot's container and its runner, then frees the slot. If the container `Ended` and its runner took
     /// no job, the repository's next runners are held back for a while.
     async fn release(&mut self, slot: &SlotRef, occupant: &Occupant, why: Release) {
-        // The runner logs each job it takes; its exit code says nothing (run.sh exits 0 when it fails to start).
-        let took_job = if why == Release::Ended {
+        // The runner logs each job it takes and how it ended; its exit code says nothing (run.sh exits 0 when it
+        // fails to start).
+        let logs = if why == Release::Ended {
             match self.docker.logs(&occupant.container).await {
-                Ok(logs) => Some(logs.contains("Running job: ")),
+                Ok(logs) => Some(logs),
                 Err(error) => {
                     warn!("cannot read the log of {}: {error}", occupant.runner_name);
                     None
@@ -65,15 +67,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         } else {
             None
         };
+        let took_job = logs.as_ref().map(|logs| logs.contains("Running job: "));
         // The capture ends with the container; its last lines must be stored before the job's record closes.
         self.end_capture(&occupant.runner_name).await;
         self.count_mirror_bytes().await;
-        match self.docker.remove(&occupant.container).await {
-            Err(error) if !is_not_found(&error) => {
-                warn!("cannot remove {}: {error}", occupant.runner_name);
-                return;
+        // A failed job's container is kept as its record, then removed, in the background.
+        let recorded =
+            logs.as_deref().is_some_and(record::failed) && self.begin_record(slot, occupant).await;
+        if !recorded {
+            match self.docker.remove(&occupant.container).await {
+                Err(error) if !is_not_found(&error) => {
+                    warn!("cannot remove {}: {error}", occupant.runner_name);
+                    return;
+                }
+                _ => {}
             }
-            _ => {}
         }
         match self
             .github

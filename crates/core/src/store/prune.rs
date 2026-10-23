@@ -151,11 +151,13 @@ fn jobs(db: &Db<'_>, before: u64) -> rusqlite::Result<()> {
         .collect::<rusqlite::Result<_>>()?;
     delete_logs(db, &jobs)?;
     let mut steps = db.prepare("DELETE FROM steps WHERE job = ?1")?;
+    let mut kept = db.prepare("DELETE FROM records WHERE job = ?1")?;
     let mut records = db.prepare("DELETE FROM jobs WHERE id = ?1")?;
     for chunk in jobs.chunks(usize::try_from(BATCH).unwrap_or(usize::MAX)) {
         batched_once(db, || {
             for job in chunk {
                 steps.execute([job])?;
+                kept.execute([job])?;
                 records.execute([job])?;
             }
             Ok(())

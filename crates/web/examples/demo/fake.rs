@@ -264,7 +264,15 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             truncated: false,
         },
     };
-    (Job { summary, steps }, samples, lines)
+    (
+        Job {
+            summary,
+            steps,
+            record: None,
+        },
+        samples,
+        lines,
+    )
 }
 
 fn slot(
@@ -502,6 +510,7 @@ impl Fixtures {
                 memory_in_use: 9 * GIB + 7 * GIB + 7 * GIB + 512 * MIB,
                 mirror_memory: 512 * MIB,
                 seed_memory: Vec::new(),
+                shell_memory: Vec::new(),
             },
             profiles: vec![
                 ProfileStatus {

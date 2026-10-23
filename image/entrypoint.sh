@@ -1,7 +1,8 @@
 #!/bin/bash
 # Runs as root under `dind` (cgroup nesting): lays out this slot's state, starts the container's Docker Engine, then
 # runs the GitHub Actions runner as the unprivileged `runner` user from a just-in-time config. The runner takes one
-# job and exits, and runnerd removes the container.
+# job and exits; scrub.sh deletes its credentials, and runnerd removes the container, or keeps it as the record of a
+# failed job.
 set -euo pipefail
 
 # runnerd puts the runner's just-in-time config here before it starts the container: never in its environment, which
@@ -31,4 +32,16 @@ jitconfig=$(< "$jitconfig_file")
 rm -f "$jitconfig_file"
 export HOME=/home/runner USER=runner LOGNAME=runner
 cd "$HOME"
-exec setpriv --reuid=runner --regid=runner --init-groups -- ./run.sh --jitconfig "$jitconfig"
+setpriv --reuid=runner --regid=runner --init-groups -- ./run.sh --jitconfig "$jitconfig" &
+runner=$!
+# docker stop's signal is the runner's, which cancels its job.
+trap 'kill -TERM "$runner" 2> /dev/null' TERM INT
+status=0
+wait "$runner" || status=$?
+# A trapped signal ends the wait before the runner exits.
+while kill -0 "$runner" 2> /dev/null; do
+    status=0
+    wait "$runner" || status=$?
+done
+runnerd-scrub
+exit "$status"

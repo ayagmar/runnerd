@@ -256,6 +256,18 @@ struct DockerState {
     block_pulls: bool,
     /// The image of each runner container started, in order.
     started_images: Vec<String>,
+    /// What a runner container printed, when not just that it took its job.
+    runner_log: Option<String>,
+    /// The paths a container's layer added or changed.
+    changed: Vec<String>,
+    /// The bytes a container's layer holds.
+    written: u64,
+    /// Docker's free disk; plenty when unset.
+    free: Option<u64>,
+    /// The images Docker has, record images among them.
+    images: Vec<docker::Image>,
+    /// The create requests of the shells started, by container ID.
+    shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
 }
 
@@ -392,7 +404,13 @@ impl DockerApi for FakeDocker {
     }
 
     async fn logs(&self, _container: &str) -> Result<String, docker::Error> {
-        Ok("Running job: build".to_owned())
+        Ok(self
+            .0
+            .lock()
+            .unwrap()
+            .runner_log
+            .clone()
+            .unwrap_or_else(|| "Running job: build".to_owned()))
     }
 
     async fn logs_since(&self, _container: &str, _since: u64) -> Result<String, docker::Error> {
@@ -457,6 +475,82 @@ impl DockerApi for FakeDocker {
 
     async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, docker::Error> {
         Ok(self.0.lock().unwrap().volume_sizes.clone())
+    }
+
+    async fn changes(&self, _container: &str) -> Result<Vec<String>, docker::Error> {
+        Ok(self.0.lock().unwrap().changed.clone())
+    }
+
+    async fn written(&self, _container: &str) -> Result<u64, docker::Error> {
+        Ok(self.0.lock().unwrap().written)
+    }
+
+    async fn commit(
+        &self,
+        container: &str,
+        reference: &str,
+        labels: BTreeMap<String, String>,
+    ) -> Result<u64, docker::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("commit {container} {reference}"));
+        let bytes = state.written;
+        state.images.push(docker::Image {
+            reference: reference.to_owned(),
+            labels: labels.into_iter().collect(),
+            bytes,
+        });
+        Ok(bytes)
+    }
+
+    async fn images(&self, label: &str) -> Result<Vec<docker::Image>, docker::Error> {
+        let state = self.0.lock().unwrap();
+        Ok(state
+            .images
+            .iter()
+            .filter(|image| image.labels.contains_key(label))
+            .cloned()
+            .collect())
+    }
+
+    async fn remove_image(&self, reference: &str) -> Result<(), docker::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("remove image {reference}"));
+        state.images.retain(|image| image.reference != reference);
+        Ok(())
+    }
+
+    async fn free_space(&self) -> Result<u64, docker::Error> {
+        Ok(self.0.lock().unwrap().free.unwrap_or(1 << 40))
+    }
+
+    async fn shell(
+        &self,
+        name: &str,
+        body: ContainerCreateBody,
+        _size: docker::TtySize,
+    ) -> Result<docker::Tty, docker::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("shell {name}"));
+        let memory = body
+            .host_config
+            .as_ref()
+            .and_then(|host| host.memory)
+            .unwrap_or(0);
+        state
+            .memory
+            .insert(name.to_owned(), u64::try_from(memory).unwrap_or(0));
+        state.containers.push(Container {
+            id: name.to_owned(),
+            name: name.to_owned(),
+            running: true,
+            labels: body.labels.clone().unwrap_or_default(),
+        });
+        state.shells.insert(name.to_owned(), body);
+        Ok(docker::Tty {
+            container: name.to_owned(),
+            output: futures_util::stream::empty().boxed(),
+            input: Box::pin(tokio::io::sink()),
+        })
     }
 }
 
@@ -2636,3 +2730,5 @@ async fn a_requested_reseed_waits_for_the_profiles_image_and_then_runs() {
     until_called(&mut engine, &docker, &seed).await;
     assert_eq!(docker.0.lock().unwrap().started_images, [PUBLISHED]);
 }
+
+mod records;

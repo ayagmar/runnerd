@@ -31,6 +31,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0003_paused.sql"),
     include_str!("store/migrations/0004_prune.sql"),
     include_str!("store/migrations/0005_announced_profiles.sql"),
+    include_str!("store/migrations/0006_records.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -213,6 +214,16 @@ enum Write {
         sizes: BTreeMap<String, u64>,
     },
     Event(Event),
+    RecordMade(api::Record),
+    RecordSkipped {
+        job: u64,
+        why: String,
+    },
+    RecordRemoved {
+        job: u64,
+        at: u64,
+        by: api::RecordRemoval,
+    },
     Paused {
         repositories: Vec<String>,
         /// Whether it committed.
@@ -405,6 +416,21 @@ impl Store {
     /// Stores a durable event, or sends a live one, to every subscriber.
     pub fn event(&self, event: Event) {
         self.send(Write::Event(event));
+    }
+
+    /// Records that a failed job's runner was kept as `record`, and announces it.
+    pub fn record_made(&self, record: api::Record) {
+        self.send(Write::RecordMade(record));
+    }
+
+    /// Records why a failed job's runner was not kept.
+    pub fn record_skipped(&self, job: u64, why: String) {
+        self.send(Write::RecordSkipped { job, why });
+    }
+
+    /// Records that a job's record was removed at `at` (ms), and why, and announces it.
+    pub fn record_removed(&self, job: u64, at: u64, by: api::RecordRemoval) {
+        self.send(Write::RecordRemoved { job, at, by });
     }
 
     /// Records the paused repositories, all of them, in place of the ones recorded before. The write is sent at

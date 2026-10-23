@@ -1,6 +1,7 @@
 //! Control from the API: the `Control` handle the daemon's API holds (pause flags, which it records in the store so
 //! a restart keeps them, shutdown, a channel of `Command`s) and the engine's side of each command: pause and resume,
-//! of one repository or all, with or without cancelling their runs, reseed, cache clean and config replacement.
+//! of one repository or all, with or without cancelling their runs, reseed, cache clean, config replacement, the
+//! removal of records and the shells opened in them.
 //! Commands run between ticks or while a tick waits for GitHub, so they see the slot state a tick does (ADRs 0019,
 //! 0026). It must not serve HTTP or write the config file: the daemon does, through `Commit`.
 
@@ -11,11 +12,12 @@ use std::time::Duration;
 use tokio::sync::{Notify, mpsc, oneshot};
 use tracing::{info, warn};
 
+use super::records::RecordSelection;
 use super::{Engine, Occupant};
 use crate::api;
 use crate::cache;
 use crate::config::Config;
-use crate::docker::DockerApi;
+use crate::docker::{DockerApi, Tty, TtySize};
 use crate::github::GithubApi;
 use crate::isolation;
 use crate::scheduler::SlotRef;
@@ -129,6 +131,27 @@ pub enum Command {
         commit: Commit,
         /// Answered once the engine runs with it: with a warning from the commit, or why it did not commit.
         reply: oneshot::Sender<Result<Option<String>, ControlError>>,
+    },
+    /// Remove records of failed jobs.
+    RemoveRecords {
+        /// Which.
+        selection: RecordSelection,
+        /// The answer.
+        reply: oneshot::Sender<Result<api::RemovedRecords, ControlError>>,
+    },
+    /// Start a shell in a job's record, if the budget has room for it.
+    OpenShell {
+        /// The job.
+        job: u64,
+        /// Its terminal's size.
+        size: TtySize,
+        /// The shell's terminal.
+        reply: oneshot::Sender<Result<Tty, ControlError>>,
+    },
+    /// Remove a shell's container: its terminal closed.
+    CloseShell {
+        /// The container's ID.
+        container: String,
     },
 }
 
@@ -343,6 +366,27 @@ impl Control {
         .await?
     }
 
+    /// Removes the selected records of failed jobs and their images.
+    pub async fn remove_records(
+        &self,
+        selection: RecordSelection,
+    ) -> Result<api::RemovedRecords, ControlError> {
+        self.send(|reply| Command::RemoveRecords { selection, reply })
+            .await?
+    }
+
+    /// Starts a shell in a job's record and returns its terminal. The caller closes it with `close_shell` once the
+    /// terminal ends, from either side.
+    pub async fn open_shell(&self, job: u64, size: TtySize) -> Result<Tty, ControlError> {
+        self.send(|reply| Command::OpenShell { job, size, reply })
+            .await?
+    }
+
+    /// Removes a shell's container. Not waited for, so it can be sent while the terminal is dropped.
+    pub fn close_shell(&self, container: String) {
+        let _ = self.commands.send(Command::CloseShell { container });
+    }
+
     /// Runs `commit` to write a validated config, and if it commits, runs with the config from then on, before the
     /// next tick. If it does not, nothing changes and the answer is `Failed`. Running jobs keep running: removed
     /// profiles and slots go as their runners finish.
@@ -421,6 +465,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 };
                 let _ = reply.send(answer);
             }
+            Command::RemoveRecords { selection, reply } => {
+                let _ = reply.send(self.remove_records(&selection).await);
+            }
+            Command::OpenShell { job, size, reply } => {
+                let opened = self.open_shell(job, size).await;
+                // A terminal nobody waits for any more is closed at once.
+                if let Err(Ok(tty)) = reply.send(opened) {
+                    self.close_shell(&tty.container).await;
+                }
+            }
+            Command::CloseShell { container } => self.close_shell(&container).await,
         }
     }
 

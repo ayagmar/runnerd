@@ -9,7 +9,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use runnerd_core::api::{
     Caches, CheckStatus, ConfigCheck, ConfigFile, Doctor, Event, EventQuery, Job, JobPage,
-    JobQuery, JobState, LogQuery, PauseQuery, Paused, Status,
+    JobQuery, JobState, LogQuery, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
+    ShellQuery, Status,
 };
 use serde::Serialize;
 
@@ -22,7 +23,7 @@ mod tui;
 mod watch;
 
 use output::fail;
-use runnerd_core::client::{Client, ClientError, StatusCode};
+use runnerd_core::client::{Client, ClientError, Method, StatusCode};
 
 /// Command-line client for the runnerd daemon.
 #[derive(Parser)]
@@ -120,6 +121,20 @@ enum Command {
         #[arg(long)]
         no_wait: bool,
     },
+    /// Open a shell in a failed job's record: its runner as the job left it, in the job's workspace.
+    ///
+    /// Shows what the failed step ran first. Exiting the shell removes its container.
+    Shell {
+        job: u64,
+        /// Show what this step ran instead, by its number in `runnerctl job`.
+        #[arg(long)]
+        step: Option<u32>,
+    },
+    /// List the records of failed jobs, their sizes and the limits they are kept within.
+    Records {
+        #[command(subcommand)]
+        command: Option<RecordsCommand>,
+    },
     /// Show the cache volumes, their sizes and limits.
     Caches {
         /// Empty this volume (a slot layer or a shared cache) instead; refused while a runner uses it.
@@ -138,6 +153,22 @@ enum Command {
         /// Print the URL instead of opening it.
         #[arg(long)]
         no_open: bool,
+    },
+}
+
+#[derive(Subcommand)]
+enum RecordsCommand {
+    /// Remove records and free the disk they take.
+    Rm {
+        /// The job whose record goes.
+        #[arg(required_unless_present_any = ["all", "older_than"])]
+        job: Option<u64>,
+        /// Remove every record, but those a shell is open in.
+        #[arg(long, conflicts_with_all = ["job", "older_than"])]
+        all: bool,
+        /// Remove the records older than this, such as 2d or 12h.
+        #[arg(long, value_name = "AGE", conflicts_with = "job")]
+        older_than: Option<String>,
     },
 }
 
@@ -353,6 +384,8 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         Command::Reseed { profile, no_wait } => {
             return reseed(client, json, &profile, no_wait).await;
         }
+        Command::Shell { job, step } => return shell(client, job, step).await,
+        Command::Records { command } => return records(client, json, command).await,
         Command::Caches {
             clean: Some(volume),
         } => {
@@ -373,6 +406,104 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         Command::Config { command } => return config(client, json, command).await,
         Command::Doctor => return doctor(client, json).await,
         Command::Web { no_open } => return web(client, no_open),
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `runnerctl records`: lists the records of failed jobs, or removes some.
+async fn records(
+    client: &Client,
+    json: bool,
+    command: Option<RecordsCommand>,
+) -> Result<ExitCode, Error> {
+    let Some(RecordsCommand::Rm {
+        job,
+        all,
+        older_than,
+    }) = command
+    else {
+        let records: Records = client.get("/v1/records").await?;
+        if json {
+            return print_json(&records);
+        }
+        output::text(&human::records(&records, now(), output::paint()));
+        return Ok(ExitCode::SUCCESS);
+    };
+    let path = match job {
+        Some(job) => format!("/v1/records/{job}"),
+        None => with_query("/v1/records", &RemoveRecordsQuery { all, older_than })?,
+    };
+    let reply = client.request(Method::DELETE, &path, None).await?;
+    if !reply.status.is_success() {
+        return Err(Error::Local(reply.message()));
+    }
+    let removed: RemovedRecords =
+        serde_json::from_slice(&reply.body).map_err(|error| Error::Local(error.to_string()))?;
+    if json {
+        return print_json(&removed);
+    }
+    output::line(match removed.jobs.len() {
+        0 => "no record removed".to_owned(),
+        1 => format!("removed 1 record, {} freed", human::bytes(removed.bytes)),
+        count => format!(
+            "removed {count} records, {} freed",
+            human::bytes(removed.bytes)
+        ),
+    });
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `path?query`, as the API reads it.
+fn with_query(path: &str, query: &impl Serialize) -> Result<String, Error> {
+    let query =
+        serde_urlencoded::to_string(query).map_err(|error| Error::Local(error.to_string()))?;
+    Ok(if query.is_empty() {
+        path.to_owned()
+    } else {
+        format!("{path}?{query}")
+    })
+}
+
+/// Opens a shell in a job's record and carries this terminal's keys to it and its output here, in raw mode, until
+/// the shell exits or the daemon closes it.
+async fn shell(client: &Client, job: u64, step: Option<u32>) -> Result<ExitCode, Error> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+    let size = output::terminal_size();
+    let query = ShellQuery {
+        step,
+        cols: size.map(|(cols, _)| cols),
+        rows: size.map(|(_, rows)| rows),
+    };
+    let terminal = client.shell(job, &query).await?;
+    let (mut from_shell, mut to_shell) = tokio::io::split(terminal);
+    let _raw = output::raw_mode();
+    let mut typed = output::stdin_chunks();
+    let shown = async {
+        let mut buffer = vec![0; 8192];
+        loop {
+            match from_shell.read(&mut buffer).await {
+                Ok(0) | Err(_) => break,
+                Ok(read) => {
+                    if !output::bytes(&buffer[..read]) {
+                        break;
+                    }
+                }
+            }
+        }
+    };
+    let carried = async {
+        while let Some(chunk) = typed.recv().await {
+            if to_shell.write_all(&chunk).await.is_err() {
+                break;
+            }
+        }
+        // The keyboard closed: the shell's input ends, and with it the shell.
+        let _ = to_shell.shutdown().await;
+        std::future::pending::<()>().await;
+    };
+    tokio::select! {
+        () = shown => {}
+        () = carried => {}
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -709,6 +840,7 @@ mod tests {
                 log: LogSummary::default(),
             },
             steps: Vec::new(),
+            record: None,
         }
     }
 

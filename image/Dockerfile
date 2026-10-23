@@ -95,6 +95,7 @@ COPY job-cleanup.sh /usr/local/sbin/runnerd-job-cleanup
 COPY job-started.sh /usr/local/bin/runnerd-job-started.sh
 COPY job-completed.sh /usr/local/bin/runnerd-job-completed.sh
 COPY seed.sh /usr/local/sbin/runnerd-seed
+COPY scrub.sh /usr/local/sbin/runnerd-scrub
 COPY entrypoint.sh /usr/local/bin/runnerd-runner
 # The runner accepts hook scripts only by their extension.
 ENV ACTIONS_RUNNER_HOOK_JOB_STARTED=/usr/local/bin/runnerd-job-started.sh \

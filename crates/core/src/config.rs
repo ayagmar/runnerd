@@ -28,6 +28,9 @@ pub struct Config {
     /// What is kept of past jobs.
     #[serde(default)]
     pub history: History,
+    /// How much the records of failed jobs may keep.
+    #[serde(default)]
+    pub records: Records,
 }
 
 /// `[host]`: where runner containers run and how they are isolated.
@@ -115,6 +118,8 @@ pub struct Profile {
     pub memory: ByteSize,
     /// The most jobs of this profile running at once.
     pub slots: u32,
+    /// Whether a failed job's runner is kept as a record, to open a shell in (`runnerctl shell`).
+    pub record_failures: bool,
 }
 
 /// The image a profile's runners run.
@@ -146,6 +151,8 @@ struct ProfileToml {
     cpus: u32,
     memory: ByteSize,
     slots: u32,
+    #[serde(default)]
+    record_failures: bool,
 }
 
 impl TryFrom<ProfileToml> for Profile {
@@ -174,6 +181,7 @@ impl TryFrom<ProfileToml> for Profile {
             cpus: profile.cpus,
             memory: profile.memory,
             slots: profile.slots,
+            record_failures: profile.record_failures,
         })
     }
 }
@@ -221,6 +229,33 @@ impl Default for History {
             events: Duration::from_hours(30 * 24),
             jobs: Duration::from_hours(90 * 24),
             log_max: ByteSize(50 << 20),
+        }
+    }
+}
+
+/// `[records]`: how much the records of failed jobs may keep (`record_failures` under a profile turns them on).
+/// When a new record would pass a limit, the oldest records go first. Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Records {
+    /// The most disk all records may take together. Default 20G.
+    pub max_total: ByteSize,
+    /// The most records kept. Default 10.
+    pub max_count: u32,
+    /// How long a record is kept. Default 7 days.
+    #[serde(deserialize_with = "duration")]
+    pub max_age: Duration,
+    /// The disk Docker must keep free: no record is made that would leave less. Default 10G.
+    pub min_free: ByteSize,
+}
+
+impl Default for Records {
+    fn default() -> Records {
+        Records {
+            max_total: ByteSize(20 << 30),
+            max_count: 10,
+            max_age: Duration::from_hours(7 * 24),
+            min_free: ByteSize(10 << 30),
         }
     }
 }
@@ -423,6 +458,11 @@ impl Config {
                 self.host.poll_interval.is_zero(),
                 "host.poll_interval".to_owned(),
             ),
+            (self.records.max_count == 0, "records.max_count".to_owned()),
+            (
+                self.records.max_total.0 == 0,
+                "records.max_total".to_owned(),
+            ),
         ];
         if let Some((_, field)) = zero_limits
             .chain(mirror_zero_limits)
@@ -554,18 +594,18 @@ impl<'de> Deserialize<'de> for ByteSize {
     }
 }
 
-/// A duration as Go and the registry write it: `30s`, `90m`, `168h`.
-fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
-    let s = String::deserialize(deserializer)?;
+/// Parses a duration as Go and the registry write it, `30s`, `90m`, `168h`, or in days: `7d`.
+pub fn parse_duration(s: &str) -> Result<Duration, String> {
     let invalid = || {
-        de::Error::custom(format!(
-            "invalid duration {s:?}, expected a number and s, m or h, such as \"168h\""
-        ))
+        format!(
+            "invalid duration {s:?}, expected a number and s, m, h or d, such as \"168h\" or \"7d\""
+        )
     };
     let (number, factor) = match s.chars().last() {
         Some('s') => (&s[..s.len() - 1], 1),
         Some('m') => (&s[..s.len() - 1], 60),
         Some('h') => (&s[..s.len() - 1], 3600),
+        Some('d') => (&s[..s.len() - 1], 86400),
         _ => return Err(invalid()),
     };
     let number: u64 = number.parse().map_err(|_| invalid())?;
@@ -573,6 +613,10 @@ fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::E
         .checked_mul(factor)
         .map(Duration::from_secs)
         .ok_or_else(invalid)
+}
+
+fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
+    parse_duration(&String::deserialize(deserializer)?).map_err(de::Error::custom)
 }
 
 #[cfg(test)]

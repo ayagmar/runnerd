@@ -78,6 +78,7 @@ fn app() -> App {
                 memory_in_use: 0,
                 mirror_memory: 0,
                 seed_memory: Vec::new(),
+                shell_memory: Vec::new(),
             },
             profiles: vec![profile("jvm", 2, 9 << 30), profile("node", 1, 7 << 30)],
             repositories: vec![
@@ -693,6 +694,7 @@ async fn dropping_then_back(
                     memory_in_use: in_use,
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
+                    shell_memory: Vec::new(),
                 },
             },
         };
@@ -810,6 +812,7 @@ fn opening_a_job_from_the_latest_jobs_follows_only_its_log() {
     app.update(Msg::Job(Job {
         summary: app.job.as_ref().unwrap().job.summary.clone(),
         steps: vec![step(1, "Set up job", 1009, Some(1012))],
+        record: None,
     }));
     let job = screen(&app, 120, 40, false);
     assert!(job.contains("FAILURE"), "{job}");
@@ -1022,6 +1025,7 @@ fn a_job_read_again_as_finished_leaves_the_slots() {
     app.update(Msg::Job(Job {
         summary: done,
         steps: Vec::new(),
+        record: None,
     }));
     assert!(app.live.running.is_empty() && app.series.is_empty());
     assert!(screen(&app, 120, 40, false).contains("SUCCESS"));
