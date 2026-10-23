@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use runnerd_core::api::{Advice, Check, CheckStatus as Status, Sizing};
-use runnerd_core::config::{self, ByteSize, Config, Image, Isolation};
+use runnerd_core::config::{self, Admission, ByteSize, Config, Image, Isolation};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::record;
 use runnerd_core::sizing::{Window, advise};
@@ -435,7 +435,20 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         )
     };
     let config_check = match config.validate(slice.memory_max) {
-        Ok(warnings) if warnings.is_empty() => pass("config", format!("fits in {name}")),
+        Ok(warnings) if warnings.is_empty() => pass(
+            "config",
+            match (
+                config.host.admission,
+                config.memory_caps(),
+                slice.memory_max,
+            ) {
+                (Admission::Measured, Ok(caps), Some(max)) if caps > max => format!(
+                    "memory caps sum to {caps}, over {name}'s {max} MemoryMax: admission = \"measured\" starts \
+                     what the predicted peaks fit"
+                ),
+                _ => format!("fits in {name}"),
+            },
+        ),
         Ok(warnings) => Check {
             name: "config".to_owned(),
             status: Status::Pass,

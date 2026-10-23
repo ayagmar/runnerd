@@ -31,7 +31,7 @@ use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing,
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
     LogSummary, ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus,
-    RunnerStatus, Sample, SeedMemory, SlotStatus, Status, Step, Timeline,
+    RunnerStatus, Sample, SeedMemory, ShellMemory, SlotStatus, Status, Step, Timeline,
 };
 
 use unicode_width::UnicodeWidthStr;
@@ -732,6 +732,20 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     let shown = screen(&app, 120, 40, false);
     let heading = shown.lines().nth(1).unwrap();
     assert!(heading.contains("· mirror 512M · jvm seed 9G"), "{shown}");
+}
+
+#[test]
+fn the_budget_names_a_shell_open_in_a_record() {
+    let mut app = app();
+    let budget = &mut app.live.status.budget;
+    budget.shell_memory = vec![ShellMemory {
+        job: 42,
+        memory: 9 << 30,
+    }];
+    budget.memory_in_use += 9 << 30;
+    let shown = screen(&app, 160, 40, false);
+    let names = shown.lines().nth(3).unwrap();
+    assert!(names.contains("job 42 shell 9G"), "{shown}");
 }
 
 #[test]
@@ -1547,4 +1561,29 @@ async fn a_stream_reopened_at_once_with_no_event_to_resume_after_reads_the_state
         "the reread status shows"
     );
     assert_eq!(*streams.lock().unwrap(), [None, None]);
+}
+
+#[test]
+fn the_help_shows_every_key_in_an_80_by_24_terminal() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('?')));
+    let shown = screen(&app, 80, 24, false);
+    for expected in ["overview", "write the advice", "this help", "suspend"] {
+        assert!(shown.contains(expected), "{expected}: {shown}");
+    }
+}
+
+#[test]
+fn an_empty_records_view_says_in_full_how_records_are_kept() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('3')));
+    app.update(Msg::Records(records(&[])));
+    let shown: String = screen(&app, 80, 24, false)
+        .split_whitespace()
+        .collect::<Vec<_>>()
+        .join(" ");
+    assert!(
+        shown.contains("as a record, to open a shell where it failed"),
+        "the hint wraps instead of being cut: {shown}"
+    );
 }

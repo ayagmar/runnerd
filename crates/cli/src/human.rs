@@ -559,7 +559,8 @@ pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
     if records.records.is_empty() {
         out.push_str(&paint.paint(
             Tone::Dim,
-            "none kept: set record_failures = true under a profile to keep its failed jobs' runners\n",
+            "none kept: a profile with record_failures = true keeps each failed job's runner as a record, to open a \
+             shell where it failed\n",
         ));
         return out;
     }

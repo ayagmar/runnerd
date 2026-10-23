@@ -161,6 +161,13 @@ async fn a_runner_that_left_its_credentials_is_not_kept_and_the_history_says_why
     );
     let skipped = note(&handle, 1).await.unwrap().skipped.unwrap();
     assert!(skipped.contains("/home/runner/.credentials"), "{skipped}");
+    assert!(
+        skipped.contains(&format!(
+            "the image of runnerd {}",
+            env!("CARGO_PKG_VERSION")
+        )),
+        "says which image deletes them: {skipped}"
+    );
 }
 
 #[tokio::test]
@@ -345,6 +352,37 @@ async fn a_shell_holds_a_slots_memory_and_is_refused_while_the_budget_is_full() 
         docker
             .calls()
             .contains(&format!("remove {}", tty.container))
+    );
+}
+
+#[tokio::test]
+async fn under_measured_admission_no_shell_opens_while_the_slice_is_at_the_high_water_mark() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().images = vec![record_image(10, 60)];
+    let dir = TestDir::new("shell");
+    let config = recording().replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nadmission = \"measured\"",
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(10 << 30);
+    engine.recover().await.unwrap();
+    let slice_at = |memory| {
+        handle.store.host_sample(api::HostSample {
+            at: crate::time::now_ms() / 1000,
+            cpu: 0,
+            memory,
+        });
+    };
+
+    // 9.2G of 10G: past 90%, though the 4G shell fits beside no runner.
+    slice_at((92 << 30) / 10);
+    let refused = engine.open_shell(10, SIZE).await.unwrap_err();
+    assert!(refused.to_string().contains("90%"), "{refused}");
+    slice_at(3 << 30);
+    assert!(
+        engine.open_shell(10, SIZE).await.is_ok(),
+        "opens once under"
     );
 }
 

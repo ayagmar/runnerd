@@ -219,7 +219,8 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 }
 
 fn help(frame: &mut Frame<'_>, area: Rect) {
-    const KEYS: [(&str, &str); 24] = [
+    // At most 20, so it fits a terminal of 24 rows.
+    const KEYS: [(&str, &str); 20] = [
         ("1 o", "overview"),
         ("2 h", "history"),
         ("3", "records of failed jobs"),
@@ -230,16 +231,12 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
         ("enter", "open the job"),
         ("esc", "back from a job"),
         ("G g", "follow the log, or go to its start"),
-        ("p", "pause the repository: no new runners"),
-        ("r", "resume the repository"),
-        ("P", "pause every repository"),
-        ("U", "resume every repository"),
+        ("p r", "pause the repository, or resume it"),
+        ("P U", "pause every repository, or resume them"),
         ("R", "reseed the profile's snapshot"),
-        ("c", "history: cycle the outcome filter"),
-        ("s", "history: cycle the repository filter"),
+        ("c s", "history: cycle the outcome or repository filter"),
         ("] [", "history: next and previous page"),
-        ("d", "records: remove the record"),
-        ("D", "records: remove every record"),
+        ("d D", "records: remove the record, or every record"),
         ("a", "sizing: write the advice into the config"),
         ("?", "this help; any key closes it"),
         ("ctrl-z", "suspend; the shell's fg brings it back"),
@@ -456,7 +453,7 @@ struct Held {
     memory: u64,
 }
 
-/// The mirror, then each seed container in its profile's colour.
+/// The mirror, each seed container in its profile's colour, then each shell open in a record.
 fn held(status: &Status, theme: Theme) -> Vec<Held> {
     let budget = &status.budget;
     let mirror = (budget.mirror_memory > 0).then(|| Held {
@@ -475,7 +472,12 @@ fn held(status: &Status, theme: Theme) -> Vec<Held> {
             memory: seed.memory,
         }
     });
-    mirror.into_iter().chain(seeds).collect()
+    let shells = budget.shell_memory.iter().map(|shell| Held {
+        style: Style::default(),
+        label: format!("job {} shell {}", shell.job, bytes(shell.memory)),
+        memory: shell.memory,
+    });
+    mirror.into_iter().chain(seeds).chain(shells).collect()
 }
 
 /// The running job in a slot.
@@ -1142,10 +1144,12 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
     );
     if records.records.is_empty() {
         frame.render_widget(
-            Line::styled(
-                "none kept: set record_failures = true under a profile to keep its failed jobs' runners",
+            Paragraph::new(Line::styled(
+                "none kept: a profile with record_failures = true keeps each failed job's runner as a record, \
+                 to open a shell where it failed",
                 theme.dim(),
-            ),
+            ))
+            .wrap(Wrap { trim: true }),
             table_area,
         );
         return;

@@ -569,6 +569,34 @@ async fn pruning_drops_samples_and_logs_then_finished_jobs_past_their_ages_and_k
 }
 
 #[tokio::test]
+async fn pruning_keeps_an_idle_runner_that_has_been_up_longer_than_job_records_are_kept() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.runner_started(runner("idle", 1_000_000));
+    store.runner_started(runner("gone", 1_000_000));
+    store.runner_removed("gone", 1_000_100);
+    store.flush().await;
+
+    store
+        .prune(1_000_100 + 91 * DAY_MS, &crate::config::History::default())
+        .await
+        .unwrap();
+    let held: Vec<_> = store
+        .sizing(0)
+        .await
+        .unwrap()
+        .runners
+        .into_iter()
+        .map(|runner| runner.removed_at)
+        .collect();
+    assert_eq!(
+        held,
+        [None],
+        "the idle runner is still held, the removed one is pruned"
+    );
+}
+
+#[tokio::test]
 async fn a_closed_store_stops_a_prune_after_its_batch() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");

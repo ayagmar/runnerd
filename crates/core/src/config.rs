@@ -753,6 +753,23 @@ pub fn parse_duration(s: &str) -> Result<Duration, String> {
         .ok_or_else(invalid)
 }
 
+/// Parses an age as the clients' `--since` and `--older-than` take it: `30m`, `12h`, `7d`, `2w`.
+pub fn parse_age(text: &str) -> Result<Duration, String> {
+    let error = || "expected a number and s, m, h, d or w, such as 12h".to_owned();
+    let split = text.find(|c: char| !c.is_ascii_digit()).ok_or_else(error)?;
+    let (number, unit) = text.split_at(split);
+    let number: u64 = number.parse().map_err(|_| error())?;
+    let unit = match unit {
+        "s" => 1,
+        "m" => 60,
+        "h" => 3600,
+        "d" => 86_400,
+        "w" => 7 * 86_400,
+        _ => return Err(error()),
+    };
+    Ok(Duration::from_secs(number.saturating_mul(unit)))
+}
+
 fn duration<'de, D: Deserializer<'de>>(deserializer: D) -> Result<Duration, D::Error> {
     parse_duration(&String::deserialize(deserializer)?).map_err(de::Error::custom)
 }

@@ -35,7 +35,9 @@ use axum::body::Bytes;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
-use runnerd_core::api::{Event, EventEnvelope, HostSample, JobState, Sample, SeedMemory};
+use runnerd_core::api::{
+    Event, EventEnvelope, HostSample, JobState, Sample, SeedMemory, ShellMemory,
+};
 
 use crate::views::{repository_id, slot_id};
 
@@ -526,6 +528,29 @@ async fn the_budget_names_the_mirror_and_each_seed_container() {
             overview.body
         );
     }
+}
+
+#[tokio::test]
+async fn the_budget_names_a_shell_open_in_a_record() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let budget = &mut fixtures.status.budget;
+        budget.shell_memory = vec![ShellMemory {
+            job: 42,
+            memory: 9 << 30,
+        }];
+        budget.memory_in_use += 9 << 30;
+    }
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await;
+    assert!(
+        overview
+            .body
+            .contains("<strong>9G</strong> held by the shell in job 42's record"),
+        "the shell's memory is not shown as free: {}",
+        overview.body
+    );
 }
 
 /// The HTML from the start of the element whose `data-on:pointerenter` selects `key` to that attribute.
