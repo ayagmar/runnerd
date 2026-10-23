@@ -6,7 +6,7 @@
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex, TryLockError};
 use std::time::Duration;
@@ -69,6 +69,14 @@ pub enum StoreError {
     /// A blocking read did not finish.
     #[error("a database read stopped: {0}")]
     Join(#[from] tokio::task::JoinError),
+    /// The database's `-wal` file holds changes not yet in it, and this user cannot open the database the way that
+    /// reads them.
+    #[error(
+        "{} holds changes not yet in the job history, which this user cannot read; run runnerd doctor as the user \
+         the daemon runs as",
+        .0.display()
+    )]
+    Unread(PathBuf),
 }
 
 /// A runner container as the history records it.
@@ -613,7 +621,8 @@ impl Store {
 
 /// What sizing reads from the database at `path`, opened read-only and not migrated, as `runnerd doctor` reads it
 /// while no daemon runs; `None` when there is no database yet. In a directory it may write, SQLite keeps the
-/// `-wal` and `-shm` files a read of a WAL database needs next to it; in one it may not, it reads the file as it is.
+/// `-wal` and `-shm` files a read of a WAL database needs next to it; in one it may not, it reads the file as it is,
+/// or refuses when the `-wal` holds changes the file does not have yet.
 pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, StoreError> {
     if !path.exists() {
         return Ok(None);
@@ -631,7 +640,13 @@ pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, Sto
                 Some(rusqlite::ErrorCode::ReadOnly | rusqlite::ErrorCode::CannotOpen)
             ) =>
         {
-            // No `-shm` can be made: read the file alone, without what a running daemon has not checkpointed.
+            // No `-shm` can be made: read the file alone, unless the `-wal` holds what it lacks.
+            let mut wal = path.as_os_str().to_owned();
+            wal.push("-wal");
+            let wal = PathBuf::from(wal);
+            if std::fs::metadata(&wal).is_ok_and(|wal| wal.len() > 0) {
+                return Err(StoreError::Unread(wal));
+            }
             let uri = format!(
                 "file:{}?mode=ro&immutable=1",
                 name.replace('%', "%25")

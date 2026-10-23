@@ -751,6 +751,29 @@ fn doctor_reads_the_history_in_a_directory_it_cannot_write() {
 }
 
 #[test]
+fn doctor_refuses_a_history_it_cannot_write_beside_while_its_wal_holds_changes() {
+    use std::os::unix::fs::PermissionsExt as _;
+    let (written, copied) = (TestDir::new("store"), TestDir::new("store"));
+    database_of_version(&written.0.join("runnerd.db"), MIGRATIONS.len());
+    // A daemon still running, or killed before a checkpoint: its last change is in the -wal only.
+    let open = Connection::open(written.0.join("runnerd.db")).unwrap();
+    open.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
+    open.execute("UPDATE jobs SET memory_peak = memory_peak + 1", [])
+        .unwrap();
+    for file in ["runnerd.db", "runnerd.db-wal"] {
+        std::fs::copy(written.0.join(file), copied.0.join(file)).unwrap();
+    }
+    std::fs::set_permissions(&copied.0, std::fs::Permissions::from_mode(0o555)).unwrap();
+    let history = super::sizing_at(&copied.0.join("runnerd.db"), 0);
+    std::fs::set_permissions(&copied.0, std::fs::Permissions::from_mode(0o755)).unwrap();
+    let error = history.unwrap_err().to_string();
+    assert!(
+        error.contains("runnerd.db-wal") && error.contains("as the user the daemon runs as"),
+        "{error}"
+    );
+}
+
+#[test]
 fn doctor_reads_the_peaks_of_a_history_from_before_runners_had_caps() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
