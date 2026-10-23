@@ -303,6 +303,22 @@ impl App {
     }
 
     pub(crate) fn update(&mut self, msg: Msg) -> Vec<Effect> {
+        if let Msg::Key(key) = msg {
+            return self.key(key);
+        }
+        // Rows of the latest jobs come and go above the selected one, as queued jobs start: the selection follows its
+        // job, or stays on a row that is there when the job left.
+        let selected = self.latest_rows().nth(self.latest).map(LatestRow::id);
+        let effects = self.apply(msg);
+        let rows = self.latest_rows().count();
+        self.latest = selected
+            .and_then(|id| self.latest_rows().position(|row| row.id() == id))
+            .unwrap_or(self.latest)
+            .min(rows.saturating_sub(1));
+        effects
+    }
+
+    fn apply(&mut self, msg: Msg) -> Vec<Effect> {
         match msg {
             Msg::Key(key) => return self.key(key),
             Msg::Resize => {}

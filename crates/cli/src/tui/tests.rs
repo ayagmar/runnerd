@@ -474,6 +474,58 @@ fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_oth
 }
 
 #[test]
+fn the_selected_latest_job_stays_selected_when_a_queued_job_above_it_starts() {
+    let mut app = app();
+    let queued = |id, repository: &str| QueuedJob {
+        id,
+        repository: repository.to_owned(),
+        run_id: 4002,
+        run_attempt: 1,
+        workflow: Some("CI".to_owned()),
+        name: "build".to_owned(),
+        branch: Some("main".to_owned()),
+        url: None,
+        queued_at: 1000,
+    };
+    app.live.status.queued = vec![
+        queued(51, "halyard/ledger"),
+        queued(52, "halyard/storefront"),
+    ];
+    app.live.recent = vec![summary(42, JobState::Completed)];
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Down));
+    app.update(event(
+        Some(9),
+        Event::JobStarted {
+            job: summary(51, JobState::Running),
+        },
+    ));
+    assert_eq!(
+        app.update(key(KeyCode::Char('p'))),
+        vec![Effect::Pause {
+            repository: Some("halyard/storefront".to_owned()),
+            force: false
+        }]
+    );
+    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenJob(52)]);
+
+    app.update(key(KeyCode::Esc));
+    app.update(key(KeyCode::Down));
+    app.update(event(
+        Some(10),
+        Event::JobStarted {
+            job: summary(52, JobState::Running),
+        },
+    ));
+    assert_eq!(
+        app.update(key(KeyCode::Enter)),
+        vec![Effect::OpenJob(42)],
+        "a selection whose job left the list moves to a row still there"
+    );
+}
+
+#[test]
 fn the_budget_names_the_mirror_and_each_seed_container() {
     let mut app = app();
     let budget = &mut app.live.status.budget;
