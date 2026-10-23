@@ -12,7 +12,7 @@ use std::future::Future;
 use std::io;
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
@@ -32,6 +32,10 @@ use crate::views::{self, Part, Parts, Tone, digest, overview};
 
 /// How long to collect events before rendering: a burst (a slot and the budget change together) renders once.
 const SETTLE: Duration = Duration::from_millis(250);
+
+/// How old the overview's status may get while host samples arrive. Some of its changes have no event of their own
+/// (`shutting_down`, a repository's queue listing failing or recovering), so it is read again this often.
+const STATUS_AGE: Duration = Duration::from_secs(10);
 
 type Patches = mpsc::Sender<SseEvent>;
 
@@ -317,6 +321,7 @@ async fn run_overview(
     let mut events = Box::pin(envelopes(events));
     let mut stopping = app.stopping.clone();
     let mut data = overview::Overview::load(&app.daemon, crate::now()).await?;
+    let mut status_read = Instant::now();
     let mut sent = Sent::default();
     if let Some(shown) = shown {
         data.now = shown.at;
@@ -342,7 +347,10 @@ async fn run_overview(
         for event in batch {
             match event {
                 Event::JobSample { job, sample } => data.add_job_sample(job, sample),
-                Event::HostSample { sample } => data.add_host_sample(sample),
+                Event::HostSample { sample } => {
+                    data.add_host_sample(sample);
+                    status_changed |= status_read.elapsed() >= STATUS_AGE;
+                }
                 Event::LogLine { .. } | Event::CacheReseeded { .. } => {}
                 Event::BudgetChanged { .. }
                 | Event::ProfileChanged { .. }
@@ -360,10 +368,11 @@ async fn run_overview(
                 }
             }
         }
-        // Read again only when an event says it changed: with a long queue the status is large, and most batches
-        // are samples.
+        // Read again only when an event says it changed, or it is `STATUS_AGE` old: with a long queue the status is
+        // large, and most batches are samples.
         if status_changed {
             data.status = app.daemon.get("/v1/status").await?;
+            status_read = Instant::now();
         }
         if jobs_changed {
             data.reload_running(&app.daemon).await?;
