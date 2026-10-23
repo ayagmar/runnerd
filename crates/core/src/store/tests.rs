@@ -10,7 +10,7 @@ use super::{
     LOG_BACKLOG, LogPosition, MIGRATIONS, Measured, MirrorPosition, RunnerRecord, SampleRecord,
     Store, StoreError,
 };
-use crate::api::{JobQuery, JobState, StatsQuery};
+use crate::api::{Bucket, JobQuery, JobState, StatsQuery};
 use crate::github::QueuedJob;
 use crate::testdir::TestDir;
 
@@ -188,6 +188,33 @@ async fn stats_count_a_lost_job_without_a_conclusion_as_failed() {
         .map(|row| (row.jobs, row.succeeded, row.failed, row.cancelled))
         .collect();
     assert_eq!(counts, [(1, 0, 1, 0)]);
+}
+
+#[tokio::test]
+async fn hourly_stats_count_at_most_the_last_31_days() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.queued("o/r", &queued(1));
+    store.runner_started(runner("r1", 1_000_100));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.lost(1, 1_000_300);
+    store.flush().await;
+    // Forty days after the job.
+    let now = 1_000 + 40 * 24 * 3600;
+    let jobs = |bucket| {
+        let store = store.clone();
+        async move {
+            let query = StatsQuery {
+                since: Some(0),
+                bucket,
+                ..StatsQuery::default()
+            };
+            let stats = store.stats(query, now).await.unwrap();
+            stats.rows.iter().map(|row| row.jobs).sum::<u64>()
+        }
+    };
+    assert_eq!(jobs(Bucket::Hour).await, 0);
+    assert_eq!(jobs(Bucket::Day).await, 1);
 }
 
 fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord {

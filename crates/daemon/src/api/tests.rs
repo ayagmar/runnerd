@@ -7,8 +7,8 @@ use std::time::Duration;
 
 use reqwest::StatusCode;
 use runnerd_core::api::{
-    Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, JobState, Paused,
-    ProfileStatus, RunningJob, Status,
+    Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
+    HostSamples, JobState, Paused, ProfileStatus, RunningJob, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::github::{JobDetails, QueuedJob};
@@ -668,6 +668,33 @@ fn memory(events: &[EventEnvelope]) -> Vec<u64> {
             other => panic!("unexpected {other:?}"),
         })
         .collect()
+}
+
+#[tokio::test]
+async fn the_slices_samples_go_back_a_day_at_most() {
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    let now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs();
+    for at in [now - 2 * 24 * 3600, now - 3600] {
+        daemon.store.host_sample(HostSample {
+            at,
+            cpu: 1,
+            memory: 1,
+        });
+    }
+    daemon.store.flush().await;
+    let response = daemon
+        .client
+        .get("http://runnerd/v1/host/samples?since=0")
+        .send()
+        .await
+        .unwrap();
+    let samples: HostSamples = serde_json::from_slice(&body(response).await).unwrap();
+    let times: Vec<u64> = samples.samples.iter().map(|sample| sample.at).collect();
+    assert_eq!(times, [now - 3600]);
 }
 
 #[tokio::test]
