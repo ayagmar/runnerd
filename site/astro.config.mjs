@@ -4,7 +4,7 @@ import starlight from '@astrojs/starlight';
 const site = 'https://ayagmar.github.io';
 const base = '/runnerd';
 
-// The social card: the landing page's first screen, dark, in a 1200x630 viewport 9s into the replay.
+// The social card: a screenshot of the landing page in a 1200x630 viewport at 1x, dark theme, 9s into the replay.
 const card = [
   { tag: 'meta', attrs: { property: 'og:image', content: `${site}${base}/og.png` } },
   { tag: 'meta', attrs: { property: 'og:image:width', content: '1200' } },
@@ -17,7 +17,7 @@ export default defineConfig({
   base,
   trailingSlash: 'always',
   // Source Serif 4 and Libre Franklin (OFL, public/fonts), Fontsource's latin files cut to ASCII and the punctuation the
-  // site uses: pyftsubset --unicodes=U+20-7E,U+A0,U+B7,U+D7,U+2013,U+2014,U+2018,U+2019,U+201C,U+201D,U+2026,U+2192,U+2212
+  // site uses: pyftsubset --unicodes=U+20-7E,U+A0,U+B7,U+D7,U+2013,U+2014,U+2018,U+2019,U+201C,U+201D,U+2026,U+2212
   // --layout-features='*' --flavor=woff2. The serif's cut is renamed runnerd serif in its name table, since 'Source' is
   // a Reserved Font Name. Astro emits metric-matched fallbacks, so the swap moves nothing.
   fonts: [
