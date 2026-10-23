@@ -70,6 +70,7 @@ impl Writer<'_> {
             }
             Write::RunnerStarted(runner) => self.runner_started(&runner),
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
+            Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
                     self.runner_removed(&runner, at, announced)
@@ -258,6 +259,16 @@ impl Writer<'_> {
             self.db.execute(
                 "UPDATE runners SET admission = ?2 WHERE name = ?1",
                 params![runner, serde_json::to_string(&admission).ok()],
+            ),
+        );
+    }
+
+    fn runner_oom_killed(&self, runner: &str) {
+        logged(
+            "record a kill for memory",
+            self.db.execute(
+                "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), 1) WHERE name = ?1",
+                [runner],
             ),
         );
     }

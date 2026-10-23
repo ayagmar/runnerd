@@ -38,6 +38,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         for (slot, occupant) in occupied {
             let running = match self.docker.inspect(&occupant.container).await {
+                // A kill in the last interval before it stopped, which no sample of its cgroup saw.
+                Ok(state) if state.oom_killed => {
+                    self.store.runner_oom_killed(&occupant.runner_name);
+                    state.running
+                }
                 Ok(state) => state.running,
                 Err(error) if is_not_found(&error) => false,
                 Err(error) => {

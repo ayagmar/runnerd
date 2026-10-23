@@ -21,6 +21,9 @@ pub const MIRROR_IMAGE: &str =
 /// The host name runner containers reach the mirror at (`image/daemon.json`).
 const MIRROR_ALIAS: &str = "mirror";
 
+/// The mirror's `oom_score_adj`: the kernel picks it after the runners' processes, which keep the default 0.
+const MIRROR_OOM_SCORE_ADJ: i64 = -500;
+
 /// The names of everything runnerd creates in Docker, under one prefix: `runnerd`, or another for tests.
 #[derive(Debug, Clone)]
 pub struct Names {
@@ -112,6 +115,9 @@ pub fn mirror_body(names: &Names, mirror: &config::Mirror, slice: &str) -> Conta
             memory: Some(memory),
             memory_swap: Some(memory),
             nano_cpus: Some(i64::from(mirror.cpus) * 1_000_000_000),
+            // When the slice runs out of memory, which measured admission allows, the kernel kills a job's process
+            // before the mirror every runner pulls through.
+            oom_score_adj: Some(MIRROR_OOM_SCORE_ADJ),
             mounts: Some(vec![volume(names.mirror(), "/var/lib/registry", false)]),
             network_mode: Some(names.network()),
             ..Default::default()

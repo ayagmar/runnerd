@@ -190,6 +190,7 @@ enum Write {
         runner: String,
         admission: api::Admission,
     },
+    RunnerOomKilled(String),
     RunnerRemoved {
         runner: String,
         at: u64,
@@ -453,6 +454,12 @@ impl Store {
             runner: runner.to_owned(),
             admission,
         });
+    }
+
+    /// Records that Docker saw the kernel kill a process in a runner's container for memory, which its samples may
+    /// have missed: one in the last interval before the container stopped.
+    pub fn runner_oom_killed(&self, runner: &str) {
+        self.send(Write::RunnerOomKilled(runner.to_owned()));
     }
 
     /// The last host sample sent, stored or not; `None` before the first.

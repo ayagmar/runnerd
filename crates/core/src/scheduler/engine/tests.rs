@@ -336,6 +336,7 @@ impl DockerApi for FakeDocker {
         Ok(RunnerState {
             running: found.running,
             exit_code: None,
+            oom_killed: false,
             privileged: false,
             runtime: None,
             pid: Some(4242),
