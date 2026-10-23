@@ -12,6 +12,7 @@ const description =
   'runnerd runs GitHub Actions jobs on a Linux machine you already have: a fresh container per job, Docker inside it without --privileged, every runner inside one memory budget.';
 const url = new URL(base, Astro.site).href;
 const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
+const firstRun = ['runnerd init halyard/ledger halyard/storefront', 'systemctl --user enable --now runnerd'];
 
 // The calculator's starting config, the example on every page: two jvm and two node slots and the Docker Hub mirror,
 // in GiB, inside ci.slice.
@@ -249,7 +250,7 @@ $ runnerd check-config runnerd.toml</span>
         <h2 id="roadmap-title">One slot still free</h2>
         <ul class="strip">
           <li class="shipped">
-            <strong>runnerd 0.0.4</strong>
+            <strong>runnerd 0.0.5</strong>
             <span>Released</span>
           </li>
           {
@@ -277,15 +278,20 @@ $ runnerd check-config runnerd.toml</span>
 
       <section class="install wrap" id="install" aria-labelledby="install-title">
         <div class="install-tile">
-          <h2 id="install-title">Install in one line</h2>
-          <div class="command">
-            <pre><code>{install}</code></pre>
-            <button class="copy" type="button" data-copy={install} hidden>Copy</button>
+          <h2 id="install-title">Install</h2>
+          <div class="commands">
+            <div class="command">
+              <pre><code>{install}</code></pre>
+              <button class="copy" type="button" data-copy={install} hidden>Copy</button>
+            </div>
+            <div class="command">
+              <pre class="lines"><code>{firstRun.map((line) => <span>{line}</span>)}</code></pre>
+            </div>
           </div>
-          <p>Checks SHA-256, installs to <code>~/.local/bin</code>, runs <code>runnerd doctor</code>. No sudo.</p>
+          <p>No sudo. <code>init</code> prints the root steps it needs and runs none.</p>
           <p class="install-links">
-            <a href={docs}>Requirements</a>
-            <a href={`${base}running/`}>Build the image and serve</a>
+            <a href={`${docs}#first-run`}>First run</a>
+            <a href={`${base}running/#the-service`}>The service</a>
             <a href={`${docs}#verify-a-release`}>Verify a release</a>
           </p>
         </div>
@@ -980,6 +986,18 @@ $ runnerd check-config runnerd.toml</span>
 
   .install-tile p code {
     background: rgb(0 0 0 / 0.07);
+  }
+
+  .commands {
+    display: grid;
+    gap: var(--gap);
+  }
+
+  /* One command per line; a wrapped one hangs, so two never read as four. */
+  .command .lines span {
+    display: block;
+    padding-left: 2ch;
+    text-indent: -2ch;
   }
 
   .command {

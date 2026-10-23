@@ -1,36 +1,44 @@
 ---
 title: Running
-description: Start the runnerd daemon, how it schedules runners and keeps caches warm, and its JSON API.
+description: Run runnerd as a user service, how it schedules runners and keeps caches warm, and its JSON API.
 ---
 
-## Build the runner image
+## The service
 
-runnerd runs the image `runnerd-runner:<image_stage>`. In a checkout of the repository, `image/Dockerfile` has a `base` stage and, on it, the `jvm` and `node` stages the [example config](../configuration/) uses. Add a stage on `base` for any other `image_stage`.
+`runnerd init` writes a user unit that runs `runnerd serve`:
 
-Then build both:
+```ini
+[Service]
+Type=exec
+ExecStart="/home/dana/.local/bin/runnerd" serve --config "/home/dana/.config/runnerd/runnerd.toml"
+Restart=on-failure
+RestartSec=10
 
-```sh
-docker build --target jvm -t runnerd-runner:jvm image
-docker build --target node -t runnerd-runner:node image
+[Install]
+WantedBy=default.target
 ```
 
-## Start and stop the daemon
-
 ```sh
-runnerd serve --config runnerd.toml
+systemctl --user enable --now runnerd   # start now and at login
+loginctl enable-linger "$USER"          # keep it running while you are logged out
+journalctl --user -u runnerd -f         # its log
+systemctl --user restart runnerd        # after editing runnerd.toml by hand
+systemctl --user stop runnerd           # waits for running jobs, up to systemd's stop timeout
 ```
 
-Without `--config`, it reads `$XDG_CONFIG_HOME/runnerd/runnerd.toml`. It takes the `gh` CLI's token at start and again when GitHub rejects it.
+A config saved from the dashboard or `PUT /v1/config` applies without a restart. `runnerd stop` waits for running jobs too; `runnerd stop --force`, or a second signal, kills them.
 
-SIGTERM, SIGINT or `runnerd stop` stops polling and waits for running jobs. A second signal, or `runnerd stop --force`, kills them.
+Runner containers live in Docker, not in the unit: a restarted runnerd adopts the ones still running, and keeps the repositories it had paused paused.
 
 ## How it schedules
 
+- It reads the `gh` CLI's token at start, and again when GitHub rejects it.
 - Every `poll_interval` (`[host]`, default `15s`) it asks GitHub for each repository's queued jobs.
 - A job is served when every label in its `runs-on` is in its repository's `labels`.
 - For each one it registers a just-in-time runner and starts it in a free slot of the repository's profile, if the slice's `MemoryMax` still has room for the profile's `memory`. Other jobs wait in GitHub's queue.
 - The runner takes one job, its container exits, and runnerd removes it. A runner with no job after 5 minutes is removed.
 - A restarted runnerd adopts the runner containers still running and deletes this host's runners that have none.
+- Before a profile's first runner it pulls the profile's `image`, logging the pull's progress.
 
 ## Warm caches
 
@@ -52,11 +60,14 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs, the memory budget |
 | `POST /v1/repositories/{owner}/{name}/pause?force=` | no new runners; `409` naming the running job, unless `force=true` cancels its run |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
+| `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every repository; `409` naming the running jobs pauses none |
 | `POST /v1/profiles/{name}/reseed` | `202`; reseeds once the profile's slots are free |
 | `POST /v1/caches/{name}/clean` | `204`; `409` naming the jobs that use it |
 | `GET /v1/config`, `PUT /v1/config`, `POST /v1/config/check` | the config file; replace it and reload, or check one |
 | `GET /v1/doctor` | `runnerd doctor`'s checks |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
+
+A pause lasts until a resume, across restarts.
 
 ```sh
 curl --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/status
