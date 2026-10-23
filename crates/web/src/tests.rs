@@ -469,6 +469,33 @@ async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
 }
 
 #[tokio::test]
+async fn a_job_whose_samples_were_deleted_still_shows_its_memory_peak() {
+    let dashboard = Dashboard::start().await;
+    let peak = {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        fixtures.samples.insert(LEDGER_RUNNING, Vec::new());
+        let job = fixtures
+            .jobs
+            .iter()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        job.summary.metrics.memory_peak.unwrap()
+    };
+    let cookie = dashboard.sign_in().await;
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    assert!(
+        job.contains(&format!(
+            "<dt>Memory peak over the job</dt><dd>{}</dd>",
+            crate::format::bytes(peak)
+        )),
+        "the job's kept peak shows without samples"
+    );
+}
+
+#[tokio::test]
 async fn a_step_marks_its_own_stretch_of_the_memory_and_cpu_charts() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

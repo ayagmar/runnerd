@@ -334,6 +334,9 @@ pub(crate) fn metrics(view: &JobView) -> Markup {
                 }
             }
             dl.totals {
+                // The job's own peak, which history keeps after its samples are deleted; the charts' peak is of the
+                // samples left.
+                div { dt { "Memory peak over the job" } dd { (optional(metrics.memory_peak, format::bytes)) } }
                 div { dt { "Average memory" } dd { (optional(metrics.memory_average, format::bytes)) } }
                 div { dt { "CPU time" } dd { (optional(metrics.cpu_time.map(|ms| ms / 1000), format::duration)) } }
                 div { dt { "Average CPU" } dd { (optional(metrics.cpu_average, |m| format!("{} cores", format::cores(m)))) } }
