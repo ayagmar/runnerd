@@ -1508,6 +1508,14 @@ html {
   font-size: 1.125rem;
 }
 
+/* A narrow block's name wraps rather than losing its end. */
+.bar-small .block > .name {
+  font-size: 0.8125rem;
+  line-height: 1.15;
+  white-space: normal;
+  overflow-wrap: anywhere;
+}
+
 .bar:has(.max-mark) {
   margin-top: 1.6rem;
 }

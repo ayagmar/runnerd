@@ -146,11 +146,11 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
                 }
             }
             @if !blocks.is_empty() {
-                div.bar.bar-small role="img" aria-label=(format!("Memory caps {} of {}", format::bytes(caps), check.memory_max.map_or("no limit".to_owned(), format::bytes))) {
+                div.bar.bar-small role="img" aria-label=(format!("Memory caps {} of {}: {}", format::bytes(caps), check.memory_max.map_or("no limit".to_owned(), format::bytes), blocks.iter().map(|block| format!("{} {}", block.label, format::bytes(block.bytes))).collect::<Vec<_>>().join(", "))) {
                     @for block in &blocks {
                         div class=(format!("block {}", block.class)) style=(format!("--size: {:.4}", ratio(block.bytes, whole))) title=(format!("{}: {}", block.label, format::bytes(block.bytes))) {
-                            // The name is in the title: the file beside the bar names each size.
                             span.size { (format::bytes(block.bytes)) }
+                            span.name { (block.label) }
                         }
                     }
                     @if let Some(max) = check.memory_max.filter(|max| *max > caps) {

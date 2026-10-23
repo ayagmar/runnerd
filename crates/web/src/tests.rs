@@ -957,6 +957,7 @@ async fn the_config_page_shows_the_file_its_budget_and_the_doctor() {
         "/home/forge/.config/runnerd/runnerd.toml",
         "Fits the budget",
         "jvm 2",
+        "node 2 7G",
         "MemoryHigh=30G",
     ] {
         assert!(
