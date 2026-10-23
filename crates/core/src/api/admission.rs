@@ -28,8 +28,14 @@ pub enum Basis {
         /// How many.
         runs: u64,
     },
-    /// Too few runs of the job but enough of its profile: the larger of the profile's p95 peak and the job's own
-    /// largest, plus the margin.
+    /// Fewer than `[sizing] min_jobs` runs of the job but at least `admission::OWN_RUNS`, and enough of its
+    /// profile: the job's largest peak plus the margin.
+    JobMax {
+        /// How many runs of the job.
+        runs: u64,
+    },
+    /// One run of the job but enough of its profile: the larger of the profile's p95 peak and the job's peak, plus
+    /// the margin.
     Profile {
         /// How many runs of the profile.
         runs: u64,
@@ -84,8 +90,13 @@ impl Admission {
             Basis::Job { runs } => {
                 format!("reserved {reserved}, the p95 peak of {runs} runs of its job + the margin")
             }
+            Basis::JobMax { runs } => {
+                format!(
+                    "reserved {reserved}, the largest peak of {runs} runs of its job + the margin"
+                )
+            }
             Basis::Profile { runs } => format!(
-                "reserved {reserved}, from {runs} runs of its profile: its job had too few of its own"
+                "reserved {reserved}, from {runs} runs of its profile: its job had one of its own"
             ),
             Basis::ProfileMax { runs } => format!(
                 "reserved {reserved}, the largest peak of {runs} runs of its profile + the margin: its job had no \

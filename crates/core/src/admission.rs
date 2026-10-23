@@ -16,6 +16,10 @@ const AT_CAP: u64 = 95;
 /// days. After a run past what it reserved, its job reserves its largest peak for as long.
 pub const UNPREDICTABLE_FOR: u64 = 7 * 24 * 3600 * 1000;
 
+/// From this many runs of its own, fewer than `[sizing] min_jobs`, a job reserves its own largest peak: with one,
+/// the larger of that and its profile's p95.
+pub const OWN_RUNS: u64 = 2;
+
 /// While the slice uses this percent of its `MemoryMax` or more, measured admission starts nothing.
 pub const HIGH_WATER: u64 = 90;
 
@@ -155,6 +159,10 @@ impl Predictor {
             (Some(job), _) if job.runs() >= min_jobs => {
                 (self.with_margin(job.p95()), Basis::Job { runs: job.runs() })
             }
+            (Some(job), Some(peers)) if peers.runs() >= min_jobs && job.runs() >= OWN_RUNS => (
+                self.with_margin(job.max()),
+                Basis::JobMax { runs: job.runs() },
+            ),
             (Some(job), Some(peers)) if peers.runs() >= min_jobs => (
                 self.with_margin(job.max().max(peers.p95())),
                 Basis::Profile { runs: peers.runs() },

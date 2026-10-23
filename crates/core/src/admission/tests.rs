@@ -96,19 +96,77 @@ fn a_job_with_enough_runs_is_predicted_from_its_own_p95() {
 }
 
 #[test]
-fn a_job_with_few_runs_takes_its_profiles_p95_or_its_own_largest_peak_whichever_is_more() {
+fn a_job_with_one_run_takes_its_profiles_p95_or_its_peak_whichever_is_more() {
     let mut predictor = predictor();
     for _ in 0..60 {
         predictor.learn(&build(2 * G), "node", 7 * G, NOW);
     }
-    let e2e = run("halyard/storefront", "e2e", "node", NOW, 20, 5 * G);
-    for _ in 0..3 {
-        predictor.learn(&e2e, "node", 7 * G, NOW);
-    }
+    predictor.learn(
+        &run("halyard/storefront", "e2e", "node", NOW, 20, 5 * G),
+        "node",
+        7 * G,
+        NOW,
+    );
+    predictor.learn(
+        &run("halyard/storefront", "lint", "node", NOW, 1, 200 * M),
+        "node",
+        7 * G,
+        NOW,
+    );
     // The profile's p95 is 2G, but e2e reached 5G: 5.75G.
+    let e2e = predictor.predict(&key("e2e"), "node", 7 * G, NOW);
+    assert_eq!(e2e.basis, Basis::Profile { runs: 62 });
+    assert_eq!(e2e.memory, 5888 * M);
+    // One light run may not be the job's heaviest: 2G + 15%, rounded up to 2.5G.
+    let lint = predictor.predict(&key("lint"), "node", 7 * G, NOW);
+    assert_eq!(lint.basis, Basis::Profile { runs: 62 });
+    assert_eq!(lint.memory, 2560 * M);
+}
+
+#[test]
+fn a_job_with_a_few_runs_reserves_its_own_largest_peak_even_above_its_profiles_p95() {
+    let mut predictor = predictor();
+    for _ in 0..60 {
+        predictor.learn(&build(2 * G), "node", 7 * G, NOW);
+    }
+    for peak in [4 * G, 5 * G, 4 * G] {
+        predictor.learn(
+            &run("halyard/storefront", "e2e", "node", NOW, 20, peak),
+            "node",
+            7 * G,
+            NOW,
+        );
+    }
+    // A rare heavy job is not predicted at its light neighbours' 2G: 5G + 15% is 5.75G.
     let prediction = predictor.predict(&key("e2e"), "node", 7 * G, NOW);
-    assert_eq!(prediction.basis, Basis::Profile { runs: 63 });
+    assert_eq!(prediction.basis, Basis::JobMax { runs: 3 });
     assert_eq!(prediction.memory, 5888 * M);
+}
+
+#[test]
+fn a_job_whose_own_runs_all_peaked_far_below_its_profiles_p95_reserves_near_its_own_peak() {
+    let mut predictor = predictor();
+    // A profile of 200M checks and 4.8G stacks: its p95 is 4.8G.
+    for i in 0..30 {
+        let (name, peak) = if i % 3 == 0 {
+            ("e2e", 4800 * M)
+        } else {
+            ("changes", 200 * M)
+        };
+        predictor.learn(
+            &run("halyard/storefront", name, "node", NOW, 5, peak),
+            "node",
+            7 * G,
+            NOW,
+        );
+    }
+    for _ in 0..6 {
+        predictor.learn(&build(1300 * M), "node", 7 * G, NOW);
+    }
+    // 1300M + 15% is 1495M, rounded up to 1.5G, not the 5.5G of the profile's p95.
+    let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW);
+    assert_eq!(prediction.basis, Basis::JobMax { runs: 6 });
+    assert_eq!(prediction.memory, 1536 * M);
 }
 
 #[test]
