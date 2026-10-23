@@ -44,24 +44,30 @@ narrows the risk of a burst; it does not rule out the slice filling.
 On the wire, the new case is the `job` basis with an added `peak` field, written only when it is `largest`. A
 reader released before this ignores the field and shows the reservation as "the p95 peak of N runs".
 
-`runnerd simulate` on that host's history (140 jobs over 22 hours, `jvm` 2 and `node` 6 slots). Measured
-admission's p95 wait; jobs that peaked above what they reserved; and by how much, added up:
+`runnerd simulate` follows the rule as the daemon does each tick: at every moment it predicts the running jobs
+again, the first running copy of a job, in the order they started, going by its own runs. It knows each job from
+its start, so it never meets a busy runner whose job is not known, and start order stands for slot order.
 
-| MemoryMax | Caps | Before, `min_jobs` 10 | Before, `min_jobs` 3 | Now, `min_jobs` 10 |
-|---|---|---|---|---|
-| 33G | 4m51s | 3m50s; 2, 2.9G | 3m29s; 7, 11.3G | 3m29s; 2, 2.9G |
-| 20G | 11m02s | 9m36s; 2, 4.5G | 7m37s; 6, 10.8G | 6m56s; 2, 4.5G |
-| 14G | 23m43s | 22m56s; 2, 3.0G | 15m12s; 6, 10.8G | 13m50s; 2, 2.7G |
+On that host's history (175 jobs over 22.5 hours, `jvm` 2 and `node` 6 slots), measured admission's p95 wait;
+jobs that peaked above what they reserved when they ended; and by how much, added up:
 
-The replay holds each running job at its peak from its start, so it cannot show the warm-up burst. An engine test
-does: two 200M runs of a job, then four copies queued at once that each need 3G after warming up at 300M, in a 10G
-slice. The copies start two at a time at 3.5G, and a third once the first copy's job is known and it reserves
-256M. Three copies at 3G fit the slice; four, as two light runs alone would admit, do not.
+| MemoryMax | Caps | Before, `min_jobs` 10 | Before, `min_jobs` 3 | Now, `min_jobs` 10 | Now, `min_jobs` 3 |
+|---|---|---|---|---|---|
+| 33G | 4m32s | 3m40s; 2, 2.9G | 2m59s; 7, 11.3G | 2m59s; 2, 3.0G | 2m59s; 4, 7.2G |
+| 20G | 10m11s | 9m10s; 2, 4.5G | 6m50s; 6, 10.8G | 6m21s; 2, 3.0G | 6m14s; 4, 7.2G |
+| 14G | 30m40s | 23m29s; 2, 3.0G | 13m27s; 6, 10.8G | 11m52s; 2, 2.7G | 11m33s; 4, 7.2G |
+
+The replay holds each running job at its peak from its start, so it cannot show the warm-up burst. Two engine
+tests do, on a 10G slice where a job's two runs peaked at 200M and its profile's p95 is 3G. In one, four copies
+queue at once and warm up at 300M: they start two at a time at 3.5G, and a third once the first copy's job is
+known and it reserves 256M. Three copies at 3G fit the slice; four, as the two light runs alone would admit, do
+not. In the other, the copies arrive one per poll and no log capture reports which job a runner took: only the
+first starts at 256M, and once a second copy queues beside the busy runner both reserve 3.5G.
 
 ## Consequences
 
 Young jobs reserve what they used, one copy at a time. A burst of copies of a young job starts at the old rule's
 pace. A job whose runs keep failing stays on the old rule until `min_jobs` runs. A single copy can still go past
 its own runs, by up to its cap; that run makes its job reserve its largest peak for 7 days (0033). In the replay,
-the same jobs went above what they reserved under the old rule and this one, by the same amounts except one, which
-was 0.3G less.
+as many jobs went above what they reserved under the old rule as under this one. At 33G the total was 0.1G more,
+and at 20G and 14G it was less.
