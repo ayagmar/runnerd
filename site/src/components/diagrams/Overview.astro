@@ -4,7 +4,7 @@ import Diagram from '../Diagram.astro';
 ---
 
 <Diagram name="overview" caption="One daemon between GitHub and Docker; every client goes through its API.">
-  <svg viewBox="0 0 480 486" role="img" aria-labelledby="overview-title overview-desc">
+  <svg viewBox="0 0 480 486" role="img" aria-labelledby="overview-title" aria-describedby="overview-desc">
     <title id="overview-title">How runnerd fits together</title>
     <desc id="overview-desc">
       runnerd serve polls GitHub over HTTPS with the gh CLI's token and registers a just-in-time runner for each queued

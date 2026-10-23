@@ -6,7 +6,7 @@ import Diagram from '../Diagram.astro';
 const steps = [
   { name: 'queued', what: 'GitHub lists it; its labels match', y: 0 },
   { name: 'slot', what: "the profile's lowest free slot", y: 84 },
-  { name: 'JIT runner', what: 'registered for this one job', y: 168 },
+  { name: 'JIT runner', what: 'registers for one job', y: 168 },
   { name: 'container', what: 'slot volume over the snapshot', y: 252 },
   { name: 'running', what: 'steps, log, samples every 2 s', y: 336 },
   { name: 'finished', what: 'runner exits, scrubs its secrets', y: 420 },
@@ -15,13 +15,13 @@ const steps = [
 ---
 
 <Diagram name="lifecycle" caption="A job's way through runnerd. Only a failed job of a profile with record_failures leaves a record.">
-  <svg viewBox="0 0 480 608" role="img" aria-labelledby="lifecycle-title lifecycle-desc">
+  <svg viewBox="0 0 480 608" role="img" aria-labelledby="lifecycle-title" aria-describedby="lifecycle-desc">
     <title id="lifecycle-title">A job's lifecycle</title>
     <desc id="lifecycle-desc">
       A job is queued on GitHub with labels a repository's labels match. runnerd takes the lowest free slot of the
       repository's profile; with no slot or no memory free, the job stays queued on GitHub until the next poll. It
-      registers a just-in-time runner for this one job and starts a container with the slot's volume over the profile's
-      snapshot. While the job runs, the job history records its steps, log and samples every 2 seconds. When it
+      registers a just-in-time runner for one job, removed if it gets no job in 5 minutes, and starts a container with
+      the slot's volume over the profile's snapshot. While the job runs, the job history records its steps, log and samples every 2 seconds. When it
       finishes, the runner exits and the image deletes its secrets. If the job failed and the profile has
       record_failures, the container is first committed to an image, runnerd-record:job, that runnerctl shell opens.
       Then the container and the runner's registration are removed and the slot is free.
@@ -53,6 +53,8 @@ const steps = [
     <text class="m" x="330" y="64">no slot or memory</text>
     <text class="m" x="330" y="84">free: it stays queued</text>
     <text class="m" x="330" y="104">until the next poll</text>
+
+    <text class="m" x="56" y="244">no job in 5 min: removed</text>
 
     <path class="line" d="M40 478V550" marker-end="url(#lifecycle-arrow)"></path>
     <text class="m" x="56" y="520">passed, or not recorded</text>
