@@ -10,7 +10,7 @@ use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use runnerd_core::api::{Check, CheckStatus};
-use runnerd_core::config::{ByteSize, Config, slice_memory_max};
+use runnerd_core::config::{ByteSize, Config, PUBLISHED_RUNNER, slice_memory_max};
 
 use crate::{doctor, output};
 
@@ -31,7 +31,7 @@ const IMAGE_STAGE: &str = "base";
 /// The published image of `IMAGE_STAGE` for this release, which runnerd pulls before the first runner.
 fn starter_image() -> String {
     format!(
-        "ghcr.io/ayagmar/runnerd-runner:{IMAGE_STAGE}-{}",
+        "{PUBLISHED_RUNNER}:{IMAGE_STAGE}-{}",
         env!("CARGO_PKG_VERSION")
     )
 }

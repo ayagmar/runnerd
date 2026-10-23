@@ -136,8 +136,7 @@ The toolchain is pinned in `rust-toolchain.toml`. Before sending a change, run t
 [AGENTS.md](https://github.com/ayagmar/runnerd/blob/main/AGENTS.md); CI runs the same. [CONTRIBUTING.md](https://github.com/ayagmar/runnerd/blob/main/CONTRIBUTING.md) explains which CI jobs a change
 triggers and how a release is cut.
 
-The tests that start real containers are ignored by default. They need Docker with sysbox and the images, which a
-running daemon removes when no profile of its config names them:
+The tests that start real containers are ignored by default. They need Docker with sysbox and the images:
 
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image

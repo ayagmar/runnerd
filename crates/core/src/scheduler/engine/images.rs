@@ -1,9 +1,10 @@
 //! The profiles' runner images: before a profile with a pulled `image` starts a runner, the engine checks Docker
 //! has the image and pulls it in the background when it does not. A pull that failed is tried again later, longer
 //! each time in a row. Images built from `image_stage` are never pulled; a missing one fails the runner's start.
-//! At start, after a reload and after a pull, it removes the tags of runner images no profile runs (ADR 0040).
+//! At start, after a reload and after a pull, it removes the tags of runnerd's published runner images that no
+//! profile runs and no container was made from, one at a time (ADR 0040); it never removes another image.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::SystemTime;
 
 use tokio::task::JoinHandle;
@@ -11,8 +12,8 @@ use tracing::{info, warn};
 
 use super::Engine;
 use super::runners::backoff;
-use crate::config::Image;
-use crate::docker::{self, DockerApi};
+use crate::config::{Image, PUBLISHED_RUNNER};
+use crate::docker::{self, DockerApi, TaggedImage};
 use crate::github::GithubApi;
 
 /// Where a pulled image stands.
@@ -30,15 +31,24 @@ pub(super) enum ImageState {
     },
 }
 
-/// The pulled images of the config's profiles, and the removal of the runner images no profile runs.
+/// The pulled images of the config's profiles, and the removal of the published runner images no profile runs.
 #[derive(Debug)]
 pub(super) struct Images {
     /// The pulled images, by reference.
     states: BTreeMap<String, ImageState>,
-    /// Whether the runner images no profile runs are to be removed: at start, after a reload or a pull.
+    /// Whether runner images no profile runs may be left to remove: at start, after a reload or a pull.
     pub(super) stale_due: bool,
-    /// Their running removal.
-    pub(super) removing: Option<JoinHandle<()>>,
+    /// The tag being removed, one at a time.
+    pub(super) removing: Option<Removal>,
+    /// Tags Docker refused to remove since the removals were last due, not tried again until then.
+    refused: BTreeSet<String>,
+}
+
+/// A tag being removed.
+#[derive(Debug)]
+pub(super) struct Removal {
+    tag: String,
+    pub(super) task: JoinHandle<Result<(), docker::Error>>,
 }
 
 impl Images {
@@ -48,6 +58,7 @@ impl Images {
             states: BTreeMap::new(),
             stale_due: true,
             removing: None,
+            refused: BTreeSet::new(),
         }
     }
 }
@@ -111,47 +122,95 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
-        self.remove_stale_images();
+        self.remove_stale_images().await;
     }
 
-    /// Removes in the background the runner images no profile runs, when due and not already removing them.
-    fn remove_stale_images(&mut self) {
-        if !self.images.stale_due
-            || self
-                .images
-                .removing
-                .as_ref()
-                .is_some_and(|task| !task.is_finished())
-        {
+    /// Removes the next published runner image tag no profile runs, one per tick, in the background. Which one is
+    /// decided here, against the config and pulls of now, so a reload or a pull publishing its tag in between counts;
+    /// an image a reload wanted while its tag was being removed is checked again, and pulled.
+    async fn remove_stale_images(&mut self) {
+        if let Some(removal) = &self.images.removing {
+            if !removal.task.is_finished() {
+                return;
+            }
+            let Some(Removal { tag, task }) = self.images.removing.take() else {
+                return;
+            };
+            match task.await {
+                Ok(Ok(())) => {
+                    info!("removed {tag}, which no profile runs");
+                    let removed = Reference::parse(&tag);
+                    // Present when a reload wanted it while it was being removed: checked again, and pulled.
+                    self.images.states.retain(|reference, state| {
+                        !matches!(state, ImageState::Present)
+                            || Reference::parse(reference).tag_ref() != removed.tag_ref()
+                    });
+                }
+                Ok(Err(error)) => {
+                    warn!("cannot remove {tag}: {error}");
+                    self.images.refused.insert(tag);
+                }
+                Err(error) => {
+                    warn!("removing {tag} stopped: {error}");
+                    self.images.refused.insert(tag);
+                }
+            }
+        }
+        if !self.images.stale_due {
             return;
         }
-        self.images.stale_due = false;
-        // A retired profile may still reseed from its image.
-        let wanted: Vec<String> = self
+        let Some(tag) = self.next_stale_tag().await else {
+            self.images.stale_due = false;
+            self.images.refused.clear();
+            return;
+        };
+        let docker = self.docker.clone();
+        let reference = tag.clone();
+        let task = tokio::spawn(async move { docker.remove_image(&reference).await });
+        self.images.removing = Some(Removal { tag, task });
+    }
+
+    /// The first tag of runnerd's published runner images that no profile, retired or not, names, no pull is
+    /// fetching, no container was made from, and Docker did not refuse to remove since the removals were due.
+    /// `None` when there is none, or Docker did not list its images or containers.
+    async fn next_stale_tag(&self) -> Option<String> {
+        let listed = async {
+            let images = self.docker.tagged_images().await?;
+            let used = self.docker.container_images().await?;
+            Ok::<_, docker::Error>((images, used))
+        };
+        let (images, used) = match listed.await {
+            Ok(listed) => listed,
+            Err(error) => {
+                warn!("cannot list Docker's images and containers: {error}");
+                return None;
+            }
+        };
+        let wanted: Vec<Reference> = self
             .config
             .profiles
             .values()
             .chain(self.retired.values())
             .map(|profile| profile.image.reference())
+            .chain(
+                self.images
+                    .states
+                    .iter()
+                    .filter(|(_, state)| matches!(state, ImageState::Pulling { .. }))
+                    .map(|(reference, _)| reference.clone()),
+            )
+            .map(|reference| Reference::parse(&reference))
             .collect();
-        let docker = self.docker.clone();
-        self.images.removing = Some(tokio::spawn(async move {
-            let tags = match docker.image_tags().await {
-                Ok(tags) => tags,
-                Err(error) => {
-                    warn!("cannot list Docker's images: {error}");
-                    return;
-                }
-            };
-            for tag in stale_tags(&tags, &wanted) {
-                // Docker refuses to remove the image of a container, running or not; a record's image keeps the
-                // layers it was made from.
-                match docker.remove_image(&tag).await {
-                    Ok(()) => info!("removed {tag}, which no profile runs"),
-                    Err(error) => warn!("cannot remove {tag}: {error}"),
-                }
-            }
-        }));
+        images
+            .iter()
+            .filter(|image| !used.contains(&image.id))
+            .filter(|image| !wanted.iter().any(|reference| reference.names(image)))
+            .flat_map(|image| &image.tags)
+            .find(|tag| {
+                Reference::parse(tag).name == PUBLISHED_RUNNER
+                    && !self.images.refused.contains(*tag)
+            })
+            .cloned()
     }
 
     /// Whether a profile's runners must wait for their image: it is pulled and Docker does not have it yet.
@@ -172,43 +231,70 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 }
 
-/// The last part of a runner image's repository, wherever it is published: `runnerd-runner` for the stages built
-/// on this host, `ghcr.io/ayagmar/runnerd-runner` for the published ones.
-const RUNNER_REPOSITORY: &str = "runnerd-runner";
-
-/// The tags among `tags` of a runner image repository that no reference in `wanted` names.
-fn stale_tags(tags: &[String], wanted: &[String]) -> Vec<String> {
-    tags.iter()
-        .filter(|tag| repository(tag).rsplit('/').next() == Some(RUNNER_REPOSITORY))
-        .filter(|tag| !wanted.iter().any(|reference| names(reference, tag)))
-        .cloned()
-        .collect()
+/// An image reference as Docker normalises it: Docker Hub's names in full (`docker.io/library/alpine`, from
+/// `alpine` or `index.docker.io/alpine`), and the tag `latest` when it has neither tag nor digest.
+#[derive(Debug, PartialEq, Eq)]
+struct Reference {
+    /// The registry and repository, such as `ghcr.io/ayagmar/runnerd-runner`.
+    name: String,
+    tag: Option<String>,
+    digest: Option<String>,
 }
 
-/// Whether an image reference, as a profile has it, names the tag as Docker lists it. A reference with a digest
-/// keeps every tag of its repository: Docker may list the image under any of them.
-fn names(reference: &str, tag: &str) -> bool {
-    let (name, digest) = match reference.split_once('@') {
-        Some((name, _)) => (name, true),
-        None => (reference, false),
-    };
-    // Docker lists Docker Hub's images by their short names.
-    let name = name.strip_prefix("docker.io/").unwrap_or(name);
-    let name = name.strip_prefix("library/").unwrap_or(name);
-    if digest {
-        repository(name) == repository(tag)
-    } else if repository(name) == name {
-        tag.strip_suffix(":latest") == Some(name)
-    } else {
-        name == tag
+impl Reference {
+    /// As `distribution/reference`'s `ParseNormalizedNamed` does: the first part is a registry when it has a `.` or
+    /// a `:`, is `localhost` or has a capital letter.
+    fn parse(reference: &str) -> Reference {
+        let (rest, digest) = match reference.split_once('@') {
+            Some((rest, digest)) => (rest, Some(digest.to_owned())),
+            None => (reference, None),
+        };
+        let (name, tag) = match rest.rsplit_once(':') {
+            Some((name, tag)) if !tag.contains('/') => (name, Some(tag.to_owned())),
+            _ => (rest, None),
+        };
+        let tag = tag.or_else(|| digest.is_none().then(|| "latest".to_owned()));
+        let (registry, path) = match name.split_once('/') {
+            Some((first, path))
+                if first.contains(['.', ':'])
+                    || first == "localhost"
+                    || first.chars().any(|c| c.is_ascii_uppercase()) =>
+            {
+                (first, path)
+            }
+            _ => ("docker.io", name),
+        };
+        let registry = if registry == "index.docker.io" {
+            "docker.io"
+        } else {
+            registry
+        };
+        let name = if registry == "docker.io" && !path.contains('/') {
+            format!("docker.io/library/{path}")
+        } else {
+            format!("{registry}/{path}")
+        };
+        Reference { name, tag, digest }
     }
-}
 
-/// A reference without its tag: `ghcr.io/ayagmar/runnerd-runner` for `ghcr.io/ayagmar/runnerd-runner:node-0.0.7`.
-fn repository(reference: &str) -> &str {
-    match reference.rsplit_once(':') {
-        Some((repository, tag)) if !tag.contains('/') => repository,
-        _ => reference,
+    /// The name and tag, which name one tag Docker has.
+    fn tag_ref(&self) -> (&str, Option<&str>) {
+        (&self.name, self.tag.as_deref())
+    }
+
+    /// Whether this reference names the image: one of its tags, or with a digest one of its digests.
+    fn names(&self, image: &TaggedImage) -> bool {
+        let by_tag = self.tag.is_some()
+            && image
+                .tags
+                .iter()
+                .any(|tag| Reference::parse(tag).tag_ref() == self.tag_ref());
+        let by_digest = self.digest.is_some()
+            && image.digests.iter().any(|digest| {
+                let digest = Reference::parse(digest);
+                digest.name == self.name && digest.digest == self.digest
+            });
+        by_tag || by_digest
     }
 }
 
@@ -223,5 +309,33 @@ fn failed(image: &str, failures: u32, error: &str) -> ImageState {
     ImageState::Failed {
         failures,
         retry_at: SystemTime::now() + wait,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Reference;
+
+    #[test]
+    fn docker_spellings_of_one_image_name_it_alike() {
+        for (spelled, listed) in [
+            ("index.docker.io/acme/runner:app", "acme/runner:app"),
+            ("docker.io/acme/runner", "acme/runner:latest"),
+            ("docker.io/library/alpine:3", "alpine:3"),
+            ("index.docker.io/alpine", "alpine:latest"),
+            ("localhost:5000/runner:app", "localhost:5000/runner:app"),
+        ] {
+            assert_eq!(
+                Reference::parse(spelled),
+                Reference::parse(listed),
+                "{spelled}"
+            );
+        }
+        for (one, other) in [
+            ("ghcr.io/acme/runner:app", "acme/runner:app"),
+            ("localhost/runner:app", "runner:app"),
+        ] {
+            assert_ne!(Reference::parse(one), Reference::parse(other), "{one}");
+        }
     }
 }

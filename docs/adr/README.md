@@ -45,5 +45,5 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |
 | [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |
 | [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default |
-| [0040](0040-unused-runner-images-removed.md) | Runner images no profile runs are removed |
+| [0040](0040-unused-runner-images-removed.md) | Published runner images no profile runs are removed |
 | [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits |

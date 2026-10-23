@@ -77,7 +77,7 @@ client → transport → principal → handler → core
    ([ADR 0026](docs/adr/0026-commands-answered-while-a-tick-waits-for-github.md)).
    `engine.rs` holds `Engine`'s state, its construction and its loop; each submodule of
    [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
-   and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images and removing the runner images none runs,
+   and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images and removing the published runner images none runs,
    [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
    `caches` (reseeds, the mirror, the shared caches), `records` (records of failed jobs and the shells in them),
    `history` (what the store records), `admission` (what a new runner reserves), `control` (`Control` and the

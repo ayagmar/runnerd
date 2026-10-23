@@ -147,6 +147,10 @@ pub struct CacheLimit {
     pub max_size: ByteSize,
 }
 
+/// Where runnerd's release workflow publishes the runner images, one tag per stage and version, such as
+/// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.7`.
+pub const PUBLISHED_RUNNER: &str = "ghcr.io/ayagmar/runnerd-runner";
+
 /// A runner image with its limits; every job of the profile gets one container with these limits.
 #[derive(Debug, Clone, Deserialize)]
 #[serde(try_from = "ProfileToml")]

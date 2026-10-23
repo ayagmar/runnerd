@@ -2,7 +2,7 @@
 //! `DockerApi` trait the engine and the caches call. It decides nothing about scheduling, and a JIT config only
 //! ever reaches a container as a root-only file, never the create request or a log line.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::fmt;
 use std::time::{Duration, Instant};
 
@@ -109,6 +109,17 @@ pub struct Image {
     pub labels: HashMap<String, String>,
     /// The disk it takes beyond its parent image: what removing it frees.
     pub bytes: u64,
+}
+
+/// An image `tagged_images` found.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct TaggedImage {
+    /// Its ID, such as `sha256:224e…`.
+    pub id: String,
+    /// Its tags, such as `ghcr.io/ayagmar/runnerd-runner:node-0.0.7`.
+    pub tags: Vec<String>,
+    /// The registry digests it was pulled by, such as `ghcr.io/ayagmar/runnerd-runner@sha256:9e79…`.
+    pub digests: Vec<String>,
 }
 
 /// A container's terminal, attached once it was created and before it started, so none of its output is missed.
@@ -256,8 +267,10 @@ pub trait DockerApi: Send + Sync {
     ) -> impl Future<Output = Result<u64, Error>> + Send;
     /// Every image with the label.
     fn images(&self, label: &str) -> impl Future<Output = Result<Vec<Image>, Error>> + Send;
-    /// Every tag of every image Docker has, such as `runnerd-runner:node`.
-    fn image_tags(&self) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
+    /// Every image Docker has a tag for.
+    fn tagged_images(&self) -> impl Future<Output = Result<Vec<TaggedImage>, Error>> + Send;
+    /// The image ID of every container, running or stopped.
+    fn container_images(&self) -> impl Future<Output = Result<BTreeSet<String>, Error>> + Send;
     /// Removes an image and the layers only it used; one that does not exist is not an error.
     fn remove_image(&self, reference: &str) -> impl Future<Output = Result<(), Error>> + Send;
     /// The free disk where Docker keeps its images and containers.
@@ -638,15 +651,36 @@ impl DockerApi for Docker {
         Ok(found)
     }
 
-    async fn image_tags(&self) -> Result<Vec<String>, Error> {
+    async fn tagged_images(&self) -> Result<Vec<TaggedImage>, Error> {
         let images = self
             .api
             .list_images(Some(ListImagesOptionsBuilder::new().build()))
             .await?;
         Ok(images
             .into_iter()
-            .flat_map(|image| image.repo_tags)
-            .filter(|tag| tag != "<none>:<none>")
+            .map(|image| TaggedImage {
+                id: image.id,
+                tags: image
+                    .repo_tags
+                    .into_iter()
+                    .filter(|tag| tag != "<none>:<none>")
+                    .collect(),
+                digests: image
+                    .repo_digests
+                    .into_iter()
+                    .filter(|digest| digest != "<none>@<none>")
+                    .collect(),
+            })
+            .filter(|image| !image.tags.is_empty())
+            .collect())
+    }
+
+    async fn container_images(&self) -> Result<BTreeSet<String>, Error> {
+        let options = ListContainersOptionsBuilder::new().all(true).build();
+        let containers = self.api.list_containers(Some(options)).await?;
+        Ok(containers
+            .into_iter()
+            .filter_map(|container| container.image_id)
             .collect())
     }
 

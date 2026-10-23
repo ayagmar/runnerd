@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use runnerd_core::api::{Advice, Check, CheckStatus as Status, Sizing};
-use runnerd_core::config::{self, Admission, ByteSize, Config, Image, Isolation};
+use runnerd_core::config::{self, Admission, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::record;
 use runnerd_core::sizing::{Window, advise};
@@ -588,7 +588,7 @@ fn image_checks(host: &Host, config: Option<&Config>, docker: Option<&DockerFact
                      match the daemon's"
                 ),
                 fix: Some(format!(
-                    "set image to this release's tag, such as {PUBLISHED}:<stage>-{version}"
+                    "set image to this release's tag, such as {PUBLISHED_RUNNER}:<stage>-{version}"
                 )),
             },
             Some(Ok(ImageFound::Present { .. })) => pass("image", format!("{reference}: present")),
@@ -619,7 +619,7 @@ fn image_checks(host: &Host, config: Option<&Config>, docker: Option<&DockerFact
                     let fix = if published {
                         format!(
                             "use the published image instead of image_stage:\n\
-                             image = \"{PUBLISHED}:{stage}-{version}\"\nor {build}"
+                             image = \"{PUBLISHED_RUNNER}:{stage}-{version}\"\nor {build}"
                         )
                     } else {
                         build
@@ -635,9 +635,6 @@ fn image_checks(host: &Host, config: Option<&Config>, docker: Option<&DockerFact
         })
         .collect()
 }
-
-/// Where the release workflow publishes the runner images.
-const PUBLISHED: &str = "ghcr.io/ayagmar/runnerd-runner";
 
 /// The Sysbox release whose packages the fix names; newer ones are at <https://github.com/nestybox/sysbox/releases>.
 const SYSBOX_VERSION: &str = "0.7.1";

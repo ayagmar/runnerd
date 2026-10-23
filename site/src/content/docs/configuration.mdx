@@ -85,7 +85,7 @@ runnerd logs the pull's progress, and `runnerd doctor` says whether each image i
 docker build --target jvm -t runnerd-runner:jvm image
 ```
 
-At start, after a reload and after a pull, runnerd removes the images in a `runnerd-runner` repository that no profile names, such as the previous version's after an upgrade ([ADR 0040](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0040-unused-runner-images-removed.md)). It touches no other image, and Docker keeps one a container still uses. Set `image_stage` soon after building a stage no profile names yet.
+At start, after a reload and after a pull, runnerd removes the published images, `ghcr.io/ayagmar/runnerd-runner`, that no profile names and no container was made from, such as the previous version's after an upgrade ([ADR 0040](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0040-unused-runner-images-removed.md)). It never removes an image built on this host or any other image; remove an old `runnerd-runner:<stage>` yourself.
 
 ### Your own image
 
