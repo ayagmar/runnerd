@@ -138,8 +138,9 @@ pub(crate) fn notice(message: &str, tone: Tone) -> Markup {
     }
 }
 
-/// A notice that offers a next step, such as cancelling the job a pause waits for. It stays until answered.
-pub(crate) fn question(message: &str, action: &str, label: &str) -> Markup {
+/// A notice that offers a next step, such as cancelling the job a pause waits for, or `dismiss` to drop it. It stays
+/// until answered.
+pub(crate) fn question(message: &str, action: &str, label: &str, dismiss: &str) -> Markup {
     html! {
         div #notice role="status" aria-live="polite" {
             div.toast.failed.question {
@@ -148,7 +149,7 @@ pub(crate) fn question(message: &str, action: &str, label: &str) -> Markup {
                     button.button-danger type="button" data-indicator:_answering=""
                         data-attr:aria-busy="$_answering && 'true'" data-attr:disabled="$_answering"
                         data-on:click=(action) { (label) }
-                    button.button-quiet type="button" data-on:click="el.closest('.toast').remove()" { "Keep it running" }
+                    button.button-quiet type="button" data-on:click="el.closest('.toast').remove()" { (dismiss) }
                 }
             }
         }

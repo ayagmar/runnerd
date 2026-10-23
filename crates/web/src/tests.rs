@@ -1090,6 +1090,11 @@ async fn pausing_a_repository_with_a_running_job_asks_first_and_cancels_only_whe
         asked.body
     );
     assert!(
+        asked.body.contains(">Keep it running<"),
+        "the question's dismissal speaks of the job: {}",
+        asked.body
+    );
+    assert!(
         asked.body.contains(&LEDGER_RUNNING.to_string()),
         "the question names the job: {}",
         asked.body
@@ -1266,6 +1271,11 @@ async fn pausing_every_repository_while_jobs_run_asks_first_naming_them_and_canc
             .contains("@post('/v1/repositories/pause?force=true')")
             && !asked.body.contains("pause with force"),
         "the question offers the forced pause of every repository: {}",
+        asked.body
+    );
+    assert!(
+        asked.body.contains(">Keep them running<"),
+        "the question's dismissal speaks of the jobs: {}",
         asked.body
     );
     assert!(

@@ -70,7 +70,7 @@ async fn rows(app: &App) -> Result<Markup, Markup> {
 
 /// The question a pause refused with 409 asks: the jobs it waits for, by repository, and whether to cancel them
 /// with `force`. The daemon's message tells a CLI user how to force it; the question asks instead.
-fn ask_to_force(reply: &Reply, force: &str, label: &str) -> Response {
+fn ask_to_force(reply: &Reply, force: &str, label: &str, dismiss: &str) -> Response {
     let message = match serde_json::from_slice::<Busy>(&reply.body) {
         Ok(busy) if !busy.jobs.is_empty() => {
             let mut repositories: Vec<(&str, Vec<String>)> = Vec::new();
@@ -96,6 +96,7 @@ fn ask_to_force(reply: &Reply, force: &str, label: &str) -> Response {
         &message,
         &format!("@post('{force}')"),
         label,
+        dismiss,
     )])
 }
 
@@ -139,6 +140,7 @@ pub(crate) async fn pause(
             &reply,
             &format!("/v1/repositories/{repository}/pause?force=true"),
             "Cancel and pause",
+            "Keep it running",
         );
     }
     if !reply.status.is_success() {
@@ -167,6 +169,7 @@ pub(crate) async fn pause_all(State(app): State<App>, Query(query): Query<PauseQ
             &reply,
             "/v1/repositories/pause?force=true",
             "Cancel and pause all",
+            "Keep them running",
         );
     }
     if !reply.status.is_success() {
