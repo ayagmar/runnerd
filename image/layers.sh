@@ -9,9 +9,9 @@
 LAYERS=(cache:/home/runner/.cache tools:/home/runner/_work/_tool android:/opt/android-sdk)
 
 # Files in the cache layer where a job may leave a registry token or its own settings: cargo's credentials and
-# config, Gradle's properties (signing keys, publishing credentials). The layer outlives the job, so they go from
-# the slot's changes before the next container mounts them, and from a new snapshot (seed.sh); the image's own
-# copies, if any, stay.
+# config, Gradle's properties (signing keys, publishing credentials). The layer outlives the job, so no container
+# sees one from the slot's changes or the snapshot (mount_layers), and a new snapshot holds none (seed.sh); the
+# image's own copies, if any, stay.
 CACHE_SECRETS=(cargo/credentials cargo/credentials.toml cargo/config cargo/config.toml gradle/gradle.properties)
 
 # Disk budgets per slot, in GB. A layer whose changes outgrow LAYER_BUDGET_GB starts over from the snapshot when
@@ -35,7 +35,9 @@ rx_bytes() {
 # Mounts each layer over its path: this slot's changes in /state/<name> over the profile's snapshot in /base/<name>
 # (when there is one) over the image. /state is this slot's volume, which also holds its Docker Engine's data
 # (daemon.json). A layer whose changes outgrew LAYER_BUDGET_GB starts over from the snapshot. CACHE_SECRETS go
-# while the layer is unmounted, as overlayfs does not define changes to a mounted upper.
+# from the slot's changes while the layer is unmounted, as overlayfs does not define changes to a mounted upper;
+# the snapshot's, from a snapshot seeded before seed.sh dropped them, are then deleted through the mounted layer,
+# which leaves a whiteout in the slot's changes that the next mount drops and makes again.
 mount_layers() {
     local layer name path lower
     for layer in "${LAYERS[@]}"; do
@@ -50,6 +52,7 @@ mount_layers() {
         # Full copies on copy-up and no index, so an upper never depends on the snapshot it was made against.
         mount -t overlay overlay \
             -o "lowerdir=$lower,upperdir=/state/$name/upper,workdir=/state/$name/work,index=off,metacopy=off" "$path"
+        [ "$name" != cache ] || hide_snapshot_secrets "$path"
     done
 }
 
@@ -58,5 +61,13 @@ drop_cache_secrets() {
     local file
     for file in "${CACHE_SECRETS[@]}"; do
         rm -f "$1/$file"
+    done
+}
+
+# Deletes from the mounted cache layer at $1 the CACHE_SECRETS the profile's snapshot holds.
+hide_snapshot_secrets() {
+    local file
+    for file in "${CACHE_SECRETS[@]}"; do
+        [ ! -e "/base/cache/$file" ] || rm -f "$1/$file"
     done
 }

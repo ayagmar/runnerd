@@ -26,10 +26,15 @@ so a Rust or Go job downloaded its toolchain and dependencies again in every new
   there. sbt and Ivy are left out: moving `~/.sbt` and `~/.ivy2` takes `SBT_OPTS`, which a workflow's own
   `SBT_OPTS` replaces, and `~/.sbt` holds credentials.
 - The cache layer outlives a job, so a file there that may hold a token or a job's settings never reaches the next
-  job or a snapshot: `layers.sh` lists them (`CACHE_SECRETS`: cargo's `credentials`, `credentials.toml`, `config`
-  and `config.toml`, Gradle's `gradle.properties`). `mount_layers` deletes them from the slot's changes before it
-  mounts the layer, and `seed.sh` from a new snapshot. A layer whose path the image lacks, such as the Android SDK
-  on `base`, is not mounted.
+  job, a record shell or a new snapshot: `layers.sh` lists them (`CACHE_SECRETS`: cargo's `credentials`,
+  `credentials.toml`, `config` and `config.toml`, Gradle's `gradle.properties`). `mount_layers` deletes them from
+  the slot's changes before it mounts the layer, then through the mounted layer the ones the snapshot holds, and
+  `seed.sh` drops them from a new snapshot. A snapshot seeded by an older image may hold one (Gradle's home was
+  already in the cache layer) and is only replaced at the next reseed, which may not come for a while: hiding its
+  copies at every mount covers it without a migration. A layer whose path the image lacks, such as the Android
+  SDK on `base`, is not mounted.
+- `images.yml` publishes the stages the tag's `image/Dockerfile` has, so publishing a release from before
+  `android` existed still works.
 
 ## Consequences
 

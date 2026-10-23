@@ -27,6 +27,18 @@ fn image() -> String {
 /// A registry token a job leaves in cargo's home in the cache layer.
 const CREDENTIALS: &str = "/home/runner/.cache/cargo/credentials.toml";
 
+/// A registry token an older image's reseed left in the profile's snapshot.
+const OLD_SNAPSHOT_CREDENTIALS: &str = "gradle/gradle.properties";
+
+/// How a container mounts the profile's snapshot.
+#[derive(Clone, Copy)]
+enum Snapshot {
+    /// As a runner does.
+    ReadOnly,
+    /// To plant what an older image's reseed left there.
+    Writable,
+}
+
 /// Runs `script` as root in a runner container of `slot` with its layers mounted; returns its exit code and output.
 async fn run_in_slot(
     docker: &Docker,
@@ -34,7 +46,25 @@ async fn run_in_slot(
     slot: usize,
     script: &str,
 ) -> Result<(i64, String), String> {
+    run(docker, names, slot, Snapshot::ReadOnly, script).await
+}
+
+async fn run(
+    docker: &Docker,
+    names: &Names,
+    slot: usize,
+    snapshot: Snapshot,
+    script: &str,
+) -> Result<(i64, String), String> {
     let name = format!("{}-slot-{slot}-job", names.network());
+    let mut mounts = runner_mounts(names, PROFILE, slot);
+    if let Snapshot::Writable = snapshot {
+        for mount in &mut mounts {
+            if mount.target.as_deref() == Some("/base") {
+                mount.read_only = Some(false);
+            }
+        }
+    }
     let spec = RunnerSpec {
         name: name.clone(),
         image: image(),
@@ -43,7 +73,7 @@ async fn run_in_slot(
         cpus: 1,
         memory: "1G".parse().map_err(|e: String| e)?,
         env: Vec::new(),
-        mounts: runner_mounts(names, PROFILE, slot),
+        mounts,
         network: Some("none".to_owned()),
         labels: BTreeMap::new(),
         entrypoint: Some(vec![
@@ -155,6 +185,51 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
         return Err(format!(
             "slot 1's next job sees its last job's credentials (exit {code}):\n{output}"
         ));
+    }
+
+    old_snapshot(docker, names, &reseed("1T")).await
+}
+
+/// After an upgrade: a snapshot seeded before the image dropped credentials still holds one, and stays, as the
+/// profile does not reseed below the threshold. No slot's job sees it, a slot's second job neither, and the rest of
+/// the snapshot stays warm.
+async fn old_snapshot(
+    docker: &Docker,
+    names: &Names,
+    below_threshold: &Reseed<'_>,
+) -> Result<(), String> {
+    let (code, output) = run(
+        docker,
+        names,
+        1,
+        Snapshot::Writable,
+        &format!(
+            "mkdir -p /base/cache/gradle && echo signing.password=hunter2 > /base/cache/{OLD_SNAPSHOT_CREDENTIALS}"
+        ),
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "planting the old snapshot's credentials exited {code}:\n{output}"
+        ));
+    }
+    let output = cache::reseed(docker, below_threshold)
+        .await
+        .map_err(|e| e.to_string())?;
+    if !output.contains("not seeded") {
+        return Err(format!("seeded below the threshold:\n{output}"));
+    }
+    let unseen = format!(
+        "test ! -e /home/runner/.cache/{OLD_SNAPSHOT_CREDENTIALS} \
+         && test \"$(cat /home/runner/.cache/runnerd-test)\" = warm"
+    );
+    for slot in [1, 2, 2] {
+        let (code, output) = run_in_slot(docker, names, slot, &unseen).await?;
+        if code != 0 {
+            return Err(format!(
+                "slot {slot} sees the old snapshot's credentials, or not its cache (exit {code}):\n{output}"
+            ));
+        }
     }
     Ok(())
 }
