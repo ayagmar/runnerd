@@ -13,7 +13,7 @@ use runnerd_core::api::{
     JobQuery, JobState, LogQuery, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
     Resize, ShellQuery, Sizing, SizingQuery, Status,
 };
-use runnerd_core::config::{ByteSize, resize_profile};
+use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
 
 mod human;
@@ -271,19 +271,7 @@ fn parse_state(text: &str) -> Result<JobState, String> {
 
 /// `30m`, `12h`, `7d`, `2w` as the time that long ago.
 fn parse_age(text: &str) -> Result<u64, String> {
-    let error = || "expected a number and s, m, h, d or w, such as 12h".to_owned();
-    let split = text.find(|c: char| !c.is_ascii_digit()).ok_or_else(error)?;
-    let (number, unit) = text.split_at(split);
-    let number: u64 = number.parse().map_err(|_| error())?;
-    let unit = match unit {
-        "s" => 1,
-        "m" => 60,
-        "h" => 3600,
-        "d" => 86_400,
-        "w" => 7 * 86_400,
-        _ => return Err(error()),
-    };
-    Ok(now().saturating_sub(number.saturating_mul(unit)))
+    config::parse_age(text).map(|age| now().saturating_sub(age.as_secs()))
 }
 
 /// `owner/name` as the API's path.

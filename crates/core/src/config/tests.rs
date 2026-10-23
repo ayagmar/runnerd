@@ -3,7 +3,7 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{ByteSize, Config, Image, Warning, parse_memory_max};
+use super::{ByteSize, Config, Image, Warning, parse_age, parse_memory_max};
 
 const MINIMAL: &str = r#"
 [host]
@@ -364,4 +364,18 @@ fn measured_admission_needs_a_memory_max_to_admit_against() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("has none"), "{error}");
+}
+
+#[test]
+fn an_age_reads_in_seconds_to_weeks_and_names_its_units_when_it_does_not() {
+    assert_eq!(parse_age("30m"), Ok(Duration::from_mins(30)));
+    assert_eq!(parse_age("30d"), Ok(Duration::from_hours(30 * 24)));
+    assert_eq!(parse_age("2w"), Ok(Duration::from_hours(14 * 24)));
+    for wrong in ["30", "d", "3x", "1.5d", ""] {
+        assert_eq!(
+            parse_age(wrong),
+            Err("expected a number and s, m, h, d or w, such as 12h".to_owned()),
+            "{wrong:?}"
+        );
+    }
 }

@@ -164,7 +164,7 @@ measured  jvm 3, node 8                 0s    10m37s    28m38s     1m09s       9
 UNDER: jobs that peaked above what admission reserved for them. HELD: times the high-water mark held back a job the predictions had room for.
 ```
 
-Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--days` sets the window. A `PEAKS` over `MemoryMax` is marked `!`. A `PEAKS` well under `MemoryMax` is what the replay shows, not a promise: leave the daemon room for what it does not model.
+Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--since 7d` (or `12h`, `2w`) sets the window. A `PEAKS` over `MemoryMax` is marked `!`. A `PEAKS` well under `MemoryMax` is what the replay shows, not a promise: leave the daemon room for what it does not model.
 
 ## The budget check
 

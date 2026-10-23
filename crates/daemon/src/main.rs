@@ -3,10 +3,11 @@
 
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
+use std::time::Duration;
 
 use clap::{Parser, Subcommand};
 use runnerd_core::cache::Names;
-use runnerd_core::config::{ByteSize, Config, slice_memory_max};
+use runnerd_core::config::{ByteSize, Config, parse_age, slice_memory_max};
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
@@ -79,9 +80,9 @@ enum Command {
         /// Replay against this MemoryMax (such as 33G) instead of reading it from systemd.
         #[arg(long)]
         memory_max: Option<ByteSize>,
-        /// Replay the jobs queued in this many past days.
-        #[arg(long, default_value_t = 30)]
-        days: u64,
+        /// Replay the jobs queued in the last 30m, 12h, 7d, 2w, …
+        #[arg(long, default_value = "30d", value_parser = parse_age)]
+        since: Duration,
         /// The slots a profile may use beyond its configured ones, as PROFILE=SLOTS [default: as many as the slice
         /// holds of the profile alone at its cap].
         #[arg(long, value_parser = simulate::slots)]
@@ -131,10 +132,11 @@ fn main() -> ExitCode {
         Some(Command::Simulate {
             config,
             memory_max,
-            days,
+            since,
             slots,
-        }) => config_or_default(config)
-            .and_then(|path| run_simulation(&path, memory_max, days, &slots.into_iter().collect())),
+        }) => config_or_default(config).and_then(|path| {
+            run_simulation(&path, memory_max, since, &slots.into_iter().collect())
+        }),
         Some(Command::Serve {
             config,
             socket,
@@ -201,7 +203,7 @@ fn check_config(path: &Path, memory_max: Option<ByteSize>) -> ExitCode {
 fn run_simulation(
     path: &Path,
     memory_max: Option<ByteSize>,
-    days: u64,
+    since: Duration,
     slots: &std::collections::BTreeMap<String, u32>,
 ) -> Result<ExitCode, ExitCode> {
     let config = Config::load(path).map_err(|error| fail(&error))?;
@@ -226,7 +228,7 @@ fn run_simulation(
         .as_millis();
     let since = u64::try_from(now)
         .unwrap_or(u64::MAX)
-        .saturating_sub(days.saturating_mul(24 * 3600 * 1000));
+        .saturating_sub(u64::try_from(since.as_millis()).unwrap_or(u64::MAX));
     let history = runnerd_core::store::sizing_at(&database, since)
         .map_err(|error| fail(&error))?
         .ok_or_else(|| {
