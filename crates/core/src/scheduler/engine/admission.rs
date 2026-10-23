@@ -307,10 +307,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         Some(crate::config::cpu_budget(self.cpus?, overcommit))
     }
 
-    /// What the runners reserve of the CPU budget, in millicores.
+    /// What the runners reserve of the CPU budget, in millicores: under caps each its container's CPU limit, whatever
+    /// it reserved under measured admission before a reload, as memory counts it.
     pub(super) fn cpu_in_use(&self) -> u64 {
         self.occupied()
-            .map(|(_, occupant)| occupant.reserved_cpu())
+            .map(|(_, occupant)| match self.config.host.admission {
+                Admission::Caps => occupant.cpus,
+                Admission::Measured => occupant.reserved_cpu(),
+            })
             .sum()
     }
 

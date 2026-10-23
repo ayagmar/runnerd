@@ -802,6 +802,51 @@ async fn a_job_with_only_runs_from_before_the_upgrade_reserves_its_profiles_larg
     );
 }
 
+/// `measured()` with 6 slots and a CPU budget of the slice's CPUs.
+fn cpu_measured() -> String {
+    measured().replace("slots = 4", "slots = 6").replace(
+        "admission = \"measured\"",
+        "admission = \"measured\"\ncpu_overcommit = 1.0",
+    )
+}
+
+#[tokio::test]
+async fn after_a_reload_to_caps_running_runners_count_at_their_cpu_limits() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &cpu_measured());
+    engine.cpus = Some(4000);
+    history(&handle.store, G, 0).await;
+    // Each build used half a CPU over its run.
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute("UPDATE jobs SET cpu_average = 500", [])
+        .unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4, "4 × 0.5 CPU fit 4");
+
+    let caps = cpu_measured().replace("admission = \"measured\"\n", "");
+    engine.reload(Config::parse(&caps).unwrap(), None, Some(4000));
+    engine.publish();
+    // Each container's limit is the profile's 2 CPUs: 8 of the 4 the budget has.
+    assert_eq!(
+        handle.status.borrow().budget.cpu.map(|cpu| cpu.in_use),
+        Some(8000)
+    );
+    github.0.lock().unwrap().queued = (1..=6).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        4,
+        "no 2-CPU runner fits a budget the running ones fill"
+    );
+}
+
 #[tokio::test]
 async fn a_reload_that_sets_cpu_overcommit_admits_by_the_slices_cpus_it_read() {
     let (github, docker, dir) = (
