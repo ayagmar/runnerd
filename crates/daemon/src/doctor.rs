@@ -33,14 +33,17 @@ pub(crate) struct DockerFacts {
     pub cgroup_version: String,
     pub cgroup_driver: String,
     pub runtimes: Vec<String>,
+    /// The platform images must be built for, such as `linux/amd64`.
+    pub platform: String,
 }
 
 /// A profile's image as Docker has it, or where it could come from.
 pub(crate) enum ImageFound {
     /// Docker has it; `version` is its `runnerd.version` label, which published images carry.
     Present { version: Option<String> },
-    /// Docker lacks it and its registry has it: runnerd pulls it before the first runner.
-    Pullable,
+    /// Docker lacks it and its registry has it for `platforms`, such as `linux/amd64`; none when the registry does
+    /// not say. runnerd pulls it before the first runner if one is Docker's.
+    Pullable { platforms: Vec<String> },
     /// Docker lacks it and cannot get it: never built, or the registry refused, with why.
     Missing(String),
 }
@@ -103,6 +106,16 @@ fn read_docker() -> Result<DockerFacts, String> {
             .map(|d| d.to_string())
             .unwrap_or_default(),
         runtimes,
+        platform: format!(
+            "{}/{}",
+            info.os_type.unwrap_or_default(),
+            // Docker reports the kernel's name for it; images name it as Go does.
+            match info.architecture.unwrap_or_default().as_str() {
+                "x86_64" => "amd64".to_owned(),
+                "aarch64" => "arm64".to_owned(),
+                other => other.to_owned(),
+            }
+        ),
     })
 }
 
@@ -112,8 +125,8 @@ fn read_images(config: &Config) -> BTreeMap<String, Result<ImageFound, String>> 
         let Some(mut labels) = docker.image_labels(reference).await? else {
             return Ok(match image {
                 Image::Stage(_) => ImageFound::Missing("not built".to_owned()),
-                Image::Pulled(_) => match docker.check_pullable(reference).await {
-                    Ok(()) => ImageFound::Pullable,
+                Image::Pulled(_) => match docker.registry_platforms(reference).await {
+                    Ok(platforms) => ImageFound::Pullable { platforms },
                     Err(error) => ImageFound::Missing(error.to_string()),
                 },
             });
@@ -302,7 +315,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     checks.extend(slice_checks(host, config));
-    checks.extend(image_checks(host, config, docker.is_some()));
+    checks.extend(image_checks(host, config, docker));
     checks.push(match &host.gh_scopes {
         Ok(scopes) if scopes.iter().any(|s| s == "repo") => pass(
             "gh",
@@ -405,13 +418,15 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
 }
 
 /// One check per distinct image of the config's profiles.
-fn image_checks(host: &Host, config: Option<&Config>, docker: bool) -> Vec<Check> {
+fn image_checks(host: &Host, config: Option<&Config>, docker: Option<&DockerFacts>) -> Vec<Check> {
     let Some(config) = config else {
         return vec![skip("image", "no config given, which names the images")];
     };
-    if !docker {
+    let Some(docker) = docker else {
         return vec![skip("image", "needs Docker")];
-    }
+    };
+    // The release publishes linux/amd64 images only (.github/workflows/images.yml).
+    let published = docker.platform == "linux/amd64";
     let version = env!("CARGO_PKG_VERSION");
     images(config)
         .into_iter()
@@ -434,21 +449,40 @@ fn image_checks(host: &Host, config: Option<&Config>, docker: bool) -> Vec<Check
                 )),
             },
             Some(Ok(ImageFound::Present { .. })) => pass("image", format!("{reference}: present")),
-            Some(Ok(ImageFound::Pullable)) => pass(
+            Some(Ok(ImageFound::Pullable { platforms }))
+                if platforms.is_empty() || platforms.contains(&docker.platform) =>
+            {
+                pass(
+                    "image",
+                    format!("{reference}: not pulled yet; runnerd pulls it before the first runner"),
+                )
+            }
+            Some(Ok(ImageFound::Pullable { platforms })) => fail(
                 "image",
-                format!("{reference}: not pulled yet; runnerd pulls it before the first runner"),
+                format!(
+                    "{reference} is built for {} only, and Docker here runs {}",
+                    platforms.join(", "),
+                    docker.platform
+                ),
+                "build the image on this host from a clone of the repository and use it with image_stage:\n\
+                 docker build --target <stage> -t runnerd-runner:<stage> image",
             ),
             Some(Ok(ImageFound::Missing(why))) => match image {
-                Image::Stage(stage) => fail(
-                    "image",
-                    format!("{reference}: {why}"),
-                    &format!(
-                        "use the published image instead of image_stage:\n\
-                         image = \"{PUBLISHED}:{stage}-{version}\"\n\
-                         or build it from a clone of the repository:\n\
+                Image::Stage(stage) => {
+                    let build = format!(
+                        "build it from a clone of the repository:\n\
                          docker build --target {stage} -t {reference} image"
-                    ),
-                ),
+                    );
+                    let fix = if published {
+                        format!(
+                            "use the published image instead of image_stage:\n\
+                             image = \"{PUBLISHED}:{stage}-{version}\"\nor {build}"
+                        )
+                    } else {
+                        build
+                    };
+                    fail("image", format!("{reference}: {why}"), &fix)
+                }
                 Image::Pulled(_) => fail(
                     "image",
                     format!("{reference}: not present, and cannot be pulled: {why}"),

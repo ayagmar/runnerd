@@ -8,8 +8,9 @@ use super::{Check, DockerFacts, Host, ImageFound, SYSBOX_SERVICES, Slice, Status
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
+/// The image `examples/runnerd.toml`'s profile `stage` pulls.
 fn published(stage: &str) -> String {
-    format!("ghcr.io/ayagmar/runnerd-runner:{stage}-{VERSION}")
+    config("sysbox").profiles[stage].image.reference()
 }
 
 const ARCH: &str = "NAME=\"Arch Linux\"\nID=arch\n";
@@ -39,6 +40,7 @@ fn ready_host(os_release: &str) -> Host {
                 "runc".to_owned(),
                 "sysbox-runc".to_owned(),
             ],
+            platform: "linux/amd64".to_owned(),
         }),
         images: ["jvm", "node"]
             .map(|stage| {
@@ -208,7 +210,12 @@ fn a_published_image_not_pulled_yet_passes_and_one_the_registry_refuses_fails() 
     let config = config("sysbox");
     let mut host = ready_host(ARCH);
     host.images = BTreeMap::from([
-        (published("jvm"), Ok(ImageFound::Pullable)),
+        (
+            published("jvm"),
+            Ok(ImageFound::Pullable {
+                platforms: vec!["linux/amd64".to_owned()],
+            }),
+        ),
         (
             published("node"),
             Ok(ImageFound::Missing("manifest unknown".to_owned())),
@@ -248,7 +255,11 @@ fn a_stage_never_built_fails_with_the_published_image_and_the_build_command() {
         .fix
         .clone()
         .unwrap();
-    assert!(fix.contains(&published("jvm")), "{fix}");
+    // This release's tag, which may differ from the example's.
+    assert!(
+        fix.contains(&format!("ghcr.io/ayagmar/runnerd-runner:jvm-{VERSION}")),
+        "{fix}"
+    );
     assert!(
         fix.contains("docker build --target jvm -t runnerd-runner:jvm image"),
         "{fix}"
@@ -270,4 +281,30 @@ fn an_image_built_for_another_release_warns() {
     let jvm = image_check(&checks, &published("jvm"));
     assert_eq!(jvm.status, Status::Warn);
     assert!(jvm.detail.contains("0.0.1"), "{jvm}");
+}
+
+#[test]
+fn an_amd64_only_image_fails_on_an_arm64_docker_with_the_local_build() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    if let Ok(docker) = &mut host.docker {
+        docker.platform = "linux/arm64".to_owned();
+    }
+    let pullable = || {
+        Ok(ImageFound::Pullable {
+            platforms: vec!["linux/amd64".to_owned()],
+        })
+    };
+    host.images = BTreeMap::from([
+        (published("jvm"), pullable()),
+        (published("node"), pullable()),
+    ]);
+    let checks = checks(&host, Some(&config));
+    assert_eq!(failed(&checks), ["image", "image"]);
+    let jvm = image_check(&checks, &published("jvm"));
+    assert!(jvm.detail.contains("linux/arm64"), "{jvm}");
+    assert!(
+        jvm.fix.as_deref().unwrap().contains("docker build"),
+        "{jvm}"
+    );
 }

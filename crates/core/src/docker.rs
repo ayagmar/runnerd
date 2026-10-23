@@ -234,12 +234,17 @@ impl Docker {
         }
     }
 
-    /// Asks the image's registry for its manifest, without pulling it: whether `pull` could get it.
-    pub async fn check_pullable(&self, image: &str) -> Result<(), Error> {
-        self.api
-            .inspect_registry_image(image, None)
-            .await
-            .map(|_| ())
+    /// Asks the image's registry for its manifest, without pulling it, and returns the platforms it is built for,
+    /// such as `linux/amd64`. An error means `pull` could not get it.
+    pub async fn registry_platforms(&self, image: &str) -> Result<Vec<String>, Error> {
+        let inspect = self.api.inspect_registry_image(image, None).await?;
+        Ok(inspect
+            .platforms
+            .into_iter()
+            .filter_map(|platform| Some(format!("{}/{}", platform.os?, platform.architecture?)))
+            // Attestation manifests in an index carry the platform unknown/unknown.
+            .filter(|platform| platform != "unknown/unknown")
+            .collect())
     }
 }
 
