@@ -6,7 +6,10 @@ use runnerd_core::api::Sizing;
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::sizing;
 
-use super::{Check, DockerFacts, Host, ImageFound, SYSBOX_SERVICES, Slice, Status, checks};
+use std::io::Write as _;
+use std::process::{Command, Stdio};
+
+use super::{Check, Daemon, DockerFacts, Host, ImageFound, SYSBOX_DAEMONS, Slice, Status, checks};
 
 const VERSION: &str = env!("CARGO_PKG_VERSION");
 
@@ -65,7 +68,8 @@ fn ready_host(os_release: &str) -> Host {
             "repo".to_owned(),
             "workflow".to_owned(),
         ]),
-        sysbox_services: SYSBOX_SERVICES.map(|unit| (unit, true)),
+        sysbox_daemons: SYSBOX_DAEMONS.map(|name| (name, Daemon::Unit)),
+        sysbox_unit: true,
         kvm: true,
     }
 }
@@ -109,35 +113,93 @@ fn a_ready_host_passes_every_check() {
     );
 }
 
+/// Asserts that every line of `check`'s fix after the first, which says what to do, is shell a user can paste:
+/// `bash -n` parses it without running it.
+fn assert_pasteable(check: &Check) {
+    let fix = check.fix.as_deref().unwrap();
+    let mut commands = String::new();
+    for line in fix.lines().skip(1) {
+        commands.push_str(line);
+        commands.push('\n');
+    }
+    let mut bash = Command::new("bash")
+        .arg("-n")
+        .stdin(Stdio::piped())
+        .stderr(Stdio::piped())
+        .spawn()
+        .unwrap();
+    bash.stdin
+        .take()
+        .unwrap()
+        .write_all(commands.as_bytes())
+        .unwrap();
+    let output = bash.wait_with_output().unwrap();
+    assert!(
+        output.status.success(),
+        "{}'s fix is not valid shell: {}\n{commands}",
+        check.name,
+        String::from_utf8_lossy(&output.stderr)
+    );
+}
+
+fn sysbox(checks: &[Check]) -> &Check {
+    checks.iter().find(|check| check.name == "sysbox").unwrap()
+}
+
 #[test]
-fn missing_sysbox_fails_with_the_package_for_the_distribution() {
+fn missing_sysbox_fails_with_pasteable_commands_for_the_distribution() {
     let config = config("sysbox");
-    for (os_release, package) in [
+    for (os_release, expected) in [
         (ARCH, "paru -S sysbox-ce-bin"),
+        ("ID=manjaro\nID_LIKE=arch\n", "paru -S sysbox-ce-bin"),
         (
             "ID=ubuntu\nID_LIKE=debian\n",
+            "sudo apt-get install jq ./sysbox-ce_0.7.1.linux_amd64.deb",
+        ),
+        (
+            "ID='ubuntu'\nID_LIKE='debian'\n",
             "sudo apt-get install jq ./sysbox-ce_0.7.1.linux_amd64.deb",
         ),
         (
             "ID=debian\n",
             "releases/download/v0.7.1/sysbox-ce_0.7.1.linux_amd64.deb",
         ),
-        ("ID=fedora\n", "make sysbox-static"),
+        ("ID=fedora\n", "sudo dnf install -y git make jq"),
         (
             "ID=\"rocky\"\nID_LIKE=\"rhel centos fedora\"\n",
-            "docker-cfg --sysbox-runtime=enable",
+            "sudo ./scr/docker-cfg --sysbox-runtime=enable",
         ),
+        (
+            "ID='almalinux'\nID_LIKE='rhel centos fedora'\n",
+            "make sysbox-static",
+        ),
+        (
+            "ID=\"amzn\"\nID_LIKE=\"fedora\"\n",
+            "sudo yum install -y git make jq",
+        ),
+        ("ID=\"rhel\"\nID_LIKE=\"fedora\"\n", "Sysbox-EE only"),
         ("ID=gentoo\n", "docs/distro-compat.md"),
         ("", "docs/distro-compat.md"),
     ] {
         let checks = checks(&without_sysbox(ready_host(os_release)), Some(&config));
         assert_eq!(failed(&checks), ["sysbox"]);
-        let sysbox = checks.iter().find(|check| check.name == "sysbox").unwrap();
+        let sysbox = sysbox(&checks);
         assert!(
-            sysbox.fix.as_deref().unwrap().contains(package),
+            sysbox.fix.as_deref().unwrap().contains(expected),
             "{os_release}: {sysbox}"
         );
+        assert_pasteable(sysbox);
     }
+}
+
+#[test]
+fn red_hat_enterprise_linux_gets_no_sysbox_ce_build() {
+    let checks = checks(
+        &without_sysbox(ready_host("ID=\"rhel\"\nID_LIKE=\"fedora\"\n")),
+        Some(&config("sysbox")),
+    );
+    let fix = sysbox(&checks).fix.as_deref().unwrap();
+    assert!(!fix.contains("make sysbox-static"), "{fix}");
 }
 
 #[test]
@@ -147,7 +209,7 @@ fn the_sysbox_package_matches_dockers_architecture() {
         docker.platform = "linux/arm64".to_owned();
     }
     let checks = checks(&host, Some(&config("sysbox")));
-    let sysbox = checks.iter().find(|check| check.name == "sysbox").unwrap();
+    let sysbox = sysbox(&checks);
     assert!(
         sysbox
             .fix
@@ -159,24 +221,63 @@ fn the_sysbox_package_matches_dockers_architecture() {
 }
 
 #[test]
-fn sysbox_needs_both_of_its_services() {
+fn sysbox_needs_both_of_its_daemons() {
     let config = config("sysbox");
-    for stopped in SYSBOX_SERVICES {
+    for stopped in SYSBOX_DAEMONS {
         let mut host = ready_host(ARCH);
-        host.sysbox_services = SYSBOX_SERVICES.map(|unit| (unit, unit != stopped));
+        host.sysbox_daemons = SYSBOX_DAEMONS.map(|name| {
+            let daemon = if name == stopped {
+                Daemon::Stopped
+            } else {
+                Daemon::Unit
+            };
+            (name, daemon)
+        });
         let checks = checks(&host, Some(&config));
         assert_eq!(failed(&checks), ["sysbox"], "{stopped} stopped");
-        let sysbox = checks.iter().find(|check| check.name == "sysbox").unwrap();
+        let sysbox = sysbox(&checks);
         assert!(sysbox.detail.contains(stopped), "{sysbox}");
         assert!(
             sysbox
                 .fix
                 .as_deref()
                 .unwrap()
-                .contains("systemctl enable --now sysbox"),
+                .contains("sudo systemctl enable --now sysbox"),
             "{sysbox}"
         );
+        assert_pasteable(sysbox);
     }
+}
+
+#[test]
+fn a_source_built_sysbox_passes_while_its_daemons_run_without_systemd() {
+    let mut host = ready_host("ID=fedora\n");
+    host.sysbox_unit = false;
+    host.sysbox_daemons = SYSBOX_DAEMONS.map(|name| (name, Daemon::Process));
+    let checks = checks(&host, Some(&config("sysbox")));
+    assert_eq!(failed(&checks), Vec::<&str>::new());
+    assert_eq!(sysbox(&checks).status, Status::Pass);
+}
+
+#[test]
+fn a_source_built_sysbox_with_a_stopped_daemon_is_started_from_its_clone() {
+    let mut host = ready_host("ID=fedora\n");
+    host.sysbox_unit = false;
+    host.sysbox_daemons = SYSBOX_DAEMONS.map(|name| {
+        let daemon = if name == "sysbox-fs" {
+            Daemon::Stopped
+        } else {
+            Daemon::Process
+        };
+        (name, daemon)
+    });
+    let checks = checks(&host, Some(&config("sysbox")));
+    assert_eq!(failed(&checks), ["sysbox"]);
+    let sysbox = sysbox(&checks);
+    let fix = sysbox.fix.as_deref().unwrap();
+    assert!(fix.contains("sudo ./scr/sysbox"), "{fix}");
+    assert!(!fix.contains("systemctl"), "{fix}");
+    assert_pasteable(sysbox);
 }
 
 #[test]
@@ -226,6 +327,7 @@ fn unreachable_docker_skips_what_depends_on_it() {
     host.docker = Err("connection refused".to_owned());
     let checks = checks(&host, None);
     assert_eq!(failed(&checks), ["Docker"]);
+    assert_pasteable(checks.iter().find(|check| check.name == "Docker").unwrap());
     let skipped: Vec<_> = checks
         .iter()
         .filter(|check| check.status == Status::Skip)

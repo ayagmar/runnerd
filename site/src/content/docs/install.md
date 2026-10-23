@@ -6,7 +6,7 @@ description: Install runnerd, write a starter config and a user unit with runner
 ## What the host needs
 
 - Linux with cgroup v2, and Docker with the systemd cgroup driver.
-- [Sysbox](https://github.com/nestybox/sysbox), so runner containers run Docker unprivileged. When it is missing, `runnerd doctor` prints the install for this distribution: Nestybox's `.deb` on Ubuntu and Debian, the AUR package `sysbox-ce-bin` on Arch, a source build on Fedora and the RHEL family, and Nestybox's support table elsewhere.
+- [Sysbox](https://github.com/nestybox/sysbox), so runner containers run Docker unprivileged. When it is missing, `runnerd doctor` prints the install for this distribution: Nestybox's `.deb` on Ubuntu and Debian, the AUR package `sysbox-ce-bin` on Arch, a source build on Fedora, CentOS Stream, Rocky, Alma and Amazon Linux, and Nestybox's support table elsewhere. Nestybox supports Red Hat Enterprise Linux with Sysbox-EE only.
 - A systemd slice whose `MemoryMax` is the budget for all runners. `runnerd init` prints one sized for the host.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 
