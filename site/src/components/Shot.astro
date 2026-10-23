@@ -35,7 +35,7 @@ const themes = await Promise.all(
       fallback,
       phone: phone && {
         image: phone,
-        sources: await Promise.all(formats.map(async (f) => ({ type: `image/${f}`, srcset: await srcset(phone, [390, 780], f) }))),
+        sources: await Promise.all(formats.map(async (f) => ({ type: `image/${f}`, srcset: await srcset(phone, [390, 640, 780], f) }))),
       },
       sources: await Promise.all(
         formats.map(async (f) => ({ type: `image/${f}`, srcset: await srcset(desktop, [640, 960, 1280, 1920], f) })),
@@ -54,7 +54,7 @@ const themes = await Promise.all(
             media="(max-width: 600px)"
             type={s.type}
             srcset={s.srcset}
-            sizes="100vw"
+            sizes="calc(100vw - 3rem)"
             width={phone.image.width}
             height={phone.image.height}
           />

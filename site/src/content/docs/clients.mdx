@@ -25,7 +25,7 @@ Pages update as things happen. Memory and CPU are sampled every 2 s, so a shorte
 <Shot
   name="overview"
   alt="The overview: 23.5G of 33G reserved in ci.slice, jvm slot 1 running halyard/ledger's build, node slot 1 running halyard/storefront's playwright job, jvm slot 2 free, node slot 2 with a runner waiting."
-  sizes="(min-width: 72rem) 45rem, 100vw"
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
 Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the latest jobs. A pause lasts until a resume, across restarts.
@@ -35,7 +35,7 @@ Below the slots: the slice over the last half hour, pause and resume per reposit
 <Shot
   name="job"
   alt="halyard/ledger's build job, running: waited 4s for a runner, 5s to start, then nine steps on one time axis, the seventh, integration tests, running."
-  sizes="(min-width: 72rem) 45rem, 100vw"
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
 Below the steps: CPU and memory against the profile's caps, and the log.
@@ -45,7 +45,7 @@ Below the steps: CPU and memory against the profile's caps, and the log.
 <Shot
   name="history"
   alt="History over the last 30 days: 861 jobs, 90% succeeded, 9m 07s average run, 18s average wait, charts of jobs per day, run and wait times and memory peaks."
-  sizes="(min-width: 72rem) 45rem, 100vw"
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
 Below the charts: every job, filtered by repository and outcome.

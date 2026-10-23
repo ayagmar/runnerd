@@ -1,0 +1,9 @@
+---
+// Starlight's head plus the text fonts, preloaded so the docs' first screen renders in them.
+import Default from '@astrojs/starlight/components/Head.astro';
+import { Font } from 'astro:assets';
+---
+
+<Default><slot /></Default>
+<Font cssVariable="--font-text" preload={[{ style: 'normal' }]} />
+<Font cssVariable="--font-display" preload />

@@ -1,4 +1,5 @@
 ---
+import { Font } from 'astro:assets';
 import '../styles/theme.css';
 import mark from '../assets/mark.svg?raw';
 import Overview from '../components/Overview.astro';
@@ -11,6 +12,7 @@ const title = 'runnerd: GitHub Actions runners on your own Linux machine';
 const description =
   'runnerd runs GitHub Actions jobs on a Linux machine you already have: a fresh container per job, Docker inside it without --privileged, every runner inside one memory budget.';
 const url = new URL(base, Astro.site).href;
+const card = new URL(`${base}og.png`, Astro.site).href;
 const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
 const firstRun = ['runnerd init halyard/ledger halyard/storefront', 'systemctl --user enable --now runnerd'];
 
@@ -88,8 +90,15 @@ const clients = [
     <meta property="og:url" content={url} />
     <meta property="og:type" content="website" />
     <meta property="og:site_name" content="runnerd" />
-    <meta name="twitter:card" content="summary" />
+    <meta property="og:image" content={card} />
+    <meta property="og:image:width" content="1200" />
+    <meta property="og:image:height" content="630" />
+    <meta name="twitter:card" content="summary_large_image" />
+    <meta name="twitter:image" content={card} />
     <link rel="icon" href={`${base}favicon.svg`} type="image/svg+xml" />
+    <link rel="sitemap" href={`${base}sitemap-index.xml`} />
+    <Font cssVariable="--font-text" preload={[{ style: 'normal' }]} />
+    <Font cssVariable="--font-display" preload />
     <script is:inline>
       // Same key as Starlight's theme picker, so the landing page and the docs agree.
       const stored = localStorage.getItem('starlight-theme');
