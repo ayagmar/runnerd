@@ -362,21 +362,21 @@ pub(crate) struct Band {
 
 impl Band {
     /// The band over a chart from `origin` to `end`, its place given in the chart's units as `--from` and `--to`
-    /// against the chart's `--span`. With `live`, the id of a live chart and how its end follows the page's clock,
-    /// a band that lasts follows it too, and its label is a part.
+    /// against the chart's `--span`. With `live`, the id of a live chart, a band that lasts follows the page's clock
+    /// to the chart's end, and its label is a part.
     fn render(
         &self,
         index: usize,
         origin: u64,
         end: u64,
-        live: Option<(&str, &str)>,
+        live: Option<&str>,
         parts: &Parts,
     ) -> Markup {
         let from = self.from.clamp(origin, end) - origin;
         let to = self.to.unwrap_or(end).clamp(origin, end).max(origin + from) - origin;
         let label = html! { @if !self.label.is_empty() { (self.label) } };
         let label = match live {
-            Some((id, _)) if !self.label.is_empty() => {
+            Some(id) if !self.label.is_empty() => {
                 let id = format!("{id}-band{index}");
                 parts.html(&id, html! { span.band-label #(id) { (label) } })
             }
@@ -384,7 +384,7 @@ impl Band {
         };
         let follow = live
             .filter(|_| self.to.is_none())
-            .map(|(_, end)| format!("{end} - {origin}"));
+            .map(|_| format!("$shown.at - {origin}"));
         let style = format!("--from: {from}; --to: {to}");
         let style = if follow.is_some() {
             parts.clocked(style)
@@ -487,7 +487,7 @@ impl TimeChart {
                             span.limit-label style=(format!("--y: {:.1}%", y / HEIGHT * 100.0)) { (label) }
                         }
                         @for (index, band) in bands.iter().enumerate() {
-                            (band.render(index, frame.from, frame.end, live.as_ref().map(|(id, _, span)| (*id, span.as_str())), parts))
+                            (band.render(index, frame.from, frame.end, live.as_ref().map(|(id, _, _)| *id), parts))
                         }
                     }
                 }
@@ -759,5 +759,30 @@ mod tests {
                 .collect()
         };
         assert_eq!(stretches(&now), stretches(&later));
+    }
+
+    #[test]
+    fn a_running_steps_band_on_a_live_chart_reaches_the_charts_end() {
+        let points: Vec<(u64, u64)> = (0..50).map(|i| (1000 + i * 2, 1 << 30)).collect();
+        let mut chart = memory_chart(points, 1100, true);
+        chart.start = 1000;
+        let band = Band {
+            from: 1040,
+            to: None,
+            shown: "$_step == 1".to_owned(),
+            label: String::new(),
+        };
+        let html = chart
+            .render_with(2 << 30, &[band], &Parts::default())
+            .into_string();
+        let attr = r#"data-style:--to=""#;
+        let rest = &html[html.find(attr).expect("the band follows the clock") + attr.len()..];
+        let follow = rest[..rest.find('"').unwrap()].replace("$shown.at", "1100");
+        let (at, origin) = follow.split_once(" - ").expect("a difference");
+        let to = at.parse::<u64>().unwrap() - origin.parse::<u64>().unwrap();
+        assert_eq!(
+            to, 100,
+            "at the page's clock the band ends at the chart's end: {follow}"
+        );
     }
 }
