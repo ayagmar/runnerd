@@ -369,6 +369,39 @@ pub(super) fn events_after(
         .collect())
 }
 
+/// The repositories as the stored `repository.*` events last announced them, by name.
+pub(super) fn announced_repositories(
+    db: &Connection,
+) -> rusqlite::Result<Vec<api::RepositoryStatus>> {
+    let bodies: Vec<String> = db
+        .prepare_cached(
+            r#"SELECT body FROM events WHERE body LIKE '%"type":"repository.%' ORDER BY id"#,
+        )?
+        .query_map([], |row| row.get(0))?
+        .collect::<rusqlite::Result<_>>()?;
+    let mut repositories = std::collections::BTreeMap::new();
+    for body in bodies {
+        match serde_json::from_str(&body) {
+            Ok(api::Event::RepositoryChanged { repository }) => {
+                repositories.insert(repository.name.clone(), repository);
+            }
+            Ok(api::Event::RepositoryRemoved { repository }) => {
+                repositories.remove(&repository);
+            }
+            Ok(_) => {}
+            // Skipping it would leave a repository out, and a client resuming after it would keep that one.
+            Err(error) => {
+                return Err(rusqlite::Error::FromSqlConversionFailure(
+                    0,
+                    rusqlite::types::Type::Text,
+                    Box::new(error),
+                ));
+            }
+        }
+    }
+    Ok(repositories.into_values().collect())
+}
+
 pub(super) fn host_samples(db: &Connection, since: u64) -> rusqlite::Result<Vec<api::HostSample>> {
     db.prepare_cached("SELECT at, cpu, memory FROM host_samples WHERE at >= ?1 ORDER BY at")?
         .query_map([since.saturating_mul(1000)], |row| {

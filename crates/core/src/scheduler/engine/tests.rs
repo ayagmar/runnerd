@@ -412,6 +412,7 @@ fn engine_with(
     dir: &TestDir,
     config: &str,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    let store = Store::open(&dir.0.join("history.db")).unwrap();
     Engine::new(
         Config::parse(config).unwrap(),
         github.clone(),
@@ -420,7 +421,8 @@ fn engine_with(
             names: Names::new("runnerd"),
             identity: identity("ci", ID_A),
             memory_max: None,
-            store: Store::open(&dir.0.join("history.db")).unwrap(),
+            announced: store.announced_repositories().unwrap(),
+            store,
             paths: Paths {
                 cgroup: dir.0.join("cgroup"),
                 proc: dir.0.join("proc"),
@@ -1658,4 +1660,161 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
         .await
         .unwrap()
         .unwrap();
+}
+
+/// The `repository.*` events stored after `after`, and the last event's ID.
+async fn repository_events(handle: &Handle, after: &mut u64) -> Vec<api::Event> {
+    handle.store.flush().await;
+    let events = handle.store.events_after(*after, 100).await.unwrap();
+    if let Some(last) = events.last() {
+        *after = last.id.unwrap();
+    }
+    events
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .filter(|event| event.kind().starts_with("repository."))
+        .collect()
+}
+
+fn repository_status(paused: bool, queued_jobs: usize) -> api::RepositoryStatus {
+    api::RepositoryStatus {
+        name: "o/r".to_owned(),
+        profile: "app".to_owned(),
+        labels: vec!["self-hosted".to_owned(), "app".to_owned()],
+        paused,
+        queued_jobs,
+    }
+}
+
+#[tokio::test]
+async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    let mut after = 0;
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: repository_status(false, 0)
+        }]
+    );
+    engine.publish();
+    assert_eq!(repository_events(&handle, &mut after).await, []);
+
+    engine.pause("o/r", RunningJobs::Keep).await.unwrap();
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: repository_status(true, 0)
+        }]
+    );
+
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: repository_status(true, 1)
+        }]
+    );
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(repository_events(&handle, &mut after).await, []);
+
+    assert!(handle.control.set_paused("o/r", false), "o/r is configured");
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: repository_status(false, 1)
+        }]
+    );
+
+    let with_s = format!(
+        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\"]\n"
+    );
+    engine.reload(Config::parse(&with_s).unwrap(), None);
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryChanged {
+            repository: api::RepositoryStatus {
+                name: "o/s".to_owned(),
+                profile: "app".to_owned(),
+                labels: vec!["self-hosted".to_owned()],
+                paused: false,
+                queued_jobs: 0,
+            }
+        }]
+    );
+    engine.reload(Config::parse(&with_s).unwrap(), None);
+    engine.publish();
+    assert_eq!(repository_events(&handle, &mut after).await, []);
+
+    engine.reload(Config::parse(CONFIG).unwrap(), None);
+    engine.publish();
+    assert_eq!(
+        repository_events(&handle, &mut after).await,
+        [api::Event::RepositoryRemoved {
+            repository: "o/s".to_owned()
+        }]
+    );
+}
+
+#[tokio::test]
+async fn a_restart_without_a_repository_announces_its_removal_to_clients_resuming_after_the_last_run()
+ {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_in(&github, &docker, &dir);
+    let mut cursor = 0;
+    repository_events(&handle, &mut cursor).await;
+    drop((engine, handle));
+
+    // Restarted with o/s in place of o/r, on the same history.
+    let config = CONFIG.replace("name = \"o/r\"", "name = \"o/s\"");
+    let (_engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut s = repository_status(false, 0);
+    s.name = "o/s".to_owned();
+    assert_eq!(
+        repository_events(&handle, &mut cursor).await,
+        [
+            api::Event::RepositoryChanged { repository: s },
+            api::Event::RepositoryRemoved {
+                repository: "o/r".to_owned()
+            }
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_pause_undone_before_it_is_published_leaves_clients_where_the_status_is() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    // A client: the status, then the repository events after what it read.
+    let mut cursor = 0;
+    repository_events(&handle, &mut cursor).await;
+    let mut shown = handle.status.borrow().repositories.clone();
+
+    engine.pause("o/r", RunningJobs::Keep).await.unwrap();
+    assert!(handle.control.set_paused("o/r", false), "o/r is configured");
+    engine.publish();
+    for event in repository_events(&handle, &mut cursor).await {
+        match event {
+            api::Event::RepositoryChanged { repository } => {
+                shown.retain(|known| known.name != repository.name);
+                shown.push(repository);
+            }
+            api::Event::RepositoryRemoved { repository } => {
+                shown.retain(|known| known.name != repository);
+            }
+            _ => {}
+        }
+    }
+    assert_eq!(shown, handle.status.borrow().repositories);
+    assert!(!shown[0].paused, "o/r shows resumed");
 }

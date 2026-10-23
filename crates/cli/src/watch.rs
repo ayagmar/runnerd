@@ -125,6 +125,21 @@ impl State {
                 }
             }
             Event::BudgetChanged { budget } => self.status.budget = budget.clone(),
+            Event::RepositoryChanged { repository } => {
+                match self
+                    .status
+                    .repositories
+                    .iter_mut()
+                    .find(|known| known.name == repository.name)
+                {
+                    Some(known) => *known = repository.clone(),
+                    None => self.status.repositories.push(repository.clone()),
+                }
+            }
+            Event::RepositoryRemoved { repository } => self
+                .status
+                .repositories
+                .retain(|known| known.name != *repository),
             Event::JobSample { job, sample } => {
                 self.samples.insert(*job, sample.clone());
             }

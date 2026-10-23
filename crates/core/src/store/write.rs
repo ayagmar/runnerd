@@ -554,7 +554,11 @@ impl Writer<'_> {
             ),
             (
                 "prune events",
-                "DELETE FROM events WHERE at < ?1",
+                // Each repository's latest event stays, whatever its age: it is what a restarted daemon compares
+                // its config with to announce a removal (`read::announced_repositories`).
+                "DELETE FROM events WHERE at < ?1 AND id NOT IN (SELECT max(id) FROM events \
+                 WHERE json_extract(body, '$.type') LIKE 'repository.%' \
+                 GROUP BY coalesce(json_extract(body, '$.repository.name'), json_extract(body, '$.repository')))",
                 before(history.events),
             ),
             (

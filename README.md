@@ -121,7 +121,7 @@ bytes, CPU millicores.
 | `GET /v1/host/samples?since=` | the slice's CPU and memory over time |
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`): counts, queue and run time, CPU, memory, mirror bytes |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
-| `GET /v1/events?job=&logs=` | server-sent events: `job.queued`, `job.started`, `job.step`, `job.finished`, `slot.changed`, `budget.changed`, `cache.reseeded`, and live `job.sample`, `host.sample` and (with `logs=true`) `log.line` |
+| `GET /v1/events?job=&logs=` | server-sent events: `job.queued`, `job.started`, `job.step`, `job.finished`, `slot.changed`, `budget.changed`, `repository.changed` (paused or resumed, its queue, or a reload changed or added it), `repository.removed` (a reload removed it), `cache.reseeded`, and live `job.sample`, `host.sample` and (with `logs=true`) `log.line` |
 
 A forced pause cancels the run of each of the repository's running jobs (GitHub cancels runs, not single jobs, so
 the run's other jobs are cancelled too) and lets the runner report it cancelled, which takes under a minute; a runner
@@ -134,6 +134,10 @@ Runners started afterwards get the new limits, image and labels. `history.databa
 
 Every event but the live ones has an ID; send the last one seen as `Last-Event-ID` and the stream resumes after it,
 across daemon restarts. Live events are not stored: a client that missed some reads the job's samples or log.
+`slot.changed`, `budget.changed` and `repository.changed` carry the state as it is after a change, not each
+transition: a pause and a resume that land before the daemon publishes its status send nothing, since the state did
+not change. Applying `repository.changed` and `repository.removed` to the repositories of a status keeps them equal
+to what `/v1/status` returns.
 
 ```sh
 curl --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/status

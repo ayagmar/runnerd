@@ -5,7 +5,7 @@
 use serde::{Deserialize, Serialize};
 
 use super::jobs::{HostSample, JobSummary, Sample, Step};
-use super::{Budget, SlotStatus};
+use super::{Budget, RepositoryStatus, SlotStatus};
 
 /// One event as `GET /v1/events` sends it: the SSE `data` field. The SSE `event` field is `event.kind()` and the
 /// SSE `id` field is `id`.
@@ -64,6 +64,19 @@ pub enum Event {
         /// The budget as it is now.
         budget: Budget,
     },
+    /// A repository was paused or resumed, its queue changed, a reload changed its profile or labels, or a reload
+    /// added it.
+    #[serde(rename = "repository.changed")]
+    RepositoryChanged {
+        /// The repository as it is now.
+        repository: RepositoryStatus,
+    },
+    /// A reload removed the repository from the config.
+    #[serde(rename = "repository.removed")]
+    RepositoryRemoved {
+        /// Its `owner/name`.
+        repository: String,
+    },
     /// A profile's snapshot check finished.
     #[serde(rename = "cache.reseeded")]
     CacheReseeded {
@@ -110,6 +123,8 @@ impl Event {
             Event::JobFinished { .. } => "job.finished",
             Event::SlotChanged { .. } => "slot.changed",
             Event::BudgetChanged { .. } => "budget.changed",
+            Event::RepositoryChanged { .. } => "repository.changed",
+            Event::RepositoryRemoved { .. } => "repository.removed",
             Event::CacheReseeded { .. } => "cache.reseeded",
             Event::JobSample { .. } => "job.sample",
             Event::HostSample { .. } => "host.sample",
@@ -136,6 +151,8 @@ impl Event {
             | Event::LogLine { job, .. } => Some(*job),
             Event::SlotChanged { .. }
             | Event::BudgetChanged { .. }
+            | Event::RepositoryChanged { .. }
+            | Event::RepositoryRemoved { .. }
             | Event::CacheReseeded { .. }
             | Event::HostSample { .. } => None,
         }

@@ -381,3 +381,76 @@ async fn a_log_batch_larger_than_the_backlog_waits_for_the_writer_too() {
         LogPosition { page: 1, offset: 9 }
     );
 }
+
+fn repository(name: &str) -> crate::api::RepositoryStatus {
+    crate::api::RepositoryStatus {
+        name: name.to_owned(),
+        profile: "app".to_owned(),
+        labels: vec!["self-hosted".to_owned()],
+        paused: false,
+        queued_jobs: 0,
+    }
+}
+
+#[tokio::test]
+async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository() {
+    use crate::api::Event;
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.event(Event::RepositoryChanged {
+        repository: repository("o/r"),
+    });
+    store.event(Event::RepositoryChanged {
+        repository: repository("o/s"),
+    });
+    store.event(Event::RepositoryRemoved {
+        repository: "o/s".to_owned(),
+    });
+    store.event(Event::BudgetChanged {
+        budget: crate::api::Budget {
+            slice: "ci.slice".to_owned(),
+            memory_max: None,
+            memory_in_use: 0,
+        },
+    });
+    store.flush().await;
+
+    // Long after: every event is older than the history keeps.
+    let later = crate::time::now_ms() + 400 * 24 * 3600 * 1000;
+    store.prune(later, &crate::config::History::default());
+    store.flush().await;
+
+    assert_eq!(store.announced_repositories().unwrap(), [repository("o/r")]);
+    let kept: Vec<_> = store
+        .events_after(0, 10)
+        .await
+        .unwrap()
+        .into_iter()
+        .map(|envelope| envelope.event)
+        .collect();
+    assert!(
+        !kept
+            .iter()
+            .any(|event| matches!(event, Event::BudgetChanged { .. })),
+        "other events are still pruned: {kept:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_repository_event_that_does_not_read_fails_the_startup_read() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.event(crate::api::Event::RepositoryChanged {
+        repository: repository("o/r"),
+    });
+    store.flush().await;
+    Connection::open(&path)
+        .unwrap()
+        .execute_batch(r#"UPDATE events SET body = '{"type":"repository.changed","repository":7}'"#)
+        .unwrap();
+    assert!(
+        store.announced_repositories().is_err(),
+        "an incomplete list would keep a removed repository in resuming clients"
+    );
+}

@@ -670,6 +670,17 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
                 .map(|max| format!(" of {}", bytes(max)))
                 .unwrap_or_default()
         ),
+        Event::RepositoryChanged { repository } => format!(
+            "{} {} {} queued",
+            repository.name,
+            if repository.paused {
+                paint.paint(Tone::Busy, "paused")
+            } else {
+                paint.paint(Tone::Good, "active")
+            },
+            repository.queued_jobs
+        ),
+        Event::RepositoryRemoved { repository } => format!("{repository} removed"),
         Event::CacheReseeded { profile, error, .. } => match error {
             Some(error) => format!(
                 "{profile} {}",
@@ -681,13 +692,49 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
     };
     Some(format!(
         "{} {text}",
-        paint.paint(Tone::Dim, &format!("{kind:<14}"))
+        paint.paint(Tone::Dim, &format!("{kind:<18}"))
     ))
 }
 
 #[cfg(test)]
 mod tests {
-    use super::{Paint, Table, Tone, bytes, duration};
+    use runnerd_core::api::{Event, EventEnvelope, RepositoryStatus};
+
+    use super::{Paint, Table, Tone, bytes, duration, event_line};
+
+    #[test]
+    fn watch_prints_a_repository_paused_or_removed_elsewhere() {
+        let line = |event| {
+            event_line(
+                &EventEnvelope {
+                    id: Some(9),
+                    at: 1000,
+                    event,
+                },
+                Paint { colour: false },
+            )
+        };
+        let paused = Event::RepositoryChanged {
+            repository: RepositoryStatus {
+                name: "halyard/ledger".to_owned(),
+                profile: "jvm".to_owned(),
+                labels: vec!["self-hosted".to_owned()],
+                paused: true,
+                queued_jobs: 2,
+            },
+        };
+        assert_eq!(
+            line(paused).as_deref(),
+            Some("repository.changed halyard/ledger paused 2 queued")
+        );
+        let removed = Event::RepositoryRemoved {
+            repository: "halyard/ledger".to_owned(),
+        };
+        assert_eq!(
+            line(removed).as_deref(),
+            Some("repository.removed halyard/ledger removed")
+        );
+    }
 
     #[test]
     fn durations_read_like_people_write_them() {

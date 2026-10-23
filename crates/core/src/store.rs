@@ -441,6 +441,12 @@ impl Store {
             .await
     }
 
+    /// The repositories as the stored events last announced them, so a restarted daemon announces only what
+    /// changed since, including the repositories its config no longer has. Blocks on the database: for startup.
+    pub fn announced_repositories(&self) -> Result<Vec<api::RepositoryStatus>, StoreError> {
+        Ok(read::announced_repositories(&lock(&self.reader))?)
+    }
+
     /// The slice's samples since `since` (seconds), oldest first.
     pub async fn host_samples(&self, since: u64) -> Result<Vec<api::HostSample>, StoreError> {
         self.read(move |db| read::host_samples(db, since)).await

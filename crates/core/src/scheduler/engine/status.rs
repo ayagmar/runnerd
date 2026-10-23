@@ -1,5 +1,5 @@
-//! Publishes `api::Status` after each tick and command, and records the slots and budget that changed as events.
-//! It reads engine state and must not change it, besides the status channel.
+//! Publishes `api::Status` after each tick and command, and records the slots, budget and repositories that
+//! changed as events. It reads engine state and must not change it, besides the status channel.
 
 use super::{Engine, Shutdown, image, unix_secs};
 use crate::api;
@@ -81,7 +81,9 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
         self.status.send_replace(status);
     }
 
-    /// Announces the slots and the budget that changed between two statuses.
+    /// Announces the slots, the budget and the repositories that changed between two statuses. The events carry
+    /// state, not transitions: a pause undone before the next publish announces nothing, and a client that applies
+    /// the events still ends where the status is.
     fn announce_changes(&self, previous: &api::Status, status: &api::Status) {
         for profile in &status.profiles {
             let before = previous
@@ -104,6 +106,24 @@ impl<G: GithubApi, D: DockerApi + 'static> Engine<G, D> {
             self.store.event(api::Event::BudgetChanged {
                 budget: status.budget.clone(),
             });
+        }
+        for repository in &status.repositories {
+            if !previous.repositories.contains(repository) {
+                self.store.event(api::Event::RepositoryChanged {
+                    repository: repository.clone(),
+                });
+            }
+        }
+        for before in &previous.repositories {
+            if !status
+                .repositories
+                .iter()
+                .any(|repository| repository.name == before.name)
+            {
+                self.store.event(api::Event::RepositoryRemoved {
+                    repository: before.name.clone(),
+                });
+            }
         }
     }
 }

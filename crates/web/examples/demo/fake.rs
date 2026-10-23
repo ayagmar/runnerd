@@ -25,7 +25,7 @@ use axum::{Json, Router};
 use futures_util::{Stream, stream};
 use runnerd_core::api::{
     Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
-    CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, EventEnvelope, HostSample,
+    CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, HostSample,
     HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery,
     LogSummary, PauseQuery, Paused, ProfileStatus, RepositoryStatus, RunnerStatus, RunningJob,
     Sample, SampleSeries, SlotStatus, Stats, StatsRow, Status, Step, Timeline,
@@ -693,6 +693,7 @@ fn pause(fake: &Fake, repository: &str, force: bool) -> Response {
 
 fn set_paused(fake: &Fake, repository: &str, paused: bool) -> Response {
     let mut fixtures = fake.fixtures.lock().unwrap();
+    let now = fixtures.now;
     match fixtures
         .status
         .repositories
@@ -701,6 +702,14 @@ fn set_paused(fake: &Fake, repository: &str, paused: bool) -> Response {
     {
         Some(found) => {
             found.paused = paused;
+            // As the daemon announces it to every client.
+            let _ = fake.events.send(EventEnvelope {
+                id: None,
+                at: now,
+                event: Event::RepositoryChanged {
+                    repository: found.clone(),
+                },
+            });
             StatusCode::NO_CONTENT.into_response()
         }
         None => not_found(&format!("{repository} is not a configured repository")),

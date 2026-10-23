@@ -453,6 +453,33 @@ async fn the_overview_stream_patches_the_slice_when_a_sample_arrives() {
 }
 
 #[tokio::test]
+async fn the_overview_shows_a_repository_resumed_from_another_client() {
+    let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused = true;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    let first = read_until(&mut stream, |text| text.contains(r#"id="recent""#)).await;
+    assert!(
+        first.contains("badge neutral"),
+        "halyard/ledger shows paused: {first}"
+    );
+    let origin = format!("http://{}", dashboard.addr);
+    let reply = dashboard
+        .request(
+            "POST",
+            "/v1/repositories/halyard/ledger/resume",
+            &[("cookie", &cookie), ("origin", &origin)],
+        )
+        .await;
+    assert_eq!(reply.status, StatusCode::OK, "{}", reply.body);
+    let update = read_until(&mut stream, |text| text.contains(r#"id="repositories""#)).await;
+    assert!(
+        update.contains(r#"id="repo-halyard-ledger""#) && !update.contains("badge neutral"),
+        "{update}"
+    );
+}
+
+#[tokio::test]
 async fn a_running_jobs_stream_appends_new_log_lines_and_updates_its_charts() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
