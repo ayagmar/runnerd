@@ -2436,6 +2436,22 @@ async fn a_restart_without_a_profile_leaves_clients_resuming_after_the_last_run_
 }
 
 #[tokio::test]
+async fn a_daemon_shutting_down_lists_no_queued_jobs_since_it_no_longer_polls_them() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(handle.status.borrow().queued.len(), 1);
+
+    engine.tick(Shutdown::Graceful).await;
+    engine.publish();
+    assert_eq!(handle.status.borrow().queued, []);
+}
+
+#[tokio::test]
 async fn the_status_lists_the_queued_jobs_runners_can_take_and_none_holds_oldest_first() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

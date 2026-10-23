@@ -99,7 +99,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// The queued jobs the repositories' runners can take and none holds, oldest first.
+    /// The queued jobs the repositories' runners can take and none holds, oldest first; none of a repository whose
+    /// last listing failed or was skipped.
     fn queued(&self) -> Vec<api::QueuedJob> {
         let taken: BTreeSet<u64> = self
             .occupied()
@@ -110,8 +111,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .repositories
             .iter()
             .flat_map(|repository| {
-                self.repositories[&repository.name]
-                    .queued
+                let state = &self.repositories[&repository.name];
+                // Unlisted at the last tick: a failed listing or a shutdown, which the history does not follow.
+                let queued = if state.listed { &state.queued[..] } else { &[] };
+                queued
                     .iter()
                     .filter(|job| {
                         crate::scheduler::matches(job, &repository.labels)

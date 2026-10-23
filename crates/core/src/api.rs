@@ -73,6 +73,8 @@ pub struct Status {
     pub repositories: Vec<RepositoryStatus>,
     /// Queued jobs the repositories' runners can take and none holds yet, at the last poll, oldest first. No event
     /// carries the list: `job.queued` announces a job, `job.started` and `job.finished` its leaving the queue.
+    /// A repository whose last listing failed, as while GitHub rate-limits runnerd, or that is no longer polled
+    /// because runnerd is shutting down, shows no jobs here, while the history keeps its jobs queued.
     #[serde(default)]
     pub queued: Vec<QueuedJob>,
 }
