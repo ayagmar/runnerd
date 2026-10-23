@@ -2,7 +2,7 @@
 # Every `runnerd …` and `runnerctl …` command line the README and the site's docs show exists: its command, its
 # subcommand when the command has them (`runnerctl config show`), and every option, each checked against `--help`.
 # Options before the command (`runnerctl --socket <path> status`) are checked against the program's own `--help`, and
-# their values skipped. Reads command lines from inline code, `sh`/`shell`/`bash` blocks (but not `cargo` lines),
+# their values skipped; so are a command's options before its subcommand (`runnerctl sizing --since 7d apply`). Reads command lines from inline code, `sh`/`shell`/`bash` blocks (but not `cargo` lines),
 # and the `$ ` lines of `console` blocks; output and prose are not commands.
 # Usage: check-docs-commands.sh <directory with runnerd and runnerctl>, such as target/debug.
 set -eu
@@ -32,6 +32,27 @@ takes_value() {
   printf '%s\n' "$1" | grep -qE -- "(^|[ ,])$2 <"
 }
 
+# leading_options HELP WHERE WORD…: checks the options at the start of the words against HELP, skipping the value
+# after one that takes it. Sets `consumed` to how many words they took, and `problem` when HELP lacks one.
+leading_options() {
+  options_help=$1
+  options_where=$2
+  shift 2
+  consumed=0
+  while [ -z "$problem" ] && [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do
+    word=$1
+    option=${word%%=*}
+    shift
+    consumed=$((consumed + 1))
+    if ! has_option "$options_help" "$option"; then
+      problem="$options_where has no $option"
+    elif [ "$option" = "$word" ] && takes_value "$options_help" "$option" && [ $# -gt 0 ]; then
+      shift
+      consumed=$((consumed + 1))
+    fi
+  done
+}
+
 echo "$lines" | {
   status=0
   while read -r line; do
@@ -42,30 +63,26 @@ echo "$lines" | {
     help=$("$bin/$program" --help)
     where=$program
     problem=
-    # Options before the command, against the program's own help; a value after one is skipped.
-    while [ -z "$problem" ] && [ $# -gt 0 ] && [ "${1#-}" != "$1" ]; do
-      word=$1
-      option=${word%%=*}
-      shift
-      if ! has_option "$help" "$option"; then
-        problem="$where has no $option"
-      elif [ "$option" = "$word" ] && takes_value "$help" "$option" && [ $# -gt 0 ]; then
-        shift
-      fi
-    done
+    # Options before the command, against the program's own help.
+    leading_options "$help" "$where" "$@"
+    shift "$consumed"
     # The command, a subcommand when the command has them, and every option after them.
     if [ -z "$problem" ] && [ $# -gt 0 ] && printf '%s' "$1" | grep -qE '^[a-z][a-z-]*$'; then
       if help=$("$bin/$program" "$1" --help 2>/dev/null); then
         where="$program $1"
         shift
-        # A subcommand is required (`<COMMAND>`) or optional (`[COMMAND]`, as `runnerctl sizing --since 7d`).
-        if [ $# -gt 0 ] && [ "${1#-}" = "$1" ] &&
-          printf '%s\n' "$help" | grep -qE '^Usage: .*(<COMMAND>|\[COMMAND\])'; then
-          if help=$("$bin/$program" "${where#* }" "$1" --help 2>/dev/null); then
-            where="$where $1"
-            shift
-          else
-            problem="$where has no subcommand $1"
+        # A subcommand is required (`<COMMAND>`) or optional (`[COMMAND]`, as `runnerctl sizing --since 7d`), after
+        # the command's own options.
+        if printf '%s\n' "$help" | grep -qE '^Usage: .*(<COMMAND>|\[COMMAND\])'; then
+          leading_options "$help" "$where" "$@"
+          shift "$consumed"
+          if [ -z "$problem" ] && [ $# -gt 0 ] && [ "${1#-}" = "$1" ]; then
+            if help=$("$bin/$program" "${where#* }" "$1" --help 2>/dev/null); then
+              where="$where $1"
+              shift
+            else
+              problem="$where has no subcommand $1"
+            fi
           fi
         fi
       else
