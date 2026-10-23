@@ -754,6 +754,55 @@ async fn jobs_wait_for_cpu_the_budget_lacks_and_their_records_say_what_they_rese
 }
 
 #[tokio::test]
+async fn a_job_with_only_runs_from_before_the_upgrade_reserves_its_profiles_largest_peak_with_its_cpu_recorded()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    // No cpu_overcommit: admission is by memory alone.
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    history(&handle.store, G, 0).await;
+    // `legacy` ran only before the upgrade: its peaks counted page cache, its CPU was recorded as ever.
+    history_of(&handle.store, "legacy", 2000, 3 * G, 0).await;
+    let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    db.execute(
+        "UPDATE runners SET memory_measure = NULL WHERE name LIKE 'earlier-2%'",
+        [],
+    )
+    .unwrap();
+    db.execute("UPDATE jobs SET cpu_average = 1500", [])
+        .unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![QueuedJob {
+        name: "legacy".to_owned(),
+        ..job(1)
+    }];
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    let runner = registered(&github.calls())[0]
+        .trim_start_matches("register ")
+        .to_owned();
+    handle.store.claimed(1, 1, &runner, time::now_ms());
+    handle.store.flush().await;
+    let admission = handle
+        .store
+        .job(1)
+        .await
+        .unwrap()
+        .unwrap()
+        .admission
+        .unwrap();
+    // The builds' 1G largest peak + 15%, as a job never seen: not its 4G cap.
+    assert_eq!(
+        (admission.reserved, admission.basis, admission.cpu),
+        (1280 * M, Basis::ProfileMax { runs: 10 }, None)
+    );
+}
+
+#[tokio::test]
 async fn a_reload_that_sets_cpu_overcommit_admits_by_the_slices_cpus_it_read() {
     let (github, docker, dir) = (
         FakeGithub::default(),

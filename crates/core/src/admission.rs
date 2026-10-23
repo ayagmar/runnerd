@@ -111,8 +111,6 @@ struct Peaks {
     overran_until: u64,
     /// The largest peak of a run past what it reserved, cancelled runs' included.
     overran_peak: u64,
-    /// The runs' CPU averages, of those that have one.
-    cpu: Averages,
 }
 
 impl Peaks {
@@ -141,6 +139,10 @@ pub struct Predictor {
     min_jobs: u32,
     jobs: BTreeMap<Key, Peaks>,
     profiles: BTreeMap<String, Peaks>,
+    /// The CPU averages of the runs that have one, apart from the peaks: a run whose peak says nothing of its
+    /// memory still says what CPU it used, and must not make its job known to memory predictions.
+    cpu_jobs: BTreeMap<Key, Averages>,
+    cpu_profiles: BTreeMap<String, Averages>,
 }
 
 impl Predictor {
@@ -151,6 +153,8 @@ impl Predictor {
             min_jobs: rules.min_jobs,
             jobs: BTreeMap::new(),
             profiles: BTreeMap::new(),
+            cpu_jobs: BTreeMap::new(),
+            cpu_profiles: BTreeMap::new(),
         }
     }
 
@@ -158,35 +162,30 @@ impl Predictor {
     pub fn learn(&mut self, run: &Ran, profile: &str, cap: u64, at: u64) {
         self.mark(run, cap, at);
         let peak = run.memory_peak;
-        let peers = self.profiles.entry(profile.to_owned()).or_default();
-        peers.add(peak);
-        if let Some(average) = run.cpu_average {
-            peers.cpu.add(average, run.succeeded);
-        }
         if let Some(job) = self.jobs.get_mut(&Key::of(run)) {
             job.add(peak);
             job.succeeded += u64::from(run.succeeded);
-            if let Some(average) = run.cpu_average {
-                job.cpu.add(average, run.succeeded);
-            }
         }
+        self.profiles
+            .entry(profile.to_owned())
+            .or_default()
+            .add(peak);
+        self.learn_cpu(run, profile);
     }
 
-    /// Learns only the CPU a run of `profile` used, for a run whose peak says nothing of its memory, as one sampled
-    /// with page cache counted.
+    /// Learns the CPU a finished run of `profile` used, without its peak: as `learn` does, and alone for a run whose
+    /// peak says nothing of its memory, as one sampled with page cache counted.
     pub fn learn_cpu(&mut self, run: &Ran, profile: &str) {
         let Some(average) = run.cpu_average else {
             return;
         };
-        self.profiles
+        self.cpu_profiles
             .entry(profile.to_owned())
             .or_default()
-            .cpu
             .add(average, run.succeeded);
-        self.jobs
+        self.cpu_jobs
             .entry(Key::of(run))
             .or_default()
-            .cpu
             .add(average, run.succeeded);
     }
 
@@ -194,12 +193,11 @@ impl Predictor {
     /// CPU (its CPU time over its run time), by the same fallbacks as memory without the margin. CPU is shared, not
     /// a kill limit, so neither a run at its cap nor copies of the job beside it change it.
     pub fn predict_cpu(&self, key: &Key, profile: &str, cap: u64) -> CpuPrediction {
-        let job = self.jobs.get(key).map(|job| &job.cpu);
+        let job = self.cpu_jobs.get(key);
         let min_jobs = u64::from(self.min_jobs);
         let peers = self
-            .profiles
+            .cpu_profiles
             .get(profile)
-            .map(|peers| &peers.cpu)
             .filter(|peers| peers.runs() >= min_jobs);
         let (cpu, basis) = match (job.filter(|job| job.runs() > 0), peers) {
             (Some(job), _) if job.runs() >= min_jobs => (
