@@ -414,7 +414,7 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
     let text = stdout(&output);
     assert!(!text.contains('\x1b'), "{text:?}");
     assert!(
-        text.contains("6.0G of 16G reserved in runnerd.slice"),
+        text.contains("6G of 16G reserved in runnerd.slice"),
         "{text}"
     );
     let slots: Vec<&str> = text
@@ -643,7 +643,7 @@ fn a_job_shows_the_caps_its_container_ran_with() {
     let output = runnerctl(&socket, &["job", "9001"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert!(
-        stdout(&output).contains("(profile jvm, slot 1, capped at 6.0G and 4.00 cores)"),
+        stdout(&output).contains("(profile jvm, slot 1, capped at 6G and 4 CPUs)"),
         "{}",
         stdout(&output)
     );

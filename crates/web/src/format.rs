@@ -1,5 +1,7 @@
 //! How the dashboard writes numbers and times: sizes as `runnerd.toml` writes them, durations like `1m 12s`, CPU in
-//! cores, dates in UTC. Pure functions of their arguments; the caller passes the current time.
+//! cores (a cap in CPUs), dates in UTC. Pure functions of their arguments; the caller passes the current time. Sizes
+//! and CPU read as in `runnerctl`; durations are a stopwatch (`2h 05m`) whose width holds as it counts, and ages are
+//! rounded (`3 h ago`) for a glance, where the terminal writes both exactly (`2h 5m`, `1h 52m ago`).
 
 use runnerd_core::config::ByteSize;
 

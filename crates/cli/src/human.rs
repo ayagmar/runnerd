@@ -1,6 +1,8 @@
 //! What people read: API types turned into aligned text, with durations like `1m 12s`, binary sizes like `213M`
 //! and colour when the output is a terminal. Pure functions of the API types and the current time; printing is
-//! `output`'s, and nothing here decides anything the daemon has not.
+//! `output`'s, and nothing here decides anything the daemon has not. Sizes and CPU read as on the dashboard; durations
+//! (`2h 5m`) and ages (`1h 52m ago`) stay exact and compact on purpose, where the dashboard writes a stopwatch
+//! (`2h 05m`) and rounds ages (`1 h ago`).
 
 use std::fmt::Write as _;
 
@@ -8,6 +10,7 @@ use runnerd_core::api::{
     CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobState, JobSummary, Status,
     Step,
 };
+use runnerd_core::config::ByteSize;
 
 /// How a piece of text should stand out.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -71,36 +74,19 @@ pub(crate) fn ago(at: u64, now: u64) -> String {
     }
 }
 
-/// Binary sizes as config files write them: `512B`, `20K`, `213M`, `1.2G`.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "one decimal is shown; sizes far beyond 2^52 bytes do not occur"
-)]
+/// Binary sizes as `runnerd.toml` writes them, and as the dashboard shows them: `512B`, `20K`, `213M`, `4.37G`, `9G`.
 pub(crate) fn bytes(n: u64) -> String {
-    const UNITS: [&str; 5] = ["K", "M", "G", "T", "P"];
-    if n < 1024 {
-        return format!("{n}B");
-    }
-    let mut value = n as f64 / 1024.0;
-    let mut unit = 0;
-    while value >= 1024.0 && unit + 1 < UNITS.len() {
-        value /= 1024.0;
-        unit += 1;
-    }
-    if value < 10.0 {
-        format!("{value:.1}{}", UNITS[unit])
-    } else {
-        format!("{value:.0}{}", UNITS[unit])
-    }
+    ByteSize(n).to_string()
 }
 
-/// Millicores as cores: `0.45`, `2.00`.
+/// Millicores as cores, as the dashboard shows them: `0.25`, `1.5`, `12`. Usage is in cores, a cap in CPUs.
 #[allow(
     clippy::cast_precision_loss,
     reason = "millicores of one host are far below 2^52"
 )]
 pub(crate) fn cores(millicores: u64) -> String {
-    format!("{:.2}", millicores as f64 / 1000.0)
+    let text = format!("{:.2}", millicores as f64 / 1000.0);
+    text.trim_end_matches('0').trim_end_matches('.').to_owned()
 }
 
 /// CPU time given in milliseconds: `4.6s` under a minute, then as [`duration`].
@@ -245,7 +231,7 @@ pub(crate) fn ran(job: &JobSummary, now: u64) -> Option<u64> {
 }
 
 const SAMPLED_NOTE: &str =
-    "memory peaks are sampled every few seconds; spikes shorter than that do not show";
+    "memory peaks are sampled every 2 s; spikes shorter than that do not show";
 
 /// The memory line of a status: what is in use of what.
 fn budget_line(status: &Status) -> String {
@@ -409,11 +395,11 @@ fn step_took(step: &Step, now: u64) -> Option<u64> {
     Some(end.saturating_sub(started))
 }
 
-/// `, capped at 6.0G and 4.00 cores`: what the job's container was held to, when the record has it.
+/// `, capped at 6G and 4 CPUs`: what the job's container was held to, when the record has it.
 fn caps(runner: &JobRunner) -> String {
     let caps: Vec<String> = [
         runner.memory_cap.map(bytes),
-        runner.cpu_cap.map(|cpu| format!("{} cores", cores(cpu))),
+        runner.cpu_cap.map(|cpu| format!("{} CPUs", cores(cpu))),
     ]
     .into_iter()
     .flatten()

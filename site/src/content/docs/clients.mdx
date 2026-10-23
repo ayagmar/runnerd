@@ -101,7 +101,7 @@ JOB           REPOSITORY      WORKFLOW / NAME  BRANCH            RESULT   WAITED
 120055991600  halyard/ledger  CI / build       main              success      9s  11m 5s      6.6G  30m 13s ago
 120055991526  halyard/ledger  CI / build       feat/checkout-v2  success     27s  11m 5s      6.6G  1h 52m ago
 120055991489  halyard/ledger  CI / build       main              failure     11s  11m 5s      6.6G  2h 31m ago
-memory peaks are sampled every few seconds; spikes shorter than that do not show
+memory peaks are sampled every 2 s; spikes shorter than that do not show
 older jobs: --before 120055991489
 ```
 
@@ -123,7 +123,7 @@ Finished
   failure  halyard/ledger      CI / build        11m 5s  2h 20m ago
   success  halyard/storefront  E2E / playwright  8m 57s  3h 5m ago
 
-CPU and MEM are the last sample, taken every few seconds. Ctrl-C quits.
+CPU and MEM are the last sample, taken every 2 s. Ctrl-C quits.
 ```
 
 ### A pause while a job runs
@@ -165,7 +165,7 @@ Profiles take the dashboard's colours in config order. `NO_COLOR` leaves bold, d
 
 <Tui
   name="job"
-  label="halyard/ledger's build job at 120 by 30: waited 4s, started in 5s, nine steps on one time axis with integration tests running, memory and CPU against the 9.0G and 8-core caps, and the log, followed."
+  label="halyard/ledger's build job at 120 by 30: waited 4s, started in 5s, nine steps on one time axis with integration tests running, memory and CPU against the 9G and 8-CPU caps, and the log, followed."
 />
 
 | Key | |

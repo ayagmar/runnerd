@@ -1038,7 +1038,7 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
             (Some(memory), Some(cpu), _) => {
                 details.push((
                     4,
-                    format!("capped at {} and {} cores", bytes(memory), cores(cpu)),
+                    format!("capped at {} and {} CPUs", bytes(memory), cores(cpu)),
                 ));
             }
             (_, _, Some(profile)) => details.push((
@@ -1382,7 +1382,7 @@ fn job_charts(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, them
     .render(frame, memory_area, theme);
     Chart {
         title: "CPU",
-        limit_label: format!("cap {}", in_cores(cpu_cap)),
+        limit_label: format!("cap {} CPUs", cores(cpu_cap)),
         values: open.samples.iter().map(|sample| sample.cpu).collect(),
         limit: cpu_cap,
         unit: in_cores,

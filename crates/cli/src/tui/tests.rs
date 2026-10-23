@@ -263,7 +263,7 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
     assert!(overview.contains("jvm · slot 1"), "{overview}");
     assert!(overview.contains("CI / build"), "{overview}");
     assert!(overview.contains("2/3 Unit tests"), "{overview}");
-    assert!(overview.contains("mem 4.0G"), "{overview}");
+    assert!(overview.contains("mem 4G"), "{overview}");
     assert!(overview.contains("1m 31s"), "ran since 1009: {overview}");
 
     // Enter on the selected slot opens its job.
@@ -287,7 +287,7 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
         "–",
         "waiting for a runner 4s",
         "runner starting 5s",
-        "capped at 9.0G and 8.00 cores",
+        "capped at 9G and 8 CPUs",
         "##[group]Unit tests",
     ] {
         assert!(job.contains(expected), "{expected}: {job}");
@@ -937,7 +937,7 @@ fn the_open_job_header_drops_whole_details_to_fit() {
         "run 40018663900",
         "slot jvm",
         "1",
-        "capped at 9.0G and 8.00 cores",
+        "capped at 9G and 8 CPUs",
         "waited 9s",
         "ran 1m 31s",
     ];
@@ -1022,7 +1022,7 @@ fn wide_characters_are_fitted_by_the_cells_they_take() {
         "run 4001".to_owned(),
         "slot jvm".to_owned(),
         "1".to_owned(),
-        "capped at 9.0G and 8.00 cores".to_owned(),
+        "capped at 9G and 8 CPUs".to_owned(),
         "waited 9s".to_owned(),
         "ran 1m 31s".to_owned(),
     ];
@@ -1184,6 +1184,9 @@ async fn a_stream_reopened_at_once_with_no_event_to_resume_after_reads_the_state
     .await
     .expect("the state should be read again after the gap");
     assert_eq!(app.connection, Connection::Live);
-    assert!(screen(&app, 120, 40, false).contains("1.0G of 33G reserved"));
+    assert!(
+        screen(&app, 120, 40, false).contains("1G of 33G reserved"),
+        "the reread status shows"
+    );
     assert_eq!(*streams.lock().unwrap(), [None, None]);
 }
