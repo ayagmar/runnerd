@@ -42,7 +42,7 @@ The installer downloads `runnerd` and `runnerctl` for Linux x86_64 or aarch64, c
 `~/.local/bin` and runs `runnerd doctor`. It never uses sudo. To pick the directory or the release:
 
 ```sh
-curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.4
+curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.5
 ```
 
 For v0.0.3 and earlier, run that release's own `install.sh`. Every release archive, `install.sh` and `sha256.sum` has
@@ -266,7 +266,7 @@ unchanged.
 
 ```console
 $ runnerctl status
-runnerd 0.0.4  4.5G of 33G reserved in runnerd.slice
+runnerd 0.0.5  4.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY      RUNNER                       UP
 jvm         1  busy   halyard/ledger  runnerd-5f2a91c0-jvm-1-k3j9  21s
