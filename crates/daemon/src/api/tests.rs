@@ -225,6 +225,11 @@ async fn start(dir: &Path, owner: Option<u32>) -> Daemon {
     start_with(dir, owner, true, sync_dir, memory_max).await
 }
 
+/// Fails as `systemctl show` does for a slice whose CPUs it cannot report.
+fn unreadable_cpus(_slice: &str) -> std::io::Result<u64> {
+    Err(std::io::Error::other("systemctl show ci.slice failed"))
+}
+
 /// Fails as flushing a directory does on an I/O error.
 fn failing_sync(_dir: &Path) -> std::io::Result<()> {
     Err(std::io::Error::other("input/output error"))
@@ -270,6 +275,7 @@ async fn start_with(
         path: config.clone(),
         text: EXAMPLE.to_owned(),
         memory_max,
+        cpus: unreadable_cpus,
         sync_dir,
     };
     let listener = bind(&socket).await.unwrap();
@@ -1194,4 +1200,47 @@ async fn a_shell_whose_client_goes_away_is_removed() {
     assert!(answer.starts_with("HTTP/1.1 101"), "{answer}");
     drop(stream);
     assert_eq!(closed_shell(&mut daemon).await, "shell-10");
+}
+
+#[tokio::test]
+async fn a_cpu_budget_needs_the_slices_cpus_and_a_config_without_one_never_reads_them() {
+    let dir = Dir::new();
+    // This daemon's slice cannot report its CPUs (`unreadable_cpus`).
+    let mut daemon = start(&dir.0, None).await;
+    let before = std::fs::read(&daemon.config).unwrap();
+    let with_budget = EXAMPLE.replacen(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\ncpu_overcommit = 1.0",
+        1,
+    );
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(with_budget)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let refused: ConfigCheck = serde_json::from_slice(&body(response).await).unwrap();
+    assert!(
+        !refused.valid && refused.message.contains("cannot be read"),
+        "{}",
+        refused.message
+    );
+    assert_eq!(std::fs::read(&daemon.config).unwrap(), before);
+    assert!(daemon.reloads.try_recv().is_err());
+
+    let without = EXAMPLE.replacen("slots = 2", "slots = 1", 1);
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(without)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        daemon.reloads.recv().await.unwrap().host.cpu_overcommit,
+        None
+    );
 }

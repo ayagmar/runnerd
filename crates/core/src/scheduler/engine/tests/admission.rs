@@ -389,7 +389,7 @@ async fn back_under_caps_every_runner_counts_at_its_cap_whatever_it_reserved() {
     let caps = CONFIG
         .replace("slots = 2", "slots = 3")
         .replace("memory = \"4G\"", "memory = \"3G\"");
-    engine.reload(Config::parse(&caps).unwrap(), Some(10 * G));
+    engine.reload(Config::parse(&caps).unwrap(), Some(10 * G), None);
     github.0.lock().unwrap().queued = (1..=3).map(job).collect();
     engine.tick(Shutdown::No).await;
     assert_eq!(
@@ -750,5 +750,38 @@ async fn jobs_wait_for_cpu_the_budget_lacks_and_their_records_say_what_they_rese
             .cpu
             .is_some_and(|cpu| !cpu.held),
         "nothing waits for CPU any more"
+    );
+}
+
+#[tokio::test]
+async fn a_reload_that_sets_cpu_overcommit_admits_by_the_slices_cpus_it_read() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    // Started without a CPU budget, so the slice's CPUs were never read.
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.cpu, None);
+    let with_budget = CONFIG.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\ncpu_overcommit = 1.0",
+    );
+    engine.reload(Config::parse(&with_budget).unwrap(), None, Some(2000));
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    // Under caps each runner reserves the profile's 2 CPUs: one fits.
+    assert_eq!(registered(&github.calls()).len(), 1);
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.cpu,
+        Some(api::CpuBudget {
+            cpus: 2000,
+            budget: 2000,
+            in_use: 2000,
+            held: true,
+        })
     );
 }

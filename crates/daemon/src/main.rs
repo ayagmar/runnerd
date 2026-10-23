@@ -426,7 +426,12 @@ async fn serve(
         .map_err(|error| fail(&format_args!("cannot read {}: {error}", path.display())))?;
     let config = Config::parse(&text).map_err(|error| fail(&error))?;
     let memory_max = slice_memory_max(&config.host.slice).map_err(|error| fail(&error))?;
-    let cpus = slice_cpus(&config.host.slice).map_err(|error| fail(&error))?;
+    // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs.
+    let cpus = if config.host.cpu_overcommit.is_some() {
+        Some(slice_cpus(&config.host.slice).map_err(|error| fail(&error))?)
+    } else {
+        None
+    };
     for warning in config.validate(memory_max).map_err(|error| fail(&error))? {
         warn!("{warning}");
     }
@@ -455,7 +460,7 @@ async fn serve(
             names: Names::new("runnerd"),
             identity,
             memory_max: memory_max.map(|max| max.0),
-            cpus: Some(cpus),
+            cpus,
             store: store.clone(),
             announced,
             paused,
@@ -486,6 +491,7 @@ async fn serve(
         path,
         text,
         memory_max: slice_memory_max,
+        cpus: slice_cpus,
         sync_dir: api::sync_dir,
     };
     let server = tokio::spawn(api::serve(listener, handle, config, async {

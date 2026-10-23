@@ -127,6 +127,8 @@ pub enum Command {
         config: Box<Config>,
         /// The `MemoryMax` of the slice it names.
         memory_max: Option<u64>,
+        /// The CPUs of the slice it names, in millicores, read when it sets `cpu_overcommit`.
+        cpus: Option<u64>,
         /// Writes the file.
         commit: Commit,
         /// Answered once the engine runs with it: with a warning from the commit, or why it did not commit.
@@ -394,11 +396,13 @@ impl Control {
         &self,
         config: Config,
         memory_max: Option<u64>,
+        cpus: Option<u64>,
         commit: Commit,
     ) -> Result<Option<String>, ControlError> {
         self.send(|reply| Command::ReplaceConfig {
             config: Box::new(config),
             memory_max,
+            cpus,
             commit,
             reply,
         })
@@ -453,12 +457,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Command::ReplaceConfig {
                 config,
                 memory_max,
+                cpus,
                 commit,
                 reply,
             } => {
                 let answer = match commit.run().await {
                     Ok(warning) => {
-                        self.reload(*config, memory_max);
+                        self.reload(*config, memory_max, cpus);
                         Ok(warning)
                     }
                     Err(message) => Err(ControlError::Failed(message)),
@@ -712,7 +717,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Runs with a new, validated config. Running jobs keep running: a removed profile, or slots past a lowered
     /// number, stay until their runners finish, and no runner starts in a profile while it has as many as its
     /// slots. Runners started from now on get the new settings.
-    pub(super) fn reload(&mut self, config: Config, memory_max: Option<u64>) {
+    /// `cpus` are the slice's, read when the config sets `cpu_overcommit`.
+    pub(super) fn reload(&mut self, config: Config, memory_max: Option<u64>, cpus: Option<u64>) {
         let mut old = std::mem::replace(&mut self.config, config);
         for (name, profile) in &self.config.profiles {
             let slots = self.slots.entry(name.clone()).or_default();
@@ -751,6 +757,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .retain(|name| profiles.contains_key(name));
         self.isolation = isolation::backend(self.config.host.isolation);
         self.memory_max = memory_max;
+        self.cpus = cpus;
         self.caches
             .send_replace(cache::volumes(&self.names, &self.config));
         info!("reloaded the config");

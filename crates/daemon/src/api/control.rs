@@ -178,6 +178,24 @@ pub(super) async fn replace_config(
     let Some(config) = config else {
         return (StatusCode::UNPROCESSABLE_ENTITY, Json(checked)).into_response();
     };
+    // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs.
+    let cpus = if config.host.cpu_overcommit.is_some() {
+        let (read, slice) = (state.cpus, config.host.slice.clone());
+        match tokio::task::spawn_blocking(move || read(&slice)).await {
+            Ok(Ok(cpus)) => Some(cpus),
+            Ok(Err(io_error)) => {
+                checked.valid = false;
+                checked.message = format!(
+                    "cpu_overcommit needs the slice {}'s CPUs, and they cannot be read: {io_error}",
+                    config.host.slice
+                );
+                return (StatusCode::UNPROCESSABLE_ENTITY, Json(checked)).into_response();
+            }
+            Err(join_error) => return failed(&join_error),
+        }
+    } else {
+        None
+    };
     let database = |config: &Config| config.history.database.clone();
     if Config::parse(&file.text).ok().as_ref().map(database) != Some(database(&config)) {
         checked
@@ -199,7 +217,7 @@ pub(super) async fn replace_config(
     match state
         .handle
         .control
-        .replace_config(config, checked.memory_max, commit)
+        .replace_config(config, checked.memory_max, cpus, commit)
         .await
     {
         Ok(warning) => {

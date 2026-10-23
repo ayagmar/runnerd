@@ -746,27 +746,48 @@ pub fn parse_slice_cpus(properties: &str, host: u64) -> Option<u64> {
     Some(cpus.saturating_mul(1000).min(quota))
 }
 
-/// How many CPUs a set such as `0-3,8,10-11` names.
+/// How many CPUs a set names, as systemd prints it (`0-3 8-11`) or as it is written (`0-3,8,10-11`).
 fn cpu_count(set: &str) -> Option<u64> {
-    set.split(',').try_fold(0u64, |count, range| {
-        let (first, last) = range.split_once('-').unwrap_or((range, range));
-        let (first, last): (u64, u64) = (first.trim().parse().ok()?, last.trim().parse().ok()?);
-        Some(count + last.checked_sub(first)? + 1)
-    })
+    set.split([',', ' '])
+        .filter(|range| !range.is_empty())
+        .try_fold(0u64, |count, range| {
+            let (first, last) = range.split_once('-').unwrap_or((range, range));
+            let (first, last): (u64, u64) = (first.parse().ok()?, last.parse().ok()?);
+            Some(count + last.checked_sub(first)? + 1)
+        })
 }
 
-/// A `CPUQuotaPerSecUSec` such as `2s`, `1.500s` or `800ms` as the millicores it allows.
+/// A `CPUQuotaPerSecUSec` as systemd prints a timespan, such as `800ms`, `2.500000s` or `1min 4s`, as the
+/// millicores it allows: a second of CPU time each second is 1000.
 fn quota_millicores(quota: &str) -> Option<u64> {
-    let (number, per_unit) = [("ms", 1.0), ("us", 0.001), ("µs", 0.001), ("s", 1000.0)]
-        .into_iter()
-        .find_map(|(unit, per_unit)| quota.strip_suffix(unit).map(|number| (number, per_unit)))?;
-    let millicores = number.parse::<f64>().ok()? * per_unit;
+    // Each unit's length in milliseconds, as systemd's `format_timespan` names them.
+    const UNITS: [(&str, f64); 10] = [
+        ("y", 31_557_600_000.0),
+        ("M", 2_629_800_000.0),
+        ("w", 604_800_000.0),
+        ("d", 86_400_000.0),
+        ("h", 3_600_000.0),
+        ("min", 60_000.0),
+        ("s", 1000.0),
+        ("ms", 1.0),
+        ("us", 0.001),
+        ("µs", 0.001),
+    ];
+    let millicores = quota.split_whitespace().try_fold(0.0, |total, part| {
+        let at = part.find(|c: char| !(c.is_ascii_digit() || c == '.'))?;
+        let (number, unit) = part.split_at(at);
+        let per_unit = UNITS
+            .iter()
+            .find_map(|(name, per_unit)| (*name == unit).then_some(*per_unit))?;
+        Some(total + number.parse::<f64>().ok()? * per_unit)
+    })?;
     #[allow(
         clippy::cast_possible_truncation,
         clippy::cast_sign_loss,
         reason = "a quota is a few thousand millicores per CPU, checked finite and not negative first"
     )]
-    (millicores.is_finite() && millicores >= 0.0).then(|| millicores.round() as u64)
+    (!quota.trim().is_empty() && millicores.is_finite() && millicores >= 0.0)
+        .then(|| millicores.round() as u64)
 }
 
 /// Parses a `MemoryMax` value as `systemctl show` prints it: bytes, or `infinity`.

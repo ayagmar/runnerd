@@ -426,5 +426,23 @@ fn a_slices_cpus_are_its_cpu_set_or_the_hosts_less_under_a_lower_quota() {
     );
     assert_eq!(parse_slice_cpus(&show("", "", "800ms"), 32), Some(800));
     assert_eq!(parse_slice_cpus(&show("0-3", "", "8s"), 32), Some(4000));
+    // As systemctl prints disjoint ranges, and a 6400% and a 10000% quota.
+    assert_eq!(
+        parse_slice_cpus(&show("0-3 8-11", "", "infinity"), 32),
+        Some(8000)
+    );
+    assert_eq!(
+        parse_slice_cpus(&show("", "0 2 4-5", "infinity"), 32),
+        Some(4000)
+    );
+    assert_eq!(
+        parse_slice_cpus(&show("", "", "1min 4s"), 128),
+        Some(64_000)
+    );
+    assert_eq!(
+        parse_slice_cpus(&show("", "", "1min 40s"), 128),
+        Some(100_000)
+    );
     assert_eq!(parse_slice_cpus(&show("zero", "", "infinity"), 32), None);
+    assert_eq!(parse_slice_cpus(&show("", "", "4 parsecs"), 32), None);
 }

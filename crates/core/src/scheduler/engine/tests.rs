@@ -1400,7 +1400,7 @@ async fn a_listing_finishes_while_a_long_command_runs() {
             Ok(None)
         });
         control
-            .replace_config(other_repository(), None, commit)
+            .replace_config(other_repository(), None, None, commit)
             .await
     });
     writes.await.unwrap();
@@ -1618,7 +1618,7 @@ async fn a_paused_repository_a_reload_removes_comes_back_active_also_after_a_res
     let dir = TestDir::new("engine");
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
     engine.pause(&Target::All, RunningJobs::Keep).await.unwrap();
-    engine.reload(Config::parse(CONFIG).unwrap(), None);
+    engine.reload(Config::parse(CONFIG).unwrap(), None, None);
     assert!(handle.control.is_paused("o/r"), "o/r stays paused");
     assert_eq!(
         handle.control.set_paused(&one("o/s"), false).await,
@@ -1627,7 +1627,7 @@ async fn a_paused_repository_a_reload_removes_comes_back_active_also_after_a_res
         ))
     );
 
-    engine.reload(Config::parse(&two_repositories()).unwrap(), None);
+    engine.reload(Config::parse(&two_repositories()).unwrap(), None, None);
     assert!(!handle.control.is_paused("o/s"), "o/s comes back active");
     handle.store.flush().await;
     drop(engine);
@@ -1774,7 +1774,7 @@ async fn a_reload_while_a_job_runs_keeps_the_job() {
     let config = CONFIG
         .replace("[profiles.app]", "[profiles.big]")
         .replace("profile = \"app\"", "profile = \"big\"");
-    engine.reload(Config::parse(&config).unwrap(), None);
+    engine.reload(Config::parse(&config).unwrap(), None, None);
     engine.tick(Shutdown::No).await;
     engine.publish();
     assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
@@ -1805,6 +1805,7 @@ async fn fewer_slots_stop_new_starts_but_not_the_running_job() {
     engine.recover().await.unwrap();
     engine.reload(
         Config::parse(&CONFIG.replace("slots = 2", "slots = 1")).unwrap(),
+        None,
         None,
     );
     engine.tick(Shutdown::No).await;
@@ -1956,6 +1957,7 @@ async fn a_running_reseed_keeps_its_memory_when_a_reload_lowers_its_profiles() {
     engine.reload(
         Config::parse(&sized("0G", "1G", "8G")).unwrap(),
         Some(10 << 30),
+        None,
     );
     github.0.lock().unwrap().queued = vec![small_job(3)];
     engine.tick(Shutdown::No).await;
@@ -1983,6 +1985,7 @@ async fn a_running_mirror_keeps_its_memory_when_a_reload_lowers_it() {
     engine.reload(
         Config::parse(&sized("512M", "6G", "3G")).unwrap(),
         Some(10 << 30),
+        None,
     );
     github.0.lock().unwrap().queued = vec![small_job(3)];
     engine.tick(Shutdown::No).await;
@@ -2014,7 +2017,7 @@ async fn a_reload_removes_the_idle_runners_of_a_repository_it_removed_or_moved()
         let (mut engine, _handle, _dir) = engine(&github, &docker);
         engine.recover().await.unwrap();
         engine.tick(Shutdown::No).await;
-        engine.reload(Config::parse(&config).unwrap(), None);
+        engine.reload(Config::parse(&config).unwrap(), None, None);
         engine.tick(Shutdown::No).await;
         assert_eq!(removed(&docker.calls()), ["remove container-1"], "{config}");
         assert!(github.0.lock().unwrap().runners.is_empty(), "{config}");
@@ -2031,6 +2034,7 @@ async fn the_runner_of_a_removed_repository_github_held_busy_is_deleted_once_it_
     engine.tick(Shutdown::No).await;
     engine.reload(
         Config::parse(&CONFIG.replace("name = \"o/r\"", "name = \"o/x\"")).unwrap(),
+        None,
         None,
     );
     // GitHub gives it a job just as it is retired, and still holds it when its container exits.
@@ -2208,6 +2212,7 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
         .command(Command::ReplaceConfig {
             config: Box::new(other_repository()),
             memory_max: None,
+            cpus: None,
             commit: failing_commit(),
             reply,
         })
@@ -2249,7 +2254,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
     until_polled(&github, 1).await;
     let refused = handle
         .control
-        .replace_config(other_repository(), None, failing_commit())
+        .replace_config(other_repository(), None, None, failing_commit())
         .await;
     assert!(matches!(refused, Err(ControlError::Failed(_))));
     // The command is followed by a tick: it runs under the old config and starts nothing for `o/x`.
@@ -2260,6 +2265,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
         .control
         .replace_config(
             other_repository(),
+            None,
             None,
             Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
         )
@@ -2355,7 +2361,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     let with_s = format!(
         "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\"]\n"
     );
-    engine.reload(Config::parse(&with_s).unwrap(), None);
+    engine.reload(Config::parse(&with_s).unwrap(), None, None);
     engine.publish();
     assert_eq!(
         repository_events(&handle, &mut after).await,
@@ -2369,11 +2375,11 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
             }
         }]
     );
-    engine.reload(Config::parse(&with_s).unwrap(), None);
+    engine.reload(Config::parse(&with_s).unwrap(), None, None);
     engine.publish();
     assert_eq!(repository_events(&handle, &mut after).await, []);
 
-    engine.reload(Config::parse(CONFIG).unwrap(), None);
+    engine.reload(Config::parse(CONFIG).unwrap(), None, None);
     engine.publish();
     assert_eq!(
         repository_events(&handle, &mut after).await,
@@ -2446,6 +2452,7 @@ async fn each_change_to_a_profile_is_announced_once_and_a_runner_only_as_its_slo
     engine.reload(
         Config::parse(&CONFIG.replace("slots = 2", "slots = 3")).unwrap(),
         None,
+        None,
     );
     engine.publish();
     assert_eq!(
@@ -2457,6 +2464,7 @@ async fn each_change_to_a_profile_is_announced_once_and_a_runner_only_as_its_slo
     engine.reload(
         Config::parse(&with_small(&CONFIG.replace("slots = 2", "slots = 3"))).unwrap(),
         None,
+        None,
     );
     engine.publish();
     assert_eq!(
@@ -2464,7 +2472,7 @@ async fn each_change_to_a_profile_is_announced_once_and_a_runner_only_as_its_slo
         [profile("small")]
     );
 
-    engine.reload(Config::parse(CONFIG).unwrap(), None);
+    engine.reload(Config::parse(CONFIG).unwrap(), None, None);
     engine.publish();
     // `app`'s third slot is free, so it goes with the reload.
     assert_eq!(
