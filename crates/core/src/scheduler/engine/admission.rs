@@ -2,7 +2,8 @@
 //! largest predicted peak of its repository's queued jobs (`admission::Predictor`, from the job history, read at
 //! most once a minute), since GitHub may give the runner any of them; the cap while the slice's memory has no
 //! recent sample; and nothing starts while the slice is at `admission::HIGH_WATER` percent of its `MemoryMax`. A
-//! job queued twice, or queued or running beside a copy, is predicted with `admission::Copies::Several`.
+//! job queued twice, queued or running beside a copy, or in a repository with a busy runner whose job is not known
+//! yet, is predicted with `admission::Copies::Several`.
 //! It reads the store and the latest host sample; it never writes the config.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -69,15 +70,30 @@ impl Admitting {
     }
 }
 
+/// What the runners run, as far as admission can tell copies of a job apart.
+struct Running {
+    /// The jobs runners are known to run.
+    keys: BTreeSet<Key>,
+    /// The repositories with a runner that took a job not known yet, which may be a copy of any of theirs.
+    unknown: BTreeSet<String>,
+}
+
+impl Running {
+    /// Whether a copy of `key` may be running.
+    fn may_run(&self, key: &Key) -> bool {
+        self.keys.contains(key) || self.unknown.contains(&key.repository)
+    }
+}
+
 /// The largest prediction among `queued`, jobs of `repository` in `profile` under `cap`. A job queued twice, or
-/// with a copy among the `running` jobs, has copies beside it.
+/// that may have a copy `running`, has copies beside it.
 fn largest<'job>(
     predictor: &Predictor,
     repository: &str,
     profile: &str,
     cap: u64,
     queued: impl Iterator<Item = &'job QueuedJob>,
-    running: &BTreeSet<Key>,
+    running: &Running,
     now: u64,
 ) -> Option<Prediction> {
     let keys: Vec<Key> = queued
@@ -90,7 +106,7 @@ fn largest<'job>(
     keys.iter()
         .map(|key| {
             let queued = keys.iter().filter(|other| *other == key).count();
-            let copies = if queued > 1 || running.contains(key) {
+            let copies = if queued > 1 || running.may_run(key) {
                 Copies::Several
             } else {
                 Copies::Alone
@@ -190,7 +206,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let Some((predictor, _)) = &self.measured.predictor else {
             return admitting;
         };
-        let running = self.running_keys();
+        let running = self.running();
         for repository in repositories {
             let Some(cap) = self
                 .config
@@ -262,8 +278,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
-        let running = self.running_keys();
-        // The first runner of each known job, in slot order, goes by its own runs; its copies have it beside them.
+        let running = self.running();
+        // The first runner of each known job, in slot order, goes by its own runs; its copies have it beside them,
+        // as does every runner of a repository with a busy runner whose job is not known yet.
         let mut seen = BTreeSet::new();
         let mut changed = Vec::new();
         let mut raised = Vec::new();
@@ -277,7 +294,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     continue;
                 };
                 let prediction = if let Some(key) = &occupant.key {
-                    let copies = if first {
+                    let copies = if first && !running.unknown.contains(&key.repository) {
                         Copies::Alone
                     } else {
                         Copies::Several
@@ -328,11 +345,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// The jobs the running runners are known to run.
-    fn running_keys(&self) -> BTreeSet<Key> {
-        self.occupied()
-            .filter_map(|(_, occupant)| occupant.key.clone())
-            .collect()
+    /// What the runners run: the jobs they are known to, and the repositories with a busy runner whose job is not
+    /// known yet, as when its log capture failed.
+    fn running(&self) -> Running {
+        Running {
+            keys: self
+                .occupied()
+                .filter_map(|(_, occupant)| occupant.key.clone())
+                .collect(),
+            unknown: self
+                .occupied()
+                .filter(|(_, occupant)| {
+                    (occupant.busy || occupant.job.is_some()) && occupant.key.is_none()
+                })
+                .map(|(_, occupant)| occupant.repository.clone())
+                .collect(),
+        }
     }
 
     /// The waiting runners to stop, as one that waited `IDLE_TIMEOUT` is: those `rereserve` raised for a heavier

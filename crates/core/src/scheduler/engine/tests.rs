@@ -248,8 +248,13 @@ struct DockerState {
     captures: HashMap<(String, String), String>,
     /// What the log capture prints in one container, whatever the position, before `captures`.
     container_captures: HashMap<String, String>,
+    /// What the log capture prints in the runner container of a slot, by the slot number in its name, before
+    /// `captures`: for runners whose names are not known before they start.
+    slot_captures: HashMap<usize, String>,
     /// The capture commands run: container, page, offset.
     captured: Vec<(String, String, String)>,
+    /// How many log captures fail to start next, as when the Engine does not answer.
+    fail_execs: u32,
     /// Images Docker does not have; every other image is present.
     missing_images: BTreeSet<String>,
     /// Every pull fails, as when the registry does not answer.
@@ -430,13 +435,25 @@ impl DockerApi for FakeDocker {
         command: Vec<String>,
     ) -> Result<docker::Output, docker::Error> {
         let mut state = self.0.lock().unwrap();
+        if state.fail_execs > 0 {
+            state.fail_execs -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "exec failed".to_owned(),
+            });
+        }
         let (page, offset) = (command[4].clone(), command[5].clone());
         state
             .captured
             .push((container.to_owned(), page.clone(), offset.clone()));
+        let slot = container
+            .rsplit('-')
+            .nth(1)
+            .and_then(|slot| slot.parse().ok());
         let output = state
             .container_captures
             .get(container)
+            .or_else(|| slot.and_then(|slot| state.slot_captures.get(&slot)))
             .or_else(|| state.captures.get(&(page, offset)))
             .cloned()
             .unwrap_or_default();

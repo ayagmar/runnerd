@@ -23,18 +23,23 @@ margin (`Basis::Job` with `peak: largest`) when:
 
 - at least 2 of its runs (`admission::OWN_RUNS`) completed with success; failed and lost runs still count for its
   largest peak, not for this;
-- and no other copy of it is queued or running (`admission::Copies`). Copies queued together, and a copy queued
-  while another runs, take the old rule. Of copies running at once, the first in slot order goes by its own runs
-  once its job is known, and the others by the old rule.
+- and no other copy of it is queued or may be running (`admission::Copies`). Copies queued together, and a copy
+  queued while another runs, take the old rule. A busy runner of the same repository whose job is not known yet,
+  because its log capture has not reported it or failed, may run a copy: while there is one, every job of that
+  repository takes the old rule, running ones included. Of copies running at once, all known, the first in slot
+  order goes by its own runs and the others by the old rule.
 
 Otherwise the old rule holds: the larger of the job's largest peak and the profile's p95, plus the margin. Below
 `min_jobs`, the p95 of a job's runs is their largest anyway (nearest rank, under 20 runs). The rules for no runs,
 runs at the cap, runs past what they reserved and the high-water mark are unchanged, as is the default
 `min_jobs = 10`.
 
-So at most one copy of a young job reserves less than the old rule would. The others reserve as much as before,
-and whatever that one copy goes past its prediction is bounded by its cap and counted against the next starts from
-its next sample.
+This is not a guarantee that at most one copy reserves less than the old rule would. Between two ticks GitHub may
+give a waiting runner a copy, as 0033 notes, and a second copy may queue before that runner shows busy, so two
+runners can start on the own-runs prediction. A busy runner whose job is unknown is raised for a heavier job only
+while one is queued; with the queue empty, both keep what they reserved until their jobs are known, counted at
+what they use from their next samples. Whatever a copy goes past its prediction is bounded by its cap. The rule
+narrows the risk of a burst; it does not rule out the slice filling.
 
 On the wire, the new case is the `job` basis with an added `peak` field, written only when it is `largest`. A
 reader released before this ignores the field and shows the reservation as "the p95 peak of N runs".

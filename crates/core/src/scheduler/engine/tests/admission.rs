@@ -498,6 +498,9 @@ async fn two_light_runs_then_a_burst_of_heavy_copies_with_warm_up_never_overlap_
     )
     .await;
     engine.recover().await.unwrap();
+    // The runners of slots 1 and 2 take builds 1 and 2.
+    docker.0.lock().unwrap().slot_captures =
+        HashMap::from([(1, "@@job 1 1\n".to_owned()), (2, "@@job 2 1\n".to_owned())]);
     // The cache is gone: four builds queue at once, each needing 3G once warmed up.
     github.0.lock().unwrap().queued = (1..=4).map(job).collect();
     slice_at(&handle.store, G);
@@ -505,17 +508,12 @@ async fn two_light_runs_then_a_burst_of_heavy_copies_with_warm_up_never_overlap_
     // Copies of a job queued together reserve 3G + 15%, rounded up to 3.5G: two fit the 10G slice, not four at
     // 200M + 15%, rounded up to 256M.
     assert_eq!(registered(&github.calls()).len(), 2);
-    // Still warming up at 300M, the two learn their jobs. The first copy reserves its own 256M, the second 3.5G, and
-    // the copies still queued 3.5G: one more fits, not two.
-    {
-        let mut state = docker.0.lock().unwrap();
-        let containers: Vec<String> = state.containers.iter().map(|c| c.name.clone()).collect();
-        for (container, job) in containers.iter().zip([1, 2]) {
-            state
-                .container_captures
-                .insert(container.clone(), format!("@@job {job} 1\n"));
-        }
-    }
+    // Their captures report their jobs.
+    github.0.lock().unwrap().queued = Vec::new();
+    slice_at(&handle.store, G);
+    engine.tick(Shutdown::No).await;
+    // Still warming up at 300M, both busy with known jobs. The first copy reserves its own 256M, the second 3.5G,
+    // and the copies still queued 3.5G: one more fits, not two.
     {
         let mut state = github.0.lock().unwrap();
         for runner in &mut state.runners {
@@ -538,4 +536,52 @@ async fn two_light_runs_then_a_burst_of_heavy_copies_with_warm_up_never_overlap_
         started * 3 * G <= 10 * G,
         "{started} copies at 3G fit the 10G slice"
     );
+}
+
+#[tokio::test]
+async fn copies_arriving_one_by_one_beside_busy_runners_whose_job_is_unknown_take_their_profiles_p95()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    // The profile's p95 is 3G; the build's two runs hit a warm cache and peaked at 200M.
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    runs_of(
+        &handle.store,
+        "build",
+        1000,
+        2,
+        200 * M,
+        0,
+        Ended::Succeeded,
+    )
+    .await;
+    engine.recover().await.unwrap();
+    // No log capture tells which job a runner took.
+    docker.0.lock().unwrap().fail_execs = u32::MAX;
+    let mut started = Vec::new();
+    for copy in 1..=4 {
+        // One build queues per poll; the runners before took theirs and warm up at 300M, sampled just now.
+        {
+            let mut state = github.0.lock().unwrap();
+            for runner in &mut state.runners {
+                (runner.status, runner.busy) = ("online".to_owned(), true);
+            }
+            state.queued = vec![job(copy)];
+        }
+        runners_use(&github, &handle.store, 300 * M);
+        slice_at(&handle.store, G);
+        engine.tick(Shutdown::No).await;
+        started.push(registered(&github.calls()).len());
+    }
+    // The first reserves 256M, alone. The second may be a copy of the busy runner's build, so it reserves
+    // 3G + 15%, rounded up to 3.5G, and so does the first once a build queues beside it: the 10G slice holds no
+    // third, where 256M each would let all four start.
+    assert_eq!(started, [1, 2, 2, 2]);
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 2 * 3584 * M);
 }
