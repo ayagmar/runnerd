@@ -15,23 +15,16 @@ runnerd init halyard/ledger halyard/storefront
 
 `runnerd init` writes two files and changes nothing else:
 
-- `~/.config/runnerd/runnerd.toml`: the repositories, and one profile sized from the host's memory and CPUs (or the
-  slice's `MemoryMax`, if the slice exists), so `runnerd check-config` passes;
+- `~/.config/runnerd/runnerd.toml`: the repositories, and one profile sized to three quarters of the host's memory
+  (or the slice's `MemoryMax` if that is smaller) and its CPUs, so `runnerd check-config` passes;
 - `~/.config/systemd/user/runnerd.service`: a user unit running `runnerd serve` with that config.
 
 It then runs `runnerd doctor` and prints what is left as commands. It prints the ones that need root and never runs
-them; on a fresh host they are usually the slice and Sysbox:
-
-```sh
-sudo tee /etc/systemd/system/runnerd.slice >/dev/null <<'EOF'
-[Slice]
-MemoryMax=46G
-EOF
-sudo systemctl daemon-reload
-```
+them; on a fresh host they are usually the slice, sized for this host, and Sysbox. Run the commands your `init`
+printed, not a copy from elsewhere.
 
 Then build the runner image (published images are on the way; `init` will use them once they ship) and start the
-service:
+service. The image is built for linux/amd64 only today, so on aarch64 runners do not start yet.
 
 ```sh
 docker build --target base -t runnerd-runner:base https://github.com/ayagmar/runnerd.git#v0.0.4:image
@@ -87,7 +80,7 @@ The unit `runnerd init` writes:
 ```ini
 [Service]
 Type=exec
-ExecStart=/home/dana/.local/bin/runnerd serve --config /home/dana/.config/runnerd/runnerd.toml
+ExecStart="/home/dana/.local/bin/runnerd" serve --config "/home/dana/.config/runnerd/runnerd.toml"
 Restart=on-failure
 RestartSec=10
 
