@@ -51,6 +51,34 @@ A slot is one concurrent job of a profile. Each job gets a new container, but th
 | pnpm store, Maven repository | shared by all slots, emptied above `max_size` when no job runs |
 | Docker Hub mirror | runs while any runner does |
 
+## Records of failed jobs
+
+With `record_failures` on a profile ([Configuration](../configuration/#records-of-failed-jobs)), a failed job's stopped runner is committed to an image, `runnerd-record:<job>`, before it is removed. `runnerctl shell <job>` starts a container from it and opens bash in the job's workspace, after printing the step that failed and what it ran:
+
+```console wrap=false
+$ runnerctl shell 120055991489
+runnerd: the record of job 120055991489 of halyard/ledger, CI / build
+It failed at step 5: Unit tests (exit code 1)
+Its log shows it ran:
+    ./gradlew test --no-daemon
+    shell: /usr/bin/bash -e {0}
+You are in /home/runner/_work/ledger/ledger, as the job left it. Not kept: the job's Docker containers and images, and what it changed in ~/.cache, the tool cache and the Android SDK, which show the profile's snapshot. Exit to remove this container.
+runner@4be1c0d2a7e9:~/_work/ledger/ledger$
+```
+
+`--step 3` shows step 3 instead. The terminal goes over the API socket. The shell's container counts against the budget with the profile's memory cap, and is refused when the budget cannot hold it. It goes when the shell exits or the client goes away.
+
+| What | In a record |
+|---|---|
+| the workspace, `_work/<repository>`, with build output and test reports | yes |
+| the runner's `_diag` logs, secrets masked as on GitHub | yes |
+| the runner's registration and credentials, the JIT config, `_work/_temp` (step scripts), the token `actions/checkout` puts in `.git/config` | never |
+| the slot's caches, tool cache, Android SDK, and the job's Docker images | no; volumes, which a shell sees as the profile's snapshot |
+
+The runner image deletes the secret files when the runner exits, and runnerd refuses to keep a container whose changes still hold one. What a job writes into its workspace itself stays: a step that saves a secret to a file leaves it in the record.
+
+Records take disk: committing one takes a second or two, and it takes about twice what the job wrote outside volumes, since Docker keeps the layer packed and unpacked. `runnerctl records` lists them with their limits; `runnerctl records rm <job>`, `--all` or `--older-than 2d` removes them. The job history keeps, after a record is gone, when it was made, its size, and why it went (`count`, `size`, `age` or `user`).
+
 ## Job history
 
 runnerd records every job its runners may run in a SQLite database, `$XDG_STATE_HOME/runnerd/runnerd.db` by default. `[history]` in the config changes the path and how long each part is kept. For each job:
@@ -96,6 +124,9 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `GET /v1/host/samples?since=` | the slice's CPU and memory, the last 24 hours at most |
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`), 744 buckets back at most: counts, queue and run time, CPU, memory, mirror bytes |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
+| `GET /v1/records` | every record of a failed job, oldest first, with the limits and the jobs whose record has a shell open |
+| `DELETE /v1/records/{job}`, `DELETE /v1/records?all=true`, `DELETE /v1/records?older_than=2d` | the jobs whose records went and the disk they took; records with a shell open stay, and removing one by its job is refused with `409` |
+| `POST /v1/records/{job}/shell?step=&cols=&rows=` with `Connection: Upgrade`, `Upgrade: runnerd-tty` | `101`, then the connection is the shell's terminal, raw bytes both ways; `409` when the budget is full |
 | `GET /v1/events?job=&logs=` | server-sent events, below |
 
 ```sh
@@ -115,6 +146,7 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 | `repository.changed` | paused or resumed, its queue changed, or a reload added or changed it |
 | `repository.removed` | a reload removed it |
 | `budget.changed`, `cache.reseeded` | the budget changed; a profile has a new snapshot |
+| `record.created`, `record.deleted` | a failed job's runner was kept as a record; a record went, and why |
 | `job.sample`, `host.sample`, `log.line` | live: a sample, or a log line with `logs=true` |
 
 Every event but the live ones has an ID: send the last one seen as `Last-Event-ID` and the stream resumes after it, across daemon restarts. Live events are not stored; a client that missed some reads the job's samples or log.

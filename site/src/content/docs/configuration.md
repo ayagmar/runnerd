@@ -51,6 +51,7 @@ labels = ["self-hosted", "linux", "x64", "node"]
 | `image` | the runner image the profile runs; see [below](#runner-images) |
 | `cpus`, `memory` | each runner's caps |
 | `slots` | how many runners of the profile may run at once |
+| `record_failures` | keep each failed job's runner as a [record](#records-of-failed-jobs), to open a shell in; off by default |
 | `labels` | what the repository's workflows ask for in `runs-on` |
 
 Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them.
@@ -71,6 +72,27 @@ docker build --target jvm -t runnerd-runner:jvm image
 ```
 
 Rebuilds install the same versions: Ubuntu packages come from one snapshot date, and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)). [Install](../install/#verify-a-release) shows how to check where a published image came from.
+
+## Records of failed jobs
+
+A profile with `record_failures = true` keeps the runner of each failed job as a Docker image, so `runnerctl shell <job>` can open a shell where the job failed ([Running](../running/#records-of-failed-jobs)). `[records]` bounds them; these are the defaults:
+
+```toml
+[profiles.jvm]
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.6"
+cpus = 8
+memory = "9G"
+slots = 2
+record_failures = true
+
+[records]
+max_total = "20G"   # all records together
+max_count = 10
+max_age = "7d"
+min_free = "10G"    # left free on Docker's disk after a new record
+```
+
+A new record pushes out the oldest past `max_count` or `max_total`; without room under `min_free`, the job gets no record, and its page says why. `runnerd doctor` warns once the records take 80% of `max_total`.
 
 ## The budget check
 

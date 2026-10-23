@@ -2,7 +2,7 @@
 
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development: the daemon schedules runners, records every job, serves a JSON API and a web dashboard, and `runnerctl` reads and controls it from a terminal.
+It is in early development: the daemon schedules runners, records every job, can keep a failed job's runner to open a shell in, serves a JSON API and a web dashboard, and `runnerctl` reads and controls it from a terminal.
 
 ## First run
 
@@ -81,8 +81,8 @@ cargo binstall runnerd runnerd-cli
 The site, <https://ayagmar.github.io/runnerd/>, has the guides:
 
 - [Install](https://ayagmar.github.io/runnerd/install/): requirements, `runnerd init`'s output, verifying a release.
-- [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, profiles, runner images, the budget check, isolation.
-- [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled and caches kept warm, the job history, and the JSON API and its events.
+- [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, profiles, runner images, records of failed jobs, the budget check, isolation.
+- [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled and caches kept warm, records of failed jobs and their shells, the job history, and the JSON API and its events.
 - [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/): the web dashboard, every `runnerctl` command, and `runnerctl tui` with its keys.
 
 [ARCHITECTURE.md](https://github.com/ayagmar/runnerd/blob/main/ARCHITECTURE.md) says where the code lives and [docs/adr](https://github.com/ayagmar/runnerd/blob/main/docs/adr/README.md) why.

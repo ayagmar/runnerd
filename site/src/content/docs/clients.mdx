@@ -42,7 +42,7 @@ Below the slots: the slice over the last half hour, pause and resume per reposit
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-Below the steps: CPU and memory against the profile's caps, and the log.
+Below the steps: CPU and memory against the profile's caps, and the log. A failed job kept as a [record](../running/#records-of-failed-jobs) shows the `runnerctl shell` command that opens a shell in it, with a copy button.
 
 ### History
 
@@ -58,7 +58,7 @@ Below the charts: every job, filtered by repository and outcome.
 
 | Page | Shows |
 |---|---|
-| Caches | each volume, its bound and its size over 30 days; reseed a snapshot or empty a cache |
+| Caches | each volume, its bound and its size over 30 days; reseed a snapshot or empty a cache; the records of failed jobs, removed one at a time or all at once |
 | Config | `runnerd.toml` in an editor that checks it against `MemoryMax` as you type, saves and reloads only when it fits; the doctor's checks |
 
 ## runnerctl
@@ -94,6 +94,8 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl pause <repo> [--force]`, `resume <repo>` | the repository gets no new runners, also after a restart; refused while it runs a job, naming the job, unless `--force` cancels the job's run and removes its runner |
 | `runnerctl pause --all [--force]`, `resume --all` | the same for every repository; refused while any runs a job, pausing none |
 | `runnerctl reseed <profile>` | makes slot 1's layers the profile's snapshot once its slots are free, and waits for it (`--no-wait`) |
+| `runnerctl shell <job> [--step 3]` | a shell in a failed job's [record](../running/#records-of-failed-jobs), in its workspace; exiting removes its container |
+| `runnerctl records`, `records rm <job>` | the records of failed jobs with their sizes and limits; removes one, or `--all`, or those `--older-than 2d` |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
@@ -166,6 +168,7 @@ The dashboard, for a host you reach over SSH. It shows what the web dashboard do
 - a card per slot with the job, its step, run time, and memory and CPU sparklines;
 - the slice's memory and CPU, the repositories, and the queued and latest jobs;
 - the history, filtered by outcome and repository;
+- the records of failed jobs, with the command that opens a shell in each;
 - a job: its timeline, its steps on one time axis, memory and CPU against its container's caps, and its log, followed while the job runs.
 
 ```sh
@@ -186,13 +189,14 @@ Profiles take the dashboard's colours in config order, mint first and pink secon
 
 | Key | |
 |---|---|
-| `1` `2` | overview, history |
+| `1` `2` `3` | overview, history, records |
 | `tab`, `j` `k` (or arrows) | the overview's pane (slots, repositories, latest jobs); move in it, or scroll a log |
 | `enter`, `esc` | open the selected job; back |
 | `p` `r` | pause or resume the selected repository; a pause refused while it runs a job asks before forcing it |
 | `P` `U` | pause or resume every repository, asking the same way |
 | `R` | reseed the selected slot's profile |
 | `c` `s` `]` `[` | history: cycle the outcome and repository filters, next and previous page |
+| `d` `D` | records: remove the selected record, or all of them, after `y` |
 | `G` `g` | follow the log, or go to its start |
 | `?` `q` | all keys; quit |
 | `ctrl-z` | suspend; `fg` brings it back, redrawn |
