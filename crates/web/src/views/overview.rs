@@ -24,6 +24,8 @@ const HOST_MARGIN: u64 = 5 * 60;
 const SPARK_WINDOW: u64 = 5 * 60;
 /// Latest jobs listed.
 const RECENT: u32 = 8;
+/// Queued jobs listed, the oldest; the history lists the rest.
+const QUEUED_SHOWN: usize = 8;
 
 /// Everything the overview shows.
 #[derive(Debug, Clone)]
@@ -862,16 +864,44 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
     }
 }
 
-/// The latest jobs, any state. A running job's row lights up its slot.
+/// The jobs: those queued, oldest first, then the latest ones, any state. A queued job's row opens it on GitHub and
+/// lights up its repository; a running job's row lights up its slot.
 pub(crate) fn recent(overview: &Overview) -> Markup {
+    let queued = &overview.status.queued;
+    let more_queued = queued.len().saturating_sub(QUEUED_SHOWN);
+    // The history has queued jobs too; the status's queue shows them.
+    let latest = overview
+        .recent
+        .iter()
+        .filter(|job| !queued.iter().any(|known| known.id == job.id));
     html! {
         section #recent .recent aria-labelledby="recent-title" {
             h2 #recent-title .visually-hidden { "Latest jobs" }
-            @if overview.recent.is_empty() {
+            @if overview.recent.is_empty() && queued.is_empty() {
                 p.muted { "No jobs yet. Jobs show here once a runner of this machine takes one." }
             } @else {
                 ul.job-list {
-                    @for job in &overview.recent {
+                    @for job in queued.iter().take(QUEUED_SHOWN) {
+                        @let repository = js(&job.repository);
+                        @let enter = format!("$_repo = {repository}");
+                        li.queued data-class:linked=(format!("$_repo == {repository}"))
+                            data-on:pointerenter=(enter) data-on:focusin=(enter)
+                            data-on:pointerleave="evt.pointerType == 'mouse' && ($_repo = '')"
+                            data-on:focusout="$_repo = ''" {
+                            a href=(job.url.clone().unwrap_or_else(|| format!("/jobs/{}", job.id))) {
+                                span.badge.queued { "queued" }
+                                (job_name(job.workflow.as_deref(), &job.name))
+                                span.repo { (job.repository) }
+                                @if job.queued_at > 0 {
+                                    span.when { (time_ago(job.queued_at, overview.now)) }
+                                }
+                            }
+                        }
+                    }
+                    @if more_queued > 0 {
+                        li.all { a href="/history?outcome=queued" { (more_queued) " more queued" } }
+                    }
+                    @for job in latest {
                         @let running = job.runner.as_ref().filter(|_| job.state == JobState::Running);
                         @let key = running.map(|runner| js(&slot_id(&runner.profile, runner.slot)));
                         @let linked = match &key {
@@ -885,7 +915,7 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
                             data-on:focusout=[enter.as_ref().map(|_| "$_slot = ''")] {
                             a href=(format!("/jobs/{}", job.id)) {
                                 (badge(job))
-                                span.job-name { (job.name) }
+                                (job_name(job.workflow.as_deref(), &job.name))
                                 span.repo { (job.repository) }
                                 span.when { (time_ago(job.timeline.queued_at, overview.now)) }
                             }
@@ -894,6 +924,16 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
                     li.all { a href="/history" { "All history" } }
                 }
             }
+        }
+    }
+}
+
+/// A job's name after its workflow's, which reads quieter: `CI / build`, as every client names a job.
+fn job_name(workflow: Option<&str>, name: &str) -> Markup {
+    html! {
+        span.job-name {
+            @if let Some(workflow) = workflow { span.workflow { (workflow) " / " } }
+            (name)
         }
     }
 }

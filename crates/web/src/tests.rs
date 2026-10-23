@@ -35,7 +35,7 @@ use axum::body::Bytes;
 use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
-use runnerd_core::api::{Event, EventEnvelope, HostSample, Sample, SeedMemory};
+use runnerd_core::api::{Event, EventEnvelope, HostSample, JobState, Sample, SeedMemory};
 
 use crate::views::{repository_id, slot_id};
 
@@ -434,6 +434,44 @@ async fn every_page_renders_from_the_daemons_data() {
 
     let missing = dashboard.page(&cookie, "/jobs/7").await;
     assert_eq!(missing.status, StatusCode::NOT_FOUND);
+}
+
+#[tokio::test]
+async fn queued_jobs_lead_the_overviews_jobs_oldest_first_once_each_linked_to_github_and_their_repository()
+ {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let mut older = fixtures.status.queued[0].clone();
+        older.id -= 5;
+        older.name = "lint".to_owned();
+        older.url = Some("https://github.com/halyard/storefront/actions/runs/1/job/2".to_owned());
+        older.queued_at -= 300;
+        fixtures.status.queued.insert(0, older);
+        // The history keeps the newer one queued too.
+        let mut recorded = fixtures.jobs[0].clone();
+        recorded.summary.id = fixtures.status.queued[1].id;
+        recorded.summary.state = JobState::Queued;
+        fixtures.jobs.insert(0, recorded);
+    }
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await;
+    let jobs = &overview.body[overview.body.find(r#"id="recent""#).unwrap()..];
+    let lint = jobs.find("https://github.com/halyard/storefront/actions/runs/1/job/2");
+    let visual_diff = jobs.find("/job/120055991710");
+    assert!(
+        lint.is_some() && lint < visual_diff,
+        "the oldest queued job comes first: {jobs}"
+    );
+    assert_eq!(
+        jobs.matches("120055991710").count(),
+        1,
+        "a queued job the history also has shows once: {jobs}"
+    );
+    assert!(
+        jobs.contains(r#"<li class="queued" data-class:linked="$_repo == 'halyard/storefront'""#),
+        "a queued row lights up with its repository: {jobs}"
+    );
 }
 
 #[tokio::test]
@@ -1416,8 +1454,7 @@ async fn pausing_every_repository_while_jobs_run_asks_first_naming_them_and_canc
         .jobs
         .iter()
         .find(|job| {
-            job.summary.state == runnerd_core::api::JobState::Running
-                && job.summary.repository == "halyard/storefront"
+            job.summary.state == JobState::Running && job.summary.repository == "halyard/storefront"
         })
         .unwrap()
         .summary

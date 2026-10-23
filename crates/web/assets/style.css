@@ -1007,6 +1007,17 @@ html {
   white-space: nowrap;
 }
 
+.job-list .workflow {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+/* A queued job: an outline, as a free slot's card is, since nothing holds it yet. */
+.job-list > li.queued a {
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+}
+
 .job-list .repo {
   grid-column: 2;
 }
