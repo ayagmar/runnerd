@@ -2,6 +2,8 @@
 //! a struct of what it shows, a `load` that reads it from the daemon, and pure render functions: one per region a
 //! live update replaces by its `id`. Views never write to the daemon; `crate::actions` does.
 
+use std::fmt::Write as _;
+
 use maud::{DOCTYPE, Markup, PreEscaped, html};
 use runnerd_core::api::{JobState, JobSummary, Status};
 
@@ -236,9 +238,16 @@ pub(crate) fn js(text: &str) -> String {
     literal
 }
 
-/// The id of a slot's card, which its budget block and its job's rows point at: `jvm` slot 1 → `slot-jvm-1`.
+/// The id of a slot's card, which its budget block and its job's rows point at: `jvm` slot 1 → `slot-6a766d-1`.
+/// The profile's name is in hex, so no two names share an id, as `node-js` and `node_js` would as a slug.
 pub(crate) fn slot_id(profile: &str, slot: usize) -> String {
-    format!("slot-{}-{slot}", slug(profile))
+    let mut id = String::with_capacity(8 + profile.len() * 2);
+    id.push_str("slot-");
+    for byte in profile.bytes() {
+        let _ = write!(id, "{byte:02x}");
+    }
+    let _ = write!(id, "-{slot}");
+    id
 }
 
 /// The path of a repository's row, for the ids live updates use: `halyard/ledger` → `halyard-ledger`.
@@ -251,6 +260,12 @@ pub(crate) fn slug(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn profiles_whose_slugs_match_get_their_own_slot_ids() {
+        assert_ne!(slot_id("node-js", 1), slot_id("node_js", 1));
+        assert_ne!(slot_id("a", 11), slot_id("a1", 1));
+    }
 
     #[test]
     fn a_quote_in_a_job_name_stays_inside_its_expression_string() {

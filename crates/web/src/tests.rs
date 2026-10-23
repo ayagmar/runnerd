@@ -409,6 +409,32 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
 }
 
 #[tokio::test]
+async fn profiles_whose_names_differ_only_in_punctuation_keep_their_own_slots() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        fixtures.status.profiles[0].name = "node-js".to_owned();
+        fixtures.status.profiles[1].name = "node_js".to_owned();
+    }
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let dash = slot_id("node-js", 1);
+    let underscore = slot_id("node_js", 1);
+    assert_ne!(dash, underscore);
+    for id in [&dash, &underscore] {
+        assert_eq!(
+            overview.matches(&format!(r#"id="{id}""#)).count(),
+            1,
+            "one card has the id {id}"
+        );
+        assert!(
+            selector_of(&overview, id, "<a ").contains(&format!(r##"href="#{id}""##)),
+            "the block for {id} points at its own card"
+        );
+    }
+}
+
+#[tokio::test]
 async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
