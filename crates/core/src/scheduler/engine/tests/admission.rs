@@ -250,14 +250,23 @@ async fn a_kill_for_memory_from_before_the_upgrade_keeps_its_job_on_its_cap() {
         2,
         "builds reserve their 4G cap, not the lints' 1.25G"
     );
-    let reserved: Vec<String> = rusqlite::Connection::open(dir.0.join("history.db"))
-        .unwrap()
-        .prepare("SELECT admission FROM runners WHERE name NOT LIKE 'earlier-%'")
-        .unwrap()
-        .query_map([], |row| row.get(0))
-        .unwrap()
-        .collect::<Result<_, _>>()
-        .unwrap();
+    // The start tasks write the runners' rows after the tick returns.
+    let mut reserved: Vec<String> = Vec::new();
+    for _ in 0..200 {
+        handle.store.flush().await;
+        reserved = rusqlite::Connection::open(dir.0.join("history.db"))
+            .unwrap()
+            .prepare("SELECT admission FROM runners WHERE name NOT LIKE 'earlier-%'")
+            .unwrap()
+            .query_map([], |row| row.get(0))
+            .unwrap()
+            .collect::<Result<_, _>>()
+            .unwrap();
+        if reserved.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     // Until a week after the kill, as without the upgrade; the history's times are a few ms older than this.
     let expires =
         (time::now_ms() - 3600 * 1000 + 60_000 + crate::admission::UNPREDICTABLE_FOR) / 1000;
