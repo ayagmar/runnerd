@@ -177,6 +177,10 @@ enum Write {
         runner: String,
         at: u64,
     },
+    RunnersGone {
+        running: Vec<String>,
+        at: u64,
+    },
     Claimed {
         job: u64,
         run_id: u64,
@@ -320,6 +324,12 @@ impl Store {
             runner: runner.to_owned(),
             at,
         });
+    }
+
+    /// Records every runner the history holds open, except the `running` ones, removed at `at` (ms): what recovery
+    /// found gone, so it stops counting as holding a slot.
+    pub fn runners_gone(&self, running: Vec<String>, at: u64) {
+        self.send(Write::RunnersGone { running, at });
     }
 
     /// Records that a runner took a job at `at` (ms).
