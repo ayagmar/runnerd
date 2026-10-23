@@ -4,8 +4,12 @@ description = "The web dashboard runnerd serves on loopback: a client of the dae
 version.workspace = true
 edition.workspace = true
 rust-version.workspace = true
-license.workspace = true
+# The vendored font is under the SIL Open Font License (assets/fonts/OFL.txt).
+license = "MIT AND OFL-1.1"
 repository.workspace = true
+readme.workspace = true
+keywords = ["github-actions", "ci", "runner", "dashboard"]
+categories = ["development-tools", "web-programming"]
 
 [dependencies]
 axum.workspace = true

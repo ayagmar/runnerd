@@ -8,6 +8,7 @@ edition = "2024"
 rust-version = "1.99"
 license = "MIT"
 repository = "https://github.com/ayagmar/runnerd"
+readme = "README.md"
 
 [workspace.dependencies]
 runnerd-core = { path = "crates/core", version = "0.0.3", default-features = false }

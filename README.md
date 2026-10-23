@@ -27,6 +27,13 @@ sh install.sh
 gh attestation verify runnerd-x86_64-unknown-linux-musl.tar.xz -R ayagmar/runnerd
 ```
 
+From crates.io, the daemon is the crate `runnerd` and `runnerctl` is in `runnerd-cli`, so install both. `cargo install` builds them with Rust 1.99 or later; [`cargo binstall`](https://github.com/cargo-bins/cargo-binstall) downloads the same release archives as `install.sh` instead:
+
+```sh
+cargo install --locked runnerd runnerd-cli
+cargo binstall runnerd runnerd-cli
+```
+
 ## Requirements
 
 - Linux with cgroup v2, and Docker using the systemd cgroup driver.
