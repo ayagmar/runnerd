@@ -1,4 +1,4 @@
-# 0033. Desktop app: a tray client and the installable dashboard, not a GUI toolkit yet
+# 0034. Desktop app: a tray client and the installable dashboard, not a GUI toolkit yet
 
 Status: **Proposed** (2026-10-23). If accepted, it supersedes [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md).
 

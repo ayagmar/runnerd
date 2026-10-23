@@ -38,4 +38,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core |
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets |
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check |
-| [0033](0033-desktop-framework.md) | Desktop app: a tray client and the installable dashboard, not a GUI toolkit yet (Proposed; would supersede 0004) |
+| [0034](0034-desktop-framework.md) | Desktop app: a tray client and the installable dashboard, not a GUI toolkit yet (Proposed; would supersede 0004) |
