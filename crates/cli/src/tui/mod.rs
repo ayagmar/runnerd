@@ -1,8 +1,8 @@
 //! `runnerctl tui`: a full-screen dashboard of the daemon, for hosts reached over SSH. A pure API client like the
 //! rest of `runnerctl`: a snapshot from `/v1/*`, then `/v1/events`. This module runs the loop: it feeds keys, events
 //! and answers to `app`'s reducer, makes the requests the reducer asks for, and draws with `draw` after each batch
-//! and every second. It decides nothing itself. Whatever ends or stops it (`q`, SIGINT, SIGTERM, SIGHUP, Ctrl-Z,
-//! SIGTSTP) gives the terminal back first; SIGCONT takes it again.
+//! and every second, at most once per `FRAME`. It decides nothing itself. Whatever ends or stops it (`q`, SIGINT,
+//! SIGTERM, SIGHUP, Ctrl-Z, SIGTSTP) gives the terminal back first; SIGCONT takes it again.
 
 use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
@@ -13,12 +13,13 @@ use runnerd_core::api::{
     EventQuery, HostSampleQuery, HostSamples, Job, JobPage, PauseQuery, Paused, SampleSeries,
     Status,
 };
+use runnerd_core::client::{Client, ClientError, Events, StatusCode};
 use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
+use tokio::time::Instant;
 
 use crate::{Error, now, output, watch};
-use runnerd_core::client::{Client, ClientError, Events, StatusCode};
 
 mod app;
 mod draw;
@@ -28,6 +29,8 @@ mod tests;
 use app::{App, Effect, LOG_LINES, Msg, Refused};
 use draw::Theme;
 
+/// The shortest time between two frames, about 30 a second.
+const FRAME: Duration = Duration::from_millis(33);
 /// How long the feed waits between attempts to reach a daemon that went away.
 const RETRY: Duration = Duration::from_secs(2);
 /// How far back the slice's charts start.
@@ -35,23 +38,7 @@ const HOST_HISTORY: u64 = 30 * 60;
 
 /// Reads the snapshot, takes over the terminal and runs until `q`. The terminal is given back however it ends.
 pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
-    // The stream opens first, so nothing that happens while the snapshot is read is missed.
-    let events = client.events(EventQuery::default(), None).await?;
-    let live = watch::State::read(client).await?;
-    let host: HostSamples = client
-        .get_query(
-            "/v1/host/samples",
-            &HostSampleQuery {
-                since: Some(now().saturating_sub(HOST_HISTORY)),
-            },
-        )
-        .await?;
-    let mut series = Vec::new();
-    for id in live.running.keys() {
-        series.push(client.get(&format!("/v1/jobs/{id}/samples")).await?);
-    }
-    let mut app = App::new(live, host.samples, series);
-
+    let (events, mut app) = snapshot(client).await?;
     // Before raw mode, so that no signal can end the process with the terminal raw.
     let mut signals = Signals::new().map_err(|error| local(&error))?;
     let (send, mut receive) = mpsc::unbounded_channel();
@@ -74,9 +61,16 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
     };
     let theme = Theme { colour };
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Drawn when something changed, at most once a frame: a burst of events is applied at once and drawn once.
+    let mut changed = true;
+    let mut next_frame = Instant::now();
     let ended = loop {
-        if let Err(error) = terminal.draw(|frame| draw::draw(frame, &app, now(), theme)) {
-            break Err(local(&error));
+        if changed && Instant::now() >= next_frame {
+            if let Err(error) = terminal.draw(|frame| draw::draw(frame, &app, now(), theme)) {
+                break Err(local(&error));
+            }
+            changed = false;
+            next_frame = Instant::now() + FRAME;
         }
         let mut msg = tokio::select! {
             msg = receive.recv() => match msg {
@@ -92,10 +86,16 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
                 if let Err(error) = taken {
                     break Err(local(&error));
                 }
+                changed = true;
                 continue;
             },
-            _ = tick.tick() => continue,
+            _ = tick.tick() => {
+                changed = true;
+                continue;
+            },
+            () = tokio::time::sleep_until(next_frame), if changed => continue,
         };
+        changed = true;
         // Everything already waiting is applied before the next frame.
         let mut quit = false;
         let mut failed = None;
@@ -127,6 +127,26 @@ pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
     feed.abort();
     requests.close_log();
     ended.and(restored)
+}
+
+/// The event stream and the state it starts from. The stream opens first, so nothing that happens while the
+/// snapshot is read is missed.
+async fn snapshot(client: &Client) -> Result<(Events, App), Error> {
+    let events = client.events(EventQuery::default(), None).await?;
+    let live = watch::State::read(client).await?;
+    let host: HostSamples = client
+        .get_query(
+            "/v1/host/samples",
+            &HostSampleQuery {
+                since: Some(now().saturating_sub(HOST_HISTORY)),
+            },
+        )
+        .await?;
+    let mut series = Vec::new();
+    for id in live.running.keys() {
+        series.push(client.get(&format!("/v1/jobs/{id}/samples")).await?);
+    }
+    Ok((events, App::new(live, host.samples, series)))
 }
 
 fn local(error: &std::io::Error) -> Error {
