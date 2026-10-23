@@ -31,7 +31,7 @@ use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing,
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
     LogSummary, ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus,
-    RunnerStatus, Sample, SeedMemory, SlotStatus, Status, Step, Timeline,
+    RunnerStatus, Sample, SeedMemory, ShellMemory, SlotStatus, Status, Step, Timeline,
 };
 
 use unicode_width::UnicodeWidthStr;
@@ -732,6 +732,20 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     let shown = screen(&app, 120, 40, false);
     let heading = shown.lines().nth(1).unwrap();
     assert!(heading.contains("· mirror 512M · jvm seed 9G"), "{shown}");
+}
+
+#[test]
+fn the_budget_names_a_shell_open_in_a_record() {
+    let mut app = app();
+    let budget = &mut app.live.status.budget;
+    budget.shell_memory = vec![ShellMemory {
+        job: 42,
+        memory: 9 << 30,
+    }];
+    budget.memory_in_use += 9 << 30;
+    let shown = screen(&app, 160, 40, false);
+    let names = shown.lines().nth(3).unwrap();
+    assert!(names.contains("job 42 shell 9G"), "{shown}");
 }
 
 #[test]

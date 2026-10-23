@@ -453,7 +453,7 @@ struct Held {
     memory: u64,
 }
 
-/// The mirror, then each seed container in its profile's colour.
+/// The mirror, each seed container in its profile's colour, then each shell open in a record.
 fn held(status: &Status, theme: Theme) -> Vec<Held> {
     let budget = &status.budget;
     let mirror = (budget.mirror_memory > 0).then(|| Held {
@@ -472,7 +472,12 @@ fn held(status: &Status, theme: Theme) -> Vec<Held> {
             memory: seed.memory,
         }
     });
-    mirror.into_iter().chain(seeds).collect()
+    let shells = budget.shell_memory.iter().map(|shell| Held {
+        style: Style::default(),
+        label: format!("job {} shell {}", shell.job, bytes(shell.memory)),
+        memory: shell.memory,
+    });
+    mirror.into_iter().chain(seeds).chain(shells).collect()
 }
 
 /// The running job in a slot.

@@ -435,7 +435,7 @@ fn bar_keys(held: &[Held], free_lens: Option<&Lens>) -> Markup {
     }
 }
 
-/// Memory the budget holds for something other than a slot: the mirror, or a profile's seed container.
+/// Memory the budget holds for something other than a slot: the mirror, a profile's seed container, or a shell.
 struct Held {
     key: String,
     /// The block's classes.
@@ -446,7 +446,7 @@ struct Held {
     lens: Lens,
 }
 
-/// The mirror, then each seed container, in the colour of the profile it reseeds.
+/// The mirror, each seed container, in the colour of the profile it reseeds, then each shell open in a record.
 fn held(status: &Status) -> Vec<Held> {
     let budget = &status.budget;
     let mirror = (budget.mirror_memory > 0).then(|| Held {
@@ -469,7 +469,17 @@ fn held(status: &Status) -> Vec<Held> {
             text: format!("held by {}'s seed container", seed.profile),
         },
     });
-    mirror.into_iter().chain(seeds).collect()
+    let shells = budget.shell_memory.iter().map(|shell| Held {
+        key: format!("shell-{}", shell.job),
+        class: "shell".to_owned(),
+        name: format!("job {} shell", shell.job),
+        memory: shell.memory,
+        lens: Lens {
+            figure: format::bytes(shell.memory),
+            text: format!("held by the shell in job {}'s record", shell.job),
+        },
+    });
+    mirror.into_iter().chain(seeds).chain(shells).collect()
 }
 
 /// What a slot's block holds of the budget: its cap; under measured admission what its runner reserves, and no
