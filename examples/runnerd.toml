@@ -18,6 +18,7 @@ reseed_at = "2G"
 samples = "168h"
 logs = "720h"
 events = "720h"
+jobs = "2160h"
 log_max = "50M"
 
 # Each profile runs one stage of image/Dockerfile. `image` (since 0.0.5) is the stage as the release publishes it,

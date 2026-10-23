@@ -205,6 +205,9 @@ pub struct History {
     /// How long events are kept for clients resuming with `Last-Event-ID`. Default 30 days.
     #[serde(deserialize_with = "duration")]
     pub events: Duration,
+    /// How long a finished job's record is kept, with its steps, totals and runner. Default 90 days.
+    #[serde(deserialize_with = "duration")]
+    pub jobs: Duration,
     /// The most log stored per job; later lines are dropped. Default 50M.
     pub log_max: ByteSize,
 }
@@ -216,6 +219,7 @@ impl Default for History {
             samples: Duration::from_hours(7 * 24),
             logs: Duration::from_hours(30 * 24),
             events: Duration::from_hours(30 * 24),
+            jobs: Duration::from_hours(90 * 24),
             log_max: ByteSize(50 << 20),
         }
     }

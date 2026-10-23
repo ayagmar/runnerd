@@ -490,7 +490,7 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository() {
 const DAY_MS: u64 = 24 * 3600 * 1000;
 
 #[tokio::test]
-async fn pruning_drops_samples_and_logs_past_their_ages() {
+async fn pruning_drops_samples_and_logs_then_finished_jobs_past_their_ages_and_keeps_open_jobs() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     store.queued("o/r", &queued(1));
@@ -507,6 +507,7 @@ async fn pruning_drops_samples_and_logs_past_their_ages() {
         .await;
     store.runner_removed("r1", 1_000_290);
     store.lost(1, 1_000_300);
+    store.queued("o/r", &queued(2));
     store.flush().await;
     let history = crate::config::History::default();
     let samples = |store: Store| async move {
@@ -515,7 +516,7 @@ async fn pruning_drops_samples_and_logs_past_their_ages() {
     };
     assert_eq!(samples(store.clone()).await, Some(1));
 
-    // Past how long samples and logs are kept.
+    // Past how long samples and logs are kept, not job records.
     store
         .prune(1_000_300 + 31 * DAY_MS, &history)
         .await
@@ -525,6 +526,16 @@ async fn pruning_drops_samples_and_logs_past_their_ages() {
     assert!(
         store.job(1).await.unwrap().is_some(),
         "job 1's record stays"
+    );
+
+    store
+        .prune(1_000_300 + 91 * DAY_MS, &history)
+        .await
+        .unwrap();
+    assert_eq!(store.job(1).await.unwrap(), None);
+    assert_eq!(
+        store.job(2).await.unwrap().map(|job| job.summary.state),
+        Some(JobState::Queued)
     );
 }
 

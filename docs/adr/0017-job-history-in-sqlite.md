@@ -1,6 +1,7 @@
 # 0017. Job history in SQLite, written by one thread
 
-Amended by [0027](0027-pruning-runs-beside-the-writer.md): pruning runs beside the writer.
+Amended by [0027](0027-pruning-runs-beside-the-writer.md): pruning runs beside the writer; and by
+[0028](0028-job-records-expire.md): job records expire after `history.jobs`.
 
 ## Context
 
