@@ -1,7 +1,9 @@
 // The landing page's dashboard overview, replayed: the web dashboard's demo daemon (crates/web/examples/demo) as a
 // script of what it would show over six minutes. `at(t)` is the whole state at demo second t, so the page renders
 // second 0 at build time and the script only moves t. Every number comes from the demo's own formulas: the fixture's
-// samples up to second 0 (fake.rs, `job`), then the samples main.rs sends every 2 seconds. Nothing here is tuned.
+// samples up to second 0 (fake.rs, `job`), then the samples main.rs sends every 2 seconds. Nothing here is tuned but
+// one thing: main.rs's live formulas depend only on the tick, so every running card would show the same CPU at a
+// given second; the replay offsets each slot's tick by the slot's index.
 
 const GIB = 1024 ** 3;
 const MIB = 1024 ** 2;
@@ -71,6 +73,8 @@ interface Run {
   started: number;
   /** The fixture's samples up to second 0, for the two jobs running when the demo starts. */
   history: Sample[];
+  /** Its slot's index over all profiles, added to main.rs's tick so each card's samples differ. */
+  phase: number;
 }
 
 interface Profile {
@@ -107,12 +111,14 @@ function history(run: Run, noise: Noise): Sample[] {
   return samples;
 }
 
-/** main.rs's live sample of a running job at demo second n (even, from 2): around 1.5 times its first sample. A job
- * the replay starts has no fixture samples; its first is `job`'s formula at progress 0, without the noise. */
+/** main.rs's live sample of a running job at demo second n (even, from 2): around 1.5 times its first sample, at
+ * its slot's phase. A job the replay starts has no fixture samples; its first is `job`'s formula at progress 0,
+ * without the noise. */
 function live(run: Run, n: number): Sample {
   const first = run.history[0]?.memory ?? Math.floor((run.memory * 35) / 100);
   const base = Math.floor((first * 3) / 2);
-  return { at: n, memory: base + ((n * 7919) % 97) * Math.floor(base / 600), cpu: 1500 + ((n * 6151) % 5200) };
+  const k = n + run.phase;
+  return { at: n, memory: base + ((k * 7919) % 97) * Math.floor(base / 600), cpu: 1500 + ((k * 6151) % 5200) };
 }
 
 /** A running job's last sample at demo second t. */
@@ -149,6 +155,7 @@ const run = (repo: string, name: string, steps: Step[], memory: number, containe
   container,
   started,
   history: [],
+  phase: 0,
 });
 const firstLedger = run(ledger, 'build', LEDGER, LEDGER_MEMORY, -427, -422);
 const firstStorefront = run(storefront, 'playwright', STOREFRONT, STOREFRONT_MEMORY, -309, -305);
@@ -171,6 +178,7 @@ const PROFILES: Profile[] = [
     slots: [[firstStorefront], [run(storefront, 'playwright', STOREFRONT, STOREFRONT_MEMORY, -12, 6)]],
   },
 ];
+PROFILES.flatMap((p) => p.slots).forEach((runs, i) => runs.forEach((r) => (r.phase = i)));
 const MAX = 33 * GIB;
 const MIRROR = 512 * MIB;
 export const LOOP = 360;
@@ -233,13 +241,21 @@ export function readout(state: State): string {
 
 const FREE = MAX - MIRROR - PROFILES.reduce((sum, p) => sum + p.memory * p.slots.length, 0);
 
-/** The budget's blocks after the slots, the mirror and what is free, in GiB. */
-export const rest = () => ({ mirror: MIRROR / GIB, free: FREE / GIB });
+/** The budget's blocks after the slots, the mirror and what is free: their share in GiB and their labels. */
+export const rest = () => ({
+  mirror: { size: MIRROR / GIB, label: size(MIRROR) },
+  free: { size: FREE / GIB, label: size(FREE) },
+});
 
 /** The lens: a line per slot saying what it holds, all in one place and hidden but for the selected slot's, so the
  * readout is as tall as its longest line and selecting a slot moves nothing. */
 export function lenses(state: State, selected: string | null): string {
-  return state.slots.map((slot) => `<span${slot.key === selected ? ' class="on"' : ''}>${lens(slot)}</span>`).join('');
+  const lines: [string, string][] = [
+    ...state.slots.map((slot): [string, string] => [slot.key, lens(slot)]),
+    ['other', `<strong>${size(MIRROR)}</strong> held by the mirror and seed containers`],
+    ['free', `<strong>${size(FREE)}</strong> of ${size(MAX)} free`],
+  ];
+  return lines.map(([key, line]) => `<span${key === selected ? ' class="on"' : ''}>${line}</span>`).join('');
 }
 
 /** What one slot holds, its figure in bold. */
@@ -268,7 +284,7 @@ export function barLabel(state: State): string {
     const what = slot.state === 'busy' ? `${slot.run!.name} on ${slot.run!.repo}` : slot.state === 'starting' ? `a runner for ${slot.run!.repo}` : 'idle';
     return `${slot.profile.name} ${slot.number} ${size(slot.profile.memory)}, ${what}`;
   });
-  return `Memory budget of ci.slice: ${size(state.reserved)} of ${size(MAX)} reserved; ${slots.join('; ')}; 512M mirror`;
+  return `Memory budget of ci.slice: ${size(state.reserved)} of ${size(MAX)} reserved; ${slots.join('; ')}; ${size(MIRROR)} mirror; ${size(FREE)} free`;
 }
 
 /** A sparkline from the job's start or five minutes back, whichever is later, in the dashboard's 1000 by 100 box:
@@ -318,6 +334,7 @@ export function steps(slot: Slot): string {
 export function mount(root: HTMLElement) {
   const blocks = new Map([...root.querySelectorAll<HTMLElement>('[data-block]')].map((el) => [el.dataset.block!, el]));
   const cards = new Map([...root.querySelectorAll<HTMLElement>('[data-card]')].map((el) => [el.dataset.card!, el]));
+  const keys = new Map([...root.querySelectorAll<HTMLElement>('[data-key]')].map((el) => [el.dataset.key!, el]));
   const bar = root.querySelector<HTMLElement>('[data-bar]')!;
   const readoutEl = root.querySelector<HTMLElement>('[data-readout]')!;
   const lensEl = root.querySelector<HTMLElement>('[data-lens]')!;
@@ -362,6 +379,10 @@ export function mount(root: HTMLElement) {
       const stepsEl = cardEl.querySelector<HTMLElement>('[data-steps]')!;
       stepsEl.toggleAttribute('data-open', picked === slot.key && slot.rows > 0);
       set(stepsEl, picked === slot.key ? steps(slot) : '');
+    }
+    for (const key of ['other', 'free']) {
+      blocks.get(key)!.classList.toggle('linked', key === hovered);
+      keys.get(key)!.classList.toggle('linked', key === hovered);
     }
     scrub.value = String(Math.floor(t));
     const time = `${Math.floor(t / 60)}:${String(Math.floor(t % 60)).padStart(2, '0')}`;
@@ -408,6 +429,8 @@ export function mount(root: HTMLElement) {
     el.addEventListener('pointerleave', (e) => e.pointerType === 'mouse' && hovered === key && hover(null));
   }
   for (const [key, el] of blocks) el.addEventListener('click', () => pick(key));
+  // On a touch screen the mirror and what is free are too thin to tap: keys under the bar select them instead.
+  for (const [key, el] of keys) el.addEventListener('click', () => hover(hovered === key ? null : key));
   for (const [key, el] of cards) {
     const button = el.querySelector<HTMLElement>('[data-pick]')!;
     button.addEventListener('focus', () => hover(key));
