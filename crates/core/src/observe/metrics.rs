@@ -1,12 +1,14 @@
 //! CPU, memory and network of runner containers and of their slice, read from cgroup v2 files and
-//! `/proc/<pid>/net/dev` every `SAMPLE_INTERVAL`. Memory is what the kernel cannot take back from the cgroup
-//! without swap: `memory.current` less the file LRU lists (`active_file`, `inactive_file`) and `slab_reclaimable`,
-//! so anonymous memory, tmpfs and shared memory (`shmem`, which sits on the anon lists), and unreclaimable kernel
-//! memory. That is what `memory.max` OOM-kills on: the kernel's cgroup-v2 docs (Documentation/admin-guide/
-//! cgroup-v2.rst) invoke the OOM killer when usage reaches the limit "and can't be reduced". `docker stats`
-//! subtracts only `inactive_file`, which still counts page cache read twice. Whether the cgroup met its limit
-//! comes from `memory.events`, never from how close a sample came to it. A container whose files vanish ends its
-//! series; that is not an error.
+//! `/proc/<pid>/net/dev` every `SAMPLE_INTERVAL`. A container's memory is an estimate of what its job holds without
+//! page cache: `memory.current` less the file LRU lists (`active_file`, `inactive_file`), so anonymous memory, tmpfs
+//! and shared memory (`shmem`, on the anon lists) and kernel memory, reclaimable slab included, since slab in use
+//! (an open file's dentry and inode) can't be freed. Page cache on the file lists is usually the kernel's to drop
+//! before `memory.max` OOM-kills ("reaches this limit and can't be reduced", Documentation/admin-guide/
+//! cgroup-v2.rst), though dirty, writeback or pinned pages may not be dropped at once. `docker stats` subtracts only
+//! `inactive_file`, so it counts page cache read twice. The slice's memory for the high-water mark is that
+//! conservative number, `memory.current` less `inactive_file`, as it always was: it stops starts before the slice
+//! is short of memory, not after. Whether a cgroup met its limit comes from `memory.events`, never from how close
+//! a sample came to it. A container whose files vanish ends its series; that is not an error.
 
 use std::collections::HashMap;
 use std::io;
@@ -69,18 +71,22 @@ impl Paths {
 pub struct Usage {
     /// CPU time so far, in microseconds (`cpu.stat` `usage_usec`).
     pub cpu_usage: u64,
-    /// `memory.current` less `active_file`, `inactive_file` and `slab_reclaimable` from `memory.stat`.
+    /// `memory.current` less `active_file` and `inactive_file` from `memory.stat`: without page cache.
     pub memory: u64,
+    /// `memory.current` less `inactive_file`: page cache read twice still counts.
+    pub memory_with_active_file: u64,
 }
 
-/// What a cgroup's `memory.events` counted so far, its descendants' included.
+/// What a cgroup's `memory.events` counted so far, its descendants' included; `None` for a counter the file lacks
+/// or that doesn't parse, which says nothing either way.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Events {
-    /// Times its memory reached `memory.max`, reclaim could not bring it down and an allocation was about to fail
-    /// (`oom`). Not `max`, which counts every reclaim at the limit, page cache's included.
-    pub oom: u64,
+    /// Times its memory, or a descendant's under its own limit, reached the limit, reclaim could not bring it down
+    /// and an allocation was about to fail (`oom`). Not `max`, which counts every reclaim at the limit, page
+    /// cache's included.
+    pub oom: Option<u64>,
     /// Processes the kernel killed in it for memory (`oom_kill`).
-    pub oom_kill: u64,
+    pub oom_kill: Option<u64>,
 }
 
 fn read(path: &Path) -> io::Result<String> {
@@ -110,26 +116,29 @@ pub fn read_usage(cgroup: &Path) -> io::Result<Usage> {
         .map_err(|_| invalid(&current_path))?;
     let stat_path = cgroup.join("memory.stat");
     let stat = read(&stat_path)?;
-    let reclaimable = ["active_file", "inactive_file", "slab_reclaimable"]
-        .iter()
-        .map(|key| field(&stat, key))
-        .sum::<Option<u64>>()
-        .ok_or_else(|| invalid(&stat_path))?;
+    let (Some(active_file), Some(inactive_file)) =
+        (field(&stat, "active_file"), field(&stat, "inactive_file"))
+    else {
+        return Err(invalid(&stat_path));
+    };
     let cpu_path = cgroup.join("cpu.stat");
     let cpu_usage = field(&read(&cpu_path)?, "usage_usec").ok_or_else(|| invalid(&cpu_path))?;
     Ok(Usage {
         cpu_usage,
-        memory: current.saturating_sub(reclaimable),
+        memory: current.saturating_sub(active_file + inactive_file),
+        memory_with_active_file: current.saturating_sub(inactive_file),
     })
 }
 
-/// A cgroup's `memory.events`; `None` when it can't be read, a counter it lacks being 0.
-pub fn read_events(cgroup: &Path) -> Option<Events> {
-    let events = read(&cgroup.join("memory.events")).ok()?;
-    Some(Events {
-        oom: field(&events, "oom").unwrap_or(0),
-        oom_kill: field(&events, "oom_kill").unwrap_or(0),
-    })
+/// A cgroup's `memory.events`; every counter `None` when the file can't be read.
+pub fn read_events(cgroup: &Path) -> Events {
+    let Ok(events) = read(&cgroup.join("memory.events")) else {
+        return Events::default();
+    };
+    Events {
+        oom: field(&events, "oom"),
+        oom_kill: field(&events, "oom_kill"),
+    }
 }
 
 /// Bytes received and sent by a process's network namespace on its `eth*` interfaces: the container's own
@@ -244,7 +253,7 @@ impl Sampler {
                 api::HostSample {
                     at: at / 1000,
                     cpu,
-                    memory: usage.memory,
+                    memory: usage.memory_with_active_file,
                 }
             });
         (samples, host)

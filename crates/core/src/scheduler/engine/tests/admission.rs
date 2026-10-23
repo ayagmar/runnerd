@@ -80,10 +80,10 @@ async fn runs_of(
             memory: peak,
             network_received: 0,
             network_sent: 0,
-            events: Some(Events {
-                oom: 0,
-                oom_kill: if i == count - 1 { oom_kills } else { 0 },
-            }),
+            events: Events {
+                oom: Some(0),
+                oom_kill: Some(if i == count - 1 { oom_kills } else { 0 }),
+            },
         }]);
         match ended {
             Ended::Lost => store.lost(id, at + 60_000),
@@ -224,6 +224,54 @@ async fn peaks_sampled_with_page_cache_do_not_predict_what_a_job_reserves() {
 }
 
 #[tokio::test]
+async fn a_kill_for_memory_from_before_the_upgrade_keeps_its_job_on_its_cap() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    // An hour ago, before the upgrade, the last build was killed for memory.
+    history(&handle.store, G, 1).await;
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute("UPDATE runners SET memory_measure = NULL", [])
+        .unwrap();
+    // Since then the profile's light lint jobs ran, sampled the new way: enough to predict a new job from.
+    history_of(&handle.store, "lint", 2000, G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        2,
+        "builds reserve their 4G cap, not the lints' 1.25G"
+    );
+    let reserved: Vec<String> = rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .prepare("SELECT admission FROM runners WHERE name NOT LIKE 'earlier-%'")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    // Until a week after the kill, as without the upgrade; the history's times are a few ms older than this.
+    let expires =
+        (time::now_ms() - 3600 * 1000 + 60_000 + crate::admission::UNPREDICTABLE_FOR) / 1000;
+    assert_eq!(reserved.len(), 2);
+    for admission in reserved {
+        let admission: api::Admission = serde_json::from_str(&admission).unwrap();
+        assert!(
+            matches!(admission.basis, Basis::Unpredictable { until } if until.abs_diff(expires) <= 1),
+            "{:?}",
+            admission.basis
+        );
+    }
+}
+
+#[tokio::test]
 async fn a_job_killed_for_memory_is_admitted_at_its_cap() {
     let (github, docker, dir) = (
         FakeGithub::default(),
@@ -289,7 +337,7 @@ fn runners_used(github: &FakeGithub, store: &Store, memory: u64, at: u64) {
             memory,
             network_received: 0,
             network_sent: 0,
-            events: None,
+            events: Events::default(),
         })
         .collect();
     store.samples(samples);

@@ -42,4 +42,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit |
 | [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time |
-| [0037](0037-memory-the-kernel-cannot-reclaim.md) | Memory is what the kernel cannot reclaim; a cap is met when the kernel says so |
+| [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |

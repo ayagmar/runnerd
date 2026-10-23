@@ -63,7 +63,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         oom_killed: false,
         reserved: None,
         hit_cap: None,
-        measure: Measure::Unreclaimable,
+        measure: Measure::WithoutPageCache,
         succeeded: true,
     }
 }

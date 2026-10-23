@@ -35,7 +35,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0005_announced_profiles.sql"),
     include_str!("store/migrations/0006_records.sql"),
     include_str!("store/migrations/0007_admission.sql"),
-    include_str!("store/migrations/0008_unreclaimable_memory.sql"),
+    include_str!("store/migrations/0008_memory_without_page_cache.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -116,14 +116,14 @@ pub struct SampleRecord {
     pub cpu: u64,
     /// CPU time so far, in microseconds.
     pub cpu_usage: u64,
-    /// Bytes the kernel could not reclaim (`observe::metrics::Usage::memory`).
+    /// Bytes without page cache (`observe::metrics::Usage::memory`).
     pub memory: u64,
     /// Bytes received since the container started.
     pub network_received: u64,
     /// Bytes sent since the container started.
     pub network_sent: u64,
-    /// The container's `memory.events` so far; `None` when they could not be read.
-    pub events: Option<Events>,
+    /// The container's `memory.events` so far.
+    pub events: Events,
 }
 
 /// The last measurement of the cache volumes.

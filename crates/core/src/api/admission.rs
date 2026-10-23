@@ -96,7 +96,7 @@ pub struct Admission {
     /// The budget the other runners, the mirror and any shell left before it started; `None` for an unlimited
     /// slice.
     pub free: Option<u64>,
-    /// The slice's memory then, without page cache; `None` without a recent sample.
+    /// The slice's memory then, less its inactive page cache (`HostSample::memory`); `None` without a recent sample.
     pub slice: Option<u64>,
 }
 

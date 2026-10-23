@@ -10,8 +10,7 @@ use crate::store::{LOG_BACKLOG, LogPosition, MirrorPosition};
 use crate::testdir::TestDir;
 
 /// Writes a container's cgroup files under the `ci.slice` fixture, and its network counters: `current` bytes in
-/// `memory.current`, `cache` of them page cache on the file lists (a third active, the rest inactive), and 300 more
-/// reclaimable slab.
+/// `memory.current`, `cache` of them page cache on the file lists (a third active, the rest inactive).
 fn container(paths: &Paths, id: &str, pid: u32, current: u64, cache: u64, usage_usec: u64) {
     let cgroup = paths.container("ci.slice", id);
     std::fs::create_dir_all(&cgroup).unwrap();
@@ -77,7 +76,7 @@ fn memory_leaves_out_page_cache_the_kernel_can_take_back_and_cpu_is_use_between_
     let runners = [tracked("runner-a", "a", 10)];
     let (first, _) = state.sample(&runners, 10_000);
     // Two seconds later the container used 3 CPU seconds: 1.5 cores. Its build read the same files twice, so a
-    // third of its page cache is active: still the kernel's to take back, so still left out.
+    // third of its page cache is active: page cache all the same, so left out.
     container(&paths, "a", 10, 5_000_000, 3_000_000, 4_000_000);
     let (second, _) = state.sample(&runners, 12_000);
     let observed: Vec<(u64, u64)> = first
@@ -85,7 +84,7 @@ fn memory_leaves_out_page_cache_the_kernel_can_take_back_and_cpu_is_use_between_
         .chain(&second)
         .map(|sample| (sample.memory, sample.cpu))
         .collect();
-    assert_eq!(observed, [(2_499_700, 0), (1_999_700, 1500)]);
+    assert_eq!(observed, [(2_500_000, 0), (2_000_000, 1500)]);
     // eth0 only: not loopback, not the inner Docker Engine's bridge.
     assert_eq!(
         (second[0].network_received, second[0].network_sent),
@@ -94,9 +93,10 @@ fn memory_leaves_out_page_cache_the_kernel_can_take_back_and_cpu_is_use_between_
 }
 
 #[test]
-fn a_job_whose_page_cache_fills_its_cap_peaks_at_what_it_cannot_give_back() {
+fn a_job_whose_page_cache_fills_its_cap_peaks_without_it_and_keeps_its_slab() {
     // As measured on a runner at its 6.25G cap: 0.5G of anonymous memory, tmpfs and kernel memory, the rest page
-    // cache. `docker stats` would say 3.6G.
+    // cache. `docker stats` would say 3.6G. Its reclaimable slab stays: dentries and inodes of open files are
+    // counted as reclaimable but can't be freed while held.
     let dir = TestDir::new("observe");
     let paths = paths(&dir.0);
     let cgroup = paths.container("ci.slice", "a");
@@ -111,11 +111,8 @@ fn a_job_whose_page_cache_fills_its_cap_peaks_at_what_it_cannot_give_back() {
     .unwrap();
     let mut state = Sampler::new(paths.clone(), "ci.slice");
     let (samples, _) = state.sample(&[tracked("runner-a", "a", 10)], 1_000);
-    // anon + shmem + the kernel memory it can't reclaim.
-    assert_eq!(
-        samples[0].memory,
-        329_342_080 + 46_301_184 + 41_672_024 - 8_112_344
-    );
+    // anon + shmem + all of its kernel memory.
+    assert_eq!(samples[0].memory, 329_342_080 + 46_301_184 + 41_672_024);
 }
 
 #[test]
@@ -138,38 +135,64 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
     let dir = TestDir::new("observe");
     let paths = paths(&dir.0);
     container(&paths, "a", 10, 4_000, 0, 0);
+    let events = paths.container("ci.slice", "a").join("memory.events");
     let mut state = Sampler::new(paths.clone(), "ci.slice");
     let runners = [tracked("runner-a", "a", 10)];
-    assert_eq!(
-        state.sample(&runners, 1_000).0[0].events,
-        None,
-        "no memory.events yet"
-    );
+    let mut events_after = |text: &str, at| {
+        std::fs::write(&events, text).unwrap();
+        state.sample(&runners, at).0[0].events
+    };
     // Reclaim at the cap (`max`) is not running out of memory: page cache filling the cap counts there too.
+    assert_eq!(
+        events_after("low 0\nhigh 0\nmax 10171\noom 0\noom_kill 0\n", 1_000),
+        Events {
+            oom: Some(0),
+            oom_kill: Some(0)
+        },
+        "zero counters say the kernel never ran out of memory"
+    );
+    assert_eq!(
+        events_after("low 0\nhigh 0\nmax 10173\noom 1\noom_kill 1\n", 3_000),
+        Events {
+            oom: Some(1),
+            oom_kill: Some(1)
+        }
+    );
+    // A counter the file lacks, or that isn't a number, says nothing either way.
+    assert_eq!(
+        events_after("low 0\nhigh 0\nmax 10173\n", 5_000),
+        Events::default()
+    );
+    assert_eq!(
+        events_after("max 10173\noom many\noom_kill 2\n", 7_000),
+        Events {
+            oom: None,
+            oom_kill: Some(2)
+        }
+    );
+    std::fs::remove_file(&events).unwrap();
+    assert_eq!(
+        state.sample(&runners, 9_000).0[0].events,
+        Events::default(),
+        "no memory.events"
+    );
+}
+
+#[test]
+fn the_slice_counts_its_active_page_cache_for_the_high_water_mark() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    std::fs::write(slice.join("memory.current"), "10000\n").unwrap();
     std::fs::write(
-        paths.container("ci.slice", "a").join("memory.events"),
-        "low 0\nhigh 0\nmax 10171\noom 0\noom_kill 0\noom_group_kill 0\n",
+        slice.join("memory.stat"),
+        "anon 4000\nfile 6000\ninactive_file 4000\nactive_file 2000\n",
     )
     .unwrap();
-    assert_eq!(
-        state.sample(&runners, 3_000).0[0].events,
-        Some(Events {
-            oom: 0,
-            oom_kill: 0
-        })
-    );
-    std::fs::write(
-        paths.container("ci.slice", "a").join("memory.events"),
-        "low 0\nhigh 0\nmax 10173\noom 1\noom_kill 1\noom_group_kill 0\n",
-    )
-    .unwrap();
-    assert_eq!(
-        state.sample(&runners, 5_000).0[0].events,
-        Some(Events {
-            oom: 1,
-            oom_kill: 1
-        })
-    );
+    std::fs::write(slice.join("cpu.stat"), "usage_usec 0\n").unwrap();
+    let (_, host) = Sampler::new(paths, "ci.slice").sample(&[], 1_000);
+    assert_eq!(host.map(|host| host.memory), Some(6000));
 }
 
 fn feed_all(chunks: &[&[u8]]) -> Vec<Captured> {

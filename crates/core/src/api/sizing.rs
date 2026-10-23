@@ -92,7 +92,7 @@ pub struct Peaks {
     /// nothing left to reclaim (for a run whose container's events were not recorded, a peak within 5% of it). They
     /// may need more than they show.
     pub at_cap: u64,
-    /// Memory the kernel could not reclaim, in bytes: without page cache.
+    /// Memory without page cache, in bytes.
     pub memory: Spread,
     /// CPU, in millicores.
     pub cpu: Spread,

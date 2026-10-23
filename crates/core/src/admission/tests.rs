@@ -67,7 +67,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         oom_killed: false,
         reserved: None,
         hit_cap: Some(false),
-        measure: Measure::Unreclaimable,
+        measure: Measure::WithoutPageCache,
         succeeded: true,
     }
 }

@@ -244,7 +244,7 @@ async fn a_host_sample_reads_back_at_once_and_is_kept_from_a_flush_on() {
 
 fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord {
     SampleRecord {
-        events: None,
+        events: Events::default(),
         runner: runner.to_owned(),
         at,
         cpu: 0,
@@ -755,10 +755,10 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
-            events: Some(Events {
-                oom: kills,
-                oom_kill: kills,
-            }),
+            events: Events {
+                oom: Some(kills),
+                oom_kill: Some(kills),
+            },
             ..sample(name, 1_000_300, 0, 0)
         }]);
         store.lost(id, 1_000_400);
@@ -795,10 +795,10 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
     // Its build hung after the kill, and someone cancelled it.
     store.samples(vec![SampleRecord {
         memory: 2 << 30,
-        events: Some(Events {
-            oom: 1,
-            oom_kill: 1,
-        }),
+        events: Events {
+            oom: Some(1),
+            oom_kill: Some(1),
+        },
         ..sample("r1", 1_000_300, 0, 0)
     }]);
     store.details(crate::github::JobDetails {
@@ -910,12 +910,16 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
     let before = super::sizing_at(&path, 0).unwrap().unwrap();
     assert_eq!(measures(&before), [(Measure::WithActiveFile, None)]);
     let store = Store::open(&path).unwrap();
-    for (id, name, oom) in [(2, "r2", 0), (3, "r3", 1)] {
+    // r4's memory.events had no `oom` counter: unknown, not "never ran out".
+    for (id, name, oom) in [(2, "r2", Some(0)), (3, "r3", Some(1)), (4, "r4", None)] {
         store.queued("o/r", &queued(id));
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
-            events: Some(Events { oom, oom_kill: 0 }),
+            events: Events {
+                oom,
+                oom_kill: Some(0),
+            },
             ..sample(name, 1_000_300, 0, 0)
         }]);
         store.lost(id, 1_000_400);
@@ -926,8 +930,9 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
         measures(&after),
         [
             (Measure::WithActiveFile, None),
-            (Measure::Unreclaimable, Some(false)),
-            (Measure::Unreclaimable, Some(true)),
+            (Measure::WithoutPageCache, Some(false)),
+            (Measure::WithoutPageCache, Some(true)),
+            (Measure::WithoutPageCache, None),
         ]
     );
 }

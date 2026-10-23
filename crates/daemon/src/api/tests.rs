@@ -387,7 +387,7 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
         });
         daemon.store.claimed(id, 2, &runner, now - 40_000);
         daemon.store.samples(vec![SampleRecord {
-            events: None,
+            events: runnerd_core::observe::metrics::Events::default(),
             runner: runner.clone(),
             at: now - 30_000,
             cpu: 0,

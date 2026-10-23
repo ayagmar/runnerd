@@ -48,7 +48,7 @@ pub struct Ran {
     pub finished_at: Option<u64>,
     /// Whether the kernel killed a process in its container for memory.
     pub oom_killed: bool,
-    /// Whether its container's memory reached its cap with nothing left to reclaim (`memory.events` `oom`); `None`
+    /// Whether its container's memory reached a limit with nothing left to reclaim (`memory.events` `oom`); `None`
     /// when its events were not recorded.
     pub hit_cap: Option<bool>,
     /// What its sampled memory counts.
@@ -65,9 +65,9 @@ pub enum Measure {
     /// `memory.current` less `inactive_file`, as runners started before schema version 8 were sampled: page cache
     /// read twice (`active_file`) counts, so peaks overstate what a job needs.
     WithActiveFile,
-    /// What the kernel cannot reclaim from the container: `memory.current` less the file LRU lists and
-    /// `slab_reclaimable`.
-    Unreclaimable,
+    /// `memory.current` less the file LRU lists (`active_file`, `inactive_file`): an estimate of what a job holds
+    /// without the page cache the kernel can drop.
+    WithoutPageCache,
 }
 
 impl Ran {

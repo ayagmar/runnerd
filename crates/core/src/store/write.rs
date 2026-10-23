@@ -224,7 +224,7 @@ impl Writer<'_> {
             self.db.execute(
                 "INSERT OR IGNORE INTO runners (name, repository, profile, slot, container, started_at, \
                  memory_cap, cpu_cap, admission, memory_measure) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'unreclaimable')",
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'without_page_cache')",
                 params![
                     runner.name,
                     runner.repository,
@@ -645,11 +645,16 @@ impl Writer<'_> {
                     sample.network_sent
                 ],
             )?;
-            if let Some(events) = sample.events {
+            if let Some(ooms) = sample.events.oom {
                 self.db.execute(
-                    "UPDATE runners SET ooms = max(coalesce(ooms, 0), ?2), oom_kills = CASE WHEN ?3 > 0 \
-                     THEN max(coalesce(oom_kills, 0), ?3) ELSE oom_kills END WHERE name = ?1",
-                    params![sample.runner, events.oom, events.oom_kill],
+                    "UPDATE runners SET ooms = max(coalesce(ooms, 0), ?2) WHERE name = ?1",
+                    params![sample.runner, ooms],
+                )?;
+            }
+            if let Some(kills) = sample.events.oom_kill.filter(|kills| *kills > 0) {
+                self.db.execute(
+                    "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), ?2) WHERE name = ?1",
+                    params![sample.runner, kills],
                 )?;
             }
             let job: Option<u64> = self

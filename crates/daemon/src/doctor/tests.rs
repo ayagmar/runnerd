@@ -580,7 +580,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             oom_killed: false,
             reserved: None,
             hit_cap: Some(false),
-            measure: sizing::Measure::Unreclaimable,
+            measure: sizing::Measure::WithoutPageCache,
             succeeded: true,
         })
         .collect()
