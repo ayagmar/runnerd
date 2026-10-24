@@ -539,7 +539,7 @@ fn younger_jobs_wait_behind_one_starved_of_cpu() {
 }
 
 #[test]
-fn a_paused_repositorys_idle_runner_stops_though_its_jobs_stay_queued() {
+fn the_idle_runner_of_a_paused_repository_stops_though_its_jobs_stay_queued() {
     let repositories = [Repository {
         paused: true,
         ..repository("o/a", "app", vec![job(1, &["app"])])
