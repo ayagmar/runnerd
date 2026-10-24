@@ -3,7 +3,7 @@
 //! it must not delete GitHub registrations: the first poll does.
 
 use std::collections::BTreeSet;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
@@ -18,12 +18,14 @@ use crate::scheduler::SlotRef;
 use crate::scheduler::warm::Attempt;
 use crate::time;
 
-/// The limits an adopted container runs with.
+/// The limits an adopted container runs with, and when it started.
 struct Caps {
     /// Bytes.
     memory: u64,
     /// Millicores.
     cpus: u64,
+    /// When Docker started it; `None` when Docker cannot tell.
+    started_at: Option<SystemTime>,
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -51,7 +53,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// The memory and CPU caps a container left by an earlier daemon runs with, which a reload since may have
-    /// changed in the config; the profile's configured caps only when Docker cannot tell.
+    /// changed in the config; the profile's configured caps only when Docker cannot tell. Also when it started.
     async fn running_caps(&self, container: &str, profile: &str) -> Caps {
         let state = self.docker.inspect(container).await.ok();
         let configured = self.config.profiles.get(profile);
@@ -62,9 +64,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .or_else(|| configured.map(|settings| settings.memory.0))
                 .unwrap_or(0),
             cpus: state
+                .as_ref()
                 .and_then(|state| state.cpus)
                 .or_else(|| configured.map(|settings| u64::from(settings.cpus) * 1000))
                 .unwrap_or(0),
+            started_at: state
+                .and_then(|state| state.started_at)
+                .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
         }
     }
 
@@ -115,7 +121,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
                 container: container.id.clone(),
                 busy: true,
-                started_at: SystemTime::now(),
+                // Its uptime goes on from its container's start, not from this restart.
+                started_at: caps.started_at.unwrap_or_else(SystemTime::now),
                 memory: caps.memory,
                 cpus: caps.cpus,
                 admission: None,

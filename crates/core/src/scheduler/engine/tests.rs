@@ -2388,7 +2388,14 @@ async fn a_running_mirror_keeps_its_memory_when_a_reload_lowers_it() {
 
 /// An idle runner of `o/r` in slot 1 of `app`: registered, not busy, no job.
 fn idle_runner(github: &FakeGithub, docker: &FakeDocker) {
-    docker.0.lock().unwrap().containers = vec![runner_container(1, 7, true)];
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![runner_container(1, 7, true)];
+        // It started waiting just now, well within `IDLE_TIMEOUT`.
+        state
+            .started
+            .insert("container-1".to_owned(), crate::time::now_ms());
+    }
     let mut state = github.0.lock().unwrap();
     state.runners = vec![runner(
         7,
@@ -3639,3 +3646,17 @@ mod admission;
 mod build_cache;
 mod records;
 mod warm;
+
+#[tokio::test]
+async fn a_runner_a_restart_adopts_keeps_the_time_its_container_started() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    docker.0.lock().unwrap().containers = vec![runner_container(1, 7, true)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.publish();
+    let status = handle.status.borrow();
+    let adopted = status.profiles[0].slots[0].runner.as_ref().unwrap();
+    // The fake's seeded containers started a second after the epoch, long before this restart.
+    assert_eq!(adopted.started_at, 1);
+}
