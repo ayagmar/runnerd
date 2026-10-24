@@ -356,7 +356,7 @@ pub struct Engine<G = Github, D = Docker> {
     build_cache: Option<BuildCache>,
     /// Each repository's default branch, once a job of it needed it: the branch whose builds write to the build
     /// cache when `[caches.build] branches` names none.
-    default_branches: BTreeMap<String, String>,
+    default_branches: BTreeMap<String, build_cache::DefaultBranch>,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {

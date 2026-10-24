@@ -65,6 +65,8 @@ fn runner_names_are_short_safe_and_hide_the_machine_id() {
 /// What the fake GitHub serves and what it was asked.
 #[derive(Default)]
 struct GithubState {
+    /// Every repository's default branch; `main` when unset.
+    default_branch: Option<String>,
     queued: Vec<QueuedJob>,
     runners: Vec<Runner>,
     /// GitHub gives this queued job to this runner right after the first poll that sees them.
@@ -255,7 +257,10 @@ impl GithubApi for FakeGithub {
     async fn default_branch(&self, repository: &str) -> Result<String, github::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("default branch {repository}"));
-        Ok("main".to_owned())
+        Ok(state
+            .default_branch
+            .clone()
+            .unwrap_or_else(|| "main".to_owned()))
     }
 
     async fn on_branch(

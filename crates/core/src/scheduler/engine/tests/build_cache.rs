@@ -98,29 +98,52 @@ async fn two_jobs(
     engine: &mut Engine<FakeGithub, FakeDocker>,
     triggers: [github::RunTrigger; 2],
 ) -> [(String, std::path::PathBuf); 2] {
+    engine.recover().await.unwrap();
+    two_more_jobs(github, docker, engine, 1, triggers).await
+}
+
+/// As `two_jobs` on an engine that runs already, for jobs `first` and `first + 1`, each of its own run.
+async fn two_more_jobs(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    first: u64,
+    triggers: [github::RunTrigger; 2],
+) -> [(String, std::path::PathBuf); 2] {
+    let ids = [first, first + 1];
     {
         let mut state = github.0.lock().unwrap();
-        state.queued = vec![
-            job(1),
-            QueuedJob {
-                run_id: 2,
-                ..job(2)
-            },
-        ];
-        let [first, second] = triggers;
-        state.triggers.insert(1, first);
-        state.triggers.insert(2, second);
+        state.queued = ids
+            .iter()
+            .map(|&id| QueuedJob {
+                run_id: id,
+                ..job(id)
+            })
+            .collect();
+        for (id, trigger) in ids.into_iter().zip(triggers) {
+            state.triggers.insert(id, trigger);
+        }
     }
     {
         let mut state = docker.0.lock().unwrap();
-        state.slot_captures.insert(1, "@@job 1 1\n".to_owned());
-        state.slot_captures.insert(2, "@@job 2 2\n".to_owned());
+        for (slot, id) in [1, 2].into_iter().zip(ids) {
+            state
+                .slot_captures
+                .insert(slot, format!("@@job {id} {id}\n"));
+        }
+        state.mounts.clear();
     }
-    engine.recover().await.unwrap();
-    engine.tick(Shutdown::No).await;
+    // Once jobs ended, the caches are checked first, and runners wait for it.
+    for _ in 0..50 {
+        engine.tick(Shutdown::No).await;
+        if docker.0.lock().unwrap().mounts.len() == 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
     let runners = [runner_in(docker, 1), runner_in(docker, 2)];
     let mut state = github.0.lock().unwrap();
-    for (id, (name, _)) in [1, 2].into_iter().zip(&runners) {
+    for (id, (name, _)) in ids.into_iter().zip(&runners) {
         state.jobs.insert(
             id,
             JobDetails {
@@ -641,4 +664,47 @@ async fn a_main_job_that_ends_before_its_writes_were_decided_keeps_what_it_store
         .build_cache;
     assert!(counts.writer, "the push to main wrote");
     assert_eq!((counts.written_bytes, counts.refused), (7, 0));
+}
+
+#[tokio::test]
+async fn a_default_branch_renamed_while_runnerd_runs_writes_within_the_hour() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-renamed");
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    github.0.lock().unwrap().default_branch = Some("master".to_owned());
+    let pushes = || [trigger("push", "master"), trigger("push", "main")];
+    let [(master, _), (main, _)] = two_jobs(&github, &docker, &mut engine, pushes()).await;
+    until_decided(&mut engine, &cache, &[&master, &main]).await;
+    jobs_end(&docker, &mut engine).await;
+
+    // The reseed slot 1's job made due finishes.
+    docker.0.lock().unwrap().seed_exit = Some(0);
+    // The repository renames master to main; an hour on, runnerd asks GitHub again.
+    github.0.lock().unwrap().default_branch = Some("main".to_owned());
+    for known in engine.default_branches.values_mut() {
+        known.read_at -= Duration::from_secs(3600);
+    }
+    let [(master, master_socket), (main, main_socket)] =
+        two_more_jobs(&github, &docker, &mut engine, 3, pushes()).await;
+    until_decided(&mut engine, &cache, &[&master, &main]).await;
+    for (socket, key) in [(&master_socket, "aa"), (&main_socket, "bb")] {
+        let path = format!("/gradle/{key}");
+        assert_eq!(
+            buildcache::request(socket, "PUT", &path, b"classes")
+                .await
+                .0,
+            200
+        );
+    }
+    let found = async |key: &str| {
+        buildcache::request(&main_socket, "GET", &format!("/gradle/{key}"), b"")
+            .await
+            .0
+    };
+    assert_eq!(
+        (found("bb").await, found("aa").await),
+        (200, 404),
+        "main writes, master no longer does"
+    );
 }

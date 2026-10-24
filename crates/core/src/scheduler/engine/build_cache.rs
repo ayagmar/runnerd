@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use bollard::models::{Mount, MountType};
 use futures_util::StreamExt;
@@ -16,6 +17,17 @@ use crate::cache;
 use crate::config::BuildCacheWriters;
 use crate::docker::DockerApi;
 use crate::github::{self, GithubApi, JobDetails};
+
+/// How long a repository's default branch is taken as known: one renamed while runnerd runs writes within the hour,
+/// and the old name stops writing.
+const DEFAULT_BRANCH_FOR: Duration = Duration::from_secs(3600);
+
+/// A repository's default branch, and when GitHub said it.
+#[derive(Debug, Clone)]
+pub(super) struct DefaultBranch {
+    branch: String,
+    pub(super) read_at: SystemTime,
+}
 
 /// A job whose writes are undecided, with what GitHub said of it.
 #[derive(Debug)]
@@ -122,7 +134,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.github.clone(),
                     undecided,
                     self.config.caches.build.branches.clone(),
-                    self.default_branches.clone(),
+                    self.known_default_branches(),
                 )
                 .await;
                 self.take_answers(answers);
@@ -165,7 +177,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         }
         let branches = self.config.caches.build.branches.clone();
-        let known = self.default_branches.clone();
+        let known = self.known_default_branches();
         let github = self.github.clone();
         let answers = self
             .serving(read_answers(github, undecided, branches, known))
@@ -173,12 +185,31 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.take_answers(answers);
     }
 
+    /// The default branches read in the last `DEFAULT_BRANCH_FOR`, by repository; the others are asked again.
+    fn known_default_branches(&self) -> BTreeMap<String, String> {
+        self.default_branches
+            .iter()
+            .filter(|(_, known)| {
+                known
+                    .read_at
+                    .elapsed()
+                    .is_ok_and(|age| age < DEFAULT_BRANCH_FOR)
+            })
+            .map(|(repository, known)| (repository.clone(), known.branch.clone()))
+            .collect()
+    }
+
     /// Records what GitHub answered of undecided jobs: their repositories' default branches, and each job's writes.
     fn take_answers(&mut self, answers: Vec<Answer>) {
         for answer in answers {
             if let Some(branch) = answer.default_branch {
-                self.default_branches
-                    .insert(answer.repository.clone(), branch);
+                self.default_branches.insert(
+                    answer.repository.clone(),
+                    DefaultBranch {
+                        branch,
+                        read_at: SystemTime::now(),
+                    },
+                );
             }
             if let (Some(writes), Some(cache)) = (answer.writes, &self.build_cache) {
                 cache.decide(&answer.runner, writes);
