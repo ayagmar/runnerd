@@ -6,7 +6,6 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
-use std::time::SystemTime;
 
 use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
@@ -2871,7 +2870,8 @@ async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
     engine.tick(Shutdown::No).await;
     // Still broken once the hold ends: held longer, without another announcement.
     for _ in 0..3 {
-        engine.repositories.get_mut("o/r").unwrap().held_until = Some(SystemTime::UNIX_EPOCH);
+        engine.repositories.get_mut("o/r").unwrap().held_until =
+            Some(std::time::SystemTime::UNIX_EPOCH);
         engine.tick(Shutdown::No).await;
     }
     handle.store.flush().await;

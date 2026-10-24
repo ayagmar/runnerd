@@ -123,7 +123,8 @@ pub enum Event {
         /// The change.
         change: SizingChange,
     },
-    /// A runner could not be registered or started, and its repository gets no runner for a while: once per hold.
+    /// A runner could not be registered or started, and its repository gets no runner for a while: once, until one of
+    /// its runners takes a job again.
     #[serde(rename = "runner.failed")]
     RunnerFailed {
         /// What failed.
