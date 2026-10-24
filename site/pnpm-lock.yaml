@@ -167,8 +167,8 @@ importers:
   .:
     dependencies:
       '@astrojs/starlight':
-        specifier: 0.42.6
-        version: 0.42.6(astro@7.4.2(@types/node@24.19.2)(yaml@2.9.1))
+        specifier: 0.42.7
+        version: 0.42.7(astro@7.4.2(@types/node@24.19.2)(yaml@2.9.1))
       astro:
         specifier: 7.4.2
         version: 7.4.2(@types/node@24.19.2)(yaml@2.9.1)
@@ -270,8 +270,8 @@ packages:
   '@astrojs/sitemap@3.7.4':
     resolution: {integrity: sha512-LbKNC24bdUWcQf/pThB6qLlSqHojxGjZDURIzFocY8rlWnAn2t74nnhnK6S5x0NHriHoAduLEpVjRykmeGiVvA==}
 
-  '@astrojs/starlight@0.42.6':
-    resolution: {integrity: sha512-Cfs7GdgzgNRCauDxQVsFUVL1thrGHK/rQdbv/SURv/xhGBXx+j5ypOHW9ENPraQxbIzUC8KAnJV7L9mvEVRuyQ==}
+  '@astrojs/starlight@0.42.7':
+    resolution: {integrity: sha512-mlbit5iRjLx5eIcLf84Q2CwkrrsEgZrQwKKBK+vRf+ZGiSrwy1UGdT1hUfAIaHrMfcvkDpL+gw3aua7HobiKFg==}
     peerDependencies:
       '@astrojs/markdown-remark': ^7.3.0
       astro: ^7.2.10
@@ -1082,8 +1082,8 @@ packages:
   http-cache-semantics@4.3.0:
     resolution: {integrity: sha512-M5t5LlJpS1UHMjvwRQVdFHvPISGeLAxNcrWuJkeGh0KxsqCHZ1O3NXZU/8x7cD0BDcGW8kapxMKTvwlqrNkHkA==}
 
-  i18next@26.5.4:
-    resolution: {integrity: sha512-Wg0O1u2xmnsve9gICDwGekLkMe9SIC7+ZiuLYfWUGb/A3TQdRKygQ4OY9ros4raf5D66ZnW9JMrTDtGP2b8a7Q==}
+  i18next@26.5.6:
+    resolution: {integrity: sha512-GFWrDwGmYhOQS3bKvjA2Ir2ob9ScEdyY1UbeQJ10jyVACGQ6XxmDYqC/lxEj/IPEJlPQYNRnYffDET6TM8mnFg==}
     peerDependencies:
       typescript: ^5 || ^6 || ^7
     peerDependenciesMeta:
@@ -1805,7 +1805,7 @@ snapshots:
       sitemap: 9.0.1
       zod: 4.6.7
 
-  '@astrojs/starlight@0.42.6(astro@7.4.2(@types/node@24.19.2)(yaml@2.9.1))':
+  '@astrojs/starlight@0.42.7(astro@7.4.2(@types/node@24.19.2)(yaml@2.9.1))':
     dependencies:
       '@astrojs/markdown-satteri': 0.4.5
       '@astrojs/mdx': 8.1.1(@astrojs/markdown-satteri@0.4.5)(astro@7.4.2(@types/node@24.19.2)(yaml@2.9.1))
@@ -1822,7 +1822,7 @@ snapshots:
       hast-util-to-html: 9.0.5
       hast-util-to-string: 3.0.1
       hastscript: 9.0.1
-      i18next: 26.5.4
+      i18next: 26.5.6
       js-yaml: 4.3.2
       klona: 2.0.6
       magic-string: 1.4.3
@@ -2650,7 +2650,7 @@ snapshots:
 
   http-cache-semantics@4.3.0: {}
 
-  i18next@26.5.4: {}
+  i18next@26.5.6: {}
 
   iron-webcrypto@1.2.1: {}
 
