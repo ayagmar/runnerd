@@ -684,15 +684,15 @@ fn plural(count: usize, one: &str, many: &str) -> String {
     }
 }
 
-/// What the target is sent for its jobs, runners and insights: one message, however many.
-fn message(target: &Target) -> Notification {
+/// The title of the target's message: what it is about, or how many of each.
+fn title(target: &Target) -> String {
     let (failed, lost, runners, found) = (
         &target.failed,
         &target.lost,
         &target.runners,
         &target.insights,
     );
-    let title = match (
+    match (
         (failed.count, failed.first.first()),
         (lost.count, lost.first.first()),
         (runners.count, runners.first.first()),
@@ -720,7 +720,18 @@ fn message(target: &Target) -> Notification {
         .flatten()
         .collect::<Vec<_>>()
         .join(", "),
-    };
+    }
+}
+
+/// What the target is sent for its jobs, runners and insights: one message, however many.
+fn message(target: &Target) -> Notification {
+    let (failed, lost, runners, found) = (
+        &target.failed,
+        &target.lost,
+        &target.runners,
+        &target.insights,
+    );
+    let title = title(target);
     let mut body = Vec::new();
     body.extend(lines(
         failed.first.iter().map(|job| {
