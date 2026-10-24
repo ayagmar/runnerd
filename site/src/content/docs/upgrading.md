@@ -5,6 +5,17 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.8 to 0.0.9
+
+The job history stays at version 9, so either version reads it. Install 0.0.9, move each profile's published `image` to its `-0.0.9` tag, and restart runnerd:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.9/install.sh | sh -s -- --version v0.0.9
+systemctl --user restart runnerd
+```
+
+Browsers signed in to the dashboard sign in once more; from then on they stay signed in across restarts ([From another device](../clients/#from-another-device)).
+
 ## 0.0.7 to 0.0.8
 
 ### Before
