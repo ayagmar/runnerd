@@ -1203,9 +1203,11 @@ pub fn mask_secrets(text: &str) -> Option<String> {
 /// `text` with each [`SECRET_SHOWN`] in a target's `url` or headers replaced by the value `stored` has for the target
 /// of the same name, everything else as written: what `PUT /v1/config` and `POST /v1/config/check` read, so a config
 /// shown masked saves with its secrets. A value with nothing to keep stays [`SECRET_SHOWN`], which `Config::validate`
-/// refuses.
+/// refuses. A text that does not parse as a config is answered as sent: a TOML error quotes the line it is on, and
+/// that line must hold the mask, not the value put back. One that parses still does with the values put back, as they
+/// are strings where strings were, and `Config::validate` names a target's field, never its value.
 pub fn keep_secrets(text: &str, stored: &str) -> String {
-    if !text.contains(SECRET_SHOWN) {
+    if !text.contains(SECRET_SHOWN) || Config::parse(text).is_err() {
         return text.to_owned();
     }
     let (Ok(mut document), Ok(mut old)) = (

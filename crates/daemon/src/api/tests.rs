@@ -1614,6 +1614,77 @@ async fn the_config_api_never_shows_a_notify_secret_and_saving_what_it_shows_kee
 }
 
 #[tokio::test]
+async fn a_broken_edit_of_the_masked_config_answers_an_error_without_the_secrets() {
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let secrets = format!(
+        "{EXAMPLE}\n[notify]\ntargets = [{{ name = \"phone\", kind = \"ntfy\", \
+         url = \"http://127.0.0.1:9/s3cret-topic\", headers = {{ Authorization = \"Bearer tk_hunter2\" }} }}]\n"
+    );
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(secrets.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    daemon.reloads.recv().await.unwrap();
+    let shown: ConfigFile = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .get("http://runnerd/v1/config")
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+
+    // A typo on the line that holds the masks, and a header that is not a string beside one.
+    for broken in [
+        shown.text.replace("kind = \"ntfy\"", "kind = \"ntfyy\""),
+        shown.text.replace(
+            "Authorization = \"<secret>\"",
+            "Authorization = \"<secret>\", X = 5",
+        ),
+    ] {
+        assert_ne!(broken, shown.text);
+        let checked = daemon
+            .client
+            .post("http://runnerd/v1/config/check")
+            .body(broken.clone())
+            .send()
+            .await
+            .unwrap();
+        let saved = daemon
+            .client
+            .put("http://runnerd/v1/config")
+            .body(broken)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        for answer in [body(checked).await, body(saved).await] {
+            let answer: ConfigCheck = serde_json::from_slice(&answer).unwrap();
+            assert!(!answer.valid, "refused");
+            assert!(answer.message.contains("<secret>"), "{}", answer.message);
+            for secret in ["s3cret", "hunter2"] {
+                assert!(!answer.message.contains(secret), "{}", answer.message);
+            }
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(&daemon.config).unwrap(),
+        secrets,
+        "the file as it was"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_second_daemon_does_not_take_over_a_live_socket() {
     let (_client, _, dir) = daemon().await;
     assert!(bind(&dir.0.join("runnerd.sock")).await.is_err());
