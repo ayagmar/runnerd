@@ -324,7 +324,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .flatten()
                 .all(|occupant| !occupant.busy && occupant.job.is_none())
         };
+        // A shell holds back the reseed until it closes, so runners keep serving meanwhile.
         let reseed = (self.reseed_due.contains(profile) || self.reseed_requested.contains(profile))
+            && !self.shell_profiles().contains(profile)
             && self.slots.get(profile).is_some_and(idle);
         // Until the check ends: a runner started meanwhile mounts the volumes it may remove.
         let check = (self.trim.is_some()

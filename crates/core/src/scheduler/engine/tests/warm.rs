@@ -661,3 +661,29 @@ async fn a_cache_a_warm_runner_mounts_is_cleaned_and_the_runner_comes_back() {
     assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
     assert_eq!(registered(&github.calls()).len(), 2, "a new warm runner");
 }
+
+#[tokio::test]
+async fn a_warm_runner_waits_while_a_shell_holds_back_its_profiles_reseed() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    docker.0.lock().unwrap().images = vec![records::record_image(10, 60)];
+    let config = warm_config().replace("slots = 2", "slots = 2\nrecord_failures = true");
+    let (mut engine, handle, _dir) = active(&github, &docker, &config).await;
+    engine.recover().await.unwrap();
+    engine
+        .open_shell(10, docker::TtySize { cols: 80, rows: 24 })
+        .await
+        .unwrap();
+
+    // The shell mounts the snapshot, so the reseed waits for it to close, and the warm runner with it.
+    engine.reseed_due.insert("app".to_owned());
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert!(
+        engine.reseeds.is_empty(),
+        "no reseed runs while the shell is open"
+    );
+}
