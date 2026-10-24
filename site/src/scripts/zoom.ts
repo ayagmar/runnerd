@@ -10,6 +10,12 @@ dialog.innerHTML = '<button class="zoom-close" type="button">Close</button><div 
 const body = dialog.querySelector<HTMLElement>('.zoom-body')!;
 const close = dialog.querySelector<HTMLButtonElement>('.zoom-close')!;
 let opener: HTMLElement | null = null;
+// Set from a request to close until the dialog has closed, so a double click goes back only once.
+let closing = false;
+let closedAt = -Infinity;
+
+// A reload while it was open brings back its history entry without it: drop the entry's mark.
+if (history.state?.zoom) history.replaceState(null, '');
 
 function show(trigger: HTMLElement, content: HTMLElement) {
   if (!dialog.isConnected) document.body.append(dialog);
@@ -22,20 +28,36 @@ function show(trigger: HTMLElement, content: HTMLElement) {
   history.pushState({ zoom: true }, '');
 }
 
-function hide() {
-  if (!dialog.open) return;
-  dialog.close();
+// Every way to close goes back past the entry show() added, and popstate closes the dialog; it stays open until
+// then, so a second tap cannot reach the page under it.
+function dismiss() {
+  if (closing) return;
+  closing = true;
+  if (history.state?.zoom) history.back();
+  else dialog.close();
+}
+
+// However it closed, even natively without a cancel that could be stopped, the page is let go here.
+dialog.addEventListener('close', () => {
   document.documentElement.classList.remove('zoom-open');
   body.replaceChildren();
   opener?.focus({ preventScroll: true });
   opener = null;
-}
+  if (!closing && history.state?.zoom) history.back();
+  closing = false;
+  closedAt = performance.now();
+});
 
-// Every way to close goes back past the entry show() added; popstate then hides the dialog.
-function dismiss() {
-  if (history.state?.zoom) history.back();
-  else hide();
-}
+// The second tap of a double tap that closed it lands on the page once it has closed: it opens nothing.
+document.addEventListener(
+  'click',
+  (event) => {
+    if (performance.now() - closedAt > 400) return;
+    event.preventDefault();
+    event.stopPropagation();
+  },
+  true,
+);
 
 function openShot(link: HTMLAnchorElement) {
   const shown = link.querySelector('img')!;
@@ -43,13 +65,20 @@ function openShot(link: HTMLAnchorElement) {
   const full = (light && link.dataset.zoomLight) || link.href;
   const img = document.createElement('img');
   img.alt = shown.alt;
-  const width = Number(link.dataset.zoomWidth);
-  img.width = width;
-  const height = Number(link.dataset.zoomHeight);
-  img.height = height;
-  // What the page shows is already loaded: it stands in until the full-size file arrives, unless it is a phone crop.
+  let width = Number(link.dataset.zoomWidth);
+  let height = Number(link.dataset.zoomHeight);
+  // What the page shows is already loaded: it stands in until the full-size file arrives. On a phone, a phone crop
+  // is shown as it is: its text reads better than the desktop capture fitted to the screen.
   const same = Math.abs(shown.naturalWidth / shown.naturalHeight - width / height) < 0.01;
-  if (same && shown.complete) {
+  const phoneCrop = !same && shown.complete && matchMedia('(max-width: 600px)').matches;
+  if (phoneCrop) {
+    width = shown.naturalWidth;
+    height = shown.naturalHeight;
+  }
+  img.width = width;
+  img.height = height;
+  if (phoneCrop) img.src = shown.currentSrc;
+  else if (same && shown.complete) {
     img.src = shown.currentSrc;
     const loader = new Image();
     loader.onload = () => (img.src = full);
@@ -104,7 +133,9 @@ close.addEventListener('click', dismiss);
 dialog.addEventListener('click', (event) => {
   if (event.target === dialog || event.target === body) dismiss();
 });
-addEventListener('popstate', hide);
+addEventListener('popstate', () => {
+  if (dialog.open) dialog.close();
+});
 
 // A swipe down closes it, unless the picture is pinch-zoomed or the swipe scrolled it.
 let start: { x: number; y: number; top: number } | null = null;
