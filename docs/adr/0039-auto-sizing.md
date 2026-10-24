@@ -1,6 +1,7 @@
 # 0039. Auto sizing: the daemon applies advice itself, a step at a time, off by default
 
-Status: **Accepted** (2026-10-23). Amends [0032](0032-sizing-advice-from-sampled-peaks.md).
+Status: **Accepted** (2026-10-23). Amends [0032](0032-sizing-advice-from-sampled-peaks.md). Amended by
+[0049](0049-auto-sizing-without-hand-tuning.md): `cpus` too, slots without `max_slots`, raises within the hour.
 
 ## Context
 
