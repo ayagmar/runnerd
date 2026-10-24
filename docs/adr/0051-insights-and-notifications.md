@@ -71,7 +71,8 @@ say it stopped; systemd and the dashboard do.
 A runner that cannot start was a log line only. It becomes a durable event, `runner.failed`, stored when a
 repository is first held back, so clients see it too and the notifier reads it like the others. A repository that
 stays broken is held again every 10 minutes at most; those holds are not announced again until a runner takes a job,
-so a revoked app or a missing image is one message, not one every 10 minutes all night.
+so a revoked app or a missing image is one message, not one every 10 minutes all night. A warm runner that started,
+connected and waited out its time ends a streak too, so a failure days later on a quiet repository is announced.
 
 How the notifier runs:
 
@@ -94,7 +95,8 @@ How the notifier runs:
 - An insight is told once. It is told again only after it went away for a day, so one hovering at a threshold does
   not ping every few hours.
 - The digest goes at the first check after `digest_at` on a local day it has not gone yet, so moving `digest_at`
-  later does not send a second; a target added today gets its first tomorrow. The local offset is read from
+  later does not send a second; a target added today gets its first tomorrow. A digest counts for the day it was
+  made, not the day it was delivered, so one retried past midnight does not stand in for the next day's. The local offset is read from
   `date +%z` at each check, so it follows the host's time zone and daylight saving without a time zone library; a
   check that cannot read it skips the digest rather than guess UTC.
 - The URL and every header value are secrets: their `Debug` shows `<secret>`, no log line or error shows them
@@ -106,6 +108,10 @@ How the notifier runs:
   the stored value back in place of each `<secret>`, by target name and field, so a config edited in the browser or
   by `runnerctl` saves with its secrets. A `<secret>` with nothing to keep, as in a target renamed in the editor, is
   refused as invalid: write the value. The owner reads and edits the file itself for the values.
+  The text as sent is parsed first, masks and all, and a text that does not parse is answered with that error: a
+  TOML error quotes its line, and a line runnerd had filled in would quote the secret back to the browser. Once it
+  parses, filling in strings where strings were cannot break it, and `validate` names a target's field, never its
+  value. Comments are not masked; the site says to keep old URLs out of them.
 - Known limit: a TOML syntax error quotes the line it is on. A broken line holding a URL or header in the file on
   disk shows in the error a reload logs, as any config line does.
 - Nothing leaves the machine without `[notify]`.

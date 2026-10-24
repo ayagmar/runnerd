@@ -248,5 +248,5 @@ Each `[[notify.targets]]`:
 | `url` | required | an ntfy topic's URL (`https://ntfy.sh/<topic>`) or the webhook's; a secret that no log line, error or client shows |
 | `headers` | `{}` | sent with each post, such as `{ Authorization = "Bearer tk_…" }`; their values are secrets too |
 
-The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show `url` and header values as `"<secret>"`. Leave them so and saving keeps the values in the file; write a new value over one to change it. A target renamed in the editor has nothing to keep, so write its values again.
+The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show `url` and header values as `"<secret>"`. Leave them so and saving keeps the values in the file; write a new value over one to change it. A target renamed in the editor has nothing to keep, so write its values again. Comments are shown as written.
 | `events` | `["failed", "lost", "runner", "insights"]` | what it is sent; add `"digest"` for the daily digest |

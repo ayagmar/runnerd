@@ -83,4 +83,4 @@ On a self-hosted ntfy server with access control, add its token: `headers = { Au
 }
 ```
 
-The URL and header values are secrets: no log line, error or `runnerctl notify test` answer shows them, only the target's name and the HTTP status or what failed. The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show them as `"<secret>"`, and saving keeps them; read or change them in `runnerd.toml` itself. One exception: a TOML syntax error on a `url` or `headers` line quotes that line in the error, as it would any line.
+The URL and header values are secrets: no log line, error or `runnerctl notify test` answer shows them, only the target's name and the HTTP status or what failed. The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show them as `"<secret>"`, and saving keeps them; read or change them in `runnerd.toml` itself. Comments are shown as written, so keep old URLs out of them. One exception: a TOML syntax error on a `url` or `headers` line quotes that line in the error, as it would any line.
