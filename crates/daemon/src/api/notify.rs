@@ -987,8 +987,8 @@ pub(super) async fn test(
         Err(why) => return error(StatusCode::INTERNAL_SERVER_ERROR, &why),
     };
     info!("notify: test message requested by {principal:?}");
-    let mut deliveries = Vec::new();
-    for target in &targets {
+    // All at once, so slow targets together still answer within the client's wait.
+    let deliveries = futures_util::future::join_all(targets.iter().map(|target| async {
         let notification = Notification {
             event: NotifyEvent::Test,
             title: "runnerd can reach you".to_owned(),
@@ -1007,11 +1007,12 @@ pub(super) async fn test(
         if let Some(why) = &error {
             warn!("notify {}: test not delivered: {why}", target.name);
         }
-        deliveries.push(Delivery {
+        Delivery {
             target: target.name.clone(),
             error,
-        });
-    }
+        }
+    }))
+    .await;
     Json(NotifyTest {
         targets: deliveries,
     })

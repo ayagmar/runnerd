@@ -2157,6 +2157,44 @@ async fn a_notify_test_says_what_each_target_did_without_its_url() {
 }
 
 #[tokio::test]
+async fn a_notify_test_asks_every_target_at_once_so_slow_ones_fit_the_clients_wait() {
+    let dir = Dir::new();
+    // Each target answers only once both were asked: one after the other, the first never answers.
+    let both = Arc::new(tokio::sync::Barrier::new(2));
+    let app = axum::Router::new().fallback(axum::routing::post(move || {
+        let both = both.clone();
+        async move {
+            both.wait().await;
+            StatusCode::OK
+        }
+    }));
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let text = format!(
+        "{EXAMPLE}\n[[notify.targets]]\nname = \"phone\"\nkind = \"webhook\"\nurl = \"http://{address}/phone\"\n\
+         [[notify.targets]]\nname = \"desk\"\nkind = \"webhook\"\nurl = \"http://{address}/desk\"\n"
+    );
+    let daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &text).await;
+
+    let response = tokio::time::timeout(
+        Duration::from_secs(5),
+        daemon.client.post("http://runnerd/v1/notify/test").send(),
+    )
+    .await
+    .expect("the test answers within one target's timeout")
+    .unwrap();
+    let tested: runnerd_core::api::NotifyTest =
+        serde_json::from_slice(&body(response).await).unwrap();
+    let delivered: Vec<(&str, Option<&str>)> = tested
+        .targets
+        .iter()
+        .map(|delivery| (delivery.target.as_str(), delivery.error.as_deref()))
+        .collect();
+    assert_eq!(delivered, [("phone", None), ("desk", None)]);
+}
+
+#[tokio::test]
 async fn insights_and_the_digest_read_the_history() {
     let (client, _, _dir) = daemon().await;
 
