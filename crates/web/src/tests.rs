@@ -543,6 +543,21 @@ async fn a_login_link_signs_in_once() {
     assert_ne!(dashboard.login_url(), used);
 }
 
+#[tokio::test]
+async fn a_browser_that_opens_its_login_link_again_lands_signed_in() {
+    let dashboard = Dashboard::start().await;
+    let used = dashboard.login_url();
+    let cookie = dashboard.sign_in().await;
+    let path = used
+        .strip_prefix(&format!("http://{}", dashboard.addr))
+        .unwrap();
+    let again = dashboard
+        .request("GET", path, &[("cookie", cookie.as_str())])
+        .await;
+    assert_eq!(again.status, StatusCode::SEE_OTHER);
+    assert_eq!(again.headers[header::LOCATION], "/");
+}
+
 /// The one-time link in a QR code's reply.
 fn pairing_link(reply: &str) -> &str {
     let from = reply.find("login?code=").unwrap();
