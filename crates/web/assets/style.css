@@ -35,6 +35,7 @@
   --memory: #1f6b3a;
   --cpu: #5b3fc4;
   --wait: #9a5b00;
+  --wait-ink: #7a4800;
   --success-bg: #d3efdb;
   --success-ink: #134526;
   --failure-bg: #ffd9d4;
@@ -62,6 +63,7 @@
     --memory: #8fe0a6;
     --cpu: #b7a6ff;
     --wait: #f1c46b;
+    --wait-ink: #f1c46b;
     --success-bg: #163d25;
     --success-ink: #c3edce;
     --failure-bg: #4a1d1a;
@@ -84,6 +86,7 @@
   --memory: #8fe0a6;
   --cpu: #b7a6ff;
   --wait: #f1c46b;
+  --wait-ink: #f1c46b;
   --success-bg: #163d25;
   --success-ink: #c3edce;
   --failure-bg: #4a1d1a;
@@ -393,10 +396,11 @@ html {
   box-shadow: inset 0 0 0 2px var(--profile);
 }
 
-/* A runner registered and waiting for its job: the block, paler. */
+/* A runner registered and waiting for its job: the block, paler. Its text stays the blocks' ink: on the dark
+   theme's paler mix, the theme's light ink falls under 4.5:1. */
 .block.starting {
   background: color-mix(in srgb, var(--profile) 55%, var(--bg));
-  color: var(--ink);
+  color: var(--block-ink);
 }
 
 .block.mirror,
@@ -521,17 +525,13 @@ html {
   outline-offset: -2px;
 }
 
+/* The mirror, a seed container and the free remainder are often too thin to label or tap: keys under the bar name
+   them and select them. */
 .bar-keys {
-  display: none;
+  display: flex;
   flex-wrap: wrap;
   gap: var(--gap);
   margin-top: var(--gap);
-}
-
-@media (pointer: coarse) {
-  .bar-keys {
-    display: flex;
-  }
 }
 
 .bar-key {
@@ -1067,6 +1067,170 @@ html {
   height: 0.45rem;
   background: currentColor;
   animation: beat 1.6s var(--ease) infinite;
+}
+
+/* Health: whether CI keeps up, in four figures. A figure that needs a look takes the colour of what it counts. */
+dl.health-figures {
+  display: grid;
+  grid-template-columns: repeat(4, minmax(0, 1fr));
+  gap: var(--gap);
+}
+
+.health-figures > div {
+  display: flex;
+  flex-direction: column;
+  gap: 0.2rem;
+  padding: 0.9rem 1rem 1rem;
+  background: var(--surface);
+}
+
+.health-figures dt {
+  font-size: 0.875rem;
+}
+
+.health-figures dd {
+  font-size: 1rem;
+  letter-spacing: normal;
+}
+
+.health-figures .figure-main {
+  font-size: 2.25rem;
+  font-weight: 700;
+  letter-spacing: -0.04em;
+  line-height: 1;
+  text-decoration: none;
+}
+
+.health-figures a.figure-main:hover {
+  text-decoration: underline;
+}
+
+.health-figures .figure-of {
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.health-figures .figure-note {
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
+.health-figures .waiting {
+  background: color-mix(in srgb, var(--wait) 16%, var(--surface));
+}
+
+.health-figures .waiting .figure-main {
+  color: var(--wait-ink);
+}
+
+.health-figures .failing {
+  background: var(--failure-bg);
+}
+
+.health-figures .failing,
+.health-figures .failing :is(dt, .figure-note) {
+  color: var(--failure-ink);
+}
+
+/* The longest wait of each hour of the last day: the shape of the bursts, not their numbers. */
+.wait-hours {
+  display: flex;
+  align-items: flex-end;
+  gap: 2px;
+  height: 1.75rem;
+  margin-top: auto;
+  padding-top: 0.5rem;
+}
+
+.wait-hours span {
+  flex: 1;
+  min-height: 2px;
+  height: calc(var(--h) * 100%);
+  background: var(--wait);
+}
+
+/* The queue: each waiting job, how long it has waited, and why. */
+.queue-list {
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.queue-list a {
+  display: grid;
+  grid-template-columns: 5.5rem minmax(0, 1fr) minmax(0, 1.1fr);
+  align-items: center;
+  gap: 0.1rem 1rem;
+  padding: 0.65rem 1rem;
+  background: transparent;
+  box-shadow: inset 0 0 0 1px var(--line);
+  text-decoration: none;
+}
+
+.queue-list .waited {
+  grid-row: 1 / span 2;
+  font-size: 1.25rem;
+  font-weight: 700;
+  letter-spacing: -0.03em;
+  color: var(--wait-ink);
+}
+
+.queue-list .job-name {
+  font-weight: 600;
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-list a:hover .job-name {
+  text-decoration: underline;
+}
+
+.queue-list .workflow {
+  font-weight: 400;
+  color: var(--muted);
+}
+
+.queue-list .repo {
+  grid-column: 2;
+  font-size: 0.875rem;
+  color: var(--muted);
+  overflow: hidden;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+}
+
+.queue-list .reason {
+  grid-column: 3;
+  grid-row: 1 / span 2;
+  display: flex;
+  align-items: baseline;
+  gap: 0.5rem;
+  font-weight: 500;
+}
+
+.reason::before {
+  content: '';
+  flex: none;
+  width: 0.6rem;
+  height: 0.6rem;
+  background: var(--wait);
+}
+
+.reason.act::before {
+  background: var(--failure-ink);
+}
+
+.reason.soon::before {
+  background: var(--accent);
+}
+
+.queue-list > li.linked a {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
 }
 
 /* The job page. */
@@ -2041,6 +2205,34 @@ html {
   .filters label,
   .filters select {
     width: 100%;
+  }
+
+  dl.health-figures {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .health-figures .figure-main {
+    font-size: 1.875rem;
+  }
+
+  /* The reason gets a line of its own under the job. */
+  .queue-list a {
+    grid-template-columns: 4.25rem minmax(0, 1fr);
+    padding: 0.65rem 0.75rem;
+    column-gap: 0.75rem;
+  }
+
+  .queue-list .waited {
+    grid-row: 1 / span 3;
+    align-self: start;
+    font-size: 1.125rem;
+  }
+
+  .queue-list .reason {
+    grid-column: 2;
+    grid-row: auto;
+    margin-top: 0.2rem;
+    font-size: 0.9375rem;
   }
 }
 

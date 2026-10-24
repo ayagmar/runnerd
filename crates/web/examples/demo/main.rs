@@ -13,7 +13,7 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use runnerd_core::api::{Event, EventEnvelope, HostSample, JobState, Sample};
+use runnerd_core::api::{Event, EventEnvelope, HostSample, JobState, Sample, Waiting};
 
 mod fake;
 
@@ -34,6 +34,7 @@ async fn main() {
     let socket = dir.join("runnerd.sock");
     let _ = std::fs::remove_file(&socket);
     let fake = fake::Fake::new(fake::Fixtures::new(now()));
+    burst(&fake);
     fake::serve(&socket, fake.clone());
     let listener = runnerd_web::listen(&addr).await.unwrap().unwrap();
     let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
@@ -114,6 +115,33 @@ async fn main() {
         }
         if web.is_finished() {
             return;
+        }
+    }
+}
+
+/// A burst on storefront, as pushes to a pull request bring: three more jobs, which wait for a node slot behind the
+/// one its starting runner will take.
+fn burst(fake: &fake::Fake) {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let first = fixtures.status.queued[0].clone();
+    for (n, (name, waited)) in [("a11y", 35), ("lighthouse", 22), ("unit", 9)]
+        .into_iter()
+        .enumerate()
+    {
+        let mut job = first.clone();
+        job.id += 1 + n as u64;
+        name.clone_into(&mut job.name);
+        job.queued_at = now() - waited;
+        job.url = None;
+        job.waiting = Some(Waiting::NoSlot {
+            profile: "node".to_owned(),
+        });
+        fixtures.status.queued.push(job);
+    }
+    let queued = fixtures.status.queued.len();
+    for repository in &mut fixtures.status.repositories {
+        if repository.name == first.repository {
+            repository.queued_jobs = queued;
         }
     }
 }

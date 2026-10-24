@@ -593,7 +593,7 @@ impl Fixtures {
                         .to_owned(),
                 ),
                 queued_at: now - 41,
-                waiting: None,
+                waiting: Some(runnerd_core::api::Waiting::RunnerStarting),
             }],
         };
         jobs.sort_by_key(|job| std::cmp::Reverse(job.summary.id));
@@ -676,6 +676,16 @@ impl Fixtures {
                     .is_none_or(|c| job.conclusion.as_ref() == Some(c))
             })
             .filter(|job| query.before.is_none_or(|before| job.id < before))
+            .filter(|job| {
+                query
+                    .since
+                    .is_none_or(|since| job.timeline.queued_at >= since)
+            })
+            .filter(|job| {
+                query
+                    .until
+                    .is_none_or(|until| job.timeline.queued_at < until)
+            })
             .collect();
         let next = (jobs.len() > limit).then(|| jobs[limit - 1].id);
         jobs.truncate(limit);

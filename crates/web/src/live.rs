@@ -347,6 +347,7 @@ async fn run_overview(
         let open = settle(&mut events, &mut batch).await;
         let mut jobs_changed = false;
         let mut status_changed = false;
+        let mut day_changed = false;
         for event in batch {
             match event {
                 Event::JobSample { job, sample } => data.add_job_sample(job, sample),
@@ -366,12 +367,15 @@ async fn run_overview(
                 | Event::RepositoryRemoved { .. } => status_changed = true,
                 Event::JobStep { .. } => jobs_changed = true,
                 // The status's queue and slots follow jobs.
-                Event::JobQueued { .. }
-                | Event::JobStarted { .. }
-                | Event::JobFinished { .. }
-                | Event::SlotChanged { .. } => {
+                Event::SlotChanged { .. } => {
                     jobs_changed = true;
                     status_changed = true;
+                }
+                // The health figures count the day's jobs too.
+                Event::JobQueued { .. } | Event::JobStarted { .. } | Event::JobFinished { .. } => {
+                    jobs_changed = true;
+                    status_changed = true;
+                    day_changed = true;
                 }
             }
         }
@@ -394,6 +398,9 @@ async fn run_overview(
                 )
                 .await?
                 .jobs;
+        }
+        if day_changed {
+            data.reload_day(&app.daemon).await?;
         }
         if !open {
             return Ok(End::Lost);

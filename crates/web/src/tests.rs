@@ -39,7 +39,7 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{
-    Event, EventEnvelope, HostSample, JobState, Sample, SeedMemory, ShellMemory,
+    Event, EventEnvelope, HostSample, JobState, Sample, SeedMemory, ShellMemory, Waiting,
 };
 
 use crate::views::{repository_id, slot_id};
@@ -805,8 +805,7 @@ async fn every_page_renders_from_the_daemons_data() {
 }
 
 #[tokio::test]
-async fn queued_jobs_lead_the_overviews_jobs_oldest_first_once_each_linked_to_github_and_their_repository()
- {
+async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits_once_each() {
     let dashboard = Dashboard::start().await;
     {
         let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
@@ -815,6 +814,9 @@ async fn queued_jobs_lead_the_overviews_jobs_oldest_first_once_each_linked_to_gi
         older.name = "lint".to_owned();
         older.url = Some("https://github.com/halyard/storefront/actions/runs/1/job/2".to_owned());
         older.queued_at -= 300;
+        older.waiting = Some(Waiting::NoSlot {
+            profile: "node".to_owned(),
+        });
         fixtures.status.queued.insert(0, older);
         // The history keeps the newer one queued too.
         let mut recorded = fixtures.jobs[0].clone();
@@ -824,21 +826,32 @@ async fn queued_jobs_lead_the_overviews_jobs_oldest_first_once_each_linked_to_gi
     }
     let cookie = dashboard.sign_in().await;
     let overview = dashboard.page(&cookie, "/").await;
-    let jobs = &overview.body[overview.body.find(r#"id="recent""#).unwrap()..];
-    let lint = jobs.find("https://github.com/halyard/storefront/actions/runs/1/job/2");
-    let visual_diff = jobs.find("/job/120055991710");
+    let body = &overview.body;
+    let queue = &body[body.find(r#"id="queue""#).unwrap()..body.find(r#"id="budget""#).unwrap()];
+    let lint = queue.find("https://github.com/halyard/storefront/actions/runs/1/job/2");
+    let visual_diff = queue.find("/job/120055991710");
     assert!(
         lint.is_some() && lint < visual_diff,
-        "the oldest queued job comes first: {jobs}"
-    );
-    assert_eq!(
-        jobs.matches("120055991710").count(),
-        1,
-        "a queued job the history also has shows once: {jobs}"
+        "the oldest queued job comes first: {queue}"
     );
     assert!(
-        jobs.contains(r#"<li class="queued" data-class:linked="$_repo == 'halyard/storefront'""#),
-        "a queued row lights up with its repository: {jobs}"
+        queue.contains("All 2 node slots are busy")
+            && queue.contains("A runner is starting for it in node\u{a0}2"),
+        "each queued job says why it waits: {queue}"
+    );
+    assert!(
+        queue.contains(r#"<li data-class:linked="$_repo == 'halyard/storefront'""#),
+        "a queued row lights up with its repository: {queue}"
+    );
+    assert_eq!(
+        body.matches("120055991710").count(),
+        1,
+        "a queued job the history also has shows once, in the queue: {body}"
+    );
+    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
+    assert!(
+        health.contains(r##"<a class="figure-main" href="#queue">2</a>"##),
+        "the health figures count both waiting: {health}"
     );
 }
 
@@ -1266,7 +1279,7 @@ async fn a_stream_opened_by_the_page_it_just_rendered_sends_none_of_its_regions_
     // A page that names no regions gets them all.
     let mut fresh = dashboard.stream(&cookie, "/live/overview").await;
     let first = read_until(&mut fresh, |text| text.contains("datastar-patch-signals")).await;
-    assert_eq!(first.matches("<section").count(), 5, "{first}");
+    assert_eq!(first.matches("<section").count(), 7, "{first}");
 }
 
 #[tokio::test]
