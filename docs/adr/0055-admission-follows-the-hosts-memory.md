@@ -71,6 +71,8 @@ bootloader change and leaves the reclaim that slows the jobs. runnerd should pre
   job page show when they are not enough.
 - A kernel without pressure stall information still has `MemAvailable`. Without `/proc/meminfo` the host bound is
   absent, as without a recent reading, and only `MemoryMax` bounds starts.
-- `runnerd doctor` reads the host as admission does, with what the slice's runners hold now, and warns while the
-  host stalls short of memory or has less to spare than the smallest profile's `memory`. Under measured admission a
-  runner may reserve less than that, so the doctor can warn where admission still starts one.
+- `runnerd doctor` reads the host by admission's rule with the plain margin, with what the slice's runners hold
+  now, and warns while the host stalls short of memory or has less to spare than the smallest profile's `memory`.
+  Admission keeps half a margin more after a wait and while a stall lasts, so the doctor can pass while admission
+  still holds jobs. Under measured admission a runner may reserve less than `memory`, so the doctor can also warn
+  where admission still starts one.

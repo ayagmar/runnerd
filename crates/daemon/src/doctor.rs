@@ -747,8 +747,9 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
 }
 
 /// Warns when admission would hold runners back for the host's memory, by `host::budget` with what the slice's
-/// runners hold now: while the host stalls short of memory, or while it has less to spare than the smallest
-/// profile's runner may reserve.
+/// runners hold now and the plain margin: while the host stalls short of memory, or while it has less to spare than
+/// the smallest profile's runner may reserve. Admission keeps half a margin more after a wait and while a stall
+/// lasts, so it can still hold jobs where this passes.
 fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Check {
     let Some(memory) = memory else {
         return skip("host memory", "/proc/meminfo has no MemAvailable");
