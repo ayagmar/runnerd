@@ -24,7 +24,7 @@ use runnerd_core::api::{
 };
 use runnerd_core::config::ByteSize;
 use runnerd_core::scheduler::engine::{Handle, RunningJobs};
-use runnerd_web::{PAIRING_LIFETIME, PairError, Sessions};
+use runnerd_web::{PAIRING_LIFETIME, PAIRING_MAX, PairError, Sessions};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 use tracing::info;
@@ -213,7 +213,8 @@ async fn sign_out_dashboard(
 }
 
 /// `POST /v1/dashboard/pairings?origin=`: a fresh link on `origin`, or on each of `[web] origins`, that signs one
-/// device in there within 5 minutes, as `runnerctl web --qr` shows.
+/// device in there within 5 minutes, as `runnerctl web --qr` shows. More origins than codes may be alive at once is
+/// refused, so every link returned works.
 async fn pair_dashboard(
     Authenticated(principal): Authenticated,
     State(state): State<AppState>,
@@ -223,6 +224,7 @@ async fn pair_dashboard(
         let status = match failure {
             PairError::DashboardOff | PairError::NoOrigins => StatusCode::CONFLICT,
             PairError::NotListed(_) => StatusCode::BAD_REQUEST,
+            PairError::SignedOut => StatusCode::UNAUTHORIZED,
             PairError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
         };
         error(status, &failure.to_string())
@@ -233,6 +235,17 @@ async fn pair_dashboard(
         (None, Some(origins)) if origins.is_empty() => return refused(&PairError::NoOrigins),
         (None, Some(origins)) => origins,
     };
+    // Each new code would drop the oldest beyond the cap: refuse before making any rather than return dead links.
+    if origins.len() > PAIRING_MAX {
+        return error(
+            StatusCode::CONFLICT,
+            &format!(
+                "[web] origins lists {} addresses, more than the {PAIRING_MAX} pairing codes alive at once; pick \
+                 one with `runnerctl web --qr --base <origin>`",
+                origins.len()
+            ),
+        );
+    }
     let now = std::time::Instant::now();
     let mut links = Vec::new();
     for origin in origins {

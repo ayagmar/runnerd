@@ -1006,21 +1006,7 @@ async fn pairing_links_from_the_socket_are_fresh_and_sign_one_device_in_on_their
     };
     let off = pair("").await.unwrap();
     assert_eq!(off.status(), StatusCode::CONFLICT, "no dashboard runs yet");
-    let listener = runnerd_web::listen("127.0.0.1:0").await.unwrap().unwrap();
-    let addr = listener.local_addr().unwrap();
-    runnerd_web::spawn(
-        listener,
-        dir.0.join("runnerd.sock"),
-        vec![PROXY.parse().unwrap()],
-        daemon.sessions.clone(),
-        std::future::pending::<()>(),
-    );
-    for _ in 0..100 {
-        if runnerd_web::login_file(&dir.0.join("runnerd.sock")).exists() {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-    }
+    let addr = dashboard_for(&dir.0, &daemon, &[PROXY.to_owned()]).await;
     let mut links = Vec::new();
     for _ in 0..2 {
         let reply = pair("").await.unwrap();
@@ -1061,6 +1047,83 @@ async fn pairing_links_from_the_socket_are_fresh_and_sign_one_device_in_on_their
     );
     let unlisted = pair("?origin=https%3A%2F%2Fother.example").await.unwrap();
     assert_eq!(unlisted.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A dashboard sharing `daemon`'s credentials, taking writes from `proxies`; its address.
+async fn dashboard_for(dir: &Path, daemon: &Daemon, proxies: &[String]) -> std::net::SocketAddr {
+    let listener = runnerd_web::listen("127.0.0.1:0").await.unwrap().unwrap();
+    let addr = listener.local_addr().unwrap();
+    runnerd_web::spawn(
+        listener,
+        dir.join("runnerd.sock"),
+        proxies
+            .iter()
+            .map(|origin| origin.parse().unwrap())
+            .collect(),
+        daemon.sessions.clone(),
+        std::future::pending::<()>(),
+    );
+    for _ in 0..100 {
+        if runnerd_web::login_file(&dir.join("runnerd.sock")).exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    addr
+}
+
+#[tokio::test]
+async fn as_many_origins_as_live_codes_each_get_a_link_that_works_and_more_get_none() {
+    let origins = |count: usize| -> Vec<String> {
+        (1..=count)
+            .map(|n| format!("https://forge-{n}.example.ts.net:8443"))
+            .collect()
+    };
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    let addr = dashboard_for(&dir.0, &daemon, &origins(8)).await;
+    let reply = daemon
+        .client
+        .post("http://runnerd/v1/dashboard/pairings")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    let pairings: Pairings = serde_json::from_slice(&body(reply).await).unwrap();
+    assert_eq!(pairings.links.len(), 8);
+    for link in &pairings.links {
+        assert_eq!(
+            open_link(addr, &link.url, &link.origin).await,
+            StatusCode::SEE_OTHER,
+            "the link on {} works",
+            link.origin
+        );
+    }
+
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    let addr = dashboard_for(&dir.0, &daemon, &origins(9)).await;
+    let one = daemon
+        .client
+        .post("http://runnerd/v1/dashboard/pairings?origin=https%3A%2F%2Fforge-1.example.ts.net%3A8443")
+        .send()
+        .await
+        .unwrap();
+    let one: Pairings = serde_json::from_slice(&body(one).await).unwrap();
+    let reply = daemon
+        .client
+        .post("http://runnerd/v1/dashboard/pairings")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::CONFLICT);
+    let message = String::from_utf8(body(reply).await).unwrap();
+    assert!(message.contains("--base"), "{message}");
+    assert_eq!(
+        open_link(addr, &one.links[0].url, &one.links[0].origin).await,
+        StatusCode::SEE_OTHER,
+        "the refused batch made no code that pushed out one made before"
+    );
 }
 
 #[tokio::test]
