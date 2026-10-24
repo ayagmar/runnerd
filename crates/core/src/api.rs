@@ -26,6 +26,7 @@
 //! | `GET /v1/jobs/{id}/logs?`[`LogQuery`] | `text/plain`, one line per log line |
 //! | `GET /v1/host/samples?`[`HostSampleQuery`] | [`HostSamples`] |
 //! | `GET /v1/stats?`[`StatsQuery`] | [`Stats`] |
+//! | `GET /v1/activity?`[`ActivityQuery`] | [`Activity`] |
 //! | `GET /v1/sizing?`[`SizingQuery`] | [`Sizing`] |
 //! | `GET /v1/caches` | [`Caches`] |
 //! | `GET /v1/caches/history?`[`CacheHistoryQuery`] | [`CacheHistory`] |
