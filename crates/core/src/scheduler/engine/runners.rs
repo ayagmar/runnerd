@@ -13,7 +13,7 @@ use crate::cache::{self, runner_mounts};
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
 use crate::record;
-use crate::scheduler::SlotRef;
+use crate::scheduler::{IDLE_TIMEOUT, SlotRef};
 
 /// Why a slot's runner is removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -99,11 +99,31 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }
         self.forget(occupant);
+        let ran = occupant.busy
+            || occupant.job.is_some()
+            || match why {
+                // Unread logs: it may have run one.
+                Release::Ended => took_job != Some(false),
+                Release::Idle => false,
+            };
         if let Some(state) = self.repositories.get_mut(&occupant.repository) {
             match took_job {
                 Some(true) => {
                     state.failures = 0;
                     state.held_until = None;
+                }
+                // One that waited `IDLE_TIMEOUT` had started and connected: a warm runner whose container went
+                // (a restart of Docker, or the runner removed on GitHub) says nothing of the next one's start.
+                Some(false)
+                    if occupant
+                        .started_at
+                        .elapsed()
+                        .is_ok_and(|waited| waited >= IDLE_TIMEOUT) =>
+                {
+                    info!(
+                        "{}: {} ended without a job after waiting for one",
+                        occupant.repository, occupant.runner_name
+                    );
                 }
                 Some(false) => {
                     warn!(
@@ -115,13 +135,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 None => {}
             }
         }
-        self.vacate(slot);
+        self.vacate(slot, ran);
     }
 
-    /// Frees a slot whose runner is gone. Its runner may have grown the shared caches, and in slot 1 its
-    /// profile's layers: both are checked once idle. A killed job's partial writes count too: they stay in slot 1
-    /// and would reach the snapshot on any later reseed, like those of a job cancelled or out of memory.
-    fn vacate(&mut self, slot: &SlotRef) {
+    /// Frees a slot whose runner is gone. Its runner may have grown the shared caches, and if it `ran` a job in slot
+    /// 1, its profile's layers: both are checked once idle. A killed job's partial writes count too: they stay in
+    /// slot 1 and would reach the snapshot on any later reseed, like those of a job cancelled or out of memory. A
+    /// warm runner that leaves slot 1 without a job changed nothing there.
+    fn vacate(&mut self, slot: &SlotRef, ran: bool) {
         if let Some(entry) = self
             .slots
             .get_mut(&slot.profile)
@@ -129,7 +150,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         {
             *entry = None;
         }
-        if slot.index == 0 {
+        if slot.index == 0 && ran {
             self.reseed_due.insert(slot.profile.clone());
         }
         self.trim_due = true;
@@ -172,7 +193,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Ok(_) => {}
                 Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
             }
-            self.vacate(slot);
+            self.vacate(slot, occupant.busy || occupant.job.is_some());
             return;
         }
         match self
@@ -200,9 +221,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Holds back a repository's next runners after one failed, longer each time in a row.
+    /// Holds back a repository's next runners after one failed, longer each time in a row. Runners that fail while
+    /// it is held started before the hold, so they do not lengthen it.
     fn hold(&mut self, repository: &str) {
-        if let Some(state) = self.repositories.get_mut(repository) {
+        if let Some(state) = self.repositories.get_mut(repository)
+            && state
+                .held_until
+                .is_none_or(|until| until <= SystemTime::now())
+        {
             state.failures += 1;
             let wait = backoff(state.failures);
             state.held_until = Some(SystemTime::now() + wait);

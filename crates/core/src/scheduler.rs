@@ -60,13 +60,14 @@ impl Repository {
 pub struct Profile {
     /// Memory a slot's container may use.
     pub memory: u64,
-    /// CPU a slot's container may use, in millicores.
+    /// CPU a slot's container may use, in millicores; under a CPU budget, at most the budget, as a runner at its caps
+    /// reserves it.
     pub cpus: u64,
     /// While the profile's snapshot is rebuilt or its image pulled, none of its slots starts.
     pub preparing: Option<Preparing>,
-    /// Its slot 1 ran a job since its last reseed and every runner of it is idle: its warm runners stop, and none
-    /// starts, so the reseed can run.
-    pub reseed_due: bool,
+    /// Upkeep waits for its runners, all idle: its reseed (slot 1 ran a job since the last), or the shared caches'
+    /// check, which waits for every profile's. Its warm runners stop, and none starts, so the upkeep can run.
+    pub upkeep_due: bool,
     /// Index 0 is slot 1.
     pub slots: Vec<Slot>,
 }
@@ -512,9 +513,9 @@ fn sort_out(
         matching.clear();
         warm = 0;
     }
-    // A reseed waits for its profile's runners: none is kept, and none waits out `IDLE_TIMEOUT` first.
-    let reseed_due = profile.is_some_and(|profile| profile.reseed_due);
-    if reseed_due {
+    // Upkeep waits for its profile's runners: none is kept, and none waits out `IDLE_TIMEOUT` first.
+    let upkeep_due = profile.is_some_and(|profile| profile.upkeep_due);
+    if upkeep_due {
         warm = 0;
     }
     let idle: Vec<(SlotRef, &RunnerSlot)> = profile
@@ -535,7 +536,7 @@ fn sort_out(
     let stops: Vec<SlotRef> = idle
         .iter()
         .filter(|(_, runner)| {
-            reseed_due
+            upkeep_due
                 || now
                     .duration_since(runner.started_at)
                     .is_ok_and(|waited| waited >= IDLE_TIMEOUT)

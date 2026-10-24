@@ -48,25 +48,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             Err(error) => warn!("cannot read the job history for warm runners: {error}"),
         }
-        if let Some((learned, _)) = &self.warm.learned {
-            self.warm.runs.expire(learned, now);
-        }
+        self.warm.runs.expire(now);
     }
 
-    /// Notes a job of `repository` seen queued or taken now, of run `run_id`, with its workflow when known.
+    /// Notes a job of `repository` queued or taken at `at` (ms), of run `run_id`, with its workflow when known.
     pub(super) fn note_job(
         &mut self,
         repository: &str,
         run_id: u64,
         job: u64,
         workflow: Option<&str>,
+        at: u64,
     ) {
         if let Some((learned, _)) = &mut self.warm.learned {
-            learned.note(repository, time::now_ms());
+            learned.note(repository, at);
         }
-        self.warm
-            .runs
-            .note(repository, run_id, job, workflow, time::now_ms());
+        self.warm.runs.note(repository, run_id, job, workflow, at);
     }
 
     /// Notes the workflow of run `run_id`, if it is followed, as a running job's details say.
@@ -91,8 +88,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .map(|job| (repository.name.clone(), job.clone())),
             );
         }
+        let now = time::now_ms();
         for (repository, job) in seen {
-            self.note_job(&repository, job.run_id, job.id, job.workflow.as_deref());
+            self.note_job(
+                &repository,
+                job.run_id,
+                job.id,
+                job.workflow.as_deref(),
+                now,
+            );
         }
     }
 

@@ -177,6 +177,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         match self.store.open_jobs().await {
             Ok(open) => {
                 for job in open {
+                    // Its run is as old as the job, for the warm runners its remaining jobs get, not as new as
+                    // this start.
+                    let runs = job.state == api::JobState::Queued
+                        || job
+                            .runner
+                            .as_ref()
+                            .is_some_and(|runner| running.contains(runner));
+                    if runs {
+                        self.note_job(
+                            &job.repository,
+                            job.run_id,
+                            job.id,
+                            job.workflow.as_deref(),
+                            job.queued_at,
+                        );
+                    }
                     if job.state == api::JobState::Queued {
                         self.queued_jobs.insert(job.id, job.repository);
                         continue;

@@ -272,6 +272,9 @@ pub struct Engine<G = Github, D = Docker> {
     trim_due: bool,
     /// The running check of the shared caches: Docker takes many seconds to measure volumes.
     trim: Option<JoinHandle<Result<Trimmed, docker::Error>>>,
+    /// When the last check of the shared caches started; the daemon's start counts as one, as the first runs then
+    /// unless runners were adopted.
+    checked_at: SystemTime,
     mirror_up: bool,
     /// The memory cap the running mirror started with.
     mirror_memory: u64,
@@ -364,10 +367,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         let (records, records_receiver) = records::RecordState::new();
-        // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
-        let mirror_memory = config.mirror_memory();
         let mut engine = Engine {
             isolation: isolation::backend(config.host.isolation),
+            // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
+            mirror_memory: config.mirror_memory(),
             config,
             github: Arc::new(github),
             docker: Arc::new(docker),
@@ -388,9 +391,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // So the caches are measured once at start.
             trim_due: true,
             trim: None,
+            checked_at: SystemTime::now(),
             // Unknown: an earlier run may have left it up, so the first idle tick stops it.
             mirror_up: true,
-            mirror_memory,
             rate_limit_logged: false,
             busy_orphans: BTreeSet::new(),
             status,

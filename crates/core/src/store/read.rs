@@ -728,7 +728,7 @@ pub(super) fn cache_history(db: &Connection, since: u64) -> rusqlite::Result<Vec
 
 pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
     db.prepare_cached(
-        "SELECT j.id, j.repository, j.state, j.runner, r.removed_at FROM jobs j \
+        "SELECT j.id, j.repository, j.state, j.runner, r.removed_at, j.run_id, j.workflow, j.queued_at FROM jobs j \
          LEFT JOIN runners r ON r.name = j.runner WHERE j.state IN ('queued', 'running') ORDER BY j.id",
     )?
     .query_map([], |row| {
@@ -738,6 +738,9 @@ pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
             state: state(&row.get::<_, String>(2)?),
             runner: row.get(3)?,
             runner_removed_at: row.get(4)?,
+            run_id: row.get(5)?,
+            workflow: row.get(6)?,
+            queued_at: row.get(7)?,
         })
     })?
     .collect()

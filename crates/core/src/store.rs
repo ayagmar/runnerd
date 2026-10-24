@@ -161,6 +161,12 @@ pub struct OpenJob {
     pub runner: Option<String>,
     /// When its runner was removed, in milliseconds since the epoch.
     pub runner_removed_at: Option<u64>,
+    /// The workflow run it belongs to.
+    pub run_id: u64,
+    /// The workflow's name, when known.
+    pub workflow: Option<String>,
+    /// When GitHub queued it, in milliseconds since the epoch.
+    pub queued_at: u64,
 }
 
 /// Where a job's log capture continues: the runner's page file and the byte offset in it.

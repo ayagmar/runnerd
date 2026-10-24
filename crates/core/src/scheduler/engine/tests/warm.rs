@@ -315,3 +315,195 @@ async fn an_idle_runner_adopted_after_a_restart_stays_as_the_warm_runner() {
     );
     assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
 }
+
+#[tokio::test]
+async fn the_shared_caches_are_checked_hourly_though_a_warm_runner_always_waits() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert!(engine.trim.is_none(), "no check while a runner runs");
+
+    // An hour after the last check, with a job ended since: the warm runner stops for the check, then comes back.
+    engine.checked_at -= Duration::from_secs(3600);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [None, None]);
+    assert!(engine.trim.is_some(), "the shared caches are checked");
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert_eq!(registered(&github.calls()).len(), 2);
+}
+
+#[tokio::test]
+async fn a_warm_runner_that_took_a_job_before_its_stop_leaves_no_room_for_younger_jobs_either() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    // o/r's 4G warm runner in `app`; o/s runs 1G jobs in `small`. 4.5G leaves room for o/s's jobs only once the
+    // warm runner stops.
+    let config = format!(
+        "{}\n[profiles.small]\nimage_stage = \"app\"\ncpus = 1\nmemory = \"1G\"\nslots = 2\n\n\
+         [[repositories]]\nname = \"o/s\"\nprofile = \"small\"\nlabels = [\"self-hosted\", \"other\"]\nwarm = 0\n",
+        warm_config().replace("slots = 2", "slots = 1")
+    );
+    let (mut engine, _handle, _dir) = active(&github, &docker, &config).await;
+    engine.memory_max = Some(4608 << 20);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = [7, 8]
+            .into_iter()
+            .map(|id| QueuedJob {
+                labels: vec!["self-hosted".to_owned(), "other".to_owned()],
+                ..job(id)
+            })
+            .collect();
+        // The warm runner just took a job of o/r: GitHub refuses its delete.
+        state.busy_deletes = 1;
+    }
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "neither o/s job starts on room the warm runner still holds"
+    );
+    assert!(engine.memory_in_use() <= 4608 << 20, "within MemoryMax");
+}
+
+#[tokio::test]
+async fn a_warm_runner_gone_without_a_job_after_waiting_holds_back_nothing() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+
+    // Docker restarted under it an hour later: its container ended, and it took no job.
+    for occupant in engine.slots.values_mut().flatten().flatten() {
+        occupant.started_at -= Duration::from_secs(3600);
+    }
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.runner_log = Some("Listening for Jobs".to_owned());
+        state.containers[0].running = false;
+    }
+    github.0.lock().unwrap().queued = vec![job(5)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(waiting(&handle), [Some(api::Waiting::RunnerStarting)]);
+    assert_eq!(
+        registered(&github.calls()).len(),
+        3,
+        "a runner for the job, and a warm one"
+    );
+}
+
+#[tokio::test]
+async fn runners_failing_together_hold_their_repository_back_once() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(1), job(2)];
+    engine.tick(Shutdown::No).await;
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.runner_log = Some("Failed to connect".to_owned());
+        for container in &mut state.containers {
+            container.running = false;
+        }
+    }
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        engine.repositories["o/r"].failures, 1,
+        "two runners of one start fail once"
+    );
+}
+
+#[tokio::test]
+async fn a_warm_runner_leaving_slot_1_without_a_job_needs_no_reseed() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, _handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.warm.learned = Some((Learned::default(), std::time::SystemTime::now()));
+    for occupant in engine.slots.values_mut().flatten().flatten() {
+        occupant.started_at -= IDLE_TIMEOUT;
+    }
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    let seed = format!("start {}", Names::new("runnerd").seed("app"));
+    assert!(
+        !docker.calls().contains(&seed),
+        "slot 1 changed nothing: {:?}",
+        docker.calls()
+    );
+}
+
+#[tokio::test]
+async fn a_profile_with_more_cpus_than_the_budget_still_gets_a_warm_runner() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let config = warm_config().replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\ncpu_overcommit = 1.0",
+    );
+    let (mut engine, handle, _dir) = active(&github, &docker, &config).await;
+    // One CPU for a profile of two, as a job's runner would reserve.
+    engine.cpus = Some(1000);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+}
+
+#[tokio::test]
+async fn a_run_under_way_before_a_restart_counts_from_its_jobs_not_from_the_restart() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let config = warm_config().replace("slots = 2", "slots = 4");
+    // Run 50's job, queued half an hour ago, runs on a runner the restart adopts.
+    running_job(&github, &docker, "o/r", 1, 50);
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .get_mut(&50)
+        .unwrap()
+        .workflow_name = Some("CI".to_owned());
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    // Three runs of CI two days ago, three jobs each, queued together.
+    let then = time::now_ms() - 2 * 24 * 60 * MINUTE;
+    for run in 1..=3 {
+        for n in 0..3 {
+            handle
+                .store
+                .queued("o/r", &ci_job(run * 10 + n, run, then + run * MINUTE));
+        }
+    }
+    let queued_at = time::now_ms() - 30 * MINUTE;
+    handle.store.queued("o/r", &ci_job(50, 50, queued_at));
+    handle.store.claimed(
+        50,
+        50,
+        &identity("ci", ID_A).runner_name("app", 1, 1),
+        queued_at + MINUTE,
+    );
+    handle.store.flush().await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    // Its run stopped counting 25 minutes ago: one warm runner, as o/r is active, and none for the run's other jobs.
+    assert_eq!(registered(&github.calls()).len(), 1);
+}

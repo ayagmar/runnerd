@@ -163,3 +163,28 @@ fn warm_zero_turns_off_warm_runners_and_bursts() {
     assert_eq!(target(1, true, 2), 3, "one warm plus two of a run");
     assert_eq!(target(1, false, 2), 2, "a run's jobs while quiet");
 }
+
+#[test]
+fn a_run_counts_from_its_first_job_however_late_it_is_seen_again() {
+    let now = MIDNIGHT + 12 * HOUR;
+    let history: Vec<Seen> = (1..=3)
+        .flat_map(|run| {
+            let first = now - run * HOUR;
+            [
+                seen("o/app", "CI", run, first),
+                seen("o/app", "CI", run, first),
+                seen("o/app", "CI", run, first),
+            ]
+        })
+        .collect();
+    let learned = Learned::new(&history, now - 2 * MINUTE);
+    let mut runs = Runs::default();
+    // After a restart: the history's job, queued 30 minutes ago, then its runner's capture now.
+    runs.note("o/app", 10, 100, Some("CI"), now - 30 * MINUTE);
+    runs.note("o/app", 10, 100, None, now);
+    assert_eq!(
+        runs.remaining("o/app", &learned, now),
+        0,
+        "the run stopped counting long ago"
+    );
+}

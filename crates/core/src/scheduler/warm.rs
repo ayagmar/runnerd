@@ -19,6 +19,9 @@ const USUAL_DAYS: usize = 3;
 /// A workflow's runs before its jobs per run are expected of the next.
 const MIN_RUNS: usize = 3;
 
+/// How long a run is remembered after its first job, whether or not it still counts.
+const FORGET_AFTER: Duration = Duration::from_hours(24);
+
 /// How long a run whose workflow is not known yet counts.
 const UNKNOWN_SPAN: Duration = Duration::from_secs(3600);
 
@@ -161,7 +164,7 @@ struct Run {
     repository: String,
     workflow: Option<String>,
     jobs: BTreeSet<u64>,
-    /// When its first job was seen, in milliseconds.
+    /// When its first job was queued or seen, in milliseconds.
     first: u64,
 }
 
@@ -186,6 +189,7 @@ impl Runs {
             first: at,
         });
         run.jobs.insert(job);
+        run.first = run.first.min(at);
         if run.workflow.is_none() {
             run.workflow = workflow.map(str::to_owned);
         }
@@ -200,9 +204,12 @@ impl Runs {
         }
     }
 
-    /// Forgets the runs that stopped counting at `now` (ms).
-    pub fn expire(&mut self, learned: &Learned, now: u64) {
-        self.0.retain(|_, run| run.counts(learned, now));
+    /// Forgets the runs whose first job came `FORGET_AFTER` before `now` (ms). One that stopped counting is kept
+    /// until then, so a job of it seen again, as after a restart, does not count it again as a new run.
+    pub fn expire(&mut self, now: u64) {
+        let after = u64::try_from(FORGET_AFTER.as_millis()).unwrap_or(u64::MAX);
+        self.0
+            .retain(|_, run| now.saturating_sub(run.first) < after);
     }
 
     /// The jobs `repository`'s runs are expected to queue still at `now` (ms): per run that still counts, its

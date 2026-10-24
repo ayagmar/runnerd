@@ -60,7 +60,7 @@ fn profiles(slots: Vec<Slot>) -> BTreeMap<String, Profile> {
             memory: 4 * GIB,
             cpus: 2000,
             preparing: None,
-            reseed_due: false,
+            upkeep_due: false,
             slots,
         },
     )])
@@ -459,7 +459,7 @@ fn each_job_left_queued_says_why_it_waits() {
             memory: GIB,
             cpus: 1000,
             preparing: None,
-            reseed_due: false,
+            upkeep_due: false,
             slots: vec![busy],
         },
     );
@@ -469,7 +469,7 @@ fn each_job_left_queued_says_why_it_waits() {
             memory: GIB,
             cpus: 1000,
             preparing: Some(Preparing::Reseeding),
-            reseed_due: false,
+            upkeep_due: false,
             slots: vec![Slot::Free],
         },
     );
@@ -782,7 +782,7 @@ fn a_queued_job_takes_the_memory_and_cpu_of_warm_runners_of_another_profile() {
             memory: 4 * GIB,
             cpus: 2000,
             preparing: None,
-            reseed_due: false,
+            upkeep_due: false,
             slots: vec![idle_runner("o/w", now()), idle_runner("o/w", now())],
         },
     );
@@ -916,7 +916,7 @@ fn warm_runners_start_only_within_the_budget_one_per_repository_first() {
 #[test]
 fn a_profile_due_a_reseed_stops_its_warm_runners_at_once_and_starts_none() {
     let mut profiles = profiles(vec![idle_runner("o/a", now()), Slot::Free]);
-    profiles.get_mut("app").unwrap().reseed_due = true;
+    profiles.get_mut("app").unwrap().upkeep_due = true;
     let plan = plan(
         &[warm("o/a", "app", 1)],
         &profiles,

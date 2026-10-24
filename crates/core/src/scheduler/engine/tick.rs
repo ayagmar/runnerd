@@ -123,6 +123,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         self.note_high_water(&admitting);
         let mut held_for_cpu = BTreeSet::new();
+        // Once a start waits for a warm runner that took a job, the plan's later starts counted on its room too.
+        let mut deferred = false;
         for decision in decisions {
             match decision {
                 Decision::Stop { slot } => {
@@ -132,7 +134,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     };
                     self.stop(&slot, jobs).await;
                 }
-                start @ Decision::Start { .. } => self.apply_start(start, &mut admitting).await,
+                Decision::Start { .. } if deferred => {}
+                start @ Decision::Start { .. } => {
+                    deferred = !self.apply_start(start, &mut admitting).await;
+                }
                 Decision::HeldForCpu { repository } => {
                     held_for_cpu.insert(repository);
                 }
@@ -149,8 +154,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Carries out a plan's `Decision::Start`, unless a warm runner it replaces is still there: that one took a job
-    /// before its stop, and the start waits for the next plan.
-    async fn apply_start(&mut self, start: Decision, admitting: &mut Admitting) {
+    /// before its stop, and the start waits for the next plan. Returns whether it went ahead.
+    async fn apply_start(&mut self, start: Decision, admitting: &mut Admitting) -> bool {
         let Decision::Start {
             slot,
             repository,
@@ -160,11 +165,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             replacing,
         } = start
         else {
-            return;
+            return true;
         };
         if replacing.iter().any(|slot| self.holds_runner(slot)) {
             info!("{repository}: a warm runner it would replace took a job; starting next tick");
-            return;
+            return false;
         }
         let mut admission = admitting.admit(&repository, memory, cpu);
         if warm {
@@ -175,7 +180,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             self.start(&slot, &repository, admission, Purpose::Warm)
                 .await;
-            return;
+            return true;
         }
         let held_since = self
             .repositories
@@ -187,6 +192,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         self.start(&slot, &repository, admission, Purpose::Job)
             .await;
+        true
     }
 
     pub(super) fn plan(&self) -> (Plan, Admitting) {
@@ -226,43 +232,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .config
             .profiles
             .iter()
-            .map(|(name, profile)| {
-                let slots = &self.slots[name];
-                // A reload may have left fewer slots than runners: free slots count only up to the configured number.
-                let mut free = (profile.slots as usize)
-                    .saturating_sub(slots.iter().filter(|slot| slot.is_some()).count());
-                let slots = slots
-                    .iter()
-                    .map(|slot| match slot {
-                        None if free > 0 => {
-                            free -= 1;
-                            Slot::Free
-                        }
-                        None => Slot::Closed,
-                        Some(occupant) => Slot::Runner(RunnerSlot {
-                            repository: occupant.repository.clone(),
-                            busy: occupant.busy,
-                            started_at: occupant.started_at,
-                            memory: self.takes(occupant),
-                            cpu: self.reserves_cpu(occupant),
-                        }),
-                    })
-                    .collect();
-                let profile = Profile {
-                    memory: profile.memory.0,
-                    cpus: u64::from(profile.cpus) * 1000,
-                    reseed_due: self.reseed_waits_for_warm(name),
-                    preparing: if self.is_reseeding(name) {
-                        Some(Preparing::Reseeding)
-                    } else if self.awaits_image(&profile.image) {
-                        Some(Preparing::PullingImage)
-                    } else {
-                        None
-                    },
-                    slots,
-                };
-                (name.clone(), profile)
-            })
+            .map(|(name, profile)| (name.clone(), self.plan_profile(name, profile)))
             .collect();
         let free_memory = self
             .memory_max
@@ -296,24 +266,50 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         (plan, admitting)
     }
 
+    /// A profile as `plan` sees it.
+    fn plan_profile(&self, name: &str, profile: &crate::config::Profile) -> Profile {
+        let slots = &self.slots[name];
+        // A reload may have left fewer slots than runners: free slots count only up to the configured number.
+        let mut free = (profile.slots as usize)
+            .saturating_sub(slots.iter().filter(|slot| slot.is_some()).count());
+        let slots = slots
+            .iter()
+            .map(|slot| match slot {
+                None if free > 0 => {
+                    free -= 1;
+                    Slot::Free
+                }
+                None => Slot::Closed,
+                Some(occupant) => Slot::Runner(RunnerSlot {
+                    repository: occupant.repository.clone(),
+                    busy: occupant.busy,
+                    started_at: occupant.started_at,
+                    memory: self.takes(occupant),
+                    cpu: self.reserves_cpu(occupant),
+                }),
+            })
+            .collect();
+        Profile {
+            memory: profile.memory.0,
+            cpus: (u64::from(profile.cpus) * 1000).min(self.cpu_budget().unwrap_or(u64::MAX)),
+            upkeep_due: self.upkeep_waits_for_warm(name),
+            preparing: if self.is_reseeding(name) {
+                Some(Preparing::Reseeding)
+            } else if self.awaits_image(&profile.image) {
+                Some(Preparing::PullingImage)
+            } else {
+                None
+            },
+            slots,
+        }
+    }
+
     /// Whether a slot holds a runner.
     fn holds_runner(&self, slot: &SlotRef) -> bool {
         self.slots
             .get(&slot.profile)
             .and_then(|slots| slots.get(slot.index))
             .is_some_and(Option::is_some)
-    }
-
-    /// Whether a reseed of `profile` is due and waits only for its runners, all idle: its warm runners then stop and
-    /// none starts.
-    fn reseed_waits_for_warm(&self, profile: &str) -> bool {
-        (self.reseed_due.contains(profile) || self.reseed_requested.contains(profile))
-            && self.slots.get(profile).is_some_and(|slots| {
-                slots
-                    .iter()
-                    .flatten()
-                    .all(|occupant| !occupant.busy && occupant.job.is_none())
-            })
     }
 
     /// What the runners take (`takes`), and the memory
