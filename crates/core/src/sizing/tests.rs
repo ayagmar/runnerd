@@ -880,6 +880,26 @@ labels = ["node"]
         );
     }
 
+    #[test]
+    fn under_measured_admission_a_lowering_that_adds_a_slot_says_why_both() {
+        let config = on(&measured(), "");
+        // Peaks of 2G at a 5.5G cap, waiting 5 minutes: lower the cap and add a slot.
+        let waited = history(capped_builds(10, 2 * G, 300));
+        let changed = due(&config, &waited, 64 * G, &BTreeMap::new());
+        let [change] = &changed[..] else {
+            panic!("one change: {changed:?}")
+        };
+        assert!(
+            change.to.memory < change.from.memory && change.to.slots == 5,
+            "{change:?}"
+        );
+        assert!(
+            change.reason.contains("lower memory") && change.reason.contains("waited 300s"),
+            "the reason says both: {}",
+            change.reason
+        );
+    }
+
     /// When node was last changed, `hours_ago`.
     fn node_changed(hours_ago: u64) -> BTreeMap<String, u64> {
         BTreeMap::from([("node".to_owned(), (NOW - hours_ago * HOUR) / 1000)])

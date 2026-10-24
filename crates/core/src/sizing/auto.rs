@@ -56,19 +56,7 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
     let window = context.window;
     let sizing = advise(config, context.memory_max, history, window);
     let now = window.now / 1000;
-    let mut budget = Budget {
-        caps: config.memory_caps().map_or(u64::MAX, |caps| caps.0),
-        cpus: config
-            .profiles
-            .values()
-            .map(|profile| u64::from(profile.cpus) * 1000 * u64::from(profile.slots))
-            .sum(),
-        slots: sizing
-            .profiles
-            .iter()
-            .map(|advised| (advised.name.clone(), advised.slots))
-            .collect(),
-    };
+    let mut budget = Budget::new(config, &sizing.profiles);
     let mut changes = Vec::new();
     for advised in &sizing.profiles {
         let Some(profile) = config.profiles.get(&advised.name) else {
@@ -105,7 +93,9 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
                 measured_slots(config, &sizing.profiles, advised, &fresh, &context, &budget)
             }
         };
-        if slots > profile.slots && memory == profile.memory.0 {
+        // Under caps a lowered memory's slots are the advice's, which its line says.
+        let advised_slots = config.host.admission == Admission::Caps && memory < profile.memory.0;
+        if slots > profile.slots && !advised_slots {
             reasons.push(fresh.waited(last.is_some()));
         }
         let cpus = cpus(
@@ -166,6 +156,24 @@ struct Budget {
     cpus: u64,
     /// Each profile's slots.
     slots: BTreeMap<String, u32>,
+}
+
+impl Budget {
+    /// The budget the config takes as it is.
+    fn new(config: &Config, profiles: &[ProfileSizing]) -> Budget {
+        Budget {
+            caps: config.memory_caps().map_or(u64::MAX, |caps| caps.0),
+            cpus: config
+                .profiles
+                .values()
+                .map(|profile| u64::from(profile.cpus) * 1000 * u64::from(profile.slots))
+                .sum(),
+            slots: profiles
+                .iter()
+                .map(|advised| (advised.name.clone(), advised.slots))
+                .collect(),
+        }
+    }
 }
 
 /// What the jobs queued since a profile's last change say about its slots: a raise reads only them, so one slot
