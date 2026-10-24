@@ -306,6 +306,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             })
             .collect();
         Profile {
+            count: profile.slots as usize,
             memory: profile.memory.0,
             cpus: (u64::from(profile.cpus) * 1000).min(self.cpu_budget().unwrap_or(u64::MAX)),
             upkeep_due: self.upkeep_waits_for_warm(name),

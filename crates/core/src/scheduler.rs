@@ -68,6 +68,8 @@ pub struct Profile {
     /// Upkeep waits for its runners, all idle: its reseed (slot 1 ran a job since the last), or the shared caches'
     /// check, which waits for every profile's. Its warm runners stop, and none starts, so the upkeep can run.
     pub upkeep_due: bool,
+    /// Its configured `slots`. A reload that lowered them leaves runners past them, whose slots close once they end.
+    pub count: usize,
     /// Index 0 is slot 1.
     pub slots: Vec<Slot>,
 }
@@ -544,7 +546,7 @@ fn sort_out(
     if upkeep_due {
         warm = 0;
     }
-    let idle: Vec<(SlotRef, &RunnerSlot)> = profile
+    let (idle, closing): (Vec<(SlotRef, &RunnerSlot)>, Vec<_>) = profile
         .into_iter()
         .flat_map(|profile| profile.slots.iter().enumerate())
         .filter_map(|(index, slot)| match slot {
@@ -557,7 +559,11 @@ fn sort_out(
             )),
             _ => None,
         })
-        .collect();
+        .partition(|(slot, _)| profile.is_none_or(|profile| slot.index < profile.count));
+    // Idle runners in slots a lowered `slots` closed stop now: neither warm nor room for a job, their slots close.
+    decided
+        .decisions
+        .extend(closing.into_iter().map(|(slot, _)| Decision::Stop { slot }));
     let surplus = idle.len().saturating_sub(matching.len());
     let stops: Vec<SlotRef> = idle
         .iter()
