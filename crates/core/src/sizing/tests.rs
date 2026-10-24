@@ -579,6 +579,25 @@ mod auto {
     }
 
     #[test]
+    fn a_step_short_of_the_advice_says_the_memory_and_slots_it_writes_and_what_it_goes_toward() {
+        // The advice: 2.25G, and 6 slots in the same 14G, as jobs waited. A 25% step writes 5.25G, where 2 fit.
+        let config = on(CONFIG, "");
+        let waited = history(builds(10, 1000 * M, 2000 * M, 300));
+        let changed = due(&config, &waited, 33 * G, &BTreeMap::new());
+        let [change] = &changed[..] else {
+            panic!("one change: {changed:?}")
+        };
+        assert_eq!((change.to.memory, change.to.slots), (5376 * M, 2));
+        assert!(
+            change.reason.starts_with("lower memory to 5.25G from 7G")
+                && change.reason.contains("a step toward 2.25G")
+                && !change.reason.contains("6 slots"),
+            "the reason is the change's, not the advice's: {}",
+            change.reason
+        );
+    }
+
+    #[test]
     fn auto_sizing_is_off_unless_the_config_turns_it_on() {
         let config = Config::parse(CONFIG).unwrap();
         let enough = history(builds(10, 1000 * M, 2000 * M, 5));

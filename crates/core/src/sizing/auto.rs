@@ -8,8 +8,8 @@
 
 use std::collections::BTreeMap;
 
-use crate::api::{Advice, ProfileSizing, Resize, SizingChange, cores};
-use crate::config::{Admission, Config, Profile, cpu_budget};
+use crate::api::{Advice, ProfileSizing, Resize, Sizing, SizingChange, cores};
+use crate::config::{Admission, ByteSize, Config, Profile, cpu_budget};
 
 use super::{
     BUSY, GRANULE, History, Ran, WAITED, Window, advise, busy, first_runner, spread, waits,
@@ -83,9 +83,6 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
             met_cap(history, &advised.name),
             lowering,
         );
-        if memory != profile.memory.0 {
-            reasons.push(sizing.memory_line(advised));
-        }
         let running = context.running.get(&advised.name).copied().unwrap_or(0);
         let slots = match config.host.admission {
             Admission::Caps => {
@@ -106,7 +103,16 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
             slots,
             lowering,
         );
-        // Under caps a lowered memory's slots are the advice's, which its line says.
+        if memory != profile.memory.0 {
+            reasons.push(memory_reason(
+                &sizing,
+                advised,
+                memory,
+                slots,
+                config.sizing.max_step,
+            ));
+        }
+        // Under caps a lowered memory's slots are its line's.
         let advised_slots = config.host.admission == Admission::Caps && memory < profile.memory.0;
         if slots > profile.slots && !advised_slots {
             reasons.push(fresh.waited(last.is_some()));
@@ -250,6 +256,34 @@ impl Fresh {
             self.wait,
             self.busy
         )
+    }
+}
+
+/// Why `memory` changes, as the advice line says it of the `memory` and `slots` this change writes, not the
+/// advice's own: a step of `max_step` stops short of the advice's memory, and the slots that fit follow the step.
+/// A step short of the advice says what it goes toward.
+fn memory_reason(
+    sizing: &Sizing,
+    advised: &ProfileSizing,
+    memory: u64,
+    slots: u32,
+    max_step: u32,
+) -> String {
+    let made = ProfileSizing {
+        advice: match advised.advice {
+            Advice::Lower { .. } => Advice::Lower { memory, slots },
+            Advice::Raise { .. } => Advice::Raise { memory, slots },
+            other => other,
+        },
+        ..advised.clone()
+    };
+    let line = sizing.memory_line(&made);
+    match advised.advice.change() {
+        Some(advice) if advice.memory != memory => format!(
+            "{line}; a step toward {}, at most {max_step}% a change",
+            ByteSize(advice.memory)
+        ),
+        _ => line,
     }
 }
 

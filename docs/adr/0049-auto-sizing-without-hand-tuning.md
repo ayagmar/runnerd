@@ -84,6 +84,10 @@ one when they fit the slice". `GET /v1/sizing`'s `auto_plan` gains `raise_interv
 `until` is now when the profile may be raised again, `lower_until` when it may be lowered. `runnerd init` writes
 `[sizing] auto = true`.
 
+A change's reason describes the `memory` and `slots` it writes, not the advice's: a step of `max_step` stops short
+of the advice, and says what it goes toward. Before, a 25% step from 5.25G read "lower memory to 2.5G … 4 slots fit"
+while it wrote 4G and kept 2 slots.
+
 ## Consequences
 
 - The history schema goes to version 10 (`from_cpus`, `to_cpus` on `auto_sizing`); 0.0.9 refuses a database that
