@@ -18,7 +18,7 @@ runnerctl web
 xdg-open "$(head -n 1 "$XDG_RUNTIME_DIR/runnerd.web")"
 ```
 
-A browser stays signed in for 30 days after its last visit, across restarts of runnerd and of the browser. The session secret is in `dashboard-session` beside the job history (`~/.local/state/runnerd/`), readable by you only. To sign every browser out, this one included:
+A browser stays signed in for 30 days after its last visit, across restarts of runnerd and of the browser. The session secret is in `dashboard-session` beside the job history (`~/.local/state/runnerd/`), readable by you only. The directory must be one other users cannot write. To sign every browser out, this one included, and end every link and QR code made before:
 
 ```sh
 runnerctl web --sign-out-all
@@ -49,7 +49,7 @@ Now `runnerctl web` prints a one-time link for each address in `[web] origins` t
 runnerctl web --qr
 ```
 
-A code from the dashboard works once, within 5 minutes; a link from `runnerctl web` works once, and the daemon writes a new one in its place. Each address has its own link, so using one leaves the others working. `--base <origin>` prints the link for a proxy not in `[web] origins`, which can then only read. Behind a proxy that says it took the request over HTTPS (`X-Forwarded-Proto`, which `tailscale serve` sends), the session cookie is `Secure`. Anyone who can reach the proxy sees the sign-in page and nothing else without a link.
+A QR code works once, within 5 minutes, and only on the address it shows; each one is new. A link from `runnerctl web` works once, and the daemon writes a new one in its place. Each address has its own link, so using one leaves the others working. `--base <origin>` prints the link for a proxy not in `[web] origins`, which can then only read. Behind a proxy that says it took the request over HTTPS (`X-Forwarded-Proto`, which `tailscale serve` sends), the session cookie is `Secure`. Anyone who can reach the proxy sees the sign-in page and nothing else without a link.
 
 runnerd does not trust Tailscale's identity headers such as `Tailscale-User-Login`: any local user could send them straight to `127.0.0.1:7477`.
 
@@ -138,7 +138,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
-| `runnerctl web` | opens the dashboard with a one-time login link from `$XDG_RUNTIME_DIR/runnerd.web` and prints one for each of `[web] origins` (`--no-open` prints them all, `--qr` shows the origins' links as QR codes, `--sign-out-all` signs every browser out) |
+| `runnerctl web` | opens the dashboard with a one-time login link from `$XDG_RUNTIME_DIR/runnerd.web` and prints one for each of `[web] origins` (`--no-open` prints them all, `--qr` shows a fresh 5-minute link on each origin as a QR code, `--sign-out-all` signs every browser out) |
 
 ### Sizing
 

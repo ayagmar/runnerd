@@ -33,7 +33,7 @@ mod format;
 mod live;
 mod views;
 
-pub use auth::{Sessions, login_file, session_file};
+pub use auth::{PAIRING_LIFETIME, PairError, Sessions, login_file, session_file};
 use views::caches::CachesView;
 use views::config::{ConfigQuery, ConfigView};
 use views::history::{Filter, History};

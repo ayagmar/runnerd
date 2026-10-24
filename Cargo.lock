@@ -1521,6 +1521,7 @@ dependencies = [
  "maud",
  "qrcode",
  "runnerd-core",
+ "rustix",
  "serde",
  "serde_json",
  "serde_urlencoded",

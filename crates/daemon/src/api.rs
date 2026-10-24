@@ -1,9 +1,10 @@
 //! Serves `runnerd_core::api` on the local Unix socket. Owns routing, the socket file and authentication: every
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
-//! no scheduling state of its own and never returns secrets. History reads are in `history`, the event stream in
+//! no scheduling state of its own and returns no secret but a pairing link. History reads are in `history`, the event stream in
 //! `events`, pause, resume, reseed, cache clean, the config file and the doctor in `control`, records and the shells
 //! in them in `records`. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path. Signing
-//! every browser out of the dashboard replaces its session secret, which `runnerd_web::Sessions` owns.
+//! every browser out of the dashboard and making its pairing links go through `runnerd_web::Sessions`, which owns
+//! them; a pairing link is the one secret the API returns, to the owner only.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -11,17 +12,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::connect_info::Connected;
-use axum::extract::{ConnectInfo, FromRequestParts, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Query, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::serve::IncomingStream;
 use axum::{Json, Router};
-use runnerd_core::api::{ErrorResponse, Principal, ShutdownRequest, Status};
+use runnerd_core::api::{
+    ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownRequest, Status,
+};
 use runnerd_core::config::ByteSize;
 use runnerd_core::scheduler::engine::{Handle, RunningJobs};
-use runnerd_web::Sessions;
+use runnerd_web::{PAIRING_LIFETIME, PairError, Sessions};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 use tracing::info;
@@ -151,6 +154,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/doctor", get(control::doctor))
         .route("/v1/shutdown", post(shutdown))
         .route("/v1/dashboard/sign-out", post(sign_out_dashboard))
+        .route("/v1/dashboard/pairings", post(pair_dashboard))
         .route("/v1/jobs", get(history::jobs))
         .route("/v1/jobs/{id}", get(history::job))
         .route("/v1/jobs/{id}/samples", get(history::samples))
@@ -206,6 +210,46 @@ async fn sign_out_dashboard(
             &format!("cannot write a new dashboard session secret: {failure}"),
         ),
     }
+}
+
+/// `POST /v1/dashboard/pairings?origin=`: a fresh link on `origin`, or on each of `[web] origins`, that signs one
+/// device in there within 5 minutes, as `runnerctl web --qr` shows.
+async fn pair_dashboard(
+    Authenticated(principal): Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<PairingQuery>,
+) -> Response {
+    let refused = |failure: &PairError| {
+        let status = match failure {
+            PairError::DashboardOff | PairError::NoOrigins => StatusCode::CONFLICT,
+            PairError::NotListed(_) => StatusCode::BAD_REQUEST,
+            PairError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        error(status, &failure.to_string())
+    };
+    let origins = match (query.origin, state.sessions.origins()) {
+        (Some(origin), _) => vec![origin],
+        (None, None) => return refused(&PairError::DashboardOff),
+        (None, Some(origins)) if origins.is_empty() => return refused(&PairError::NoOrigins),
+        (None, Some(origins)) => origins,
+    };
+    let now = std::time::Instant::now();
+    let mut links = Vec::new();
+    for origin in origins {
+        match state.sessions.pair(&origin, now) {
+            Ok(url) => links.push(Pairing {
+                origin,
+                url,
+                lifetime: PAIRING_LIFETIME.as_secs(),
+            }),
+            Err(failure) => return refused(&failure),
+        }
+    }
+    info!(
+        "{} dashboard pairing link(s) made for {principal:?}",
+        links.len()
+    );
+    Json(Pairings { links }).into_response()
 }
 
 /// Binds the socket with mode 0600. A socket file no daemon answers on is replaced; a live one is an error.

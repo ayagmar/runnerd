@@ -15,6 +15,9 @@ impl TempDir {
             std::env::temp_dir().join(format!("runnerd-web-test-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
+        // Only this user may write to it, as the dashboard's session secret needs.
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
         TempDir(path)
     }
 }
@@ -150,10 +153,14 @@ impl Dashboard {
         headers: &[(&str, &str)],
         body: Bytes,
     ) -> Request<Full<Bytes>> {
-        let mut request = Request::builder()
-            .method(method)
-            .uri(path)
-            .header(header::HOST, self.addr.to_string());
+        let mut request = Request::builder().method(method).uri(path);
+        // The dashboard's own address, unless the request comes through a proxy that names another.
+        if !headers
+            .iter()
+            .any(|(name, _)| name.eq_ignore_ascii_case("host"))
+        {
+            request = request.header(header::HOST, self.addr.to_string());
+        }
         for (name, value) in headers {
             request = request.header(*name, *value);
         }
@@ -559,7 +566,17 @@ async fn a_qr_code_from_the_config_page_signs_a_phone_in_through_the_proxy_once(
     let path = link
         .strip_prefix("https://forge.example.ts.net:8443")
         .unwrap();
-    let phone = [("x-forwarded-proto", "https")];
+    // `tailscale serve` passes the phone's Host on and says it took the request over https.
+    let phone = [
+        ("x-forwarded-proto", "https"),
+        ("host", "forge.example.ts.net:8443"),
+    ];
+    let elsewhere = dashboard.request("GET", path, &[]).await;
+    assert_eq!(
+        elsewhere.status,
+        StatusCode::UNAUTHORIZED,
+        "the code does not work on the loopback address"
+    );
     let signed_in = dashboard.request("GET", path, &phone).await;
     assert_eq!(signed_in.status, StatusCode::SEE_OTHER);
     let set = signed_in.headers[header::SET_COOKIE].to_str().unwrap();

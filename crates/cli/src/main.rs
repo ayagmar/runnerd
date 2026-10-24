@@ -11,8 +11,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use clap::{Parser, Subcommand};
 use runnerd_core::api::{
     Caches, CheckStatus, ConfigCheck, ConfigFile, Doctor, Event, EventQuery, Job, JobPage,
-    JobQuery, JobState, LogQuery, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
-    Resize, ShellQuery, Sizing, SizingQuery, Status,
+    JobQuery, JobState, LogQuery, PairingQuery, Pairings, PauseQuery, Paused, Records,
+    RemoveRecordsQuery, RemovedRecords, Resize, ShellQuery, Sizing, SizingQuery, Status,
 };
 use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
@@ -174,7 +174,8 @@ struct WebArgs {
     /// `https://host.example.ts.net:8443`. `[web] origins` need not be named here.
     #[arg(long, value_name = "ORIGIN")]
     base: Option<config::Origin>,
-    /// Print a QR code of the link on each of `[web] origins`, or on `--base`, to scan with a phone.
+    /// Print a QR code of a fresh link on each of `[web] origins`, or on `--base`, that signs a phone in within 5
+    /// minutes.
     #[arg(long)]
     qr: bool,
     /// Sign every browser out of the dashboard, with a new session secret.
@@ -897,7 +898,7 @@ fn qr(text: &str, colour: bool) -> Result<String, Error> {
 }
 
 /// Opens the dashboard with the one-time login link the daemon writes next to its socket and prints the links for
-/// other devices; or through `base`; or prints them, or their QR codes; or signs every browser out.
+/// other devices; or through `base`; or prints them; or QR codes of fresh pairing links; or signs every browser out.
 async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
     let base = args.base.as_ref();
     if args.sign_out_all {
@@ -905,6 +906,22 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
         output::line(
             "signed every browser out of the dashboard; `runnerctl web` signs this one in again",
         );
+        return Ok(ExitCode::SUCCESS);
+    }
+    if args.qr {
+        let query = PairingQuery {
+            origin: base.map(ToString::to_string),
+        };
+        let pairings: Pairings = client.post_json("/v1/dashboard/pairings", &query).await?;
+        for link in &pairings.links {
+            output::text(&qr(&link.url, output::paint().colour)?);
+            output::line(format_args!(
+                "scan to sign one device in on {}, within {} minutes: {}",
+                link.origin,
+                link.lifetime / 60,
+                link.url
+            ));
+        }
         return Ok(ExitCode::SUCCESS);
     }
     let file = client.socket().with_extension("web");
@@ -929,20 +946,6 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
             file.display()
         )));
     };
-    if args.qr {
-        if links.remote.is_empty() {
-            return Err(Error::Local(
-                "no address another device reaches the dashboard on: list it in `[web] origins` in runnerd.toml \
-                 and restart runnerd, or pass --base"
-                    .to_owned(),
-            ));
-        }
-        for link in &links.remote {
-            output::text(&qr(link, output::paint().colour)?);
-            output::line(format_args!("scan to sign a device in; works once: {link}"));
-        }
-        return Ok(ExitCode::SUCCESS);
-    }
     let (open, others) = match base {
         Some(_) => (
             links.remote.into_iter().next().unwrap_or(links.local),
