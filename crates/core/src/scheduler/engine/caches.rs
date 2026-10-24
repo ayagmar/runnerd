@@ -3,6 +3,7 @@
 //! runner. Reseeds and cache checks
 //! run as background tasks the tick collects; it must not start or stop runners.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use tokio::task::JoinHandle;
@@ -73,7 +74,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             for name in due {
                 self.reseed_due.remove(&name);
                 let requested = self.reseed_requested.remove(&name);
-                self.spawn_reseed(name, requested);
+                let oversized = self.oversized.remove(&name);
+                self.spawn_reseed(name, requested || oversized);
             }
         }
         // A shell mounts the shared caches.
@@ -98,9 +100,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             } else {
                 cache::Mirror::Down
             };
+            // A reseed mounts its profile's slot volumes.
+            let slots: BTreeMap<String, usize> = self
+                .config
+                .profiles
+                .iter()
+                .filter(|(name, _)| !self.reseeds.contains_key(*name))
+                .map(|(name, profile)| (name.clone(), profile.slots as usize))
+                .collect();
             let build = self.build_cache.clone();
             self.trim = Some(tokio::spawn(async move {
-                let mut trimmed = cache::trim_shared(&*docker, &names, &caches, mirror).await?;
+                let mut trimmed =
+                    cache::trim_shared(&*docker, &names, &caches, mirror, &slots).await?;
                 if let Some(build) = build {
                     match tokio::task::spawn_blocking(move || build.trim()).await {
                         Ok(build) => {
@@ -122,7 +133,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Rebuilds a profile's snapshot in the background; its slots start nothing until it is done. A `requested`
-    /// reseed runs however little slot 1 changed.
+    /// reseed, or that of a snapshot over its limit, runs however little slot 1 changed.
     fn spawn_reseed(&mut self, name: String, requested: bool) {
         let Some(profile) = self.config.profiles.get(&name) else {
             return;
@@ -170,7 +181,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         };
         match task.await {
-            Ok(Ok(Trimmed { sizes, emptied })) => {
+            Ok(Ok(Trimmed {
+                sizes,
+                emptied,
+                closed,
+                free,
+            })) => {
+                self.mark_oversized(&sizes);
+                if let Some(free) = free {
+                    self.docker_disk =
+                        Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+                }
                 let ours = self.names.network();
                 self.store.cache_sizes(
                     time::now_ms(),
@@ -182,9 +203,56 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 for Emptied { name, size } in emptied {
                     info!("emptied {name}, which had grown to {size}");
                 }
+                for Emptied { name, size } in closed {
+                    info!("removed {name} ({size}): its profile has fewer slots now");
+                }
             }
             Ok(Err(error)) => warn!("cannot check the shared caches: {error}"),
             Err(error) => warn!("checking the shared caches stopped: {error}"),
+        }
+    }
+
+    /// Measures what the slots' Docker Engines may keep (`cache::docker_disk`), for the runners that start before the
+    /// first check of the caches, which waits for no runner to run: after a restart that adopted some, that can be
+    /// long.
+    pub(super) async fn measure_docker_disk(&mut self) {
+        let free = self.docker.free_space().await;
+        let sizes = self.docker.volume_sizes().await;
+        match (free, sizes) {
+            (Ok(free), Ok(sizes)) => {
+                self.docker_disk =
+                    Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+            }
+            (Err(error), _) | (_, Err(error)) => {
+                warn!(
+                    "cannot measure Docker's disk, so runners keep their image's Docker budget: {error}"
+                );
+            }
+        }
+    }
+
+    /// Makes the profiles whose snapshot `sizes` measured over `snapshot_max` due for a reseed, which then starts
+    /// the snapshot over (docs/adr/0041): slot 1 may never change enough to reach `reseed_at`. A reseed running now,
+    /// or one that finished after the check started, may have replaced the snapshot after it was measured.
+    fn mark_oversized(&mut self, sizes: &BTreeMap<String, u64>) {
+        let max = self.config.caches.snapshot_max;
+        for profile in self.config.profiles.keys() {
+            let Some(&size) = sizes.get(&self.names.base(profile)) else {
+                continue;
+            };
+            let reseeded = self
+                .reseeded_at
+                .get(profile)
+                .is_some_and(|&at| at >= self.checked_at);
+            if size > max.0 && !self.reseeds.contains_key(profile) && !reseeded {
+                info!(
+                    "{profile}: the snapshot holds {}, over snapshot_max ({max}): it starts over at the next reseed, \
+                     once the profile is idle",
+                    ByteSize(size)
+                );
+                self.reseed_due.insert(profile.clone());
+                self.oversized.insert(profile.clone());
+            }
         }
     }
 
@@ -197,6 +265,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         for name in finished {
             self.reseed_memory.remove(&name);
+            self.reseeded_at.insert(name.clone(), SystemTime::now());
             let Some(task) = self.reseeds.remove(&name) else {
                 continue;
             };

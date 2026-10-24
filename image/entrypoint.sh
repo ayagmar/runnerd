@@ -19,12 +19,8 @@ start_build_cache
 # pnpm processes sharing the store must share their lock directory (Dockerfile).
 install -d -o runner -g runner -m 700 "$XDG_RUNTIME_DIR"
 
-dockerd --group docker > /var/log/dockerd.log 2>&1 &
-for _ in $(seq 60); do
-    docker info > /dev/null 2>&1 && break
-    sleep 1
-done
-docker info > /dev/null || { cat /var/log/dockerd.log; exit 1; }
+start_docker
+keep_docker_budget
 
 # Whatever the slot's last job left in its Docker Engine, if that job's container was stopped before its cleanup.
 runnerd-job-cleanup

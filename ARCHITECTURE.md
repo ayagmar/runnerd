@@ -144,8 +144,9 @@ queued → slot → container → removed
    runner's `_diag/pages`, CPU and memory from the container's cgroup every 2 s (`observe::metrics`), and the
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`).
-6. When a profile is idle after its slot 1 ran a job, `cache::reseed` makes slot 1's layers the profile's snapshot,
-   which starts over above `[caches] snapshot_max` ([ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md)).
+6. When a profile is idle after its slot 1 ran a job, or after the caches' check measured its snapshot over
+   `[caches] snapshot_max`, `cache::reseed` makes slot 1's layers the profile's snapshot, which starts over above
+   that limit ([ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md)).
 
 On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`) and schedules
 nothing until Docker has listed them.
@@ -253,6 +254,13 @@ nothing until Docker has listed them.
 - A file in the cache layer that may hold a token (`CACHE_SECRETS` in `image/layers.sh`: cargo's credentials and
   config, Gradle's `gradle.properties`) never reaches the next job in the slot, a record shell or a new snapshot,
   including one an older snapshot holds ([ADR 0035](docs/adr/0035-runner-image-stages.md)).
+- A slot's Docker Engine keeps its images and build cache on the slot's volume, given to dockerd as `--data-root`
+  and never in `daemon.json`, where sysbox would mount a directory of its own over it. The slots' stores together
+  stay within a quarter of Docker's disk not otherwise used: the engine gives each runner its share as
+  `RUNNERD_DOCKER_BUDGET_GB` (measured at start and with every check of the caches), the image's job cleanup trims
+  the build cache and then empties a store still over it, and the check removes the volumes of slots past their
+  profile's count. A store whose engine does not start is emptied
+  ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md)).
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It
   mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell
   exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.

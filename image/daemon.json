@@ -1,10 +1,9 @@
 {
-  "data-root": "/state/docker",
   "registry-mirrors": ["http://mirror:5000"],
   "builder": {
     "gc": {
       "enabled": true,
-      "defaultKeepStorage": "10GB"
+      "defaultReservedSpace": "512MB"
     }
   }
 }

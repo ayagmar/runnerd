@@ -342,6 +342,14 @@ struct DockerState {
     held_removals: BTreeSet<String>,
     /// The mounts of each runner container started, by name.
     mounts: HashMap<String, Vec<bollard::models::Mount>>,
+    /// The entrypoint of each container started with its own, by name: a seed container's says its thresholds.
+    entrypoints: HashMap<String, Vec<String>>,
+    /// The environment of each container started, by name.
+    envs: HashMap<String, Vec<String>>,
+    /// What seed containers exit with, at once; `None`: they run for the whole test.
+    seed_exit: Option<i64>,
+    /// Measuring the volumes does not finish while this holds true, as when Docker takes long to measure them.
+    volume_sizes_held: tokio::sync::watch::Sender<bool>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
@@ -379,6 +387,12 @@ impl DockerApi for FakeDocker {
         }
         state.started_images.push(spec.image.clone());
         state.mounts.insert(spec.name.clone(), spec.mounts.clone());
+        state.envs.insert(spec.name.clone(), spec.env.clone());
+        if let Some(entrypoint) = &spec.entrypoint {
+            state
+                .entrypoints
+                .insert(spec.name.clone(), entrypoint.clone());
+        }
         state.memory.insert(spec.name.clone(), spec.memory.0);
         state
             .started
@@ -481,7 +495,9 @@ impl DockerApi for FakeDocker {
     }
 
     async fn wait(&self, _container: &str) -> Result<i64, docker::Error> {
-        // Seed containers run for the whole test.
+        if let Some(code) = self.0.lock().unwrap().seed_exit {
+            return Ok(code);
+        }
         std::future::pending().await
     }
 
@@ -583,6 +599,8 @@ impl DockerApi for FakeDocker {
     }
 
     async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, docker::Error> {
+        let mut held = self.0.lock().unwrap().volume_sizes_held.subscribe();
+        let _ = held.wait_for(|held| !held).await;
         Ok(self.0.lock().unwrap().volume_sizes.clone())
     }
 
@@ -2040,6 +2058,165 @@ async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runn
         .await;
     assert_eq!(answer.await.unwrap(), Ok(None));
     assert_eq!(engine.config.profiles["app"].slots, 1);
+}
+
+#[tokio::test]
+async fn each_slots_docker_engine_keeps_its_share_of_a_quarter_of_the_disk_not_otherwise_used() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        // 40 GiB free and 8 GiB in slot 1's volume: the 2 slots keep 12 GiB together.
+        state.free = Some(40 << 30);
+        state
+            .volume_sizes
+            .insert("runnerd-app-slot-1".to_owned(), 8 << 30);
+    }
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    // The startup check measures the disk, and is collected.
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.jobs.insert(1, details(1, "in_progress", None));
+    }
+    engine.tick(Shutdown::No).await;
+
+    let state = docker.0.lock().unwrap();
+    let started = state.started_images.len();
+    let envs: Vec<_> = state.envs.iter().collect();
+    assert_eq!(started, 1, "one runner started: {envs:?}");
+    assert_eq!(
+        envs[0].1,
+        &["RUNNERD_DOCKER_BUDGET_GB=6".to_owned()],
+        "{envs:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_runner_started_before_any_check_of_the_caches_gets_its_slots_docker_budget() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.free = Some(40 << 30);
+        state
+            .volume_sizes
+            .insert("runnerd-app-slot-1".to_owned(), 8 << 30);
+    }
+    // An adopted runner keeps the caches from being checked.
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(2)];
+    engine.tick(Shutdown::No).await;
+
+    let state = docker.0.lock().unwrap();
+    let envs: Vec<_> = state.envs.iter().collect();
+    assert_eq!(envs.len(), 1, "one runner started: {envs:?}");
+    assert_eq!(
+        envs[0].1,
+        &["RUNNERD_DOCKER_BUDGET_GB=6".to_owned()],
+        "{envs:?}"
+    );
+}
+
+#[tokio::test]
+async fn the_volume_of_a_slot_past_a_lowered_slot_count_is_removed_at_the_next_check_of_the_caches()
+{
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        // app has 2 slots; a third was open before.
+        let mut sizes = docker.0.lock().unwrap();
+        for slot in 1..=3 {
+            sizes
+                .volume_sizes
+                .insert(format!("runnerd-app-slot-{slot}"), 5 << 30);
+        }
+    }
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+
+    until_called(&mut engine, &docker, "remove volume runnerd-app-slot-3").await;
+    let calls = docker.calls();
+    assert!(
+        !calls
+            .iter()
+            .any(|call| call == "remove volume runnerd-app-slot-1"
+                || call == "remove volume runnerd-app-slot-2"),
+        "the open slots keep their volumes: {calls:?}"
+    );
+}
+
+#[tokio::test]
+async fn a_check_of_the_caches_that_measured_the_snapshot_before_its_reseed_does_not_reseed_it_again()
+ {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().seed_exit = Some(0);
+    running_job(&github, &docker, "o/r", 1, 1);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+
+    // Slot 1's job ends: its reseed and a check of the caches start together. The check measures the snapshot as
+    // it was, over its limit, and answers only after the reseed replaced it.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.volume_sizes_held.send_replace(true);
+        state
+            .volume_sizes
+            .insert("runnerd-app-base".to_owned(), 11 << 30);
+        state.containers[0].running = false;
+    }
+    let seed = format!("start {}", Names::new("runnerd").seed("app"));
+    until_called(&mut engine, &docker, &seed).await;
+    for _ in 0..100 {
+        if engine.reseeds.is_empty() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(engine.reseeds.is_empty(), "the reseed finished");
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volume_sizes_held
+        .send_replace(false);
+    for _ in 0..20 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+
+    let seeds = docker.calls().iter().filter(|call| **call == seed).count();
+    assert_eq!(seeds, 1, "one reseed: {:?}", docker.calls());
+}
+
+#[tokio::test]
+async fn a_snapshot_over_its_limit_starts_over_at_the_next_idle_moment_however_little_slot_1_changed()
+ {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    // 11 GB against the default snapshot_max of 10G; no job ran in slot 1 since the last reseed.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volume_sizes
+        .insert("runnerd-app-base".to_owned(), 11 << 30);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+
+    let seed = Names::new("runnerd").seed("app");
+    until_called(&mut engine, &docker, &format!("start {seed}")).await;
+    let entrypoint = docker.0.lock().unwrap().entrypoints[&seed].clone();
+    assert_eq!(
+        entrypoint[1..],
+        ["0".to_owned(), (10u64 << 30).to_string()],
+        "the seed runs whatever slot 1 changed, against snapshot_max"
+    );
 }
 
 #[tokio::test]

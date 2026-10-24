@@ -176,6 +176,25 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.drop_closed_slots();
     }
 
+    /// A runner container's environment: its slot's share of what the slots' Docker Engines may keep, which its
+    /// image's job cleanup holds it to, once the caches' check has measured Docker's disk.
+    fn runner_env(&self) -> Vec<String> {
+        self.docker_disk
+            .map(|disk| {
+                let slots = self
+                    .config
+                    .profiles
+                    .values()
+                    .map(|p| u64::from(p.slots))
+                    .sum();
+                vec![format!(
+                    "RUNNERD_DOCKER_BUDGET_GB={}",
+                    cache::docker_budget_gib(disk, slots)
+                )]
+            })
+            .unwrap_or_default()
+    }
+
     /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job.
     pub(super) async fn stop(&mut self, slot: &SlotRef, jobs: RunningJobs) {
         let Some(occupant) = self
@@ -333,7 +352,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
             memory: profile.memory,
-            env: Vec::new(),
+            env: self.runner_env(),
             mounts: self.runner_mounts(&slot.profile, number, &name, repository),
             network: Some(self.names.network()),
             labels: BTreeMap::from([
