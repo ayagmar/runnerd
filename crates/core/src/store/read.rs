@@ -49,7 +49,9 @@ const SUMMARY: &str = "j.id, j.repository, j.run_id, j.run_attempt, j.workflow, 
      j.state, j.conclusion, j.runner, r.profile, r.slot, j.queued_at, r.started_at, j.started_at, j.finished_at, \
      r.removed_at, j.cpu_time, j.cpu_peak, j.cpu_average, j.memory_peak, j.memory_average, j.network_received, \
      j.network_sent, coalesce(r.mirror_bytes, 0), j.log_lines, j.log_bytes, j.log_truncated, \
-     r.memory_cap, r.cpu_cap \
+     r.memory_cap, r.cpu_cap, coalesce(r.build_cache_hits, 0), coalesce(r.build_cache_misses, 0), \
+     coalesce(r.build_cache_read_bytes, 0), coalesce(r.build_cache_written_bytes, 0), \
+     coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0) \
      FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
 
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
@@ -96,6 +98,14 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             network_received: row.get(24)?,
             network_sent: row.get(25)?,
             mirror_bytes: row.get(26)?,
+            build_cache: api::BuildCacheCounts {
+                hits: row.get(32)?,
+                misses: row.get(33)?,
+                read_bytes: row.get(34)?,
+                written_bytes: row.get(35)?,
+                refused: row.get(36)?,
+                writer: row.get(37)?,
+            },
         },
         log: api::LogSummary {
             lines: row.get(27)?,
@@ -118,15 +128,17 @@ pub(super) fn summary(db: &Connection, id: u64) -> rusqlite::Result<Option<api::
         return Ok(None);
     };
     if !summary.state.is_final() {
-        let mirror_bytes = summary.metrics.mirror_bytes;
+        let (mirror_bytes, build_cache) =
+            (summary.metrics.mirror_bytes, summary.metrics.build_cache);
         summary.metrics = metrics(db, id)?;
         summary.metrics.mirror_bytes = mirror_bytes;
+        summary.metrics.build_cache = build_cache;
     }
     Ok(Some(summary))
 }
 
 /// A job's use over its samples: from its start to its end when known, else over its container's whole life.
-/// `mirror_bytes` is left 0.
+/// `mirror_bytes` and `build_cache` are left 0.
 pub(super) fn metrics(db: &Connection, job: u64) -> rusqlite::Result<api::JobMetrics> {
     let window: Option<(Option<String>, Option<u64>, Option<u64>)> = db
         .query_row(
@@ -204,6 +216,7 @@ fn window_metrics(
                     .get::<_, Option<u64>>(6)?
                     .map(|sent| sent.saturating_sub(sent_before)),
                 mirror_bytes: 0,
+                build_cache: api::BuildCacheCounts::default(),
             })
         },
     )
@@ -706,7 +719,9 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
 pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<Vec<crate::insights::Run>> {
     db.prepare_cached(
         "SELECT j.id, j.repository, j.workflow, j.name, j.branch, j.url, j.run_id, j.run_attempt, j.state, \
-         j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak \
+         j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak, \
+         r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
+         r.build_cache_refused, r.build_cache_writer \
          FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
     )?
@@ -728,6 +743,17 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<Vec<crat
             runner_started_at: row.get(13)?,
             profile: row.get(14)?,
             memory_peak: row.get(15)?,
+            build_cache: match row.get::<_, Option<bool>>(21)? {
+                Some(writer) => Some(api::BuildCacheCounts {
+                    hits: row.get(16)?,
+                    misses: row.get(17)?,
+                    read_bytes: row.get(18)?,
+                    written_bytes: row.get(19)?,
+                    refused: row.get(20)?,
+                    writer,
+                }),
+                None => None,
+            },
         })
     })?
     .collect()
@@ -765,6 +791,29 @@ pub(super) fn latest_cache_sizes(db: &Connection) -> rusqlite::Result<super::Mea
         at: Some(secs(at)),
         bytes,
     })
+}
+
+/// What the build cache served and took from the runners started since `since` (ms), summed.
+pub(super) fn build_cache_since(
+    db: &Connection,
+    since: u64,
+) -> rusqlite::Result<api::BuildCacheCounts> {
+    db.query_row(
+        "SELECT coalesce(sum(build_cache_hits), 0), coalesce(sum(build_cache_misses), 0), \
+         coalesce(sum(build_cache_read_bytes), 0), coalesce(sum(build_cache_written_bytes), 0), \
+         coalesce(sum(build_cache_refused), 0) FROM runners WHERE started_at >= ?1 AND build_cache_writer IS NOT NULL",
+        [since],
+        |row| {
+            Ok(api::BuildCacheCounts {
+                hits: row.get(0)?,
+                misses: row.get(1)?,
+                read_bytes: row.get(2)?,
+                written_bytes: row.get(3)?,
+                refused: row.get(4)?,
+                writer: false,
+            })
+        },
+    )
 }
 
 pub(super) fn cache_history(db: &Connection, since: u64) -> rusqlite::Result<Vec<api::CacheSize>> {

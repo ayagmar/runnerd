@@ -1,5 +1,6 @@
-//! Cache upkeep: reseeds idle profiles, stops the mirror and empties the shared caches and the mirror's storage
-//! over their limit when no runner runs, and counts what the mirror served each runner. Reseeds and cache checks
+//! Cache upkeep: reseeds idle profiles, stops the mirror, empties the shared caches and the mirror's storage over
+//! their limit and trims the build cache to its own when no runner runs, and counts what the mirror served each
+//! runner. Reseeds and cache checks
 //! run as background tasks the tick collects; it must not start or stop runners.
 
 use std::time::{Duration, SystemTime};
@@ -97,8 +98,25 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             } else {
                 cache::Mirror::Down
             };
+            let build = self.build_cache.clone();
             self.trim = Some(tokio::spawn(async move {
-                cache::trim_shared(&*docker, &names, &caches, mirror).await
+                let mut trimmed = cache::trim_shared(&*docker, &names, &caches, mirror).await?;
+                if let Some(build) = build {
+                    match tokio::task::spawn_blocking(move || build.trim()).await {
+                        Ok(build) => {
+                            if build.after != build.before {
+                                info!(
+                                    "trimmed the build cache from {} to {}, its least recently used entries first",
+                                    ByteSize(build.before.bytes),
+                                    ByteSize(build.after.bytes)
+                                );
+                            }
+                            trimmed.sizes.insert(names.build_cache(), build.after.bytes);
+                        }
+                        Err(error) => warn!("trimming the build cache stopped: {error}"),
+                    }
+                }
+                Ok(trimmed)
             }));
         }
     }

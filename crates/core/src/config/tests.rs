@@ -159,6 +159,13 @@ fn config_with_a_zero_limit_names_the_field() {
             "profiles.app.max_slots",
             MINIMAL.replace("slots = 1", "slots = 1\nmax_slots = 0"),
         ),
+        (
+            "caches.build.max_size",
+            MINIMAL.replace(
+                "maven = { max_size = \"5G\" }",
+                "maven = { max_size = \"5G\" }\nbuild = { max_size = \"0G\" }",
+            ),
+        ),
     ] {
         let error = Config::parse(&text)
             .unwrap()
@@ -167,6 +174,19 @@ fn config_with_a_zero_limit_names_the_field() {
             .to_string();
         assert!(error.contains(field), "{field}: {error}");
     }
+}
+
+#[test]
+fn a_config_from_before_the_build_cache_gives_every_repository_one_main_writes() {
+    let config = Config::parse(MINIMAL).unwrap();
+    let build = &config.caches.build;
+    assert!(build.enabled, "on: its defaults are safe");
+    assert!(
+        build.branches.is_empty(),
+        "only each repository's default branch writes"
+    );
+    assert_eq!(build.max_size, size("10G"));
+    assert!(config.repositories[0].build_cache, "owner/app gets it");
 }
 
 #[test]

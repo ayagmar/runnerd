@@ -171,6 +171,20 @@ pub struct JobDetails {
     pub steps: Vec<JobStep>,
 }
 
+/// What started a workflow run, as `GET /repos/{owner}/{repo}/actions/runs/{id}` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunTrigger {
+    /// `push`, `pull_request`, `schedule`, `workflow_dispatch`, ….
+    pub event: String,
+    /// The branch it ran on: a pull request's head branch, which may be a fork's.
+    pub head_branch: Option<String>,
+    /// `owner/name` of the repository its commit came from: a fork's, for a pull request from one.
+    pub head_repository: Option<String>,
+    /// The commit it ran. A tag's run gives the tag's name as `head_branch`, so only this says whether the
+    /// branch has it.
+    pub head_sha: String,
+}
+
 fn first_attempt() -> u32 {
     1
 }
@@ -244,6 +258,25 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         id: u64,
     ) -> impl Future<Output = Result<JobDetails, Error>> + Send;
+    /// What started a workflow run.
+    fn run_trigger(
+        &self,
+        repository: &str,
+        run: u64,
+    ) -> impl Future<Output = Result<RunTrigger, Error>> + Send;
+    /// The repository's default branch.
+    fn default_branch(
+        &self,
+        repository: &str,
+    ) -> impl Future<Output = Result<String, Error>> + Send;
+    /// Whether `branch` of the repository has the commit `sha`: its head or an ancestor of it. A tag of the same
+    /// name, which git would take for it, does not count.
+    fn on_branch(
+        &self,
+        repository: &str,
+        branch: &str,
+        sha: &str,
+    ) -> impl Future<Output = Result<bool, Error>> + Send;
     /// Cancels a workflow run, and so every job in it: GitHub cancels runs, not single jobs. A run that already
     /// completed is left as it is.
     fn cancel_run(
@@ -303,6 +336,39 @@ struct Job {
     workflow_name: Option<String>,
     head_branch: Option<String>,
     html_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RunBody {
+    event: String,
+    head_branch: Option<String>,
+    head_repository: Option<RepositoryName>,
+    head_sha: String,
+}
+
+#[derive(Deserialize)]
+struct RepositoryName {
+    full_name: String,
+}
+
+#[derive(Deserialize)]
+struct CompareBody {
+    status: String,
+}
+
+#[derive(Deserialize)]
+struct BranchBody {
+    commit: CommitBody,
+}
+
+#[derive(Deserialize)]
+struct CommitBody {
+    sha: String,
+}
+
+#[derive(Deserialize)]
+struct RepositoryBody {
+    default_branch: String,
 }
 
 #[derive(Deserialize)]
@@ -559,6 +625,59 @@ impl GithubApi for Github {
     async fn job(&self, repository: &str, id: u64) -> Result<JobDetails, Error> {
         self.get(&format!("/repos/{repository}/actions/jobs/{id}"))
             .await
+    }
+
+    async fn run_trigger(&self, repository: &str, run: u64) -> Result<RunTrigger, Error> {
+        let path = format!("/repos/{repository}/actions/runs/{run}");
+        let run: Result<RunBody, Error> = self.get(&path).await;
+        // Asked once per job: its large answer is not worth keeping for a conditional request.
+        lock(&self.etags).remove(&path);
+        let run = run?;
+        Ok(RunTrigger {
+            event: run.event,
+            head_branch: run.head_branch,
+            head_repository: run.head_repository.map(|head| head.full_name),
+            head_sha: run.head_sha,
+        })
+    }
+
+    async fn default_branch(&self, repository: &str) -> Result<String, Error> {
+        let body: RepositoryBody = self.get(&format!("/repos/{repository}")).await?;
+        Ok(body.default_branch)
+    }
+
+    async fn on_branch(&self, repository: &str, branch: &str, sha: &str) -> Result<bool, Error> {
+        let commit =
+            |sha: &str| !sha.is_empty() && sha.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !commit(sha) {
+            return Ok(false);
+        }
+        // A branch name may hold `#`, `%` or `?`, which would end or change the path.
+        let base: String = branch
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.') {
+                    char::from(byte).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect();
+        // Compare would read a bare name as git does, a tag before a branch: a tag `main` would pass for the
+        // branch. This endpoint knows only branches.
+        let path = format!("/repos/{repository}/branches/{base}");
+        let head: Result<BranchBody, Error> = self.get(&path).await;
+        lock(&self.etags).remove(&path);
+        let head = head?.commit.sha;
+        if !commit(&head) {
+            return Ok(false);
+        }
+        // The commits it lists are not needed: one is the fewest it sends.
+        let path = format!("/repos/{repository}/compare/{head}...{sha}?per_page=1");
+        let body: Result<CompareBody, Error> = self.get(&path).await;
+        lock(&self.etags).remove(&path);
+        // `behind`: the branch has moved on past it.
+        Ok(matches!(body?.status.as_str(), "identical" | "behind"))
     }
 
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), Error> {

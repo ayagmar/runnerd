@@ -7,9 +7,9 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    Advice, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind, Insights, Job, JobPage,
-    JobRunner, JobSizing, JobState, JobSummary, NotifyTest, QueuedJob, Record, RecordNote, Records,
-    RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
+    Advice, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind,
+    Insights, Job, JobPage, JobRunner, JobSizing, JobState, JobSummary, NotifyTest, QueuedJob,
+    Record, RecordNote, Records, RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
 };
 use runnerd_core::config::ByteSize;
 
@@ -691,6 +691,9 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
         parts.push(format!("{} from the mirror", bytes(metrics.mirror_bytes)));
         usage.row(vec![plain("network"), plain(parts.join(", "))]);
     }
+    if let Some(line) = build_cache(&metrics.build_cache) {
+        usage.row(vec![plain("build cache"), plain(line)]);
+    }
     let log = &summary.log;
     usage.row(vec![
         plain("log"),
@@ -897,6 +900,7 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
             CacheKind::Pnpm => "pnpm store".to_owned(),
             CacheKind::Maven => "Maven repository".to_owned(),
             CacheKind::Mirror => "Docker Hub mirror".to_owned(),
+            CacheKind::Build => "build cache".to_owned(),
         };
         let over = volume.limit.is_some_and(|limit| volume.bytes > limit);
         table.row(vec![
@@ -910,7 +914,43 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
         ]);
     }
     out.push_str(&table.render(paint, ""));
+    if let Some(build) = &caches.build {
+        let week = &build.week;
+        let served = match week.hit_percent() {
+            Some(percent) => format!(
+                "{percent}% of {} lookups hit in 7 days, {} served, {} stored",
+                week.lookups(),
+                bytes(week.read_bytes),
+                bytes(week.written_bytes)
+            ),
+            None => "no lookups in 7 days".to_owned(),
+        };
+        let _ = writeln!(out, "build cache: {} entries; {served}", build.entries);
+    }
     out
+}
+
+/// What the build cache did for a job, if it had it: `None` for a job without it, or one that never asked.
+fn build_cache(counts: &BuildCacheCounts) -> Option<String> {
+    if counts.lookups() == 0 && counts.written_bytes == 0 && counts.refused == 0 {
+        return None;
+    }
+    let mut parts = vec![format!(
+        "{} of {} lookups hit ({}%)",
+        counts.hits,
+        counts.lookups(),
+        counts.hit_percent().unwrap_or(0)
+    )];
+    parts.push(format!("{} served", bytes(counts.read_bytes)));
+    if counts.writer {
+        parts.push(format!("{} stored", bytes(counts.written_bytes)));
+    } else {
+        parts.push("read only".to_owned());
+    }
+    if counts.refused > 0 {
+        parts.push(format!("{} uploads refused", counts.refused));
+    }
+    Some(parts.join(", "))
 }
 
 /// `runnerctl insights`: one line per insight, warnings first, then each repository's waits this week against the
@@ -930,6 +970,7 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
             InsightKind::Slower { .. } => "slower",
             InsightKind::Flaky { .. } => "flaky",
             InsightKind::NearCap { .. } => "near-cap",
+            InsightKind::ColdCache { .. } => "cold-cache",
             InsightKind::Waits { .. } => "waits",
         };
         let _ = writeln!(

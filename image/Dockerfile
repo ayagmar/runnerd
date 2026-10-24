@@ -16,10 +16,11 @@ ARG UBUNTU_SNAPSHOT=20261022T000000Z
 RUN echo "APT::Snapshot \"${UBUNTU_SNAPSHOT}\";" > /etc/apt/apt.conf.d/50runnerd-snapshot
 
 # What the workflows expect from GitHub's ubuntu-24.04 image and the base image lacks: iptables for dockerd, make,
-# xz-utils and zstd (setup-* archives, actions/cache) and zip.
+# xz-utils and zstd (setup-* archives, actions/cache) and zip; and socat, which forwards the build cache's socket
+# (build-cache.sh).
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        iptables make xz-utils zip zstd \
+        iptables make socat xz-utils zip zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker Engine, CLI, Compose and Buildx from the official image, replacing the older CLI of the base image.
@@ -79,6 +80,8 @@ RUN chmod 755 /home/runner \
 
 COPY daemon.json /etc/docker/daemon.json
 COPY layers.sh /usr/local/lib/runnerd-layers.sh
+COPY build-cache.sh /usr/local/lib/runnerd-build-cache.sh
+COPY build-cache.gradle /usr/local/share/runnerd/build-cache.gradle
 COPY job-cleanup.sh /usr/local/sbin/runnerd-job-cleanup
 COPY job-started.sh /usr/local/bin/runnerd-job-started.sh
 COPY job-completed.sh /usr/local/bin/runnerd-job-completed.sh

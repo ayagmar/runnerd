@@ -429,3 +429,125 @@ async fn a_run_that_left_the_queue_is_no_longer_cached() {
     assert_eq!(jobs_requests.len(), 2);
     assert!(!jobs_requests[1].headers.contains_key("if-none-match"));
 }
+
+/// A repository's history as the fake GitHub's git sees it: each commit's parents, and its branches and tags.
+struct History {
+    parents: &'static [(&'static str, &'static [&'static str])],
+    branches: &'static [(&'static str, &'static str)],
+    tags: &'static [(&'static str, &'static str)],
+}
+
+impl History {
+    /// What git takes a name in a compare for: a commit, else a tag, else a branch.
+    fn resolve(&self, name: &str) -> Option<&'static str> {
+        let known = |refs: &[(&str, &'static str)]| {
+            refs.iter()
+                .find(|(other, _)| *other == name)
+                .map(|(_, sha)| *sha)
+        };
+        let commit = self.parents.iter().find(|(sha, _)| *sha == name);
+        commit
+            .map(|(sha, _)| *sha)
+            .or_else(|| known(self.tags))
+            .or_else(|| known(self.branches))
+    }
+
+    fn ancestor(&self, older: &str, newer: &str) -> bool {
+        let parents = self
+            .parents
+            .iter()
+            .find(|(sha, _)| *sha == newer)
+            .map_or(&[][..], |(_, parents)| *parents);
+        parents
+            .iter()
+            .any(|parent| *parent == older || self.ancestor(older, parent))
+    }
+
+    fn answer(&self, uri: &str) -> Response {
+        let path = uri.trim_start_matches("/repos/o/r/");
+        if let Some(branch) = path.strip_prefix("branches/") {
+            return match self.branches.iter().find(|(name, _)| *name == branch) {
+                Some((_, sha)) => json(&format!(r#"{{"commit":{{"sha":"{sha}"}}}}"#)),
+                None => StatusCode::NOT_FOUND.into_response(),
+            };
+        }
+        let Some(range) = path
+            .strip_prefix("compare/")
+            .and_then(|rest| rest.strip_suffix("?per_page=1"))
+        else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let Some((base, head)) = range.split_once("...") else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let (Some(base), Some(head)) = (self.resolve(base), self.resolve(head)) else {
+            return StatusCode::NOT_FOUND.into_response();
+        };
+        let status = if base == head {
+            "identical"
+        } else if self.ancestor(head, base) {
+            "behind"
+        } else if self.ancestor(base, head) {
+            "ahead"
+        } else {
+            "diverged"
+        };
+        json(&format!(r#"{{"status":"{status}"}}"#))
+    }
+}
+
+#[tokio::test]
+async fn a_commit_is_on_a_branch_only_as_its_head_or_an_ancestor() {
+    // main is a0, a1, a2; someone tagged their own commit x9 `main`; release/1#1 forked at a0.
+    let history = History {
+        parents: &[
+            ("a0", &[]),
+            ("a1", &["a0"]),
+            ("a2", &["a1"]),
+            ("x9", &["a1"]),
+            ("c1", &["a0"]),
+        ],
+        branches: &[("main", "a2"), ("release/1%231", "c1")],
+        tags: &[("main", "x9")],
+    };
+    let (url, seen) = fake_github(move |request| history.answer(&request.uri)).await;
+    let github = client(&url);
+    assert!(
+        github.on_branch("o/r", "main", "a2").await.unwrap(),
+        "main's head"
+    );
+    assert!(
+        github.on_branch("o/r", "main", "a0").await.unwrap(),
+        "an ancestor"
+    );
+    assert!(
+        !github.on_branch("o/r", "main", "x9").await.unwrap(),
+        "the commit of a tag named main, which main never had"
+    );
+    assert!(
+        github.on_branch("o/r", "release/1#1", "c1").await.unwrap(),
+        "an escaped name"
+    );
+    assert!(
+        !github.on_branch("o/r", "release/1#1", "a2").await.unwrap(),
+        "diverged"
+    );
+    assert!(
+        github.on_branch("o/r", "gone", "a2").await.is_err(),
+        "no such branch"
+    );
+    assert!(
+        github.on_branch("o/r", "main", "ee").await.is_err(),
+        "unknown commit"
+    );
+    let asked = seen.lock().unwrap().len();
+    assert!(
+        !github.on_branch("o/r", "main", "../x").await.unwrap(),
+        "not a commit"
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        asked,
+        "an invalid commit is never asked"
+    );
+}

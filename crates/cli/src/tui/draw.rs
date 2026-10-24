@@ -2697,6 +2697,9 @@ fn metrics_line(open: &JobView, width: usize, theme: Theme) -> Line<'static> {
     if metrics.mirror_bytes > 0 {
         parts.push(("mirror", Some(bytes(metrics.mirror_bytes))));
     }
+    if let Some(percent) = metrics.build_cache.hit_percent() {
+        parts.push(("build cache", Some(format!("{percent}% hit"))));
+    }
     let mut line = Line::default();
     for (label, value) in parts {
         let Some(value) = value else { continue };

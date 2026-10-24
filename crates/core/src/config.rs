@@ -125,6 +125,47 @@ pub struct Caches {
     /// or from the image when those are larger too.
     #[serde(default = "default_snapshot_max")]
     pub snapshot_max: ByteSize,
+    /// The build cache every runner shares.
+    #[serde(default)]
+    pub build: BuildCache,
+}
+
+/// `[caches.build]`: the build cache every runner shares (ADR 0052): Gradle's, and the other tools' the runner image
+/// points at it. Every field has a default.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct BuildCache {
+    /// Whether runners get it. Default true.
+    pub enabled: bool,
+    /// Above this size, the entries used least recently go when no job runs. Default 10G.
+    pub max_size: ByteSize,
+    /// The branches whose pushes, scheduled and manually started runs may write to it besides each repository's
+    /// default branch, which always may. Every other job only reads. Default empty.
+    pub branches: Vec<String>,
+    /// Where its entries are kept; default `$XDG_CACHE_HOME/runnerd/build-cache`.
+    pub directory: Option<PathBuf>,
+}
+
+impl BuildCache {
+    fn validate(&self) -> Result<(), ConfigError> {
+        if self.enabled && self.max_size.0 == 0 {
+            return Err(ConfigError::ZeroLimit {
+                field: "caches.build.max_size".to_owned(),
+            });
+        }
+        Ok(())
+    }
+}
+
+impl Default for BuildCache {
+    fn default() -> BuildCache {
+        BuildCache {
+            enabled: true,
+            max_size: ByteSize(10 << 30),
+            branches: Vec::new(),
+            directory: None,
+        }
+    }
 }
 
 fn default_reseed_at() -> ByteSize {
@@ -276,6 +317,13 @@ pub struct Repository {
     /// runners off. Default 1.
     #[serde(default = "default_warm")]
     pub warm: u32,
+    /// Whether its runners get the shared build cache, when `[caches.build]` is enabled. Default true.
+    #[serde(default = "default_true")]
+    pub build_cache: bool,
+}
+
+fn default_true() -> bool {
+    true
 }
 
 fn default_warm() -> u32 {
@@ -1078,6 +1126,7 @@ impl Config {
             return Err(ConfigError::ZeroLimit { field });
         }
         self.check_sizing_bounds()?;
+        self.caches.build.validate()?;
         self.host.check_cpu_overcommit()?;
         self.web.validate()?;
         self.notify.validate()?;

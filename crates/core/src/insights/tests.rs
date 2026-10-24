@@ -1,7 +1,7 @@
 //! Insights from synthetic histories of fictional repositories: one `halyard/api` job run a few times a day.
 
 use super::{Run, digest, insights};
-use crate::api::{AutoNote, InsightKind, JobState, Severity};
+use crate::api::{self, AutoNote, InsightKind, JobState, Severity};
 use crate::config::Config;
 
 const G: u64 = 1 << 30;
@@ -59,6 +59,7 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         runner_started_at: Some(finished - seconds * 1000 - 15_000),
         profile: Some("app".to_owned()),
         memory_peak: Some(G),
+        build_cache: None,
     }
 }
 
@@ -261,6 +262,51 @@ fn a_lost_job_that_passed_on_a_re_run_is_not_flaky() {
     );
 }
 
+/// Five runs on `branch` whose runners found `hits` of 40 lookups each in the build cache, and could write to it
+/// or not.
+fn cached(branch: &str, hits: u64, writer: bool) -> Vec<Run> {
+    history(&[240; 5])
+        .into_iter()
+        .map(|run| Run {
+            branch: Some(branch.to_owned()),
+            build_cache: Some(api::BuildCacheCounts {
+                hits,
+                misses: 40 - hits,
+                writer,
+                ..api::BuildCacheCounts::default()
+            }),
+            ..run
+        })
+        .collect()
+}
+
+#[test]
+fn main_runs_that_find_nothing_their_predecessors_stored_have_a_cold_cache() {
+    let found = insights(&cached("main", 1, true), &config(), 14, NOW).insights;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(
+        found[0].kind,
+        InsightKind::ColdCache {
+            branch: Some("main".to_owned()),
+            hits: 5,
+            lookups: 200,
+        }
+    );
+    assert!(
+        found[0].sentence.contains("2% of its build cache lookups"),
+        "{}",
+        found[0].sentence
+    );
+}
+
+#[test]
+fn a_warm_cache_or_runs_that_only_read_are_no_insight() {
+    for runs in [cached("main", 30, true), cached("feature", 0, false)] {
+        let found = insights(&runs, &config(), 14, NOW).insights;
+        assert!(found.is_empty(), "{found:?}");
+    }
+}
+
 fn peaking(peaks_in_tenths_of_g: &[u64]) -> Vec<Run> {
     let mut runs = history(&vec![240; peaks_in_tenths_of_g.len()]);
     for (run, peak) in runs.iter_mut().zip(peaks_in_tenths_of_g) {
@@ -442,6 +488,6 @@ fn every_kind_of_insight_reads_back_as_the_daemon_sends_it() {
     );
 
     let sent = serde_json::to_string(&found).unwrap();
-    let read: crate::api::Insights = serde_json::from_str(&sent).unwrap();
+    let read: api::Insights = serde_json::from_str(&sent).unwrap();
     assert_eq!(read, found);
 }

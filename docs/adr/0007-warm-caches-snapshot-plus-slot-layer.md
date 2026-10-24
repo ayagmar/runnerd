@@ -1,7 +1,9 @@
 # 0007. Warm caches: per-profile snapshot plus per-slot layer
 
 Amended by [0041](0041-snapshot-and-mirror-limits.md): a snapshot over `[caches] snapshot_max` starts over from slot
-1's changes at its next reseed, and the mirror's storage is emptied above `mirror.max_size`.
+1's changes at its next reseed, and the mirror's storage is emptied above `mirror.max_size`. Amended by
+[0052](0052-shared-build-cache.md): a build cache the daemon keeps per repository is shared by every slot, written
+only by the default branch's pushes, schedules and manual runs.
 
 ## Context
 

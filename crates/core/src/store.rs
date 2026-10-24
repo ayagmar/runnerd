@@ -40,6 +40,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0009_auto_sizing.sql"),
     include_str!("store/migrations/0010_auto_sizing_cpus.sql"),
     include_str!("store/migrations/0011_notify.sql"),
+    include_str!("store/migrations/0012_build_cache.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -205,6 +206,10 @@ enum Write {
         admission: api::Admission,
     },
     RunnerOomKilled(String),
+    BuildCache {
+        runner: String,
+        counts: api::BuildCacheCounts,
+    },
     RunnerRemoved {
         runner: String,
         at: u64,
@@ -250,7 +255,8 @@ enum Write {
         at: u64,
         sizes: BTreeMap<String, u64>,
     },
-    Event(Event),
+    /// Boxed: an event with a job's summary is many times the other writes' size.
+    Event(Box<Event>),
     RecordMade(api::Record),
     RecordSkipped {
         job: u64,
@@ -526,6 +532,14 @@ impl Store {
         self.send(Write::RunnerOomKilled(runner.to_owned()));
     }
 
+    /// Adds what the shared build cache served a runner and took from it, and records whether its job could write.
+    pub fn build_cache(&self, runner: &str, counts: api::BuildCacheCounts) {
+        self.send(Write::BuildCache {
+            runner: runner.to_owned(),
+            counts,
+        });
+    }
+
     /// The last host sample sent, stored or not; `None` before the first.
     pub fn latest_host_sample(&self) -> Option<api::HostSample> {
         lock(&self.latest_host).clone()
@@ -546,7 +560,7 @@ impl Store {
 
     /// Stores a durable event, or sends a live one, to every subscriber.
     pub fn event(&self, event: Event) {
-        self.send(Write::Event(event));
+        self.send(Write::Event(Box::new(event)));
     }
 
     /// Records that a failed job's runner was kept as `record`, and announces it.
@@ -796,6 +810,12 @@ impl Store {
     /// The last measurement of every volume, with its time (seconds), by name.
     pub async fn cache_sizes_now(&self) -> Result<Measured, StoreError> {
         self.read(read::latest_cache_sizes).await
+    }
+
+    /// What the build cache served and took from the runners started since `since` (ms), summed.
+    pub async fn build_cache_since(&self, since: u64) -> Result<api::BuildCacheCounts, StoreError> {
+        self.read(move |db| read::build_cache_since(db, since))
+            .await
     }
 
     /// Every volume measurement since `since` (seconds).

@@ -9,7 +9,7 @@
 
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development: the daemon schedules runners, records every job, can keep a failed job's runner to open a shell in, advises on each profile's memory and slots from past jobs' peaks and can apply that advice itself, can admit runners by those peaks instead of their caps and by CPU, says why each queued job waits, serves a JSON API and a web dashboard you can install as an app and reach through a proxy, and `runnerctl` reads and controls it from a terminal.
+It is in early development: the daemon schedules runners, records every job, shares one build cache across every slot that only the default branch writes, can keep a failed job's runner to open a shell in, advises on each profile's memory and slots from past jobs' peaks and can apply that advice itself, can admit runners by those peaks instead of their caps and by CPU, says why each queued job waits, serves a JSON API and a web dashboard you can install as an app and reach through a proxy, and `runnerctl` reads and controls it from a terminal.
 
 ```mermaid
 flowchart TB
@@ -122,7 +122,7 @@ The site, <https://ayagmar.github.io/runnerd/>, has the guides:
 - [Install](https://ayagmar.github.io/runnerd/install/): requirements, `runnerd init`'s output, verifying a release.
 - [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, runner images, records of failed jobs, the budget check, isolation, and every key with its default.
 - [Admission and sizing](https://ayagmar.github.io/runnerd/admission/): what a job's memory counts, sizing advice from the job history and auto sizing, measured and CPU admission, `runnerd simulate`.
-- [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled, warm runners that wait for the next job, how caches are kept warm, records of failed jobs and their shells, the job history, and the JSON API and its events.
+- [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled, warm runners that wait for the next job, how caches are kept warm, the shared build cache, records of failed jobs and their shells, the job history, and the JSON API and its events.
 - [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/): the web dashboard, from another device too, every `runnerctl` command, and `runnerctl tui` with its keys.
 - [Upgrading](https://ayagmar.github.io/runnerd/upgrading/): what each release changes on an existing host, and what to do before and after.
 
@@ -144,6 +144,13 @@ The tests that start real containers are ignored by default. They need Docker wi
 docker build --target jvm -t runnerd-runner:jvm image
 docker build --target base -t runnerd-runner:base image
 cargo test -p runnerd-core --test docker_smoke --test cache_reseed -- --ignored
+```
+
+The Gradle build cache test builds its own image from the Gradle image, so it needs the network too:
+
+```sh
+cargo test -p runnerd-core --test build_cache_gradle -- --ignored
+docker rmi runnerd-test-build-cache
 ```
 
 ## License

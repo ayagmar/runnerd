@@ -5,14 +5,15 @@ import Diagram from '../Diagram.astro';
 ---
 
 <Diagram name="caches" caption="Two slots of the jvm profile. A slot's changes stay in its own volume; slot 1's become the snapshot when the profile is idle.">
-  <svg viewBox="0 0 480 452" role="img" aria-labelledby="caches-title" aria-describedby="caches-desc">
+  <svg viewBox="0 0 480 460" role="img" aria-labelledby="caches-title" aria-describedby="caches-desc">
     <title id="caches-title">The warm caches of one profile</title>
     <desc id="caches-desc">
       Each slot of the jvm profile has its own read-write volume, runnerd-jvm-slot-1 and runnerd-jvm-slot-2, holding
       its Docker Engine's data and its changes to ~/.cache, the tool cache and the Android SDK. Under both slots is the
       profile's read-only snapshot, runnerd-jvm-base, and under that the runner image. When the profile is idle and
       slot 1 changed by reseed_at, slot 1's layers become the snapshot. Every slot of every profile shares the pnpm
-      store, runnerd-pnpm, the Maven repository, runnerd-maven, and the Docker Hub mirror, runnerd-mirror.
+      store, runnerd-pnpm, the Maven repository, runnerd-maven, the Docker Hub mirror, runnerd-mirror, and the build
+      cache the daemon keeps per repository, which pushes to the default branch write and every job reads.
     </desc>
     <rect class="frame" x="1" y="1" width="226" height="52"></rect>
     <text class="t" x="16" y="34">jvm 1's container</text>
@@ -39,18 +40,23 @@ import Diagram from '../Diagram.astro';
     <text class="m" x="268" y="192">when the profile is idle</text>
 
     <text class="t" x="0" y="300">shared by every slot</text>
-    <rect class="box" x="0" y="316" width="152" height="76"></rect>
-    <text x="14" y="340">pnpm store</text>
-    <text class="m" x="14" y="362">emptied above</text>
-    <text class="m" x="14" y="382">max_size</text>
-    <rect class="box" x="164" y="316" width="152" height="76"></rect>
-    <text x="178" y="340">Maven repo</text>
-    <text class="m" x="178" y="362">emptied above</text>
-    <text class="m" x="178" y="382">max_size</text>
-    <rect class="box" x="328" y="316" width="152" height="76"></rect>
-    <text x="342" y="340">Docker Hub</text>
-    <text x="342" y="362">mirror</text>
-    <text class="m" x="342" y="382">while runners run</text>
-    <text class="m" x="0" y="430">runnerd-pnpm, runnerd-maven, runnerd-mirror</text>
+    <rect class="box" x="0" y="316" width="114" height="76"></rect>
+    <text x="12" y="340">pnpm store</text>
+    <text class="m" x="12" y="362">emptied above</text>
+    <text class="m" x="12" y="382">max_size</text>
+    <rect class="box" x="122" y="316" width="114" height="76"></rect>
+    <text x="134" y="340">Maven repo</text>
+    <text class="m" x="134" y="362">emptied above</text>
+    <text class="m" x="134" y="382">max_size</text>
+    <rect class="box" x="244" y="316" width="114" height="76"></rect>
+    <text x="256" y="340">Docker Hub</text>
+    <text x="256" y="362">mirror</text>
+    <text class="m" x="256" y="382">while runners run</text>
+    <rect class="box" x="366" y="316" width="114" height="76"></rect>
+    <text x="378" y="340">build cache</text>
+    <text class="m" x="378" y="362">main writes,</text>
+    <text class="m" x="378" y="382">all read</text>
+    <text class="m" x="0" y="430">runnerd-pnpm, runnerd-maven, runnerd-mirror, and the</text>
+    <text class="m" x="0" y="448">daemon's build cache, one per repository</text>
   </svg>
 </Diagram>

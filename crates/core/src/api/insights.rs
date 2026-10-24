@@ -99,6 +99,15 @@ pub enum InsightKind {
         /// What auto sizing does about it.
         auto: AutoNote,
     },
+    /// A job's runs that write to the build cache find almost nothing in it: its cache keys differ from run to run.
+    ColdCache {
+        /// The branch those runs are on.
+        branch: Option<String>,
+        /// Lookups that found an entry, over those runs.
+        hits: u64,
+        /// Lookups over those runs.
+        lookups: u64,
+    },
     /// A repository's jobs wait longer this week than the week before.
     Waits {
         /// The 95th percentile of waits the week before, in seconds.

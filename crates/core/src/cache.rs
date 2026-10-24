@@ -72,6 +72,12 @@ impl Names {
     pub fn mirror(&self) -> String {
         format!("{}-mirror", self.prefix)
     }
+
+    /// What `GET /v1/caches` and `runnerctl caches clean` call the shared build cache: a directory of the daemon's,
+    /// not a Docker volume.
+    pub fn build_cache(&self) -> String {
+        format!("{}-build-cache", self.prefix)
+    }
 }
 
 fn volume(source: String, target: &str, read_only: bool) -> Mount {
@@ -287,6 +293,13 @@ pub fn volumes(names: &Names, config: &config::Config) -> Vec<api::CacheVolume> 
             names.mirror(),
             api::CacheKind::Mirror,
             Some(config.caches.mirror.max_size.0),
+        ));
+    }
+    if config.caches.build.enabled {
+        volumes.push(volume(
+            names.build_cache(),
+            api::CacheKind::Build,
+            Some(config.caches.build.max_size.0),
         ));
     }
     volumes.sort_by(|a, b| a.name.cmp(&b.name));

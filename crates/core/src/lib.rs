@@ -10,6 +10,8 @@
 pub mod admission;
 pub mod api;
 #[cfg(feature = "host")]
+pub mod buildcache;
+#[cfg(feature = "host")]
 pub mod cache;
 #[cfg(feature = "client")]
 pub mod client;

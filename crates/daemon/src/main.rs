@@ -6,6 +6,7 @@ use std::process::ExitCode;
 use std::time::Duration;
 
 use clap::{Parser, Subcommand};
+use runnerd_core::buildcache::BuildCache;
 use runnerd_core::cache::Names;
 use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory_max};
 use runnerd_core::docker::Docker;
@@ -410,6 +411,42 @@ fn open_history(config: &Config) -> Result<History, ExitCode> {
     })
 }
 
+/// The shared build cache: its entries in `[caches.build] directory` or `$XDG_CACHE_HOME/runnerd/build-cache`, each
+/// runner's socket beside the API's. Opened whether `[caches.build]` is on or not, so a reload can turn it on.
+/// Without it runners build without it, which the log says.
+fn open_build_cache(config: &Config, socket: &Path) -> Option<BuildCache> {
+    let directory = config.caches.build.directory.clone().or_else(|| {
+        std::env::var_os("XDG_CACHE_HOME")
+            .map(PathBuf::from)
+            .or_else(|| std::env::var_os("HOME").map(|home| Path::new(&home).join(".cache")))
+            .map(|dir| dir.join("runnerd/build-cache"))
+    });
+    let Some(directory) = directory else {
+        warn!("no build cache: neither XDG_CACHE_HOME nor HOME is set; set caches.build.directory");
+        return None;
+    };
+    let sockets = socket.with_file_name("runnerd-build-cache");
+    match BuildCache::open(&directory, &sockets, config.caches.build.max_size.0) {
+        Ok(cache) => {
+            let size = cache.size();
+            info!(
+                "build cache in {}: {} entries, {}",
+                directory.display(),
+                size.entries,
+                ByteSize(size.bytes)
+            );
+            Some(cache)
+        }
+        Err(error) => {
+            warn!(
+                "no build cache: cannot open {}: {error}",
+                directory.display()
+            );
+            None
+        }
+    }
+}
+
 fn default_database() -> Option<PathBuf> {
     let dir = std::env::var_os("XDG_STATE_HOME")
         .map(PathBuf::from)
@@ -466,6 +503,7 @@ async fn serve(
         .await
         .map_err(|error| fail(&format_args!("--web {web}: {error}")))?;
     let proxies = config.web.origins.clone();
+    let build_cache = open_build_cache(&config, &socket);
     let (engine, handle) = Engine::new(
         config,
         github,
@@ -479,6 +517,7 @@ async fn serve(
             announced,
             paused,
             paths: Paths::default(),
+            build_cache,
         },
     );
     tokio::spawn(shut_down_on_signals(handle.control.clone()));

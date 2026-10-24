@@ -7,7 +7,8 @@ use std::fmt::Write as _;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Job, JobPage, JobQuery, JobState, JobSummary, Sample, SampleSeries, Status, Step,
+    BuildCacheCounts, Job, JobPage, JobQuery, JobState, JobSummary, Sample, SampleSeries, Status,
+    Step,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -454,6 +455,25 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
                 div { dt { "Received" } dd { (optional(metrics.network_received, format::bytes)) } }
                 div { dt { "Sent" } dd { (optional(metrics.network_sent, format::bytes)) } }
                 div { dt { "From the mirror" } dd { (format::bytes(metrics.mirror_bytes)) } }
+                (build_cache(&metrics.build_cache))
+            }
+        }
+    }
+}
+
+/// What the shared build cache served the job and took from it, for a job that asked it anything.
+fn build_cache(cache: &BuildCacheCounts) -> Markup {
+    html! {
+        @if let Some(percent) = cache.hit_percent() {
+            div title=(format!("{} of {} lookups found an entry", cache.hits, cache.lookups())) {
+                dt { "From the build cache" }
+                dd { (percent) "% hit, " (format::bytes(cache.read_bytes)) }
+            }
+            div {
+                dt { "To the build cache" }
+                dd {
+                    @if cache.writer { (format::bytes(cache.written_bytes)) } @else { "read only" }
+                }
             }
         }
     }

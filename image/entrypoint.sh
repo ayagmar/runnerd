@@ -11,8 +11,11 @@ jitconfig_file=/run/runnerd/jitconfig
 [ -f "$jitconfig_file" ] || { echo "$jitconfig_file is missing: runnerd starts runner containers" >&2; exit 1; }
 # shellcheck source=SCRIPTDIR/layers.sh
 . /usr/local/lib/runnerd-layers.sh
+# shellcheck source=SCRIPTDIR/build-cache.sh
+. /usr/local/lib/runnerd-build-cache.sh
 
 mount_layers
+start_build_cache
 # pnpm processes sharing the store must share their lock directory (Dockerfile).
 install -d -o runner -g runner -m 700 "$XDG_RUNTIME_DIR"
 

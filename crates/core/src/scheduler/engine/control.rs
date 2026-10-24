@@ -16,7 +16,7 @@ use super::records::RecordSelection;
 use super::{Engine, Occupant};
 use crate::api;
 use crate::cache;
-use crate::config::Config;
+use crate::config::{ByteSize, Config};
 use crate::docker::{DockerApi, Tty, TtySize};
 use crate::github::GithubApi;
 use crate::isolation;
@@ -697,7 +697,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .map(|(_, occupant)| occupant.running_job())
                     .collect()
             }
-            api::CacheKind::Pnpm | api::CacheKind::Maven | api::CacheKind::Mirror => self
+            api::CacheKind::Pnpm
+            | api::CacheKind::Maven
+            | api::CacheKind::Mirror
+            | api::CacheKind::Build => self
                 .occupied()
                 .map(|(_, occupant)| occupant.running_job())
                 .collect(),
@@ -716,6 +719,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 ),
                 jobs: users,
             });
+        }
+        if volume.kind == api::CacheKind::Build {
+            let Some(cache) = self.build_cache.clone() else {
+                return Err(ControlError::Failed(
+                    "the build cache did not open when runnerd started; its log says why"
+                        .to_owned(),
+                ));
+            };
+            let trimmed = tokio::task::spawn_blocking(move || cache.clear())
+                .await
+                .map_err(|error| ControlError::Failed(format!("cannot empty {name}: {error}")))?;
+            info!(
+                "emptied {name}: {} entries, {}",
+                trimmed.before.entries,
+                ByteSize(trimmed.before.bytes)
+            );
+            self.trim_due = true;
+            return Ok(());
         }
         if volume.kind == api::CacheKind::Mirror && self.mirror_up {
             cache::mirror_down(&*self.docker, &self.names)
@@ -762,6 +783,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// `cpus` are the slice's, read when the config sets `cpu_overcommit`.
     pub(super) fn reload(&mut self, config: Config, memory_max: Option<u64>, cpus: Option<u64>) {
         let mut old = std::mem::replace(&mut self.config, config);
+        if let Some(cache) = &self.build_cache {
+            cache.set_max_size(self.config.caches.build.max_size.0);
+        }
         for (name, profile) in &self.config.profiles {
             let slots = self.slots.entry(name.clone()).or_default();
             if slots.len() < profile.slots as usize {

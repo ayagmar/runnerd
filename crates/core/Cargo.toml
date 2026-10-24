@@ -17,6 +17,9 @@ default = ["host"]
 host = [
   "dep:bollard",
   "dep:futures-util",
+  "dep:http-body-util",
+  "dep:hyper",
+  "dep:hyper-util",
   "dep:reqwest",
   "dep:rusqlite",
   "dep:rustix",
@@ -25,11 +28,16 @@ host = [
   "dep:tar",
   "dep:tokio",
   "dep:tracing",
+  "hyper/server",
+  "tokio/fs",
+  "tokio/io-util",
+  "tokio/net",
 ]
 # The client of the daemon's API over its socket, for `runnerctl` and the dashboard: hyper's HTTP/1 client, no TLS.
 client = [
   "dep:http-body-util",
   "dep:hyper",
+  "hyper/client",
   "dep:hyper-util",
   "dep:serde_json",
   "dep:serde_urlencoded",
@@ -42,7 +50,7 @@ client = [
 bollard = { workspace = true, optional = true }
 futures-util = { workspace = true, optional = true }
 http-body-util = { workspace = true, optional = true }
-hyper = { workspace = true, optional = true, features = ["client", "http1"] }
+hyper = { workspace = true, optional = true, features = ["http1"] }
 hyper-util = { workspace = true, optional = true, features = ["tokio"] }
 reqwest = { workspace = true, optional = true }
 rusqlite = { workspace = true, optional = true }
@@ -71,6 +79,10 @@ required-features = ["host"]
 
 [[test]]
 name = "cache_reseed"
+required-features = ["host"]
+
+[[test]]
+name = "build_cache_gradle"
 required-features = ["host"]
 
 [lints]

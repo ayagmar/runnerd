@@ -16,7 +16,7 @@ flowchart TB
     subgraph core["runnerd-core"]
         types["api, config"]
         client["client"]
-        host["admission, docker, github, cache, insights, isolation,<br/>record, scheduler, observe, sizing, store"]
+        host["admission, buildcache, docker, github, cache, insights, isolation,<br/>record, scheduler, observe, sizing, store"]
     end
     daemon -->|host| host
     daemon -->|"serves it in its process"| web
@@ -33,7 +33,7 @@ flowchart TB
 
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
-| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice, insights, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
+| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, the shared build cache's server, job history, sizing advice, insights, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper's client behind `client` and its server behind `host` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
@@ -43,13 +43,15 @@ flowchart TB
 - `api`, `config`: build without `host`. Every client reads these.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `admission`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`, `scheduler`, `observe`, `sizing`,
-  `store`: `host` only
+- `admission`, `buildcache`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`, `scheduler`, `observe`,
+  `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU
   and replays the history for `runnerd simulate`; `sizing` turns the history into advice, and `sizing::auto` picks
   the changes auto sizing makes; `insights` reads the history for jobs that got slower, are flaky or near their cap,
   and the waits of each week ([ADR 0051](docs/adr/0051-insights-and-notifications.md)). All three are pure: the
-  engine and the daemon read the store and act on what they return.
+  engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
+  shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
+  ([ADR 0052](docs/adr/0052-shared-build-cache.md)).
 
 `runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing, `api/notify` sends `[notify]`'s
 notifications), `init`, `doctor`, `simulate`, and
@@ -90,7 +92,8 @@ client → transport → principal → handler → core
    [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
    and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images and removing the published runner images none runs,
    [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
-   `caches` (reseeds, the mirror, the shared caches), `records` (records of failed jobs and the shells in them),
+   `caches` (reseeds, the mirror, the shared caches), `build_cache` (a runner's socket of the build cache, and
+   whether its job may write), `records` (records of failed jobs and the shells in them),
    `history` (what the store records), `admission` (what a new runner reserves), `warm` (how many warm runners each
    repository wants, from `scheduler::warm`), `control` (`Control` and the commands) and `status` (what it
    publishes).
@@ -127,8 +130,9 @@ queued → slot → container → removed
    (`scheduler::warm`: `[[repositories]] warm` in its active hours, plus the jobs its workflow runs seen so far are
    expected to queue still), so a job finds a runner already registered
    ([ADR 0050](docs/adr/0050-warm-runners.md)).
-3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`) and starts its
-   container (`DockerApi::start`) under the profile's limits and isolation backend.
+3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`), opens the runner's
+   build cache socket and starts its container (`DockerApi::start`) under the profile's limits and isolation
+   backend.
 4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials and every
    dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`). `Engine::collect_finished` sees the container stopped, removes it and the runner's
    registration, and frees the slot. A runner that took no job holds the repository back for a while. If the job
@@ -138,7 +142,7 @@ queued → slot → container → removed
 5. While a job runs the engine records it in the store: the job's ID from the runner's `_diag` Worker log
    (`observe::capture`, run in the container with `docker exec`), its steps from `GithubApi::job`, its log from the
    runner's `_diag/pages`, CPU and memory from the container's cgroup every 2 s (`observe::metrics`), and the
-   mirror's bytes from its access log (`observe::mirror`). The record is final once GitHub reports the job completed
+   mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`).
 6. When a profile is idle after its slot 1 ran a job, `cache::reseed` makes slot 1's layers the profile's snapshot,
    which starts over above `[caches] snapshot_max` ([ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md)).
@@ -153,11 +157,12 @@ nothing until Docker has listed them.
 | Config | `runnerd.toml`, default `$XDG_CONFIG_HOME/runnerd/runnerd.toml` ([`crates/core/src/config.rs`](crates/core/src/config.rs)) |
 | Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart, except paused repositories, which the job history keeps |
 | Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
+| Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to; times in ms |
 
 ## Invariants
 
@@ -171,6 +176,11 @@ nothing until Docker has listed them.
   (`api/notify`) reads the store's durable events and the history off the engine's loop; the engine never waits
   for it, and a target's cursor moves only once a delivery succeeded
   ([ADR 0051](docs/adr/0051-insights-and-notifications.md)).
+- A runner's build cache uploads become entries only once GitHub says its job runs on that runner and is a push,
+  schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`, of a
+  commit that branch has; until then they are held, at most `max_size` of them in all and a quarter of it per job,
+  and otherwise dropped, answered as stored. A runner reads only its repository's entries, through its own socket.
+  The cache is trimmed only while no runner runs ([ADR 0052](docs/adr/0052-shared-build-cache.md)).
 - A JIT config reaches a container only as a root-only file (`docker::JIT_CONFIG_PATH`), never the create request
   or a log line.
 - The engine deletes only GitHub runner registrations whose names start with this machine's prefix

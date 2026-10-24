@@ -132,6 +132,49 @@ pub struct JobMetrics {
     pub network_sent: Option<u64>,
     /// Of the bytes received, those the Docker Hub mirror served.
     pub mirror_bytes: u64,
+    /// What the shared build cache served it and took from it.
+    #[serde(default)]
+    pub build_cache: BuildCacheCounts,
+}
+
+/// What the shared build cache served one runner and took from it (ADR 0052), counted by the cache itself.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildCacheCounts {
+    /// Lookups that found an entry.
+    pub hits: u64,
+    /// Lookups that found none.
+    pub misses: u64,
+    /// Bytes of the entries it served.
+    pub read_bytes: u64,
+    /// Bytes of the entries it stored.
+    pub written_bytes: u64,
+    /// Entries it was sent and did not store: the job may not write (a pull request, another branch), or the
+    /// cache was full.
+    pub refused: u64,
+    /// Whether the job could write: a push, scheduled or manually started run of a branch that may write.
+    pub writer: bool,
+}
+
+impl BuildCacheCounts {
+    /// Hits and misses.
+    pub fn lookups(&self) -> u64 {
+        self.hits + self.misses
+    }
+
+    /// Hits in percent of lookups, `None` without any.
+    pub fn hit_percent(&self) -> Option<u64> {
+        let lookups = self.lookups();
+        (lookups > 0).then(|| self.hits * 100 / lookups)
+    }
+
+    /// Adds `other`'s counts; `writer` stays.
+    pub fn add(&mut self, other: &BuildCacheCounts) {
+        self.hits += other.hits;
+        self.misses += other.misses;
+        self.read_bytes += other.read_bytes;
+        self.written_bytes += other.written_bytes;
+        self.refused += other.refused;
+    }
 }
 
 /// A job's stored log.
@@ -408,6 +451,8 @@ pub enum CacheKind {
     Maven,
     /// The Docker Hub mirror's storage.
     Mirror,
+    /// The build cache every runner shares: a directory of the daemon's, not a Docker volume.
+    Build,
 }
 
 /// One cache volume and its size.
@@ -432,6 +477,22 @@ pub struct Caches {
     pub measured_at: Option<u64>,
     /// By name.
     pub volumes: Vec<CacheVolume>,
+    /// The shared build cache now, when it is on.
+    #[serde(default)]
+    pub build: Option<BuildCacheStats>,
+}
+
+/// The shared build cache (ADR 0052): its size now, and what it served the jobs of the last 7 days.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct BuildCacheStats {
+    /// The entries' bytes.
+    pub bytes: u64,
+    /// How many entries it holds.
+    pub entries: u64,
+    /// `[caches.build] max_size`.
+    pub limit: u64,
+    /// The runners of the last 7 days, summed.
+    pub week: BuildCacheCounts,
 }
 
 /// `GET /v1/caches/history` query parameters.
