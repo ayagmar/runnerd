@@ -822,6 +822,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let profiles = &self.config.profiles;
         self.reseed_requested
             .retain(|name| profiles.contains_key(name));
+        self.oversized.retain(|name| profiles.contains_key(name));
         self.isolation = isolation::backend(self.config.host.isolation);
         self.memory_max = memory_max;
         self.cpus = cpus;

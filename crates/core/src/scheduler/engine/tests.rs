@@ -342,6 +342,8 @@ struct DockerState {
     held_removals: BTreeSet<String>,
     /// The mounts of each runner container started, by name.
     mounts: HashMap<String, Vec<bollard::models::Mount>>,
+    /// The entrypoint of each container started with its own, by name: a seed container's says its thresholds.
+    entrypoints: HashMap<String, Vec<String>>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
@@ -379,6 +381,11 @@ impl DockerApi for FakeDocker {
         }
         state.started_images.push(spec.image.clone());
         state.mounts.insert(spec.name.clone(), spec.mounts.clone());
+        if let Some(entrypoint) = &spec.entrypoint {
+            state
+                .entrypoints
+                .insert(spec.name.clone(), entrypoint.clone());
+        }
         state.memory.insert(spec.name.clone(), spec.memory.0);
         state
             .started
@@ -2040,6 +2047,30 @@ async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runn
         .await;
     assert_eq!(answer.await.unwrap(), Ok(None));
     assert_eq!(engine.config.profiles["app"].slots, 1);
+}
+
+#[tokio::test]
+async fn a_snapshot_over_its_limit_starts_over_at_the_next_idle_moment_however_little_slot_1_changed()
+ {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    // 11 GB against the default snapshot_max of 10G; no job ran in slot 1 since the last reseed.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volume_sizes
+        .insert("runnerd-app-base".to_owned(), 11 << 30);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+
+    let seed = Names::new("runnerd").seed("app");
+    until_called(&mut engine, &docker, &format!("start {seed}")).await;
+    let entrypoint = docker.0.lock().unwrap().entrypoints[&seed].clone();
+    assert_eq!(
+        entrypoint[1..],
+        ["0".to_owned(), (10u64 << 30).to_string()],
+        "the seed runs whatever slot 1 changed, against snapshot_max"
+    );
 }
 
 #[tokio::test]

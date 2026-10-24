@@ -1,6 +1,7 @@
 # 0041. A profile's snapshot and the mirror's storage have size limits
 
-Status: **Accepted** (2026-10-23). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md).
+Status: **Accepted** (2026-10-23), amended 2026-10-24 (see the end). Amends
+[0007](0007-warm-caches-snapshot-plus-slot-layer.md).
 
 ## Context
 
@@ -33,3 +34,12 @@ snapshot had no limit. The Docker Hub mirror expires content after its TTL, with
 A profile's jobs run cold once after its snapshot starts over, for the tools slot 1's last job did not change; the
 next reseeds fold them back in. A snapshot already over the limit stays until its next reseed. A mirror emptied
 pulls from Docker Hub again.
+
+## Amendment (2026-10-24): a snapshot over its limit is due for a reseed
+
+A reseed ran only once slot 1's layers changed by `reseed_at` (2G), so a snapshot over the limit could stay there
+indefinitely: the owner's node snapshot held 10.94 GB against 10G while slot 1's whole volume held 1.23 GB. Now
+the check of the caches, which measures every volume when no runner runs, makes a profile whose snapshot it
+measured over `snapshot_max` due for a reseed. That reseed runs once the profile is idle, as a due one does, and
+ignores `reseed_at` as a requested one does, so it starts the snapshot over. A snapshot measured while its reseed
+runs is not counted: the measurement may predate the new snapshot.

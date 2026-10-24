@@ -74,7 +74,7 @@ A slot is one concurrent job of a profile. Each job gets a new container, but th
 | the slot's Docker images, `~/.cache`, tool cache, Android SDK | per slot, between jobs |
 | the slot's Docker build cache, BuildKit's cache mounts included | per slot, between jobs; emptied with the slot's images once they take over 20 GB together. The containers, volumes and networks a job starts go after it |
 | cargo's credentials and config, Gradle's `gradle.properties` in `~/.cache` | never: no later job or record shell sees them, even from an older snapshot |
-| the profile's snapshot | replaced by slot 1's changes once they reach [`reseed_at`](../configuration/#caches) and the profile is idle; above `snapshot_max` it starts over from slot 1's changes alone |
+| the profile's snapshot | replaced by slot 1's changes once they reach [`reseed_at`](../configuration/#caches) and the profile is idle; above `snapshot_max` it starts over from slot 1's changes alone; once measured above `snapshot_max`, it starts over at the next moment the profile is idle, however little slot 1 changed |
 | pnpm store, Maven repository | shared by all slots, emptied above their [`max_size`](../configuration/#caches) when no runner runs: warm runners stop for it at most hourly, at the first moment no job runs |
 | Docker Hub mirror | runs while any runner does, warm ones too; stops, and its storage is emptied above `mirror.max_size`, with the shared caches' check |
 | [build cache](#build-cache) | per repository, shared by every slot; written only by pushes to the default branch; its least recently used entries go above [`build.max_size`](../configuration/#caches) with the shared caches' check |

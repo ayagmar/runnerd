@@ -46,7 +46,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |
 | [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default |
 | [0040](0040-unused-runner-images-removed.md) | Published runner images no profile runs are removed |
-| [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits |
+| [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits (amended: a snapshot over its limit is due for a reseed) |
 | [0042](0042-dashboard-behind-a-proxy-and-installable.md) | The dashboard behind a proxy the owner runs, and installable as an app (amended by 0043) |
 | [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md) | Phones signed in by QR code, and sessions that outlive a restart |
 | [0044](0044-queued-jobs-say-why-they-wait.md) | Queued jobs say why they wait |

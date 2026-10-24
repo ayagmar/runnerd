@@ -3,6 +3,7 @@
 //! runner. Reseeds and cache checks
 //! run as background tasks the tick collects; it must not start or stop runners.
 
+use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use tokio::task::JoinHandle;
@@ -73,7 +74,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             for name in due {
                 self.reseed_due.remove(&name);
                 let requested = self.reseed_requested.remove(&name);
-                self.spawn_reseed(name, requested);
+                let oversized = self.oversized.remove(&name);
+                self.spawn_reseed(name, requested || oversized);
             }
         }
         // A shell mounts the shared caches.
@@ -122,7 +124,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Rebuilds a profile's snapshot in the background; its slots start nothing until it is done. A `requested`
-    /// reseed runs however little slot 1 changed.
+    /// reseed, or that of a snapshot over its limit, runs however little slot 1 changed.
     fn spawn_reseed(&mut self, name: String, requested: bool) {
         let Some(profile) = self.config.profiles.get(&name) else {
             return;
@@ -171,6 +173,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         match task.await {
             Ok(Ok(Trimmed { sizes, emptied })) => {
+                self.mark_oversized(&sizes);
                 let ours = self.names.network();
                 self.store.cache_sizes(
                     time::now_ms(),
@@ -185,6 +188,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             Ok(Err(error)) => warn!("cannot check the shared caches: {error}"),
             Err(error) => warn!("checking the shared caches stopped: {error}"),
+        }
+    }
+
+    /// Makes the profiles whose snapshot `sizes` measured over `snapshot_max` due for a reseed, which then starts
+    /// the snapshot over (docs/adr/0041): slot 1 may never change enough to reach `reseed_at`. A reseed running now
+    /// may have been measured before it replaced the snapshot.
+    fn mark_oversized(&mut self, sizes: &BTreeMap<String, u64>) {
+        let max = self.config.caches.snapshot_max;
+        for profile in self.config.profiles.keys() {
+            let Some(&size) = sizes.get(&self.names.base(profile)) else {
+                continue;
+            };
+            if size > max.0 && !self.reseeds.contains_key(profile) {
+                info!(
+                    "{profile}: the snapshot holds {}, over snapshot_max ({max}): it starts over at the next reseed, \
+                     once the profile is idle",
+                    ByteSize(size)
+                );
+                self.reseed_due.insert(profile.clone());
+                self.oversized.insert(profile.clone());
+            }
         }
     }
 
