@@ -157,6 +157,22 @@ fn slower_runs_on_a_branch_with_few_runs_do_not_count() {
     );
 }
 
+#[test]
+fn main_is_compared_even_when_pull_requests_run_more() {
+    let mut runs = history(&[240; 10]);
+    // A pull request that adds tests, pushed often: slower, and busier than main.
+    for n in 0..14 {
+        let mut feature = test_run(100 + n, 30 - n, if n < 7 { 240 } else { 600 });
+        feature.branch = Some("feature/more-tests".to_owned());
+        runs.push(feature);
+    }
+
+    assert!(
+        insights(&runs, &config(), 14, NOW).insights.is_empty(),
+        "main runs as fast as it did"
+    );
+}
+
 /// Attempt `attempt` of run `run_id` of `CI / test`, concluding `conclusion`.
 fn attempt(run_id: u64, attempt: u32, conclusion: &str) -> Run {
     let mut run = test_run(run_id * 10 + u64::from(attempt), 3, 240);
@@ -180,11 +196,31 @@ fn a_job_that_failed_and_passed_on_a_re_run_is_flaky() {
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].key, "flaky:halyard/api/CI/test");
     assert_eq!(found[0].kind, InsightKind::Flaky { flaky: 1, total: 3 });
+    assert_eq!(
+        found[0].severity,
+        Severity::Notice,
+        "once may be chance: shown, not sent"
+    );
     assert_eq!(found[0].runs[0].job, runs[1].id, "links the failed attempt");
     assert_eq!(
         found[0].sentence,
         "halyard/api: CI / test failed and then passed on a re-run in 1 of its 3 runs."
     );
+}
+
+#[test]
+fn a_job_flaky_twice_is_a_warning() {
+    let runs = vec![
+        attempt(1, 1, "failure"),
+        attempt(1, 2, "success"),
+        attempt(2, 1, "timed_out"),
+        attempt(2, 2, "success"),
+    ];
+
+    let found = insights(&runs, &config(), 14, NOW).insights;
+
+    assert_eq!(found[0].kind, InsightKind::Flaky { flaky: 2, total: 2 });
+    assert_eq!(found[0].severity, Severity::Warning);
 }
 
 #[test]
@@ -236,6 +272,11 @@ fn memory_near_the_cap_is_flagged_with_what_auto_sizing_does() {
         (profile.as_str(), *cap, *auto),
         ("app", 4 * G, AutoNote::Off)
     );
+    assert_eq!(
+        found[0].severity,
+        Severity::Warning,
+        "three runs near the cap and nothing raises it"
+    );
     assert!(
         found[0]
             .sentence
@@ -256,6 +297,23 @@ fn memory_near_the_cap_is_flagged_with_what_auto_sizing_does() {
         ),
         "auto sizing raises it: {found:#?}"
     );
+    assert_eq!(
+        found[0].severity,
+        Severity::Notice,
+        "auto sizing deals with it: shown, not sent"
+    );
+}
+
+#[test]
+fn one_spike_near_the_cap_is_a_notice() {
+    // With six runs the 95th percentile is the highest: 3.6G of 4G once.
+    let found = insights(&peaking(&[30, 30, 31, 30, 30, 36]), &config(), 14, NOW).insights;
+
+    assert!(
+        matches!(found[0].kind, InsightKind::NearCap { .. }),
+        "{found:#?}"
+    );
+    assert_eq!(found[0].severity, Severity::Notice);
 }
 
 #[test]
@@ -364,8 +422,8 @@ fn every_kind_of_insight_reads_back_as_the_daemon_sends_it() {
         .collect();
     assert_eq!(
         kinds,
-        ["flaky", "near-cap", "slower", "waits"],
-        "{found:#?}"
+        ["near-cap", "slower", "waits", "flaky"],
+        "warnings first: {found:#?}"
     );
 
     let sent = serde_json::to_string(&found).unwrap();

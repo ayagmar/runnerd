@@ -28,6 +28,10 @@ const CAP_RUNS: usize = 10;
 const CAP_MIN_RUNS: usize = 5;
 /// A job is near its cap when the 95th percentile of its peaks is this share of it, in percent.
 const NEAR_CAP: u64 = 85;
+/// Runs at `NEAR_CAP` or more that make it a warning.
+const NEAR_CAP_WARNING: usize = 2;
+/// Flaky runs that make it a warning.
+const FLAKY_WARNING: u32 = 2;
 
 /// A repository's waits are an insight when this week's p95 is this share above last week's, in percent, and a minute
 /// above it, each week with this many jobs.
@@ -225,13 +229,14 @@ fn key_text(kind: &str, (repository, workflow, name): JobKey<'_>) -> String {
 fn insight(
     key: JobKey<'_>,
     kind: &str,
+    severity: Severity,
     sentence: String,
     found: InsightKind,
     runs: Vec<RunLink>,
 ) -> Insight {
     Insight {
         key: key_text(kind, key),
-        severity: Severity::Warning,
+        severity,
         repository: key.0.to_owned(),
         workflow: key.1.map(str::to_owned),
         job: Some(key.2.to_owned()),
@@ -253,24 +258,31 @@ fn median(values: &[u64]) -> u64 {
     }
 }
 
-/// A job whose successful runs on its busiest branch got slower and stayed so.
+/// A job whose successful runs on `main` or `master`, or else its busiest branch, got slower and stayed so.
 fn slower(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
+    let timed_on = |branch: &str| -> Vec<(&Run, u64)> {
+        runs.iter()
+            .filter(|run| run.succeeded() && run.branch.as_deref() == Some(branch))
+            .filter_map(|run| Some((*run, run.took()?)))
+            .collect()
+    };
     let mut branches: BTreeMap<&str, usize> = BTreeMap::new();
     for run in runs.iter().filter(|run| run.succeeded()) {
         if let Some(branch) = &run.branch {
             *branches.entry(branch).or_default() += 1;
         }
     }
-    // The most runs; of equal counts, the first by name.
-    let branch = branches
+    // The default branch when it has runs enough, so a pull request that adds tests is not a regression; else the
+    // most runs, and of equal counts the first by name.
+    let busiest = branches
         .iter()
         .max_by(|a, b| a.1.cmp(b.1).then(b.0.cmp(a.0)))
         .map(|(branch, _)| *branch)?;
-    let timed: Vec<(&Run, u64)> = runs
-        .iter()
-        .filter(|run| run.succeeded() && run.branch.as_deref() == Some(branch))
-        .filter_map(|run| Some((*run, run.took()?)))
-        .collect();
+    let (branch, timed) = ["main", "master"]
+        .into_iter()
+        .map(|branch| (branch, timed_on(branch)))
+        .find(|(_, timed)| timed.len() >= 2 * RECENT)
+        .unwrap_or_else(|| (busiest, timed_on(busiest)));
     if timed.len() < 2 * RECENT {
         return None;
     }
@@ -307,6 +319,7 @@ fn slower(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
     Some(insight(
         key,
         "slower",
+        Severity::Warning,
         sentence,
         InsightKind::Slower {
             branch: Some(branch.to_owned()),
@@ -345,9 +358,16 @@ fn flaky(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
         "{} failed and then passed on a re-run in {flaky} of its {total} runs.",
         subject(key)
     );
+    // Once in the window may be chance: a notice; twice, a warning.
+    let severity = if flaky >= FLAKY_WARNING {
+        Severity::Warning
+    } else {
+        Severity::Notice
+    };
     Some(insight(
         key,
         "flaky",
+        severity,
         sentence,
         InsightKind::Flaky { flaky, total },
         failed_first.iter().take(5).map(|run| run.link()).collect(),
@@ -369,10 +389,13 @@ fn near_cap(key: JobKey<'_>, runs: &[&Run], config: &Config) -> Option<Insight> 
     let name = measured.first()?.profile.as_deref()?;
     let profile = config.profiles.get(name)?;
     let cap = profile.memory.0;
-    let peak = spread(measured.iter().filter_map(|run| run.memory_peak).collect()).p95;
-    if cap == 0 || peak.saturating_mul(100) < cap.saturating_mul(NEAR_CAP) {
+    let peaks: Vec<u64> = measured.iter().filter_map(|run| run.memory_peak).collect();
+    let near = |peak: &u64| peak.saturating_mul(100) >= cap.saturating_mul(NEAR_CAP);
+    let peak = spread(peaks.clone()).p95;
+    if cap == 0 || !near(&peak) {
         return None;
     }
+    let near_runs = peaks.iter().filter(|peak| near(peak)).count();
     let auto = if !config.sizing.auto {
         AutoNote::Off
     } else if profile
@@ -397,9 +420,16 @@ fn near_cap(key: JobKey<'_>, runs: &[&Run], config: &Config) -> Option<Insight> 
         peak.saturating_mul(100) / cap,
         ByteSize(cap)
     );
+    // Auto sizing deals with it, and one spike may be chance: a notice. The owner acts on the rest.
+    let severity = if auto == AutoNote::Raises || near_runs < NEAR_CAP_WARNING {
+        Severity::Notice
+    } else {
+        Severity::Warning
+    };
     Some(insight(
         key,
         "near-cap",
+        severity,
         sentence,
         InsightKind::NearCap {
             profile: name.to_owned(),
