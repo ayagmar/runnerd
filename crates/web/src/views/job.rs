@@ -516,22 +516,25 @@ fn runs(view: &JobView) -> Markup {
                     div { dt { "Largest memory peak" } dd { (if peak > 0 { format::bytes(peak) } else { "–".to_owned() }) } }
                 }
                 p.run-scale aria-hidden="true" { "Wait and run, up to " (format::duration(longest)) }
-                ol.run-bars style=(format!("--runs: {}", runs.len())) {
-                    @for run in runs {
-                        @let times = durations(run, view.now);
-                        @let waited = times.waited.unwrap_or(0);
-                        @let ran = times.ran.unwrap_or(0);
-                        @let this = run.id == view.job.summary.id;
-                        @let label = run_label(run, view.now);
-                        li class=(if this { "this" } else { "" }) {
-                            a href=(format!("/jobs/{}", run.id)) aria-label=(label) title=(label)
-                                aria-current=[this.then_some("page")] {
-                                span.run-time aria-hidden="true" {
-                                    span class=(format!("ran {}", outcome_class(run))) style=(format!("--h: {}", ratio(ran, longest))) {}
-                                    span.waited style=(format!("--h: {}", ratio(waited, longest))) {}
-                                }
-                                span.run-peak aria-hidden="true" {
-                                    span style=(format!("--h: {}", ratio(run.metrics.memory_peak.unwrap_or(0), peak))) {}
+                // On a narrow screen the runs scroll sideways, and start scrolled to the latest.
+                div.run-scroll {
+                    ol.run-bars style=(format!("--runs: {}", runs.len())) {
+                        @for run in runs {
+                            @let times = durations(run, view.now);
+                            @let waited = times.waited.unwrap_or(0);
+                            @let ran = times.ran.unwrap_or(0);
+                            @let this = run.id == view.job.summary.id;
+                            @let label = run_label(run, view.now);
+                            li class=(if this { "this" } else { "" }) {
+                                a href=(format!("/jobs/{}", run.id)) aria-label=(label) title=(label)
+                                    aria-current=[this.then_some("page")] {
+                                    span.run-time aria-hidden="true" {
+                                        span class=(format!("ran {}", outcome_class(run))) style=(format!("--h: {}", ratio(ran, longest))) {}
+                                        span.waited style=(format!("--h: {}", ratio(waited, longest))) {}
+                                    }
+                                    span.run-peak aria-hidden="true" {
+                                        span style=(format!("--h: {}", ratio(run.metrics.memory_peak.unwrap_or(0), peak))) {}
+                                    }
                                 }
                             }
                         }
