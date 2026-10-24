@@ -462,6 +462,28 @@ fn waits_are_split_warm_and_cold_and_longer_ones_are_a_notice() {
 }
 
 #[test]
+fn a_week_of_fewer_than_20_jobs_tells_its_longest_wait_and_one_of_more_its_1_in_20() {
+    let sentence = |now: u64| {
+        let mut runs: Vec<Run> = (0..6).map(|n| waited(n, 200, 20, false)).collect();
+        runs.extend((10..10 + now).map(|n| waited(n, 10, 300, false)));
+        insights(&runs, &config(), 14, NOW)
+            .insights
+            .into_iter()
+            .find(|insight| insight.key == "waits:halyard/api")
+            .expect("waits went up")
+            .sentence
+    };
+    assert_eq!(
+        sentence(19),
+        "halyard/api: the longest wait for a runner this week is 5m, up from 20s the week before."
+    );
+    assert_eq!(
+        sentence(20),
+        "halyard/api: 1 job in 20 waits 5m or more for a runner this week, up from 20s the week before."
+    );
+}
+
+#[test]
 fn the_digest_counts_the_day_and_lists_only_new_insights() {
     // Flaky two days ago, and again today: not new. Slower since today: new.
     let mut runs = vec![attempt(900, 1, "failure"), attempt(900, 2, "success")];
