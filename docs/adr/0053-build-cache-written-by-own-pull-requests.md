@@ -18,9 +18,10 @@ asked for pull requests to write, per repository.
 - **Which pull requests.** With `"pull-requests"`, a job's uploads are also kept when GitHub says, besides what
   0052 checks (the job runs on that runner):
   - through `GET /actions/runs/{id}`: the event is `pull_request`, never `pull_request_target` or any other; the
-    head repository is the repository itself; `actor`, who pushed the commit, and `triggering_actor`, who started
-    or re-ran the run, are both of type `User`; and the run lists at least one pull request. GitHub lists none for
-    a fork's, and may list none once a pull request is closed.
+    head repository is the repository itself; `actor`, who opened, reopened or pushed to the pull request for this
+    run, and `triggering_actor`, who started or re-ran the run, are both of type `User`; and the run lists at least
+    one pull request into the repository. GitHub lists none for a fork's, and may list none once a pull request is
+    closed; one it lists into another repository of a fork network is left out, so it is never looked up here.
   - through `GET /pulls/{number}`, for each pull request the run lists: its `user` is of type `User`, and its head
     is the run's head branch in the repository itself.
   - through `GET /branches/{branch}` and `GET /compare/{head}...{sha}`, as 0052 does: the pull request's branch
@@ -29,7 +30,9 @@ asked for pull requests to write, per repository.
   the job ends first. Nothing the runner's log or environment says counts.
 - **Bots read.** Renovate, Dependabot, `github-actions` and any GitHub App act as `Bot`, so their pull requests and
   the runs they push or re-run only read, even on a person's pull request; so does a run a person re-ran on a bot's
-  push (its `actor` is the bot).
+  push (its `actor` is the bot). What is checked is who acted on the pull request, not who made its commits: when a
+  person opens a pull request from a branch a bot or a workflow pushed, its `opened` run writes. That stays inside
+  what this trusts (below): whoever can push a branch.
 - Everything else of 0052 stays: per-repository entries, the uploads' limits, 200 for refused uploads, the commit
   check for branch runs.
 
@@ -62,5 +65,5 @@ entries in any slot.
 A pull request's runs can also fill the cache with entries no `main` build uses; the hourly trim removes the least
 recently used, so a busy repository may keep less of `main`'s.
 
-Deciding a pull request's job takes up to three more GitHub requests than refusing it did: its pull request, its
-branch's head and the compare.
+Deciding a pull request's job takes three more GitHub requests than refusing it did, one more for each further pull
+request its run lists: its pull request, its branch's head and the compare.
