@@ -195,7 +195,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             cache.forget_others(&keep);
         }
         self.recover_history(&running).await;
-        self.measure_docker_disk().await;
+        self.measure_docker_disk();
         Ok(())
     }
 

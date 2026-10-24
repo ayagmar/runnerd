@@ -212,22 +212,40 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Measures what the slots' Docker Engines may keep (`cache::docker_disk`), for the runners that start before the
-    /// first check of the caches, which waits for no runner to run: after a restart that adopted some, that can be
-    /// long.
-    pub(super) async fn measure_docker_disk(&mut self) {
-        let free = self.docker.free_space().await;
-        let sizes = self.docker.volume_sizes().await;
-        match (free, sizes) {
-            (Ok(free), Ok(sizes)) => {
-                self.docker_disk =
-                    Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+    /// Starts measuring what the slots' Docker Engines may keep (`cache::docker_disk`), for the runners that start
+    /// before the first check of the caches, which waits for no runner to run: after a restart that adopted some,
+    /// that can be long. Docker measures every volume, which takes minutes on a host whose slots hold Docker stores,
+    /// so it runs in the background; until it ends, each image keeps its own default.
+    pub(super) fn measure_docker_disk(&mut self) {
+        let docker = self.docker.clone();
+        self.disk = Some(tokio::spawn(async move {
+            Ok(Disk {
+                free: docker.free_space().await?,
+                sizes: docker.volume_sizes().await?,
+            })
+        }));
+    }
+
+    /// Takes in the measure `measure_docker_disk` started, once it ended. A check of the caches since measured
+    /// later, so it wins.
+    pub(super) async fn collect_disk(&mut self) {
+        if !self.disk.as_ref().is_some_and(JoinHandle::is_finished) {
+            return;
+        }
+        let Some(task) = self.disk.take() else {
+            return;
+        };
+        match task.await {
+            Ok(Ok(Disk { free, sizes })) => {
+                if self.docker_disk.is_none() {
+                    self.docker_disk =
+                        Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+                }
             }
-            (Err(error), _) | (_, Err(error)) => {
-                warn!(
-                    "cannot measure Docker's disk, so runners keep their image's Docker budget: {error}"
-                );
-            }
+            Ok(Err(error)) => warn!(
+                "cannot measure Docker's disk, so runners keep their image's Docker budget: {error}"
+            ),
+            Err(error) => warn!("measuring Docker's disk stopped: {error}"),
         }
     }
 
@@ -320,4 +338,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn is_reseeding(&self, profile: &str) -> bool {
         self.reseeds.contains_key(profile) || self.reseed_requested.contains(profile)
     }
+}
+
+/// Docker's free disk and the volumes' sizes, as `measure_docker_disk` read them.
+#[derive(Debug)]
+pub(super) struct Disk {
+    free: u64,
+    sizes: BTreeMap<String, u64>,
 }

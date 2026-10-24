@@ -63,6 +63,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn tick(&mut self, mode: Shutdown) {
         self.collect_reseeds().await;
         self.collect_trim().await;
+        self.collect_disk().await;
         self.collect_recordings().await;
         self.collect_finished().await;
         self.collect_shells().await;

@@ -307,6 +307,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// What the slots' Docker Engines may keep together, from the last check of the caches (`cache::docker_disk`);
     /// `None` until one measured Docker's disk, when each image keeps its own default.
     docker_disk: Option<u64>,
+    /// The measure of Docker's disk recovery started, in the background: Docker measures every volume.
+    disk: Option<JoinHandle<Result<caches::Disk, docker::Error>>>,
     /// Whether a job ended since the shared caches were last checked.
     trim_due: bool,
     /// The running check of the shared caches: Docker takes many seconds to measure volumes.
@@ -440,6 +442,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             oversized: BTreeSet::new(),
             reseeded_at: BTreeMap::new(),
             docker_disk: None,
+            disk: None,
             // So the caches are measured once at start.
             trim_due: true,
             trim: None,

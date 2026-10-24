@@ -18,8 +18,10 @@ host: too large for a small disk, and a knob to hand-tune is what auto sizing ex
   slot volumes already hold. Adding back what the volumes hold means the budget does not shrink as the stores fill
   the disk they were given. Each slot gets an equal share of the profiles' configured slots, in whole GiB, at
   least 1 and at most 20, the old fixed budget.
-- The engine measures Docker's free disk and the volumes once at start (`Engine::recover`), and again with every
-  check of the caches, which already measures every volume while no runner runs (`cache::trim_shared`). It keeps
+- The engine measures Docker's free disk and the volumes once at start (`Engine::recover`), in the background
+  since the volumes holding Docker stores take minutes to measure, and again with every check of the caches, which
+  already measures every volume while no runner runs (`cache::trim_shared`). A runner started before the first
+  measure lands keeps its image's default. It keeps
   the total and divides it among the slots when it starts a runner, so a change in slots, from config or auto
   sizing, applies from the next runner on.
 - The check of the caches removes a configured profile's slot volumes past its slot count, which a lowered count,

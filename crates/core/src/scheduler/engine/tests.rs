@@ -2110,6 +2110,14 @@ async fn a_runner_started_before_any_check_of_the_caches_gets_its_slots_docker_b
     running_job(&github, &docker, "o/r", 1, 1);
     let (mut engine, _handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
+    // Docker's measure, started by the recovery, lands before the job is queued.
+    while !engine
+        .disk
+        .as_ref()
+        .is_some_and(tokio::task::JoinHandle::is_finished)
+    {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     github.0.lock().unwrap().queued = vec![job(2)];
     engine.tick(Shutdown::No).await;
 
@@ -3685,4 +3693,44 @@ async fn a_runner_waiting_for_a_job_of_a_repository_paused_since_stops_before_gi
         None,
         "its runner stopped"
     );
+}
+
+#[tokio::test]
+async fn a_start_schedules_while_docker_still_measures_the_volumes() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    {
+        let mut state = docker.0.lock().unwrap();
+        // Docker measures every slot's Docker store: minutes, on a host with many.
+        state.volume_sizes_held.send_replace(true);
+        state.free = Some(100 << 30);
+    }
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    tokio::time::timeout(Duration::from_secs(2), engine.recover())
+        .await
+        .expect("recovery does not wait for the measure")
+        .unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "the job's runner starts"
+    );
+
+    // The measure lands: the slots' Docker stores get their share from then on.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volume_sizes_held
+        .send_replace(false);
+    for _ in 0..100 {
+        engine.tick(Shutdown::No).await;
+        if engine.docker_disk.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(engine.docker_disk.is_some(), "the measure is taken in");
 }
