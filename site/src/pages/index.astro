@@ -4,7 +4,6 @@ import { Font, getImage } from 'astro:assets';
 import '../styles/theme.css';
 import mark from '../assets/mark.svg?raw';
 import Overview from '../components/Overview.astro';
-import Shot from '../components/Shot.astro';
 import Tui from '../components/Tui.astro';
 import replay from '../assets/admission/replay.json';
 import { size } from '../scripts/overview';
@@ -109,22 +108,29 @@ const initFail = `FAIL  slice: runnerd.slice has no unit file with a MemoryMax, 
 const start = ['systemctl --user daemon-reload', 'systemctl --user enable --now runnerd'];
 const runsOn = 'runs-on: [self-hosted, linux, x64]';
 
-// The dashboard on a phone: the overview's phone shot, in the page's theme.
-const phoneShots = import.meta.glob<{ default: ImageMetadata }>('../assets/dashboard/overview-phone-*.webp', { eager: true });
-const phones = await Promise.all(
-  (['light', 'dark'] as const).map(async (theme) => {
-    const src = phoneShots[`../assets/dashboard/overview-phone-${theme}.webp`]!.default;
-    const widths = [390, 480, 640, 780];
-    const sources = await Promise.all(
-      (['avif', 'webp'] as const).map(async (format) => {
-        const images = await Promise.all(widths.map((width) => getImage({ src, width, format, quality: 70 })));
-        return { type: `image/${format}`, srcset: images.map((i) => `${i.src} ${i.attributes.width}w`).join(', ') };
-      }),
-    );
-    const fallback = await getImage({ src, width: 390, format: 'webp', quality: 70 });
-    return { theme, src, sources, fallback };
-  }),
-);
+// The dashboard's captures in the grid, one <picture> each. The page is dark until its script runs, so the dark
+// sources are the default and the light ones start disabled (media="not all"); the theme switch in
+// scripts/landing.ts enables them. The images are lazy, so the light theme never loads the dark copy first, and
+// without JS, where Chromium loads lazy images at once, only the dark copy loads.
+const shots = import.meta.glob<{ default: ImageMetadata }>('../assets/dashboard/*.webp', { eager: true });
+const capture = async (name: string, widths: number[]) => {
+  const themes = await Promise.all(
+    (['light', 'dark'] as const).map(async (theme) => {
+      const src = shots[`../assets/dashboard/${name}-${theme}.webp`]!.default;
+      return Promise.all(
+        (['avif', 'webp'] as const).map(async (format) => {
+          const images = await Promise.all(widths.map((width) => getImage({ src, width, format, quality: 70 })));
+          return { theme, type: `image/${format}`, srcset: images.map((i) => `${i.src} ${i.attributes.width}w`).join(', ') };
+        }),
+      );
+    }),
+  );
+  const src = shots[`../assets/dashboard/${name}-dark.webp`]!.default;
+  const fallback = await getImage({ src, width: widths[0], format: 'webp', quality: 70 });
+  return { sources: themes.flat(), src, fallback };
+};
+const jobShot = await capture('job', [640, 960, 1280, 1920]);
+const phoneShot = await capture('overview-phone', [390, 480, 640, 780]);
 ---
 
 <!doctype html>
@@ -272,11 +278,27 @@ const phones = await Promise.all(
           <li class="client client-web">
             <h3><a href={`${clientsDoc}#a-job`}>Dashboard</a></h3>
             <code class="prompt-line">$ runnerctl web</code>
-            <Shot
-              name="job"
-              alt="halyard/ledger's CI / build job, running: waited 4s for a runner, 5s to start, then nine steps on one time axis, the seventh, integration tests, running."
-              sizes="(min-width: 860px) 40vw, calc(100vw - 2rem)"
-            />
+            <picture class="shot">
+              {
+                jobShot.sources.map((source) => (
+                  <source
+                    type={source.type}
+                    srcset={source.srcset}
+                    sizes="(min-width: 860px) 40vw, calc(100vw - 2rem)"
+                    media={source.theme === 'light' ? 'not all' : undefined}
+                    data-light={source.theme === 'light' ? '' : undefined}
+                  />
+                ))
+              }
+              <img
+                src={jobShot.fallback.src}
+                alt="halyard/ledger's CI / build job, running: waited 4s for a runner, 5s to start, then nine steps on one time axis, the seventh, integration tests, running."
+                width={jobShot.src.width}
+                height={jobShot.src.height}
+                loading="lazy"
+                decoding="async"
+              />
+            </picture>
           </li>
           <li class="client client-cli">
             <h3><a href={`${clientsDoc}#runnerctl`}>Command line</a></h3>
@@ -298,23 +320,27 @@ const phones = await Promise.all(
               <p>Scan the code and the phone stays signed in for 30 days after its last visit.</p>
             </div>
             <div class="phone-frame">
-              {
-                phones.map(({ theme, src, sources, fallback }) => (
-                  <picture class="shot" data-shot-theme={theme}>
-                    {sources.map((s) => (
-                      <source type={s.type} srcset={s.srcset} sizes="(max-width: 860px) 48vw, 15rem" />
-                    ))}
-                    <img
-                      src={fallback.src}
-                      alt="The dashboard's overview on a phone: the budget bar with two jvm and two node slots, then jvm slot 1's card running halyard/ledger's build, with its memory and CPU charts."
-                      width={src.width}
-                      height={src.height}
-                      loading="lazy"
-                      decoding="async"
+              <picture class="shot">
+                {
+                  phoneShot.sources.map((source) => (
+                    <source
+                      type={source.type}
+                      srcset={source.srcset}
+                      sizes="(max-width: 860px) 48vw, 15rem"
+                      media={source.theme === 'light' ? 'not all' : undefined}
+                      data-light={source.theme === 'light' ? '' : undefined}
                     />
-                  </picture>
-                ))
-              }
+                  ))
+                }
+                <img
+                  src={phoneShot.fallback.src}
+                  alt="The dashboard's overview on a phone: the budget bar with two jvm and two node slots, then jvm slot 1's card running halyard/ledger's build, with its memory and CPU charts."
+                  width={phoneShot.src.width}
+                  height={phoneShot.src.height}
+                  loading="lazy"
+                  decoding="async"
+                />
+              </picture>
             </div>
           </li>
         </ul>
