@@ -88,7 +88,14 @@ impl Dashboard {
         fake::serve(&socket, fake.clone());
         let listener = crate::listen("127.0.0.1:0").await.unwrap().unwrap();
         let addr = listener.local_addr().unwrap();
-        crate::spawn(listener, socket, proxies, std::future::pending::<()>());
+        let sessions = crate::Sessions::open(dir.0.join("dashboard-session")).unwrap();
+        crate::spawn(
+            listener,
+            socket,
+            proxies,
+            sessions,
+            std::future::pending::<()>(),
+        );
         // The login file is written before the first request is served.
         for _ in 0..100 {
             if crate::login_file(&dir.0.join("runnerd.sock")).exists() {
@@ -99,11 +106,17 @@ impl Dashboard {
         Dashboard { addr, dir, fake }
     }
 
-    fn login_url(&self) -> String {
+    /// The login file's links: the loopback address's, then each proxy's.
+    fn login_urls(&self) -> Vec<String> {
         std::fs::read_to_string(crate::login_file(&self.dir.0.join("runnerd.sock")))
             .unwrap()
-            .trim()
-            .to_owned()
+            .lines()
+            .map(str::to_owned)
+            .collect()
+    }
+
+    fn login_url(&self) -> String {
+        self.login_urls().remove(0)
     }
 
     /// Signs in with the one-time URL and returns the session cookie.
@@ -514,6 +527,155 @@ async fn a_login_link_signs_in_once() {
     let again = dashboard.request("GET", path, &[]).await;
     assert_eq!(again.status, StatusCode::UNAUTHORIZED);
     assert_ne!(dashboard.login_url(), used);
+}
+
+/// The one-time link in a QR code's reply.
+fn pairing_link(reply: &str) -> &str {
+    let from = reply.find("login?code=").unwrap();
+    let from = reply[..from].rfind('>').unwrap() + 1;
+    &reply[from..from + reply[from..].find('<').unwrap()]
+}
+
+#[tokio::test]
+async fn a_qr_code_from_the_config_page_signs_a_phone_in_through_the_proxy_once() {
+    let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
+    let cookie = dashboard.sign_in().await;
+    let config = dashboard.page(&cookie, "/config").await.body;
+    assert!(
+        config.contains("Add a device") && config.contains("@post('/pair')"),
+        "the config page offers a QR code"
+    );
+    let reply = dashboard
+        .write(&cookie, "POST", "/pair", &serde_json::json!({}))
+        .await;
+    assert_eq!(reply.status, StatusCode::OK);
+    assert!(
+        reply.body.contains(r#"id="pairing-code""#)
+            && reply.body.contains("<svg class=\"qr-code\""),
+        "{}",
+        reply.body
+    );
+    let link = pairing_link(&reply.body);
+    let path = link
+        .strip_prefix("https://forge.example.ts.net:8443")
+        .unwrap();
+    let phone = [("x-forwarded-proto", "https")];
+    let signed_in = dashboard.request("GET", path, &phone).await;
+    assert_eq!(signed_in.status, StatusCode::SEE_OTHER);
+    let set = signed_in.headers[header::SET_COOKIE].to_str().unwrap();
+    assert!(set.contains("; Secure"), "the phone's cookie is Secure");
+    let phone_cookie = set.split(';').next().unwrap();
+    assert_eq!(
+        dashboard.page(phone_cookie, "/").await.status,
+        StatusCode::OK
+    );
+    let again = dashboard.request("GET", path, &phone).await;
+    assert_eq!(
+        again.status,
+        StatusCode::UNAUTHORIZED,
+        "the code works once"
+    );
+}
+
+#[tokio::test]
+async fn a_qr_code_is_made_only_for_the_dashboards_own_pages() {
+    let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
+    let cookie = dashboard.sign_in().await;
+    let without_session = dashboard.request("POST", "/pair", &[]).await;
+    assert_eq!(without_session.status, StatusCode::UNAUTHORIZED);
+    for origin in [None, Some("http://evil.example")] {
+        let mut headers = vec![("cookie", cookie.as_str())];
+        if let Some(origin) = origin {
+            headers.push(("origin", origin));
+        }
+        let reply = dashboard.request("POST", "/pair", &headers).await;
+        assert_eq!(reply.status, StatusCode::FORBIDDEN, "origin {origin:?}");
+        assert!(!reply.body.contains("login?code="), "no link leaks");
+    }
+}
+
+#[tokio::test]
+async fn without_a_proxy_the_config_page_says_where_to_list_one() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let config = dashboard.page(&cookie, "/config").await.body;
+    assert!(
+        config.contains("[web] origins") && !config.contains("@post('/pair')"),
+        "no QR code without an address a phone can reach"
+    );
+    let reply = dashboard
+        .write(&cookie, "POST", "/pair", &serde_json::json!({}))
+        .await;
+    assert!(
+        !reply.body.contains("login?code=") && reply.body.contains(r#"id="notice""#),
+        "{}",
+        reply.body
+    );
+}
+
+#[tokio::test]
+async fn the_signed_out_page_points_a_phone_at_the_qr_code_not_at_typing_an_address() {
+    let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
+    let page = dashboard
+        .request("GET", "/", &[("x-forwarded-proto", "https")])
+        .await
+        .body;
+    assert!(
+        page.contains("Add a device") && page.contains("runnerctl web --qr"),
+        "{page}"
+    );
+    assert!(!page.contains("--base"), "no address to type");
+}
+
+#[tokio::test]
+async fn each_visit_renews_a_session_that_lasts_30_days() {
+    let dashboard = Dashboard::start().await;
+    let url = dashboard.login_url();
+    let path = url
+        .strip_prefix(&format!("http://{}", dashboard.addr))
+        .unwrap();
+    let login = dashboard.request("GET", path, &[]).await;
+    let set = login.headers[header::SET_COOKIE].to_str().unwrap();
+    assert!(set.contains("; Max-Age=2592000;"), "{set}");
+    let cookie = set.split(';').next().unwrap();
+    let visit = dashboard.page(cookie, "/history").await;
+    let renewed = visit.headers[header::SET_COOKIE].to_str().unwrap();
+    assert!(
+        renewed.starts_with(cookie) && renewed.contains("; Max-Age=2592000;"),
+        "the visit sets the cookie again with its full lifetime"
+    );
+}
+
+#[tokio::test]
+async fn a_browser_stays_signed_in_when_the_dashboard_restarts() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let secret = cookie.split_once('=').unwrap().1;
+    // The same dashboard after a restart: a new listener, the same socket and session file.
+    let listener = crate::listen("127.0.0.1:0").await.unwrap().unwrap();
+    let addr = listener.local_addr().unwrap();
+    let sessions = crate::Sessions::open(dashboard.dir.0.join("dashboard-session")).unwrap();
+    crate::spawn(
+        listener,
+        dashboard.dir.0.join("runnerd.sock"),
+        Vec::new(),
+        sessions.clone(),
+        std::future::pending::<()>(),
+    );
+    let restarted = Dashboard {
+        addr,
+        dir: TempDir::new(),
+        fake: dashboard.fake.clone(),
+    };
+    // A browser sends the cookie it has for the dashboard's port, which stays the same across restarts.
+    let cookie = format!("runnerd-{}={secret}", addr.port());
+    assert_eq!(restarted.page(&cookie, "/").await.status, StatusCode::OK);
+    sessions.sign_out_all().unwrap();
+    assert_eq!(
+        restarted.page(&cookie, "/").await.status,
+        StatusCode::UNAUTHORIZED,
+        "signing every device out ends it"
+    );
 }
 
 #[tokio::test]

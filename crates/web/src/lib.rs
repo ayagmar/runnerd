@@ -2,7 +2,7 @@
 //! `runnerctl`: it reads `runnerd_core::api` types over the daemon's Unix socket (`runnerd_core::client`), renders
 //! HTML on the server (`views`, `chart`), and keeps open pages current over SSE with Datastar (`live`). Writes
 //! (pause, reseed, the config) are passed on to the same API (`actions`). It holds no state of its own beyond the
-//! session (`auth`), and never talks to Docker or GitHub.
+//! session and its login codes (`auth`), and never talks to Docker or GitHub.
 
 use std::future::Future;
 use std::io;
@@ -33,7 +33,7 @@ mod format;
 mod live;
 mod views;
 
-pub use auth::login_file;
+pub use auth::{Sessions, login_file, session_file};
 use views::caches::CachesView;
 use views::config::{ConfigQuery, ConfigView};
 use views::history::{Filter, History};
@@ -48,6 +48,8 @@ pub const DEFAULT_ADDR: &str = "127.0.0.1:7477";
 #[derive(Clone)]
 pub(crate) struct App {
     daemon: Client,
+    /// `[web] origins`, where the config page offers to sign a phone in.
+    proxies: Arc<[String]>,
     /// Set when the dashboard stops, so live pages end.
     stopping: watch::Receiver<bool>,
 }
@@ -81,32 +83,34 @@ pub fn spawn(
     listener: TcpListener,
     socket: PathBuf,
     proxies: Vec<Origin>,
+    sessions: Arc<Sessions>,
     stop: impl Future + Send + 'static,
 ) -> JoinHandle<()> {
     tokio::spawn(async move {
         let stop = async {
             stop.await;
         };
-        if let Err(error) = serve(listener, &socket, &proxies, stop).await {
+        if let Err(error) = serve(listener, &socket, &proxies, sessions, stop).await {
             warn!("the dashboard stopped: {error}");
         }
     })
 }
 
 /// Serves the dashboard on `listener` for the daemon whose API is on `socket`, until `stop` completes. Pages from
-/// `proxies` (`[web] origins`), reverse proxies in front of it, may write too. Writes the one-time login URL to
-/// `login_file(socket)` and removes it when done.
+/// `proxies` (`[web] origins`), reverse proxies in front of it, may write too. A browser signed in to `sessions`
+/// is let in. Writes a one-time login link per address to `login_file(socket)` and removes it when done.
 pub async fn serve(
     listener: TcpListener,
     socket: &Path,
     proxies: &[Origin],
+    sessions: Arc<Sessions>,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let addr = listener.local_addr()?;
     let file = login_file(socket);
-    let auth = auth::Auth::new(addr, proxies, file.clone())?;
+    let auth = auth::Auth::new(addr, proxies, sessions, file.clone())?;
     info!(
-        "serving the dashboard on http://{addr}; `runnerctl web` opens it (login URL in {})",
+        "serving the dashboard on http://{addr}; `runnerctl web` opens it (login links in {})",
         file.display()
     );
     let (stopping, stopping_receiver) = watch::channel(false);
@@ -126,6 +130,7 @@ pub async fn serve(
 }
 
 fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>) -> Router {
+    let proxies = auth.proxies().into();
     let pages = Router::new()
         .route("/", get(overview))
         .route("/history", get(history))
@@ -158,9 +163,14 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
                 views::error_page("Not found", "There is no page at this address."),
             )
         })
-        .with_state(App { daemon, stopping });
+        .with_state(App {
+            daemon,
+            proxies,
+            stopping,
+        });
     let login = Router::new()
         .route("/login", get(auth::login))
+        .route("/pair", post(auth::pair))
         .with_state(auth.clone());
     pages
         .merge(login)
@@ -250,7 +260,7 @@ async fn config(State(app): State<App>, Query(query): Query<ConfigQuery>) -> Res
     page(
         ConfigView::load(&app.daemon, query)
             .await
-            .map(|config| views::config::render(&config)),
+            .map(|config| views::config::render(&config, &app.proxies)),
     )
 }
 

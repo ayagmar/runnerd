@@ -291,6 +291,7 @@ async fn start_serving(
         sync_dir,
         auto_every: Duration::from_millis(20),
     };
+    let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
     let listener = bind(&socket).await.unwrap();
     let mode = std::fs::metadata(&socket).unwrap();
     assert_eq!(
@@ -304,8 +305,8 @@ async fn start_serving(
     let served = tokio::spawn(async move {
         let _sender = sender;
         match owner {
-            Some(owner) => serve_for(listener, handle, source, owner, stopped).await,
-            None => serve(listener, handle, source, stopped).await,
+            Some(owner) => serve_for(listener, handle, source, sessions, owner, stopped).await,
+            None => serve(listener, handle, source, sessions, stopped).await,
         }
         .unwrap();
     });
@@ -957,6 +958,21 @@ async fn shutdown_is_graceful_unless_forced() {
 }
 
 #[tokio::test]
+async fn signing_every_browser_out_replaces_the_dashboards_session_secret() {
+    let (client, _control, dir) = daemon().await;
+    let file = dir.0.join("dashboard-session");
+    let before = std::fs::read_to_string(&file).unwrap();
+    let response = client
+        .post("http://runnerd/v1/dashboard/sign-out")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(before != after, "the old secret no longer signs in");
+}
+
+#[tokio::test]
 async fn every_route_refuses_other_users() {
     let me = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata("/proc/self").unwrap());
     let (client, control, _dir) = daemon_for(Some(me + 1)).await;
@@ -965,6 +981,7 @@ async fn every_route_refuses_other_users() {
         client.post("http://runnerd/v1/repositories/o/app/pause"),
         client.post("http://runnerd/v1/repositories/o/app/resume"),
         client.post("http://runnerd/v1/shutdown"),
+        client.post("http://runnerd/v1/dashboard/sign-out"),
         client.get("http://runnerd/v1/jobs"),
         client.get("http://runnerd/v1/jobs/1"),
         client.get("http://runnerd/v1/jobs/1/samples"),

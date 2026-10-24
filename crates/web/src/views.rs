@@ -200,10 +200,10 @@ pub(crate) enum SignedOut {
 pub(crate) fn signed_out(reason: SignedOut) -> Markup {
     let main = html! {
         section.signed-out {
-            h1 { @if reason == SignedOut::CodeUsed { "That link was used already" } @else { "Open the dashboard from your terminal" } }
-            p { "Run " code { "runnerctl web" } " on this machine. It opens a one-time link that signs this browser in." }
-            p { "Here through a proxy from another device? Run " code { "runnerctl web --no-open --base https://host:port" } " on runnerd's machine, with this page's address, and open the link it prints here." }
-            p.muted { "Each link works once. The daemon writes a fresh one to " code { "$XDG_RUNTIME_DIR/runnerd.web" } " after every use." }
+            h1 { @if reason == SignedOut::CodeUsed { "That link was used already, or it expired" } @else { "Sign in to runnerd" } }
+            p { "On another device, such as a phone: open the dashboard on runnerd's computer, choose " strong { "Add a device" } " on the Config page, and scan the QR code. Or run " code { "runnerctl web --qr" } " on that computer." }
+            p { "On runnerd's computer: run " code { "runnerctl web" } ". It opens a link that signs this browser in." }
+            p.muted { "Each link works once. A device stays signed in for 30 days after its last visit." }
         }
     };
     page("Sign in", None, None, &main)

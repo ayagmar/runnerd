@@ -872,6 +872,63 @@ fn web_prints_the_login_url_the_daemon_wrote_next_to_its_socket() {
     assert_eq!(stdout(&output), format!("{url}\n"));
 }
 
+const LOGIN_LINKS: &str = "http://127.0.0.1:7477/login?code=aa\n\
+                           https://forge.example.ts.net:8443/login?code=bb\n\
+                           https://forge.lan/login?code=cc\n";
+
+#[test]
+fn web_prints_its_own_link_and_one_for_each_configured_proxy() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    std::fs::write(dir.0.join("runnerd.web"), LOGIN_LINKS).unwrap();
+    let output = runnerctl(&socket, &["web", "--no-open"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), LOGIN_LINKS);
+    // A proxy in `[web] origins` gets its own link; any other the loopback one's code.
+    for (base, link) in [
+        ("https://forge.lan", "https://forge.lan/login?code=cc"),
+        (
+            "https://other.example",
+            "https://other.example/login?code=aa",
+        ),
+    ] {
+        let output = runnerctl(&socket, &["web", "--no-open", "--base", base]);
+        assert_eq!(stdout(&output), format!("{link}\n"), "--base {base}");
+    }
+}
+
+#[test]
+fn web_qr_shows_a_code_for_each_proxy_and_says_where_to_list_one_when_none_is() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    std::fs::write(dir.0.join("runnerd.web"), LOGIN_LINKS).unwrap();
+    let output = runnerctl(&socket, &["web", "--qr"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    let shown = stdout(&output);
+    for link in [
+        "https://forge.example.ts.net:8443/login?code=bb",
+        "https://forge.lan/login?code=cc",
+    ] {
+        assert!(shown.contains(link), "{shown}");
+    }
+    assert!(
+        shown.contains('█') && !shown.contains("127.0.0.1"),
+        "QR codes of the proxies' links only:\n{shown}"
+    );
+    std::fs::write(
+        dir.0.join("runnerd.web"),
+        "http://127.0.0.1:7477/login?code=aa\n",
+    )
+    .unwrap();
+    let output = runnerctl(&socket, &["web", "--qr"]);
+    assert!(!output.status.success(), "a phone cannot reach loopback");
+    assert!(
+        stderr(&output).contains("[web] origins"),
+        "{}",
+        stderr(&output)
+    );
+}
+
 #[test]
 fn a_job_shows_the_caps_its_container_ran_with() {
     let dir = TempDir::new();

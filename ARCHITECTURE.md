@@ -33,7 +33,7 @@ flowchart TB
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
 | `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
-| `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API | `runnerd-core` with `host`; hyper for a shell's upgraded connection |
+| `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out route; hyper for a shell's upgraded connection |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
 
@@ -49,7 +49,7 @@ flowchart TB
   the changes auto sizing makes. Both are pure: the engine and the daemon read the store and act on what they return.
 
 `runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing), `init`, `doctor`, `simulate`, and
-`output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session, the login URL and the `Origin`
+`output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session secret, the login links and pairing codes, and the `Origin`
 check), `views` (one per page), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
 `assets` (the files the pages load, the web app manifest and icons included).
 
@@ -96,7 +96,9 @@ The dashboard's path is browser → loopback TCP → session check → `runnerd-
 session check ([`crates/web/src/auth.rs`](crates/web/src/auth.rs)) admits a request only with the session cookie, and
 a write only with the dashboard's own `Origin` or one of `[web] origins`, the proxies the owner runs in front of it
 ([ADR 0042](docs/adr/0042-dashboard-behind-a-proxy-and-installable.md)); the daemon then sees the dashboard as its
-own user.
+own user. A browser signed in stays signed in across restarts: the session secret is a file the daemon keeps,
+and `POST /v1/dashboard/sign-out` on the socket replaces it
+([ADR 0043](docs/adr/0043-phones-paired-by-qr-code-and-sessions-that-last.md)).
 
 ## Job lifecycle
 
@@ -140,7 +142,7 @@ nothing until Docker has listed them.
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
-| Dashboard session | in memory, new each daemon run; the one-time login URL in `runnerd.web` next to the socket (0600) |
+| Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each |
 | Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories, what became of each record, auto sizing's changes; times in ms |
 
 ## Invariants
@@ -215,6 +217,6 @@ nothing until Docker has listed them.
   mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell
   exits, its client goes away, after 8 hours, or when the daemon stops; `Engine::recover` removes any left over.
   A record with a shell open is never removed.
-- The dashboard listens on loopback only, never logs its session token or login code, and serves every file its
+- The dashboard listens on loopback only, never logs or shows in `Debug` its session secret or a login code, and serves every file its
   pages load, its web app manifest and icons included; its Content-Security-Policy allows nothing else. Other
   devices reach it only through a proxy the owner runs, whose origin `[web] origins` lists.

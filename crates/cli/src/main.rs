@@ -2,6 +2,7 @@
 //! to API calls here; the transport is `runnerd_core::client`, text for people `human`, the live view `watch`, the
 //! full-screen dashboard `tui`, printing `output`.
 
+use std::fmt::Write as _;
 use std::io::IsTerminal;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
@@ -159,16 +160,26 @@ enum Command {
     },
     /// Check that the host can run runners. Runs `runnerd doctor` here when the daemon is not running.
     Doctor,
-    /// Open the web dashboard, logging in with the daemon's one-time URL.
-    Web {
-        /// Print the URL instead of opening it.
-        #[arg(long)]
-        no_open: bool,
-        /// The address of a proxy in front of the dashboard, one of `[web] origins`, to log in through instead,
-        /// such as `https://host.example.ts.net:8443`.
-        #[arg(long, value_name = "ORIGIN")]
-        base: Option<config::Origin>,
-    },
+    /// Open the web dashboard with a one-time login link, and print one for each of `[web] origins`.
+    Web(WebArgs),
+}
+
+/// `runnerctl web`'s flags.
+#[derive(clap::Args)]
+struct WebArgs {
+    /// Print the links instead of opening one.
+    #[arg(long)]
+    no_open: bool,
+    /// The address of a proxy in front of the dashboard to log in through instead, such as
+    /// `https://host.example.ts.net:8443`. `[web] origins` need not be named here.
+    #[arg(long, value_name = "ORIGIN")]
+    base: Option<config::Origin>,
+    /// Print a QR code of the link on each of `[web] origins`, or on `--base`, to scan with a phone.
+    #[arg(long)]
+    qr: bool,
+    /// Sign every browser out of the dashboard, with a new session secret.
+    #[arg(long, conflicts_with_all = ["no_open", "base", "qr"])]
+    sign_out_all: bool,
 }
 
 #[derive(Subcommand)]
@@ -435,7 +446,7 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         }
         Command::Config { command } => return config(client, json, command).await,
         Command::Doctor => return doctor(client, json).await,
-        Command::Web { no_open, base } => return web(client, no_open, base.as_ref()),
+        Command::Web(args) => return web(client, &args).await,
     }
     Ok(ExitCode::SUCCESS)
 }
@@ -831,11 +842,74 @@ async fn doctor(client: &Client, json: bool) -> Result<ExitCode, Error> {
     Ok(exit(passed))
 }
 
-/// Opens the dashboard with the one-time login URL the daemon writes next to its socket, through `base` if given.
-fn web(client: &Client, no_open: bool, base: Option<&config::Origin>) -> Result<ExitCode, Error> {
+/// The login links the daemon wrote: one on its loopback address, and one on each of `[web] origins` or on `base`.
+#[derive(Debug, PartialEq, Eq)]
+struct Links {
+    local: String,
+    remote: Vec<String>,
+}
+
+impl Links {
+    /// Reads the login file's text, a link per line with the loopback address's first. A link on `base` is the
+    /// proxy's own when it is one of `[web] origins`, or else the loopback link's code on `base`.
+    fn parse(text: &str, base: Option<&config::Origin>) -> Option<Links> {
+        let mut lines = text.lines().map(str::trim).filter(|line| !line.is_empty());
+        let local = lines.next()?.to_owned();
+        let proxies: Vec<String> = lines.map(str::to_owned).collect();
+        let remote = match base {
+            None => proxies,
+            Some(base) => {
+                let prefix = format!("{base}/login?");
+                let link = match proxies.into_iter().find(|link| link.starts_with(&prefix)) {
+                    Some(link) => link,
+                    None => format!("{base}{}", &local[local.find("/login?")?..]),
+                };
+                vec![link]
+            }
+        };
+        Some(Links { local, remote })
+    }
+}
+
+/// `text` as a QR code of half-height blocks. With `colour`, dark blocks on a white background whatever the
+/// terminal's; without, the light modules are drawn, which reads right on a dark terminal and inverted on a light
+/// one.
+fn qr(text: &str, colour: bool) -> Result<String, Error> {
+    use qrcode::render::unicode::Dense1x2;
+    let code = qrcode::QrCode::new(text.as_bytes())
+        .map_err(|error| Error::Local(format!("cannot make a QR code of the link: {error}")))?;
+    let mut render = code.render::<Dense1x2>();
+    if !colour {
+        render
+            .dark_color(Dense1x2::Light)
+            .light_color(Dense1x2::Dark);
+    }
+    let drawn = render.build();
+    Ok(drawn.lines().fold(String::new(), |mut lines, line| {
+        if colour {
+            let _ = writeln!(lines, "\x1b[30;107m{line}\x1b[0m");
+        } else {
+            lines.push_str(line);
+            lines.push('\n');
+        }
+        lines
+    }))
+}
+
+/// Opens the dashboard with the one-time login link the daemon writes next to its socket and prints the links for
+/// other devices; or through `base`; or prints them, or their QR codes; or signs every browser out.
+async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
+    let base = args.base.as_ref();
+    if args.sign_out_all {
+        client.post("/v1/dashboard/sign-out", &()).await?;
+        output::line(
+            "signed every browser out of the dashboard; `runnerctl web` signs this one in again",
+        );
+        return Ok(ExitCode::SUCCESS);
+    }
     let file = client.socket().with_extension("web");
-    let url = match std::fs::read_to_string(&file) {
-        Ok(text) => text.trim().to_owned(),
+    let text = match std::fs::read_to_string(&file) {
+        Ok(text) => text,
         Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
             return Err(Error::Local(format!(
                 "no {}: runnerd is not running, or was started with --web off",
@@ -849,29 +923,56 @@ fn web(client: &Client, no_open: bool, base: Option<&config::Origin>) -> Result<
             )));
         }
     };
-    let url = match (base, url.find("/login?")) {
-        (None, _) => url,
-        (Some(base), Some(login)) => format!("{base}{}", &url[login..]),
-        (Some(_), None) => {
-            return Err(Error::Local(format!(
-                "{} holds no login URL",
-                file.display()
-            )));
-        }
+    let Some(links) = Links::parse(&text, base) else {
+        return Err(Error::Local(format!(
+            "{} holds no login URL",
+            file.display()
+        )));
     };
-    if no_open {
-        output::line(url);
+    if args.qr {
+        if links.remote.is_empty() {
+            return Err(Error::Local(
+                "no address another device reaches the dashboard on: list it in `[web] origins` in runnerd.toml \
+                 and restart runnerd, or pass --base"
+                    .to_owned(),
+            ));
+        }
+        for link in &links.remote {
+            output::text(&qr(link, output::paint().colour)?);
+            output::line(format_args!("scan to sign a device in; works once: {link}"));
+        }
         return Ok(ExitCode::SUCCESS);
     }
-    match std::process::Command::new("xdg-open").arg(&url).status() {
+    let (open, others) = match base {
+        Some(_) => (
+            links.remote.into_iter().next().unwrap_or(links.local),
+            Vec::new(),
+        ),
+        None => (links.local, links.remote),
+    };
+    if args.no_open {
+        output::line(&open);
+        for link in &others {
+            output::line(link);
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    match std::process::Command::new("xdg-open").arg(&open).status() {
         Ok(status) if status.success() => {
             output::line("opened the dashboard in your browser");
-            Ok(ExitCode::SUCCESS)
         }
-        _ => Err(Error::Local(format!(
-            "cannot open a browser with xdg-open; open this URL, which works once: {url}"
-        ))),
+        _ => {
+            return Err(Error::Local(format!(
+                "cannot open a browser with xdg-open; open this URL, which works once: {open}"
+            )));
+        }
     }
+    for link in &others {
+        output::line(format_args!(
+            "on another device, open this link, which works once (or run `runnerctl web --qr`): {link}"
+        ));
+    }
+    Ok(ExitCode::SUCCESS)
 }
 
 /// Hands the log from line `from` to `line`, until it returns false. Following, it reads until the daemon ends the

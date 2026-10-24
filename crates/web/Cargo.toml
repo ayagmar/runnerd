@@ -16,6 +16,7 @@ axum.workspace = true
 datastar = { version = "0.4.1", features = ["axum"] }
 futures-util.workspace = true
 maud = { version = "0.27.0", features = ["axum"] }
+qrcode.workspace = true
 runnerd-core = { workspace = true, features = ["client"] }
 serde.workspace = true
 serde_json.workspace = true
@@ -28,6 +29,7 @@ http-body-util.workspace = true
 hyper = { workspace = true, features = ["client", "http1"] }
 hyper-util = { workspace = true, features = ["tokio"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
+tracing-subscriber.workspace = true
 
 [lints]
 workspace = true

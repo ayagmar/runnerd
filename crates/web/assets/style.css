@@ -1808,6 +1808,77 @@ html {
   overflow-wrap: anywhere;
 }
 
+/* Signing in another device: a QR code of a one-time link, dark on white in either theme. */
+.devices {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+}
+
+.devices h2 {
+  margin: 0;
+}
+
+.devices p {
+  margin: 0;
+}
+
+.devices label {
+  font-size: 0.875rem;
+  font-weight: 500;
+  margin-bottom: -0.5rem;
+}
+
+.devices select {
+  min-height: 44px;
+  max-width: 100%;
+  padding: 0 0.6rem;
+  font: inherit;
+  color: var(--ink);
+  background: var(--surface);
+  border: 1px solid var(--line);
+}
+
+#pairing-code {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+}
+
+.qr {
+  margin: 0;
+  display: grid;
+  gap: 0.5rem;
+}
+
+.qr-code {
+  display: block;
+  width: min(16rem, 100%);
+  height: auto;
+}
+
+.qr figcaption {
+  font-size: 0.875rem;
+}
+
+.qr figcaption code,
+.pairing-link code {
+  overflow-wrap: anywhere;
+}
+
+.pairing-link {
+  font-size: 0.875rem;
+  max-width: 100%;
+}
+
+.pairing-link summary {
+  min-height: 44px;
+  display: flex;
+  align-items: center;
+  cursor: pointer;
+  color: var(--muted);
+}
+
 /* Notices and the signed-out page. */
 #notice {
   position: fixed;

@@ -25,7 +25,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0017](0017-job-history-in-sqlite.md) | Job history in SQLite, written by one thread (amended by 0027, 0028) |
 | [0018](0018-job-identity-and-logs-from-inside-the-runner.md) | Job identity and logs from inside the runner container |
 | [0019](0019-control-commands-through-the-engine.md) | Control commands go through the engine; a reload keeps running jobs (amended by 0026) |
-| [0020](0020-dashboard-is-an-api-client-on-loopback.md) | The dashboard is an API client, on loopback behind a one-time login (amended by 0042) |
+| [0020](0020-dashboard-is-an-api-client-on-loopback.md) | The dashboard is an API client, on loopback behind a one-time login (amended by 0042, 0043) |
 | [0021](0021-clients-speak-http-over-the-socket-with-hyper.md) | Clients speak HTTP over the socket with hyper (in part superseded by 0030) |
 | [0022](0022-terminal-ui-is-ratatui-in-runnerctl.md) | The terminal UI is ratatui in runnerctl, behind a feature |
 | [0023](0023-runner-image-pinned-to-a-snapshot-date.md) | Runner image pinned to an Ubuntu snapshot date |
@@ -47,4 +47,5 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default |
 | [0040](0040-unused-runner-images-removed.md) | Published runner images no profile runs are removed |
 | [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits |
-| [0042](0042-dashboard-behind-a-proxy-and-installable.md) | The dashboard behind a proxy the owner runs, and installable as an app |
+| [0042](0042-dashboard-behind-a-proxy-and-installable.md) | The dashboard behind a proxy the owner runs, and installable as an app (amended by 0043) |
+| [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md) | Phones signed in by QR code, and sessions that outlive a restart |
