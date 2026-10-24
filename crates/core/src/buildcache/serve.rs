@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tracing::debug;
 
-use super::{Inner, UPLOADS, Upload, Writes, valid_segment};
+use super::{Inner, Upload, Writes, valid_segment};
 use crate::sync::lock;
 
 type Body = UnsyncBoxBody<Bytes, io::Error>;
@@ -95,34 +95,33 @@ async fn read(
     counted: bool,
     kind: ReadKind,
 ) -> Response<Body> {
-    let known = lock(&inner.state).entries.get(&entry).copied();
-    let path = inner.root.join(&entry);
-    let file = match known {
-        Some(_) => tokio::fs::File::open(&path).await.ok(),
+    let known = lock(&inner.state).entries.contains_key(&entry);
+    let file = if known {
+        tokio::fs::File::open(inner.root.join(&entry)).await.ok()
+    } else {
+        None
+    };
+    // The file's own length: an upload stored meanwhile may have replaced the entry the index knew.
+    let opened = match file {
+        Some(file) => file
+            .metadata()
+            .await
+            .ok()
+            .map(|metadata| (file, metadata.len())),
         None => None,
     };
-    let (Some(known), Some(file)) = (known, file) else {
+    let Some((file, bytes)) = opened else {
         if counted && let Some(open) = lock(&inner.state).runners.get_mut(runner) {
             open.counts.misses += 1;
         }
         return status(StatusCode::NOT_FOUND);
     };
     if counted {
-        let mut state = lock(&inner.state);
-        let now = crate::time::now_ms();
-        if let Some(used) = state.entries.get_mut(&entry) {
-            used.used = now;
-        }
-        if let Some(open) = state.runners.get_mut(runner) {
+        if let Some(open) = lock(&inner.state).runners.get_mut(runner) {
             open.counts.hits += 1;
-            open.counts.read_bytes += known.bytes;
+            open.counts.read_bytes += bytes;
         }
-        // Its time survives a restart, which counts entries by when they were last modified.
-        tokio::task::spawn_blocking(move || {
-            if let Ok(file) = std::fs::File::open(&path) {
-                let _ = file.set_modified(std::time::SystemTime::now());
-            }
-        });
+        inner.touch(&entry);
     }
     let body = match kind {
         ReadKind::Head => Empty::new().map_err(|never| match never {}).boxed_unsync(),
@@ -142,9 +141,7 @@ async fn read(
         }
     };
     let mut response = Response::new(body);
-    response
-        .headers_mut()
-        .insert(CONTENT_LENGTH, known.bytes.into());
+    response.headers_mut().insert(CONTENT_LENGTH, bytes.into());
     response
 }
 
@@ -158,7 +155,7 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
         (
             writes,
             state.max_size / 4,
-            inner.root.join(UPLOADS).join(state.next_upload.to_string()),
+            inner.uploads.join(state.next_upload.to_string()),
         )
     };
     let refused = || {
@@ -177,6 +174,8 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
     });
     if same && writes == Some(Writes::Allowed) {
         drain(body).await;
+        // Still in use, though only ever sent again: Bazel's blobs an action's result needs.
+        inner.touch(&entry);
         return accepted();
     }
     match writes {
@@ -189,23 +188,20 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
         }
         Some(Writes::Allowed | Writes::Undecided) => {}
     }
-    let bytes = match receive(body, &upload, max_entry).await {
-        Ok(Some(bytes)) => bytes,
-        Ok(None) => {
-            let _ = tokio::fs::remove_file(&upload).await;
-            return refused();
-        }
+    let mut receiving = Receiving {
+        inner,
+        file: upload,
+        bytes: 0,
+    };
+    match receive(&mut receiving, body, max_entry).await {
+        Ok(true) => {}
+        Ok(false) => return refused(),
         Err(error) => {
             debug!("{runner}: a build cache upload failed: {error}");
-            let _ = tokio::fs::remove_file(&upload).await;
             return status(StatusCode::INTERNAL_SERVER_ERROR);
         }
-    };
-    let upload = Upload {
-        file: upload,
-        entry,
-        bytes,
-    };
+    }
+    let upload = receiving.into_upload(entry);
     let writes = {
         let mut state = lock(&inner.state);
         match state.runners.get_mut(runner) {
@@ -222,29 +218,57 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
         inner.store(runner, upload);
         accepted()
     } else {
-        let _ = tokio::fs::remove_file(&upload.file).await;
+        inner.remove_uploads(&[upload]);
         refused()
     }
 }
 
-/// Writes the body to `file`; `None` once it passes `max` bytes.
-async fn receive(mut body: Incoming, file: &std::path::Path, max: u64) -> io::Result<Option<u64>> {
-    let mut out = tokio::fs::File::create(file).await?;
-    let mut bytes = 0;
+/// An upload being received. Unless it becomes an `Upload`, its file goes and the uploads' room it took is given
+/// back, also when its connection is cut midway, as when its runner is removed.
+struct Receiving<'inner> {
+    inner: &'inner Inner,
+    file: PathBuf,
+    bytes: u64,
+}
+
+impl Receiving<'_> {
+    fn into_upload(mut self, entry: PathBuf) -> Upload {
+        let bytes = std::mem::take(&mut self.bytes);
+        Upload {
+            file: std::mem::take(&mut self.file),
+            entry,
+            bytes,
+        }
+    }
+}
+
+impl Drop for Receiving<'_> {
+    fn drop(&mut self) {
+        if !self.file.as_os_str().is_empty() {
+            let _ = std::fs::remove_file(&self.file);
+            self.inner.release(self.bytes);
+        }
+    }
+}
+
+/// Writes the body to the upload's file; false once it passes `max` bytes or the uploads' room runs out.
+async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming, max: u64) -> io::Result<bool> {
+    let mut out = tokio::fs::File::create(&receiving.file).await?;
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(io::Error::other)?;
         if let Ok(data) = frame.into_data() {
-            bytes += data.len() as u64;
-            if bytes > max {
+            let length = data.len() as u64;
+            if receiving.bytes + length > max || !receiving.inner.reserve(length) {
                 drop(out);
                 drain(body).await;
-                return Ok(None);
+                return Ok(false);
             }
+            receiving.bytes += length;
             out.write_all(&data).await?;
         }
     }
     out.flush().await?;
-    Ok(Some(bytes))
+    Ok(true)
 }
 
 async fn drain(mut body: Incoming) {

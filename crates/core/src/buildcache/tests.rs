@@ -275,3 +275,80 @@ async fn sockets_are_reachable_by_a_containers_root_and_entries_by_no_one_else()
     assert_eq!(mode(dir.parent().unwrap()), 0o700);
     assert_eq!(mode(cache.directory()), 0o700);
 }
+
+#[tokio::test]
+async fn undecided_jobs_uploads_take_at_most_the_size_limit() {
+    let Cache { cache, _dir } = open("held-limit", 400);
+    let fork = cache.attach("fork", "o/app").unwrap();
+    for key in ["a", "b", "c", "d", "e"] {
+        let path = format!("/gradle/{key}");
+        assert_eq!(request(&fork, "PUT", &path, &[0; 100]).await.0, 200);
+    }
+    let waiting = std::fs::read_dir(cache.directory().with_file_name(UPLOADS))
+        .unwrap()
+        .count();
+    assert_eq!(waiting, 4, "the fifth upload was not kept on disk");
+    cache.decide("fork", Writes::Allowed);
+    assert_eq!(cache.size().entries, 4);
+    assert_eq!(request(&fork, "GET", "/gradle/e", b"").await.0, 404);
+    // The room the held uploads took is free again.
+    assert_eq!(request(&fork, "PUT", "/gradle/e", &[0; 100]).await.0, 200);
+    assert_eq!(request(&fork, "GET", "/gradle/e", b"").await.0, 200);
+    assert_eq!(cache.detach("fork").unwrap().refused, 1);
+}
+
+#[tokio::test]
+async fn an_entry_over_a_quarter_of_the_limit_or_past_twice_it_is_refused() {
+    let Cache { cache, _dir } = open("limits", 400);
+    let app = cache.attach("app", "o/app").unwrap();
+    cache.decide("app", Writes::Allowed);
+    assert_eq!(request(&app, "PUT", "/gradle/big", &[0; 101]).await.0, 200);
+    assert_eq!(request(&app, "GET", "/gradle/big", b"").await.0, 404);
+    for key in 0..8 {
+        let path = format!("/gradle/{key}");
+        assert_eq!(request(&app, "PUT", &path, &[0; 100]).await.0, 200);
+    }
+    assert_eq!(cache.size().bytes, 800);
+    assert_eq!(request(&app, "PUT", "/gradle/more", &[0; 100]).await.0, 200);
+    assert_eq!(request(&app, "GET", "/gradle/more", b"").await.0, 404);
+    let counts = cache.detach("app").unwrap();
+    assert_eq!((counts.refused, counts.written_bytes), (2, 800));
+}
+
+#[tokio::test]
+async fn an_entry_only_ever_sent_again_stays_in_use() {
+    let Cache { cache, _dir } = open("sent-again", 1 << 20);
+    let app = cache.attach("app", "o/app").unwrap();
+    cache.decide("app", Writes::Allowed);
+    for key in ["blob", "old"] {
+        assert_eq!(
+            request(&app, "PUT", &format!("/bazel/cas/{key}"), &[0; 100])
+                .await
+                .0,
+            200
+        );
+        tokio::time::sleep(std::time::Duration::from_millis(5)).await;
+    }
+    // Bazel sends the blob again with the next build's outputs, and never reads it.
+    assert_eq!(
+        request(&app, "PUT", "/bazel/cas/blob", &[0; 100]).await.0,
+        200
+    );
+    cache.set_max_size(100);
+    cache.trim();
+    assert_eq!(request(&app, "GET", "/bazel/cas/blob", b"").await.0, 200);
+    assert_eq!(request(&app, "GET", "/bazel/cas/old", b"").await.0, 404);
+}
+
+#[tokio::test]
+async fn files_runnerd_did_not_write_in_its_directory_are_never_counted_or_removed() {
+    let dir = TestDir::new("foreign");
+    std::fs::create_dir_all(dir.0.join("o/app/gradle")).unwrap();
+    std::fs::write(dir.0.join("o/app/gradle/notes"), b"mine").unwrap();
+    std::fs::write(dir.0.join("photo.jpg"), b"mine").unwrap();
+    let cache = BuildCache::open(&dir.0, &dir.0.join("sockets"), 1 << 20).unwrap();
+    assert_eq!(cache.size().entries, 0);
+    cache.clear();
+    assert!(dir.0.join("o/app/gradle/notes").exists(), "notes stay");
+    assert!(dir.0.join("photo.jpg").exists(), "the photo stays");
+}

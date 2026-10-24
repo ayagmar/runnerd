@@ -27,8 +27,11 @@ pub const MOUNT: &str = "/run/runnerd-build-cache";
 /// The socket's name in that directory.
 pub const SOCKET: &str = "cache.sock";
 
-/// Where uploads are written before they become entries; emptied at start.
-const UPLOADS: &str = ".uploads";
+/// The directory of the entries, in the build cache's directory: nothing else there is counted or trimmed.
+const ENTRIES: &str = "entries";
+
+/// Where uploads are written before they become entries, in the build cache's directory; emptied at start.
+const UPLOADS: &str = "uploads";
 
 /// Whether a runner's job may write entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -97,8 +100,10 @@ pub struct BuildCache {
 
 #[derive(Debug)]
 struct Inner {
-    /// The entries, under `<owner>/<name>/<tool>/<key>`, and the uploads.
+    /// The entries, under `<owner>/<name>/<tool>/<key>`.
     root: PathBuf,
+    /// The uploads not yet entries.
+    uploads: PathBuf,
     /// One directory per runner, holding its socket.
     sockets: PathBuf,
     // A panic midway leaves at worst an entry counted that is gone, or a file not counted, which `open` counts at
@@ -113,6 +118,9 @@ struct State {
     bytes: u64,
     runners: HashMap<String, Runner>,
     next_upload: u64,
+    /// The bytes of the uploads not yet entries, being received or held: at most `max_size`, so jobs whose writes
+    /// are undecided cannot fill the disk.
+    uploading: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -145,20 +153,22 @@ impl BuildCache {
     /// Opens the build cache in `directory`, counting the entries an earlier run left, with each runner's socket
     /// under `sockets`.
     pub fn open(directory: &Path, sockets: &Path, max_size: u64) -> io::Result<BuildCache> {
-        private_dir(directory)?;
-        let uploads = directory.join(UPLOADS);
+        std::fs::create_dir_all(directory)?;
+        let (root, uploads) = (directory.join(ENTRIES), directory.join(UPLOADS));
         match std::fs::remove_dir_all(&uploads) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
             _ => {}
         }
+        private_dir(&root)?;
         private_dir(&uploads)?;
         private_dir(sockets)?;
         let mut entries = HashMap::new();
-        count_entries(directory, directory, &mut entries)?;
+        count_entries(&root, &root, &mut entries)?;
         let bytes = entries.values().map(|entry: &Entry| entry.bytes).sum();
         Ok(BuildCache {
             inner: Arc::new(Inner {
-                root: directory.to_owned(),
+                root,
+                uploads,
                 sockets: sockets.to_owned(),
                 state: Mutex::new(State {
                     max_size,
@@ -170,7 +180,7 @@ impl BuildCache {
         })
     }
 
-    /// Where the entries are.
+    /// Where the entries are: `entries` in the build cache's directory.
     pub fn directory(&self) -> &Path {
         &self.inner.root
     }
@@ -214,7 +224,7 @@ impl BuildCache {
         );
         if let Some(old) = old {
             old.serving.abort();
-            remove_uploads(&old.held);
+            self.inner.remove_uploads(&old.held);
         }
         Ok(dir)
     }
@@ -266,7 +276,7 @@ impl BuildCache {
                 if let Some(open) = lock(&self.inner.state).runners.get_mut(runner) {
                     open.counts.refused += held.len() as u64;
                 }
-                remove_uploads(&held);
+                self.inner.remove_uploads(&held);
             }
         }
     }
@@ -276,7 +286,7 @@ impl BuildCache {
     pub fn detach(&self, runner: &str) -> Option<BuildCacheCounts> {
         let mut open = lock(&self.inner.state).runners.remove(runner)?;
         open.serving.abort();
-        remove_uploads(&open.held);
+        self.inner.remove_uploads(&open.held);
         open.counts.refused += open.held.len() as u64;
         open.counts.writer = open.writes == Writes::Allowed;
         if let Err(error) = std::fs::remove_dir_all(&open.dir)
@@ -368,6 +378,7 @@ impl Inner {
                 .is_none_or(|parent| std::fs::create_dir_all(parent).is_ok())
             && std::fs::rename(&upload.file, &path).is_ok();
         let mut state = lock(&self.state);
+        state.uploading = state.uploading.saturating_sub(upload.bytes);
         if stored {
             let entry = Entry {
                 bytes: upload.bytes,
@@ -387,6 +398,42 @@ impl Inner {
                 open.counts.refused += 1;
             }
         }
+    }
+
+    /// Takes `bytes` more of the uploads' room, unless they would take more than `max_size`.
+    fn reserve(&self, bytes: u64) -> bool {
+        let mut state = lock(&self.state);
+        let fits = state.uploading + bytes <= state.max_size;
+        if fits {
+            state.uploading += bytes;
+        }
+        fits
+    }
+
+    /// Gives back what `reserve` took for an upload removed before it became an entry.
+    fn release(&self, bytes: u64) {
+        let mut state = lock(&self.state);
+        state.uploading = state.uploading.saturating_sub(bytes);
+    }
+
+    fn remove_uploads(&self, uploads: &[Upload]) {
+        for upload in uploads {
+            let _ = std::fs::remove_file(&upload.file);
+            self.release(upload.bytes);
+        }
+    }
+
+    /// Marks an entry used now, in the index and, so the order survives a restart, in its file's time.
+    fn touch(&self, entry: &Path) {
+        if let Some(used) = lock(&self.state).entries.get_mut(entry) {
+            used.used = crate::time::now_ms();
+        }
+        let path = self.root.join(entry);
+        tokio::task::spawn_blocking(move || {
+            if let Ok(file) = std::fs::File::open(&path) {
+                let _ = file.set_modified(std::time::SystemTime::now());
+            }
+        });
     }
 }
 
@@ -443,20 +490,11 @@ fn private_dir(path: &Path) -> io::Result<()> {
     std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700))
 }
 
-fn remove_uploads(uploads: &[Upload]) {
-    for upload in uploads {
-        let _ = std::fs::remove_file(&upload.file);
-    }
-}
-
 /// Counts the entries under `dir`, by their path under `root`, last used when last modified.
 fn count_entries(root: &Path, dir: &Path, entries: &mut HashMap<PathBuf, Entry>) -> io::Result<()> {
     for item in std::fs::read_dir(dir)? {
         let item = item?;
         let path = item.path();
-        if dir == root && item.file_name() == UPLOADS {
-            continue;
-        }
         let metadata = item.metadata()?;
         if metadata.is_dir() {
             count_entries(root, &path, entries)?;
