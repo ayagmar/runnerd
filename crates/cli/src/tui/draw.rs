@@ -1901,10 +1901,22 @@ fn plan_line(
         return (what, change.reason.clone());
     }
     if let Some(hold) = plan.held.iter().find(|hold| hold.profile == profile.name) {
+        if now < hold.until {
+            return (
+                format!("No change for {}", duration(hold.until.saturating_sub(now))),
+                format!(
+                    "changed {}; the interval holds it until then",
+                    human::ago(hold.changed, now)
+                ),
+            );
+        }
         return (
-            format!("No change for {}", duration(hold.until.saturating_sub(now))),
             format!(
-                "changed {}; the interval holds it until then",
+                "No lowering for {}",
+                duration(hold.lowered_after().saturating_sub(now))
+            ),
+            format!(
+                "changed {}; a raise may come before then",
                 human::ago(hold.changed, now)
             ),
         );

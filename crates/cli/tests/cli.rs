@@ -320,10 +320,12 @@ async fn get_sizing() -> axum::Json<Sizing> {
             from: Resize {
                 memory: 9 << 30,
                 slots: 2,
+                cpus: Some(6),
             },
             to: Resize {
                 memory: 7 << 30,
                 slots: 2,
+                cpus: Some(8),
             },
             reason: "lower memory to 2.5G from 9G, its largest peak + 15%".to_owned(),
             uncertain: false,
@@ -1120,7 +1122,10 @@ fn sizing_shows_what_auto_sizing_changed_and_undoes_it_back_to_what_it_replaced(
     let fake = serve(&socket);
     let shown = runnerctl(&socket, &["sizing"]);
     let text = stdout(&shown);
-    assert!(text.contains("memory 9G → 7G, slots 2"), "{text}");
+    assert!(
+        text.contains("memory 9G → 7G, slots 2, cpus 6 → 8"),
+        "{text}"
+    );
     assert!(text.contains("runnerctl sizing undo node"), "{text}");
 
     let undone = runnerctl(&socket, &["sizing", "undo", "node", "--yes"]);
@@ -1133,6 +1138,9 @@ fn sizing_shows_what_auto_sizing_changed_and_undoes_it_back_to_what_it_replaced(
     let replaced = fake.lock().unwrap().replaced.clone();
     assert_eq!(
         replaced,
-        [CONFIG.replace("memory = \"7G\"", "memory = \"9G\"")]
+        [CONFIG
+            .replace("memory = \"7G\"", "memory = \"9G\"")
+            .replace("cpus = 8", "cpus = 6")],
+        "memory and the cpus it changed are back to what it replaced"
     );
 }

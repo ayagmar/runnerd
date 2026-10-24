@@ -84,6 +84,7 @@ async fn look(state: &AppState, refused: &mut BTreeMap<String, String>) {
     refused.remove(&path);
     let context = Context {
         memory_max: read.memory_max,
+        cpus: read.cpus,
         window: read.window,
         last: &auto.last,
         running: &read.running,
@@ -100,11 +101,12 @@ struct Read {
     window: Window,
     history: History,
     memory_max: Option<u64>,
+    cpus: Option<u64>,
     running: BTreeMap<String, u32>,
 }
 
-/// Checks the file on disk is the one runnerd runs with, and reads the history, the
-/// slice's `MemoryMax` and what runs; `Err` says why nothing can change now.
+/// Checks the file on disk is the one runnerd runs with, and reads the history, the slice's `MemoryMax` and CPUs and
+/// what runs; `Err` says why nothing can change now.
 async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Read, String> {
     on_disk(file)?;
     let history_error =
@@ -126,8 +128,19 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
         window,
         history,
         memory_max,
+        cpus: slice_cpus(state, config).await,
         running: running(state),
     })
+}
+
+/// The slice's CPUs, in millicores; `None` when they cannot be read, which only keeps auto sizing from raising
+/// `cpus`.
+async fn slice_cpus(state: &AppState, config: &Config) -> Option<u64> {
+    let (read, slice) = (state.cpus, config.host.slice.clone());
+    tokio::task::spawn_blocking(move || read(&slice))
+        .await
+        .ok()
+        .and_then(Result::ok)
 }
 
 /// Whether the file on disk is the one runnerd runs with; `Err` says why a look writes nothing when it is not.
@@ -193,11 +206,13 @@ pub(super) async fn plan(
     let blocked = on_disk(&*state.config.lock().await).err();
     let context = Context {
         memory_max,
+        cpus: slice_cpus(state, config).await,
         window,
         last: &auto.last,
         running: &running,
     };
     let interval = config.sizing.interval.as_secs();
+    let raise_interval = config.sizing.raise_after().as_secs();
     let at = window.now / 1000;
     let mut held: Vec<SizingHold> = auto
         .last
@@ -206,14 +221,16 @@ pub(super) async fn plan(
         .map(|(profile, changed)| SizingHold {
             profile: profile.clone(),
             changed: *changed,
-            until: changed.saturating_add(interval),
+            until: changed.saturating_add(raise_interval),
+            lower_until: changed.saturating_add(interval),
         })
-        .filter(|hold| hold.until > at)
+        .filter(|hold| hold.lower_until > at)
         .collect();
     held.sort_by_key(|hold| hold.until);
     Ok(Some(AutoPlan {
         every: EVERY.as_secs(),
         interval,
+        raise_interval,
         max_step: config.sizing.max_step,
         next: changes(config, &history, context),
         held,
@@ -282,6 +299,7 @@ async fn resolve(state: &AppState, config: &Config, auto: &AutoSizing) -> bool {
     for (id, change) in &auto.pending {
         let written = config.profiles.get(&change.profile).is_some_and(|profile| {
             (profile.memory.0, profile.slots) == (change.to.memory, change.to.slots)
+                && change.to.cpus.is_none_or(|cpus| profile.cpus == cpus)
         });
         // Values that differ do not say it was not written: a person may have changed them since.
         let resolution = if written {

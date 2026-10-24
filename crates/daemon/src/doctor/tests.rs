@@ -572,6 +572,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             name: "build".to_owned(),
             profile: profile.to_owned(),
             memory_cap: Some(config("sysbox").profiles[profile].memory.0),
+            cpu_cap: None,
             memory_peak: peak,
             cpu_peak: 4000,
             cpu_average: Some(1000),

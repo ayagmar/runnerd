@@ -726,8 +726,8 @@ impl Writer<'_> {
         let mut id = None;
         self.change("record an auto sizing change", |_| {
             self.db.execute(
-                "INSERT INTO auto_sizing (profile, at, from_memory, from_slots, to_memory, to_slots, reason, state) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending')",
+                "INSERT INTO auto_sizing (profile, at, from_memory, from_slots, to_memory, to_slots, reason, state, \
+                 from_cpus, to_cpus) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, 'pending', ?8, ?9)",
                 params![
                     change.profile,
                     change.at.saturating_mul(1000),
@@ -735,7 +735,9 @@ impl Writer<'_> {
                     change.from.slots,
                     change.to.memory,
                     change.to.slots,
-                    change.reason
+                    change.reason,
+                    change.from.cpus,
+                    change.to.cpus
                 ],
             )?;
             id = Some(self.db.last_insert_rowid());

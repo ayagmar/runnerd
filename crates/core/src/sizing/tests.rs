@@ -55,8 +55,9 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         name: name.to_owned(),
         profile: profile.to_owned(),
         memory_cap: Some(cap),
+        cpu_cap: Some(8000),
         memory_peak: peak,
-        cpu_peak: 3000,
+        cpu_peak: 6000,
         cpu_average: Some(1000),
         queued_at: NOW - 2 * HOUR,
         started_at: Some(NOW - 2 * HOUR + wait_secs * 1000),
@@ -474,6 +475,15 @@ fn under_measured_admission_waiting_jobs_are_told_about_slots_without_changing_t
         line.contains("slots"),
         "the line suggests more slots: {line}"
     );
+    let auto = Sizing {
+        auto: true,
+        ..sizing.clone()
+    };
+    let line = auto.advice_line(profile(&auto, "node"));
+    assert!(
+        line.contains("auto sizing adds one") && !line.contains("by hand"),
+        "with auto sizing on, the line says what it does: {line}"
+    );
 }
 
 mod auto {
@@ -522,6 +532,7 @@ mod auto {
             history,
             Context {
                 memory_max: Some(memory_max),
+                cpus: Some(32_000),
                 window: window(),
                 last,
                 running: &BTreeMap::new(),
@@ -550,7 +561,8 @@ mod auto {
                 "node",
                 Resize {
                     memory: 5376 * M,
-                    slots: 2
+                    slots: 2,
+                    cpus: None
                 }
             )]
         );
@@ -558,7 +570,8 @@ mod auto {
             lowered[0].from,
             Resize {
                 memory: 7 * G,
-                slots: 2
+                slots: 2,
+                cpus: None
             },
             "the change keeps what it replaced, to undo it"
         );
@@ -585,7 +598,8 @@ mod auto {
                 "node",
                 Resize {
                     memory: 6 * G,
-                    slots: 2
+                    slots: 2,
+                    cpus: None
                 }
             )]
         );
@@ -610,7 +624,8 @@ mod auto {
                 "node",
                 Resize {
                     memory: 5376 * M,
-                    slots: 2
+                    slots: 2,
+                    cpus: None
                 }
             )]
         );
@@ -640,7 +655,8 @@ mod auto {
                 "jvm",
                 Resize {
                     memory: 10752 * M,
-                    slots: 1
+                    slots: 1,
+                    cpus: None
                 }
             )]
         );
@@ -658,7 +674,8 @@ mod auto {
                 "jvm",
                 Resize {
                     memory: 10 * G,
-                    slots: 2
+                    slots: 2,
+                    cpus: None
                 }
             )]
         );
@@ -673,6 +690,7 @@ mod auto {
             &at_jvm_cap(),
             Context {
                 memory_max: Some(33 * G),
+                cpus: Some(32_000),
                 window: window(),
                 last: &BTreeMap::new(),
                 running: &running,
@@ -767,7 +785,8 @@ labels = ["node"]
                 "node",
                 Resize {
                     memory: 5632 * M,
-                    slots: 5
+                    slots: 5,
+                    cpus: None
                 }
             )]
         );
@@ -776,10 +795,267 @@ labels = ["node"]
             "",
         );
         assert_eq!(due(&at_max, &waited, 64 * G, &BTreeMap::new()), Vec::new());
+    }
+
+    #[test]
+    fn without_max_slots_waiting_jobs_get_a_slot_only_while_every_profiles_peaks_fit_the_slice() {
+        let config = on(&measured(), "");
+        let waited = history(capped_builds(10, 4812 * M, 300));
+        // jvm 2 × 9G at its cap, node 5 × 4812M, the mirror 0.5G: 43004M.
         assert_eq!(
-            due(&on(&measured(), ""), &waited, 64 * G, &BTreeMap::new()),
+            due(&config, &waited, 41 * G, &BTreeMap::new()),
             Vec::new(),
-            "without max_slots, slots stay the owner's"
+            "a fifth slot does not fit 41G"
+        );
+        assert_eq!(
+            resized(&due(&config, &waited, 42 * G, &BTreeMap::new())),
+            vec![(
+                "node",
+                Resize {
+                    memory: 5632 * M,
+                    slots: 5,
+                    cpus: None
+                }
+            )]
+        );
+        let unlimited = changes(
+            &config,
+            &waited,
+            Context {
+                memory_max: None,
+                cpus: Some(32_000),
+                window: window(),
+                last: &BTreeMap::new(),
+                running: &BTreeMap::new(),
+            },
+        );
+        assert_eq!(
+            unlimited,
+            Vec::new(),
+            "without max_slots or a MemoryMax nothing bounds slots"
+        );
+    }
+
+    #[test]
+    fn under_caps_waiting_jobs_get_a_slot_while_every_cap_fits_the_slice() {
+        // node's builds peak at 6G: + 15% fits its 7G, so its memory stays, and they waited 5 minutes. 2 × 9G + 3 × 7G + 0.5G
+        // = 39.5G.
+        let config = on(CONFIG, "");
+        let waited = history(builds(10, 5632 * M, 6 * G, 300));
+        assert_eq!(due(&config, &waited, 39 * G, &BTreeMap::new()), Vec::new());
+        assert_eq!(
+            resized(&due(&config, &waited, 40 * G, &BTreeMap::new())),
+            vec![(
+                "node",
+                Resize {
+                    memory: 7 * G,
+                    slots: 3,
+                    cpus: None
+                }
+            )]
+        );
+    }
+
+    #[test]
+    fn a_young_profile_whose_jobs_wait_gets_a_slot_before_it_has_min_jobs_runs() {
+        let config = on(&measured(), "");
+        let waited = history(capped_builds(3, 4812 * M, 300));
+        let raised = due(&config, &waited, 64 * G, &BTreeMap::new());
+        assert_eq!(
+            resized(&raised),
+            vec![(
+                "node",
+                Resize {
+                    memory: 5632 * M,
+                    slots: 5,
+                    cpus: None
+                }
+            )]
+        );
+        let two = history(capped_builds(2, 4812 * M, 300));
+        assert_eq!(
+            due(&config, &two, 64 * G, &BTreeMap::new()),
+            Vec::new(),
+            "two runs are too few even to add a slot"
+        );
+    }
+
+    /// When node was last changed, `hours_ago`.
+    fn node_changed(hours_ago: u64) -> BTreeMap<String, u64> {
+        BTreeMap::from([("node".to_owned(), (NOW - hours_ago * HOUR) / 1000)])
+    }
+
+    #[test]
+    fn a_raise_comes_after_the_raise_interval_while_a_lowering_waits_the_whole_interval() {
+        let config = on(&measured(), "");
+        // Queued half an hour ago, each waiting 5 minutes for a slot.
+        let waited = history(
+            capped_builds(10, 4812 * M, 300)
+                .into_iter()
+                .map(|build| Ran {
+                    queued_at: NOW - HOUR / 2,
+                    started_at: Some(NOW - HOUR / 2 + 300_000),
+                    ..build
+                })
+                .collect(),
+        );
+        let changed_minutes_ago =
+            |minutes: u64| BTreeMap::from([("node".to_owned(), (NOW - minutes * 60_000) / 1000)]);
+        assert_eq!(
+            due(&config, &waited, 64 * G, &changed_minutes_ago(59)),
+            Vec::new(),
+            "the hour's raise interval is not over"
+        );
+        let raised = due(&config, &waited, 64 * G, &changed_minutes_ago(61));
+        assert_eq!(raised.first().map(|change| change.to.slots), Some(5));
+        // Peaks far under node's cap: a lowering, which the 24 hours since the last change hold.
+        let light = history(capped_builds(10, 2 * G, 5));
+        assert_eq!(due(&config, &light, 64 * G, &node_changed(3)), Vec::new());
+        assert_eq!(
+            due(&config, &light, 64 * G, &node_changed(25))
+                .first()
+                .map(|change| change.to.memory < 5632 * M),
+            Some(true),
+            "lowered once the interval is over"
+        );
+    }
+
+    #[test]
+    fn a_raise_reads_only_the_waits_since_the_profiles_last_change() {
+        let config = on(&measured(), "");
+        // Jobs queued 2 hours ago waited; a slot was added an hour and a half ago, and nothing waited since.
+        let mut jobs = capped_builds(10, 4812 * M, 300);
+        jobs.extend((0..3).map(|_| Ran {
+            queued_at: NOW - HOUR,
+            started_at: Some(NOW - HOUR + 2000),
+            ..capped_builds(1, 4812 * M, 0).remove(0)
+        }));
+        let changed = BTreeMap::from([("node".to_owned(), (NOW - 90 * 60_000) / 1000)]);
+        assert_eq!(due(&config, &history(jobs), 64 * G, &changed), Vec::new());
+    }
+
+    /// `count` ledger tests on jvm's 8 CPUs, each peaking at `cpu_peak` millicores, at `cpu_cap`.
+    fn ledger_cpu(count: usize, cpu_peak: u64, cpu_cap: u64) -> Vec<Ran> {
+        (0..count)
+            .map(|_| Ran {
+                cpu_peak,
+                cpu_cap: Some(cpu_cap),
+                ..job("halyard/ledger", "test", "jvm", 7 * G, 5)
+            })
+            .collect()
+    }
+
+    /// The changes due at `NOW` in a 33G slice of `cpus` millicores, after the last changes `last`.
+    fn due_cpus(
+        config: &Config,
+        history: &History,
+        cpus: Option<u64>,
+        last: &BTreeMap<String, u64>,
+    ) -> Vec<SizingChange> {
+        changes(
+            config,
+            history,
+            Context {
+                memory_max: Some(33 * G),
+                cpus,
+                window: window(),
+                last,
+                running: &BTreeMap::new(),
+            },
+        )
+    }
+
+    fn cpus_to(changes: &[SizingChange]) -> Vec<(&str, Option<u32>, Option<u32>)> {
+        changes
+            .iter()
+            .map(|change| (change.profile.as_str(), change.from.cpus, change.to.cpus))
+            .collect()
+    }
+
+    #[test]
+    fn a_profile_whose_jobs_sit_at_their_cpu_cap_gets_more_cpus_up_to_the_slices() {
+        let config = on(CONFIG, "");
+        let pinned = history(ledger_cpu(3, 7900, 8000));
+        let raised = due_cpus(&config, &pinned, Some(32_000), &BTreeMap::new());
+        assert_eq!(
+            cpus_to(&raised),
+            vec![("jvm", Some(8), Some(10))],
+            "8 CPUs + 25%"
+        );
+        assert_eq!(
+            (raised[0].to.memory, raised[0].to.slots),
+            (9 * G, 2),
+            "memory and slots stay"
+        );
+        assert!(
+            raised[0].line().contains("cpus 8 → 10"),
+            "{}",
+            raised[0].line()
+        );
+        assert_eq!(
+            cpus_to(&due_cpus(&config, &pinned, Some(9_000), &BTreeMap::new())),
+            vec![("jvm", Some(8), Some(9))],
+            "at most the slice's CPUs"
+        );
+        assert_eq!(
+            due_cpus(&config, &pinned, None, &BTreeMap::new()),
+            Vec::new(),
+            "not without the slice's CPUs"
+        );
+        let elsewhere = history(ledger_cpu(3, 5900, 6000));
+        assert_eq!(
+            due_cpus(&config, &elsewhere, Some(32_000), &BTreeMap::new()),
+            Vec::new(),
+            "runs at another cap say nothing about this one"
+        );
+        let two = history(ledger_cpu(2, 7900, 8000));
+        assert_eq!(
+            due_cpus(&config, &two, Some(32_000), &BTreeMap::new()),
+            Vec::new()
+        );
+    }
+
+    #[test]
+    fn under_caps_a_cpu_raise_stays_within_the_cpu_budget() {
+        // jvm 2 × 8 and node 2 × 8 CPUs: 32 of a 36-CPU budget leave room for jvm's slots at 10, not 12.
+        let config = on(
+            &CONFIG.replace(
+                "isolation = \"sysbox\"",
+                "isolation = \"sysbox\"\ncpu_overcommit = 1.5",
+            ),
+            "max_step = 50",
+        );
+        let pinned = history(ledger_cpu(3, 7900, 8000));
+        assert_eq!(
+            cpus_to(&due_cpus(&config, &pinned, Some(24_000), &BTreeMap::new())),
+            vec![("jvm", Some(8), Some(10))]
+        );
+    }
+
+    #[test]
+    fn cpus_far_above_every_peak_are_lowered_after_the_interval_by_at_most_a_step() {
+        let config = on(CONFIG, "");
+        // Ten runs peaking at 2 CPUs of 8: + 15% is 2.3, rounded up to 3, but a step is at most 25%: 6.
+        let idle = history(ledger_cpu(10, 2000, 8000));
+        assert_eq!(
+            cpus_to(&due_cpus(&config, &idle, Some(32_000), &BTreeMap::new())),
+            vec![("jvm", Some(8), Some(6))]
+        );
+        let jvm_changed = BTreeMap::from([("jvm".to_owned(), (NOW - 3 * HOUR) / 1000)]);
+        assert_eq!(
+            due_cpus(&config, &idle, Some(32_000), &jvm_changed),
+            Vec::new(),
+            "a lowering waits the interval"
+        );
+        assert_eq!(
+            due_cpus(
+                &config,
+                &history(ledger_cpu(9, 2000, 8000)),
+                Some(32_000),
+                &BTreeMap::new()
+            ),
+            Vec::new(),
+            "a lowering takes min_jobs runs"
         );
     }
 }

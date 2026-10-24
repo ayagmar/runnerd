@@ -2552,6 +2552,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
         fixtures.auto_plan = Some(AutoPlan {
             every: 300,
             interval: 86_400,
+            raise_interval: 3600,
             max_step: 25,
             next: vec![SizingChange {
                 at: now,
@@ -2559,10 +2560,12 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
                 from: Resize {
                     memory: 7 << 30,
                     slots: 2,
+                    cpus: None,
                 },
                 to: Resize {
                     memory: 5376 << 20,
                     slots: 2,
+                    cpus: None,
                 },
                 reason: "lower memory".to_owned(),
                 uncertain: false,
@@ -2571,6 +2574,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
                 profile: "jvm".to_owned(),
                 changed: now - 3600,
                 until: now + 23 * 3600,
+                lower_until: now + 23 * 3600,
             }],
             blocked: None,
         });

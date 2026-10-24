@@ -59,6 +59,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         name: name.to_owned(),
         profile: profile.to_owned(),
         memory_cap: Some(if profile == "jvm" { 9 * G } else { 7 * G }),
+        cpu_cap: None,
         memory_peak: peak,
         cpu_peak: 3000,
         cpu_average: Some(1000),

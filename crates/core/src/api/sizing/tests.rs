@@ -35,10 +35,12 @@ fn sizing() -> Sizing {
             from: Resize {
                 memory: 7 << 30,
                 slots: 2,
+                cpus: None,
             },
             to: Resize {
                 memory: 5376 << 20,
                 slots: 2,
+                cpus: None,
             },
             reason: "lower memory to 2.25G from 7G, its largest peak + 15%".to_owned(),
             uncertain: false,
