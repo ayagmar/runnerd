@@ -179,5 +179,6 @@ fn auto_sizing(fake: &fake::Fake) {
             changed: fixtures.now - 2 * 86_400,
             until: fixtures.now + 86_400,
         }],
+        blocked: None,
     });
 }

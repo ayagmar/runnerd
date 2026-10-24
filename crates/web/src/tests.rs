@@ -2395,6 +2395,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
                 changed: now - 3600,
                 until: now + 23 * 3600,
             }],
+            blocked: None,
         });
     }
     let on = dashboard.page(&cookie, "/sizing").await.body;
@@ -2415,5 +2416,20 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     assert!(
         on.contains("at most once every 24 hours"),
         "the rules in words: {on}"
+    );
+    // The file was edited by hand: no look writes the change, so the page says why instead of promising it.
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let plan = fixtures.auto_plan.as_mut().unwrap();
+        plan.blocked = Some("the file changed on disk since runnerd read it".to_owned());
+    }
+    let blocked = dashboard.page(&cookie, "/sizing").await.body;
+    assert!(
+        blocked.contains("No look changes anything now: the file changed on disk"),
+        "the blocker shows: {blocked}"
+    );
+    assert!(
+        !blocked.contains("Next look") && blocked.contains("Once that is fixed: memory 7G"),
+        "the change is not promised for the next look: {blocked}"
     );
 }

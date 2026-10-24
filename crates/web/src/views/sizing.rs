@@ -84,6 +84,9 @@ fn auto_plan(view: &SizingView) -> Markup {
                 "runnerd looks every " (span(plan.every)) " and changes a profile at most once every "
                 (span(plan.interval)) ", moving its memory by at most " (plan.max_step) "% at a time."
             }
+            @if let Some(blocked) = &plan.blocked {
+                p.warning { "No look changes anything now: " (blocked) "." }
+            }
             ul.plan-list {
                 @for (index, profile) in sizing.profiles.iter().enumerate() {
                     li class=(format!("p{}", index % 6)) {
@@ -123,7 +126,11 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
     html! {
         @if let Some(change) = next {
             span.plan-what.changes {
-                strong { "Next look, within " (span(plan.every)) ": " (change.line()) }
+                @if plan.blocked.is_some() {
+                    strong { "Once that is fixed: " (change.line()) }
+                } @else {
+                    strong { "Next look, within " (span(plan.every)) ": " (change.line()) }
+                }
                 span.muted { (change.reason) }
             }
         } @else if let Some(hold) = held {

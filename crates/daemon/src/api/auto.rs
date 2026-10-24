@@ -106,17 +106,7 @@ struct Read {
 /// Checks the file on disk is the one runnerd runs with, and reads the history, the
 /// slice's `MemoryMax` and what runs; `Err` says why nothing can change now.
 async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Read, String> {
-    match std::fs::read_to_string(&file.path) {
-        Ok(text) if text == file.text => {}
-        Ok(_) => {
-            return Err(
-                "the file changed on disk since runnerd read it; nothing is changed until runnerd runs with it \
-                 (restart it, or make the edit in the dashboard's editor)"
-                    .to_owned(),
-            );
-        }
-        Err(io_error) => return Err(format!("cannot read it: {io_error}")),
-    }
+    on_disk(file)?;
     let history_error =
         |store_error: StoreError| format!("cannot read the job history: {store_error}");
     let window = Window::new(None, now());
@@ -140,6 +130,21 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
     })
 }
 
+/// Whether the file on disk is the one runnerd runs with; `Err` says why a look writes nothing when it is not.
+fn on_disk(file: &ConfigText) -> Result<(), String> {
+    match std::fs::read_to_string(&file.path) {
+        Ok(text) if text == file.text => Ok(()),
+        Ok(_) => {
+            Err(
+                "the file changed on disk since runnerd read it; nothing is changed until runnerd runs with it \
+                 (restart it, or make the edit in the dashboard's editor)"
+                    .to_owned(),
+            )
+        }
+        Err(io_error) => Err(format!("cannot read the file: {io_error}")),
+    }
+}
+
 /// How many runners each profile runs now, by name.
 fn running(state: &AppState) -> BTreeMap<String, u32> {
     state
@@ -159,7 +164,8 @@ fn running(state: &AppState) -> BTreeMap<String, u32> {
 }
 
 /// What auto sizing's next look would change as the history and config are now, and which profiles a recent change
-/// holds, for `GET /v1/sizing`; `None` while it is off. It settles nothing and writes nothing.
+/// holds, for `GET /v1/sizing`, and what blocks every look, by the same check a look makes; `None` while it is off.
+/// It settles nothing and writes nothing.
 pub(super) async fn plan(
     state: &AppState,
     config: &Config,
@@ -184,6 +190,7 @@ pub(super) async fn plan(
         .await
         .map_err(history_error)?;
     let running = running(state);
+    let blocked = on_disk(&*state.config.lock().await).err();
     let context = Context {
         memory_max,
         window,
@@ -210,6 +217,7 @@ pub(super) async fn plan(
         max_step: config.sizing.max_step,
         next: changes(config, &history, context),
         held,
+        blocked,
     }))
 }
 

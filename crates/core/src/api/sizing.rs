@@ -57,11 +57,15 @@ pub struct AutoPlan {
     pub interval: u64,
     /// `[sizing] max_step`: the most one change moves a profile's `memory`, in percent of it.
     pub max_step: u32,
-    /// The changes the next look would make, in the order it would make them; `at` is when this was worked out. A
-    /// look writes nothing while the file on disk differs from the config runnerd runs with.
+    /// The changes the next look would make, in the order it would make them; `at` is when this was worked out.
+    /// None of them is made while `blocked` says why.
     pub next: Vec<SizingChange>,
     /// The profiles a change in the last `interval` holds, oldest hold first.
     pub held: Vec<SizingHold>,
+    /// Why no look changes anything until the owner acts, as when the file on disk differs from the config runnerd
+    /// runs with. `None` when the next look may write `next`, and from a daemon before it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub blocked: Option<String>,
 }
 
 /// A profile auto sizing changes nothing in before `until`.

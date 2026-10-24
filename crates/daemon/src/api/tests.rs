@@ -596,6 +596,10 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
             .collect::<Vec<_>>(),
         [("node", 24 * 3600)]
     );
+    assert_eq!(
+        plan.blocked, None,
+        "the file runnerd wrote is the one it runs with"
+    );
     assert!(daemon.reloads.try_recv().is_err(), "no second reload");
     daemon.stop().await;
 }
@@ -639,6 +643,9 @@ async fn auto_sizing_leaves_a_file_edited_on_disk_until_runnerd_runs_with_it() {
         [("node", 5376 << 20)]
     );
     assert_eq!((plan.interval, plan.max_step), (24 * 3600, 25));
+    // But no look writes it: the forecast says so instead of promising it.
+    let blocked = plan.blocked.expect("the edited file blocks every look");
+    assert!(blocked.contains("changed on disk"), "{blocked}");
     assert!(daemon.reloads.try_recv().is_err(), "nothing reloaded");
     daemon.stop().await;
 }
