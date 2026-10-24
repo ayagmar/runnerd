@@ -74,7 +74,7 @@ const status = `runnerd 0.0.10  23.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
 jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792814287   7m 11s
-jvm         2  free
+jvm         2  idle   halyard/ledger      runnerd-3f9a-forge-jvm-2-1792814114  10m 4s
 node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792814405  5m 13s
 node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792814702     16s
 
@@ -111,7 +111,8 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
 // The dashboard's captures in the grid, one <picture> each. The page is dark until its script runs, so the dark
 // sources are the default and the light ones start disabled (media="not all"); the theme switch in
 // scripts/landing.ts enables them. The images are lazy, so the light theme never loads the dark copy first, and
-// without JS, where Chromium loads lazy images at once, only the dark copy loads.
+// without JS, where Chromium loads lazy images at once, only the dark copy loads. Each links to its full-size dark
+// file; scripts/zoom.ts opens it, or the light one in the light theme, in an overlay.
 const shots = import.meta.glob<{ default: ImageMetadata }>('../assets/dashboard/*.webp', { eager: true });
 const capture = async (name: string, widths: number[]) => {
   const themes = await Promise.all(
@@ -126,8 +127,9 @@ const capture = async (name: string, widths: number[]) => {
     }),
   );
   const src = shots[`../assets/dashboard/${name}-dark.webp`]!.default;
+  const light = shots[`../assets/dashboard/${name}-light.webp`]!.default;
   const fallback = await getImage({ src, width: widths[0], format: 'webp', quality: 70 });
-  return { sources: themes.flat(), src, fallback };
+  return { sources: themes.flat(), src, light, fallback };
 };
 const jobShot = await capture('job', [640, 960, 1280, 1920]);
 const phoneShot = await capture('overview-phone', [390, 480, 640, 780]);
@@ -272,33 +274,42 @@ const phoneShot = await capture('overview-phone', [390, 480, 640, 780]);
             <code class="prompt-line">$ runnerctl tui</code>
             <Tui
               name="overview-96"
-              label="The overview at 96 by 26: a health line with 2 of 4 slots running and 4 jobs waiting, the budget bar with jvm slot 1 at 4.05G and node slot 1 at 2.58G used, one line per slot, the four waiting jobs with why each waits, a runner starting for the oldest and every node slot busy for the rest, then the repositories and the latest jobs."
+              label="The overview at 96 by 26: a health line with 2 of 4 slots running, 4 jobs waiting and 3 insights, the budget bar with jvm slot 1 at 3.88G and node slot 1 at 2.47G used, one line per slot with a warm runner for halyard/ledger in jvm 2, the four waiting jobs with why each waits, a runner starting for the oldest and every node slot busy for the rest, then the repositories and the latest jobs."
             />
           </li>
           <li class="client client-web">
             <h3><a href={`${clientsDoc}#a-job`}>Dashboard</a></h3>
             <code class="prompt-line">$ runnerctl web</code>
-            <picture class="shot">
-              {
-                jobShot.sources.map((source) => (
-                  <source
-                    type={source.type}
-                    srcset={source.srcset}
-                    sizes="(min-width: 860px) 40vw, calc(100vw - 2rem)"
-                    media={source.theme === 'light' ? 'not all' : undefined}
-                    data-light={source.theme === 'light' ? '' : undefined}
-                  />
-                ))
-              }
-              <img
-                src={jobShot.fallback.src}
-                alt="halyard/ledger's CI / build job, running: waited 4s for a runner, 5s to start, then nine steps on one time axis, the seventh, integration tests, running."
-                width={jobShot.src.width}
-                height={jobShot.src.height}
-                loading="lazy"
-                decoding="async"
-              />
-            </picture>
+            <a
+              class="shot"
+              href={jobShot.src.src}
+              data-zoom
+              data-zoom-light={jobShot.light.src}
+              data-zoom-width={jobShot.src.width}
+              data-zoom-height={jobShot.src.height}
+            >
+              <picture>
+                {
+                  jobShot.sources.map((source) => (
+                    <source
+                      type={source.type}
+                      srcset={source.srcset}
+                      sizes="(min-width: 860px) 40vw, calc(100vw - 2rem)"
+                      media={source.theme === 'light' ? 'not all' : undefined}
+                      data-light={source.theme === 'light' ? '' : undefined}
+                    />
+                  ))
+                }
+                <img
+                  src={jobShot.fallback.src}
+                  alt="halyard/ledger's CI / build job, running: waited 4s for a runner, 5s to start, then nine steps on one time axis, the seventh, integration tests, running."
+                  width={jobShot.src.width}
+                  height={jobShot.src.height}
+                  loading="lazy"
+                  decoding="async"
+                />
+              </picture>
+            </a>
           </li>
           <li class="client client-cli">
             <h3><a href={`${clientsDoc}#runnerctl`}>Command line</a></h3>
@@ -320,27 +331,36 @@ const phoneShot = await capture('overview-phone', [390, 480, 640, 780]);
               <p>Scan the code and the phone stays signed in for 30 days after its last visit.</p>
             </div>
             <div class="phone-frame">
-              <picture class="shot">
-                {
-                  phoneShot.sources.map((source) => (
-                    <source
-                      type={source.type}
-                      srcset={source.srcset}
-                      sizes="(max-width: 860px) 48vw, 15rem"
-                      media={source.theme === 'light' ? 'not all' : undefined}
-                      data-light={source.theme === 'light' ? '' : undefined}
-                    />
-                  ))
-                }
-                <img
-                  src={phoneShot.fallback.src}
-                  alt="The dashboard's overview on a phone: four tiles, 2 of 4 slots running, 4 waiting, a p95 wait of 29s and 3 failed in 24 hours, then the waiting jobs, each with why it waits."
-                  width={phoneShot.src.width}
-                  height={phoneShot.src.height}
-                  loading="lazy"
-                  decoding="async"
-                />
-              </picture>
+              <a
+                class="shot"
+                href={phoneShot.src.src}
+                data-zoom
+                data-zoom-light={phoneShot.light.src}
+                data-zoom-width={phoneShot.src.width}
+                data-zoom-height={phoneShot.src.height}
+              >
+                <picture>
+                  {
+                    phoneShot.sources.map((source) => (
+                      <source
+                        type={source.type}
+                        srcset={source.srcset}
+                        sizes="(max-width: 860px) 48vw, 15rem"
+                        media={source.theme === 'light' ? 'not all' : undefined}
+                        data-light={source.theme === 'light' ? '' : undefined}
+                      />
+                    ))
+                  }
+                  <img
+                    src={phoneShot.fallback.src}
+                    alt="The dashboard's overview on a phone: four tiles, 2 of 4 slots running with 1 runner starting and 1 warm, 4 waiting, a p95 wait of 29s and 3 failed in 24 hours, then the waiting jobs, each with why it waits."
+                    width={phoneShot.src.width}
+                    height={phoneShot.src.height}
+                    loading="lazy"
+                    decoding="async"
+                  />
+                </picture>
+              </a>
             </div>
           </li>
         </ul>
@@ -435,6 +455,7 @@ runnerd doctor:
 
     <script>
       import { setup } from '../scripts/landing';
+      import '../scripts/zoom';
       setup();
     </script>
   </body>

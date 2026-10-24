@@ -116,11 +116,13 @@ h1#_top {
   outline-offset: 2px;
 }
 
-/* Dashboard screenshots: framed like a slot in the slice, only the one matching the theme is shown (and loaded). */
+/* Dashboard screenshots: framed like a slot in the slice, only the one matching the theme is shown (and loaded). Each
+   links to its full-size file, which scripts/zoom.ts opens in place. */
 .shot {
   display: block;
   padding: 8px;
   background: var(--surface);
+  cursor: zoom-in;
 }
 
 .shot img {
@@ -273,4 +275,94 @@ h1#_top {
 .tui .t-rv {
   background: var(--c, var(--term-ink));
   color: var(--term-bg);
+}
+
+.tui[role='button'] {
+  cursor: zoom-in;
+}
+
+/* The full-size overlay (scripts/zoom.ts): the whole viewport in the page's background, a screenshot fitted to it
+   until clicked, a TUI frame's text at a readable size, scrolling sideways when wider than the screen. */
+html.zoom-open {
+  overflow: hidden;
+  scrollbar-gutter: stable;
+}
+
+.zoom {
+  width: 100%;
+  height: 100%;
+  max-width: none;
+  max-height: none;
+  margin: 0;
+  padding: 0;
+  border: 0;
+  background: var(--bg);
+  color: var(--ink);
+  overscroll-behavior: contain;
+}
+
+.zoom[open] {
+  display: grid;
+  grid-template-rows: auto minmax(0, 1fr);
+}
+
+.zoom::backdrop {
+  background: none;
+}
+
+.zoom-close {
+  justify-self: end;
+  min-height: 2.75rem;
+  margin: 0.5rem 0.75rem;
+  padding: 0 1.25rem;
+  border: 0;
+  background: var(--surface-2);
+  color: var(--ink);
+  font: 600 1rem/1 var(--font-display);
+  cursor: pointer;
+}
+
+.zoom-body {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  overflow: auto;
+  padding: 0 0.75rem 0.75rem;
+  overscroll-behavior: contain;
+}
+
+.zoom-body > * {
+  margin: auto;
+}
+
+.zoom-body img {
+  display: block;
+  max-width: 100%;
+  max-height: calc(100dvh - 4.5rem);
+  width: auto;
+  height: auto;
+  cursor: zoom-in;
+}
+
+.zoom-body img.actual {
+  max-width: none;
+  max-height: none;
+  cursor: zoom-out;
+}
+
+.zoom-body .tui-zoomed {
+  max-width: 100%;
+  font-size: clamp(0.8125rem, ((100vw - 3rem) / var(--cols) - 0.5px) / 0.6, 1.125rem);
+  cursor: auto;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .zoom[open] {
+    animation: zoom-in 150ms ease-out;
+  }
+
+  @keyframes zoom-in {
+    from {
+      opacity: 0;
+    }
+  }
 }

@@ -71,7 +71,7 @@ Views of the same thing are linked. On the overview, pointing at, focusing or ta
 
 <Shot
   name="overview"
-  alt="The overview: 2 of 4 slots running, 4 jobs waiting, a p95 wait of 29s over 24 hours and 3 failed of 24 finished, then the four waiting halyard/storefront jobs, the oldest with a runner starting for it in node 2 and the others waiting because both node slots are busy."
+  alt="The overview: 2 of 4 slots running, 1 runner starting and 1 warm, 4 jobs waiting, a p95 wait of 29s over 24 hours and 3 failed of 24 finished; the four waiting halyard/storefront jobs, the oldest with a runner starting for it in node 2 and the others waiting because both node slots are busy; then 23.5G of 33G reserved in the budget bar and a card per slot, jvm 2 a warm runner for halyard/ledger waiting for a job."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
@@ -108,6 +108,12 @@ Above the charts, links filter by repository, workflow and outcome; each keeps t
 | Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../admission/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; whether [auto sizing](../admission/#auto-sizing) is on and, per profile, what its next look changes or until when a recent change holds it, or why no look changes anything, such as a hand edit runnerd does not run with yet; the changes it made, with a link that opens the last one undone in the editor |
 | Config | `runnerd.toml` in an editor that checks it against `MemoryMax` as you type, saves and reloads only when it fits; the doctor's checks |
 
+<Shot
+  name="insights"
+  alt="Insights from the last 14 days, warnings first: halyard/ledger's CI / test on main slower, 6m 10s up from 4m 40s; CI / integration near jvm's 9G cap; halyard/storefront's CI / e2e flaky; then a notice that storefront waits longer this week, and each repository's waits this week, warm and cold apart, against the week before."
+  sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
+/>
+
 ## runnerctl
 
 It talks to the socket (`--socket` picks another), prints aligned text, coloured on a terminal unless `NO_COLOR` is set, and with `--json` prints the API's response unchanged.
@@ -118,7 +124,7 @@ runnerd 0.0.10  23.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
 jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792814287   7m 11s
-jvm         2  free
+jvm         2  idle   halyard/ledger      runnerd-3f9a-forge-jvm-2-1792814114  10m 4s
 node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792814405  5m 13s
 node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792814702     16s
 
@@ -274,7 +280,7 @@ runnerctl tui
 
 <Tui
   name="overview-96"
-  label="The overview at 96 by 26: a health line with 2 of 4 slots running and 4 jobs waiting, the budget bar with jvm slot 1 at 4.05G and node slot 1 at 2.58G used, one line per slot, the four waiting jobs with why each waits, a runner starting for the oldest and every node slot busy for the rest, then the repositories and the latest jobs."
+  label="The overview at 96 by 26: a health line with 2 of 4 slots running, 4 jobs waiting and 3 insights, the budget bar with jvm slot 1 at 3.88G and node slot 1 at 2.47G used, one line per slot with a warm runner for halyard/ledger in jvm 2, the four waiting jobs with why each waits, a runner starting for the oldest and every node slot busy for the rest, then the repositories and the latest jobs."
 />
 
 Profiles take the dashboard's colours in config order, mint first and pink second. `NO_COLOR` leaves bold, dim and block glyphs. On a narrow terminal the slots become one line each and the charts, last on the page, drop out first; what does not fit a line goes as a whole figure or column, and a name that is cut ends in `…`. A wide terminal adds columns, and the charts take the rows the lists leave.
