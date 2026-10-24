@@ -35,7 +35,7 @@ const SESSION_LIFETIME: Duration = Duration::from_hours(30 * 24);
 pub const PAIRING_LIFETIME: Duration = Duration::from_mins(5);
 
 /// The most pairing codes alive at once; making another drops the oldest.
-const PAIRING_MAX: usize = 8;
+pub const PAIRING_MAX: usize = 8;
 
 /// Where the daemon serving its API on `socket` keeps the dashboard's login links, one per line: its loopback
 /// address first, then each of `[web] origins`. `runnerd.sock` → `runnerd.web`. `runnerctl web` reads it.
@@ -229,6 +229,8 @@ pub enum PairError {
     NoOrigins,
     /// The origin asked for is not one of `[web] origins`.
     NotListed(String),
+    /// The session that asked was signed out before the code was made.
+    SignedOut,
     /// No random code could be read.
     Io(io::Error),
 }
@@ -242,6 +244,7 @@ impl fmt::Display for PairError {
                  and restart runnerd",
             ),
             PairError::NotListed(origin) => write!(formatter, "{origin} is not one of [web] origins"),
+            PairError::SignedOut => formatter.write_str("this browser was signed out"),
             PairError::Io(error) => write!(formatter, "cannot make a pairing code: {error}"),
         }
     }
@@ -306,9 +309,31 @@ impl Sessions {
     }
 
     /// A link on `origin`, one of `[web] origins`, that signs one device in there within `PAIRING_LIFETIME` of
-    /// `now`.
+    /// `now`, for the daemon's owner.
     pub fn pair(&self, origin: &str, now: Instant) -> Result<String, PairError> {
+        Self::mint(&mut lock(&self.credentials), origin, now)
+    }
+
+    /// `pair` for a browser signed in with `session`, the secret its request was checked against: none once every
+    /// device was signed out since, checked under the lock that makes the code.
+    fn pair_for(
+        &self,
+        session: &SignedIn,
+        origin: &str,
+        now: Instant,
+    ) -> Result<String, PairError> {
         let mut credentials = lock(&self.credentials);
+        if !same(&session.0, &credentials.secret) {
+            return Err(PairError::SignedOut);
+        }
+        Self::mint(&mut credentials, origin, now)
+    }
+
+    fn mint(
+        credentials: &mut Credentials,
+        origin: &str,
+        now: Instant,
+    ) -> Result<String, PairError> {
         let links = credentials.links.as_ref().ok_or(PairError::DashboardOff)?;
         if links.proxies().is_empty() {
             return Err(PairError::NoOrigins);
@@ -400,6 +425,10 @@ impl Sessions {
         Some(credentials.secret.clone())
     }
 }
+
+/// The secret a request's session cookie was checked against, which the session check hands its handler.
+#[derive(Clone)]
+pub(crate) struct SignedIn(String);
 
 /// The checks of a running dashboard: its cookie's name and the origins its pages may write from.
 #[derive(Debug)]
@@ -537,6 +566,7 @@ pub(crate) struct PairRequest {
 /// `POST /pair`: a fresh one-time login link on one of `[web] origins`, as a QR code the page shows.
 pub(crate) async fn pair(
     State(auth): State<Arc<Auth>>,
+    axum::Extension(session): axum::Extension<SignedIn>,
     request: Option<axum::Json<PairRequest>>,
 ) -> Response {
     let wanted = request.map(|request| request.0.pairing).unwrap_or_default();
@@ -545,15 +575,22 @@ pub(crate) async fn pair(
     } else {
         wanted
     };
-    let markup = match auth.sessions.pair(&origin, Instant::now()) {
+    let markup = match auth.sessions.pair_for(&session, &origin, Instant::now()) {
         Ok(url) => views::config::pairing_code(&url, &origin),
+        Err(PairError::SignedOut) => {
+            return (
+                StatusCode::UNAUTHORIZED,
+                views::signed_out(SignedOut::NoSession),
+            )
+                .into_response();
+        }
         Err(error) => views::notice(&error.to_string(), views::Tone::Failed),
     };
     no_store(axum::response::Html(markup.into_string()).into_response())
 }
 
 /// Lets through the login, the assets, and requests with the session cookie, which they get again with its
-/// lifetime renewed; writes also need the dashboard's own `Origin` or a proxy's. A missing or wrong cookie is 401,
+/// lifetime renewed and hand their handler as `SignedIn`; writes also need the dashboard's own `Origin` or a proxy's. A missing or wrong cookie is 401,
 /// a foreign origin 403.
 pub(crate) async fn require_session(
     State(auth): State<Arc<Auth>>,
@@ -580,6 +617,8 @@ pub(crate) async fn require_session(
             .into_response();
     }
     let cookie = auth.cookie(request.headers(), &secret);
+    let mut request = request;
+    request.extensions_mut().insert(SignedIn(secret));
     let mut response = next.run(request).await;
     if let Some(cookie) = cookie {
         response.headers_mut().append(header::SET_COOKIE, cookie);

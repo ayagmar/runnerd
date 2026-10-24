@@ -53,6 +53,8 @@ struct Dashboard {
     addr: SocketAddr,
     dir: TempDir,
     fake: fake::Fake,
+    /// The credentials it checks, as the daemon's socket routes share them.
+    sessions: std::sync::Arc<crate::Sessions>,
 }
 
 struct Reply {
@@ -96,7 +98,7 @@ impl Dashboard {
             listener,
             socket,
             proxies,
-            sessions,
+            sessions.clone(),
             std::future::pending::<()>(),
         );
         // The login file is written before the first request is served.
@@ -106,7 +108,12 @@ impl Dashboard {
             }
             tokio::time::sleep(Duration::from_millis(10)).await;
         }
-        Dashboard { addr, dir, fake }
+        Dashboard {
+            addr,
+            dir,
+            fake,
+            sessions,
+        }
     }
 
     /// The login file's links: the loopback address's, then each proxy's.
@@ -595,6 +602,35 @@ async fn a_qr_code_from_the_config_page_signs_a_phone_in_through_the_proxy_once(
 }
 
 #[tokio::test]
+async fn a_qr_code_request_still_arriving_when_every_device_is_signed_out_gets_no_link() {
+    use tokio::io::{AsyncReadExt as _, AsyncWriteExt as _};
+
+    let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = tokio::net::TcpStream::connect(dashboard.addr)
+        .await
+        .unwrap();
+    // The headers pass the session check; the body is still on its way.
+    let head = format!(
+        "POST /pair HTTP/1.1\r\nhost: {}\r\ncookie: {cookie}\r\norigin: http://{}\r\n\
+         content-type: application/json\r\ncontent-length: 2\r\nconnection: close\r\n\r\n{{",
+        dashboard.addr, dashboard.addr
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    dashboard.sessions.sign_out_all().unwrap();
+    stream.write_all(b"}").await.unwrap();
+    let mut reply = String::new();
+    stream.read_to_string(&mut reply).await.unwrap();
+    assert!(
+        reply.starts_with("HTTP/1.1 401"),
+        "the request is signed out, not {}",
+        reply.lines().next().unwrap_or_default()
+    );
+    assert!(!reply.contains("login?code="), "and gets no link");
+}
+
+#[tokio::test]
 async fn a_qr_code_is_made_only_for_the_dashboards_own_pages() {
     let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
     let cookie = dashboard.sign_in().await;
@@ -683,6 +719,7 @@ async fn a_browser_stays_signed_in_when_the_dashboard_restarts() {
         addr,
         dir: TempDir::new(),
         fake: dashboard.fake.clone(),
+        sessions: sessions.clone(),
     };
     // A browser sends the cookie it has for the dashboard's port, which stays the same across restarts.
     let cookie = format!("runnerd-{}={secret}", addr.port());

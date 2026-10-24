@@ -25,7 +25,10 @@ signed in again after each upgrade.
   of its link on one of `[web] origins`, with a choice when there are several and a note pointing at `[web]
   origins` when there are none. `runnerctl web --qr` asks the daemon for the same over its socket
   (`POST /v1/dashboard/pairings`, the owner only), one per origin or for the one `--base` names, fresh on every run.
-  A pairing code works once, within 5 minutes, and at most 8 are alive at once, wherever they were asked for. It
+  A pairing code works once, within 5 minutes, and at most 8 are alive at once, wherever they were asked for; the
+  socket refuses to make more at once than that, before making any, and names `--base` to pick one origin. The
+  dashboard makes its code only if the secret its request was checked against is still the current one, checked
+  under the lock that makes the code: a request still arriving when every device is signed out gets 401, not a link. It
   works only on the origin it was made for: the request's `X-Forwarded-Proto` (else `http`) and
   `X-Forwarded-Host` (else `Host`), as a browser would serialize them, must name it. `tailscale serve` passes the
   browser's `Host` on and sets both forwarded headers (`ipn/ipnlocal/serve.go`, `addProxyForwardedHeaders`). The
