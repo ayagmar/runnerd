@@ -271,6 +271,38 @@ pub enum Bucket {
     Day,
 }
 
+/// `GET /v1/activity` query parameters.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ActivityQuery {
+    /// The start of the window; default 24 hours ago. It ends now.
+    pub since: Option<u64>,
+}
+
+/// `GET /v1/activity`: every job runnerd's runners started or finished in a window, by when that happened rather
+/// than when the job was queued, so a job that waited or ran long counts in the window it started or ended in.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Activity {
+    /// The start of the window.
+    pub since: u64,
+    /// When it was read: the end of the window.
+    pub until: u64,
+    /// Each job that started in the window, oldest start first.
+    pub started: Vec<Started>,
+    /// The jobs that finished in the window: completed, or lost with their runner.
+    pub finished: u64,
+    /// Of those, the ones that failed, timed out or were lost, as `GET /v1/stats` counts failures.
+    pub failed: u64,
+}
+
+/// A job that started: when, and how long it had waited since it was queued.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Started {
+    /// When it started.
+    pub at: u64,
+    /// Seconds it waited.
+    pub waited: u64,
+}
+
 /// `GET /v1/stats` query parameters.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct StatsQuery {

@@ -11,8 +11,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use runnerd_core::api::{
-    CacheHistory, CacheHistoryQuery, Caches, Event, HostSampleQuery, HostSamples, JobQuery,
-    LogQuery, Sizing, SizingQuery, StatsQuery,
+    ActivityQuery, CacheHistory, CacheHistoryQuery, Caches, Event, HostSampleQuery, HostSamples,
+    JobQuery, LogQuery, Sizing, SizingQuery, StatsQuery,
 };
 use runnerd_core::config::Config;
 use runnerd_core::observe::metrics::SAMPLE_INTERVAL;
@@ -109,6 +109,19 @@ pub(super) async fn stats(
 ) -> Response {
     match state.handle.store.stats(query, now()).await {
         Ok(rows) => Json(rows).into_response(),
+        Err(store_error) => failed(&store_error),
+    }
+}
+
+pub(super) async fn activity(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<ActivityQuery>,
+) -> Response {
+    let now = now();
+    let since = query.since.unwrap_or(now.saturating_sub(24 * 3600));
+    match state.handle.store.activity(since, now).await {
+        Ok(activity) => Json(activity).into_response(),
         Err(store_error) => failed(&store_error),
     }
 }

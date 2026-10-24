@@ -506,6 +506,31 @@ async fn finished_jobs(store: &Store, profile: &str, cap: u64, peak: u64) {
 }
 
 #[tokio::test]
+async fn activity_counts_the_jobs_started_and_ended_in_the_last_24_hours() {
+    let dir = Dir::new();
+    let daemon = start_serving(&dir.0, None, false, sync_dir, memory_max, &auto_sizing()).await;
+    // Ten jobs that waited 20 s, started 40 s ago and were lost 20 s ago.
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    let response = daemon
+        .client
+        .get("http://runnerd/v1/activity")
+        .send()
+        .await
+        .unwrap();
+    let activity: runnerd_core::api::Activity =
+        serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(activity.until - activity.since, 24 * 3600);
+    assert_eq!(activity.started.len(), 10);
+    assert!(
+        activity.started.iter().all(|job| job.waited == 20),
+        "each waited 20 s: {:?}",
+        activity.started
+    );
+    assert_eq!((activity.finished, activity.failed), (10, 10));
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_the_interval() {
     let dir = Dir::new();
     let text = auto_sizing();
@@ -1183,6 +1208,7 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/jobs/1/logs"),
         client.get("http://runnerd/v1/host/samples"),
         client.get("http://runnerd/v1/stats"),
+        client.get("http://runnerd/v1/activity"),
         client.get("http://runnerd/v1/sizing"),
         client.get("http://runnerd/v1/caches"),
         client.get("http://runnerd/v1/caches/history"),

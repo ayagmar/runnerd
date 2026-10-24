@@ -162,6 +162,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/host/samples", get(history::host_samples))
         .route("/v1/stats", get(history::stats))
         .route("/v1/sizing", get(history::sizing))
+        .route("/v1/activity", get(history::activity))
         .route("/v1/caches", get(history::caches))
         .route("/v1/caches/history", get(history::cache_history))
         .route("/v1/events", get(events::events))

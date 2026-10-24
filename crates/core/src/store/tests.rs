@@ -11,7 +11,7 @@ use super::{
     LOG_BACKLOG, LogPosition, MIGRATIONS, Measured, MirrorPosition, RunnerRecord, SampleRecord,
     Store, StoreError,
 };
-use crate::api::{Bucket, HostSample, JobQuery, JobState, StatsQuery};
+use crate::api::{Bucket, HostSample, JobQuery, JobState, Started, StatsQuery};
 use crate::github::QueuedJob;
 use crate::observe::metrics::Events;
 use crate::sizing::Measure;
@@ -224,6 +224,95 @@ async fn stats_count_a_lost_job_without_a_conclusion_as_failed() {
         .map(|row| (row.jobs, row.succeeded, row.failed, row.cancelled))
         .collect();
     assert_eq!(counts, [(1, 0, 1, 0)]);
+}
+
+#[tokio::test]
+async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_it_was_queued() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let day = 24 * 3600;
+    let since = 10 * day;
+    let ms = |secs: u64| secs * 1000;
+    store.runner_started(runner("r", ms(since - 3 * day)));
+    // Queued three days before the window, it started and was lost in it.
+    store.queued(
+        "o/r",
+        &QueuedJob {
+            created_at: ms(since - 3 * day),
+            ..queued(1)
+        },
+    );
+    store.claimed(1, 10, "r", ms(since + 60));
+    store.lost(1, ms(since + 120));
+    // Started before the window and lost in it: it finished there, it did not start there.
+    store.queued(
+        "o/r",
+        &QueuedJob {
+            created_at: ms(since - 7200),
+            ..queued(2)
+        },
+    );
+    store.claimed(2, 10, "r", ms(since - 3600));
+    store.lost(2, ms(since + 30));
+    // Lost just before the window: neither.
+    store.queued(
+        "o/r",
+        &QueuedJob {
+            created_at: ms(since - 7200),
+            ..queued(3)
+        },
+    );
+    store.claimed(3, 10, "r", ms(since - 3600));
+    store.lost(3, ms(since - 1));
+    // Succeeded in the window: finished, not failed.
+    store.queued("o/r", &queued(4));
+    store.runner_started(runner("r4", ms(since)));
+    store.claimed(4, 10, "r4", ms(since + 200));
+    store.details(crate::github::JobDetails {
+        id: 4,
+        run_id: 10,
+        run_attempt: 1,
+        name: "job 4".to_owned(),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some("success".to_owned()),
+        started_at: None,
+        // `since` + 300 s.
+        completed_at: Some("1970-01-11T00:05:00Z".to_owned()),
+        runner_name: Some("r4".to_owned()),
+        steps: Vec::new(),
+    });
+    store.runner_removed("r4", ms(since + 310));
+    // A busy day: more jobs than a page of `GET /v1/jobs` holds, each queued 10 s before it started.
+    for id in 100..700 {
+        store.queued(
+            "o/r",
+            &QueuedJob {
+                created_at: ms(since + id * 10),
+                ..queued(id)
+            },
+        );
+        store.claimed(id, 10, "r", ms(since + id * 10 + 10));
+    }
+    store.flush().await;
+    let activity = store.activity(since, since + day).await.unwrap();
+    assert_eq!(activity.started.len(), 602);
+    assert_eq!(
+        activity.started[0],
+        Started {
+            at: since + 60,
+            waited: 3 * day + 60
+        }
+    );
+    assert!(
+        activity.started[2..].iter().all(|job| job.waited == 10),
+        "each of the busy day's jobs waited 10 s"
+    );
+    assert_eq!((activity.finished, activity.failed), (3, 2));
 }
 
 #[tokio::test]

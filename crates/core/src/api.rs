@@ -53,10 +53,10 @@ pub use control::{
 };
 pub use events::{Event, EventEnvelope, EventQuery};
 pub use jobs::{
-    Bucket, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, HostSample,
-    HostSampleQuery, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState,
-    JobSummary, LogQuery, LogSummary, Sample, SampleSeries, Stats, StatsQuery, StatsRow, Step,
-    Timeline,
+    Activity, ActivityQuery, Bucket, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize,
+    CacheVolume, Caches, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics, JobPage,
+    JobQuery, JobRunner, JobState, JobSummary, LogQuery, LogSummary, Sample, SampleSeries, Started,
+    Stats, StatsQuery, StatsRow, Step, Timeline,
 };
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,

@@ -697,6 +697,11 @@ impl Store {
         Ok(samples)
     }
 
+    /// The jobs runnerd's runners started and finished from `since` until `now` (seconds).
+    pub async fn activity(&self, since: u64, now: u64) -> Result<api::Activity, StoreError> {
+        self.read(move |db| read::activity(db, since, now)).await
+    }
+
     /// Finished jobs per repository and bucket.
     pub async fn stats(&self, query: api::StatsQuery, now: u64) -> Result<api::Stats, StoreError> {
         self.read(move |db| read::stats(db, &query, now)).await

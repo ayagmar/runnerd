@@ -514,6 +514,36 @@ pub(super) fn host_samples(db: &Connection, since: u64) -> rusqlite::Result<Vec<
         .collect()
 }
 
+/// What `Store::activity` reads. Jobs another runner ran are left out: their wait is not for runnerd.
+pub(super) fn activity(db: &Connection, since: u64, now: u64) -> rusqlite::Result<api::Activity> {
+    let ms = |secs: u64| i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX);
+    let started = db
+        .prepare_cached(
+            "SELECT started_at, max(started_at - queued_at, 0) FROM jobs \
+             WHERE started_at >= ?1 AND started_at <= ?2 AND state != 'elsewhere' ORDER BY started_at",
+        )?
+        .query_map(params![ms(since), ms(now)], |row| {
+            Ok(api::Started {
+                at: secs(row.get(0)?),
+                waited: secs(row.get(1)?),
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let (finished, failed) = db.query_row(
+        "SELECT count(*), count(*) FILTER (WHERE state = 'lost' OR conclusion IN ('failure', 'timed_out')) \
+         FROM jobs WHERE finished_at >= ?1 AND finished_at <= ?2 AND state IN ('completed', 'lost')",
+        params![ms(since), ms(now)],
+        |row| Ok((row.get(0)?, row.get(1)?)),
+    )?;
+    Ok(api::Activity {
+        since,
+        until: now,
+        started,
+        finished,
+        failed,
+    })
+}
+
 pub(super) fn stats(
     db: &Connection,
     query: &api::StatsQuery,

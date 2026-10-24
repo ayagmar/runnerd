@@ -144,6 +144,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `GET /v1/jobs/{id}/logs?from=&follow=` | its log as text; with `follow=true`, open until the job's record is final |
 | `GET /v1/host/samples?since=` | the slice's CPU and memory, the last 24 hours at most |
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`), 744 buckets back at most: counts, queue and run time, CPU, memory, mirror bytes |
+| `GET /v1/activity?since=` | every job runnerd's runners started or finished from `since` (default 24 hours ago) until now, by when it started or ended rather than when it was queued: each start with how long the job waited, and how many finished and failed |
 | `GET /v1/sizing?since=` | per configured profile and per job (repository, workflow, name): percentiles of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../admission/#sizing) for `memory` and `slots`; whether [auto sizing](../admission/#auto-sizing) is on, the changes it made, and while on what its next look would change, which profiles a recent change holds, and why no look writes anything when the file on disk was edited since runnerd read it; the last 30 days by default |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
 | `GET /v1/records` | every record of a failed job, oldest first, with the limits and the jobs whose record has a shell open |
