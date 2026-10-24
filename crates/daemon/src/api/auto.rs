@@ -86,7 +86,7 @@ async fn look(state: &AppState, refused: &mut BTreeMap<String, String>) {
         memory_max: read.memory_max,
         cpus: read.cpus,
         window: read.window,
-        last: &auto.last,
+        last: &read.last,
         running: &read.running,
     };
     for change in changes(&config, &read.history, context) {
@@ -102,6 +102,8 @@ struct Read {
     history: History,
     memory_max: Option<u64>,
     cpus: Option<u64>,
+    /// When each profile last changed, read after `history`.
+    last: BTreeMap<String, u64>,
     running: BTreeMap<String, u32>,
 }
 
@@ -118,6 +120,7 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
         .sizing(window.since)
         .await
         .map_err(history_error)?;
+    let last = last_changes(state).await.map_err(history_error)?;
     let (read, slice) = (state.memory_max, config.host.slice.clone());
     let memory_max = tokio::task::spawn_blocking(move || read(&slice))
         .await
@@ -129,8 +132,16 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
         history,
         memory_max,
         cpus: slice_cpus(state, config).await,
+        last,
         running: running(state),
     })
+}
+
+/// When auto sizing last changed each profile, pending changes included. Read after the history it sizes from, never
+/// before: a change recorded between the two reads would otherwise be missing from the holds while the runs after it,
+/// which the history has, ask for another, and a profile would be changed twice in one interval.
+async fn last_changes(state: &AppState) -> Result<BTreeMap<String, u64>, StoreError> {
+    Ok(state.handle.store.auto_sizing().await?.last)
 }
 
 /// The slice's CPUs, in millicores; `None` when they cannot be read, which only keeps auto sizing from raising
@@ -189,12 +200,6 @@ pub(super) async fn plan(
     }
     let history_error =
         |store_error: StoreError| format!("cannot read the job history: {store_error}");
-    let auto = state
-        .handle
-        .store
-        .auto_sizing()
-        .await
-        .map_err(history_error)?;
     let window = Window::new(None, now());
     let history = state
         .handle
@@ -202,20 +207,20 @@ pub(super) async fn plan(
         .sizing(window.since)
         .await
         .map_err(history_error)?;
+    let last = last_changes(state).await.map_err(history_error)?;
     let running = running(state);
     let blocked = on_disk(&*state.config.lock().await).err();
     let context = Context {
         memory_max,
         cpus: slice_cpus(state, config).await,
         window,
-        last: &auto.last,
+        last: &last,
         running: &running,
     };
     let interval = config.sizing.interval.as_secs();
     let raise_interval = config.sizing.raise_after().as_secs();
     let at = window.now / 1000;
-    let mut held: Vec<SizingHold> = auto
-        .last
+    let mut held: Vec<SizingHold> = last
         .iter()
         .filter(|(profile, _)| config.profiles.contains_key(*profile))
         .map(|(profile, changed)| SizingHold {
