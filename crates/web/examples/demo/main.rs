@@ -1,7 +1,7 @@
 //! The dashboard against made-up data, for working on its design: `cargo run -p runnerd-web --example demo -- DIR
 //! [ADDR [ORIGIN...]]` serves a fake daemon's socket in DIR and the dashboard on ADDR (default 127.0.0.1:7478),
 //! taking writes from each ORIGIN as from `[web] origins` too, and sends a sample of each running job and of the
-//! slice every 2 seconds, and a log line every second. Open the URL in `DIR/runnerd.web`.
+//! slice every 2 seconds, and a log line every second. Open the first link in `DIR/runnerd.web`.
 
 #![allow(
     clippy::unwrap_used,
@@ -36,14 +36,16 @@ async fn main() {
     let fake = fake::Fake::new(fake::Fixtures::new(now()));
     fake::serve(&socket, fake.clone());
     let listener = runnerd_web::listen(&addr).await.unwrap().unwrap();
+    let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
     let web = runnerd_web::spawn(
         listener,
         socket.clone(),
         proxies,
+        sessions,
         std::future::pending::<()>(),
     );
     println!(
-        "login URL in {}",
+        "login links in {}",
         runnerd_web::login_file(&socket).display()
     );
     let mut tick = tokio::time::interval(Duration::from_secs(1));

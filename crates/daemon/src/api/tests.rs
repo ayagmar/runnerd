@@ -10,8 +10,8 @@ use futures_util::StreamExt;
 use reqwest::StatusCode;
 use runnerd_core::api::{
     Advice, Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
-    HostSamples, JobState, Paused, ProfileStatus, Records, RemovedRecords, Resize, RunningJob,
-    Sizing, SizingChange, Status,
+    HostSamples, JobState, Pairings, Paused, ProfileStatus, Records, RemovedRecords, Resize,
+    RunningJob, Sizing, SizingChange, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::docker::Tty;
@@ -207,6 +207,8 @@ struct Daemon {
     closed: mpsc::UnboundedReceiver<String>,
     stop: oneshot::Sender<()>,
     served: tokio::task::JoinHandle<()>,
+    /// The dashboard's credentials, which a test's dashboard shares.
+    sessions: Arc<runnerd_web::Sessions>,
 }
 
 impl Daemon {
@@ -291,6 +293,8 @@ async fn start_serving(
         sync_dir,
         auto_every: Duration::from_millis(20),
     };
+    let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
+    let sessions_kept = sessions.clone();
     let listener = bind(&socket).await.unwrap();
     let mode = std::fs::metadata(&socket).unwrap();
     assert_eq!(
@@ -304,8 +308,8 @@ async fn start_serving(
     let served = tokio::spawn(async move {
         let _sender = sender;
         match owner {
-            Some(owner) => serve_for(listener, handle, source, owner, stopped).await,
-            None => serve(listener, handle, source, stopped).await,
+            Some(owner) => serve_for(listener, handle, source, sessions, owner, stopped).await,
+            None => serve(listener, handle, source, sessions, stopped).await,
         }
         .unwrap();
     });
@@ -323,6 +327,7 @@ async fn start_serving(
         closed,
         stop,
         served,
+        sessions: sessions_kept,
     }
 }
 
@@ -957,6 +962,171 @@ async fn shutdown_is_graceful_unless_forced() {
 }
 
 #[tokio::test]
+async fn signing_every_browser_out_replaces_the_dashboards_session_secret() {
+    let (client, _control, dir) = daemon().await;
+    let file = dir.0.join("dashboard-session");
+    let before = std::fs::read_to_string(&file).unwrap();
+    let response = client
+        .post("http://runnerd/v1/dashboard/sign-out")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NO_CONTENT);
+    let after = std::fs::read_to_string(&file).unwrap();
+    assert!(before != after, "the old secret no longer signs in");
+}
+
+/// Opens `link` on the dashboard at `addr` as a browser at `origin` does through a proxy, and returns the status.
+async fn open_link(addr: std::net::SocketAddr, link: &str, origin: &str) -> StatusCode {
+    let path = &link[link.find("/login?").unwrap()..];
+    let host = origin.split_once("://").unwrap().1;
+    reqwest::Client::builder()
+        .redirect(reqwest::redirect::Policy::none())
+        .build()
+        .unwrap()
+        .get(format!("http://{addr}{path}"))
+        .header("host", host)
+        .header("x-forwarded-proto", origin.split_once("://").unwrap().0)
+        .send()
+        .await
+        .unwrap()
+        .status()
+}
+
+#[tokio::test]
+async fn pairing_links_from_the_socket_are_fresh_and_sign_one_device_in_on_their_origin_only() {
+    const PROXY: &str = "https://forge.example.ts.net:8443";
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    let pair = |query: &'static str| {
+        daemon
+            .client
+            .post(format!("http://runnerd/v1/dashboard/pairings{query}"))
+            .send()
+    };
+    let off = pair("").await.unwrap();
+    assert_eq!(off.status(), StatusCode::CONFLICT, "no dashboard runs yet");
+    let addr = dashboard_for(&dir.0, &daemon, &[PROXY.to_owned()]).await;
+    let mut links = Vec::new();
+    for _ in 0..2 {
+        let reply = pair("").await.unwrap();
+        assert_eq!(reply.status(), StatusCode::OK);
+        let pairings: Pairings = serde_json::from_slice(&body(reply).await).unwrap();
+        assert_eq!(pairings.links.len(), 1, "one per origin");
+        assert_eq!(pairings.links[0].origin, PROXY);
+        assert_eq!(pairings.links[0].lifetime, 300);
+        links.push(pairings.links[0].url.clone());
+    }
+    assert_ne!(links[0], links[1], "each request makes a new code");
+    for elsewhere in [&format!("http://{addr}"), "https://forge.lan"] {
+        assert_eq!(
+            open_link(addr, &links[0], elsewhere).await,
+            StatusCode::UNAUTHORIZED,
+            "not on {elsewhere}"
+        );
+    }
+    assert_eq!(
+        open_link(addr, &links[0], PROXY).await,
+        StatusCode::SEE_OTHER
+    );
+    assert_eq!(
+        open_link(addr, &links[0], PROXY).await,
+        StatusCode::UNAUTHORIZED,
+        "once only"
+    );
+    daemon
+        .client
+        .post("http://runnerd/v1/dashboard/sign-out")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(
+        open_link(addr, &links[1], PROXY).await,
+        StatusCode::UNAUTHORIZED,
+        "a link made before signing every device out no longer works"
+    );
+    let unlisted = pair("?origin=https%3A%2F%2Fother.example").await.unwrap();
+    assert_eq!(unlisted.status(), StatusCode::BAD_REQUEST);
+}
+
+/// A dashboard sharing `daemon`'s credentials, taking writes from `proxies`; its address.
+async fn dashboard_for(dir: &Path, daemon: &Daemon, proxies: &[String]) -> std::net::SocketAddr {
+    let listener = runnerd_web::listen("127.0.0.1:0").await.unwrap().unwrap();
+    let addr = listener.local_addr().unwrap();
+    runnerd_web::spawn(
+        listener,
+        dir.join("runnerd.sock"),
+        proxies
+            .iter()
+            .map(|origin| origin.parse().unwrap())
+            .collect(),
+        daemon.sessions.clone(),
+        std::future::pending::<()>(),
+    );
+    for _ in 0..100 {
+        if runnerd_web::login_file(&dir.join("runnerd.sock")).exists() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    addr
+}
+
+#[tokio::test]
+async fn as_many_origins_as_live_codes_each_get_a_link_that_works_and_more_get_none() {
+    let origins = |count: usize| -> Vec<String> {
+        (1..=count)
+            .map(|n| format!("https://forge-{n}.example.ts.net:8443"))
+            .collect()
+    };
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    let addr = dashboard_for(&dir.0, &daemon, &origins(8)).await;
+    let reply = daemon
+        .client
+        .post("http://runnerd/v1/dashboard/pairings")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::OK);
+    let pairings: Pairings = serde_json::from_slice(&body(reply).await).unwrap();
+    assert_eq!(pairings.links.len(), 8);
+    for link in &pairings.links {
+        assert_eq!(
+            open_link(addr, &link.url, &link.origin).await,
+            StatusCode::SEE_OTHER,
+            "the link on {} works",
+            link.origin
+        );
+    }
+
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    let addr = dashboard_for(&dir.0, &daemon, &origins(9)).await;
+    let one = daemon
+        .client
+        .post("http://runnerd/v1/dashboard/pairings?origin=https%3A%2F%2Fforge-1.example.ts.net%3A8443")
+        .send()
+        .await
+        .unwrap();
+    let one: Pairings = serde_json::from_slice(&body(one).await).unwrap();
+    let reply = daemon
+        .client
+        .post("http://runnerd/v1/dashboard/pairings")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(reply.status(), StatusCode::CONFLICT);
+    let message = String::from_utf8(body(reply).await).unwrap();
+    assert!(message.contains("--base"), "{message}");
+    assert_eq!(
+        open_link(addr, &one.links[0].url, &one.links[0].origin).await,
+        StatusCode::SEE_OTHER,
+        "the refused batch made no code that pushed out one made before"
+    );
+}
+
+#[tokio::test]
 async fn every_route_refuses_other_users() {
     let me = std::os::unix::fs::MetadataExt::uid(&std::fs::metadata("/proc/self").unwrap());
     let (client, control, _dir) = daemon_for(Some(me + 1)).await;
@@ -965,6 +1135,8 @@ async fn every_route_refuses_other_users() {
         client.post("http://runnerd/v1/repositories/o/app/pause"),
         client.post("http://runnerd/v1/repositories/o/app/resume"),
         client.post("http://runnerd/v1/shutdown"),
+        client.post("http://runnerd/v1/dashboard/sign-out"),
+        client.post("http://runnerd/v1/dashboard/pairings"),
         client.get("http://runnerd/v1/jobs"),
         client.get("http://runnerd/v1/jobs/1"),
         client.get("http://runnerd/v1/jobs/1/samples"),

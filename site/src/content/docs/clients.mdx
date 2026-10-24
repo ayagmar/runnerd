@@ -10,17 +10,23 @@ Output and screenshots here come from the dashboard's demo daemon, whose made-up
 
 ## Dashboard
 
-`runnerd serve` serves it on `127.0.0.1:7477`; `--web <address>` picks another loopback address, `--web off` serves none. Each browser logs in once, through a one-time URL the daemon keeps in `$XDG_RUNTIME_DIR/runnerd.web`:
+`runnerd serve` serves it on `127.0.0.1:7477`; `--web <address>` picks another loopback address, `--web off` serves none. Each browser signs in once, through a one-time link the daemon keeps in `$XDG_RUNTIME_DIR/runnerd.web`:
 
 ```sh
 runnerctl web
 # without runnerctl
-xdg-open "$(cat "$XDG_RUNTIME_DIR/runnerd.web")"
+xdg-open "$(head -n 1 "$XDG_RUNTIME_DIR/runnerd.web")"
+```
+
+A browser stays signed in for 30 days after its last visit, across restarts of runnerd and of the browser. The session secret is in `dashboard-session` beside the job history (`~/.local/state/runnerd/`), readable by you only. The directory must be one other users cannot write. To sign every browser out, this one included, and end every link and QR code made before:
+
+```sh
+runnerctl web --sign-out-all
 ```
 
 Pages update as things happen, over one server-sent event stream per page. Memory and CPU are sampled every 2 s, so a shorter peak does not show; the dashboard calls them sampled peaks.
 
-Any local user can reach the port, so every page needs the session cookie the login URL sets, and writes such as a pause also need the dashboard's own `Origin`, so another site the browser has open cannot send them. The pages load nothing from elsewhere: the Datastar script and the font are in the binary.
+Any local user can reach the port, so every page needs the session cookie a login link sets, and writes such as a pause also need the dashboard's own `Origin`, so another site the browser has open cannot send them. The pages load nothing from elsewhere: the Datastar script and the font are in the binary.
 
 ### From another device
 
@@ -37,13 +43,15 @@ Then add the proxy's address to [`[web] origins`](../configuration/#web) in `run
 origins = ["https://forge.tail0b5e.ts.net:8443"]
 ```
 
-The login URL names the loopback address. `--base` prints it for the proxy instead; open what it prints on the other device:
+Now `runnerctl web` prints a one-time link for each address in `[web] origins` too, after opening the dashboard here. To sign a phone in, scan a QR code: open **Config** in the dashboard on this computer and choose **Show a QR code** under **Add a device**, or print one in the terminal:
 
 ```sh
-runnerctl web --no-open --base https://forge.tail0b5e.ts.net:8443
+runnerctl web --qr
 ```
 
-Each link works once and signs in one browser. Behind a proxy that says it took the request over HTTPS (`X-Forwarded-Proto`, which `tailscale serve` sends), the session cookie is `Secure`. Anyone who can reach the proxy sees the sign-in page and nothing else without a link.
+A QR code works once, within 5 minutes, and only on the address it shows; each one is new. A link from `runnerctl web` works once, and the daemon writes a new one in its place. Each address has its own link, so using one leaves the others working. `--base <origin>` prints the link for a proxy not in `[web] origins`, which can then only read. Behind a proxy that says it took the request over HTTPS (`X-Forwarded-Proto`, which `tailscale serve` sends), the session cookie is `Secure`. Anyone who can reach the proxy sees the sign-in page and nothing else without a link.
+
+runnerd does not trust Tailscale's identity headers such as `Tailscale-User-Login`: any local user could send them straight to `127.0.0.1:7477`.
 
 ### Install it as an app
 
@@ -130,7 +138,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
-| `runnerctl web` | opens the dashboard with the one-time login URL from `$XDG_RUNTIME_DIR/runnerd.web` (`--no-open` prints it) |
+| `runnerctl web` | opens the dashboard with a one-time login link from `$XDG_RUNTIME_DIR/runnerd.web` and prints one for each of `[web] origins` (`--no-open` prints them all, `--qr` shows a fresh 5-minute link on each origin as a QR code, `--sign-out-all` signs every browser out) |
 
 ### Sizing
 

@@ -22,9 +22,9 @@ use axum::routing::{delete, get, post};
 use runnerd_core::api::{
     Advice, Budget, Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse,
     Event, EventEnvelope, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary, LogSummary,
-    Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record, RecordLimits, Records,
-    RemovedRecords, RepositoryStatus, Resize, RunnerStatus, RunningJob, Sizing, SizingChange,
-    SlotStatus, Spread, Status, Timeline,
+    Pairing, Pairings, Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record,
+    RecordLimits, Records, RemovedRecords, RepositoryStatus, Resize, RunnerStatus, RunningJob,
+    Sizing, SizingChange, SlotStatus, Spread, Status, Timeline,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -438,6 +438,33 @@ async fn events(State(fake): State<Shared>, headers: HeaderMap) -> Response {
     ([(header::CONTENT_TYPE, "text/event-stream")], body).into_response()
 }
 
+/// Fresh links on each of two `[web] origins`, or on the one asked for.
+async fn pairings(RawQuery(query): RawQuery) -> Response {
+    static MADE: AtomicU32 = AtomicU32::new(0);
+    let origins = match query.as_deref() {
+        None => vec!["https://forge.example.ts.net:8443", "https://forge.lan"],
+        Some("origin=https%3A%2F%2Fforge.lan") => vec!["https://forge.lan"],
+        Some(_) => {
+            return refuse(
+                StatusCode::BAD_REQUEST,
+                "https://other.example is not one of [web] origins",
+            );
+        }
+    };
+    let links = origins
+        .into_iter()
+        .map(|origin| Pairing {
+            origin: origin.to_owned(),
+            url: format!(
+                "{origin}/login?code={:064x}",
+                MADE.fetch_add(1, Ordering::Relaxed)
+            ),
+            lifetime: 300,
+        })
+        .collect();
+    axum::Json(Pairings { links }).into_response()
+}
+
 /// Serves the fake daemon on `socket` until the test process ends.
 fn serve(socket: &Path) -> Shared {
     let fake = Shared::default();
@@ -460,6 +487,7 @@ fn serve(socket: &Path) -> Shared {
         .route("/v1/records", get(get_records))
         .route("/v1/records", delete(remove_records))
         .route("/v1/records/{job}", delete(remove_record))
+        .route("/v1/dashboard/pairings", post(pairings))
         .route(
             "/v1/records/{job}/shell",
             post(async || {
@@ -870,6 +898,74 @@ fn web_prints_the_login_url_the_daemon_wrote_next_to_its_socket() {
     let output = runnerctl(&socket, &["web", "--no-open"]);
     assert!(output.status.success(), "{}", stderr(&output));
     assert_eq!(stdout(&output), format!("{url}\n"));
+}
+
+const LOGIN_LINKS: &str = "http://127.0.0.1:7477/login?code=aa\n\
+                           https://forge.example.ts.net:8443/login?code=bb\n\
+                           https://forge.lan/login?code=cc\n";
+
+#[test]
+fn web_prints_its_own_link_and_one_for_each_configured_proxy() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    std::fs::write(dir.0.join("runnerd.web"), LOGIN_LINKS).unwrap();
+    let output = runnerctl(&socket, &["web", "--no-open"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert_eq!(stdout(&output), LOGIN_LINKS);
+    // A proxy in `[web] origins` gets its own link; any other the loopback one's code.
+    for (base, link) in [
+        ("https://forge.lan", "https://forge.lan/login?code=cc"),
+        (
+            "https://other.example",
+            "https://other.example/login?code=aa",
+        ),
+    ] {
+        let output = runnerctl(&socket, &["web", "--no-open", "--base", base]);
+        assert_eq!(stdout(&output), format!("{link}\n"), "--base {base}");
+    }
+}
+
+#[test]
+fn web_qr_shows_a_fresh_code_for_each_proxy_each_time_and_relays_a_refusal() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let first = runnerctl(&socket, &["web", "--qr"]);
+    assert!(first.status.success(), "{}", stderr(&first));
+    let shown = stdout(&first);
+    for origin in ["https://forge.example.ts.net:8443", "https://forge.lan"] {
+        assert!(
+            shown.contains(&format!(
+                "on {origin}, within 5 minutes: {origin}/login?code="
+            )),
+            "{shown}"
+        );
+    }
+    assert!(shown.contains('█'), "QR codes:\n{shown}");
+    let again = stdout(&runnerctl(&socket, &["web", "--qr"]));
+    let links = |text: &str| -> Vec<String> {
+        text.lines()
+            .filter_map(|line| line.split_once(": ").map(|(_, link)| link.to_owned()))
+            .collect()
+    };
+    assert!(
+        links(&shown)
+            .iter()
+            .all(|link| !links(&again).contains(link)),
+        "each run shows new codes"
+    );
+    let one = stdout(&runnerctl(
+        &socket,
+        &["web", "--qr", "--base", "https://forge.lan"],
+    ));
+    assert_eq!(links(&one).len(), 1, "{one}");
+    let refused = runnerctl(&socket, &["web", "--qr", "--base", "https://other.example"]);
+    assert!(!refused.status.success(), "an unlisted origin gets no link");
+    assert!(
+        stderr(&refused).contains("is not one of [web] origins"),
+        "{}",
+        stderr(&refused)
+    );
 }
 
 #[test]

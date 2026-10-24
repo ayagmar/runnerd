@@ -20,6 +20,9 @@ impl Dir {
             std::env::temp_dir().join(format!("runnerd-test-daemon-{}-{n}", std::process::id()));
         let _ = std::fs::remove_dir_all(&path);
         std::fs::create_dir_all(&path).unwrap();
+        // Only this user may write to it, as the dashboard's session secret needs.
+        std::fs::set_permissions(&path, std::os::unix::fs::PermissionsExt::from_mode(0o700))
+            .unwrap();
         Dir(path)
     }
 }

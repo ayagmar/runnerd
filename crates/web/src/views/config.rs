@@ -1,9 +1,12 @@
 //! `/config`: the daemon's `runnerd.toml` in an editor, checked against the slice's `MemoryMax` as it is typed and
 //! drawn as the budget it asks for; saving writes it and has the daemon reload it. From the sizing page, the editor
 //! starts with a profile's advised memory and slots in the file, or those an auto sizing change replaced,
-//! unsaved. Also the doctor's checks.
+//! unsaved. Also the doctor's checks, and a QR code that signs another device in.
+
+use std::fmt::Write as _;
 
 use maud::{Markup, html};
+use qrcode::QrCode;
 use runnerd_core::api::{Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, Resize, Sizing};
 use runnerd_core::client::{Client, ClientError};
 use runnerd_core::config::{ByteSize, Config, resize_profile};
@@ -136,8 +139,8 @@ fn quoted(revision: &str) -> Option<String> {
         .then(|| format!("'{revision}'"))
 }
 
-/// The whole page.
-pub(crate) fn render(view: &ConfigView) -> Markup {
+/// The whole page; `proxies` are `[web] origins`, where another device can be signed in.
+pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
     let main = html! {
         div.section-head.page-head {
             h1.visually-hidden { "Config" }
@@ -178,6 +181,7 @@ pub(crate) fn render(view: &ConfigView) -> Markup {
                     None => {}
                 }
                 (result(&view.check, &view.text, &Outcome::Checked))
+                (devices(proxies))
                 (doctor(&view.doctor))
             }
         }
@@ -290,6 +294,74 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
 
 fn path_unchanged() -> &'static str {
     "The file is as it was, and runnerd runs with the config it had."
+}
+
+/// Signing a phone or another computer in: a QR code of a one-time login link on one of `proxies`.
+fn devices(proxies: &[String]) -> Markup {
+    html! {
+        section.devices aria-labelledby="devices-title" {
+            h2 #devices-title { "Add a device" }
+            @if proxies.is_empty() {
+                p.muted {
+                    "To sign a phone in, list the address it reaches this dashboard on, such as your "
+                    code { "tailscale serve" } " URL, in " code { "[web] origins" } " and restart runnerd."
+                }
+            } @else {
+                p { "Scan a QR code with the phone's camera to sign it in. The code works once, for 5 minutes." }
+                @if let [_, _, ..] = proxies {
+                    label for="pairing" { "Sign in on" }
+                    select #pairing data-bind:pairing="" {
+                        @for proxy in proxies { option value=(proxy) { (proxy) } }
+                    }
+                }
+                div #pairing-code {
+                    button.button type="button" data-on:click="@post('/pair')" { "Show a QR code" }
+                }
+            }
+        }
+    }
+}
+
+/// The QR code of `url`, a one-time login link on `origin`, in place of the button that asked for it.
+pub(crate) fn pairing_code(url: &str, origin: &str) -> Markup {
+    html! {
+        div #pairing-code {
+            figure.qr {
+                (qr_svg(url))
+                figcaption { "Signs one device in on " code { (origin) } " within 5 minutes." }
+            }
+            details.pairing-link {
+                summary { "Show the link" }
+                code { (url) }
+            }
+            button.button-quiet type="button" data-on:click="@post('/pair')" { "Show a new code" }
+        }
+    }
+}
+
+/// `text` as a QR code in SVG: dark modules on white with the four-module quiet zone, whatever the theme, since
+/// cameras read dark on light best.
+fn qr_svg(text: &str) -> Markup {
+    let Ok(code) = QrCode::new(text.as_bytes()) else {
+        return html! { p { "This link is too long for a QR code." } };
+    };
+    let width = code.width();
+    let path = code
+        .to_colors()
+        .iter()
+        .enumerate()
+        .filter(|(_, color)| **color == qrcode::Color::Dark)
+        .fold(String::new(), |mut path, (index, _)| {
+            let _ = write!(path, "M{},{}h1v1h-1z", index % width + 4, index / width + 4);
+            path
+        });
+    let size = width + 8;
+    html! {
+        svg.qr-code viewBox=(format!("0 0 {size} {size}")) role="img" aria-label="QR code of a one-time sign-in link" {
+            rect width=(size) height=(size) fill="#fff" {}
+            path d=(path) fill="#000" shape-rendering="crispEdges" {}
+        }
+    }
 }
 
 /// The doctor's checks for the config the daemon runs with.

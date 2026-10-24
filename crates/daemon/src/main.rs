@@ -11,7 +11,7 @@ use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
-use runnerd_core::scheduler::engine::{Engine, HostIdentity, RunningJobs, Setup};
+use runnerd_core::scheduler::engine::{Control, Engine, HostIdentity, RunningJobs, Setup};
 use runnerd_core::store::{Announced, Store};
 use tracing::{info, warn};
 
@@ -363,9 +363,12 @@ struct History {
     announced: Announced,
     /// The repositories recorded paused.
     paused: Vec<String>,
+    /// The dashboard's session secret, kept beside it.
+    sessions: std::sync::Arc<runnerd_web::Sessions>,
 }
 
-/// The job history, the profiles and repositories its events last announced and the ones recorded paused.
+/// The job history, the profiles and repositories its events last announced and the ones recorded paused, and the
+/// dashboard's session secret beside it.
 fn open_history(config: &Config) -> Result<History, ExitCode> {
     let database = config
         .history
@@ -392,10 +395,18 @@ fn open_history(config: &Config) -> Result<History, ExitCode> {
             database.display()
         ))
     })?;
+    let session_file = runnerd_web::session_file(&database);
+    let sessions = runnerd_web::Sessions::open(session_file.clone()).map_err(|error| {
+        fail(&format_args!(
+            "cannot read or write the dashboard's session secret {}: {error}",
+            session_file.display()
+        ))
+    })?;
     Ok(History {
         store,
         announced,
         paused,
+        sessions,
     })
 }
 
@@ -446,6 +457,7 @@ async fn serve(
         store,
         announced,
         paused,
+        sessions,
     } = open_history(&config)?;
     let socket = socket_or_default(socket)?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
@@ -468,23 +480,7 @@ async fn serve(
             paths: Paths::default(),
         },
     );
-    let control = handle.control.clone();
-    tokio::spawn(async move {
-        for jobs in [RunningJobs::Keep, RunningJobs::Kill] {
-            if wait_for_signal().await.is_err() {
-                return;
-            }
-            info!(
-                "{}",
-                if jobs == RunningJobs::Kill {
-                    "killing running jobs"
-                } else {
-                    "stopping once running jobs finish; signal again to kill them"
-                }
-            );
-            control.shutdown(jobs);
-        }
-    });
+    tokio::spawn(shut_down_on_signals(handle.control.clone()));
     info!("serving the API on {}", socket.display());
     let engine = tokio::spawn(engine.run());
     let (stopped, stop) = tokio::sync::oneshot::channel::<()>();
@@ -496,12 +492,18 @@ async fn serve(
         sync_dir: api::sync_dir,
         auto_every: api::AUTO_SIZING_EVERY,
     };
-    let server = tokio::spawn(api::serve(listener, handle, config, async {
-        let _ = stop.await;
-    }));
+    let server = tokio::spawn(api::serve(
+        listener,
+        handle,
+        config,
+        sessions.clone(),
+        async {
+            let _ = stop.await;
+        },
+    ));
     let (web_stopped, web_stop) = tokio::sync::oneshot::channel::<()>();
     let web = web_listener
-        .map(|listener| runnerd_web::spawn(listener, socket.clone(), proxies, web_stop));
+        .map(|listener| runnerd_web::spawn(listener, socket.clone(), proxies, sessions, web_stop));
     let engine_done = engine.await;
     let _ = web_stopped.send(());
     let _ = stopped.send(());
@@ -517,6 +519,24 @@ async fn serve(
         .map_err(|error| fail(&error))?
         .map_err(|error| fail(&error))?;
     Ok(ExitCode::SUCCESS)
+}
+
+/// Stops the engine on SIGTERM or SIGINT once running jobs finish, and kills them on a second.
+async fn shut_down_on_signals(control: std::sync::Arc<Control>) {
+    for jobs in [RunningJobs::Keep, RunningJobs::Kill] {
+        if wait_for_signal().await.is_err() {
+            return;
+        }
+        info!(
+            "{}",
+            if jobs == RunningJobs::Kill {
+                "killing running jobs"
+            } else {
+                "stopping once running jobs finish; signal again to kill them"
+            }
+        );
+        control.shutdown(jobs);
+    }
 }
 
 /// Waits for SIGTERM or SIGINT.

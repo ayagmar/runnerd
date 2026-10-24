@@ -16,6 +16,7 @@ path = "src/main.rs"
 
 [dependencies]
 clap.workspace = true
+qrcode.workspace = true
 ratatui = { workspace = true, optional = true }
 runnerd-core = { workspace = true, features = ["client"] }
 rustix = { workspace = true, features = ["process", "termios"] }

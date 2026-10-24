@@ -1,8 +1,10 @@
 //! Serves `runnerd_core::api` on the local Unix socket. Owns routing, the socket file and authentication: every
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
-//! no scheduling state of its own and never returns secrets. History reads are in `history`, the event stream in
+//! no scheduling state of its own and returns no secret but a pairing link. History reads are in `history`, the event stream in
 //! `events`, pause, resume, reseed, cache clean, the config file and the doctor in `control`, records and the shells
-//! in them in `records`. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path.
+//! in them in `records`. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path. Signing
+//! every browser out of the dashboard and making its pairing links go through `runnerd_web::Sessions`, which owns
+//! them; a pairing link is the one secret the API returns, to the owner only.
 
 use std::io;
 use std::os::unix::fs::{MetadataExt, PermissionsExt};
@@ -10,16 +12,19 @@ use std::path::{Path, PathBuf};
 use std::sync::Arc;
 
 use axum::extract::connect_info::Connected;
-use axum::extract::{ConnectInfo, FromRequestParts, State};
+use axum::extract::{ConnectInfo, FromRequestParts, Query, State};
 use axum::http::StatusCode;
 use axum::http::request::Parts;
 use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post, put};
 use axum::serve::IncomingStream;
 use axum::{Json, Router};
-use runnerd_core::api::{ErrorResponse, Principal, ShutdownRequest, Status};
+use runnerd_core::api::{
+    ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownRequest, Status,
+};
 use runnerd_core::config::ByteSize;
 use runnerd_core::scheduler::engine::{Handle, RunningJobs};
+use runnerd_web::{PAIRING_LIFETIME, PAIRING_MAX, PairError, Sessions};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
 use tracing::info;
@@ -92,6 +97,8 @@ struct AppState {
     memory_max: MemoryMax,
     cpus: SliceCpus,
     sync_dir: SyncDir,
+    /// The dashboard's session secret.
+    sessions: Arc<Sessions>,
 }
 
 /// The authenticated sender of a request.
@@ -146,6 +153,8 @@ fn router(state: AppState) -> Router {
         .route("/v1/config/check", post(control::check_config))
         .route("/v1/doctor", get(control::doctor))
         .route("/v1/shutdown", post(shutdown))
+        .route("/v1/dashboard/sign-out", post(sign_out_dashboard))
+        .route("/v1/dashboard/pairings", post(pair_dashboard))
         .route("/v1/jobs", get(history::jobs))
         .route("/v1/jobs/{id}", get(history::job))
         .route("/v1/jobs/{id}/samples", get(history::samples))
@@ -186,6 +195,76 @@ async fn shutdown(
     StatusCode::ACCEPTED
 }
 
+/// `POST /v1/dashboard/sign-out`: signs every browser out of the dashboard, with a new session secret.
+async fn sign_out_dashboard(
+    Authenticated(principal): Authenticated,
+    State(state): State<AppState>,
+) -> Response {
+    match state.sessions.sign_out_all() {
+        Ok(()) => {
+            info!("every browser signed out of the dashboard by {principal:?}");
+            StatusCode::NO_CONTENT.into_response()
+        }
+        Err(failure) => error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            &format!("cannot write a new dashboard session secret: {failure}"),
+        ),
+    }
+}
+
+/// `POST /v1/dashboard/pairings?origin=`: a fresh link on `origin`, or on each of `[web] origins`, that signs one
+/// device in there within 5 minutes, as `runnerctl web --qr` shows. More origins than codes may be alive at once is
+/// refused, so every link returned works.
+async fn pair_dashboard(
+    Authenticated(principal): Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<PairingQuery>,
+) -> Response {
+    let refused = |failure: &PairError| {
+        let status = match failure {
+            PairError::DashboardOff | PairError::NoOrigins => StatusCode::CONFLICT,
+            PairError::NotListed(_) => StatusCode::BAD_REQUEST,
+            PairError::SignedOut => StatusCode::UNAUTHORIZED,
+            PairError::Io(_) => StatusCode::INTERNAL_SERVER_ERROR,
+        };
+        error(status, &failure.to_string())
+    };
+    let origins = match (query.origin, state.sessions.origins()) {
+        (Some(origin), _) => vec![origin],
+        (None, None) => return refused(&PairError::DashboardOff),
+        (None, Some(origins)) if origins.is_empty() => return refused(&PairError::NoOrigins),
+        (None, Some(origins)) => origins,
+    };
+    // Each new code would drop the oldest beyond the cap: refuse before making any rather than return dead links.
+    if origins.len() > PAIRING_MAX {
+        return error(
+            StatusCode::CONFLICT,
+            &format!(
+                "[web] origins lists {} addresses, more than the {PAIRING_MAX} pairing codes alive at once; pick \
+                 one with `runnerctl web --qr --base <origin>`",
+                origins.len()
+            ),
+        );
+    }
+    let now = std::time::Instant::now();
+    let mut links = Vec::new();
+    for origin in origins {
+        match state.sessions.pair(&origin, now) {
+            Ok(url) => links.push(Pairing {
+                origin,
+                url,
+                lifetime: PAIRING_LIFETIME.as_secs(),
+            }),
+            Err(failure) => return refused(&failure),
+        }
+    }
+    info!(
+        "{} dashboard pairing link(s) made for {principal:?}",
+        links.len()
+    );
+    Json(Pairings { links }).into_response()
+}
+
 /// Binds the socket with mode 0600. A socket file no daemon answers on is replaced; a live one is an error.
 pub(crate) async fn bind(path: &Path) -> io::Result<UnixListener> {
     if path.exists() {
@@ -207,10 +286,11 @@ pub(crate) async fn serve(
     listener: UnixListener,
     handle: Handle,
     config: ConfigSource,
+    sessions: Arc<Sessions>,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let owner = std::fs::metadata("/proc/self")?.uid();
-    serve_for(listener, handle, config, owner, stop).await
+    serve_for(listener, handle, config, sessions, owner, stop).await
 }
 
 /// Serves the API to the user `owner` only.
@@ -218,6 +298,7 @@ async fn serve_for(
     listener: UnixListener,
     handle: Handle,
     config: ConfigSource,
+    sessions: Arc<Sessions>,
     owner: u32,
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
@@ -233,6 +314,7 @@ async fn serve_for(
         memory_max: config.memory_max,
         cpus: config.cpus,
         sync_dir: config.sync_dir,
+        sessions,
     };
     tokio::spawn(auto::run(state.clone(), config.auto_every));
     let app = router(state).into_make_service_with_connect_info::<Peer>();

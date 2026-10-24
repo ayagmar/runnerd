@@ -1,5 +1,6 @@
 //! The daemon's JSON API, version 1: the request and response types every client deserializes, and the
-//! principal a transport authenticates. Plain data only: no I/O, no Docker or GitHub types, no secrets.
+//! principal a transport authenticates. Plain data only: no I/O, no Docker or GitHub types, no secrets but a
+//! [`Pairing`]'s one-time link, which its `Debug` leaves out.
 //!
 //! Routes, all under the authenticated principal:
 //!
@@ -17,6 +18,8 @@
 //! | `PUT /v1/config` | TOML in, [`ConfigCheck`]; 422 [`ConfigCheck`] when invalid |
 //! | `GET /v1/doctor` | [`Doctor`] |
 //! | `POST /v1/shutdown` | [`ShutdownRequest`] in, 202 |
+//! | `POST /v1/dashboard/sign-out` | none, 204 |
+//! | `POST /v1/dashboard/pairings?`[`PairingQuery`] | [`Pairings`]; 409 when the dashboard is off or has no `[web] origins` |
 //! | `GET /v1/jobs?`[`JobQuery`] | [`JobPage`] |
 //! | `GET /v1/jobs/{id}` | [`Job`] |
 //! | `GET /v1/jobs/{id}/samples` | [`SampleSeries`] |
@@ -271,6 +274,42 @@ pub struct QueuedJob {
     pub url: Option<String>,
     /// When GitHub queued it, in seconds since the Unix epoch; 0 if GitHub did not say.
     pub queued_at: u64,
+}
+
+/// `POST /v1/dashboard/pairings`: which of `[web] origins` to make a link for.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PairingQuery {
+    /// One of `[web] origins`; each of them when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub origin: Option<String>,
+}
+
+/// `POST /v1/dashboard/pairings`: fresh one-time links that sign a device in to the dashboard.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pairings {
+    /// One per origin asked for.
+    pub links: Vec<Pairing>,
+}
+
+/// A link that signs one device in to the dashboard on `origin`, and nowhere else, within `lifetime`.
+#[derive(Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pairing {
+    /// One of `[web] origins`.
+    pub origin: String,
+    /// The link with its one-time code: a credential, which `Debug` leaves out.
+    pub url: String,
+    /// Seconds it works for from when it was made.
+    pub lifetime: u64,
+}
+
+impl std::fmt::Debug for Pairing {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter
+            .debug_struct("Pairing")
+            .field("origin", &self.origin)
+            .field("lifetime", &self.lifetime)
+            .finish_non_exhaustive()
+    }
 }
 
 /// `POST /v1/shutdown`.
