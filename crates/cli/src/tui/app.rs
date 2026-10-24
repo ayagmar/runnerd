@@ -58,8 +58,11 @@ pub(crate) enum Msg {
     Status(Status),
     Records(Records),
     Sizing(Sizing),
-    /// The jobs started and finished in the last 24 hours.
-    Activity(Activity),
+    /// The jobs started and finished in the last 24 hours, read by the request of this generation.
+    Activity {
+        generation: u64,
+        activity: Activity,
+    },
     /// The status read again for why each queued job waits; `None` when it could not be read.
     Reasons(Option<Box<Status>>),
     /// The answer to the open job's request for its latest runs.
@@ -140,8 +143,11 @@ pub(crate) enum Effect {
     RemoveRecords(Removal),
     /// Read the sizing advice.
     Sizing,
-    /// Read the jobs started and finished in the last 24 hours.
-    Activity,
+    /// Read the jobs started and finished in the last 24 hours; the answer carries the generation, so an older read
+    /// that answers late does not undo a newer one.
+    Activity {
+        generation: u64,
+    },
     /// Read the status again for why each queued job waits.
     Reasons,
     /// Read the open job's latest runs: the same repository's, workflow's and job name's.
@@ -359,6 +365,9 @@ pub(crate) struct App {
     pub(crate) activity: Option<Activity>,
     /// The host sample time from which the activity is read again, unless a job starts or ends first.
     activity_due: u64,
+    /// The generation of the last activity request, and of the read shown.
+    activity_asked: u64,
+    activity_shown: u64,
     /// The queued jobs' reasons: from which host sample time they are read again, whether a read is under way, and
     /// whether something changed since it began, so another follows it.
     reasons_due: u64,
@@ -403,6 +412,8 @@ impl App {
             activity_due: activity
                 .as_ref()
                 .map_or(0, |activity| activity.until + ACTIVITY_EVERY),
+            activity_asked: 0,
+            activity_shown: 0,
             reasons_due: 0,
             reasons_asked: false,
             reasons_stale: false,
@@ -469,7 +480,7 @@ impl App {
                 self.series.retain(|id, _| running.contains_key(id));
                 self.history.learn(&self.live.recent);
                 // Jobs may have started and ended while the stream was away.
-                return vec![Effect::Activity];
+                return vec![self.ask_activity()];
             }
             Msg::Job(job) => {
                 if let Some(open) = &mut self.job
@@ -528,10 +539,10 @@ impl App {
                 self.sized = self.sized.min(sizing.profiles.len().saturating_sub(1));
                 self.sizing = Some(sizing);
             }
-            Msg::Activity(activity) => {
-                self.activity_due = activity.until + ACTIVITY_EVERY;
-                self.activity = Some(activity);
-            }
+            Msg::Activity {
+                generation,
+                activity,
+            } => self.activity(generation, activity),
             Msg::Reasons(status) => return self.reasons(status.as_deref()),
             Msg::Runs { job, page } => match page {
                 Ok(page) => {
@@ -570,6 +581,23 @@ impl App {
         Vec::new()
     }
 
+    /// Shows the day's activity, unless a newer read already answered.
+    fn activity(&mut self, generation: u64, activity: Activity) {
+        if generation > self.activity_shown {
+            self.activity_shown = generation;
+            self.activity_due = activity.until + ACTIVITY_EVERY;
+            self.activity = Some(activity);
+        }
+    }
+
+    /// Asks for the day's activity again.
+    fn ask_activity(&mut self) -> Effect {
+        self.activity_asked += 1;
+        Effect::Activity {
+            generation: self.activity_asked,
+        }
+    }
+
     /// Asks for the queued jobs' reasons, or, while a read is under way, for another once it answers: a burst of
     /// events makes one read at a time.
     fn ask_reasons(&mut self) -> Option<Effect> {
@@ -605,7 +633,7 @@ impl App {
                 if sample.at >= self.activity_due {
                     // Asked once until the answer moves it on, however many samples come before.
                     self.activity_due = sample.at + ACTIVITY_EVERY;
-                    effects.push(Effect::Activity);
+                    effects.push(self.ask_activity());
                 }
                 if sample.at >= self.reasons_due {
                     self.reasons_due = sample.at + REASONS_EVERY;
@@ -616,13 +644,13 @@ impl App {
                 effects.extend(self.ask_reasons());
             }
             Event::JobStarted { .. } => {
-                effects.push(Effect::Activity);
+                effects.push(self.ask_activity());
                 effects.extend(self.ask_reasons());
             }
             Event::JobFinished { job } => {
                 self.series.remove(&job.id);
                 self.history.learn([job]);
-                effects.push(Effect::Activity);
+                effects.push(self.ask_activity());
                 effects.extend(self.ask_reasons());
                 if self.view == View::History && self.history.before.is_none() {
                     effects.push(self.history.request(Rows::Keep));

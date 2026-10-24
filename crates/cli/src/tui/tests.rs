@@ -1669,7 +1669,10 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
 #[test]
 fn the_day_s_figures_are_read_again_as_jobs_start_and_end_and_once_a_minute_otherwise() {
     let mut app = app();
-    app.update(Msg::Activity(day()));
+    app.update(Msg::Activity {
+        generation: 1,
+        activity: day(),
+    });
     let host = |at| {
         event(
             None,
@@ -1683,12 +1686,12 @@ fn the_day_s_figures_are_read_again_as_jobs_start_and_end_and_once_a_minute_othe
         )
     };
     assert!(
-        !app.update(host(NOW + 30)).contains(&Effect::Activity),
+        !app.update(host(NOW + 30)).iter().any(asks_activity),
         "read a moment ago"
     );
-    assert!(app.update(host(NOW + 60)).contains(&Effect::Activity));
+    assert!(app.update(host(NOW + 60)).iter().any(asks_activity));
     assert!(
-        !app.update(host(NOW + 62)).contains(&Effect::Activity),
+        !app.update(host(NOW + 62)).iter().any(asks_activity),
         "asked once, not with every sample while the answer comes"
     );
     assert!(
@@ -1698,7 +1701,8 @@ fn the_day_s_figures_are_read_again_as_jobs_start_and_end_and_once_a_minute_othe
                 job: summary(42, JobState::Running)
             }
         ))
-        .contains(&Effect::Activity),
+        .iter()
+        .any(asks_activity),
         "a start changes the waits"
     );
 }
@@ -1878,6 +1882,54 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
     assert!(
         rows_with(&shown, "■ node")[0].contains("Once that is fixed: memory 7G → 5.25G"),
         "{shown}"
+    );
+}
+
+/// Whether an effect reads the day's activity.
+fn asks_activity(effect: &Effect) -> bool {
+    matches!(effect, Effect::Activity { .. })
+}
+
+/// The generation of the activity read `effects` ask for.
+fn activity_generation(effects: &[Effect]) -> u64 {
+    effects
+        .iter()
+        .find_map(|effect| match effect {
+            Effect::Activity { generation } => Some(*generation),
+            _ => None,
+        })
+        .expect("an activity read")
+}
+
+#[test]
+fn an_activity_read_that_answers_after_a_newer_one_is_ignored() {
+    let mut app = app();
+    let started = activity_generation(&app.update(event(
+        Some(1),
+        Event::JobStarted {
+            job: summary(42, JobState::Running),
+        },
+    )));
+    let mut failed = summary(42, JobState::Completed);
+    failed.conclusion = Some("failure".to_owned());
+    failed.timeline.finished_at = Some(1090);
+    let finished =
+        activity_generation(&app.update(event(Some(2), Event::JobFinished { job: failed })));
+    let mut after = day();
+    after.failed = 3;
+    after.finished = 31;
+    app.update(Msg::Activity {
+        generation: finished,
+        activity: after,
+    });
+    app.update(Msg::Activity {
+        generation: started,
+        activity: day(),
+    });
+    let health = screen(&app, 160, 40, false);
+    assert!(
+        health.contains("3 failed of 31 finished"),
+        "the older read does not take the failure back: {health}"
     );
 }
 

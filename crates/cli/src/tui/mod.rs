@@ -421,8 +421,8 @@ impl Requests {
                     answer(&send, client.get::<Sizing>("/v1/sizing").await, Msg::Sizing);
                 });
             }
-            Effect::Activity => {
-                tokio::spawn(read_activity(client, send));
+            Effect::Activity { generation } => {
+                tokio::spawn(read_activity(client, send, generation));
             }
             Effect::Reasons => {
                 tokio::spawn(async move {
@@ -465,9 +465,12 @@ impl Requests {
 
 /// Reads the day's activity again. Like the snapshot, a daemon without it keeps the figures it has: no flash every
 /// minute.
-async fn read_activity(client: Client, send: UnboundedSender<Msg>) {
+async fn read_activity(client: Client, send: UnboundedSender<Msg>, generation: u64) {
     if let Ok(activity) = activity(&client).await {
-        let _ = send.send(Msg::Activity(activity));
+        let _ = send.send(Msg::Activity {
+            generation,
+            activity,
+        });
     }
 }
 
