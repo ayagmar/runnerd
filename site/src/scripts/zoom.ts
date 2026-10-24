@@ -61,24 +61,20 @@ document.addEventListener(
 
 function openShot(link: HTMLAnchorElement) {
   const shown = link.querySelector('img')!;
+  // On a phone, a shot with a phone crop opens that crop: the page shows it there, and its text reads better than
+  // the desktop capture fitted to the screen.
+  const phone = link.dataset.zoomPhone !== undefined && matchMedia('(max-width: 600px)').matches;
   const light = document.documentElement.dataset.theme === 'light';
-  const full = (light && link.dataset.zoomLight) || link.href;
+  const full = phone ? link.dataset.zoomPhone! : (light && link.dataset.zoomLight) || link.href;
+  const width = Number(phone ? link.dataset.zoomPhoneWidth : link.dataset.zoomWidth);
+  const height = Number(phone ? link.dataset.zoomPhoneHeight : link.dataset.zoomHeight);
   const img = document.createElement('img');
   img.alt = shown.alt;
-  let width = Number(link.dataset.zoomWidth);
-  let height = Number(link.dataset.zoomHeight);
-  // What the page shows is already loaded: it stands in until the full-size file arrives. On a phone, a phone crop
-  // is shown as it is: its text reads better than the desktop capture fitted to the screen.
-  const same = Math.abs(shown.naturalWidth / shown.naturalHeight - width / height) < 0.01;
-  const phoneCrop = !same && shown.complete && matchMedia('(max-width: 600px)').matches;
-  if (phoneCrop) {
-    width = shown.naturalWidth;
-    height = shown.naturalHeight;
-  }
   img.width = width;
   img.height = height;
-  if (phoneCrop) img.src = shown.currentSrc;
-  else if (same && shown.complete) {
+  // What the page shows is already loaded: it stands in until the full-size file arrives.
+  const same = shown.complete && Math.abs(shown.naturalWidth / shown.naturalHeight - width / height) < 0.01;
+  if (same) {
     img.src = shown.currentSrc;
     const loader = new Image();
     loader.onload = () => (img.src = full);
@@ -87,7 +83,9 @@ function openShot(link: HTMLAnchorElement) {
   // Fitted to the screen first; a click shows it at its own size when that is larger, and back.
   img.addEventListener('click', () => {
     const fitted = img.getBoundingClientRect().width < width - 1;
-    if (fitted || img.classList.contains('actual')) img.classList.toggle('actual');
+    if (!fitted && !img.classList.contains('actual')) return;
+    // Its pixel width in CSS pixels, whatever file stands in for it.
+    img.style.width = img.classList.toggle('actual') ? `${width}px` : '';
   });
   show(link, img);
 }
