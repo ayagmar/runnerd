@@ -153,7 +153,13 @@ pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizin
         .await
         .map_err(|store_error| store_error.to_string())?;
     let memory_max = memory_max.map(|max| max.0);
-    let auto_plan = super::auto::plan(state, &config, memory_max).await?;
+    // A forecast: the advice stands without it.
+    let auto_plan = super::auto::plan(state, &config, memory_max)
+        .await
+        .unwrap_or_else(|message| {
+            tracing::warn!("auto sizing: cannot work out its next look: {message}");
+            None
+        });
     Ok(Sizing {
         changes,
         auto_plan,

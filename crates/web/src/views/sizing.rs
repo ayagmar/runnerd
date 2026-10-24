@@ -57,6 +57,15 @@ pub(crate) fn render(view: &SizingView) -> Markup {
 fn auto_plan(view: &SizingView) -> Markup {
     let sizing = &view.sizing;
     let Some(plan) = sizing.auto_plan.as_ref().filter(|_| sizing.auto) else {
+        if sizing.auto {
+            // A daemon that does not say what it does next.
+            return html! {
+                section.auto-plan aria-labelledby="auto-title" {
+                    h2 #auto-title { "Auto sizing is on" }
+                    p { "runnerd writes the advice into the config itself, a step at a time." }
+                }
+            };
+        }
         return html! {
             section.auto-plan.off aria-labelledby="auto-title" {
                 h2 #auto-title { "Auto sizing is off" }
