@@ -18,6 +18,9 @@ use runnerd_core::client::{Client, ClientError, Events};
 /// Finished jobs kept on screen.
 const RECENT: usize = 5;
 
+/// Seconds between two reads of why queued jobs wait, besides the read after each job or slot change.
+const REASONS_EVERY: u32 = 10;
+
 /// What the screen shows.
 #[derive(Debug)]
 pub(crate) struct State {
@@ -69,6 +72,18 @@ impl State {
                 .take(RECENT)
                 .collect(),
         })
+    }
+
+    /// Takes why each queued job waits from a status read: only the reasons, as the queue itself is kept from
+    /// events, which may be newer than the read. A job the read lacks says nothing until the next.
+    pub(crate) fn take_reasons(&mut self, status: &Status) {
+        for job in &mut self.status.queued {
+            job.waiting = status
+                .queued
+                .iter()
+                .find(|read| read.id == job.id)
+                .and_then(|read| read.waiting.clone());
+        }
     }
 
     /// Applies one event. Returns a running job to read again: `job.started` carries no name for a job its runner
@@ -214,6 +229,8 @@ pub(crate) async fn run(
 ) -> Result<(), ClientError> {
     let mut state = State::read(client).await?;
     let mut tick = tokio::time::interval(Duration::from_secs(1));
+    // Seconds until the reasons queued jobs wait are read again: they change with time too, as a backoff ends.
+    let mut reasons_in = REASONS_EVERY;
     // One read stays pending across redraws: dropping it at every tick would restart the stream's idle timeout, and
     // a stalled stream would never be reconnected.
     let mut next = Box::pin(next_event(events));
@@ -229,11 +246,26 @@ pub(crate) async fn run(
                 if missed {
                     state = State::read(client).await?;
                 }
-                if let Some(id) = state.apply(&envelope?) {
+                let envelope = envelope?;
+                if let Some(id) = state.apply(&envelope) {
                     state.refresh(client.get(&format!("/v1/jobs/{id}")).await?);
                 }
+                // A job or slot changed, so every reason may be wrong: a job behind one that started, a slot freed.
+                if matches!(
+                    envelope.event,
+                    Event::JobQueued { .. }
+                        | Event::JobStarted { .. }
+                        | Event::JobFinished { .. }
+                        | Event::SlotChanged { .. }
+                ) {
+                    reasons_in = 0;
+                }
             }
-            _ = tick.tick() => {}
+            _ = tick.tick() => reasons_in = reasons_in.saturating_sub(1),
+        }
+        if reasons_in == 0 && !state.status.queued.is_empty() {
+            state.take_reasons(&client.get("/v1/status").await?);
+            reasons_in = REASONS_EVERY;
         }
     }
 }
@@ -381,6 +413,7 @@ fn jobs(state: &State, now: u64, paint: Paint) -> String {
                 (job.repository.clone(), Tone::Plain),
                 (human::queued_title(job), Tone::Plain),
                 (human::queued_ago(job, now), Tone::Dim),
+                (human::waiting(job, &state.status, now), Tone::Dim),
             ]);
         }
         out.push_str(&queued.render(paint, "  "));
@@ -431,7 +464,7 @@ mod tests {
     use axum::extract::State as Shared;
     use axum::routing::get;
     use futures_util::{StreamExt, stream};
-    use runnerd_core::api::{EventQuery, JobPage};
+    use runnerd_core::api::{EventQuery, JobPage, Waiting};
 
     use super::{State, frame, run};
     use crate::human::Paint;
@@ -624,6 +657,32 @@ mod tests {
         state.apply(&event(Event::JobStarted { job: started }));
         let ids: Vec<u64> = state.status.queued.iter().map(|job| job.id).collect();
         assert_eq!(ids, [8], "the started job left the queue");
+    }
+
+    #[test]
+    fn a_queued_job_says_why_it_waits_once_a_status_read_says_it() {
+        let mut state = state();
+        let mut queued = summary(JobState::Queued);
+        queued.runner = None;
+        state.apply(&event(Event::JobQueued { job: queued }));
+        let mut read = state.status.clone();
+        read.queued[0].waiting = Some(Waiting::NoSlot {
+            profile: "jvm".to_owned(),
+        });
+        state.take_reasons(&read);
+        let reason = read.queued[0]
+            .waiting
+            .as_ref()
+            .unwrap()
+            .reason(&read.queued[0], &read, 1030);
+        let shown = screen(&state);
+        assert!(
+            shown
+                .lines()
+                .any(|line| line.starts_with("  halyard/ledger  build / test")
+                    && line.ends_with(&reason)),
+            "the queued row ends with {reason:?}: {shown}"
+        );
     }
 
     #[test]

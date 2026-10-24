@@ -24,7 +24,7 @@ use runnerd_core::api::{
     Event, EventEnvelope, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary, LogSummary,
     Pairing, Pairings, Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record,
     RecordLimits, Records, RemovedRecords, RepositoryStatus, Resize, RunnerStatus, RunningJob,
-    Sizing, SizingChange, SlotStatus, Spread, Status, Timeline,
+    Sizing, SizingChange, SlotStatus, Spread, Status, Timeline, Waiting,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -113,7 +113,9 @@ fn status() -> Status {
             branch: Some("main".to_owned()),
             url: None,
             queued_at: 1_000_000,
-            waiting: None,
+            waiting: Some(Waiting::NoSlot {
+                profile: "jvm".to_owned(),
+            }),
         }],
     }
 }
@@ -695,12 +697,17 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
         slots[1].find("free"),
         "the state column lines up:\n{text}"
     );
+    let status = status();
+    let reason = Waiting::NoSlot {
+        profile: "jvm".to_owned(),
+    }
+    .reason(&status.queued[0], &status, 0);
     assert!(
         text.lines().any(
             |line| line.starts_with("9002  halyard/ledger  build / lint  ")
-                && line.ends_with(" ago")
+                && line.ends_with(&format!(" ago  {reason}"))
         ),
-        "the queued job is listed under the repositories:\n{text}"
+        "the queued job is listed under the repositories with why it waits, as every client says it:\n{text}"
     );
 }
 

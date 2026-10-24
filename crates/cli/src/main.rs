@@ -86,11 +86,12 @@ enum Command {
         #[arg(long)]
         from: Option<u64>,
     },
-    /// Live view of slots, running jobs and their steps, queued and finished jobs.
+    /// Live view of slots, running jobs and their steps, queued jobs with why each waits, and finished jobs.
     ///
     /// Redraws in place on a terminal; otherwise prints one line per event.
     Watch,
-    /// Full-screen dashboard: budget, slots with their memory and CPU, history, and each job's steps and log.
+    /// Full-screen dashboard: a line on CI's health (what runs, what waits and for how long), the budget, slots with
+    /// their memory and CPU, the queue with why each job waits, history, and each job's steps and log.
     ///
     /// Keys: 1 overview, 2 history, tab and j/k to move, enter to open a job, p/r to pause or resume, ? for all.
     #[cfg(feature = "tui")]
