@@ -247,15 +247,17 @@ every repository resumed
 
 ## runnerctl tui
 
-The dashboard, for a host you reach over SSH. It shows what the web dashboard does:
+The dashboard, for a host you reach over SSH. It shows what the web dashboard does, in the same words:
 
+- a health line: slots running, jobs waiting and the oldest's wait, and over the last 24 hours the p95 wait with a bar for the longest wait of each hour, and the failures;
 - the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container; its heading adds the CPU budget under [CPU admission](../admission/#cpu-admission);
 - a card per slot with the job, its step, run time, and memory and CPU sparklines;
-- the slice's memory and CPU, the repositories, and the queued and latest jobs;
-- the history, filtered by outcome and repository;
+- **Waiting**: each queued job, oldest first, with how long it has waited and why runnerd has not started it;
+- the repositories, the latest jobs, and the slice's memory and CPU up to its MemoryMax and CPUs;
+- the history, filtered by outcome, repository and workflow;
 - the records of failed jobs, with the command that opens a shell in each;
-- sizing: each profile's peaks and advice, its jobs below, and what auto sizing last changed;
-- a job: its timeline, its steps on one time axis, memory and CPU against its container's caps, and its log, followed while the job runs.
+- sizing: each profile's peaks and advice, its jobs below, what auto sizing last changed and, while it is on, what its next look changes, how long a recent change holds a profile, or why no look changes anything;
+- a job: its timeline and, while it waits, why; the same job's latest runs as bars of their run times, waits and memory peaks, with the median run and wait; its steps on one time axis, memory and CPU against its container's caps, and its log, followed while the job runs.
 
 ```sh
 runnerctl tui
@@ -266,7 +268,7 @@ runnerctl tui
   label="The overview at 96 by 26: the budget bar with jvm slot 1 at 3.89G and node slot 1 at 2.47G used, node slot 2's idle runner and the mirror, one line per slot, the slice's memory and CPU charts, the repositories and the latest jobs."
 />
 
-Profiles take the dashboard's colours in config order, mint first and pink second. `NO_COLOR` leaves bold, dim and block glyphs. On a narrow terminal, as here, the slots become one line each; at 80×24 the charts drop out first.
+Profiles take the dashboard's colours in config order, mint first and pink second. `NO_COLOR` leaves bold, dim and block glyphs. On a narrow terminal the slots become one line each and the charts, last on the page, drop out first; what does not fit a line goes as a whole figure or column, and a name that is cut ends in `…`. A wide terminal adds columns, and the charts take the rows the lists leave.
 
 <Tui
   name="job"
@@ -276,16 +278,16 @@ Profiles take the dashboard's colours in config order, mint first and pink secon
 | Key | |
 |---|---|
 | `1` `2` `3` `4` | overview, history, records, sizing |
-| `tab`, `j` `k` (or arrows) | the overview's pane (slots, repositories, latest jobs); move in it, or scroll a log |
+| `tab`, `j` `k` (or arrows) | the overview's pane (slots, waiting, repositories, latest jobs); move in it, or scroll a log |
 | `enter`, `esc` | open the selected job; back |
 | `p` `r` | pause or resume the selected repository; a pause refused while it runs a job asks before forcing it |
 | `P` `U` | pause or resume every repository, asking the same way |
 | `R` | reseed the selected slot's profile |
-| `c` `s` `]` `[` | history: cycle the outcome and repository filters, next and previous page |
+| `c` `s` `w` `]` `[` | history: cycle the outcome, repository and workflow filters, next and previous page |
 | `d` `D` | records: remove the selected record, or all of them, after `y` |
 | `a` | sizing: write the selected profile's advice into the config, after `y` |
 | `G` `g` | follow the log, or go to its start |
-| `?` `q` | all keys; quit |
+| `?` `q` | all keys; quit. The footer shows the keys of the view, as many as fit |
 | `ctrl-z` | suspend; `fg` brings it back, redrawn |
 
 SIGINT, SIGTERM and SIGHUP quit and SIGTSTP suspends, each after giving the terminal back. When the daemon goes away the header says `reconnecting`. Once it is back, the event stream resumes after the last event read, and an open job's log carries on from its next line.

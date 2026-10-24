@@ -31,12 +31,12 @@ use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing,
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
     LogSummary, ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus,
-    RunnerStatus, Sample, SeedMemory, ShellMemory, SlotStatus, Status, Step, Timeline,
+    RunnerStatus, Sample, SeedMemory, ShellMemory, SlotStatus, Status, Step, Timeline, Waiting,
 };
 
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, Effect, Msg, Refused, Removal, Resizing, View};
+use super::app::{App, Connection, Effect, Msg, Pane, Refused, Removal, Resizing, View};
 use super::draw::{Theme, draw};
 use super::feed;
 use crate::testing::Fake;
@@ -97,7 +97,7 @@ fn app() -> App {
         host: None,
         recent: Vec::new(),
     };
-    App::new(live, Vec::new(), Vec::new())
+    App::new(live, None, Vec::new(), Vec::new())
 }
 
 fn summary(id: u64, state: JobState) -> JobSummary {
@@ -165,6 +165,17 @@ fn event(id: Option<u64>, event: Event) -> Msg {
 
 fn key(code: KeyCode) -> Msg {
     Msg::Key(KeyEvent::from(code))
+}
+
+/// The jobs `effects` open.
+fn opened(effects: &[Effect]) -> Vec<u64> {
+    effects
+        .iter()
+        .filter_map(|effect| match effect {
+            Effect::OpenJob(id) => Some(*id),
+            _ => None,
+        })
+        .collect()
 }
 
 /// The screen as text, one line per row.
@@ -273,7 +284,7 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
     assert!(overview.contains("1m 31s"), "ran since 1009: {overview}");
 
     // Enter on the selected slot opens its job.
-    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenJob(42)]);
+    assert_eq!(opened(&app.update(key(KeyCode::Enter))), [42]);
     assert_eq!(app.view, View::Job);
     app.update(Msg::LogLine {
         job: 42,
@@ -305,9 +316,9 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
     finished.conclusion = Some("success".to_owned());
     finished.timeline.finished_at = Some(1095);
     // The finished job is read again, for its steps' last state and its totals.
-    assert_eq!(
-        app.update(event(Some(7), Event::JobFinished { job: finished })),
-        vec![Effect::RefreshJob(42)]
+    assert!(
+        app.update(event(Some(7), Event::JobFinished { job: finished }))
+            .contains(&Effect::RefreshJob(42))
     );
     assert!(screen(&app, 120, 40, false).contains("SUCCESS"));
     assert_eq!(app.update(key(KeyCode::Esc)), vec![Effect::CloseJob]);
@@ -605,12 +616,10 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
     );
 }
 
-#[test]
-fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_others() {
-    let mut app = app();
-    let queued = |id, name: &str, at| QueuedJob {
+fn queued(id: u64, repository: &str, name: &str, at: u64) -> QueuedJob {
+    QueuedJob {
         id,
-        repository: "halyard/storefront".to_owned(),
+        repository: repository.to_owned(),
         run_id: 4002,
         run_attempt: 1,
         workflow: Some("E2E".to_owned()),
@@ -619,27 +628,44 @@ fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_oth
         url: None,
         queued_at: at,
         waiting: None,
-    };
-    app.live.status.queued = vec![queued(51, "visual-diff", 1041), queued(52, "a11y", 1090)];
-    app.live.recent = vec![summary(42, JobState::Completed)];
-    let shown = screen(&app, 120, 40, false);
-    let rows: Vec<&str> = shown
-        .lines()
-        .filter_map(|line| {
-            let at = line.find("QUEUED").or_else(|| line.find("COMPLETED"))?;
-            Some(line[at..].trim_end())
-        })
-        .collect();
-    assert_eq!(rows.len(), 3, "{shown}");
-    assert!(
-        rows[0].starts_with("QUEUED    E2E / visual-diff halyard/storefront")
-            && rows[0].ends_with("59s ago"),
-        "{rows:?}"
-    );
-    assert!(rows[1].starts_with("QUEUED    E2E / a11y"), "{rows:?}");
-    assert!(rows[2].contains("CI / build halyard/ledger"), "{rows:?}");
+    }
+}
 
-    app.update(key(KeyCode::Tab));
+#[test]
+fn the_queue_lists_each_waiting_job_oldest_first_with_why_and_opens_and_pauses_like_the_others() {
+    let mut app = app();
+    app.live.status.queued = vec![
+        QueuedJob {
+            waiting: Some(Waiting::NoSlot {
+                profile: "node".to_owned(),
+            }),
+            ..queued(51, "halyard/storefront", "visual-diff", 1041)
+        },
+        QueuedJob {
+            waiting: Some(Waiting::Paused),
+            ..queued(52, "halyard/storefront", "a11y", 1090)
+        },
+    ];
+    app.live.recent = vec![summary(42, JobState::Completed)];
+    for width in [80, 120] {
+        let shown = screen(&app, width, 24, false);
+        let rows = rows_with(&shown, "E2E / ");
+        assert_eq!(rows.len(), 2, "{shown}");
+        assert!(
+            rows[0].trim_start().starts_with("59s E2E / visual-diff")
+                && rows[0].trim_end().ends_with("The node slot is busy"),
+            "the oldest first, with how long it waited and why: {rows:?}"
+        );
+        assert!(
+            rows[1].trim_end().ends_with("halyard/storefront is paused"),
+            "{rows:?}"
+        );
+        assert!(
+            shown.contains("2 waiting, oldest 59s"),
+            "the health line counts them: {shown}"
+        );
+    }
+
     app.update(key(KeyCode::Tab));
     assert_eq!(
         app.update(key(KeyCode::Char('p'))),
@@ -648,7 +674,7 @@ fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_oth
             force: false
         }]
     );
-    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenJob(51)]);
+    assert_eq!(opened(&app.update(key(KeyCode::Enter))), [51]);
     let job = screen(&app, 120, 40, false);
     let head: Vec<&str> = job.lines().skip(1).take(2).map(str::trim_end).collect();
     assert_eq!(
@@ -656,29 +682,24 @@ fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_oth
         ["■ halyard/storefront", "E2E / visual-diff  QUEUED"],
         "{job}"
     );
+    assert!(
+        job.contains("waiting for a runner 59s  The node slot is busy"),
+        "its page says why it waits: {job}"
+    );
+    assert!(
+        !job.contains("Memory") && !job.contains("Steps"),
+        "nothing to chart or list before a runner has it: {job}"
+    );
 }
 
 #[test]
-fn the_selected_latest_job_stays_selected_when_a_queued_job_above_it_starts() {
+fn the_selected_job_stays_selected_when_jobs_above_it_start_or_finish() {
     let mut app = app();
-    let queued = |id, repository: &str| QueuedJob {
-        id,
-        repository: repository.to_owned(),
-        run_id: 4002,
-        run_attempt: 1,
-        workflow: Some("CI".to_owned()),
-        name: "build".to_owned(),
-        branch: Some("main".to_owned()),
-        url: None,
-        queued_at: 1000,
-        waiting: None,
-    };
     app.live.status.queued = vec![
-        queued(51, "halyard/ledger"),
-        queued(52, "halyard/storefront"),
+        queued(51, "halyard/ledger", "build", 1000),
+        queued(52, "halyard/storefront", "build", 1000),
     ];
     app.live.recent = vec![summary(42, JobState::Completed)];
-    app.update(key(KeyCode::Tab));
     app.update(key(KeyCode::Tab));
     app.update(key(KeyCode::Down));
     app.update(event(
@@ -694,20 +715,27 @@ fn the_selected_latest_job_stays_selected_when_a_queued_job_above_it_starts() {
             force: false
         }]
     );
-    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenJob(52)]);
-
+    assert_eq!(opened(&app.update(key(KeyCode::Enter))), [52]);
     app.update(key(KeyCode::Esc));
-    app.update(key(KeyCode::Down));
+
+    // The last queued job starts: the queue is gone, and so is its selection.
     app.update(event(
         Some(10),
         Event::JobStarted {
             job: summary(52, JobState::Running),
         },
     ));
+    assert_eq!(app.pane, Pane::Slots, "an empty queue keeps no selection");
+    app.update(key(KeyCode::Tab));
+    app.update(key(KeyCode::Tab));
+    assert_eq!(app.pane, Pane::Latest, "tab passes the empty queue");
+    let mut newer = summary(43, JobState::Completed);
+    newer.timeline.finished_at = Some(1090);
+    app.update(event(Some(11), Event::JobFinished { job: newer }));
     assert_eq!(
-        app.update(key(KeyCode::Enter)),
-        vec![Effect::OpenJob(42)],
-        "a selection whose job left the list moves to a row still there"
+        opened(&app.update(key(KeyCode::Enter))),
+        [42],
+        "a job finishing above the selected one leaves it selected"
     );
 }
 
@@ -722,7 +750,7 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     }];
     budget.memory_in_use = 13 << 30;
     let shown = screen(&app, 160, 40, false);
-    let names = shown.lines().nth(3).unwrap();
+    let names = shown.lines().nth(4).unwrap();
     assert!(
         names.contains("mirror 4G") && names.contains("jvm seed 9G"),
         "{shown}"
@@ -731,7 +759,7 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     // A 512M mirror is a cell or two at common widths: the heading names it.
     app.live.status.budget.mirror_memory = 512 << 20;
     let shown = screen(&app, 120, 40, false);
-    let mut lines = shown.lines().skip(1);
+    let mut lines = shown.lines().skip(2);
     let (heading, bar) = (lines.next().unwrap(), lines.next().unwrap());
     assert!(heading.ends_with("· mirror 512M"), "{shown}");
     assert!(bar.contains("▒ "), "the mirror's block shows: {shown}");
@@ -739,7 +767,7 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     // Without a MemoryMax the slots fill the bar, leaving no room for a block: the heading still names each.
     app.live.status.budget.memory_max = None;
     let shown = screen(&app, 120, 40, false);
-    let heading = shown.lines().nth(1).unwrap();
+    let heading = shown.lines().nth(2).unwrap();
     assert!(heading.contains("· mirror 512M · jvm seed 9G"), "{shown}");
 }
 
@@ -753,7 +781,7 @@ fn the_budget_names_a_shell_open_in_a_record() {
     }];
     budget.memory_in_use += 9 << 30;
     let shown = screen(&app, 160, 40, false);
-    let names = shown.lines().nth(3).unwrap();
+    let names = shown.lines().nth(4).unwrap();
     assert!(names.contains("job 42 shell 9G"), "{shown}");
 }
 
@@ -1001,9 +1029,10 @@ fn opening_a_job_from_the_latest_jobs_follows_only_its_log() {
     done.conclusion = Some("failure".to_owned());
     done.timeline.finished_at = Some(1050);
     app.update(event(Some(1), Event::JobFinished { job: done }));
+    // Past the empty queue and the repositories.
     app.update(key(KeyCode::Tab));
     app.update(key(KeyCode::Tab));
-    assert_eq!(app.update(key(KeyCode::Enter)), vec![Effect::OpenJob(41)]);
+    assert_eq!(opened(&app.update(key(KeyCode::Enter))), [41]);
     app.update(Msg::LogLine {
         job: 99,
         text: "another job's line".to_owned(),
@@ -1597,4 +1626,314 @@ fn an_empty_records_view_says_in_full_how_records_are_kept() {
         shown.contains("as a record, to open a shell where it failed"),
         "the hint wraps instead of being cut: {shown}"
     );
+}
+
+/// A day in which jobs that waited 10 s, 20 s and 300 s started, and 2 of 30 finished jobs failed.
+fn day() -> runnerd_core::api::Activity {
+    let started = |at, waited| runnerd_core::api::Started { at, waited };
+    runnerd_core::api::Activity {
+        since: 0,
+        until: NOW,
+        started: vec![started(200, 10), started(600, 20), started(900, 300)],
+        finished: 30,
+        failed: 2,
+    }
+}
+
+#[test]
+fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns() {
+    let mut app = app();
+    app.activity = Some(day());
+    app.live.status.queued = vec![queued(51, "halyard/storefront", "visual-diff", 1041)];
+    let wide = screen(&app, 160, 40, false);
+    let health = wide.lines().nth(1).unwrap();
+    for expected in [
+        "0/3 running",
+        "1 waiting, oldest 59s",
+        "24 h: wait p95 5m 0s",
+        "2 failed of 30 finished",
+    ] {
+        assert!(health.contains(expected), "{expected}: {health}");
+    }
+    assert!(health.contains('█'), "the longest hour's bar: {health}");
+
+    let small = screen(&app, 80, 24, false);
+    let health = small.lines().nth(1).unwrap();
+    assert!(
+        health.contains("24 h: wait p95 5m 0s") && health.contains("2 failed"),
+        "at 80 columns the figures stay and the details go whole: {health}"
+    );
+    assert!(!health.contains('…'), "nothing cut mid-figure: {health}");
+}
+
+#[test]
+fn the_day_s_figures_are_read_again_as_jobs_start_and_end_and_once_a_minute_otherwise() {
+    let mut app = app();
+    app.update(Msg::Activity(day()));
+    let host = |at| {
+        event(
+            None,
+            Event::HostSample {
+                sample: runnerd_core::api::HostSample {
+                    at,
+                    cpu: 0,
+                    memory: 0,
+                },
+            },
+        )
+    };
+    assert!(
+        !app.update(host(NOW + 30)).contains(&Effect::Activity),
+        "read a moment ago"
+    );
+    assert!(app.update(host(NOW + 60)).contains(&Effect::Activity));
+    assert!(
+        !app.update(host(NOW + 62)).contains(&Effect::Activity),
+        "asked once, not with every sample while the answer comes"
+    );
+    assert!(
+        app.update(event(
+            Some(1),
+            Event::JobStarted {
+                job: summary(42, JobState::Running)
+            }
+        ))
+        .contains(&Effect::Activity),
+        "a start changes the waits"
+    );
+}
+
+#[test]
+fn the_history_filters_by_the_workflows_its_repository_has_run() {
+    let mut app = app();
+    let (generation, _) = history_request(&app.update(key(KeyCode::Char('2'))));
+    let mut e2e = summary(43, JobState::Completed);
+    e2e.repository = "halyard/storefront".to_owned();
+    e2e.workflow = Some("E2E".to_owned());
+    app.update(history_page(
+        generation,
+        vec![summary(42, JobState::Completed), e2e],
+        None,
+    ));
+    let ci = history_query(&app.update(key(KeyCode::Char('w'))));
+    assert_eq!(
+        ci.workflow.as_deref(),
+        Some("CI"),
+        "by name, across repositories"
+    );
+    let e2e = history_query(&app.update(key(KeyCode::Char('w'))));
+    assert_eq!(e2e.workflow.as_deref(), Some("E2E"));
+    assert!(screen(&app, 120, 24, false).contains("workflow E2E"));
+    let any = history_query(&app.update(key(KeyCode::Char('w'))));
+    assert_eq!(any.workflow, None, "then any again");
+
+    app.update(key(KeyCode::Char('w')));
+    let ledger = history_query(&app.update(key(KeyCode::Char('s'))));
+    assert_eq!(
+        (ledger.repository.as_deref(), ledger.workflow.as_deref()),
+        (Some("halyard/ledger"), Some("CI")),
+        "a workflow the repository runs stays"
+    );
+    let storefront = history_query(&app.update(key(KeyCode::Char('s'))));
+    assert_eq!(
+        (storefront.repository.as_deref(), storefront.workflow),
+        (Some("halyard/storefront"), None),
+        "one it never ran would show nothing, so it goes"
+    );
+    let only = history_query(&app.update(key(KeyCode::Char('w'))));
+    assert_eq!(
+        only.workflow.as_deref(),
+        Some("E2E"),
+        "only its own workflows"
+    );
+}
+
+#[test]
+fn a_job_s_page_compares_it_with_the_same_job_s_latest_runs() {
+    let mut app = app();
+    running_job(&mut app);
+    let effects = app.update(key(KeyCode::Enter));
+    let Some(Effect::Runs { job, query }) = effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::Runs { .. }))
+        .cloned()
+    else {
+        panic!("asks for its runs: {effects:?}");
+    };
+    assert_eq!(
+        (
+            query.repository.as_deref(),
+            query.workflow.as_deref(),
+            query.name.as_deref()
+        ),
+        (Some("halyard/ledger"), Some("CI"), Some("build"))
+    );
+    let run = |id, ran: u64, conclusion: &str| {
+        let mut run = finished(id, 100);
+        run.timeline.queued_at = 0;
+        run.timeline.started_at = Some(10);
+        run.timeline.finished_at = Some(10 + ran);
+        run.conclusion = Some(conclusion.to_owned());
+        run.metrics.memory_peak = Some(6 << 30);
+        run
+    };
+    let mut other_workflow = run(30, 999, "failure");
+    other_workflow.workflow = Some("Nightly".to_owned());
+    let mut newest_first = vec![
+        summary(42, JobState::Running),
+        run(33, 300, "success"),
+        run(32, 100, "failure"),
+        run(31, 200, "success"),
+        other_workflow,
+    ];
+    app.update(Msg::Runs {
+        job,
+        page: Ok(runnerd_core::api::JobPage {
+            jobs: std::mem::take(&mut newest_first),
+            next: None,
+        }),
+    });
+    let shown = screen(&app, 120, 40, false);
+    let heading = rows_with(&shown, "Latest 4 runs");
+    assert_eq!(
+        heading.len(),
+        1,
+        "another workflow's job of that name is left out: {shown}"
+    );
+    for expected in [
+        "median run 3m 20s",
+        "wait 10s",
+        "1 of 3 failed",
+        "largest peak 6G",
+    ] {
+        assert!(heading[0].contains(expected), "{expected}: {shown}");
+    }
+    let bars = rows_with(&shown, "  waited ")[0];
+    assert!(
+        bars.starts_with("ran ") && bars.contains("peak "),
+        "{shown}"
+    );
+    assert!(
+        screen(&app, 80, 24, false).contains("Latest 4 runs"),
+        "it stays at 80 by 24"
+    );
+}
+
+#[test]
+fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
+    use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
+    let mut app = app();
+    app.update(key(KeyCode::Char('4')));
+    let mut sizing = sizing();
+    sizing.auto = true;
+    sizing.auto_plan = Some(AutoPlan {
+        every: 300,
+        interval: 86_400,
+        max_step: 25,
+        next: vec![SizingChange {
+            at: NOW,
+            profile: "node".to_owned(),
+            from: Resize {
+                memory: 7 << 30,
+                slots: 2,
+            },
+            to: Resize {
+                memory: 5376 << 20,
+                slots: 2,
+            },
+            reason: "lower memory".to_owned(),
+            uncertain: false,
+        }],
+        held: vec![SizingHold {
+            profile: "jvm".to_owned(),
+            changed: NOW - 600,
+            until: NOW + 7200,
+        }],
+        blocked: None,
+    });
+    app.update(Msg::Sizing(sizing.clone()));
+    for width in [80, 120] {
+        let shown = screen(&app, width, 24, false);
+        assert!(
+            shown.contains("looks every 5 minutes") && shown.contains("at most 25%"),
+            "the rules, wrapped rather than cut: {shown}"
+        );
+        let jvm = rows_with(&shown, "■ jvm")[0];
+        assert!(jvm.contains("No change for 2h 0m"), "{shown}");
+        let node = rows_with(&shown, "■ node")[0];
+        assert!(
+            node.contains("Next look, within 5 minutes: memory 7G → 5.25G, slots 2"),
+            "{shown}"
+        );
+    }
+
+    sizing.auto_plan.as_mut().unwrap().blocked =
+        Some("runnerd.toml changed on disk since runnerd read it".to_owned());
+    app.update(Msg::Sizing(sizing));
+    let shown = screen(&app, 120, 24, false);
+    assert!(
+        shown.contains("No look changes anything now: runnerd.toml changed on disk"),
+        "{shown}"
+    );
+    assert!(
+        rows_with(&shown, "■ node")[0].contains("Once that is fixed: memory 7G → 5.25G"),
+        "{shown}"
+    );
+}
+
+#[test]
+fn a_queued_job_s_reason_is_read_again_one_read_at_a_time_since_no_event_carries_it() {
+    let mut app = app();
+    let queued_event = |id| {
+        event(
+            Some(id),
+            Event::JobQueued {
+                job: summary(id, JobState::Queued),
+            },
+        )
+    };
+    assert_eq!(app.update(queued_event(51)), vec![Effect::Reasons]);
+    assert!(
+        app.update(queued_event(52)).is_empty(),
+        "a burst makes one read at a time"
+    );
+    let mut read = app.live.status.clone();
+    read.queued[0].waiting = Some(Waiting::NoSlot {
+        profile: "jvm".to_owned(),
+    });
+    // The read is older than the second job's event: the queue keeps it, and the read asks again for it.
+    read.queued.truncate(1);
+    assert_eq!(
+        app.update(Msg::Reasons(Some(Box::new(read)))),
+        vec![Effect::Reasons]
+    );
+    assert_eq!(
+        app.live.status.queued.len(),
+        2,
+        "{:?}",
+        app.live.status.queued
+    );
+    let shown = screen(&app, 120, 24, false);
+    assert!(shown.contains("All 2 jvm slots are busy"), "{shown}");
+
+    app.update(Msg::Reasons(None));
+    let host = |at| {
+        event(
+            None,
+            Event::HostSample {
+                sample: runnerd_core::api::HostSample {
+                    at,
+                    cpu: 0,
+                    memory: 0,
+                },
+            },
+        )
+    };
+    assert!(app.update(host(NOW)).contains(&Effect::Reasons));
+    app.update(Msg::Reasons(None));
+    assert!(
+        !app.update(host(NOW + 5)).contains(&Effect::Reasons),
+        "read again every 10 s while nothing changes"
+    );
+    assert!(app.update(host(NOW + 10)).contains(&Effect::Reasons));
 }

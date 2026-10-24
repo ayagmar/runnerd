@@ -14,13 +14,13 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    AdmissionPolicy, Advice, Job, JobSummary, ProfileSizing, ProfileStatus, RepositoryStatus,
-    Sample, Sizing, SlotStatus, Status, Step,
+    Activity, AdmissionPolicy, Advice, AutoPlan, Job, JobSummary, ProfileSizing, ProfileStatus,
+    QueuedJob, RepositoryStatus, Sample, Sizing, SlotStatus, Status, Step, WaitKind, period,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
-use super::app::{App, Connection, JobView, LatestRow, Outcome, Pane, Removal, View};
+use super::app::{App, Connection, History, JobView, Outcome, Pane, Removal, View};
 use crate::human::{self, Tone, bytes, cores, duration};
 use crate::watch;
 
@@ -120,10 +120,8 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) {
 }
 
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
-    let mut spans = vec![
-        Span::styled(" runnerd ", bold()),
-        Span::styled(format!("{}  ", app.live.status.version), theme.dim()),
-    ];
+    let mut spans = vec![Span::styled(" runnerd ", bold())];
+    let version = Span::styled(format!("{}  ", app.live.status.version), theme.dim());
     for (key, name, view) in [
         ("1", "Overview", View::Overview),
         ("2", "History", View::History),
@@ -143,7 +141,6 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             selected(),
         ));
     }
-    frame.render_widget(Line::from(spans), area);
     let mut right = Vec::new();
     if app.live.status.shutting_down {
         right.push(Span::styled("shutting down  ", theme.wait()));
@@ -155,7 +152,15 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             theme.wait().add_modifier(Modifier::BOLD),
         )),
     }
-    frame.render_widget(Line::from(right).alignment(Alignment::Right), area);
+    let right = Line::from(right);
+    // The version goes first when the tabs and the connection do not fit beside it.
+    if Line::from(spans.clone()).width() + version.width() + right.width()
+        <= usize::from(area.width)
+    {
+        spans.insert(1, version);
+    }
+    frame.render_widget(Line::from(spans), area);
+    frame.render_widget(right.alignment(Alignment::Right), area);
 }
 
 fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
@@ -200,41 +205,78 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         };
         Line::styled(format!(" {}", flash.text), style)
     } else {
-        let keys = match app.view {
-            View::Overview => {
-                "tab pane  j/k move  enter open  p pause  r resume  R reseed  ? help  q quit"
-            }
-            View::History => {
-                "j/k move  enter open  c outcome  s repository  ] next  [ back  ? help  q quit"
-            }
-            View::Records => "j/k move  enter open  d remove  D remove all  ? help  q quit",
-            View::Sizing => "j/k move  a apply the advice  ? help  q quit",
-            View::Job => {
-                "j/k scroll  G follow  p pause  r resume  R reseed  esc back  ? help  q quit"
-            }
-        };
-        Line::styled(format!(" {keys}"), theme.dim())
+        Line::styled(
+            format!(" {}", footer_keys(app, usize::from(area.width) - 1)),
+            theme.dim(),
+        )
     };
     frame.render_widget(line, area);
 }
 
+/// The keys that matter on the view, those that do not fit left out from the least used: each view's own first,
+/// then moving and opening, then help and quit, which stay.
+fn footer_keys(app: &App, width: usize) -> String {
+    let mut keys: Vec<(u8, &str)> = match app.view {
+        View::Overview => {
+            let mut keys = vec![
+                (1, "tab pane"),
+                (2, "j/k move"),
+                (1, "enter open"),
+                (1, "p/r pause/resume"),
+                (3, "P/U all"),
+            ];
+            if app.pane == Pane::Slots {
+                keys.push((2, "R reseed"));
+            }
+            keys
+        }
+        View::History => vec![
+            (2, "j/k move"),
+            (2, "enter open"),
+            (1, "c outcome"),
+            (1, "s repository"),
+            (1, "w workflow"),
+            (1, "] [ page"),
+        ],
+        View::Records => vec![
+            (2, "j/k move"),
+            (2, "enter open"),
+            (1, "d remove"),
+            (1, "D remove all"),
+        ],
+        View::Sizing => vec![(2, "j/k move"), (1, "a apply the advice")],
+        View::Job => vec![
+            (2, "j/k scroll"),
+            (2, "G follow"),
+            (1, "p/r pause/resume"),
+            (3, "R reseed"),
+            (1, "esc back"),
+        ],
+    };
+    keys.extend([(4, "1-4 views"), (0, "? help"), (0, "q quit")]);
+    let line = |keys: &[(u8, &str)]| {
+        keys.iter()
+            .map(|(_, key)| *key)
+            .collect::<Vec<_>>()
+            .join("  ")
+    };
+    drop_least(&mut keys, 1, |keys| line(keys).width() <= width);
+    line(&keys)
+}
+
 fn help(frame: &mut Frame<'_>, area: Rect) {
     // At most 20, so it fits a terminal of 24 rows.
-    const KEYS: [(&str, &str); 20] = [
-        ("1 o", "overview"),
-        ("2 h", "history"),
-        ("3", "records of failed jobs"),
-        ("4", "sizing: what each profile's jobs use"),
-        ("tab", "next pane of the overview"),
+    const KEYS: [(&str, &str); 16] = [
+        ("1 2 3 4", "overview, history, records, sizing; o and h too"),
+        ("tab", "overview: slots, waiting, repositories, latest"),
         ("j k ↓ ↑", "move, or scroll the log"),
         ("PgDn PgUp", "move by ten"),
-        ("enter", "open the job"),
-        ("esc", "back from a job"),
+        ("enter esc", "open the job; back from it"),
         ("G g", "follow the log, or go to its start"),
         ("p r", "pause the repository, or resume it"),
         ("P U", "pause every repository, or resume them"),
         ("R", "reseed the profile's snapshot"),
-        ("c s", "history: cycle the outcome or repository filter"),
+        ("c s w", "history: cycle outcome, repository, workflow"),
         ("] [", "history: next and previous page"),
         ("d D", "records: remove the record, or every record"),
         ("a", "sizing: write the advice into the config"),
@@ -269,47 +311,388 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
 }
 
 /// A section's title on the left and a note on the right, on one line.
+/// The note is cut to leave the title and two cells beside it.
 fn heading(frame: &mut Frame<'_>, area: Rect, title: &str, note: String, theme: Theme) {
     frame.render_widget(Line::styled(title.to_owned(), bold()), area);
+    let room = usize::from(area.width).saturating_sub(title.width() + 2);
+    let note = if note.width() <= room {
+        note
+    } else {
+        fit(&note, room).trim_end().to_owned()
+    };
     frame.render_widget(
         Line::styled(note, theme.dim()).alignment(Alignment::Right),
         area,
     );
 }
 
+/// The fewest rows the repositories and latest jobs keep: a title and four jobs.
+const LISTS_MIN: u16 = 5;
+
+/// Top to bottom as the dashboard's overview: health, budget, slots, the queue, then the repositories and latest
+/// jobs; the slice's charts, last on the dashboard, take what the lists leave and are the first to go.
 fn overview(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let slots = app.slots().count();
     let columns = usize::from(area.width / 30).clamp(1, slots.max(1));
-    let cards = u16::try_from(slots.div_ceil(columns) * 7 + 1).unwrap_or(u16::MAX);
-    let lines = u16::try_from(slots + 1).unwrap_or(u16::MAX);
-    let rest = area.height.saturating_sub(3);
-    let as_cards = rest >= cards + 8;
+    let cards = length(slots.div_ceil(columns) * 7 + 1);
+    let lines = length(slots + 1);
+    let queued = app.live.status.queued.len();
+    let rest = area.height.saturating_sub(4);
+    let queue_least = if queued == 0 {
+        0
+    } else {
+        length(queued.min(3) + 1)
+    };
+    let as_cards = rest >= cards + queue_least + LISTS_MIN;
     let slots_height = if as_cards { cards } else { lines };
-    let charts = rest.saturating_sub(slots_height) >= 7 + 6;
-    let [budget_area, slots_area, charts_area, lists_area] = Layout::vertical([
+    let left = rest.saturating_sub(slots_height);
+    let queue_height = if queued == 0 {
+        0
+    } else {
+        length(queued + 1)
+            .min(left.saturating_sub(LISTS_MIN))
+            .max(left.min(2))
+    };
+    let left = left.saturating_sub(queue_height);
+    let side_by_side = area.width >= 100;
+    let lists_wanted = lists_height(app, side_by_side);
+    // The charts take what the lists leave, from a chart of four rows.
+    let charts_height = if left >= 6 + LISTS_MIN {
+        left.saturating_sub(lists_wanted).max(6)
+    } else {
+        0
+    };
+    let [
+        health_area,
+        budget_area,
+        slots_area,
+        queue_area,
+        lists_area,
+        charts_area,
+    ] = Layout::vertical([
+        Constraint::Length(1),
         Constraint::Length(3),
         Constraint::Length(slots_height),
-        Constraint::Length(if charts { 7 } else { 0 }),
+        Constraint::Length(queue_height),
         Constraint::Min(0),
+        Constraint::Length(charts_height),
     ])
     .areas(area);
+    health(frame, health_area, app, now, theme);
     budget(frame, budget_area, app, theme);
     if as_cards {
         slot_cards(frame, slots_area, app, columns, now, theme);
     } else {
         slot_lines(frame, slots_area, app, now, theme);
     }
-    if charts {
+    if queue_height > 0 {
+        queue(frame, queue_area, app, now, theme);
+    }
+    if charts_height > 0 {
         slice(frame, charts_area, app, theme);
     }
-    let [repositories_area, latest_area] = if lists_area.width >= 70 {
-        Layout::horizontal([Constraint::Percentage(45), Constraint::Percentage(55)])
-            .areas(lists_area)
+    let [repositories_area, latest_area] = if side_by_side {
+        let width = repositories_width(app).min(lists_area.width * 2 / 5);
+        Layout::horizontal([Constraint::Length(width), Constraint::Min(0)]).areas(lists_area)
     } else {
-        Layout::vertical([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(lists_area)
+        // Stacked, the repositories take the rows they need, at most half unless the latest jobs need less.
+        let latest = length(app.live.recent.len() + 1).min(LISTS_MIN);
+        let height = length(app.live.status.repositories.len() + 1)
+            .min((lists_area.height / 2).max(lists_area.height.saturating_sub(latest)))
+            .max(lists_area.height.min(2));
+        Layout::vertical([Constraint::Length(height), Constraint::Min(0)]).areas(lists_area)
     };
     repositories(frame, repositories_area, app, theme);
     latest(frame, latest_area, app, now, theme);
+}
+
+/// A count of rows or cells as a height or width.
+fn length(count: usize) -> u16 {
+    u16::try_from(count).unwrap_or(u16::MAX)
+}
+
+/// The rows the repositories and latest jobs would fill, side by side or one above the other.
+fn lists_height(app: &App, side_by_side: bool) -> u16 {
+    let repositories = app.live.status.repositories.len() + 1;
+    let latest = app.live.recent.len() + 1;
+    length(if side_by_side {
+        repositories.max(latest)
+    } else {
+        repositories + latest
+    })
+}
+
+/// The figures that say whether CI keeps up, as the dashboard opens with them: slots running, jobs waiting and the
+/// oldest's wait, then over the last 24 hours the p95 wait with the longest wait of each hour, and the failures.
+/// What does not fit goes whole, least telling first: the starting runners, the finished count, the hours, the
+/// oldest wait.
+fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+    const SPARK_LEAST: usize = 8;
+    let mut items = health_items(app, now, theme);
+    let width = usize::from(area.width);
+    let used = |items: &[(u8, Option<Vec<Span<'static>>>)]| -> usize {
+        items
+            .iter()
+            .map(|(_, spans)| {
+                spans
+                    .as_ref()
+                    .map_or(1 + SPARK_LEAST, |spans| Line::from(spans.clone()).width())
+            })
+            .sum()
+    };
+    drop_least(&mut items, 1, |items| used(items) <= width);
+    let room = width
+        .saturating_sub(used(&items) - (1 + SPARK_LEAST))
+        .saturating_sub(1);
+    let hours = app
+        .activity
+        .as_ref()
+        .map(Activity::wait_hours)
+        .unwrap_or_default();
+    let mut spans = Vec::new();
+    for (_, item) in items {
+        if let Some(item) = item {
+            spans.extend(item);
+        } else {
+            let bars = resample(&hours, room.min(hours.len()));
+            let longest = bars.iter().copied().max().unwrap_or(0);
+            spans.push(Span::raw(" "));
+            spans.push(Span::styled(
+                spark(bars.into_iter(), longest, usize::MAX),
+                theme.wait(),
+            ));
+        }
+    }
+    frame.render_widget(Line::from(spans), area);
+}
+
+/// The health line's figures, each with its rank for [`drop_least`]; `None` marks where the hours' bars go.
+fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
+    let status = &app.live.status;
+    let runners: Vec<_> = status
+        .profiles
+        .iter()
+        .flat_map(|profile| &profile.slots)
+        .filter_map(|slot| slot.runner.as_ref())
+        .collect();
+    let starting = runners.iter().filter(|runner| !runner.busy).count();
+    let slots: usize = status
+        .profiles
+        .iter()
+        .map(|profile| profile.slots.len())
+        .sum();
+    let queued = &status.queued;
+    let oldest = queued
+        .iter()
+        .filter(|job| job.queued_at > 0)
+        .map(|job| job.queued_at)
+        .min();
+    let sep = || Span::styled(" · ", theme.dim());
+    let mut items: Vec<(u8, Option<Vec<Span<'static>>>)> = vec![(
+        0,
+        Some(vec![
+            Span::styled((runners.len() - starting).to_string(), bold()),
+            Span::raw(format!("/{slots} running")),
+        ]),
+    )];
+    if starting > 0 {
+        items.push((
+            4,
+            Some(vec![Span::styled(
+                format!(", {starting} starting"),
+                theme.dim(),
+            )]),
+        ));
+    }
+    items.push((
+        0,
+        Some(vec![
+            sep(),
+            Span::styled(
+                queued.len().to_string(),
+                if queued.is_empty() {
+                    bold()
+                } else {
+                    theme.wait().add_modifier(Modifier::BOLD)
+                },
+            ),
+            Span::raw(" waiting"),
+        ]),
+    ));
+    if let Some(oldest) = oldest {
+        items.push((
+            1,
+            Some(vec![Span::raw(format!(
+                ", oldest {}",
+                duration(now.saturating_sub(oldest))
+            ))]),
+        ));
+    }
+    if let Some(day) = &app.activity {
+        items.push((
+            0,
+            Some(vec![
+                sep(),
+                Span::styled("24 h: ", theme.dim()),
+                Span::raw("wait p95 "),
+                Span::styled(
+                    day.wait_p95().map_or_else(|| "–".to_owned(), duration),
+                    bold(),
+                ),
+            ]),
+        ));
+        if day.wait_hours().iter().any(|wait| *wait > 0) {
+            items.push((2, None));
+        }
+        items.push((
+            0,
+            Some(vec![
+                sep(),
+                Span::styled(
+                    day.failed.to_string(),
+                    if day.failed > 0 {
+                        theme.tone(Tone::Bad)
+                    } else {
+                        bold()
+                    },
+                ),
+                Span::raw(" failed"),
+            ]),
+        ));
+        items.push((
+            3,
+            Some(vec![Span::raw(format!(" of {} finished", day.finished))]),
+        ));
+    }
+    items
+}
+
+/// `values` in `width` buckets, each the largest of the values it covers, in order.
+fn resample(values: &[u64], width: usize) -> Vec<u64> {
+    if width == 0 {
+        return Vec::new();
+    }
+    (0..width)
+        .map(|bucket| {
+            let start = bucket * values.len() / width;
+            let end = ((bucket + 1) * values.len() / width).max(start + 1);
+            values[start..end.min(values.len())]
+                .iter()
+                .copied()
+                .max()
+                .unwrap_or(0)
+        })
+        .collect()
+}
+
+/// How a reason is drawn: what the owner can act on stands out, what clears by itself is quiet.
+fn reason_style(kind: WaitKind, theme: Theme) -> Style {
+    match kind {
+        WaitKind::Act => theme.wait().add_modifier(Modifier::BOLD),
+        WaitKind::Soon => theme.dim(),
+        WaitKind::Full => theme.wait(),
+    }
+}
+
+/// Why `job` waits in `width` cells, in the daemon's words as the dashboard shows them; nothing from a daemon that
+/// does not say.
+fn reason(app: &App, job: &QueuedJob, now: u64, width: usize, theme: Theme) -> Span<'static> {
+    job.waiting.as_ref().map_or_else(Span::default, |waiting| {
+        Span::styled(
+            fit(&waiting.reason(job, &app.live.status, now), width)
+                .trim_end()
+                .to_owned(),
+            reason_style(waiting.kind(), theme),
+        )
+    })
+}
+
+/// Every queued job, oldest first: how long it has waited, its name, its repository where there is room, and why it
+/// waits, which takes the rest of the line.
+fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+    let focused = app.pane == Pane::Queue;
+    let queued = &app.live.status.queued;
+    let [title, table_area] =
+        Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
+    let hidden = queued.len().saturating_sub(usize::from(table_area.height));
+    heading(
+        frame,
+        title,
+        "Waiting",
+        if hidden > 0 {
+            format!("{} queued, oldest first; {hidden} more below", queued.len())
+        } else {
+            format!("{} queued, oldest first", queued.len())
+        },
+        theme,
+    );
+    let width = usize::from(table_area.width);
+    let waits: Vec<String> = queued
+        .iter()
+        .map(|job| match job.queued_at {
+            0 => "–".to_owned(),
+            at => duration(now.saturating_sub(at)),
+        })
+        .collect();
+    let wait_width = waits.iter().map(|wait| wait.width()).max().unwrap_or(0);
+    let names: Vec<String> = queued.iter().map(human::queued_title).collect();
+    let name_width = names
+        .iter()
+        .map(|name| name.width())
+        .max()
+        .unwrap_or(0)
+        .min((width * 3 / 10).max(12));
+    let repository_width = if width >= 120 {
+        queued
+            .iter()
+            .map(|job| job.repository.width())
+            .max()
+            .unwrap_or(0)
+            .min(24)
+    } else {
+        0
+    };
+    // A cell between columns.
+    let reason_width = width.saturating_sub(
+        wait_width
+            + 1
+            + name_width
+            + 1
+            + if repository_width > 0 {
+                repository_width + 1
+            } else {
+                0
+            },
+    );
+    let rows = queued
+        .iter()
+        .zip(waits)
+        .zip(names)
+        .map(|((job, wait), name)| {
+            let mut cells = vec![
+                Cell::from(Line::from(Span::styled(wait, theme.wait())).right_aligned()),
+                Cell::from(fit(&name, name_width)),
+            ];
+            if repository_width > 0 {
+                cells.push(Cell::from(Span::styled(
+                    fit(&job.repository, repository_width),
+                    theme.dim(),
+                )));
+            }
+            cells.push(Cell::from(reason(app, job, now, reason_width, theme)));
+            Row::new(cells)
+        });
+    let mut widths = vec![
+        Constraint::Length(length(wait_width)),
+        Constraint::Length(length(name_width)),
+    ];
+    if repository_width > 0 {
+        widths.push(Constraint::Length(length(repository_width)));
+    }
+    widths.push(Constraint::Fill(1));
+    let table = Table::new(rows, widths).row_highlight_style(selected());
+    let mut state = TableState::default().with_selected(focused.then_some(app.queued));
+    frame.render_stateful_widget(table, table_area, &mut state);
 }
 
 /// `part` of `whole` as cells of `width`.
@@ -318,8 +701,9 @@ fn scale(part: u64, whole: u64, width: u16) -> u16 {
     u16::try_from(cells).unwrap_or(width).min(width)
 }
 
-/// The budget's heading: what is reserved of what, how runners are admitted, and what the slice uses.
-fn budget_note(app: &App) -> String {
+/// The budget's heading: what is reserved of what, how runners are admitted, and what the slice uses, each with its
+/// rank for [`fit_details`].
+fn budget_note(app: &App) -> Vec<(u8, String)> {
     let budget = &app.live.status.budget;
     let mut note = match budget.memory_max {
         Some(max) => format!(
@@ -337,13 +721,14 @@ fn budget_note(app: &App) -> String {
     if let Some(by) = budget.admission_note() {
         let _ = write!(note, " {by}");
     }
+    let mut parts = vec![(0, note)];
     if let Some(cpu) = budget.cpu {
-        let _ = write!(note, " · {}", cpu.line());
+        parts.push((1, cpu.line()));
     }
     if let Some(host) = &app.live.host {
-        let _ = write!(note, " · {} in use, sampled", bytes(host.memory));
+        parts.push((2, format!("{} in use, sampled", bytes(host.memory))));
     }
-    note
+    parts
 }
 
 /// The budget as one bar: a block per slot as wide as its memory (under measured admission, a block per runner as
@@ -408,10 +793,13 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             .collect();
         text.push(' ');
         cells.push(Span::styled(text, style));
-        names.push(Span::styled(
-            format!("{} ", fit(&label, usize::from(width.saturating_sub(1)))),
-            style,
-        ));
+        let room = usize::from(width.saturating_sub(1));
+        // Short of room, `used` goes before the figure is cut.
+        let label = match label.strip_suffix(" used") {
+            Some(short) if label.width() > room => short.to_owned(),
+            _ => label,
+        };
+        names.push(Span::styled(format!("{} ", fit(&label, room)), style));
         drawn += width;
     }
     // The mirror and each seed container, named as the slots are, or in the heading when too narrow for it.
@@ -426,7 +814,7 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             .min(bar.width.saturating_sub(drawn));
         let room = usize::from(width.saturating_sub(1));
         if label.width() > room {
-            let _ = write!(note, " · {label}");
+            note.push((3, label.clone()));
         }
         if width < 2 {
             continue;
@@ -442,7 +830,8 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         names.push(Span::styled(format!("{name:room$} "), style));
         drawn += width;
     }
-    heading(frame, title, "Budget", note, theme);
+    let room = usize::from(title.width).saturating_sub("Budget".width() + 2);
+    heading(frame, title, "Budget", fit_details(note, room), theme);
     let free = bar.width.saturating_sub(drawn);
     cells.push(Span::styled("·".repeat(usize::from(free)), theme.dim()));
     frame.render_widget(Line::from(cells), bar);
@@ -501,6 +890,21 @@ fn spark(values: impl DoubleEndedIterator<Item = u64>, max: u64, width: usize) -
         .collect();
     bars.reverse();
     bars.into_iter().collect()
+}
+
+/// `text` in lines of at most `width` cells, broken between words; a word longer than a line is cut by [`fit`].
+fn wrap(text: &str, width: usize) -> Vec<String> {
+    let mut lines: Vec<String> = Vec::new();
+    for word in text.split_whitespace() {
+        match lines.last_mut() {
+            Some(line) if line.width() + 1 + word.width() <= width => {
+                line.push(' ');
+                line.push_str(word);
+            }
+            _ => lines.push(fit(word, width).trim_end().to_owned()),
+        }
+    }
+    lines
 }
 
 /// `text` cut or padded to `width` terminal cells, ending in `…` when cut.
@@ -611,23 +1015,36 @@ fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: The
                         .map_or_else(String::new, |at| duration(now.saturating_sub(at)));
                     let memory = usage.last().map_or_else(String::new, |s| bytes(s.memory));
                     let cpu = usage.last().map_or_else(String::new, |s| cores(s.cpu));
-                    // Fixed columns at the right; the job's name takes what is left.
+                    // Fixed columns at the right, their sparklines only from 100 columns; the job's name takes what
+                    // is left, then its repository if that fits too.
+                    let sparks = width >= 100;
                     let job_width = width
-                        .saturating_sub(11 + 7 + 16 + 9 + 7 + 6 + 6 + 6)
+                        .saturating_sub(11 + 7 + 16 + 9 + 7 + 6 + if sparks { 13 } else { 0 })
                         .max(10);
+                    let title = human::title(&job.summary);
+                    let repository = &job.summary.repository;
+                    let (title, repository) = if title.width() + 1 + repository.width() <= job_width
+                    {
+                        let pad = job_width - title.width() - 1;
+                        (format!("{title} "), fit(repository, pad))
+                    } else {
+                        (fit(&title, job_width), String::new())
+                    };
                     spans.extend([
-                        Span::raw(fit(
-                            &format!("{} {}", human::title(&job.summary), job.summary.repository),
-                            job_width,
-                        )),
+                        Span::raw(title),
+                        Span::styled(repository, theme.dim()),
                         Span::styled(format!(" {count:>5} "), theme.cpu()),
                         Span::raw(fit(&name, 16)),
                         Span::raw(format!(" {ran:>7} ")),
                         Span::raw(format!("{memory:>6} ")),
-                        Span::styled(usage.memory(6), theme.memory()),
-                        Span::raw(format!("{cpu:>5} ")),
-                        Span::styled(usage.cpu(6), theme.cpu()),
                     ]);
+                    if sparks {
+                        spans.push(Span::styled(usage.memory(6), theme.memory()));
+                    }
+                    spans.push(Span::raw(format!("{cpu:>5} ")));
+                    if sparks {
+                        spans.push(Span::styled(usage.cpu(6), theme.cpu()));
+                    }
                 }
                 (None, Some(runner)) => spans.push(Span::styled(
                     format!("runner for {} waiting for its job", runner.repository),
@@ -812,11 +1229,6 @@ fn slice(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(area);
     let status = &app.live.status;
     let memory_max = status.budget.memory_max;
-    let cpus: u64 = status
-        .profiles
-        .iter()
-        .map(|profile| u64::from(profile.cpus) * profile.slots.len() as u64)
-        .sum();
     Chart {
         title: "Memory",
         limit_label: memory_max.map_or_else(String::new, |max| format!("MemoryMax {}", bytes(max))),
@@ -828,9 +1240,13 @@ fn slice(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     .render(frame, memory_area, theme);
     Chart {
         title: "CPU",
-        limit_label: format!("{cpus} CPUs of all slots"),
+        // Up to the CPUs the slice may use, as the dashboard draws it: the slots' quotas may add up past them.
+        limit_label: status
+            .budget
+            .slice_cpus
+            .map_or_else(String::new, |cpus| format!("slice {} CPUs", cores(cpus))),
         values: app.host.iter().map(|sample| sample.cpu).collect(),
-        limit: cpus * 1000,
+        limit: status.budget.slice_cpus.unwrap_or(0),
         unit: in_cores,
         style: theme.cpu(),
     }
@@ -862,7 +1278,17 @@ impl Chart {
                         .map_or_else(String::new, |last| format!("{} ", unit(*last))),
                 ),
             ]))
-            .title_top(Line::styled(format!(" {} ", self.limit_label), theme.dim()).right_aligned())
+            .title_top(
+                Line::styled(
+                    if self.limit_label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {} ", self.limit_label)
+                    },
+                    theme.dim(),
+                )
+                .right_aligned(),
+            )
             .title_bottom(Line::styled(
                 peak.map_or_else(
                     || " no samples yet ".to_owned(),
@@ -897,6 +1323,26 @@ fn list_block(title: &str, focused: bool, theme: Theme) -> Block<'_> {
             format!(" {title} "),
             if focused { selected() } else { bold() },
         ))
+}
+
+/// What the repositories pane needs to show each repository whole with its profile, and a cell before the next pane.
+fn repositories_width(app: &App) -> u16 {
+    let widest = app
+        .live
+        .status
+        .repositories
+        .iter()
+        .map(|repository| {
+            // `■ `, the name, `  profile`, `  N queued`, `  paused`.
+            2 + repository.name.width()
+                + 2
+                + repository.profile.width()
+                + format!("  {} queued", repository.queued_jobs).width()
+                + if repository.paused { 8 } else { 0 }
+        })
+        .max()
+        .unwrap_or(0);
+    length(widest + 1).max(24)
 }
 
 fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
@@ -966,80 +1412,122 @@ fn finished_ago(job: &JobSummary, now: u64) -> String {
         .map_or_else(String::new, |at| human::ago(at, now))
 }
 
+/// The latest finished jobs, newest first: the outcome, the job, its repository where there is room, from 110 columns
+/// how long it waited and from 140 its branch, how long it ran and when it finished.
 fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let focused = app.pane == Pane::Latest;
-    let width = usize::from(area.width);
-    let rows: Vec<_> = app
-        .latest_rows()
-        .map(|row| match row {
-            LatestRow::Queued(job) => (
-                Span::styled(
-                    format!("{:<9}", "QUEUED"),
-                    theme.tone(Tone::Busy).add_modifier(Modifier::BOLD),
-                ),
-                format!("{} {}", human::queued_title(job), job.repository),
-                String::new(),
-                human::queued_ago(job, now),
-            ),
-            LatestRow::Finished(job) => (
-                badge(job, theme),
-                format!("{} {}", human::title(job), job.repository),
-                human::ran(job, now).map_or_else(String::new, duration),
-                finished_ago(job, now),
-            ),
-        })
+    let block = list_block("Latest jobs", focused, theme);
+    let inner = block.inner(area);
+    frame.render_widget(block, area);
+    let jobs = &app.live.recent;
+    let run_times: Vec<String> = jobs
+        .iter()
+        .map(|job| human::ran(job, now).map_or_else(String::new, duration))
         .collect();
-    // The times are as wide as the widest of them; the job's name takes what is left.
-    let ran_width = rows
+    let finished: Vec<String> = jobs.iter().map(|job| finished_ago(job, now)).collect();
+    // The times are as wide as the widest of them; the job and its repository take what is left, the job first.
+    let ran_width = run_times.iter().map(|ran| ran.width()).max().unwrap_or(0);
+    let ago_width = finished.iter().map(|ago| ago.width()).max().unwrap_or(0);
+    let waits: Vec<String> = jobs
         .iter()
-        .map(|(_, _, ran, _)| ran.width())
+        .map(|job| human::waited(job, now).map_or_else(String::new, duration))
+        .collect();
+    let wait_width = if inner.width >= 110 {
+        waits.iter().map(|wait| wait.width()).max().unwrap_or(0)
+    } else {
+        0
+    };
+    let branch_width = if inner.width >= 140 {
+        jobs.iter()
+            .map(|job| job.branch.as_deref().unwrap_or_default().width())
+            .max()
+            .unwrap_or(0)
+            .min(20)
+    } else {
+        0
+    };
+    let optional = [wait_width, branch_width]
+        .iter()
+        .filter(|width| **width > 0)
+        .map(|width| width + 1)
+        .sum::<usize>();
+    let rest =
+        usize::from(inner.width).saturating_sub(9 + 1 + ran_width + 1 + ago_width + 1 + optional);
+    let titles: Vec<String> = jobs.iter().map(human::title).collect();
+    let title_width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
+    let repository_width = jobs
+        .iter()
+        .map(|job| job.repository.width())
         .max()
         .unwrap_or(0);
-    let ago_width = rows
+    // The repository shows from a dozen cells, cut if it must be.
+    let (title_width, repository_width) = if rest >= title_width + 1 + repository_width.min(12) {
+        (title_width, rest - title_width - 1)
+    } else {
+        (rest, 0)
+    };
+    let rows = jobs
         .iter()
-        .map(|(_, _, _, ago)| ago.width())
-        .max()
-        .unwrap_or(0);
-    let name_width = width
-        .saturating_sub(10 + ran_width + 1 + ago_width + 1)
-        .max(8);
-    let lines: Vec<Line<'_>> = rows
-        .into_iter()
-        .enumerate()
-        .map(|(position, (badge, name, ran, ago))| {
-            let line = Line::from(vec![
-                badge,
-                Span::raw(" "),
-                Span::raw(fit(&name, name_width)),
-                Span::raw(format!(" {ran:>ran_width$} ")),
-                Span::styled(format!("{ago:>ago_width$}"), theme.dim()),
-            ]);
-            if focused && position == app.latest {
-                line.style(selected())
-            } else {
-                line
+        .zip(titles)
+        .zip(run_times.into_iter().zip(finished))
+        .zip(waits)
+        .map(|(((job, title), (ran, ago)), wait)| {
+            let mut cells = vec![
+                Cell::from(badge(job, theme)),
+                Cell::from(fit(&title, title_width)),
+            ];
+            if repository_width > 0 {
+                cells.push(Cell::from(Span::styled(
+                    fit(&job.repository, repository_width),
+                    theme.dim(),
+                )));
             }
-        })
-        .collect();
-    frame.render_widget(
-        Paragraph::new(lines).block(list_block("Latest jobs", focused, theme)),
-        area,
-    );
+            if branch_width > 0 {
+                cells.push(Cell::from(Span::styled(
+                    fit(job.branch.as_deref().unwrap_or_default(), branch_width),
+                    theme.dim(),
+                )));
+            }
+            if wait_width > 0 {
+                cells.push(Cell::from(
+                    Line::from(Span::styled(wait, theme.wait())).right_aligned(),
+                ));
+            }
+            cells.extend([
+                Cell::from(Line::from(ran).right_aligned()),
+                Cell::from(Line::from(Span::styled(ago, theme.dim())).right_aligned()),
+            ]);
+            Row::new(cells)
+        });
+    let mut widths = vec![
+        Constraint::Length(9),
+        Constraint::Length(length(title_width)),
+    ];
+    for width in [repository_width, branch_width, wait_width] {
+        if width > 0 {
+            widths.push(Constraint::Length(length(width)));
+        }
+    }
+    widths.extend([
+        Constraint::Length(length(ran_width)),
+        Constraint::Length(length(ago_width)),
+    ]);
+    let table = Table::new(rows, widths).row_highlight_style(selected());
+    let mut state = TableState::default().with_selected(focused.then_some(app.latest));
+    frame.render_stateful_widget(table, inner, &mut state);
 }
 
 fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let filters = &app.history;
     let [title, table_area] =
         Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    let page = filters.previous.len() + 1;
     heading(
         frame,
         title,
         "History",
-        format!(
-            "outcome {} · repository {} · page {page}",
-            filters.conclusion.as_deref().unwrap_or("any"),
-            filters.repository.as_deref().unwrap_or("any"),
+        history_note(
+            filters,
+            usize::from(title.width).saturating_sub("History".width() + 2),
         ),
         theme,
     );
@@ -1115,6 +1603,20 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         .row_highlight_style(selected());
     let mut state = TableState::default().with_selected(Some(filters.selected));
     frame.render_stateful_widget(table, table_area, &mut state);
+}
+
+/// The history's filters and page, as fit `width`.
+fn history_note(filters: &History, width: usize) -> String {
+    let any = |filter: &Option<String>| filter.clone().unwrap_or_else(|| "any".to_owned());
+    fit_details(
+        vec![
+            (0, format!("outcome {}", any(&filters.conclusion))),
+            (0, format!("repository {}", any(&filters.repository))),
+            (1, format!("workflow {}", any(&filters.workflow))),
+            (2, format!("page {}", filters.previous.len() + 1)),
+        ],
+        width,
+    )
 }
 
 /// The records of failed jobs, each a stopped runner `runnerctl shell` opens a shell in.
@@ -1223,29 +1725,44 @@ fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
         return;
     };
     let wide = area.width >= 100;
-    let profiles = u16::try_from(sizing.profiles.len()).unwrap_or(u16::MAX);
-    let [title, profiles_area, advice_area, jobs_area] = Layout::vertical([
+    let profiles = length(sizing.profiles.len());
+    let plan = auto_plan(sizing, usize::from(area.width), now, app, theme);
+    let [title, profiles_area, plan_area, advice_area, jobs_area] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Length(profiles.saturating_add(1)),
+        Constraint::Length(length(plan.len())),
         Constraint::Length(3),
         Constraint::Min(0),
     ])
     .areas(area);
+    frame.render_widget(Paragraph::new(plan), plan_area);
     heading(
         frame,
         title,
         "Sizing",
-        format!(
-            "{} of history · peaks every {} s +{}% · advice after {} jobs{}",
-            duration(sizing.until.saturating_sub(sizing.since)),
-            sizing.sample_interval,
-            sizing.margin,
-            sizing.min_jobs,
-            if sizing.auto {
-                " · auto sizing on"
-            } else {
-                ""
-            }
+        fit_details(
+            vec![
+                (
+                    0,
+                    format!(
+                        "{} of history",
+                        duration(sizing.until.saturating_sub(sizing.since))
+                    ),
+                ),
+                (
+                    2,
+                    format!(
+                        "peaks every {} s +{}%",
+                        sizing.sample_interval, sizing.margin
+                    ),
+                ),
+                (1, format!("advice after {} jobs", sizing.min_jobs)),
+                (
+                    if sizing.auto_plan.is_some() { 3 } else { 0 },
+                    format!("auto sizing {}", if sizing.auto { "on" } else { "off" }),
+                ),
+            ],
+            usize::from(title.width).saturating_sub("Sizing".width() + 2),
         ),
         theme,
     );
@@ -1291,6 +1808,104 @@ fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     }
     frame.render_widget(Paragraph::new(lines).wrap(Wrap { trim: true }), advice_area);
     sizing_jobs(frame, jobs_area, profile, wide, theme);
+}
+
+/// Under auto sizing, its rules, why no look changes anything if one would not, and per profile what its next look
+/// changes, how long a recent change holds it, or that its advice asks for nothing; a blank line after. Nothing while
+/// auto sizing is off, or from a daemon that does not say what it does next.
+fn auto_plan(
+    sizing: &Sizing,
+    width: usize,
+    now: u64,
+    app: &App,
+    theme: Theme,
+) -> Vec<Line<'static>> {
+    let Some(plan) = sizing.auto_plan.as_ref().filter(|_| sizing.auto) else {
+        return Vec::new();
+    };
+    let mut lines = vec![Line::from("")];
+    // The rules and what blocks every look are sentences, wrapped rather than cut.
+    for (position, line) in wrap(&format!("Auto sizing {}", plan.rules()), width)
+        .into_iter()
+        .enumerate()
+    {
+        lines.push(
+            match line.strip_prefix("Auto sizing ").filter(|_| position == 0) {
+                Some(rest) => Line::from(vec![
+                    Span::styled("Auto sizing ", bold()),
+                    Span::styled(rest.to_owned(), theme.dim()),
+                ]),
+                None => Line::styled(line, theme.dim()),
+            },
+        );
+    }
+    if let Some(blocked) = &plan.blocked {
+        lines.extend(
+            wrap(&format!("No look changes anything now: {blocked}"), width)
+                .into_iter()
+                .map(|line| Line::styled(line, theme.tone(Tone::Bad))),
+        );
+    }
+    let name_width = sizing
+        .profiles
+        .iter()
+        .map(|profile| profile.name.width())
+        .max()
+        .unwrap_or(0);
+    for profile in &sizing.profiles {
+        let (what, why) = plan_line(sizing, plan, profile, now);
+        let room = width.saturating_sub(2 + name_width + 1);
+        let what_width = what.width().min(room);
+        let mut spans = vec![
+            Span::styled("■ ", theme.profile(app.profile_index(&profile.name))),
+            Span::raw(format!("{:<name_width$} ", profile.name)),
+            Span::raw(fit(&what, what_width)),
+        ];
+        let rest = room.saturating_sub(what_width + 2);
+        if rest >= 12 {
+            spans.push(Span::styled(
+                format!("  {}", fit(&why, rest).trim_end()),
+                theme.dim(),
+            ));
+        }
+        lines.push(Line::from(spans));
+    }
+    lines
+}
+
+/// What auto sizing does next with a profile, then why, as the dashboard's sizing page says it.
+fn plan_line(
+    sizing: &Sizing,
+    plan: &AutoPlan,
+    profile: &ProfileSizing,
+    now: u64,
+) -> (String, String) {
+    if let Some(change) = plan
+        .next
+        .iter()
+        .find(|change| change.profile == profile.name)
+    {
+        let what = if plan.blocked.is_some() {
+            format!("Once that is fixed: {}", change.line())
+        } else {
+            format!(
+                "Next look, within {}: {}",
+                period(plan.every),
+                change.line()
+            )
+        };
+        return (what, change.reason.clone());
+    }
+    if let Some(hold) = plan.held.iter().find(|hold| hold.profile == profile.name) {
+        return (
+            format!("No change for {}", duration(hold.until.saturating_sub(now))),
+            format!(
+                "changed {}; the interval holds it until then",
+                human::ago(hold.changed, now)
+            ),
+        );
+    }
+    ("Nothing to change".to_owned(), sizing.advice_line(profile))
 }
 
 /// A row per profile: its memory and slots, its jobs' peaks, how busy and how long waited, the advice.
@@ -1450,20 +2065,102 @@ fn advice_word(advice: Advice) -> String {
 fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, theme: Theme) {
     let job = &open.job;
     let summary = &job.summary;
-    let steps_wanted = u16::try_from(job.steps.len() + 1).unwrap_or(u16::MAX);
-    let fixed = 3 + 2;
-    let full_charts = area.height >= fixed + steps_wanted + 7 + 6;
-    let charts_height = if full_charts { 7 } else { 2 };
+    // A queued job has no steps yet, nor their heading.
+    let steps_wanted = if job.steps.is_empty() {
+        0
+    } else {
+        length(job.steps.len() + 1)
+    };
+    let runs_height = if open.runs.as_ref().is_some_and(|runs| runs.len() > 1) {
+        2
+    } else {
+        0
+    };
+    let fixed = 3 + 2 + runs_height;
+    // Until a runner has it there is nothing to chart.
+    let charted = summary.runner.is_some() || !open.samples.is_empty();
+    let full_charts = charted && area.height >= fixed + steps_wanted + 7 + 6;
+    let charts_height = match (charted, full_charts) {
+        (false, _) => 0,
+        (true, true) => 7,
+        (true, false) => 2,
+    };
     let steps_height = steps_wanted.min(area.height.saturating_sub(fixed + charts_height + 4));
-    let [head, timeline_area, steps_area, charts_area, log_area] = Layout::vertical([
+    let [
+        head,
+        timeline_area,
+        runs_area,
+        steps_area,
+        charts_area,
+        log_area,
+    ] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(2),
+        Constraint::Length(runs_height),
         Constraint::Length(steps_height),
         Constraint::Length(charts_height),
         Constraint::Min(0),
     ])
     .areas(area);
 
+    let width = usize::from(head.width);
+    let details = fit_details(job_details(app, job, now), width);
+    let badge = badge(summary, theme);
+    let title = human::title(summary);
+    let title_width = title.width().min(width.saturating_sub(badge.width() + 2));
+    let style = summary.runner.as_ref().map_or_else(
+        || theme.dim(),
+        |runner| theme.profile(app.profile_index(&runner.profile)),
+    );
+    frame.render_widget(
+        Paragraph::new(vec![
+            Line::from(vec![
+                Span::styled("■ ", style),
+                Span::styled(
+                    fit(&summary.repository, width.saturating_sub(2)),
+                    theme.dim(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(fit(&title, title_width), bold()),
+                Span::raw("  "),
+                badge,
+            ]),
+            Line::styled(details, theme.dim()),
+        ]),
+        head,
+    );
+    let waiting = app
+        .live
+        .status
+        .queued
+        .iter()
+        .find(|queued| queued.id == summary.id)
+        .filter(|_| summary.timeline.started_at.is_none());
+    timeline(
+        frame,
+        timeline_area,
+        summary,
+        waiting.map(|queued| reason(app, queued, now, usize::from(area.width), theme)),
+        now,
+        theme,
+    );
+    if let Some(runs) = open.runs.as_ref().filter(|_| runs_height > 0) {
+        job_runs(frame, runs_area, app, summary, runs, now, theme);
+    }
+    steps(frame, steps_area, job, now, theme);
+    match (charted, full_charts) {
+        (false, _) => {}
+        (true, true) => job_charts(frame, charts_area, app, open, theme),
+        (true, false) => job_spark(frame, charts_area, app, open, theme),
+    }
+    log(frame, log_area, open, theme);
+}
+
+/// The open job's details under its name, each with its rank: when they do not fit one line, the least important
+/// go first.
+fn job_details(app: &App, job: &Job, now: u64) -> Vec<(u8, String)> {
+    let summary = &job.summary;
     let profile = summary.runner.as_ref().and_then(|runner| {
         app.live
             .status
@@ -1471,7 +2168,6 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
             .iter()
             .find(|p| p.name == runner.profile)
     });
-    // Each detail with its rank: when they do not fit one line, the least important go first.
     let mut details = vec![];
     if let Some(branch) = &summary.branch {
         details.push((3, format!("branch {branch}")));
@@ -1510,68 +2206,48 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
     {
         details.push((1, format!("record kept: runnerctl shell {}", summary.id)));
     }
-    let width = usize::from(head.width);
-    let details = fit_details(details, width);
-    let badge = badge(summary, theme);
-    let title = human::title(summary);
-    let title_width = title.width().min(width.saturating_sub(badge.width() + 2));
-    let style = summary.runner.as_ref().map_or_else(
-        || theme.dim(),
-        |runner| theme.profile(app.profile_index(&runner.profile)),
-    );
-    frame.render_widget(
-        Paragraph::new(vec![
-            Line::from(vec![
-                Span::styled("■ ", style),
-                Span::styled(
-                    fit(&summary.repository, width.saturating_sub(2)),
-                    theme.dim(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(fit(&title, title_width), bold()),
-                Span::raw("  "),
-                badge,
-            ]),
-            Line::styled(details, theme.dim()),
-        ]),
-        head,
-    );
-    timeline(frame, timeline_area, summary, now, theme);
-    steps(frame, steps_area, job, now, theme);
-    if full_charts {
-        job_charts(frame, charts_area, app, open, theme);
-    } else {
-        job_spark(frame, charts_area, app, open, theme);
-    }
-    log(frame, log_area, open, theme);
+    details
 }
 
 /// `details` joined by ` · ` in their order, without the least important (highest rank) that do not fit `width`.
 fn fit_details(mut details: Vec<(u8, String)>, width: usize) -> String {
-    loop {
-        let line = details
+    let line = |details: &[(u8, String)]| {
+        details
             .iter()
             .map(|(_, detail)| detail.as_str())
             .collect::<Vec<_>>()
-            .join(" · ");
-        if line.width() <= width {
-            return line;
-        }
-        let Some(least) = details
+            .join(" · ")
+    };
+    drop_least(&mut details, 0, |details| line(details).width() <= width);
+    line(&details)
+}
+
+/// Removes the least important of `items` (the highest rank, the last of equals) until they `fit`, keeping those
+/// ranked under `kept`.
+fn drop_least<T>(items: &mut Vec<(u8, T)>, kept: u8, fit: impl Fn(&[(u8, T)]) -> bool) {
+    while !fit(items) {
+        let Some(least) = items
             .iter()
             .enumerate()
+            .filter(|(_, (rank, _))| *rank >= kept)
             .max_by_key(|(_, (rank, _))| *rank)
             .map(|(position, _)| position)
         else {
-            return line;
+            return;
         };
-        details.remove(least);
+        items.remove(least);
     }
 }
 
-/// Waiting for a runner, the runner starting, and running, as one bar.
-fn timeline(frame: &mut Frame<'_>, area: Rect, job: &JobSummary, now: u64, theme: Theme) {
+/// Waiting for a runner, the runner starting, and running, as one bar; while it waits, why.
+fn timeline(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    job: &JobSummary,
+    reason: Option<Span<'static>>,
+    now: u64,
+    theme: Theme,
+) {
     let timeline = &job.timeline;
     let end = timeline.finished_at.unwrap_or(now);
     let started = timeline.started_at;
@@ -1612,6 +2288,11 @@ fn timeline(frame: &mut Frame<'_>, area: Rect, job: &JobSummary, now: u64, theme
         Span::styled("░ ", theme.wait()),
         Span::raw(format!("waiting for a runner {}  ", duration(waiting))),
     ];
+    if let Some(reason) = reason {
+        let room = usize::from(area.width).saturating_sub(Line::from(spans.clone()).width());
+        let text = fit(&reason.content, room).trim_end().to_owned();
+        spans.push(Span::styled(text, reason.style));
+    }
     if started.is_some() {
         spans.extend([
             Span::styled("▒ ", theme.cpu()),
@@ -1621,6 +2302,116 @@ fn timeline(frame: &mut Frame<'_>, area: Rect, job: &JobSummary, now: u64, theme
         ]);
     }
     frame.render_widget(Line::from(spans), legend);
+}
+
+/// The same job's latest runs, oldest first, as the dashboard's job page compares them: a heading with the median
+/// run and wait, the failures and the largest memory peak, then a bar each of their run times in their outcome's
+/// colour, their waits and their memory peaks in the profile's colour, this run reversed in each.
+fn job_runs(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    summary: &JobSummary,
+    runs: &[JobSummary],
+    now: u64,
+    theme: Theme,
+) {
+    let [title, bars] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+    let finished: Vec<&JobSummary> = runs
+        .iter()
+        .filter(|run| run.state.is_final() && run.timeline.started_at.is_some())
+        .collect();
+    let median = |mut values: Vec<u64>| {
+        values.sort_unstable();
+        values.get(values.len().saturating_sub(1) / 2).copied()
+    };
+    let ran = median(
+        finished
+            .iter()
+            .filter_map(|run| human::ran(run, now))
+            .collect(),
+    );
+    let waited = median(
+        finished
+            .iter()
+            .filter_map(|run| human::waited(run, now))
+            .collect(),
+    );
+    let failed = finished
+        .iter()
+        .filter(|run| human::outcome(run).1 == Tone::Bad)
+        .count();
+    let peak = runs.iter().filter_map(|run| run.metrics.memory_peak).max();
+    let mut note = vec![];
+    if let Some(ran) = ran {
+        note.push((0, format!("median run {}", duration(ran))));
+    }
+    if let Some(waited) = waited {
+        note.push((1, format!("wait {}", duration(waited))));
+    }
+    note.push((0, format!("{failed} of {} failed", finished.len())));
+    if let Some(peak) = peak {
+        note.push((2, format!("largest peak {}", bytes(peak))));
+    }
+    let heading_title = format!("Latest {} runs", runs.len());
+    let room = usize::from(title.width).saturating_sub(heading_title.width() + 2);
+    heading(frame, title, &heading_title, fit_details(note, room), theme);
+    // Three bars of equal width, each after its label, showing the newest runs that fit.
+    let labels = ["ran ", "  waited ", "  peak "];
+    let label_width: usize = labels.iter().map(|label| label.width()).sum();
+    let width = (usize::from(bars.width).saturating_sub(label_width) / 3).min(runs.len());
+    let shown = &runs[runs.len() - width..];
+    let longest = shown
+        .iter()
+        .filter_map(|run| human::ran(run, now))
+        .max()
+        .unwrap_or(0);
+    let longest_wait = shown
+        .iter()
+        .filter_map(|run| human::waited(run, now))
+        .max()
+        .unwrap_or(0);
+    let profile = theme.profile(
+        summary
+            .runner
+            .as_ref()
+            .and_then(|runner| app.profile_index(&runner.profile)),
+    );
+    let this = |run: &JobSummary, style: Style| {
+        if run.id == summary.id {
+            style.add_modifier(Modifier::REVERSED)
+        } else {
+            style
+        }
+    };
+    let bar = |value: Option<u64>, max: u64| {
+        spark(value.into_iter(), max, 1)
+            .chars()
+            .next()
+            .unwrap_or(' ')
+    };
+    let mut spans = vec![Span::styled(labels[0], theme.dim())];
+    spans.extend(shown.iter().map(|run| {
+        Span::styled(
+            bar(human::ran(run, now), longest).to_string(),
+            this(run, theme.tone(human::outcome(run).1)),
+        )
+    }));
+    spans.push(Span::styled(labels[1], theme.dim()));
+    spans.extend(shown.iter().map(|run| {
+        Span::styled(
+            bar(human::waited(run, now), longest_wait).to_string(),
+            this(run, theme.wait()),
+        )
+    }));
+    spans.push(Span::styled(labels[2], theme.dim()));
+    spans.extend(shown.iter().map(|run| {
+        Span::styled(
+            bar(run.metrics.memory_peak, peak.unwrap_or(0)).to_string(),
+            this(run, profile),
+        )
+    }));
+    frame.render_widget(Line::from(spans), bars);
 }
 
 /// Each step as a bar on the job's time axis, with its duration. Steps that do not fit are left out around the

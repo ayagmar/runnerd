@@ -43,3 +43,7 @@ with numbers (predicted peaks, the high-water mark, CPU priority) the status doe
   it never runs, so a younger job said "all slots busy" beside a free slot, right after a resume or after a slot's
   caches could not be prepared. A job held only by the plan's own starts now says `behind-start`; `no-slot`,
   `memory` and `cpu` mean what runs now. The plan's decisions are unchanged.
+- Amended (2026-10-24, the TUI): the reason's words are `api::Waiting::reason` in core, so the dashboard and
+  `runnerctl tui` say the same thing (`Waiting::kind` says how to draw it). The TUI keeps the status from events, so, as
+  the dashboard does, it reads `GET /v1/status` again after each job and slot event and every 10 s while samples
+  arrive, one read at a time, and takes only the reasons from it: the queue itself stays the one events keep.
