@@ -1233,6 +1233,67 @@ dl.health-figures {
   outline-offset: -2px;
 }
 
+/* A job's latest runs: a column each, run time stacked on its wait, and its memory peak under them. */
+.run-bars {
+  list-style: none;
+  margin: 1.25rem 0 0.75rem;
+  padding: 0;
+  display: grid;
+  grid-template-columns: repeat(var(--runs), minmax(0, 2.75rem));
+  gap: 3px;
+}
+
+.run-scale {
+  margin: 1.25rem 0 0;
+  font-size: 0.75rem;
+  color: var(--muted);
+}
+
+.run-scale + .run-bars {
+  margin-top: 0.25rem;
+}
+
+.run-bars a {
+  display: grid;
+  grid-template-rows: 7rem 2.5rem;
+  gap: 4px;
+  height: 100%;
+  padding: 2px;
+  text-decoration: none;
+}
+
+.run-bars a:hover,
+.run-bars .this a {
+  background: var(--surface);
+}
+
+.run-bars .this a {
+  outline: 2px solid var(--ink);
+  outline-offset: -2px;
+}
+
+.run-time,
+.run-peak {
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+}
+
+.run-time span,
+.run-peak span {
+  height: calc(var(--h) * 100%);
+}
+
+.run-time .ran { min-height: 2px; background: var(--muted); }
+.run-time .ran.success { background: var(--memory); }
+.run-time .ran.failure { background: var(--failure-ink); }
+.run-time .ran.running { background: var(--cpu); }
+.run-time .waited { background: var(--wait); }
+.run-peak { border-top: 1px solid var(--line); }
+.run-peak span { background: var(--profile, var(--muted)); }
+
+.legend .peak .swatch { background: var(--profile, var(--muted)); }
+
 /* The job page. */
 .job-head {
   display: grid;

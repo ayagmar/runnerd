@@ -1,17 +1,26 @@
 //! `/jobs/{id}`: one job's phases, its steps on a shared time axis, its CPU and memory over time against the caps
 //! its container ran with (or, for records without them, the profile's limits as configured now), and its log, live
-//! while it runs. A failed job whose runner was kept as a record gets the command that opens a shell in it.
+//! while it runs, and the same job's latest runs (wait, run time, outcome and memory peak) beside it. A failed job
+//! whose runner was kept as a record gets the command that opens a shell in it.
+
+use std::fmt::Write as _;
 
 use maud::{Markup, html};
-use runnerd_core::api::{Job, JobSummary, Sample, SampleSeries, Status, Step};
+use runnerd_core::api::{
+    Job, JobPage, JobQuery, JobState, JobSummary, Sample, SampleSeries, Status, Step,
+};
 use runnerd_core::client::{Client, ClientError};
 
-use super::{Live, Parts, badge, digest, page, time_ago};
+use super::{Live, Parts, badge, digest, durations, outcome_class, page, profile_class, time_ago};
 use crate::chart::{Band, Base, Series, TimeChart, nice_top};
 use crate::format;
 
 /// Log lines the page shows; the full log is at `/jobs/{id}/log`.
 pub(crate) const LOG_TAIL: u64 = 1000;
+/// Runs of the same job the page compares.
+const RUNS: usize = 30;
+/// The repository's jobs read to find them.
+const RUNS_READ: u32 = 500;
 
 /// Everything the job page shows.
 #[derive(Debug, Clone)]
@@ -25,6 +34,10 @@ pub(crate) struct JobView {
     /// The number of the first line in `log`.
     pub(crate) log_from: u64,
     pub(crate) log: Vec<String>,
+    /// The latest runs of the same job (repository, workflow and name), this one included, oldest first.
+    pub(crate) runs: Vec<JobSummary>,
+    /// The colour class of the job's profile, which its runs' memory peaks are drawn in.
+    pub(crate) profile_class: String,
 }
 
 impl JobView {
@@ -39,7 +52,30 @@ impl JobView {
             .lines()
             .map(str::to_owned)
             .collect();
+        let page: JobPage = daemon
+            .get_query(
+                "/v1/jobs",
+                &JobQuery {
+                    repository: Some(job.summary.repository.clone()),
+                    limit: Some(RUNS_READ),
+                    ..JobQuery::default()
+                },
+            )
+            .await?;
+        let mut runs: Vec<JobSummary> = page
+            .jobs
+            .into_iter()
+            .filter(|run| run.workflow == job.summary.workflow && run.name == job.summary.name)
+            .take(RUNS)
+            .collect();
+        runs.reverse();
+        let profile_class = job.summary.runner.as_ref().map_or_else(
+            || "p-none".to_owned(),
+            |runner| profile_class(&status, &runner.profile),
+        );
         Ok(JobView {
+            runs,
+            profile_class,
             limits: limits(&status, &job),
             now,
             job,
@@ -108,6 +144,7 @@ pub(crate) fn render(view: &JobView) -> Markup {
         @if let Some(admission) = &view.job.admission {
             p.muted.admission { (admission.line()) }
         }
+        (runs(view))
         (record(view))
         (log(view))
     };
@@ -419,6 +456,126 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
             }
         }
     }
+}
+
+/// The same job's latest runs, oldest first: a column each, its wait under its run time on one scale, and its
+/// memory peak under it against the largest; this run is outlined. Each column opens its run.
+fn runs(view: &JobView) -> Markup {
+    let runs = &view.runs;
+    let longest = runs
+        .iter()
+        .map(|run| {
+            let times = durations(run, view.now);
+            times.waited.unwrap_or(0) + times.ran.unwrap_or(0)
+        })
+        .max()
+        .unwrap_or(0);
+    let peak = runs
+        .iter()
+        .filter_map(|run| run.metrics.memory_peak)
+        .max()
+        .unwrap_or(0);
+    let finished: Vec<&JobSummary> = runs
+        .iter()
+        .filter(|run| run.state.is_final() && run.timeline.started_at.is_some())
+        .collect();
+    let median = |values: Vec<u64>| {
+        let mut values = values;
+        values.sort_unstable();
+        values.get(values.len().saturating_sub(1) / 2).copied()
+    };
+    let ran = median(
+        finished
+            .iter()
+            .filter_map(|run| durations(run, view.now).ran)
+            .collect(),
+    );
+    let waited = median(
+        finished
+            .iter()
+            .filter_map(|run| durations(run, view.now).waited)
+            .collect(),
+    );
+    let failed = finished
+        .iter()
+        .filter(|run| outcome_class(run) == "failure")
+        .count();
+    let ratio = |part: u64, whole: u64| format!("{:.3}", crate::chart::ratio(part, whole));
+    html! {
+        @if runs.len() > 1 {
+            section #runs class=(format!("runs {}", view.profile_class)) aria-labelledby="runs-title" {
+                div.section-head {
+                    h2 #runs-title { "Latest " (runs.len()) " runs of this job" }
+                    a href=(format!("/history?repository={}", view.job.summary.repository)) { "History of " (view.job.summary.repository) }
+                }
+                dl.headline {
+                    div { dt { "Median run" } dd { (ran.map_or("–".to_owned(), format::duration)) } }
+                    div { dt { "Median wait" } dd { (waited.map_or("–".to_owned(), format::duration)) } }
+                    div { dt { "Failed" } dd { (failed) " of " (finished.len()) } }
+                    div { dt { "Largest memory peak" } dd { (if peak > 0 { format::bytes(peak) } else { "–".to_owned() }) } }
+                }
+                p.run-scale aria-hidden="true" { "Wait and run, up to " (format::duration(longest)) }
+                ol.run-bars style=(format!("--runs: {}", runs.len())) {
+                    @for run in runs {
+                        @let times = durations(run, view.now);
+                        @let waited = times.waited.unwrap_or(0);
+                        @let ran = times.ran.unwrap_or(0);
+                        @let this = run.id == view.job.summary.id;
+                        @let label = run_label(run, view.now);
+                        li class=(if this { "this" } else { "" }) {
+                            a href=(format!("/jobs/{}", run.id)) aria-label=(label) title=(label)
+                                aria-current=[this.then_some("page")] {
+                                span.run-time aria-hidden="true" {
+                                    span class=(format!("ran {}", outcome_class(run))) style=(format!("--h: {}", ratio(ran, longest))) {}
+                                    span.waited style=(format!("--h: {}", ratio(waited, longest))) {}
+                                }
+                                span.run-peak aria-hidden="true" {
+                                    span style=(format!("--h: {}", ratio(run.metrics.memory_peak.unwrap_or(0), peak))) {}
+                                }
+                            }
+                        }
+                    }
+                }
+                ul.legend {
+                    li.success { span.swatch {} "ran, succeeded" }
+                    li.failure { span.swatch {} "ran, failed" }
+                    li.wait { span.swatch {} "waited for a runner" }
+                    li.peak { span.swatch {} "memory peak" }
+                }
+            }
+        }
+    }
+}
+
+/// A run's column, in words: `Oct 22 14:02 UTC, success: waited 12s, ran 7m 34s, memory peak 4.1G`.
+fn run_label(run: &JobSummary, now: u64) -> String {
+    let times = durations(run, now);
+    let mut label = format!(
+        "{} {} UTC, {}",
+        format::short_date(run.timeline.queued_at),
+        format::clock(run.timeline.queued_at),
+        super::outcome_label(run)
+    );
+    match (times.waited, times.ran) {
+        (Some(waited), Some(ran)) => {
+            let verb = if run.state == JobState::Running {
+                "running for"
+            } else {
+                "ran"
+            };
+            let _ = write!(
+                label,
+                ": waited {}, {verb} {}",
+                format::duration(waited),
+                format::duration(ran)
+            );
+        }
+        _ => label.push_str(": did not start"),
+    }
+    if let Some(peak) = run.metrics.memory_peak {
+        let _ = write!(label, ", memory peak {}", format::bytes(peak));
+    }
+    label
 }
 
 /// The dashed memory and CPU lines of the job's charts, with their labels.

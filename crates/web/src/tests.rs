@@ -2280,3 +2280,58 @@ async fn resuming_every_repository_when_the_history_cannot_record_it_says_so() {
         reply.body
     );
 }
+
+#[tokio::test]
+async fn a_jobs_page_compares_it_with_the_same_jobs_latest_runs_only() {
+    let dashboard = Dashboard::start().await;
+    let (this, same, others) = {
+        let fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let this = fixtures.jobs[0].summary.clone();
+        let same_job = |job: &&runnerd_core::api::Job| {
+            job.summary.repository == this.repository
+                && job.summary.workflow == this.workflow
+                && job.summary.name == this.name
+        };
+        let same: Vec<u64> = fixtures
+            .jobs
+            .iter()
+            .filter(same_job)
+            .map(|job| job.summary.id)
+            .collect();
+        let others: Vec<u64> = fixtures
+            .jobs
+            .iter()
+            .filter(|job| !same_job(job))
+            .map(|job| job.summary.id)
+            .collect();
+        (this, same, others)
+    };
+    assert!(
+        same.len() > 1 && !others.is_empty(),
+        "the fixtures have both"
+    );
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard
+        .page(&cookie, &format!("/jobs/{}", this.id))
+        .await
+        .body;
+    let runs = &page[page.find(r#"id="runs""#).unwrap()..];
+    let runs = &runs[..runs.find("</section>").unwrap()];
+    for id in same.iter().take(30) {
+        assert!(
+            runs.contains(&format!(r#"href="/jobs/{id}""#)),
+            "run {id} is compared: {runs}"
+        );
+    }
+    for id in &others {
+        assert!(
+            !runs.contains(&format!("/jobs/{id}\"")),
+            "job {id} is another job: {runs}"
+        );
+    }
+    assert!(
+        runs.contains(&format!(r#"href="/jobs/{}" aria-label="#, this.id))
+            && runs.contains(r#"aria-current="page""#),
+        "this run is marked among them: {runs}"
+    );
+}

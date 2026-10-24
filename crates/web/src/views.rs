@@ -295,6 +295,16 @@ fn outcome(job: &JobSummary) -> Outcome {
     Outcome { label, class }
 }
 
+/// A job's outcome in a word, as its badge says it.
+pub(crate) fn outcome_label(job: &JobSummary) -> &'static str {
+    outcome(job).label
+}
+
+/// The CSS class of a job's outcome: `success`, `failure`, `running`, `queued` or `neutral`.
+pub(crate) fn outcome_class(job: &JobSummary) -> &'static str {
+    outcome(job).class
+}
+
 /// A job's outcome as a badge.
 pub(crate) fn badge(job: &JobSummary) -> Markup {
     let Outcome { label, class } = outcome(job);
