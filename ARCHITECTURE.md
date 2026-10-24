@@ -45,8 +45,9 @@ flowchart TB
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
 - `admission`, `buildcache`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`, `scheduler`, `observe`,
   `sizing`, `store`: `host` only
-  ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU
-  and replays the history for `runnerd simulate`; `sizing` turns the history into advice, and `sizing::auto` picks
+  ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU,
+  replays the history for `runnerd simulate`, and works out what the host's memory leaves the slice
+  (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `sizing` turns the history into advice, and `sizing::auto` picks
   the changes auto sizing makes; `insights` reads the history for jobs that got slower, are flaky or near their cap,
   and the waits of each week ([ADR 0051](docs/adr/0051-insights-and-notifications.md)). All three are pure: the
   engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
@@ -120,8 +121,9 @@ queued → slot → container → removed
    time.
 2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget: what each
    runner reserves is its cap, or under `admission = "measured"` its predicted peak (`engine/admission`,
-   [ADR 0033](docs/adr/0033-measured-admission.md)), and under `cpu_overcommit` within the CPU budget too
-   ([ADR 0038](docs/adr/0038-cpu-admission.md)). A profile whose
+   [ADR 0033](docs/adr/0033-measured-admission.md)), within what the host's memory leaves the slice
+   ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)), and under `cpu_overcommit` within the CPU
+   budget too ([ADR 0038](docs/adr/0038-cpu-admission.md)). A profile whose
    `image` Docker lacks starts nothing until the engine pulled it in the background
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)). For each job it leaves queued it says
    why, which the status passes on ([ADR 0044](docs/adr/0044-queued-jobs-say-why-they-wait.md)). A job that does
@@ -141,7 +143,8 @@ queued → slot → container → removed
    ([ADR 0031](docs/adr/0031-records-of-failed-jobs.md)).
 5. While a job runs the engine records it in the store: the job's ID from the runner's `_diag` Worker log
    (`observe::capture`, run in the container with `docker exec`), its steps from `GithubApi::job`, its log from the
-   runner's `_diag/pages`, CPU and memory from the container's cgroup every 2 s (`observe::metrics`), and the
+   runner's `_diag/pages`, CPU, memory and `memory.events` from the container's cgroup every 2 s (`observe::metrics`,
+   which reads the host's `/proc/meminfo` and `/proc/pressure/memory` beside them), and the
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`).
 6. When a profile is idle after its slot 1 ran a job, or after the caches' check measured its snapshot over
@@ -161,9 +164,9 @@ nothing until Docker has listed them.
 | Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
-| Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
+| Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to, the spans admission held starts back for the host's memory; times in ms |
 
 ## Invariants
 
@@ -237,6 +240,13 @@ nothing until Docker has listed them.
   after a run of its job out of memory at its cap or killed for memory, or when a restart adopted it
   ([ADR 0033](docs/adr/0033-measured-admission.md)). Job memory samples leave out page cache, and
   predictions learn peaks only from runners sampled that way ([ADR 0037](docs/adr/0037-memory-without-page-cache.md)). Each runner's record keeps what it reserves and why.
+- Under either policy, what the running containers reserve, a new runner's reservation with them, also fits what
+  the host's memory leaves the slice, from a reading of the last three intervals: the slice's memory without page
+  cache plus `MemAvailable`, less a margin of the larger of 2G and a sixteenth of the host's memory, twice that
+  while a job waits for it; and nothing starts while `full` memory pressure over 10 s is at 5%, until it is under
+  1%. No runner is stopped for the host. The spans in which a job waited for it are recorded, and sizing takes them
+  out of the jobs' waits. Sizing never advises a cap under the largest peak plus 1G
+  ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)).
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
   the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no
