@@ -199,11 +199,13 @@ struct Occupant {
     key: Option<Key>,
     /// The labels it registered with; `None` for one adopted from a container that does not say.
     labels: Option<Vec<String>>,
+    /// The image it runs; `None` for one adopted from a container that does not say.
+    image: Option<String>,
 }
 
 impl Occupant {
-    /// Whether it no longer is what `repository`'s runners in `profile` start as: other labels, or other limits
-    /// than the profile's. An unknown label set counts as the same.
+    /// Whether it no longer is what `repository`'s runners in `profile` start as: other labels, or another image or
+    /// other limits than the profile's. An unknown label set or image counts as the same.
     fn outdated(
         &self,
         repository: &crate::config::Repository,
@@ -218,7 +220,13 @@ impl Occupant {
             };
             set(labels) != set(&repository.labels)
         });
-        differ || self.memory != profile.memory.0 || self.cpus != u64::from(profile.cpus) * 1000
+        differ
+            || self
+                .image
+                .as_ref()
+                .is_some_and(|image| *image != profile.image.reference())
+            || self.memory != profile.memory.0
+            || self.cpus != u64::from(profile.cpus) * 1000
     }
 
     /// What it reserves of the budget under measured admission: its cap if it has no admission.

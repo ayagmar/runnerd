@@ -590,13 +590,15 @@ async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_i
 }
 
 #[tokio::test]
-async fn a_warm_runner_whose_labels_or_limits_a_reload_changed_makes_way_for_one_that_has_them() {
+async fn a_warm_runner_whose_labels_image_or_limits_a_reload_changed_makes_way_for_one_that_has_them()
+ {
     let gpu = warm_config().replace(
         "labels = [\"self-hosted\", \"app\"]",
         "labels = [\"self-hosted\", \"app\", \"gpu\"]",
     );
     let more_memory = warm_config().replace("memory = \"4G\"", "memory = \"6G\"");
-    for config in [gpu, more_memory] {
+    let other_image = warm_config().replace("image_stage = \"app\"", "image_stage = \"app-next\"");
+    for config in [gpu, more_memory, other_image] {
         let github = FakeGithub::default();
         let docker = FakeDocker::default();
         let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;

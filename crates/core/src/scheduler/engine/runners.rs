@@ -19,6 +19,9 @@ use crate::scheduler::{IDLE_TIMEOUT, SlotRef};
 /// takes them, so a restart knows them.
 pub(super) const LABELS: &str = "runnerd.labels";
 
+/// The runner container's label with the image it runs, as the config named it, so a restart knows it.
+pub(super) const IMAGE: &str = "runnerd.image";
+
 /// Why a slot's runner is removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Release {
@@ -35,6 +38,7 @@ fn container_labels(
     slot: usize,
     runner_id: u64,
     labels: &[String],
+    image: &str,
 ) -> BTreeMap<String, String> {
     BTreeMap::from([
         ("runnerd.job".to_owned(), name.to_owned()),
@@ -42,6 +46,7 @@ fn container_labels(
         ("runnerd.slot".to_owned(), slot.to_string()),
         ("runnerd.runner-id".to_owned(), runner_id.to_string()),
         (LABELS.to_owned(), labels.join(",")),
+        (IMAGE.to_owned(), image.to_owned()),
     ])
 }
 
@@ -369,9 +374,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
         };
+        let image = profile.image.reference();
         let spec = RunnerSpec {
             name: name.clone(),
-            image: profile.image.reference(),
+            image: image.clone(),
             profile: slot.profile.clone(),
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
@@ -379,7 +385,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             env: self.runner_env(),
             mounts: self.runner_mounts(&slot.profile, number, &name, repository),
             network: Some(self.names.network()),
-            labels: container_labels(&name, repository, number, runner.id, &labels),
+            labels: container_labels(&name, repository, number, runner.id, &labels, &image),
             entrypoint: None,
             jit_config: Some(jit_config),
         };
@@ -406,6 +412,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     job: None,
                     key: None,
                     labels: Some(labels),
+                    image: Some(image),
                 };
                 if let Some(entry) = self
                     .slots

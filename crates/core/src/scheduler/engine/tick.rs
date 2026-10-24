@@ -259,7 +259,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             SystemTime::now(),
         );
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now,
-        // or its runners start with other labels or limits, which a job queued since may need.
+        // or its runners start with other labels, image or limits, which a job queued since may need.
         plan.decisions.extend(
             self.occupied()
                 .filter(|(slot, occupant)| {
