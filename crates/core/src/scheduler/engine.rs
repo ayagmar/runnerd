@@ -223,6 +223,8 @@ struct RepositoryState {
     held_until: Option<SystemTime>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
+    /// Runners in a row that ended without a job after waiting `IDLE_TIMEOUT` for one.
+    idle_exits: u32,
     /// Its oldest job held for CPU that memory and a slot had room for, and since when, kept while that job stays
     /// queued: a tick held by memory or slots in between does not make it younger.
     cpu_wait: Option<CpuWait>,

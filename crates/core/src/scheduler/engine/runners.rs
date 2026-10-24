@@ -110,20 +110,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match took_job {
                 Some(true) => {
                     state.failures = 0;
+                    state.idle_exits = 0;
                     state.held_until = None;
                 }
                 // One that waited `IDLE_TIMEOUT` had started and connected: a warm runner whose container went
-                // (a restart of Docker, or the runner removed on GitHub) says nothing of the next one's start.
+                // once (a restart of Docker, the runner removed on GitHub) says nothing of the next one's start. The
+                // second in a row is a fault that would restart one every few minutes.
                 Some(false)
                     if occupant
                         .started_at
                         .elapsed()
                         .is_ok_and(|waited| waited >= IDLE_TIMEOUT) =>
                 {
-                    info!(
+                    state.idle_exits += 1;
+                    warn!(
                         "{}: {} ended without a job after waiting for one",
                         occupant.repository, occupant.runner_name
                     );
+                    if state.idle_exits >= 2 {
+                        self.hold(&occupant.repository);
+                    }
                 }
                 Some(false) => {
                     warn!(

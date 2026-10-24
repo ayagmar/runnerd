@@ -533,3 +533,30 @@ async fn a_run_under_way_before_a_restart_counts_from_its_jobs_not_from_the_rest
     // Its run stopped counting 25 minutes ago: one warm runner, as o/r is active, and none for the run's other jobs.
     assert_eq!(registered(&github.calls()).len(), 1);
 }
+
+#[tokio::test]
+async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let config = warm_config().replace("slots = 2", "slots = 1");
+    let (mut engine, _handle, _dir) = active(&github, &docker, &config).await;
+    engine.recover().await.unwrap();
+    docker.0.lock().unwrap().runner_log = Some("Listening for Jobs".to_owned());
+    for exits in 1..=2 {
+        engine.tick(Shutdown::No).await;
+        // Something kills each one after it waited a while.
+        for occupant in engine.slots.values_mut().flatten().flatten() {
+            occupant.started_at -= Duration::from_secs(3600);
+        }
+        for container in &mut docker.0.lock().unwrap().containers {
+            container.running = false;
+        }
+        engine.tick(Shutdown::No).await;
+        assert_eq!(
+            engine.repositories["o/r"].held_until.is_some(),
+            exits == 2,
+            "held after the second in a row, not the first"
+        );
+    }
+    assert_eq!(registered(&github.calls()).len(), 2, "no third");
+}
