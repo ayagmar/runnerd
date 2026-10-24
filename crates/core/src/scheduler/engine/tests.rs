@@ -2794,6 +2794,7 @@ async fn the_status_lists_the_queued_jobs_runners_can_take_and_none_holds_oldest
             branch: branch.map(str::to_owned),
             url: url.map(str::to_owned),
             queued_at,
+            waiting: Some(api::Waiting::Paused),
         }
     };
     assert_eq!(

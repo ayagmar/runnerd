@@ -112,6 +112,7 @@ fn status() -> Status {
             branch: Some("main".to_owned()),
             url: None,
             queued_at: 1_000_000,
+            waiting: None,
         }],
     }
 }

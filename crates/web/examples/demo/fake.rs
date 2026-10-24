@@ -593,6 +593,7 @@ impl Fixtures {
                         .to_owned(),
                 ),
                 queued_at: now - 41,
+                waiting: None,
             }],
         };
         jobs.sort_by_key(|job| std::cmp::Reverse(job.summary.id));

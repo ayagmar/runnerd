@@ -616,6 +616,7 @@ fn queued_jobs_lead_the_latest_jobs_oldest_first_and_open_and_pause_like_the_oth
         branch: Some("main".to_owned()),
         url: None,
         queued_at: at,
+        waiting: None,
     };
     app.live.status.queued = vec![queued(51, "visual-diff", 1041), queued(52, "a11y", 1090)];
     app.live.recent = vec![summary(42, JobState::Completed)];
@@ -668,6 +669,7 @@ fn the_selected_latest_job_stays_selected_when_a_queued_job_above_it_starts() {
         branch: Some("main".to_owned()),
         url: None,
         queued_at: 1000,
+        waiting: None,
     };
     app.live.status.queued = vec![
         queued(51, "halyard/ledger"),

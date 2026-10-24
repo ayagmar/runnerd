@@ -274,6 +274,63 @@ pub struct QueuedJob {
     pub url: Option<String>,
     /// When GitHub queued it, in seconds since the Unix epoch; 0 if GitHub did not say.
     pub queued_at: u64,
+    /// Why no runner has it yet, as the last plan saw it. `None` before the daemon has planned with it, while it
+    /// shuts down, and from a daemon before it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
+}
+
+/// Why a queued job has no runner of its own yet. Jobs are served oldest first; each takes the first of these that
+/// holds for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum Waiting {
+    /// Its repository is paused.
+    Paused,
+    /// Runners of its repository ended without taking a job, so none starts before `until` (seconds since the Unix
+    /// epoch).
+    Backoff {
+        /// When runners may start again.
+        until: u64,
+    },
+    /// A runner started for it and waits for GitHub to hand it the job: a runner takes any job its labels match,
+    /// so not necessarily this one.
+    RunnerStarting,
+    /// Slot 1 of its profile is becoming the profile's snapshot, so none of the profile's slots starts.
+    Reseeding {
+        /// The profile.
+        profile: String,
+    },
+    /// Its profile's image is being pulled, so none of the profile's slots starts.
+    PullingImage {
+        /// The profile.
+        profile: String,
+    },
+    /// Every slot of its profile holds a runner.
+    NoSlot {
+        /// The profile.
+        profile: String,
+    },
+    /// What its runner would reserve does not fit the memory budget left. Under measured admission, `free` is 0
+    /// while the slice is at the high-water mark (`Budget::held`).
+    Memory {
+        /// What its runner would reserve, in bytes.
+        needs: u64,
+        /// What the budget has left, in bytes.
+        free: u64,
+    },
+    /// What its runner would reserve does not fit the CPU budget left, in millicores.
+    Cpu {
+        /// What its runner would reserve.
+        needs: u64,
+        /// What the CPU budget has left.
+        free: u64,
+    },
+    /// An older job has waited long enough for CPU that no younger one takes CPU before it.
+    BehindCpu {
+        /// The older job's ID.
+        job: u64,
+    },
 }
 
 /// `POST /v1/dashboard/pairings`: which of `[web] origins` to make a link for.

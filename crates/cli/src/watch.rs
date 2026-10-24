@@ -201,6 +201,7 @@ fn queued_job(job: &JobSummary) -> QueuedJob {
         branch: job.branch.clone(),
         url: job.url.clone(),
         queued_at: job.timeline.queued_at,
+        waiting: None,
     }
 }
 

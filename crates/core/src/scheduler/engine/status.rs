@@ -147,6 +147,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         branch: job.branch.clone(),
                         url: job.url.clone(),
                         queued_at: job.created_at / 1000,
+                        waiting: state.waiting.get(&job.id).cloned(),
                     })
             })
             .collect();

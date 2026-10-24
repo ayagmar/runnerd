@@ -4,6 +4,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+use crate::api::Waiting;
 use crate::github::QueuedJob;
 
 pub mod engine;
@@ -58,9 +59,18 @@ pub struct Profile {
     /// CPU a slot's container may use, in millicores.
     pub cpus: u64,
     /// While the profile's snapshot is rebuilt or its image pulled, none of its slots starts.
-    pub preparing: bool,
+    pub preparing: Option<Preparing>,
     /// Index 0 is slot 1.
     pub slots: Vec<Slot>,
+}
+
+/// Why none of a profile's slots starts for now.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Preparing {
+    /// Slot 1's layers become the profile's snapshot.
+    Reseeding,
+    /// Its image is being pulled.
+    PullingImage,
 }
 
 /// What a slot holds.
@@ -121,6 +131,16 @@ pub enum Decision {
     },
 }
 
+/// What `plan` decides, and why each queued job it starts no runner for waits.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Plan {
+    /// What to start, hold and stop.
+    pub decisions: Vec<Decision>,
+    /// Why each queued job of a repository's matching jobs waits, by job ID. A job a runner starts for, or an idle
+    /// runner will take, is `Waiting::RunnerStarting`.
+    pub waiting: BTreeMap<u64, Waiting>,
+}
+
 /// Whether a job may run on a repository's runners: every label it asks for is one of theirs. GitHub compares
 /// labels without regard to case.
 pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
@@ -131,7 +151,7 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
     })
 }
 
-/// Decides which slots start a runner and which idle runners stop.
+/// Decides which slots start a runner and which idle runners stop, and why each job left queued waits.
 ///
 /// Each repository gets a runner per matching queued job, less its runners still waiting for a job. Jobs are
 /// served oldest first across repositories, each in the lowest free slot of its repository's profile, while what
@@ -146,54 +166,14 @@ pub fn plan(
     free_memory: Option<u64>,
     free_cpu: Option<u64>,
     now: SystemTime,
-) -> Vec<Decision> {
-    let mut decisions = Vec::new();
+) -> Plan {
+    let mut decided = Plan::default();
     let mut wanted = BTreeMap::new();
     let mut jobs = Vec::new();
     for repository in repositories {
-        let held = repository.held_until.is_some_and(|until| until > now);
-        let matching: Vec<&QueuedJob> = if repository.paused {
-            Vec::new()
-        } else {
-            repository
-                .queued
-                .iter()
-                .filter(|job| matches(job, &repository.labels))
-                .collect()
-        };
-        let idle: Vec<(SlotRef, &RunnerSlot)> = profiles
-            .get(&repository.profile)
-            .into_iter()
-            .flat_map(|profile| profile.slots.iter().enumerate())
-            .filter_map(|(index, slot)| match slot {
-                Slot::Runner(runner) if runner.repository == repository.name && !runner.busy => {
-                    Some((
-                        SlotRef {
-                            profile: repository.profile.clone(),
-                            index,
-                        },
-                        runner,
-                    ))
-                }
-                _ => None,
-            })
-            .collect();
-        let surplus = idle.len().saturating_sub(matching.len());
-        decisions.extend(
-            idle.iter()
-                .filter(|(_, runner)| {
-                    now.duration_since(runner.started_at)
-                        .is_ok_and(|waited| waited >= IDLE_TIMEOUT)
-                })
-                .take(surplus)
-                .map(|(slot, _)| Decision::Stop { slot: slot.clone() }),
-        );
-        if !held {
-            let missing = matching.len().saturating_sub(idle.len());
-            wanted.insert(repository.name.as_str(), missing);
-            // The oldest jobs are the ones still waiting once the idle runners take theirs.
-            let skip = matching.len() - missing;
-            jobs.extend(matching.iter().skip(skip).map(|job| (job.id, repository)));
+        if let Some(serve) = sort_out(repository, profiles, now, &mut decided) {
+            wanted.insert(repository.name.as_str(), serve.len());
+            jobs.extend(serve.into_iter().map(|job| (job, repository)));
         }
     }
     jobs.sort_by_key(|(id, _)| *id);
@@ -201,7 +181,9 @@ pub fn plan(
     let mut taken = taken_slots(profiles);
     let mut free_memory = free_memory;
     let mut free_cpu = free_cpu;
-    for (_, repository) in jobs {
+    // The job that waited long enough for CPU that no younger one takes CPU before it.
+    let mut first_for_cpu = None;
+    for (job, repository) in jobs {
         let Some(missing) = wanted.get_mut(repository.name.as_str()) else {
             continue;
         };
@@ -214,24 +196,53 @@ pub fn plan(
         ) else {
             continue;
         };
-        let memory = repository.runner_memory.unwrap_or(profile.memory);
-        if free_memory.is_some_and(|free| free < memory) {
+        if let Some(older) = first_for_cpu {
+            decided
+                .waiting
+                .insert(job, Waiting::BehindCpu { job: older });
             continue;
         }
+        let profile_name = || repository.profile.clone();
         let Some(index) = taken.iter().position(|taken| !taken) else {
+            let reason = match profile.preparing {
+                Some(Preparing::Reseeding) => Waiting::Reseeding {
+                    profile: profile_name(),
+                },
+                Some(Preparing::PullingImage) => Waiting::PullingImage {
+                    profile: profile_name(),
+                },
+                None => Waiting::NoSlot {
+                    profile: profile_name(),
+                },
+            };
+            decided.waiting.insert(job, reason);
             continue;
         };
+        let memory = repository.runner_memory.unwrap_or(profile.memory);
+        if let Some(free) = free_memory.filter(|free| *free < memory) {
+            decided.waiting.insert(
+                job,
+                Waiting::Memory {
+                    needs: memory,
+                    free,
+                },
+            );
+            continue;
+        }
         let cpu = repository.runner_cpu.unwrap_or(profile.cpus);
-        if free_cpu.is_some_and(|free| free < cpu) {
+        if let Some(free) = free_cpu.filter(|free| *free < cpu) {
             let held = Decision::HeldForCpu {
                 repository: repository.name.clone(),
             };
-            if !decisions.contains(&held) {
-                decisions.push(held);
+            if !decided.decisions.contains(&held) {
+                decided.decisions.push(held);
             }
+            decided
+                .waiting
+                .insert(job, Waiting::Cpu { needs: cpu, free });
             // It waited long enough: no younger job takes CPU until it fits.
             if repository.starved_of_cpu(now) {
-                break;
+                first_for_cpu = Some(job);
             }
             continue;
         }
@@ -239,7 +250,8 @@ pub fn plan(
         *missing -= 1;
         free_memory = free_memory.map(|free| free - memory);
         free_cpu = free_cpu.map(|free| free - cpu);
-        decisions.push(Decision::Start {
+        decided.waiting.insert(job, Waiting::RunnerStarting);
+        decided.decisions.push(Decision::Start {
             slot: SlotRef {
                 profile: repository.profile.clone(),
                 index,
@@ -249,7 +261,74 @@ pub fn plan(
             cpu,
         });
     }
-    decisions
+    decided
+}
+
+/// Stops a repository's idle runners no job is left for and says why its jobs wait when it is paused or held, or
+/// which an idle runner will take. Returns the IDs of the jobs it wants a runner for, unless it is held.
+fn sort_out(
+    repository: &Repository,
+    profiles: &BTreeMap<String, Profile>,
+    now: SystemTime,
+    decided: &mut Plan,
+) -> Option<Vec<u64>> {
+    let mut matching: Vec<&QueuedJob> = repository
+        .queued
+        .iter()
+        .filter(|job| matches(job, &repository.labels))
+        .collect();
+    if repository.paused {
+        decided
+            .waiting
+            .extend(matching.iter().map(|job| (job.id, Waiting::Paused)));
+        // None is left for its idle runners, which stop.
+        matching.clear();
+    }
+    let idle: Vec<(SlotRef, &RunnerSlot)> = profiles
+        .get(&repository.profile)
+        .into_iter()
+        .flat_map(|profile| profile.slots.iter().enumerate())
+        .filter_map(|(index, slot)| match slot {
+            Slot::Runner(runner) if runner.repository == repository.name && !runner.busy => Some((
+                SlotRef {
+                    profile: repository.profile.clone(),
+                    index,
+                },
+                runner,
+            )),
+            _ => None,
+        })
+        .collect();
+    let surplus = idle.len().saturating_sub(matching.len());
+    decided.decisions.extend(
+        idle.iter()
+            .filter(|(_, runner)| {
+                now.duration_since(runner.started_at)
+                    .is_ok_and(|waited| waited >= IDLE_TIMEOUT)
+            })
+            .take(surplus)
+            .map(|(slot, _)| Decision::Stop { slot: slot.clone() }),
+    );
+    let missing = matching.len().saturating_sub(idle.len());
+    // The oldest jobs are the ones still waiting once the idle runners take theirs.
+    let skip = matching.len() - missing;
+    decided.waiting.extend(
+        matching
+            .iter()
+            .take(skip)
+            .map(|job| (job.id, Waiting::RunnerStarting)),
+    );
+    let serve = matching.iter().skip(skip).map(|job| job.id);
+    match repository.held_until.filter(|until| *until > now) {
+        Some(until) => {
+            let until = crate::time::ms(until) / 1000;
+            decided
+                .waiting
+                .extend(serve.map(|job| (job, Waiting::Backoff { until })));
+            None
+        }
+        None => Some(serve.collect()),
+    }
 }
 
 /// Whether each slot of each profile is taken, by profile name: by a runner, closed, or its profile preparing.
@@ -260,7 +339,7 @@ fn taken_slots(profiles: &BTreeMap<String, Profile>) -> BTreeMap<&str, Vec<bool>
             let taken = profile
                 .slots
                 .iter()
-                .map(|slot| profile.preparing || *slot != Slot::Free)
+                .map(|slot| profile.preparing.is_some() || *slot != Slot::Free)
                 .collect();
             (name.as_str(), taken)
         })

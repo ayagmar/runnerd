@@ -3,7 +3,7 @@
 //! holds; starting and removing a slot's runner is `runners`. It lists every repository at once, a few requests at
 //! a time, and answers the API's commands while it waits for the listings (ADR 0026).
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
 use std::time::SystemTime;
 
@@ -12,11 +12,12 @@ use tracing::{info, warn};
 
 use super::admission::Admitting;
 use super::{Engine, Occupant, RunningJobs, Shutdown};
+use crate::api;
 use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
-use crate::scheduler::{Decision, Profile, Repository, RunnerSlot, Slot, plan};
+use crate::scheduler::{Decision, Plan, Preparing, Profile, Repository, RunnerSlot, Slot, plan};
 use crate::time;
 
 /// GitHub requests a tick has in flight at most. GitHub asks clients not to flood it with concurrent requests;
@@ -101,16 +102,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.refresh_predictor().await;
             self.rereserve().await;
         }
-        let (decisions, mut admitting) = match mode {
+        let (Plan { decisions, waiting }, mut admitting) = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Force => (
-                self.occupied()
-                    .filter(|(_, occupant)| mode == Shutdown::Force || !occupant.busy)
-                    .map(|(slot, _)| Decision::Stop { slot })
-                    .collect(),
+                Plan {
+                    decisions: self
+                        .occupied()
+                        .filter(|(_, occupant)| mode == Shutdown::Force || !occupant.busy)
+                        .map(|(slot, _)| Decision::Stop { slot })
+                        .collect(),
+                    waiting: BTreeMap::new(),
+                },
                 self.admitting(&mut [], None),
             ),
         };
+        self.note_waiting(&waiting);
         self.note_high_water(&admitting);
         let mut held_for_cpu = BTreeSet::new();
         for decision in decisions {
@@ -154,7 +160,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.prune();
     }
 
-    fn plan(&self) -> (Vec<Decision>, Admitting) {
+    /// Keeps why each repository's queued jobs wait, for the status.
+    fn note_waiting(&mut self, waiting: &BTreeMap<u64, api::Waiting>) {
+        for state in self.repositories.values_mut() {
+            state.waiting = state
+                .queued
+                .iter()
+                .filter_map(|job| Some((job.id, waiting.get(&job.id)?.clone())))
+                .collect();
+        }
+    }
+
+    fn plan(&self) -> (Plan, Admitting) {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
@@ -212,7 +229,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 let profile = Profile {
                     memory: profile.memory.0,
                     cpus: u64::from(profile.cpus) * 1000,
-                    preparing: self.is_reseeding(name) || self.awaits_image(&profile.image),
+                    preparing: if self.is_reseeding(name) {
+                        Some(Preparing::Reseeding)
+                    } else if self.awaits_image(&profile.image) {
+                        Some(Preparing::PullingImage)
+                    } else {
+                        None
+                    },
                     slots,
                 };
                 (name.clone(), profile)
@@ -222,7 +245,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .memory_max
             .map(|max| max.saturating_sub(self.memory_in_use()));
         let admitting = self.admitting(&mut repositories, free_memory);
-        let mut decisions = plan(
+        let mut plan = plan(
             &repositories,
             &profiles,
             admitting.free,
@@ -230,7 +253,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             SystemTime::now(),
         );
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
-        decisions.extend(
+        plan.decisions.extend(
             self.occupied()
                 .filter(|(slot, occupant)| {
                     !occupant.busy
@@ -242,9 +265,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .map(|(slot, _)| Decision::Stop { slot }),
         );
-        let stops = self.over_budget(&decisions);
-        decisions.extend(stops);
-        (decisions, admitting)
+        let stops = self.over_budget(&plan.decisions);
+        plan.decisions.extend(stops);
+        (plan, admitting)
     }
 
     /// What the runners take (`takes`), and the memory
