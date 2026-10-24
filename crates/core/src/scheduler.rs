@@ -533,12 +533,14 @@ fn sort_out(
         decided
             .waiting
             .extend(matching.iter().map(|job| (job.id, Waiting::Paused)));
-        // None is left for its idle runners, which stop.
+        // None is left for its idle runners, which stop at once.
         matching.clear();
         warm = 0;
     }
-    // Upkeep waits for its profile's runners: none is kept, and none waits out `IDLE_TIMEOUT` first.
+    // Upkeep waits for its profile's runners: none is kept, and none waits out `IDLE_TIMEOUT` first. Nor does a
+    // paused repository's: GitHub would give it a job queued before the pause.
     let upkeep_due = profile.is_some_and(|profile| profile.upkeep_due);
+    let stop_now = upkeep_due || repository.paused;
     if upkeep_due {
         warm = 0;
     }
@@ -560,7 +562,7 @@ fn sort_out(
     let stops: Vec<SlotRef> = idle
         .iter()
         .filter(|(_, runner)| {
-            upkeep_due
+            stop_now
                 || now
                     .duration_since(runner.started_at)
                     .is_ok_and(|waited| waited >= IDLE_TIMEOUT)

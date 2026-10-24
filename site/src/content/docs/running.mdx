@@ -231,7 +231,7 @@ Every event but the live ones has an ID: send the last one seen as `Last-Event-I
 
 A forced pause cancels the run of each of the repository's running jobs. GitHub cancels runs, not single jobs, so the run's other jobs are cancelled too. The runner reports the job cancelled, which takes under a minute; one still running 90 s later is removed, and its registration is deleted once GitHub lets go of it.
 
-A pause lasts until a resume, across restarts: the job history records the paused repositories, and a restarted daemon starts no runner for them. If the history cannot record a pause or resume, the change holds until the daemon restarts, and the request fails with `500` saying so. A reload that removes a paused repository forgets its pause; added back, it starts active.
+A paused repository's runners still waiting for a job, warm ones included, stop at once, so none takes a job queued before the pause. A pause lasts until a resume, across restarts: the job history records the paused repositories, and a restarted daemon starts no runner for them. If the history cannot record a pause or resume, the change holds until the daemon restarts, and the request fails with `500` saying so. A reload that removes a paused repository forgets its pause; added back, it starts active.
 
 ### Reloading
 

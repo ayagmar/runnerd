@@ -3660,3 +3660,29 @@ async fn a_runner_a_restart_adopts_keeps_the_time_its_container_started() {
     // The fake's seeded containers started a second after the epoch, long before this restart.
     assert_eq!(adopted.started_at, 1);
 }
+
+#[tokio::test]
+async fn a_runner_waiting_for_a_job_of_a_repository_paused_since_stops_before_github_gives_it_one()
+{
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "a runner starts for it"
+    );
+
+    // Paused seconds later, before GitHub gave the runner the job: the job is not to run.
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(waiting(&handle), [Some(api::Waiting::Paused)]);
+    assert_eq!(
+        handle.status.borrow().profiles[0].slots[0].runner,
+        None,
+        "its runner stopped"
+    );
+}
