@@ -2662,13 +2662,13 @@ async fn a_warm_runner_reads_as_warm_not_as_a_runner_waiting_for_its_job() {
 }
 
 #[tokio::test]
-async fn the_insights_page_shows_each_insight_and_the_week_s_waits() {
+async fn the_insights_page_counts_and_shows_each_insight_and_the_week_s_waits() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let page = dashboard.page(&cookie, "/insights").await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     for expected in [
-        "3 insights",
+        ">4 insights<",
         "Last 24 hours: 57 jobs finished, 3 failed, 1 new insight.",
         "halyard/ledger: CI / test on main takes 6m 10s now, up from 4m 40s.",
         "failed and then passed on a re-run in 2 of its 31 runs",

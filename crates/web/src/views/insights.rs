@@ -33,17 +33,13 @@ impl InsightsView {
 pub(crate) fn render(view: &InsightsView) -> Markup {
     let insights = &view.insights;
     let days = insights.until.saturating_sub(insights.since) / 86_400;
-    let warnings = insights
-        .insights
-        .iter()
-        .filter(|insight| insight.severity == Severity::Warning)
-        .count();
+    let count = insights.insights.len();
     let day = &view.digest;
     let main = html! {
         div.page-head {
             h1.visually-hidden { "Insights" }
             p.figures {
-                span.big { (warnings) @if warnings == 1 { " insight" } @else { " insights" } }
+                span.big { (count) @if count == 1 { " insight" } @else { " insights" } }
                 span.muted { " from the last " (days) " days" }
             }
             p.muted {
