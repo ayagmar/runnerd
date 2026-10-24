@@ -236,7 +236,7 @@ pub fn cpus(millicores: u64) -> String {
 }
 
 /// Seconds as `45s`, `1m30s` or `2h05m`.
-fn wait(secs: u64) -> String {
+pub(super) fn wait(secs: u64) -> String {
     match secs {
         0..60 => format!("{secs}s"),
         60..3600 => format!("{}m{:02}s", secs / 60, secs % 60),

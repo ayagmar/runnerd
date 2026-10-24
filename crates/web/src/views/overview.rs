@@ -8,7 +8,7 @@ use maud::{Markup, html};
 use runnerd_core::api::{
     Activity, ActivityQuery, AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery,
     JobState, JobSummary, ProfileStatus, QueuedJob, RepositoryStatus, Sample, SampleSeries,
-    SlotStatus, Started, Status, Waiting,
+    SlotStatus, Started, Status, WaitKind,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -1033,14 +1033,6 @@ impl<'overview> Health<'overview> {
             failed: overview.day.failed,
         }
     }
-
-    /// The 95th percentile of the waits, by nearest rank as the sizing page's are.
-    fn wait_p95(&self) -> Option<u64> {
-        let mut waits: Vec<u64> = self.waits.iter().map(|wait| wait.waited).collect();
-        waits.sort_unstable();
-        let rank = (waits.len() * 95).div_ceil(100);
-        waits.get(rank.checked_sub(1)?).copied()
-    }
 }
 
 /// The figures that say whether CI keeps up: slots running, jobs waiting and the oldest's wait, the waits of the
@@ -1053,7 +1045,7 @@ pub(crate) fn health(overview: &Overview) -> Markup {
         .filter(|job| job.queued_at > 0)
         .map(|job| job.queued_at)
         .min();
-    let p95 = health.wait_p95();
+    let p95 = overview.day.wait_p95();
     html! {
         section #health .health aria-labelledby="health-title" {
             h2 #health-title .visually-hidden { "Health" }
@@ -1078,7 +1070,7 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                     dt { "Wait p95, 24 h" }
                     dd { span.figure-main { (p95.map_or("–".to_owned(), format::duration)) } }
                     dd.figure-note { (health.waits.len()) " job" @if health.waits.len() != 1 { "s" } " started" }
-                    (wait_hours(health.waits, overview.day.until))
+                    (wait_hours(&overview.day))
                 }
                 div class=(if health.failed > 0 { "failing" } else { "" }) {
                     dt { "Failed, 24 h" }
@@ -1095,17 +1087,9 @@ pub(crate) fn health(overview: &Overview) -> Markup {
 
 /// The longest wait that started in each hour of the last day, counted back from `until` so the 24 hours are the
 /// day the figures count, oldest hour first, as bars against the longest.
-fn wait_hours(waits: &[Started], until: u64) -> Markup {
-    let since = until.saturating_sub(DAY);
-    let mut hours = [0u64; 24];
-    for wait in waits
-        .iter()
-        .filter(|wait| (since..=until).contains(&wait.at))
-    {
-        // A start exactly `DAY` ago is in the oldest hour.
-        let back = usize::try_from((until - wait.at) / 3600).map_or(23, |back| back.min(23));
-        hours[23 - back] = hours[23 - back].max(wait.waited);
-    }
+fn wait_hours(day: &Activity) -> Markup {
+    let since = day.until.saturating_sub(DAY);
+    let hours = day.wait_hours();
     let longest = hours.iter().copied().max().unwrap_or(0);
     html! {
         @if longest > 0 {
@@ -1167,7 +1151,7 @@ fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
                     @if let Some(branch) = &job.branch { " · " (branch) }
                 }
                 @if let Some(waiting) = &job.waiting {
-                    span class=(format!("reason {}", reason_class(waiting))) { (reason(overview, job, waiting)) }
+                    span class=(format!("reason {}", reason_class(waiting.kind()))) { (waiting.reason(job, &overview.status, overview.now)) }
                 }
             }
         }
@@ -1175,92 +1159,12 @@ fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
 }
 
 /// How a reason is drawn: one the owner can act on, one that clears by itself, or what is full.
-fn reason_class(waiting: &Waiting) -> &'static str {
-    match waiting {
-        Waiting::Paused | Waiting::Backoff { .. } => "act",
-        Waiting::RunnerStarting
-        | Waiting::Reseeding { .. }
-        | Waiting::PullingImage { .. }
-        | Waiting::BehindStart { .. } => "soon",
-        Waiting::NoSlot { .. }
-        | Waiting::Memory { .. }
-        | Waiting::Cpu { .. }
-        | Waiting::BehindCpu { .. } => "full",
+fn reason_class(kind: WaitKind) -> &'static str {
+    match kind {
+        WaitKind::Act => "act",
+        WaitKind::Soon => "soon",
+        WaitKind::Full => "full",
     }
-}
-
-/// Why a queued job waits, in the owner's words, with the numbers that hold it.
-fn reason(overview: &Overview, job: &QueuedJob, waiting: &Waiting) -> String {
-    let status = &overview.status;
-    match waiting {
-        Waiting::Paused => format!("{} is paused", job.repository),
-        Waiting::Backoff { until } => format!(
-            "Runners failed to take a job; retrying in {}",
-            format::duration(until.saturating_sub(overview.now))
-        ),
-        Waiting::RunnerStarting => {
-            let slot = status.profiles.iter().find_map(|profile| {
-                profile
-                    .slots
-                    .iter()
-                    .find(|slot| {
-                        slot.runner.as_ref().is_some_and(|runner| {
-                            runner.repository == job.repository && !runner.busy
-                        })
-                    })
-                    .map(|slot| format!("{}\u{a0}{}", profile.name, slot.slot))
-            });
-            match slot {
-                Some(slot) => format!("A runner is starting for it in {slot}"),
-                None => "A runner is starting for it".to_owned(),
-            }
-        }
-        Waiting::Reseeding { profile } => format!("{profile} is rebuilding its snapshot"),
-        Waiting::PullingImage { profile } => format!("Pulling {profile}'s image"),
-        Waiting::NoSlot { profile } => {
-            let slots = status
-                .profiles
-                .iter()
-                .find(|candidate| &candidate.name == profile)
-                .map_or(0, |profile| profile.slots.len());
-            format!("All {slots} {profile} slots are busy")
-        }
-        Waiting::Memory { .. } if status.budget.held => {
-            "The slice is past 90% of its MemoryMax, so nothing starts".to_owned()
-        }
-        Waiting::Memory { needs, free } => format!(
-            "Needs {} of memory; {} of the budget is free",
-            format::bytes(*needs),
-            format::bytes(*free)
-        ),
-        Waiting::Cpu { needs, free } => format!(
-            "Needs {} CPUs; {} are free",
-            format::cores(*needs),
-            format::cores(*free)
-        ),
-        Waiting::BehindCpu { job: older } => {
-            format!(
-                "Behind {}, which waits for CPU",
-                older_name(overview, *older)
-            )
-        }
-        Waiting::BehindStart { job: older } => {
-            format!(
-                "Next after {}, whose runner starts first",
-                older_name(overview, *older)
-            )
-        }
-    }
-}
-
-/// The name of the queued job `id`, which a reason names.
-fn older_name(overview: &Overview, id: u64) -> String {
-    overview
-        .status
-        .queued
-        .iter()
-        .find(|candidate| candidate.id == id)
-        .map_or_else(|| "an older job".to_owned(), |older| older.name.clone())
 }
 
 /// A job's name after its workflow's, which reads quieter: `CI / build`, as every client names a job.

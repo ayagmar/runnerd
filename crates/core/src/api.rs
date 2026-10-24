@@ -66,7 +66,7 @@ pub use records::{
 };
 pub use sizing::{
     Advice, AutoPlan, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingHold,
-    SizingQuery, Spread,
+    SizingQuery, Spread, period,
 };
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
@@ -345,6 +345,106 @@ pub enum Waiting {
         /// The older job's ID.
         job: u64,
     },
+}
+
+/// What a [`Waiting`] reason waits on, which clients draw it by.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum WaitKind {
+    /// Something the owner can act on: a pause, or runners that failed to take a job.
+    Act,
+    /// Something that clears by itself shortly: a runner starting, a reseed, an image pull, an older job's start.
+    Soon,
+    /// Room: a slot, memory or CPU that a running job holds.
+    Full,
+}
+
+impl Waiting {
+    /// What it waits on.
+    pub fn kind(&self) -> WaitKind {
+        match self {
+            Waiting::Paused | Waiting::Backoff { .. } => WaitKind::Act,
+            Waiting::RunnerStarting
+            | Waiting::Reseeding { .. }
+            | Waiting::PullingImage { .. }
+            | Waiting::BehindStart { .. } => WaitKind::Soon,
+            Waiting::NoSlot { .. }
+            | Waiting::Memory { .. }
+            | Waiting::Cpu { .. }
+            | Waiting::BehindCpu { .. } => WaitKind::Full,
+        }
+    }
+
+    /// Why `job` waits, in the owner's words with the numbers that hold it, as every client says it: such as
+    /// `All 2 node slots are busy` or `Needs 9G of memory; 2.5G of the budget is free`. `status` is the one `job`
+    /// is queued in, which names the slot of a starting runner and the older job one waits behind.
+    pub fn reason(&self, job: &QueuedJob, status: &Status, now: u64) -> String {
+        let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
+        let older_name = |id: u64| {
+            status
+                .queued
+                .iter()
+                .find(|candidate| candidate.id == id)
+                .map_or_else(|| "an older job".to_owned(), |older| older.name.clone())
+        };
+        match self {
+            Waiting::Paused => format!("{} is paused", job.repository),
+            Waiting::Backoff { until } => format!(
+                "Runners failed to take a job; retrying in {}",
+                admission::wait(until.saturating_sub(now))
+            ),
+            Waiting::RunnerStarting => {
+                let slot = status.profiles.iter().find_map(|profile| {
+                    profile
+                        .slots
+                        .iter()
+                        .find(|slot| {
+                            slot.runner.as_ref().is_some_and(|runner| {
+                                runner.repository == job.repository && !runner.busy
+                            })
+                        })
+                        .map(|slot| format!("{}\u{a0}{}", profile.name, slot.slot))
+                });
+                match slot {
+                    Some(slot) => format!("A runner is starting for it in {slot}"),
+                    None => "A runner is starting for it".to_owned(),
+                }
+            }
+            Waiting::Reseeding { profile } => format!("{profile} is rebuilding its snapshot"),
+            Waiting::PullingImage { profile } => format!("Pulling {profile}'s image"),
+            Waiting::NoSlot { profile } => {
+                let slots = status
+                    .profiles
+                    .iter()
+                    .find(|candidate| &candidate.name == profile)
+                    .map_or(0, |profile| profile.slots.len());
+                if slots == 1 {
+                    format!("The {profile} slot is busy")
+                } else {
+                    format!("All {slots} {profile} slots are busy")
+                }
+            }
+            Waiting::Memory { .. } if status.budget.held => {
+                "The slice is past 90% of its MemoryMax, so nothing starts".to_owned()
+            }
+            Waiting::Memory { needs, free } => format!(
+                "Needs {} of memory; {} of the budget is free",
+                size(*needs),
+                size(*free)
+            ),
+            Waiting::Cpu { needs, free } => {
+                format!("Needs {}; {} are free", cpus(*needs), cores(*free))
+            }
+            Waiting::BehindCpu { job: older } => {
+                format!("Behind {}, which waits for CPU", older_name(*older))
+            }
+            Waiting::BehindStart { job: older } => {
+                format!(
+                    "Next after {}, whose runner starts first",
+                    older_name(*older)
+                )
+            }
+        }
+    }
 }
 
 /// `GET /v1/dashboard`: the dashboard's `[web]` settings, as the daemon read them when it started.

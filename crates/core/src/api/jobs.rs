@@ -294,6 +294,36 @@ pub struct Activity {
     pub failed: u64,
 }
 
+impl Activity {
+    /// The 95th percentile of the waits of the jobs that started, by nearest rank as sizing's are; `None` when none
+    /// started.
+    pub fn wait_p95(&self) -> Option<u64> {
+        let mut waits: Vec<u64> = self.started.iter().map(|start| start.waited).collect();
+        waits.sort_unstable();
+        let rank = (waits.len() * 95).div_ceil(100);
+        waits.get(rank.checked_sub(1)?).copied()
+    }
+
+    /// The longest wait of the jobs that started in each of the 24 hours before `until`, oldest hour first; 0 for
+    /// an hour without a start. Counted back from `until`, so the hours are the day the other figures count.
+    pub fn wait_hours(&self) -> [u64; 24] {
+        const HOUR: u64 = 3600;
+        let since = self.until.saturating_sub(24 * HOUR);
+        let mut hours = [0u64; 24];
+        for start in self
+            .started
+            .iter()
+            .filter(|start| (since..=self.until).contains(&start.at))
+        {
+            // A start exactly 24 hours ago is in the oldest hour.
+            let back =
+                usize::try_from((self.until - start.at) / HOUR).map_or(23, |back| back.min(23));
+            hours[23 - back] = hours[23 - back].max(start.waited);
+        }
+        hours
+    }
+}
+
 /// A job that started: when, and how long it had waited since it was queued.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Started {
