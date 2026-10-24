@@ -5,6 +5,33 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.12 to 0.0.13
+
+### Before
+
+The first start of 0.0.13 migrates the job history to version 13, and 0.0.12 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-3), into a directory such as `~/runnerd-0.0.12`.
+
+### Upgrade
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.13/install.sh | sh -s -- --version v0.0.13
+```
+
+Move each profile's published `image` to its `-0.0.13` tag, then check the file and start runnerd:
+
+```sh
+runnerd check-config
+systemctl --user start runnerd
+runnerctl doctor
+```
+
+### What changes on its own
+
+- **Admission follows the host's memory.** New runners start only while the host has room for them beside everything else it runs, and not while it stalls short of memory. Waiting jobs say "The host is short of memory"; running jobs are never stopped, and these waits don't count as demand for more slots ([The host's memory](../admission/#the-hosts-memory)). `runnerd doctor` has a `host memory` check.
+- **Caps keep at least 1G above a job's largest peak** for page cache, so its downloads aren't throttled at its cap. Under `[sizing] auto`, small jobs' profiles grow their `memory` over the next looks.
+- **A job's page and `runnerctl job` count the times the kernel throttled its downloads for memory pressure**, and the Memory pressure insight warns when it happens to a repository again and again.
+- **After a restart, runners runnerd adopts keep the CPU and memory they reserved and their uptime.** Waiting runners whose labels, limits or image a reload changed are replaced; for an image, once the new one is pulled, so the old runners serve meanwhile.
+
 ## 0.0.11 to 0.0.12
 
 The job history stays at version 12, so either version reads it. Install 0.0.12, move each profile's published `image` to its `-0.0.12` tag, and restart runnerd:
@@ -30,7 +57,7 @@ runnerctl doctor
 
 ### Before
 
-The first start of 0.0.11 migrates the job history to version 12, and 0.0.10 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-2), into a directory such as `~/runnerd-0.0.10`.
+The first start of 0.0.11 migrates the job history to version 12, and 0.0.10 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-3), into a directory such as `~/runnerd-0.0.10`.
 
 ### Upgrade
 
@@ -59,7 +86,7 @@ Jobs reach the build cache only from the 0.0.11 images; an older image ignores i
 
 ### Before
 
-The first start of 0.0.10 migrates the job history to version 11, and 0.0.9 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-2), into a directory such as `~/runnerd-0.0.9`.
+The first start of 0.0.10 migrates the job history to version 11, and 0.0.9 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-3), into a directory such as `~/runnerd-0.0.9`.
 
 ### Upgrade
 
