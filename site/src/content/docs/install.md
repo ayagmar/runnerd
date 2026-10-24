@@ -42,13 +42,13 @@ FAIL  slice: runnerd.slice has no unit file with a MemoryMax, so nothing holds r
            EOF
            sudo systemctl daemon-reload
 ok    config: valid, with warnings: the slice runnerd.slice has no MemoryMax, so nothing holds runners to their 40.5G of caps; install a unit file for it
-ok    image: ghcr.io/ayagmar/runnerd-runner:base-0.0.9: not pulled yet; runnerd pulls it before the first runner
+ok    image: ghcr.io/ayagmar/runnerd-runner:base-0.0.10: not pulled yet; runnerd pulls it before the first runner
 info  records: the records of failed jobs take 0B of [records] max_total = 20G
 ok    gh: logged in to github.com with the repo scope
 info  /dev/kvm: present, for a future Kata Containers backend
 
 First run the fixes above for slice; runnerd init runs nothing as root.
-Start runnerd and have it start at login; it pulls ghcr.io/ayagmar/runnerd-runner:base-0.0.9 before the first runner:
+Start runnerd and have it start at login; it pulls ghcr.io/ayagmar/runnerd-runner:base-0.0.10 before the first runner:
   systemctl --user daemon-reload
   systemctl --user enable --now runnerd
   runnerctl status
@@ -86,7 +86,7 @@ jobs:
 ## Pick a directory or release
 
 ```sh
-curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.9
+curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.10
 ```
 
 From crates.io, `runnerctl` is in `runnerd-cli`:
@@ -104,5 +104,5 @@ Every release archive, `install.sh` and `sha256.sum` has a GitHub build provenan
 curl -fsSLO https://github.com/ayagmar/runnerd/releases/latest/download/install.sh
 gh attestation verify install.sh -R ayagmar/runnerd
 sh install.sh
-gh attestation verify oci://ghcr.io/ayagmar/runnerd-runner:base-0.0.9 --repo ayagmar/runnerd
+gh attestation verify oci://ghcr.io/ayagmar/runnerd-runner:base-0.0.10 --repo ayagmar/runnerd
 ```

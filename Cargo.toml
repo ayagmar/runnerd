@@ -3,7 +3,7 @@ resolver = "3"
 members = ["crates/core", "crates/daemon", "crates/cli", "crates/web"]
 
 [workspace.package]
-version = "0.0.9"
+version = "0.0.10"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -11,8 +11,8 @@ repository = "https://github.com/ayagmar/runnerd"
 readme = "README.md"
 
 [workspace.dependencies]
-runnerd-core = { path = "crates/core", version = "0.0.9", default-features = false }
-runnerd-web = { path = "crates/web", version = "0.0.9" }
+runnerd-core = { path = "crates/core", version = "0.0.10", default-features = false }
+runnerd-web = { path = "crates/web", version = "0.0.10" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }
 bollard = { version = "0.21.1", default-features = false, features = ["pipe"] }
 clap = { version = "4.6.7", features = ["derive"] }

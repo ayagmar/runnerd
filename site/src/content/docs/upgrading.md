@@ -5,6 +5,38 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.9 to 0.0.10
+
+### Before
+
+The first start of 0.0.10 migrates the job history to version 11, and 0.0.9 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-1), into a directory such as `~/runnerd-0.0.9`.
+
+### Upgrade
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.10/install.sh | sh -s -- --version v0.0.10
+```
+
+Move each profile's published `image` to its `-0.0.10` tag, then check the file and start runnerd:
+
+```sh
+runnerd check-config
+systemctl --user start runnerd
+runnerctl doctor
+```
+
+### What changes on its own
+
+- **Warm runners** are on: each active repository keeps one idle runner registered, so its next job starts without waiting for one. A queued job takes back the room a warm runner holds. Set `warm = 0` under a repository to turn it off ([Warm runners](../running/#warm-runners)).
+- **Auto sizing**, where `[sizing] auto` is on, now raises within the hour (`raise_interval`) and lowers no sooner than `interval`. It changes `cpus` too, and adds slots while they fit `MemoryMax`, so `max_slots` is optional. Keep `max_slots`, or set a long `raise_interval`, to hold the old behaviour ([Auto sizing](../admission/#auto-sizing)).
+- **The shared caches and the mirror** are checked at most hourly on a busy day, at the first moment no job runs; idle warm runners stop for it.
+- **`runnerctl config show`** and the dashboard's config editor show notification URLs and header values as `<secret>`. Back up `runnerd.toml` itself, not that output.
+
+### New, off until you set them
+
+- [Notifications](../insights/#notifications) to ntfy or a webhook under `[notify]`: failed and lost jobs, runners that cannot start, new insights, a daily digest.
+- `runnerd init` writes `[sizing] auto = true` for new configs; existing configs are left as they are.
+
 ## 0.0.8 to 0.0.9
 
 The job history stays at version 9, so either version reads it. Install 0.0.9, move each profile's published `image` to its `-0.0.9` tag, and restart runnerd:
