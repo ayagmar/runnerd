@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ratatui::crossterm::event::{self as terminal, Event as TerminalEvent};
 use runnerd_core::api::{
-    Activity, ActivityQuery, EventQuery, HostSampleQuery, HostSamples, Job, JobPage, PauseQuery,
-    Paused, Records, SampleSeries, Sizing, Status,
+    Activity, ActivityQuery, EventQuery, HostSampleQuery, HostSamples, Insights, InsightsQuery,
+    Job, JobPage, PauseQuery, Paused, Records, SampleSeries, Sizing, Status,
 };
 use runnerd_core::client::{Client, ClientError, Events, StatusCode};
 use runnerd_core::config::ByteSize;
@@ -424,6 +424,9 @@ impl Requests {
             Effect::Activity { generation } => {
                 tokio::spawn(read_activity(client, send, generation));
             }
+            Effect::Insights => {
+                tokio::spawn(read_insights(client, send));
+            }
             Effect::Reasons => {
                 tokio::spawn(async move {
                     let status = client.get::<Status>("/v1/status").await.ok();
@@ -471,6 +474,16 @@ async fn read_activity(client: Client, send: UnboundedSender<Msg>, generation: u
             generation,
             activity,
         });
+    }
+}
+
+/// Reads the insights and sends them; a daemon before insights has none to show.
+async fn read_insights(client: Client, send: UnboundedSender<Msg>) {
+    if let Ok(insights) = client
+        .get_query::<Insights>("/v1/insights", &InsightsQuery::default())
+        .await
+    {
+        let _ = send.send(Msg::Insights(Box::new(insights)));
     }
 }
 

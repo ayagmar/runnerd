@@ -15,6 +15,7 @@ use crate::format;
 pub(crate) mod caches;
 pub(crate) mod config;
 pub(crate) mod history;
+pub(crate) mod insights;
 pub(crate) mod job;
 pub(crate) mod overview;
 pub(crate) mod sizing;
@@ -24,6 +25,7 @@ pub(crate) mod sizing;
 pub(crate) enum Page {
     Overview,
     History,
+    Insights,
     Caches,
     Sizing,
     Config,
@@ -127,6 +129,7 @@ pub(crate) fn page(
     let nav = [
         (Page::Overview, "/", "Overview"),
         (Page::History, "/history", "History"),
+        (Page::Insights, "/insights", "Insights"),
         (Page::Caches, "/caches", "Caches"),
         (Page::Sizing, "/sizing", "Sizing"),
         (Page::Config, "/config", "Config"),

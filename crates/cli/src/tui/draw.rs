@@ -15,7 +15,8 @@ use ratatui::widgets::{
 };
 use runnerd_core::api::{
     Activity, AdmissionPolicy, Advice, AutoPlan, Job, JobSummary, ProfileSizing, ProfileStatus,
-    QueuedJob, RepositoryStatus, Sample, Sizing, SlotStatus, Status, Step, WaitKind, period,
+    QueuedJob, RepositoryStatus, Sample, Severity, Sizing, SlotStatus, Status, Step, WaitKind,
+    period,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -426,9 +427,9 @@ fn lists_height(app: &App, side_by_side: bool) -> u16 {
 }
 
 /// The figures that say whether CI keeps up, as the dashboard opens with them: slots running, jobs waiting and the
-/// oldest's wait, then over the last 24 hours the p95 wait with the longest wait of each hour, and the failures.
-/// What does not fit goes whole, least telling first: the starting and warm runners, the finished count, the hours, the
-/// oldest wait.
+/// oldest's wait, then over the last 24 hours the p95 wait with the longest wait of each hour, and the failures, then
+/// how many warning insights hold. What does not fit goes whole, least telling first: where to read the insights, the
+/// starting and warm runners, the finished count, the hours, the oldest wait and the insights.
 fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     const SPARK_LEAST: usize = 8;
     let mut items = health_items(app, now, theme);
@@ -579,6 +580,39 @@ fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'
         items.push((
             3,
             Some(vec![Span::raw(format!(" of {} finished", day.finished))]),
+        ));
+    }
+    items.extend(insight_items(app, theme));
+    items
+}
+
+/// How many warning insights hold, and where to read them; nothing without one.
+fn insight_items(app: &App, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
+    let sep = || Span::styled(" · ", theme.dim());
+    let mut items = Vec::new();
+    let warnings = app.insights.as_ref().map_or(0, |insights| {
+        insights
+            .insights
+            .iter()
+            .filter(|insight| insight.severity == Severity::Warning)
+            .count()
+    });
+    if warnings > 0 {
+        let what = if warnings == 1 { "insight" } else { "insights" };
+        items.push((
+            1,
+            Some(vec![
+                sep(),
+                Span::styled(
+                    warnings.to_string(),
+                    theme.wait().add_modifier(Modifier::BOLD),
+                ),
+                Span::raw(format!(" {what}")),
+            ]),
+        ));
+        items.push((
+            5,
+            Some(vec![Span::styled(": runnerctl insights", theme.dim())]),
         ));
     }
     items

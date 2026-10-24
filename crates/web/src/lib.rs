@@ -37,6 +37,7 @@ pub use auth::{PAIRING_LIFETIME, PAIRING_MAX, PairError, Sessions, login_file, s
 use views::caches::CachesView;
 use views::config::{ConfigQuery, ConfigView};
 use views::history::{Filter, History};
+use views::insights::InsightsView;
 use views::job::JobView;
 use views::overview::Overview;
 use views::sizing::SizingView;
@@ -136,6 +137,7 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .route("/history", get(history))
         .route("/caches", get(caches))
         .route("/sizing", get(sizing))
+        .route("/insights", get(insights))
         .route("/jobs/{id}", get(job))
         .route("/jobs/{id}/log", get(job_log))
         .route("/live/overview", get(live::overview))
@@ -253,6 +255,14 @@ async fn sizing(State(app): State<App>) -> Response {
         SizingView::load(&app.daemon, now())
             .await
             .map(|sizing| views::sizing::render(&sizing)),
+    )
+}
+
+async fn insights(State(app): State<App>) -> Response {
+    page(
+        InsightsView::load(&app.daemon, now())
+            .await
+            .map(|insights| views::insights::render(&insights)),
     )
 }
 

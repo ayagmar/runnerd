@@ -50,3 +50,9 @@ labels = ["self-hosted", "linux", "x64", "jvm"]
 name = "halyard/storefront"
 profile = "node"
 labels = ["self-hosted", "linux", "x64", "node"]
+
+# Failures, lost jobs, runners that cannot start and new insights, to a phone through ntfy. Off without a target.
+# [[notify.targets]]
+# name = "phone"
+# kind = "ntfy"
+# url = "https://ntfy.sh/<a long random topic>"

@@ -25,9 +25,23 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::testdir::Dir;
 
+use super::notify::{Setup, Timing};
 use super::{ConfigSource, MemoryMax, SyncDir, bind, serve, serve_for, sync_dir};
 
 const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
+
+/// The notifier at a test's pace, in UTC.
+const NOTIFY: Setup = Setup {
+    timing: Timing {
+        gather: Duration::from_millis(50),
+        gap: Duration::from_millis(50),
+        retry: Duration::from_millis(50),
+        retry_max: Duration::from_millis(200),
+        check: Duration::from_millis(100),
+        timeout: Duration::from_secs(2),
+    },
+    offset: || Some(0),
+};
 
 /// The slice's `MemoryMax`, in place of systemd's: the example's caps sum to 32.5G.
 #[allow(
@@ -293,6 +307,7 @@ async fn start_serving(
         cpus: unreadable_cpus,
         sync_dir,
         auto_every: Duration::from_millis(20),
+        notify: NOTIFY,
     };
     let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
     let sessions_kept = sessions.clone();
@@ -1930,4 +1945,67 @@ async fn a_cpu_budget_needs_the_slices_cpus_and_a_config_without_one_never_reads
         daemon.reloads.recv().await.unwrap().host.cpu_overcommit,
         None
     );
+}
+
+#[tokio::test]
+async fn a_notify_test_says_what_each_target_did_without_its_url() {
+    let dir = Dir::new();
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = closed.local_addr().unwrap().to_string();
+    drop(closed);
+    let text = format!(
+        "{EXAMPLE}\n[[notify.targets]]\nname = \"phone\"\nkind = \"ntfy\"\nurl = \"http://{address}/s3cret-topic\"\n"
+    );
+    let daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &text).await;
+
+    let response = daemon
+        .client
+        .post("http://runnerd/v1/notify/test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let tested: runnerd_core::api::NotifyTest =
+        serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(tested.targets.len(), 1);
+    assert_eq!(tested.targets[0].target, "phone");
+    let error = tested.targets[0]
+        .error
+        .clone()
+        .expect("nothing listens there");
+    assert_eq!(error, "cannot connect to the target");
+
+    let response = daemon
+        .client
+        .post("http://runnerd/v1/notify/test?target=desk")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let refused: ErrorResponse = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(refused.message, "[notify] has no target named \"desk\"");
+}
+
+#[tokio::test]
+async fn insights_and_the_digest_read_the_history() {
+    let (client, _, _dir) = daemon().await;
+
+    let response = client
+        .get("http://runnerd/v1/insights?days=7")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let insights: runnerd_core::api::Insights =
+        serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(insights.until - insights.since, 7 * 24 * 3600);
+    assert!(
+        insights.insights.is_empty(),
+        "an empty history says nothing"
+    );
+
+    let response = client.get("http://runnerd/v1/digest").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let digest: runnerd_core::api::Digest = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!((digest.finished, digest.failed), (0, 0));
 }

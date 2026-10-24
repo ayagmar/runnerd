@@ -6,9 +6,9 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use runnerd_core::api::{
-    Activity, Event, EventEnvelope, HostSample, Job, JobMetrics, JobPage, JobQuery, JobState,
-    JobSummary, LogSummary, QueuedJob, Records, Resize, Sample, SampleSeries, Sizing, Status,
-    Timeline,
+    Activity, Event, EventEnvelope, HostSample, Insights, Job, JobMetrics, JobPage, JobQuery,
+    JobState, JobSummary, LogSummary, QueuedJob, Records, Resize, Sample, SampleSeries, Sizing,
+    Status, Timeline,
 };
 
 use crate::watch;
@@ -30,6 +30,9 @@ const ACTIVITY_EVERY: u64 = 60;
 /// How often the queued jobs' reasons are read again while no job or slot changes: no event carries them (ADR 0044),
 /// so the dashboard reads the status this often too.
 const REASONS_EVERY: u64 = 10;
+/// How often the insights are read again: they change with finished jobs, slowly, and each read goes over two weeks of
+/// history.
+const INSIGHTS_EVERY: u64 = 300;
 
 /// What happened: a key, something from the daemon, or the answer to a request.
 #[derive(Debug)]
@@ -65,6 +68,8 @@ pub(crate) enum Msg {
     },
     /// The status read again for why each queued job waits; `None` when it could not be read.
     Reasons(Option<Box<Status>>),
+    /// What the history says (`GET /v1/insights`).
+    Insights(Box<Insights>),
     /// The answer to the open job's request for its latest runs.
     Runs {
         job: u64,
@@ -150,6 +155,8 @@ pub(crate) enum Effect {
     },
     /// Read the status again for why each queued job waits.
     Reasons,
+    /// Read the insights again.
+    Insights,
     /// Read the open job's latest runs: the same repository's, workflow's and job name's.
     Runs {
         job: u64,
@@ -372,6 +379,10 @@ pub(crate) struct App {
     pub(crate) latest: usize,
     /// The jobs started and finished in the last 24 hours, once read.
     pub(crate) activity: Option<Activity>,
+    /// What the history says; `None` until read, or from a daemon before insights.
+    pub(crate) insights: Option<Insights>,
+    /// The host sample time from which the insights are read again.
+    insights_due: u64,
     /// The host sample time from which the activity is read again, unless a job starts or ends first.
     activity_due: u64,
     /// The generation of the last activity request, and of the read shown.
@@ -427,6 +438,8 @@ impl App {
             reasons_asked: false,
             reasons_stale: false,
             activity,
+            insights: None,
+            insights_due: 0,
             history: History::default(),
             job: None,
             flash: None,
@@ -545,6 +558,7 @@ impl App {
                 activity,
             } => self.activity(generation, activity),
             Msg::Reasons(status) => return self.reasons(status.as_deref()),
+            Msg::Insights(insights) => self.insights = Some(*insights),
             Msg::Runs { job, page } => match page {
                 Ok(page) => {
                     self.history.learn(&page.jobs);
@@ -663,6 +677,10 @@ impl App {
                     self.activity_due = sample.at + ACTIVITY_EVERY;
                     effects.push(self.ask_activity());
                 }
+                if sample.at >= self.insights_due {
+                    self.insights_due = sample.at + INSIGHTS_EVERY;
+                    effects.push(Effect::Insights);
+                }
                 if sample.at >= self.reasons_due {
                     self.reasons_due = sample.at + REASONS_EVERY;
                     effects.extend(self.ask_reasons());
@@ -704,6 +722,10 @@ impl App {
                 };
                 self.flash(text, outcome);
             }
+            Event::RunnerFailed { failure } => self.flash(
+                format!("{}: {}", failure.repository, failure.error),
+                Outcome::Failed,
+            ),
             Event::SizingChanged { change } => {
                 self.flash(
                     format!("{}: auto sizing: {}", change.profile, change.line()),

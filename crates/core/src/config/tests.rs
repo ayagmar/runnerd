@@ -626,3 +626,98 @@ fn a_slices_cpus_are_its_cpu_set_or_the_hosts_less_under_a_lower_quota() {
     assert_eq!(parse_slice_cpus(&show("zero", "", "infinity"), 32), None);
     assert_eq!(parse_slice_cpus(&show("", "", "4 parsecs"), 32), None);
 }
+
+const NOTIFY: &str = r#"
+[notify]
+digest_at = "07:30"
+
+[[notify.targets]]
+name = "phone"
+kind = "ntfy"
+url = "https://ntfy.example/halyard-ci-6f3a"
+headers = { Authorization = "Bearer tk_hunter2" }
+
+[[notify.targets]]
+name = "relay"
+kind = "webhook"
+url = "https://hooks.example/runnerd?key=s3cret"
+events = ["failed", "digest"]
+"#;
+
+#[test]
+fn notify_targets_get_failures_lost_jobs_runners_and_insights_by_default() {
+    use crate::api::NotifyEvent;
+
+    let config = Config::parse(&format!("{MINIMAL}{NOTIFY}")).unwrap();
+
+    assert!(config.validate(None).is_ok());
+    assert_eq!(config.notify.digest_at.to_string(), "07:30");
+    let events: Vec<_> = config
+        .notify
+        .targets
+        .iter()
+        .map(|target| target.events.clone())
+        .collect();
+    assert_eq!(
+        events,
+        [
+            vec![
+                NotifyEvent::Failed,
+                NotifyEvent::Lost,
+                NotifyEvent::Runner,
+                NotifyEvent::Insights
+            ],
+            vec![NotifyEvent::Failed, NotifyEvent::Digest],
+        ]
+    );
+    assert!(
+        Config::parse(MINIMAL).unwrap().notify.targets.is_empty(),
+        "nothing is sent without [notify]"
+    );
+}
+
+#[test]
+fn a_notify_targets_url_and_headers_never_show_in_debug_output_or_errors() {
+    let config = Config::parse(&format!("{MINIMAL}{NOTIFY}")).unwrap();
+    let shown = format!("{config:?}");
+    for secret in ["halyard-ci-6f3a", "hunter2", "s3cret", "hooks.example"] {
+        assert!(!shown.contains(secret), "Debug shows {secret}: {shown}");
+    }
+
+    let broken = NOTIFY.replace(
+        "https://hooks.example/runnerd?key=s3cret",
+        "hooks.example/runnerd?key=s3cret",
+    );
+    let error = Config::parse(&format!("{MINIMAL}{broken}"))
+        .unwrap()
+        .validate(None)
+        .unwrap_err()
+        .to_string();
+    assert_eq!(
+        error,
+        "notify target \"relay\": url does not start with https:// or http://"
+    );
+}
+
+#[test]
+fn an_ntfy_target_needs_a_topic_and_targets_need_their_own_names() {
+    let refused = |notify: &str| {
+        Config::parse(&format!("{MINIMAL}{notify}"))
+            .unwrap()
+            .validate(None)
+            .unwrap_err()
+            .to_string()
+    };
+    assert_eq!(
+        refused(&NOTIFY.replace("ntfy.example/halyard-ci-6f3a", "ntfy.example/")),
+        "notify target \"phone\": url is not an ntfy topic's, such as https://ntfy.sh/<topic>"
+    );
+    assert_eq!(
+        refused(&NOTIFY.replace("\"relay\"", "\"phone\"")),
+        "notify target \"phone\": another target has this name"
+    );
+    assert!(
+        Config::parse(&format!("{MINIMAL}{}", NOTIFY.replace("07:30", "7:30"))).is_err(),
+        "a time of day is HH:MM"
+    );
+}

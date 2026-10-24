@@ -1,0 +1,933 @@
+//! Notifications (ADR 0051): under `[notify]`, sends failed and lost jobs, runners that cannot start, new warning
+//! insights and the daily digest to webhook and ntfy targets. A reader of the store's durable events beside auto
+//! sizing, off the engine's loop: the engine never waits for it. Each target's cursor, the insights it was told and
+//! its last digest are stored once a delivery succeeds, so a restart neither drops nor repeats a message. It folds a
+//! burst into one message, retries with backoff, and never logs or returns a target's URL or header values.
+
+use std::collections::{BTreeMap, BTreeSet};
+use std::sync::Arc;
+use std::time::Duration;
+
+use axum::Json;
+use axum::extract::{Query, State};
+use axum::http::StatusCode;
+use axum::response::{IntoResponse, Response};
+use runnerd_core::api::{
+    Delivery, Digest, Event, EventEnvelope, Insight, JobState, JobSummary, Notification,
+    NotifyEvent, NotifyTest, NotifyTestQuery, Priority, RunnerFailure, Severity,
+};
+use runnerd_core::config::{Config, DayTime, Notify, NotifyKind, NotifyTarget};
+use runnerd_core::insights;
+use runnerd_core::store::Store;
+use serde_json::json;
+use tokio::sync::broadcast::error::RecvError;
+use tokio::sync::{Mutex, broadcast, watch};
+use tokio::time::Instant;
+use tracing::{info, warn};
+
+use super::history::{insight_runs_of, now};
+use super::{AppState, Authenticated, ConfigText, error};
+
+/// How the notifier paces itself: `TIMING` in the daemon, shorter in tests.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Timing {
+    /// How long after the first event of a message it waits for more to fold in.
+    pub gather: Duration,
+    /// The least time between two messages to one target.
+    pub gap: Duration,
+    /// The wait before the first retry; each next one doubles, up to `retry_max`.
+    pub retry: Duration,
+    /// The longest wait between retries.
+    pub retry_max: Duration,
+    /// How often insights and the digest's time are looked at.
+    pub check: Duration,
+    /// How long a request may take.
+    pub timeout: Duration,
+}
+
+/// The daemon's pace.
+pub(crate) const TIMING: Timing = Timing {
+    gather: Duration::from_secs(10),
+    gap: Duration::from_mins(1),
+    retry: Duration::from_secs(5),
+    retry_max: Duration::from_mins(10),
+    check: Duration::from_mins(5),
+    timeout: Duration::from_secs(10),
+};
+
+/// Reads the host's offset from UTC, in seconds: `local_offset`, or a test's.
+pub(crate) type LocalOffset = fn() -> Option<i64>;
+
+/// The host's offset from UTC now, in seconds, as `date +%z` prints it, so it follows the zone and daylight saving;
+/// `None` when it cannot be read, and the digest goes by UTC.
+pub(crate) fn local_offset() -> Option<i64> {
+    let output = std::process::Command::new("date")
+        .arg("+%z")
+        .output()
+        .ok()?;
+    parse_offset(String::from_utf8_lossy(&output.stdout).trim())
+}
+
+/// `+0200` or `-0530` in seconds.
+fn parse_offset(text: &str) -> Option<i64> {
+    let (sign, digits) = match text.split_at_checked(1)? {
+        ("+", digits) => (1, digits),
+        ("-", digits) => (-1, digits),
+        _ => return None,
+    };
+    if digits.len() != 4 || !digits.chars().all(|c| c.is_ascii_digit()) {
+        return None;
+    }
+    let hours: i64 = digits[..2].parse().ok()?;
+    let minutes: i64 = digits[2..].parse().ok()?;
+    Some(sign * (hours * 3600 + minutes * 60))
+}
+
+/// Whether the digest due at `at` local time is due at `now` (seconds) in a zone `offset` seconds from UTC, when the
+/// last went at `last`: once a day, at the first look after its time.
+fn digest_due(now: u64, offset: i64, at: DayTime, last: u64) -> bool {
+    const DAY: i64 = 24 * 3600;
+    let now = i64::try_from(now).unwrap_or(i64::MAX);
+    let today = (now + offset).div_euclid(DAY) * DAY;
+    let due = today + i64::from(at.minutes) * 60 - offset;
+    now >= due && i64::try_from(last).unwrap_or(i64::MAX) < due
+}
+
+/// What the notifier needs: `TIMING` and `local_offset` in the daemon.
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct Setup {
+    /// Its pace.
+    pub timing: Timing,
+    /// Reads the host's offset from UTC.
+    pub offset: LocalOffset,
+}
+
+/// The daemon's setup.
+pub(crate) const SETUP: Setup = Setup {
+    timing: TIMING,
+    offset: local_offset,
+};
+
+const DAY_MS: u64 = 24 * 3600 * 1000;
+
+/// One target's state: what it was sent, what waits to be, and when it may be sent.
+struct Target {
+    config: NotifyTarget,
+    /// The last event read; delivered, or not wanted.
+    cursor: u64,
+    /// The cursor as stored.
+    stored: u64,
+    failed: Vec<JobSummary>,
+    lost: Vec<JobSummary>,
+    runners: Vec<RunnerFailure>,
+    /// New warning insights to tell, and when the warning insights held at the last look (ms).
+    insights: Vec<Insight>,
+    present: Option<(u64, BTreeSet<String>)>,
+    /// When each insight told of was last seen to hold (ms), by key.
+    told: BTreeMap<String, u64>,
+    digest: Option<Digest>,
+    /// When the last digest went (ms).
+    last_digest: u64,
+    /// When the oldest thing waiting to be sent came.
+    since: Option<Instant>,
+    sent: Option<Instant>,
+    retry_at: Option<Instant>,
+    failures: u32,
+}
+
+impl Target {
+    fn wants(&self, event: NotifyEvent) -> bool {
+        self.config.events.contains(&event)
+    }
+
+    fn waiting(&self) -> bool {
+        !(self.failed.is_empty()
+            && self.lost.is_empty()
+            && self.runners.is_empty()
+            && self.insights.is_empty())
+    }
+
+    /// When it may send next, if it has something to.
+    fn due(&self, timing: &Timing) -> Option<Instant> {
+        let earliest = [
+            self.since.map(|since| since + timing.gather),
+            self.sent.map(|sent| sent + timing.gap),
+            self.retry_at,
+        ]
+        .into_iter()
+        .flatten()
+        .max();
+        (self.waiting() || self.digest.is_some()).then(|| earliest.unwrap_or_else(Instant::now))
+    }
+
+    /// Takes in a stored event the target wants.
+    fn take(&mut self, event: Event) {
+        let before = self.waiting();
+        match event {
+            Event::JobFinished { job }
+                if job.state == JobState::Lost && self.wants(NotifyEvent::Lost) =>
+            {
+                self.lost.push(job);
+            }
+            Event::JobFinished { job }
+                if job.state == JobState::Completed
+                    && matches!(job.conclusion.as_deref(), Some("failure" | "timed_out"))
+                    && self.wants(NotifyEvent::Failed) =>
+            {
+                self.failed.push(job);
+            }
+            Event::RunnerFailed { failure } if self.wants(NotifyEvent::Runner) => {
+                self.runners.push(failure);
+            }
+            _ => {}
+        }
+        if !before && self.waiting() {
+            self.since = Some(Instant::now());
+        }
+    }
+
+    /// Takes in the warning insights that hold at `now` (ms): those not told, or gone for a day since, wait to be.
+    fn look(&mut self, warnings: &[Insight], now: u64) {
+        let before = self.waiting();
+        self.insights = warnings
+            .iter()
+            .filter(|insight| {
+                self.told
+                    .get(&insight.key)
+                    .is_none_or(|seen| *seen + DAY_MS < now)
+            })
+            .cloned()
+            .collect();
+        self.present = Some((
+            now,
+            warnings.iter().map(|insight| insight.key.clone()).collect(),
+        ));
+        if !before && self.waiting() {
+            self.since = Some(Instant::now());
+        }
+    }
+
+    /// What to store once the insights looked at are told: each held one seen now, and those gone for a day
+    /// forgotten.
+    fn told_now(&mut self) -> (Vec<(String, u64)>, Vec<String>) {
+        let Some((at, present)) = self.present.take() else {
+            return (Vec::new(), Vec::new());
+        };
+        for key in &present {
+            self.told.insert(key.clone(), at);
+        }
+        let gone: Vec<String> = self
+            .told
+            .iter()
+            .filter(|(key, seen)| !present.contains(*key) && **seen + DAY_MS < at)
+            .map(|(key, _)| key.clone())
+            .collect();
+        for key in &gone {
+            self.told.remove(key);
+        }
+        let set = present
+            .into_iter()
+            .map(|key| (format!("insight:{key}"), at))
+            .collect();
+        (
+            set,
+            gone.into_iter()
+                .map(|key| format!("insight:{key}"))
+                .collect(),
+        )
+    }
+
+    fn failed_to_send(&mut self, timing: &Timing, why: &str) {
+        self.failures += 1;
+        let wait = timing
+            .retry
+            .saturating_mul(1 << self.failures.saturating_sub(1).min(16))
+            .min(timing.retry_max);
+        self.retry_at = Some(Instant::now() + wait);
+        warn!(
+            "notify {}: not delivered: {why}; retrying in {}s",
+            self.config.name,
+            wait.as_secs()
+        );
+    }
+
+    fn delivered(&mut self) {
+        self.sent = Some(Instant::now());
+        self.retry_at = None;
+        self.failures = 0;
+    }
+}
+
+/// The notifier's view of the daemon.
+pub(super) struct Notifier {
+    pub store: Store,
+    pub config: Arc<Mutex<ConfigText>>,
+    pub stopping: watch::Receiver<bool>,
+    pub setup: Setup,
+}
+
+/// Sends what `[notify]` asks for until the server stops; reads `[notify]` again at every wake, so a reload takes
+/// effect without a restart.
+pub(super) async fn run(notifier: Notifier) {
+    let Notifier {
+        store,
+        config,
+        mut stopping,
+        setup,
+    } = notifier;
+    let http = match client(setup.timing.timeout) {
+        Ok(http) => http,
+        Err(why) => {
+            warn!("notify: cannot make an HTTP client, so nothing is sent: {why}");
+            return;
+        }
+    };
+    let mut live = store.subscribe();
+    let mut stored = match store.notify_state().await {
+        Ok(stored) => stored,
+        Err(store_error) => {
+            warn!("notify: cannot read what was sent, so nothing is: {store_error}");
+            return;
+        }
+    };
+    let mut targets: BTreeMap<String, Target> = BTreeMap::new();
+    let mut next_look = Instant::now();
+    loop {
+        let parsed = Config::parse(&config.lock().await.text).ok();
+        if let Some(parsed) = &parsed {
+            reconcile(&store, &mut targets, &mut stored, parsed).await;
+        }
+        let looking = Instant::now() >= next_look;
+        if looking {
+            next_look = Instant::now() + setup.timing.check;
+        }
+        if let Some(parsed) = parsed.filter(|_| !targets.is_empty()) {
+            step(&store, &http, &setup, &mut targets, &parsed, looking).await;
+        }
+        let wake = targets
+            .values()
+            .filter_map(|target| target.due(&setup.timing))
+            .chain([next_look])
+            .min()
+            .unwrap_or(next_look);
+        tokio::select! {
+            () = tokio::time::sleep_until(wake) => {}
+            closed = durable(&mut live) => if closed { return },
+            _ = stopping.wait_for(|stopping| *stopping) => return,
+        }
+    }
+}
+
+/// Waits for the next durable event; `true` once the store is gone. A client that lagged reads the store anyway.
+async fn durable(live: &mut broadcast::Receiver<Arc<EventEnvelope>>) -> bool {
+    loop {
+        match live.recv().await {
+            Ok(envelope) if envelope.id.is_none() => {}
+            Ok(_) | Err(RecvError::Lagged(_)) => return false,
+            Err(RecvError::Closed) => return true,
+        }
+    }
+}
+
+/// Follows `[notify]`'s targets: a new one resumes where the history says it got to, or starts now; a removed one is
+/// forgotten.
+async fn reconcile(
+    store: &Store,
+    targets: &mut BTreeMap<String, Target>,
+    stored: &mut BTreeMap<String, BTreeMap<String, u64>>,
+    config: &Config,
+) {
+    let names: BTreeSet<&str> = config
+        .notify
+        .targets
+        .iter()
+        .map(|target| target.name.as_str())
+        .collect();
+    let removed = targets.keys().any(|name| !names.contains(name.as_str()))
+        || stored.keys().any(|name| !names.contains(name.as_str()));
+    if removed {
+        targets.retain(|name, _| names.contains(name.as_str()));
+        stored.retain(|name, _| names.contains(name.as_str()));
+        if !store
+            .notify_keep(names.iter().map(|name| (*name).to_owned()).collect())
+            .await
+        {
+            warn!("notify: cannot forget the removed targets in the history");
+        }
+    }
+    for wanted in &config.notify.targets {
+        if let Some(target) = targets.get_mut(&wanted.name) {
+            target.config = wanted.clone();
+            continue;
+        }
+        let Some(target) = start(store, stored.get(&wanted.name).cloned(), wanted, config).await
+        else {
+            continue;
+        };
+        stored.remove(&wanted.name);
+        targets.insert(wanted.name.clone(), target);
+    }
+}
+
+/// A target as the history left it, or, for one it has nothing of, starting now: at the newest event, with the
+/// insights that hold now told and today's digest sent, so adding a target replays nothing.
+async fn start(
+    store: &Store,
+    kept: Option<BTreeMap<String, u64>>,
+    config: &NotifyTarget,
+    daemon: &Config,
+) -> Option<Target> {
+    let now = now() * 1000;
+    let mut kept = match kept.filter(|kept| kept.contains_key("event")) {
+        Some(kept) => kept,
+        None => begin(store, config, daemon, now).await?,
+    };
+    let cursor = kept.remove("event").unwrap_or(0);
+    let last_digest = kept.remove("digest").unwrap_or(now);
+    let told = kept
+        .into_iter()
+        .filter_map(|(key, seen)| Some((key.strip_prefix("insight:")?.to_owned(), seen)))
+        .collect();
+    Some(Target {
+        config: config.clone(),
+        cursor,
+        stored: cursor,
+        failed: Vec::new(),
+        lost: Vec::new(),
+        runners: Vec::new(),
+        insights: Vec::new(),
+        present: None,
+        told,
+        digest: None,
+        last_digest,
+        since: None,
+        sent: None,
+        retry_at: None,
+        failures: 0,
+    })
+}
+
+/// Records a target the history has nothing of as starting at `now` (ms): at the newest event, with the insights
+/// that hold now told and today's digest sent. What it recorded, or `None` if it could not.
+async fn begin(
+    store: &Store,
+    config: &NotifyTarget,
+    daemon: &Config,
+    now: u64,
+) -> Option<BTreeMap<String, u64>> {
+    let event = store
+        .last_event()
+        .await
+        .map_err(|store_error| {
+            warn!(
+                "notify {}: cannot read the history: {store_error}",
+                config.name
+            );
+        })
+        .ok()?;
+    let mut set = vec![("event".to_owned(), event), ("digest".to_owned(), now)];
+    if let Ok(runs) = insight_runs_of(store, runnerd_core::api::INSIGHT_DAYS, now).await {
+        set.extend(
+            warnings(&runs, daemon, now)
+                .into_iter()
+                .map(|insight| (format!("insight:{}", insight.key), now)),
+        );
+    }
+    if !store
+        .notify_record(&config.name, set.clone(), Vec::new())
+        .await
+    {
+        warn!("notify {}: cannot record where it starts", config.name);
+        return None;
+    }
+    info!("notify {}: starts with the events from now on", config.name);
+    Some(set.into_iter().collect())
+}
+
+fn warnings(runs: &[insights::Run], config: &Config, now: u64) -> Vec<Insight> {
+    insights::insights(runs, config, runnerd_core::api::INSIGHT_DAYS, now)
+        .insights
+        .into_iter()
+        .filter(|insight| insight.severity == Severity::Warning)
+        .collect()
+}
+
+/// Reads the events after each target's cursor, looks at insights and the digest when `looking`, and sends what is
+/// due.
+async fn step(
+    store: &Store,
+    http: &reqwest::Client,
+    setup: &Setup,
+    targets: &mut BTreeMap<String, Target>,
+    config: &Config,
+    looking: bool,
+) {
+    let now_ms = now() * 1000;
+    // Read once for every target that wants them.
+    let wants = |event| targets.values().any(|target| target.wants(event));
+    let runs = if looking && (wants(NotifyEvent::Insights) || wants(NotifyEvent::Digest)) {
+        insight_runs_of(store, runnerd_core::api::INSIGHT_DAYS, now_ms)
+            .await
+            .map_err(|store_error| warn!("notify: cannot read the history: {store_error}"))
+            .ok()
+    } else {
+        None
+    };
+    let offset = if looking && wants(NotifyEvent::Digest) {
+        let read = setup.offset;
+        tokio::task::spawn_blocking(read).await.ok().flatten()
+    } else {
+        None
+    };
+    let warned = runs.as_ref().map(|runs| warnings(runs, config, now_ms));
+    for target in targets.values_mut() {
+        if !read_events(store, target).await {
+            continue;
+        }
+        if let Some(warned) = warned
+            .as_ref()
+            .filter(|_| target.wants(NotifyEvent::Insights))
+        {
+            target.look(warned, now_ms);
+        }
+        if let Some(runs) = &runs
+            && target.wants(NotifyEvent::Digest)
+            && target.digest.is_none()
+            && digest_due(
+                now_ms / 1000,
+                offset.unwrap_or(0),
+                config.notify.digest_at,
+                target.last_digest / 1000,
+            )
+        {
+            target.digest = Some(insights::digest(runs, config, now_ms));
+        }
+        send_due(store, http, &setup.timing, target, now_ms).await;
+    }
+}
+
+/// Takes in the stored events after the target's cursor; `false` when the history cannot be read.
+async fn read_events(store: &Store, target: &mut Target) -> bool {
+    loop {
+        let batch = match store.events_after(target.cursor, 500).await {
+            Ok(batch) => batch,
+            Err(store_error) => {
+                warn!(
+                    "notify {}: cannot read events: {store_error}",
+                    target.config.name
+                );
+                return false;
+            }
+        };
+        let Some(last) = batch.last().and_then(|envelope| envelope.id) else {
+            return true;
+        };
+        for envelope in batch {
+            target.take(envelope.event);
+        }
+        target.cursor = last;
+    }
+}
+
+/// Sends the target's message and its digest if they are due, and records what was.
+async fn send_due(
+    store: &Store,
+    http: &reqwest::Client,
+    timing: &Timing,
+    target: &mut Target,
+    now_ms: u64,
+) {
+    let ready = target.due(timing).is_some_and(|due| due <= Instant::now());
+    if !target.waiting() {
+        // Nothing to send: the cursor moves past the events not wanted, and the insights still held are seen now.
+        let (mut set, remove) = target.told_now();
+        if target.cursor != target.stored {
+            set.push(("event".to_owned(), target.cursor));
+        }
+        if (!set.is_empty() || !remove.is_empty())
+            && store.notify_record(&target.config.name, set, remove).await
+        {
+            target.stored = target.cursor;
+        }
+    } else if ready {
+        let notification = message(target);
+        match deliver(http, &target.config, &notification).await {
+            Ok(()) => {
+                let (mut set, remove) = target.told_now();
+                set.push(("event".to_owned(), target.cursor));
+                if store.notify_record(&target.config.name, set, remove).await {
+                    target.stored = target.cursor;
+                } else {
+                    warn!(
+                        "notify {}: sent, but the history did not record it, so a restart may send it again",
+                        target.config.name
+                    );
+                }
+                target.failed.clear();
+                target.lost.clear();
+                target.runners.clear();
+                target.insights.clear();
+                target.since = None;
+                target.delivered();
+            }
+            Err(why) => return target.failed_to_send(timing, &why),
+        }
+    }
+    if !ready {
+        return;
+    }
+    if let Some(digest) = target.digest.clone() {
+        match deliver(http, &target.config, &digest_message(digest)).await {
+            Ok(()) => {
+                if !store
+                    .notify_record(
+                        &target.config.name,
+                        vec![("digest".to_owned(), now_ms)],
+                        Vec::new(),
+                    )
+                    .await
+                {
+                    warn!(
+                        "notify {}: sent the digest, but the history did not record it",
+                        target.config.name
+                    );
+                }
+                target.last_digest = now_ms;
+                target.digest = None;
+                target.delivered();
+            }
+            Err(why) => target.failed_to_send(timing, &why),
+        }
+    }
+}
+
+/// `repository: workflow / job`.
+fn job_line(job: &JobSummary) -> String {
+    match &job.workflow {
+        Some(workflow) => format!("{}: {workflow} / {}", job.repository, job.name),
+        None => format!("{}: {}", job.repository, job.name),
+    }
+}
+
+fn on_branch(job: &JobSummary) -> String {
+    job.branch
+        .as_ref()
+        .map_or_else(String::new, |branch| format!(" on {branch}"))
+}
+
+/// Up to five lines, and how many more.
+fn lines(all: impl ExactSizeIterator<Item = String>) -> Vec<String> {
+    let count = all.len();
+    let mut lines: Vec<String> = all.take(5).collect();
+    if count > 5 {
+        lines.push(format!("and {} more", count - 5));
+    }
+    lines
+}
+
+fn plural(count: usize, one: &str, many: &str) -> String {
+    if count == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{count} {many}")
+    }
+}
+
+/// What the target is sent for its jobs, runners and insights: one message, however many.
+fn message(target: &Target) -> Notification {
+    let (failed, lost, runners, found) = (
+        &target.failed,
+        &target.lost,
+        &target.runners,
+        &target.insights,
+    );
+    let kinds = [
+        !failed.is_empty(),
+        !lost.is_empty(),
+        !runners.is_empty(),
+        !found.is_empty(),
+    ]
+    .iter()
+    .filter(|present| **present)
+    .count();
+    let title = match (&failed[..], &lost[..], &runners[..], &found[..]) {
+        ([job], [], [], []) => format!("{} failed", job_line(job)),
+        (jobs, [], [], []) => format!("{} jobs failed", jobs.len()),
+        ([], [job], [], []) => format!("{} lost its runner", job_line(job)),
+        ([], jobs, [], []) if kinds == 1 => format!("{} jobs lost their runner", jobs.len()),
+        ([], [], [failure], []) => format!("{}: no runner starts", failure.repository),
+        ([], [], failures, []) if kinds == 1 => {
+            format!("Runners cannot start for {} repositories", failures.len())
+        }
+        ([], [], [], [insight]) => insight_title(insight),
+        ([], [], [], insights) if kinds == 1 => format!("{} new insights", insights.len()),
+        _ => [
+            (!failed.is_empty()).then(|| plural(failed.len(), "job failed", "jobs failed")),
+            (!lost.is_empty()).then(|| plural(lost.len(), "job lost", "jobs lost")),
+            (!runners.is_empty()).then(|| plural(runners.len(), "runner failed", "runners failed")),
+            (!found.is_empty()).then(|| plural(found.len(), "new insight", "new insights")),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(", "),
+    };
+    let mut body = Vec::new();
+    body.extend(lines(failed.iter().map(|job| {
+        let how = if job.conclusion.as_deref() == Some("timed_out") {
+            "timed out"
+        } else {
+            "failed"
+        };
+        format!("{} {how}{}", job_line(job), on_branch(job))
+    })));
+    body.extend(lines(lost.iter().map(|job| {
+        format!("{} lost its runner{}", job_line(job), on_branch(job))
+    })));
+    body.extend(lines(runners.iter().map(|failure| {
+        format!(
+            "{} ({}): {}; no runner for {}s",
+            failure.repository, failure.profile, failure.error, failure.held_for
+        )
+    })));
+    body.extend(lines(found.iter().map(|insight| insight.sentence.clone())));
+    let event = if !failed.is_empty() {
+        NotifyEvent::Failed
+    } else if !runners.is_empty() {
+        NotifyEvent::Runner
+    } else if !lost.is_empty() {
+        NotifyEvent::Lost
+    } else {
+        NotifyEvent::Insights
+    };
+    let url = failed
+        .iter()
+        .chain(lost)
+        .find_map(|job| job.url.clone())
+        .or_else(|| {
+            found
+                .iter()
+                .flat_map(|insight| &insight.runs)
+                .find_map(|run| run.url.clone())
+        });
+    Notification {
+        event,
+        title,
+        message: body.join("\n"),
+        url,
+        priority: if failed.is_empty() && runners.is_empty() {
+            Priority::Default
+        } else {
+            Priority::High
+        },
+        jobs: failed.iter().chain(lost).cloned().collect(),
+        runners: runners.clone(),
+        insights: found.clone(),
+        digest: None,
+    }
+}
+
+fn insight_title(insight: &Insight) -> String {
+    let subject = match (&insight.workflow, &insight.job) {
+        (Some(workflow), Some(job)) => format!("{}: {workflow} / {job}", insight.repository),
+        (None, Some(job)) => format!("{}: {job}", insight.repository),
+        _ => insight.repository.clone(),
+    };
+    let what = match insight.kind {
+        runnerd_core::api::InsightKind::Slower { .. } => "got slower",
+        runnerd_core::api::InsightKind::Flaky { .. } => "is flaky",
+        runnerd_core::api::InsightKind::NearCap { .. } => "nears its memory cap",
+        runnerd_core::api::InsightKind::Waits { .. } => "waits longer",
+    };
+    format!("{subject} {what}")
+}
+
+fn digest_message(digest: Digest) -> Notification {
+    let mut body = vec![format!(
+        "{} finished, {} failed.",
+        plural(
+            usize::try_from(digest.finished).unwrap_or(usize::MAX),
+            "job",
+            "jobs"
+        ),
+        digest.failed
+    )];
+    body.extend(lines(
+        digest.new.iter().map(|insight| insight.sentence.clone()),
+    ));
+    if !digest.waits.is_empty() {
+        body.push("Longest waits:".to_owned());
+        body.extend(
+            digest
+                .waits
+                .iter()
+                .map(|wait| format!("{}: {} waited {}s", wait.repository, wait.name, wait.waited)),
+        );
+    }
+    Notification {
+        event: NotifyEvent::Digest,
+        title: "CI in the last 24 hours".to_owned(),
+        message: body.join("\n"),
+        url: None,
+        priority: Priority::Low,
+        jobs: Vec::new(),
+        runners: Vec::new(),
+        insights: Vec::new(),
+        digest: Some(digest),
+    }
+}
+
+/// An HTTP client for targets, with the daemon's TLS provider and `timeout` per request.
+fn client(timeout: Duration) -> Result<reqwest::Client, String> {
+    runnerd_core::github::install_crypto_provider();
+    reqwest::Client::builder()
+        .user_agent(concat!("runnerd/", env!("CARGO_PKG_VERSION")))
+        .timeout(timeout)
+        .build()
+        // Built before any URL is set, so its error names none.
+        .map_err(|build_error| build_error.to_string())
+}
+
+/// Posts `notification` to `target`; the error says what failed in words that never hold the URL or a header.
+async fn deliver(
+    http: &reqwest::Client,
+    target: &NotifyTarget,
+    notification: &Notification,
+) -> Result<(), String> {
+    let (url, body) = match target.kind {
+        NotifyKind::Webhook => (
+            target.url.expose().to_owned(),
+            serde_json::to_vec(notification).map_err(|encode| encode.to_string())?,
+        ),
+        NotifyKind::Ntfy => {
+            // Checked by `Config::validate`: `scheme://host/topic`.
+            let url = target.url.expose();
+            let (server, topic) = url
+                .rsplit_once('/')
+                .ok_or_else(|| "the url is not an ntfy topic's".to_owned())?;
+            let priority = match notification.priority {
+                Priority::Low => 2,
+                Priority::Default => 3,
+                Priority::High => 4,
+            };
+            let tag = match notification.event {
+                NotifyEvent::Failed => "x",
+                NotifyEvent::Lost | NotifyEvent::Runner => "warning",
+                NotifyEvent::Insights => "chart_with_upwards_trend",
+                NotifyEvent::Digest => "memo",
+                NotifyEvent::Test => "white_check_mark",
+            };
+            let mut body = json!({
+                "topic": topic,
+                "title": notification.title,
+                "message": notification.message,
+                "priority": priority,
+                "tags": [tag],
+            });
+            if let Some(click) = &notification.url {
+                body["click"] = json!(click);
+            }
+            (
+                format!("{server}/"),
+                serde_json::to_vec(&body).map_err(|encode| encode.to_string())?,
+            )
+        }
+    };
+    let mut request = http
+        .post(url)
+        .header(reqwest::header::CONTENT_TYPE, "application/json")
+        .body(body);
+    for (name, value) in &target.headers {
+        request = request.header(name.as_str(), value.expose());
+    }
+    let response = request.send().await.map_err(|send| describe(&send))?;
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("the target answered HTTP {status}"))
+    }
+}
+
+/// What failed, in words that hold neither the URL nor anything a TLS or DNS error might quote from it.
+fn describe(send: &reqwest::Error) -> String {
+    if send.is_timeout() {
+        "the request timed out".to_owned()
+    } else if send.is_connect() {
+        "cannot connect to the target".to_owned()
+    } else if send.is_builder() {
+        "the url or a header cannot be sent".to_owned()
+    } else {
+        "the request failed".to_owned()
+    }
+}
+
+/// `POST /v1/notify/test?target=`: sends a test message to every target, or to the one named, and answers what each
+/// did.
+pub(super) async fn test(
+    Authenticated(principal): Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<NotifyTestQuery>,
+) -> Response {
+    let text = state.config.lock().await.text.clone();
+    let notify = match Config::parse(&text) {
+        Ok(config) => config.notify,
+        Err(parse_error) => {
+            return error(StatusCode::INTERNAL_SERVER_ERROR, &parse_error.to_string());
+        }
+    };
+    let Notify { targets, .. } = notify;
+    let targets: Vec<NotifyTarget> = targets
+        .into_iter()
+        .filter(|target| {
+            query
+                .target
+                .as_ref()
+                .is_none_or(|name| *name == target.name)
+        })
+        .collect();
+    if targets.is_empty() {
+        let message = match &query.target {
+            Some(name) => format!("[notify] has no target named {name:?}"),
+            None => "[notify] has no targets; add one to runnerd.toml".to_owned(),
+        };
+        return error(StatusCode::NOT_FOUND, &message);
+    }
+    let http = match client(TIMING.timeout) {
+        Ok(http) => http,
+        Err(why) => return error(StatusCode::INTERNAL_SERVER_ERROR, &why),
+    };
+    info!("notify: test message requested by {principal:?}");
+    let mut deliveries = Vec::new();
+    for target in &targets {
+        let notification = Notification {
+            event: NotifyEvent::Test,
+            title: "runnerd can reach you".to_owned(),
+            message: format!(
+                "A test from runnerd: notify target {:?} works.",
+                target.name
+            ),
+            url: None,
+            priority: Priority::Default,
+            jobs: Vec::new(),
+            runners: Vec::new(),
+            insights: Vec::new(),
+            digest: None,
+        };
+        let error = deliver(&http, target, &notification).await.err();
+        if let Some(why) = &error {
+            warn!("notify {}: test not delivered: {why}", target.name);
+        }
+        deliveries.push(Delivery {
+            target: target.name.clone(),
+            error,
+        });
+    }
+    Json(NotifyTest {
+        targets: deliveries,
+    })
+    .into_response()
+}
+
+#[cfg(test)]
+mod tests;

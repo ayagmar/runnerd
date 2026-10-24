@@ -16,7 +16,7 @@ flowchart TB
     subgraph core["runnerd-core"]
         types["api, config"]
         client["client"]
-        host["admission, docker, github, cache, isolation,<br/>record, scheduler, observe, sizing, store"]
+        host["admission, docker, github, cache, insights, isolation,<br/>record, scheduler, observe, sizing, store"]
     end
     daemon -->|host| host
     daemon -->|"serves it in its process"| web
@@ -26,14 +26,15 @@ flowchart TB
     host --> types
     host --> bollard[("bollard: Docker")]
     host --> reqwest[("reqwest: GitHub")]
+    daemon --> notify[("reqwest: [notify] targets")]
     cli -.->|Unix socket| daemon
     web -.->|Unix socket| daemon
 ```
 
 | Crate | Path | Owns | May depend on |
 |---|---|---|---|
-| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
-| `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
+| `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, job history, sizing advice, insights, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper behind `client` |
+| `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
 
@@ -42,13 +43,16 @@ flowchart TB
 - `api`, `config`: build without `host`. Every client reads these.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
-- `admission`, `docker`, `github`, `cache`, `isolation`, `record`, `scheduler`, `observe`, `sizing`, `store`: `host`
-  only
+- `admission`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`, `scheduler`, `observe`, `sizing`,
+  `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU
   and replays the history for `runnerd simulate`; `sizing` turns the history into advice, and `sizing::auto` picks
-  the changes auto sizing makes. Both are pure: the engine and the daemon read the store and act on what they return.
+  the changes auto sizing makes; `insights` reads the history for jobs that got slower, are flaky or near their cap,
+  and the waits of each week ([ADR 0051](docs/adr/0051-insights-and-notifications.md)). All three are pure: the
+  engine and the daemon read the store and act on what they return.
 
-`runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing), `init`, `doctor`, `simulate`, and
+`runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing, `api/notify` sends `[notify]`'s
+notifications), `init`, `doctor`, `simulate`, and
 `output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session secret, the login links and pairing codes, and the `Origin`
 check), `views` (one per page), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
 `assets` (the files the pages load, the web app manifest and icons included).
@@ -153,13 +157,18 @@ nothing until Docker has listed them.
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories, what became of each record, auto sizing's changes; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to; times in ms |
 
 ## Invariants
 
 - API types live only in `runnerd-core::api`. Clients deserialize the same types the daemon serializes.
 - Clients never talk to Docker or GitHub; they talk to the daemon.
-- The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error.
+- The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A `[notify]`
+  target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them.
+- Nothing leaves the machine but GitHub's and Docker's requests, unless `[notify]` names targets. The notifier
+  (`api/notify`) reads the store's durable events and the history off the engine's loop; the engine never waits
+  for it, and a target's cursor moves only once a delivery succeeded
+  ([ADR 0051](docs/adr/0051-insights-and-notifications.md)).
 - A JIT config reaches a container only as a root-only file (`docker::JIT_CONFIG_PATH`), never the create request
   or a log line.
 - The engine deletes only GitHub runner registrations whose names start with this machine's prefix

@@ -2,7 +2,8 @@
 //! handler takes a `Principal` from the one extractor here, so other transports only have to produce one. It holds
 //! no scheduling state of its own and returns no secret but a pairing link. History reads are in `history`, the event stream in
 //! `events`, pause, resume, reseed, cache clean, the config file and the doctor in `control`, records and the shells
-//! in them in `records`. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path. Signing
+//! in them in `records`. `auto` applies sizing advice under `[sizing] auto` through `control`'s config path; `notify` sends
+//! `[notify]`'s notifications and never returns a target's URL or headers. Signing
 //! every browser out of the dashboard and making its pairing links go through `runnerd_web::Sessions`, which owns
 //! them; a pairing link is the one secret the API returns, to the owner only.
 
@@ -33,6 +34,7 @@ mod auto;
 mod control;
 mod events;
 mod history;
+mod notify;
 mod records;
 
 /// The socket's default path: `$XDG_RUNTIME_DIR/runnerd.sock`.
@@ -76,9 +78,12 @@ pub(crate) struct ConfigSource {
     pub sync_dir: SyncDir,
     /// How often auto sizing looks at the advice: `auto::EVERY`, or a test's.
     pub auto_every: std::time::Duration,
+    /// How the notifier paces itself and reads the local time: `notify::SETUP`, or a test's.
+    pub notify: notify::Setup,
 }
 
 pub(crate) use auto::EVERY as AUTO_SIZING_EVERY;
+pub(crate) use notify::SETUP as NOTIFY;
 
 /// The config file as last read or written.
 struct ConfigText {
@@ -166,6 +171,9 @@ fn router(state: AppState) -> Router {
         .route("/v1/stats", get(history::stats))
         .route("/v1/sizing", get(history::sizing))
         .route("/v1/activity", get(history::activity))
+        .route("/v1/insights", get(history::insights))
+        .route("/v1/digest", get(history::digest))
+        .route("/v1/notify/test", post(notify::test))
         .route("/v1/caches", get(history::caches))
         .route("/v1/caches/history", get(history::cache_history))
         .route("/v1/events", get(events::events))
@@ -333,6 +341,12 @@ async fn serve_for(
         dashboard,
     };
     tokio::spawn(auto::run(state.clone(), config.auto_every));
+    tokio::spawn(notify::run(notify::Notifier {
+        store: state.handle.store.clone(),
+        config: state.config.clone(),
+        stopping: state.stopping.clone(),
+        setup: config.notify,
+    }));
     let app = router(state).into_make_service_with_connect_info::<Peer>();
     axum::serve(listener, app)
         .with_graceful_shutdown(async move {

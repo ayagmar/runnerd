@@ -38,6 +38,9 @@ pub struct Config {
     /// Who may use the dashboard through another address.
     #[serde(default)]
     pub web: Web,
+    /// Where the daemon sends notifications; none by default.
+    #[serde(default)]
+    pub notify: Notify,
 }
 
 /// `[host]`: where runner containers run and how they are isolated.
@@ -412,6 +415,187 @@ impl Web {
     }
 }
 
+/// `[notify]`: where the daemon sends notifications (ADR 0051). Without targets nothing leaves the machine.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields, default)]
+pub struct Notify {
+    /// When the digest goes to the targets that want it, in the host's local time. Default `09:00`.
+    pub digest_at: DayTime,
+    /// The targets, each `[[notify.targets]]`.
+    pub targets: Vec<NotifyTarget>,
+}
+
+impl Default for Notify {
+    fn default() -> Notify {
+        Notify {
+            digest_at: DayTime { minutes: 9 * 60 },
+            targets: Vec::new(),
+        }
+    }
+}
+
+impl Notify {
+    /// Refuses a target without a name, with a name another has, with a URL that is not `http` or `https`, or with
+    /// a header that cannot be sent. Says which target and which field, never the URL or a header's value.
+    fn validate(&self) -> Result<(), ConfigError> {
+        let refuse = |target: &str, why: &'static str| {
+            Err(ConfigError::Notify {
+                target: target.to_owned(),
+                why,
+            })
+        };
+        for (index, target) in self.targets.iter().enumerate() {
+            let name = target.name.as_str();
+            if name.trim().is_empty() || name.chars().any(char::is_control) {
+                return refuse(name, "name is empty");
+            }
+            if self.targets[..index].iter().any(|other| other.name == name) {
+                return refuse(name, "another target has this name");
+            }
+            let url = target.url.expose();
+            let Some(rest) = url
+                .strip_prefix("https://")
+                .or_else(|| url.strip_prefix("http://"))
+            else {
+                return refuse(name, "url does not start with https:// or http://");
+            };
+            let (host, path) = rest.split_once('/').unwrap_or((rest, ""));
+            if host.is_empty() || url.chars().any(|c| c.is_whitespace() || c.is_control()) {
+                return refuse(name, "url is not a URL");
+            }
+            if target.kind == NotifyKind::Ntfy
+                && (path.is_empty() || path.contains(['/', '?', '#']))
+            {
+                return refuse(
+                    name,
+                    "url is not an ntfy topic's, such as https://ntfy.sh/<topic>",
+                );
+            }
+            for (header, value) in &target.headers {
+                let token = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
+                if header.is_empty() || !header.chars().all(token) {
+                    return refuse(name, "a header's name is not a header name");
+                }
+                if value.expose().chars().any(char::is_control) {
+                    return refuse(name, "a header's value has a control character");
+                }
+            }
+            if target.events.contains(&api::NotifyEvent::Test) {
+                return refuse(
+                    name,
+                    "events lists test, which only runnerctl notify test sends",
+                );
+            }
+        }
+        Ok(())
+    }
+}
+
+/// `[[notify.targets]]`: one place notifications go.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct NotifyTarget {
+    /// What logs and `runnerctl notify test` call it, such as `phone`; the history keeps where it got to by it.
+    pub name: String,
+    /// What it takes.
+    pub kind: NotifyKind,
+    /// Where it is posted: the webhook's URL, or the ntfy topic's, such as `https://ntfy.sh/<topic>`. A secret.
+    pub url: Secret,
+    /// Headers sent with each post, such as an ntfy access token's `Authorization`. Their values are secrets.
+    #[serde(default)]
+    pub headers: BTreeMap<String, Secret>,
+    /// What it is sent. Default `failed`, `lost`, `runner` and `insights`.
+    #[serde(default = "default_notify_events")]
+    pub events: Vec<api::NotifyEvent>,
+}
+
+fn default_notify_events() -> Vec<api::NotifyEvent> {
+    vec![
+        api::NotifyEvent::Failed,
+        api::NotifyEvent::Lost,
+        api::NotifyEvent::Runner,
+        api::NotifyEvent::Insights,
+    ]
+}
+
+/// What a notification target takes.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum NotifyKind {
+    /// `api::Notification` as JSON.
+    Webhook,
+    /// An ntfy topic: the title, message, priority and link, published as ntfy's JSON.
+    Ntfy,
+}
+
+/// A value no `Debug` output, log line or error shows: a notification target's URL or header.
+#[derive(Clone, PartialEq, Eq, Deserialize)]
+#[serde(transparent)]
+pub struct Secret(String);
+
+impl Secret {
+    /// The value, for the request that sends it.
+    pub fn expose(&self) -> &str {
+        &self.0
+    }
+}
+
+impl From<&str> for Secret {
+    fn from(value: &str) -> Secret {
+        Secret(value.to_owned())
+    }
+}
+
+impl fmt::Debug for Secret {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.write_str("<secret>")
+    }
+}
+
+/// A time of day, `HH:MM`, 24-hour.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct DayTime {
+    /// Minutes after midnight.
+    pub minutes: u32,
+}
+
+impl FromStr for DayTime {
+    type Err = String;
+
+    fn from_str(text: &str) -> Result<DayTime, String> {
+        let invalid = || format!("invalid time of day {text:?}, expected HH:MM such as \"09:00\"");
+        let (hour, minute) = text.split_once(':').ok_or_else(invalid)?;
+        let digits = |part: &str| part.len() == 2 && part.chars().all(|c| c.is_ascii_digit());
+        if !digits(hour) || !digits(minute) {
+            return Err(invalid());
+        }
+        let (hour, minute): (u32, u32) = (
+            hour.parse().map_err(|_| invalid())?,
+            minute.parse().map_err(|_| invalid())?,
+        );
+        if hour > 23 || minute > 59 {
+            return Err(invalid());
+        }
+        Ok(DayTime {
+            minutes: hour * 60 + minute,
+        })
+    }
+}
+
+impl fmt::Display for DayTime {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{:02}:{:02}", self.minutes / 60, self.minutes % 60)
+    }
+}
+
+impl<'de> Deserialize<'de> for DayTime {
+    fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
+        String::deserialize(deserializer)?
+            .parse()
+            .map_err(de::Error::custom)
+    }
+}
+
 /// An origin as a browser sends it in `Origin`: `https://host[:port]`, or `http://` for a loopback host, in lower
 /// case, without the scheme's default port, and an address written as the URL standard serializes it. Nothing after
 /// the port: no path, query or user.
@@ -633,6 +817,14 @@ pub enum ConfigError {
         /// The profile.
         profile: String,
         /// Which bound, such as `memory is above its max_memory`.
+        why: &'static str,
+    },
+    /// A `[[notify.targets]]` entry cannot be used. Never says its URL or a header's value.
+    #[error("notify target {target:?}: {why}")]
+    Notify {
+        /// The target's name.
+        target: String,
+        /// What is wrong, such as `url does not start with https:// or http://`.
         why: &'static str,
     },
     /// The caps add up past `u64::MAX` bytes.
@@ -876,6 +1068,7 @@ impl Config {
         self.check_sizing_bounds()?;
         self.host.check_cpu_overcommit()?;
         self.web.validate()?;
+        self.notify.validate()?;
         for repository in &self.repositories {
             if !self.profiles.contains_key(&repository.profile) {
                 return Err(ConfigError::UnknownProfile {
