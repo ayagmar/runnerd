@@ -849,12 +849,15 @@ fn digest_message(digest: Digest) -> Notification {
     }
 }
 
-/// An HTTP client for targets, with the daemon's TLS provider and `timeout` per request.
+/// An HTTP client for targets, with the daemon's TLS provider and `timeout` per request. It follows no redirect:
+/// a POST followed on a 301 or 302 arrives as a GET without its body, which a server can answer with 200, and its
+/// headers would go on to the other host.
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     runnerd_core::github::install_crypto_provider();
     reqwest::Client::builder()
         .user_agent(concat!("runnerd/", env!("CARGO_PKG_VERSION")))
         .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         // Built before any URL is set, so its error names none.
         .map_err(|build_error| build_error.to_string())

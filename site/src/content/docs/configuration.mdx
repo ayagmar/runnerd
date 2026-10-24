@@ -251,7 +251,7 @@ Each `[[notify.targets]]`:
 |---|---|---|
 | `name` | required | what logs and `runnerctl notify test` call it; where it got to is kept under this name |
 | `kind` | required | `"ntfy"` or `"webhook"` |
-| `url` | required | an ntfy topic's URL (`https://ntfy.sh/<topic>`) or the webhook's; a secret that no log line, error or client shows |
+| `url` | required | an ntfy topic's URL (`https://ntfy.sh/<topic>`) or the webhook's, where it answers without a redirect: a redirect counts as a failed send; a secret that no log line, error or client shows |
 | `headers` | `{}` | sent with each post, such as `{ Authorization = "Bearer tk_…" }`; their values are secrets too |
 
 The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show `url` and header values as `"<secret>"`. Leave them so and saving keeps the values in the file; write a new value over one to change it. A target renamed in the editor has nothing to keep, so write its values again. Comments are shown as written.

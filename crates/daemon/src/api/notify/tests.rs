@@ -610,3 +610,68 @@ fn the_digest_goes_once_a_day_after_its_local_time() {
         midnight + 8 * HOUR
     ));
 }
+
+#[tokio::test]
+async fn a_target_that_redirects_is_not_counted_as_delivered() {
+    // A proxy in front of ntfy that sends http to https: a POST followed there would arrive as a GET without its
+    // body, which the server's web page answers with 200.
+    let (dir, received) = (Dir::new(), Received::default());
+    let (posts, gets) = (received.clone(), received.clone());
+    let app = Router::new()
+        .route(
+            "/hook",
+            post(move || {
+                let posts = posts.clone();
+                async move {
+                    posts.lock().unwrap().push((
+                        "/hook".to_owned(),
+                        HeaderMap::new(),
+                        Vec::new(),
+                        301,
+                    ));
+                    (StatusCode::MOVED_PERMANENTLY, [("location", "/moved")])
+                }
+            }),
+        )
+        .route(
+            "/moved",
+            axum::routing::get(move || {
+                let gets = gets.clone();
+                async move {
+                    gets.lock().unwrap().push((
+                        "/moved".to_owned(),
+                        HeaderMap::new(),
+                        Vec::new(),
+                        200,
+                    ));
+                    StatusCode::OK
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = config_text(&dir, &webhook(&format!("http://{address}/hook")));
+    let notifier = Running::start(&store, &config).await;
+
+    store.event(failed(1));
+    for _ in 0..200 {
+        if received.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    notifier.stop().await;
+
+    let paths: Vec<String> = received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|post| post.0.clone())
+        .collect();
+    assert!(
+        paths.len() >= 2 && paths.iter().all(|path| path == "/hook"),
+        "the failure is posted again, never followed to a GET: {paths:?}"
+    );
+}
