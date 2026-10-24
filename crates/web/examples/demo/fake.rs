@@ -35,6 +35,10 @@ use runnerd_core::api::{
 use runnerd_core::api::{
     Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread, Starts,
 };
+use runnerd_core::api::{
+    AutoNote, Digest, Insight, InsightKind, Insights, LongWait, RepositoryWaits, RunLink, Severity,
+    WaitSpread, WeekWaits,
+};
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
 
@@ -778,6 +782,153 @@ fn find_job(fake: &Fake, id: u64) -> Option<Job> {
         .cloned()
 }
 
+/// What the history says: ledger's tests got slower on main, storefront's end-to-end job is flaky, ledger's
+/// integration tests near jvm's 9G, and storefront's jobs wait longer than the week before.
+fn insights(fixtures: &Fixtures) -> Insights {
+    let now = fixtures.now;
+    let link = |repository: &str, back: u64, attempt| {
+        let job = fixtures
+            .jobs
+            .iter()
+            .find(|job| job.summary.repository == repository)
+            .map_or(1, |job| job.summary.id);
+        RunLink {
+            job,
+            run_id: 9_400_000 + job % 1000,
+            run_attempt: attempt,
+            branch: Some("main".to_owned()),
+            url: Some(format!(
+                "https://github.com/{repository}/actions/runs/{job}"
+            )),
+            at: now - back,
+        }
+    };
+    let insight =
+        |key: &str, severity, repository: &str, job: Option<&str>, sentence: &str, kind, runs| {
+            Insight {
+                key: key.to_owned(),
+                severity,
+                repository: repository.to_owned(),
+                workflow: job.map(|_| "CI".to_owned()),
+                job: job.map(str::to_owned),
+                sentence: sentence.to_owned(),
+                kind,
+                runs,
+            }
+        };
+    let spread = |jobs, p50, p95| WaitSpread {
+        jobs,
+        p50: Some(p50),
+        p95: Some(p95),
+    };
+    Insights {
+        since: now - 14 * 86_400,
+        until: now,
+        insights: vec![
+            insight(
+                "slower:halyard/ledger/CI/test",
+                Severity::Warning,
+                "halyard/ledger",
+                Some("test"),
+                "halyard/ledger: CI / test on main takes 6m 10s now, up from 4m 40s.",
+                InsightKind::Slower {
+                    branch: Some("main".to_owned()),
+                    before: 280,
+                    now: 370,
+                    since: Some(link("halyard/ledger", 3 * 86_400, 1)),
+                },
+                vec![link("halyard/ledger", 2 * 3600, 1)],
+            ),
+            insight(
+                "near-cap:halyard/ledger/CI/integration",
+                Severity::Warning,
+                "halyard/ledger",
+                Some("integration"),
+                "halyard/ledger: CI / integration peaks at 8.1G, 90% of jvm's 9G. Auto sizing is off: raise jvm's \
+                 memory, or turn it on.",
+                InsightKind::NearCap {
+                    profile: "jvm".to_owned(),
+                    peak: 81 * GIB / 10,
+                    cap: 9 * GIB,
+                    auto: AutoNote::Off,
+                },
+                vec![link("halyard/ledger", 5 * 3600, 1)],
+            ),
+            insight(
+                "flaky:halyard/storefront/CI/e2e",
+                Severity::Warning,
+                "halyard/storefront",
+                Some("e2e"),
+                "halyard/storefront: CI / e2e failed and then passed on a re-run in 2 of its 31 runs.",
+                InsightKind::Flaky {
+                    flaky: 2,
+                    total: 31,
+                },
+                vec![link("halyard/storefront", 26 * 3600, 1)],
+            ),
+            insight(
+                "waits:halyard/storefront",
+                Severity::Notice,
+                "halyard/storefront",
+                None,
+                "halyard/storefront: 1 job in 20 waits 4m 10s or more for a runner this week, up from 1m 30s the week \
+                 before.",
+                InsightKind::Waits {
+                    before: 90,
+                    now: 250,
+                },
+                Vec::new(),
+            ),
+        ],
+        waits: vec![
+            RepositoryWaits {
+                repository: "halyard/ledger".to_owned(),
+                now: WeekWaits {
+                    all: spread(184, 3, 41),
+                    warm: spread(151, 2, 6),
+                    cold: spread(33, 24, 58),
+                },
+                before: WeekWaits {
+                    all: spread(170, 4, 44),
+                    ..WeekWaits::default()
+                },
+            },
+            RepositoryWaits {
+                repository: "halyard/storefront".to_owned(),
+                now: WeekWaits {
+                    all: spread(212, 9, 250),
+                    warm: spread(120, 2, 11),
+                    cold: spread(92, 47, 260),
+                },
+                before: WeekWaits {
+                    all: spread(198, 6, 90),
+                    ..WeekWaits::default()
+                },
+            },
+        ],
+    }
+}
+
+/// The last 24 hours of the fixtures.
+fn digest(fixtures: &Fixtures) -> Digest {
+    let insights = insights(fixtures);
+    Digest {
+        since: fixtures.now - 86_400,
+        until: fixtures.now,
+        finished: 57,
+        failed: 3,
+        new: insights.insights.into_iter().take(1).collect(),
+        waits: vec![LongWait {
+            job: 1,
+            repository: "halyard/storefront".to_owned(),
+            workflow: Some("CI".to_owned()),
+            name: "e2e".to_owned(),
+            waited: 262,
+            url: None,
+        }],
+    }
+}
+
 /// The slice the fixtures' config names has a `MemoryMax` of 33G.
 /// What the history says of the config's profiles: jvm's tests peak at 7.8G of 9G, so 9G stays; node's builds
 /// peak at 2.1G of 7G and wait for a slot, so 2.5G caps fit 5 in its 2 × 7G. The end-to-end job has too few runs.
@@ -1261,6 +1412,14 @@ fn router(fake: Fake) -> Router {
             }),
         )
         .route("/v1/config/check", post(|text: String| async move { Json(check(&text).1) }))
+        .route(
+            "/v1/insights",
+            get(|State(fake): State<Fake>| async move { Json(insights(&fake.fixtures.lock().unwrap())) }),
+        )
+        .route(
+            "/v1/digest",
+            get(|State(fake): State<Fake>| async move { Json(digest(&fake.fixtures.lock().unwrap())) }),
+        )
         .route(
             "/v1/sizing",
             get(|State(fake): State<Fake>| async move { Json(sizing(&fake.fixtures.lock().unwrap())) }),

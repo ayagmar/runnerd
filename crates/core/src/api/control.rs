@@ -58,7 +58,8 @@ pub struct Paused {
 pub struct ConfigFile {
     /// The file it was read from, and `PUT /v1/config` writes.
     pub path: String,
-    /// The TOML, as last loaded or written by the daemon.
+    /// The TOML, as last loaded or written by the daemon, with each `[[notify.targets]]` entry's `url` and header
+    /// values shown as `config::SECRET_SHOWN`; `PUT /v1/config` puts them back.
     pub text: String,
     /// `config::revision` of `text`: send it as `PUT /v1/config?revision=` and a config replaced meanwhile, as
     /// by auto sizing, is not overwritten (409). `None` from a daemon before it.

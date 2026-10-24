@@ -1,4 +1,4 @@
-//! The job history routes: jobs, their samples and logs, the slice's samples, stats, sizing advice and cache sizes,
+//! The job history routes: jobs, their samples and logs, the slice's samples, stats, sizing advice, insights and cache sizes,
 //! read from the store. Every handler takes the authenticated principal. Reads only; a log with `follow` streams
 //! until its job's record is final or the server stops.
 
@@ -12,9 +12,11 @@ use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use runnerd_core::api::{
     ActivityQuery, CacheHistory, CacheHistoryQuery, Caches, Event, HostSampleQuery, HostSamples,
-    JobQuery, LogQuery, Sizing, SizingQuery, StatsQuery,
+    INSIGHT_DAYS, INSIGHT_DAYS_MAX, InsightsQuery, JobQuery, LogQuery, Sizing, SizingQuery,
+    StatsQuery,
 };
 use runnerd_core::config::Config;
+use runnerd_core::insights::{self, Run};
 use runnerd_core::observe::metrics::SAMPLE_INTERVAL;
 use runnerd_core::sizing::{Window, advise};
 use runnerd_core::store::{Store, StoreError};
@@ -178,6 +180,56 @@ pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizin
         auto_plan,
         ..advise(&config, memory_max, &history, window)
     })
+}
+
+pub(super) async fn insights(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<InsightsQuery>,
+) -> Response {
+    let days = query
+        .days
+        .unwrap_or(INSIGHT_DAYS)
+        .clamp(1, INSIGHT_DAYS_MAX);
+    let now = now() * 1000;
+    match insight_runs(&state, days, now).await {
+        Ok((runs, config)) => Json(insights::insights(&runs, &config, days, now)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    }
+}
+
+pub(super) async fn digest(_: Authenticated, State(state): State<AppState>) -> Response {
+    let now = now() * 1000;
+    match insight_runs(&state, INSIGHT_DAYS, now).await {
+        Ok((runs, config)) => Json(insights::digest(&runs, &config, now)).into_response(),
+        Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
+    }
+}
+
+/// What insights of `days` ending at `now` (ms) read: the jobs of those days, of the 14 the waits compare and of
+/// the day before, for the digest; and the config the daemon runs with.
+pub(super) async fn insight_runs(
+    state: &AppState,
+    days: u32,
+    now: u64,
+) -> Result<(Vec<Run>, Config), String> {
+    let runs = insight_runs_of(&state.handle.store, days, now)
+        .await
+        .map_err(|store_error| store_error.to_string())?;
+    let text = state.config.lock().await.text.clone();
+    let config = Config::parse(&text).map_err(|parse_error| parse_error.to_string())?;
+    Ok((runs, config))
+}
+
+/// The jobs insights of `days` ending at `now` (ms) read.
+pub(super) async fn insight_runs_of(
+    store: &Store,
+    days: u32,
+    now: u64,
+) -> Result<Vec<Run>, StoreError> {
+    const DAY: u64 = 24 * 3600 * 1000;
+    let back = u64::from(days.max(14)) + 1;
+    store.insights(now.saturating_sub(back * DAY)).await
 }
 
 pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> Response {

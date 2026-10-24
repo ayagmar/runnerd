@@ -158,6 +158,7 @@ impl Writer<'_> {
                 resolution,
                 done,
             } => self.sizing_resolved(id, resolution, done),
+            Write::Notify { change, done } => self.notify(change, done),
             Write::Flush(done) => {
                 self.store_host_samples();
                 let _ = done.send(());
@@ -697,6 +698,52 @@ impl Writer<'_> {
             for repository in repositories {
                 self.db
                     .execute("INSERT INTO paused (repository) VALUES (?1)", [repository])?;
+            }
+            Ok(())
+        })
+    }
+
+    /// Records what the notifier did, and sends whether it committed.
+    fn notify(&self, change: super::NotifyChange, done: oneshot::Sender<bool>) {
+        let committed = match change {
+            super::NotifyChange::Record {
+                target,
+                set,
+                remove,
+            } => self.notify_record(&target, &set, &remove),
+            super::NotifyChange::Keep(targets) => self.notify_keep(&targets),
+        };
+        let _ = done.send(committed);
+    }
+
+    fn notify_record(&self, target: &str, set: &[(String, u64)], remove: &[String]) -> bool {
+        self.change("record what was notified", |_| {
+            for (key, value) in set {
+                self.db.execute(
+                    "INSERT OR REPLACE INTO notify (target, key, value) VALUES (?1, ?2, ?3)",
+                    params![target, key, value],
+                )?;
+            }
+            for key in remove {
+                self.db.execute(
+                    "DELETE FROM notify WHERE target = ?1 AND key = ?2",
+                    params![target, key],
+                )?;
+            }
+            Ok(())
+        })
+    }
+
+    fn notify_keep(&self, targets: &[String]) -> bool {
+        self.change("forget removed notification targets", |_| {
+            let kept: Vec<String> = self
+                .db
+                .prepare_cached("SELECT DISTINCT target FROM notify")?
+                .query_map([], |row| row.get(0))?
+                .collect::<rusqlite::Result<_>>()?;
+            for gone in kept.iter().filter(|target| !targets.contains(target)) {
+                self.db
+                    .execute("DELETE FROM notify WHERE target = ?1", [gone])?;
             }
             Ok(())
         })

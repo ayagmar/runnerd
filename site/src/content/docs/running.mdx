@@ -34,6 +34,8 @@ systemctl --user stop runnerd           # waits for running jobs, up to systemd'
 
 A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]` and `history.database`. `runnerd stop` waits for running jobs too; `runnerd stop --force`, or a second signal, kills them.
 
+To back up the config, copy `runnerd.toml` itself: `runnerctl config show` shows [notification](../insights/#notifications) URLs and headers as `"<secret>"`, and runnerd refuses to start with those.
+
 Runner containers live in Docker, not in the unit: a restarted runnerd adopts the ones still running, and keeps the repositories it had paused paused.
 
 ## How it schedules
@@ -146,9 +148,9 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every configured repository; while any runs a job, `409` naming the jobs, and none is paused |
 | `POST /v1/profiles/{name}/reseed` | `202`; the profile starts no runner until its slots are free and slot 1 became its snapshot; `409` while it reseeds or a shell is open in one of its records |
 | `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache; `409` naming the jobs that use it |
-| `GET /v1/config` | the config file's path, text and revision |
-| `POST /v1/config/check` with TOML | what `runnerd check-config` says about it |
-| `PUT /v1/config?revision=` with TOML | checks it, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
+| `GET /v1/config` | the config file's path, text and revision; notification targets' `url` and header values read `"<secret>"` |
+| `POST /v1/config/check` with TOML | what `runnerd check-config` says about it, each `"<secret>"` read as the value it stands for |
+| `PUT /v1/config?revision=` with TOML | checks it, with each `"<secret>"` read as the value it stands for, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
 | `GET /v1/doctor` | `runnerd doctor`'s checks, for the config runnerd runs with |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
 | `GET /v1/dashboard` | the dashboard's `[web] open`, as runnerd read it at start |
@@ -162,6 +164,9 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`), 744 buckets back at most: counts, queue and run time, CPU, memory, mirror bytes |
 | `GET /v1/activity?since=` | every job runnerd's runners started or finished from `since` (default 24 hours ago) until now, by when it started or ended rather than when it was queued: each start with how long the job waited, and how many finished and failed |
 | `GET /v1/sizing?since=` | per configured profile and per job (repository, workflow, name): percentiles of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../admission/#sizing) for `memory` and `slots`; whether [auto sizing](../admission/#auto-sizing) is on, the changes it made, and while on what its next look would change, which profiles a recent change holds, and why no look writes anything when the file on disk was edited since runnerd read it; the last 30 days by default |
+| `GET /v1/insights?days=` | what the history says ([Insights](../insights/)): slower, flaky and near-cap jobs, waits that got longer, and each repository's waits this week against the week before; 14 days by default, 90 at most |
+| `GET /v1/digest` | the last 24 hours: jobs finished and failed, the insights new since the day before, the three longest waits |
+| `POST /v1/notify/test?target=` | sends a test message to every `[notify]` target, or the one named, and says what each did; `404` without targets |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |
 | `GET /v1/records` | every record of a failed job, oldest first, with the limits and the jobs whose record has a shell open |
 | `DELETE /v1/records/{job}`, `DELETE /v1/records?all=true`, `DELETE /v1/records?older_than=2d` | the jobs whose records went and the disk they took; records with a shell open stay, and removing one by its job is refused with `409` |
@@ -187,6 +192,7 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 | `budget.changed`, `cache.reseeded` | the budget changed; a profile has a new snapshot |
 | `record.created`, `record.deleted` | a failed job's runner was kept as a record; a record went, and why |
 | `sizing.changed` | [auto sizing](../admission/#auto-sizing) wrote a profile's new `memory` and `slots`; it carries the old ones |
+| `runner.failed` | a runner could not be registered or started, and the repository gets none for a while; once until one of its runners takes a job again |
 | `job.sample`, `host.sample`, `log.line` | live: a sample, or a log line with `logs=true` |
 
 Every event but the live ones has an ID: send the last one seen as `Last-Event-ID` and the stream resumes after it, across daemon restarts. Live events are not stored; a client that missed some reads the job's samples or log.

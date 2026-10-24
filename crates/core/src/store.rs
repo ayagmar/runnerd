@@ -1,5 +1,5 @@
 //! The job history: a SQLite database of jobs, their runners, steps, samples and logs, the events clients resume
-//! from, cache sizes and the paused repositories. Owns the schema and its migrations, the one writer and the event
+//! from, cache sizes, the paused repositories and where the notifier got to. Owns the schema and its migrations, the one writer and the event
 //! broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads and pruning run
 //! on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about scheduling
 //! and stores no secret: no token, no JIT config, no runner `_diag` log.
@@ -39,6 +39,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0008_memory_without_page_cache.sql"),
     include_str!("store/migrations/0009_auto_sizing.sql"),
     include_str!("store/migrations/0010_auto_sizing_cpus.sql"),
+    include_str!("store/migrations/0011_notify.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -276,7 +277,25 @@ enum Write {
         /// Whether it committed.
         done: oneshot::Sender<bool>,
     },
+    Notify {
+        change: NotifyChange,
+        /// Whether it committed.
+        done: oneshot::Sender<bool>,
+    },
     Flush(oneshot::Sender<()>),
+}
+
+/// What the notifier records.
+#[derive(Debug)]
+enum NotifyChange {
+    /// Sets a target's keys and removes others.
+    Record {
+        target: String,
+        set: Vec<(String, u64)>,
+        remove: Vec<String>,
+    },
+    /// Forgets every target but these.
+    Keep(Vec<String>),
 }
 
 /// What became of a pending auto sizing change.
@@ -580,6 +599,36 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
+    /// Records what the notifier delivered to a target: sets `set`'s keys and removes `remove`'s, in one
+    /// transaction. The future says whether it committed.
+    pub fn notify_record(
+        &self,
+        target: &str,
+        set: Vec<(String, u64)>,
+        remove: Vec<String>,
+    ) -> impl Future<Output = bool> + use<> {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::Notify {
+            change: NotifyChange::Record {
+                target: target.to_owned(),
+                set,
+                remove,
+            },
+            done,
+        });
+        async move { committed.await.unwrap_or(false) }
+    }
+
+    /// Forgets what the notifier kept for every target but `targets`. The future says whether it committed.
+    pub fn notify_keep(&self, targets: Vec<String>) -> impl Future<Output = bool> + use<> {
+        let (done, committed) = oneshot::channel();
+        self.send(Write::Notify {
+            change: NotifyChange::Keep(targets),
+            done,
+        });
+        async move { committed.await.unwrap_or(false) }
+    }
+
     /// Deletes what is older than `history` keeps, at `now` (ms), off the writer, in batches the writer's
     /// transactions fit between. A prune while the last one runs does nothing. The handle finishes with it; dropping
     /// it lets it run.
@@ -720,6 +769,23 @@ impl Store {
     /// What sizing reads: the finished jobs queued at or after `since` (ms) and the runners since.
     pub async fn sizing(&self, since: u64) -> Result<sizing::History, StoreError> {
         self.read(move |db| read::sizing(db, since)).await
+    }
+
+    /// The jobs completed or lost that were queued at or after `since` (ms), as insights read them.
+    pub async fn insights(&self, since: u64) -> Result<Vec<crate::insights::Run>, StoreError> {
+        self.read(move |db| read::insights(db, since)).await
+    }
+
+    /// The newest durable event's ID; 0 before the first.
+    pub async fn last_event(&self) -> Result<u64, StoreError> {
+        self.read(read::last_event).await
+    }
+
+    /// What the notifier kept for each target, by target, then key.
+    pub async fn notify_state(
+        &self,
+    ) -> Result<BTreeMap<String, BTreeMap<String, u64>>, StoreError> {
+        self.read(read::notify_state).await
     }
 
     /// The jobs queued at or after `since` (ms), whatever became of them, as warm runners learn from them.

@@ -25,9 +25,23 @@ use tokio::sync::{mpsc, oneshot, watch};
 
 use crate::testdir::Dir;
 
+use super::notify::{Setup, Timing};
 use super::{ConfigSource, MemoryMax, SyncDir, bind, serve, serve_for, sync_dir};
 
 const EXAMPLE: &str = include_str!("../../../../examples/runnerd.toml");
+
+/// The notifier at a test's pace, in UTC.
+const NOTIFY: Setup = Setup {
+    timing: Timing {
+        gather: Duration::from_millis(50),
+        gap: Duration::from_millis(50),
+        retry: Duration::from_millis(50),
+        retry_max: Duration::from_millis(200),
+        check: Duration::from_millis(100),
+        timeout: Duration::from_secs(2),
+    },
+    offset: || Some(0),
+};
 
 /// The slice's `MemoryMax`, in place of systemd's: the example's caps sum to 32.5G.
 #[allow(
@@ -293,6 +307,7 @@ async fn start_serving(
         cpus: unreadable_cpus,
         sync_dir,
         auto_every: Duration::from_millis(20),
+        notify: NOTIFY,
     };
     let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
     let sessions_kept = sessions.clone();
@@ -1503,6 +1518,173 @@ async fn a_valid_config_replaces_the_file_it_links_to_with_its_permissions_and_i
 }
 
 #[tokio::test]
+async fn the_config_api_never_shows_a_notify_secret_and_saving_what_it_shows_keeps_them() {
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let secrets = format!(
+        "{EXAMPLE}\n[[notify.targets]]\nname = \"phone\"\nkind = \"ntfy\"\n\
+         url = \"http://127.0.0.1:9/s3cret-topic\" # the topic\n\
+         headers = {{ Authorization = \"Bearer tk_hunter2\" }}\n"
+    );
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(secrets.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    daemon.reloads.recv().await.unwrap();
+
+    let shown: ConfigFile = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .get("http://runnerd/v1/config")
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    for secret in ["s3cret", "hunter2"] {
+        assert!(!shown.text.contains(secret), "{}", shown.text);
+    }
+    assert!(
+        shown
+            .text
+            .contains("url = \"<secret>\" # the topic\nheaders = { Authorization = \"<secret>\" }"),
+        "{}",
+        shown.text
+    );
+
+    // What a browser checks and saves: the text it was shown, with a change.
+    let edited = shown.text.replacen("slots = 2", "slots = 1", 1);
+    let checked: ConfigCheck = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .post("http://runnerd/v1/config/check")
+                .body(edited.clone())
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert!(checked.valid, "{}", checked.message);
+    let response = daemon
+        .client
+        .put(format!(
+            "http://runnerd/v1/config?revision={}",
+            shown.revision.unwrap()
+        ))
+        .body(edited)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(&daemon.config).unwrap(),
+        secrets.replacen("slots = 2", "slots = 1", 1),
+        "the file keeps its secrets"
+    );
+
+    // A target renamed in the editor has no secret to keep: refused, without the value.
+    let renamed = shown.text.replace("name = \"phone\"", "name = \"desk\"");
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(renamed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let refused: ConfigCheck = serde_json::from_slice(&body(response).await).unwrap();
+    assert!(
+        refused
+            .message
+            .contains("notify target \"desk\": url is <secret>"),
+        "{}",
+        refused.message
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
+async fn a_broken_edit_of_the_masked_config_answers_an_error_without_the_secrets() {
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let secrets = format!(
+        "{EXAMPLE}\n[notify]\ntargets = [{{ name = \"phone\", kind = \"ntfy\", \
+         url = \"http://127.0.0.1:9/s3cret-topic\", headers = {{ Authorization = \"Bearer tk_hunter2\" }} }}]\n"
+    );
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(secrets.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    daemon.reloads.recv().await.unwrap();
+    let shown: ConfigFile = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .get("http://runnerd/v1/config")
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+
+    // A typo on the line that holds the masks, and a header that is not a string beside one.
+    for broken in [
+        shown.text.replace("kind = \"ntfy\"", "kind = \"ntfyy\""),
+        shown.text.replace(
+            "Authorization = \"<secret>\"",
+            "Authorization = \"<secret>\", X = 5",
+        ),
+    ] {
+        assert_ne!(broken, shown.text);
+        let checked = daemon
+            .client
+            .post("http://runnerd/v1/config/check")
+            .body(broken.clone())
+            .send()
+            .await
+            .unwrap();
+        let saved = daemon
+            .client
+            .put("http://runnerd/v1/config")
+            .body(broken)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(saved.status(), StatusCode::UNPROCESSABLE_ENTITY);
+        for answer in [body(checked).await, body(saved).await] {
+            let answer: ConfigCheck = serde_json::from_slice(&answer).unwrap();
+            assert!(!answer.valid, "refused");
+            assert!(answer.message.contains("<secret>"), "{}", answer.message);
+            for secret in ["s3cret", "hunter2"] {
+                assert!(!answer.message.contains(secret), "{}", answer.message);
+            }
+        }
+    }
+    assert_eq!(
+        std::fs::read_to_string(&daemon.config).unwrap(),
+        secrets,
+        "the file as it was"
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_second_daemon_does_not_take_over_a_live_socket() {
     let (_client, _, dir) = daemon().await;
     assert!(bind(&dir.0.join("runnerd.sock")).await.is_err());
@@ -1930,4 +2112,67 @@ async fn a_cpu_budget_needs_the_slices_cpus_and_a_config_without_one_never_reads
         daemon.reloads.recv().await.unwrap().host.cpu_overcommit,
         None
     );
+}
+
+#[tokio::test]
+async fn a_notify_test_says_what_each_target_did_without_its_url() {
+    let dir = Dir::new();
+    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = closed.local_addr().unwrap().to_string();
+    drop(closed);
+    let text = format!(
+        "{EXAMPLE}\n[[notify.targets]]\nname = \"phone\"\nkind = \"ntfy\"\nurl = \"http://{address}/s3cret-topic\"\n"
+    );
+    let daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &text).await;
+
+    let response = daemon
+        .client
+        .post("http://runnerd/v1/notify/test")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let tested: runnerd_core::api::NotifyTest =
+        serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(tested.targets.len(), 1);
+    assert_eq!(tested.targets[0].target, "phone");
+    let error = tested.targets[0]
+        .error
+        .clone()
+        .expect("nothing listens there");
+    assert_eq!(error, "cannot connect to the target");
+
+    let response = daemon
+        .client
+        .post("http://runnerd/v1/notify/test?target=desk")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::NOT_FOUND);
+    let refused: ErrorResponse = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(refused.message, "[notify] has no target named \"desk\"");
+}
+
+#[tokio::test]
+async fn insights_and_the_digest_read_the_history() {
+    let (client, _, _dir) = daemon().await;
+
+    let response = client
+        .get("http://runnerd/v1/insights?days=7")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let insights: runnerd_core::api::Insights =
+        serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(insights.until - insights.since, 7 * 24 * 3600);
+    assert!(
+        insights.insights.is_empty(),
+        "an empty history says nothing"
+    );
+
+    let response = client.get("http://runnerd/v1/digest").send().await.unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let digest: runnerd_core::api::Digest = serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!((digest.finished, digest.failed), (0, 0));
 }

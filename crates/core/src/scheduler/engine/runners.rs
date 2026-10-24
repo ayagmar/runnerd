@@ -8,7 +8,7 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::{Engine, Occupant, Purpose, RunningJobs, unix_secs};
-use crate::api::Admission;
+use crate::api::{Admission, Event, RunnerFailure};
 use crate::cache::{self, runner_mounts};
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
@@ -123,12 +123,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .is_ok_and(|waited| waited >= IDLE_TIMEOUT) =>
                 {
                     state.idle_exits += 1;
+                    // It started and connected: a failure before it is over, and the next one is a new streak's
+                    // first, announced. Not so for the second in a row, a fault of its own.
+                    if state.idle_exits == 1 {
+                        state.failures = 0;
+                    }
                     warn!(
                         "{}: {} ended without a job after waiting for one",
                         occupant.repository, occupant.runner_name
                     );
                     if state.idle_exits >= 2 {
-                        self.hold(&occupant.repository);
+                        self.hold(
+                            &occupant.repository,
+                            &slot.profile,
+                            "its runners end without a job after waiting for one".to_owned(),
+                        );
                     }
                 }
                 Some(false) => {
@@ -136,7 +145,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         "{}: {} ended without taking a job",
                         occupant.repository, occupant.runner_name
                     );
-                    self.hold(&occupant.repository);
+                    self.hold(
+                        &occupant.repository,
+                        &slot.profile,
+                        format!("{} ended without taking a job", occupant.runner_name),
+                    );
                 }
                 None => {}
             }
@@ -227,9 +240,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Holds back a repository's next runners after one failed, longer each time in a row. Runners that fail while
-    /// it is held started before the hold, so they do not lengthen it.
-    fn hold(&mut self, repository: &str) {
+    /// Holds back a repository's next runners after one failed, longer each time in a row, and announces the first
+    /// hold of a streak as `runner.failed`: a repository that stays broken says so once, not every 10 minutes, until
+    /// a runner takes a job. Runners that fail while it is held started before the hold, so they do not lengthen it.
+    fn hold(&mut self, repository: &str, profile: &str, error: String) {
         if let Some(state) = self.repositories.get_mut(repository)
             && state
                 .held_until
@@ -239,6 +253,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let wait = backoff(state.failures);
             state.held_until = Some(SystemTime::now() + wait);
             warn!("{repository}: no runner starts for {}s", wait.as_secs());
+            if state.failures > 1 {
+                return;
+            }
+            self.store.event(Event::RunnerFailed {
+                failure: RunnerFailure {
+                    repository: repository.to_owned(),
+                    profile: profile.to_owned(),
+                    error,
+                    held_for: wait.as_secs(),
+                },
+            });
         }
     }
 
@@ -295,8 +320,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (runner, jit_config) = match self.github.jit_config(repository, &name, &labels).await {
             Ok(registered) => registered,
             Err(error) => {
-                warn!("{repository}: cannot register a runner: {error}");
-                self.hold(repository);
+                let failure = format!("cannot register a runner: {error}");
+                warn!("{repository}: {failure}");
+                self.hold(repository, &slot.profile, failure);
                 return;
             }
         };
@@ -354,10 +380,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Err(error) => {
                 warn!("{repository}: cannot start {name}: {error}");
                 self.recheck_image(&spec.image);
+                let failure = format!("cannot start {name}: {error}");
                 if let Err(error) = self.github.delete_runner(repository, runner.id).await {
                     warn!("{repository}: cannot delete {name}: {error}");
                 }
-                self.hold(repository);
+                self.hold(repository, &slot.profile, failure);
             }
         }
     }

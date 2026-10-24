@@ -7,8 +7,9 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    Advice, CacheKind, Caches, Event, EventEnvelope, Job, JobPage, JobRunner, JobSizing, JobState,
-    JobSummary, QueuedJob, Record, RecordNote, Records, RemovedRecords, Sizing, Status, Step,
+    Advice, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind, Insights, Job, JobPage,
+    JobRunner, JobSizing, JobState, JobSummary, NotifyTest, QueuedJob, Record, RecordNote, Records,
+    RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
 };
 use runnerd_core::config::ByteSize;
 
@@ -912,6 +913,122 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
     out
 }
 
+/// `runnerctl insights`: one line per insight, warnings first, then each repository's waits this week against the
+/// last.
+pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
+    let mut out = String::new();
+    let days = insights.until.saturating_sub(insights.since) / 86_400;
+    if insights.insights.is_empty() {
+        let _ = writeln!(out, "nothing to report from the last {days} days");
+    }
+    for insight in &insights.insights {
+        let (severity, tone) = match insight.severity {
+            Severity::Warning => ("warning", Tone::Busy),
+            Severity::Notice => ("notice", Tone::Dim),
+        };
+        let kind = match insight.kind {
+            InsightKind::Slower { .. } => "slower",
+            InsightKind::Flaky { .. } => "flaky",
+            InsightKind::NearCap { .. } => "near-cap",
+            InsightKind::Waits { .. } => "waits",
+        };
+        let _ = writeln!(
+            out,
+            "{} {kind:<9} {}",
+            paint.paint(tone, &format!("{severity:<7}")),
+            insight.sentence
+        );
+    }
+    if insights.waits.is_empty() {
+        return out;
+    }
+    let _ = writeln!(out);
+    let mut table = Table::new(&[
+        "REPOSITORY",
+        "JOBS",
+        "WAIT P50",
+        "P95",
+        "WARM P50",
+        "COLD P50",
+        "P95 WEEK BEFORE",
+    ])
+    .right(&[1, 2, 3, 4, 5, 6]);
+    let wait = |spread: &WaitSpread, value: Option<u64>| {
+        if spread.jobs == 0 {
+            dash()
+        } else {
+            value.map_or_else(dash, |seconds| plain(duration(seconds)))
+        }
+    };
+    for repository in &insights.waits {
+        let now = &repository.now;
+        table.row(vec![
+            plain(&repository.repository),
+            plain(now.all.jobs.to_string()),
+            wait(&now.all, now.all.p50),
+            wait(&now.all, now.all.p95),
+            wait(&now.warm, now.warm.p50),
+            wait(&now.cold, now.cold.p50),
+            wait(&repository.before.all, repository.before.all.p95),
+        ]);
+    }
+    out.push_str(&table.render(paint, ""));
+    out
+}
+
+/// `runnerctl insights --digest`: the last 24 hours.
+pub(crate) fn digest(digest: &Digest) -> String {
+    let mut out = format!(
+        "last 24 hours: {} finished, {} failed\n",
+        plural(digest.finished, "job", "jobs"),
+        digest.failed
+    );
+    for insight in &digest.new {
+        let _ = writeln!(out, "new: {}", insight.sentence);
+    }
+    if !digest.waits.is_empty() {
+        let _ = writeln!(out, "longest waits:");
+    }
+    for wait in &digest.waits {
+        let job = match &wait.workflow {
+            Some(workflow) => format!("{workflow} / {}", wait.name),
+            None => wait.name.clone(),
+        };
+        let _ = writeln!(out, "  {} {job} {}", wait.repository, duration(wait.waited));
+    }
+    out
+}
+
+/// `runnerctl notify test`: what each target did.
+pub(crate) fn notify_test(tested: &NotifyTest, paint: Paint) -> String {
+    let mut out = String::new();
+    for delivery in &tested.targets {
+        let _ = match &delivery.error {
+            None => writeln!(
+                out,
+                "{} {}",
+                delivery.target,
+                paint.paint(Tone::Good, "delivered")
+            ),
+            Some(error) => writeln!(
+                out,
+                "{} {}",
+                delivery.target,
+                paint.paint(Tone::Bad, &format!("not delivered: {error}"))
+            ),
+        };
+    }
+    out
+}
+
+fn plural(count: u64, one: &str, many: &str) -> String {
+    if count == 1 {
+        format!("1 {one}")
+    } else {
+        format!("{count} {many}")
+    }
+}
+
 /// One line for an event, as `watch` prints when its output is not a terminal. `None` for live samples.
 pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<String> {
     let kind = envelope.event.kind();
@@ -1002,6 +1119,10 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
         ),
         Event::RecordDeleted { job, removed_by } => format!("{job} record {removed_by}"),
         Event::SizingChanged { change } => format!("{} {}", change.profile, change.line()),
+        Event::RunnerFailed { failure } => format!(
+            "{} {}: {}; no runner for {}s",
+            failure.repository, failure.profile, failure.error, failure.held_for
+        ),
         Event::JobSample { .. } | Event::HostSample { .. } | Event::LogLine { .. } => return None,
     };
     Some(format!(

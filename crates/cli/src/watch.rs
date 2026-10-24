@@ -181,7 +181,8 @@ impl State {
             | Event::LogLine { .. }
             | Event::RecordCreated { .. }
             | Event::RecordDeleted { .. }
-            | Event::SizingChanged { .. } => {}
+            | Event::SizingChanged { .. }
+            | Event::RunnerFailed { .. } => {}
         }
         None
     }

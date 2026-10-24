@@ -123,6 +123,13 @@ pub enum Event {
         /// The change.
         change: SizingChange,
     },
+    /// A runner could not be registered or started, and its repository gets no runner for a while: once, until one of
+    /// its runners takes a job again.
+    #[serde(rename = "runner.failed")]
+    RunnerFailed {
+        /// What failed.
+        failure: RunnerFailure,
+    },
     /// Live: a running job's container was sampled.
     #[serde(rename = "job.sample")]
     JobSample {
@@ -167,6 +174,7 @@ impl Event {
             Event::RecordCreated { .. } => "record.created",
             Event::RecordDeleted { .. } => "record.deleted",
             Event::SizingChanged { .. } => "sizing.changed",
+            Event::RunnerFailed { .. } => "runner.failed",
             Event::JobSample { .. } => "job.sample",
             Event::HostSample { .. } => "host.sample",
             Event::LogLine { .. } => "log.line",
@@ -200,9 +208,23 @@ impl Event {
             | Event::RepositoryRemoved { .. }
             | Event::CacheReseeded { .. }
             | Event::SizingChanged { .. }
+            | Event::RunnerFailed { .. }
             | Event::HostSample { .. } => None,
         }
     }
+}
+
+/// A runner that could not be registered or started (`runner.failed`).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct RunnerFailure {
+    /// `owner/name`.
+    pub repository: String,
+    /// The profile it was for.
+    pub profile: String,
+    /// Why, as GitHub or Docker said.
+    pub error: String,
+    /// Seconds before the repository gets another runner.
+    pub held_for: u64,
 }
 
 /// `GET /v1/events` query parameters. Resume with the `Last-Event-ID` header.

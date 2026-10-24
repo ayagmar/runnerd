@@ -492,6 +492,7 @@ async fn serve(
         cpus: slice_cpus,
         sync_dir: api::sync_dir,
         auto_every: api::AUTO_SIZING_EVERY,
+        notify: api::NOTIFY,
     };
     let server = tokio::spawn(api::serve(
         listener,

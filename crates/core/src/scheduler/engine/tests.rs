@@ -2859,6 +2859,50 @@ async fn a_job_whose_runner_failed_to_start_waits_for_the_backoff_not_for_that_r
 }
 
 #[tokio::test]
+async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    docker.0.lock().unwrap().missing_images = BTreeSet::from(["runnerd-runner:app".to_owned()]);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    // Held back: the next tick starts nothing, and says nothing again.
+    engine.tick(Shutdown::No).await;
+    // Still broken once the hold ends: held longer, without another announcement.
+    for _ in 0..3 {
+        engine.repositories.get_mut("o/r").unwrap().held_until =
+            Some(std::time::SystemTime::UNIX_EPOCH);
+        engine.tick(Shutdown::No).await;
+    }
+    handle.store.flush().await;
+    let failures: Vec<api::RunnerFailure> = handle
+        .store
+        .events_after(0, 100)
+        .await
+        .unwrap()
+        .into_iter()
+        .filter_map(|envelope| match envelope.event {
+            api::Event::RunnerFailed { failure } => Some(failure),
+            _ => None,
+        })
+        .collect();
+    assert_eq!(failures.len(), 1, "{failures:#?}");
+    assert_eq!(
+        (
+            failures[0].repository.as_str(),
+            failures[0].profile.as_str()
+        ),
+        ("o/r", "app")
+    );
+    assert!(
+        failures[0].error.starts_with("cannot start "),
+        "{}",
+        failures[0].error
+    );
+    assert_eq!(failures[0].held_for, 30);
+}
+
+#[tokio::test]
 async fn a_pause_and_a_resume_change_why_jobs_wait_as_soon_as_they_are_published() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     github.0.lock().unwrap().queued = vec![job(1)];

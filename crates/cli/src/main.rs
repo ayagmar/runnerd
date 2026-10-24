@@ -10,9 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use runnerd_core::api::{
-    Caches, CheckStatus, ConfigCheck, ConfigFile, Dashboard, Doctor, Event, EventQuery, Job,
-    JobPage, JobQuery, JobState, LogQuery, PairingQuery, Pairings, PauseQuery, Paused, Records,
-    RemoveRecordsQuery, RemovedRecords, Resize, ShellQuery, Sizing, SizingQuery, Status,
+    Caches, CheckStatus, ConfigCheck, ConfigFile, Dashboard, Digest, Doctor, Event, EventQuery,
+    Insights, InsightsQuery, Job, JobPage, JobQuery, JobState, LogQuery, NotifyTest,
+    NotifyTestQuery, PairingQuery, Pairings, PauseQuery, Paused, Records, RemoveRecordsQuery,
+    RemovedRecords, Resize, ShellQuery, Sizing, SizingQuery, Status,
 };
 use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
@@ -148,6 +149,21 @@ enum Command {
         #[command(subcommand)]
         command: Option<SizingCommand>,
     },
+    /// Show what the history says: jobs that got slower and stayed so, jobs that fail and pass on a re-run, jobs near
+    /// their memory cap, and how long each repository's jobs wait this week against the last. One line per insight.
+    Insights {
+        /// Days of history to read [default: 14, at most 90].
+        #[arg(long)]
+        days: Option<u32>,
+        /// Show the last 24 hours instead: jobs finished and failed, new insights and the longest waits.
+        #[arg(long, conflicts_with = "days")]
+        digest: bool,
+    },
+    /// Check the notification targets of `[notify]`.
+    Notify {
+        #[command(subcommand)]
+        command: NotifyCommand,
+    },
     /// Show the cache volumes, their sizes and limits.
     Caches {
         /// Empty this volume (a slot layer or a shared cache) instead; refused while a runner uses it.
@@ -189,6 +205,16 @@ struct WebArgs {
     /// Sign every browser out of the dashboard, with a new session secret.
     #[arg(long, conflicts_with_all = ["no_open", "base", "local", "qr"])]
     sign_out_all: bool,
+}
+
+#[derive(Subcommand)]
+enum NotifyCommand {
+    /// Send every target a test message, or only the one named, and say what each did.
+    Test {
+        /// Only the target with this name.
+        #[arg(long)]
+        target: Option<String>,
+    },
 }
 
 #[derive(Subcommand)]
@@ -436,23 +462,9 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
         Command::Shell { job, step } => return shell(client, job, step).await,
         Command::Records { command } => return records(client, json, command).await,
         Command::Sizing { since, command } => return sizing(client, json, since, command).await,
-        Command::Caches {
-            clean: Some(volume),
-        } => {
-            client
-                .post(&format!("/v1/caches/{volume}/clean"), &())
-                .await?;
-            if !json {
-                output::line(format_args!("{volume} emptied"));
-            }
-        }
-        Command::Caches { clean: None } => {
-            let caches: Caches = client.get("/v1/caches").await?;
-            if json {
-                return print_json(&caches);
-            }
-            output::text(&human::caches(&caches, now(), paint));
-        }
+        Command::Insights { days, digest } => return insights(client, json, days, digest).await,
+        Command::Notify { command } => return notify(client, json, command).await,
+        Command::Caches { clean } => return caches(client, json, clean).await,
         Command::Config { command } => return config(client, json, command).await,
         Command::Doctor => return doctor(client, json).await,
         Command::Web(args) => return web(client, &args).await,
@@ -653,6 +665,66 @@ async fn reseed(
 }
 
 /// `runnerctl sizing`: shows the advice, or writes one profile's into the config.
+/// `runnerctl caches`: the cache volumes, or with `clean` empties one.
+async fn caches(client: &Client, json: bool, clean: Option<String>) -> Result<ExitCode, Error> {
+    if let Some(volume) = clean {
+        client
+            .post(&format!("/v1/caches/{volume}/clean"), &())
+            .await?;
+        if !json {
+            output::line(format_args!("{volume} emptied"));
+        }
+        return Ok(ExitCode::SUCCESS);
+    }
+    let caches: Caches = client.get("/v1/caches").await?;
+    if json {
+        return print_json(&caches);
+    }
+    output::text(&human::caches(&caches, now(), output::paint()));
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `runnerctl insights`: what the history says, or with `digest` the last 24 hours.
+async fn insights(
+    client: &Client,
+    json: bool,
+    days: Option<u32>,
+    digest: bool,
+) -> Result<ExitCode, Error> {
+    if digest {
+        let digest: Digest = client.get("/v1/digest").await?;
+        if json {
+            return print_json(&digest);
+        }
+        output::text(&human::digest(&digest));
+    } else {
+        let insights: Insights = client
+            .get_query("/v1/insights", &InsightsQuery { days })
+            .await?;
+        if json {
+            return print_json(&insights);
+        }
+        output::text(&human::insights(&insights, output::paint()));
+    }
+    Ok(ExitCode::SUCCESS)
+}
+
+/// `runnerctl notify test`: sends a test message; fails unless every target got it.
+async fn notify(client: &Client, json: bool, command: NotifyCommand) -> Result<ExitCode, Error> {
+    let NotifyCommand::Test { target } = command;
+    let tested: NotifyTest = client
+        .post_json("/v1/notify/test", &NotifyTestQuery { target })
+        .await?;
+    if json {
+        print_json(&tested)?;
+    } else {
+        output::text(&human::notify_test(&tested, output::paint()));
+    }
+    Ok(exit(
+        tested.targets.iter().all(|target| target.error.is_none()),
+    ))
+}
+
 async fn sizing(
     client: &Client,
     json: bool,

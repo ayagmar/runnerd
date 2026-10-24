@@ -1680,6 +1680,47 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
 }
 
 #[test]
+fn the_health_line_counts_the_warning_insights_and_says_where_to_read_them() {
+    use runnerd_core::api::{Insight, InsightKind, Insights, Severity};
+    let insight = |key: &str, severity| Insight {
+        key: key.to_owned(),
+        severity,
+        repository: "halyard/api".to_owned(),
+        workflow: Some("CI".to_owned()),
+        job: Some("test".to_owned()),
+        sentence: "halyard/api: CI / test failed and then passed on a re-run in 1 of its 3 runs."
+            .to_owned(),
+        kind: InsightKind::Flaky { flaky: 1, total: 3 },
+        runs: Vec::new(),
+    };
+    let mut app = app();
+    app.activity = Some(day());
+    app.update(Msg::Insights(Box::new(Insights {
+        since: 0,
+        until: NOW,
+        insights: vec![
+            insight("flaky:a", Severity::Warning),
+            insight("flaky:b", Severity::Warning),
+            insight("waits:halyard/api", Severity::Notice),
+        ],
+        waits: Vec::new(),
+    })));
+
+    let wide = screen(&app, 160, 40, false);
+    let health = wide.lines().nth(1).unwrap();
+    assert!(
+        health.contains("2 insights: runnerctl insights"),
+        "notices are not counted: {health}"
+    );
+    let small = screen(&app, 80, 24, false);
+    let health = small.lines().nth(1).unwrap();
+    assert!(
+        !health.contains("runnerctl insights") && health.contains("2 failed"),
+        "the pointer goes first at 80 columns: {health}"
+    );
+}
+
+#[test]
 fn the_day_s_figures_are_read_again_as_jobs_start_and_end_and_once_a_minute_otherwise() {
     let mut app = app();
     app.update(Msg::Activity {

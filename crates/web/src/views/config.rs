@@ -159,6 +159,9 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
                         data-on:click="@put('/config')" { "Save and reload" }
                     button.button-quiet type="button" data-on:click="@post('/config/check')" { "Check" }
                     p.muted { "Running jobs keep their slots; slots a change removes go once their jobs finish." }
+                    @if view.text.contains(runnerd_core::config::SECRET_SHOWN) {
+                        p.muted { "Notification URLs and header values show as " code { "<secret>" } "; saving keeps them." }
+                    }
                 }
             }
             div.config-side {

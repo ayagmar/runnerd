@@ -502,6 +502,15 @@ fn serve(socket: &Path) -> Shared {
         .route("/v1/records", delete(remove_records))
         .route("/v1/records/{job}", delete(remove_record))
         .route("/v1/dashboard/pairings", post(pairings))
+        .route(
+            "/v1/notify/test",
+            post(async || {
+                axum::Json(serde_json::json!({ "targets": [
+                    { "target": "phone", "error": null },
+                    { "target": "relay", "error": "the target answered HTTP 401 Unauthorized" },
+                ] }))
+            }),
+        )
         // `[web] open` names the second proxy of `LOGIN_LINKS`.
         .route(
             "/v1/dashboard",
@@ -1160,5 +1169,18 @@ fn sizing_shows_what_auto_sizing_changed_and_undoes_it_back_to_what_it_replaced(
             .replace("memory = \"7G\"", "memory = \"9G\"")
             .replace("cpus = 8", "cpus = 6")],
         "memory and the cpus it changed are back to what it replaced"
+    );
+}
+
+#[test]
+fn notify_test_fails_when_a_target_did_not_get_the_message() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let output = runnerctl(&socket, &["notify", "test"]);
+    assert!(!output.status.success(), "relay was not delivered to");
+    assert_eq!(
+        stdout(&output),
+        "phone delivered\nrelay not delivered: the target answered HTTP 401 Unauthorized\n"
     );
 }

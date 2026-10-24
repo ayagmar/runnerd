@@ -12,7 +12,7 @@ use axum::extract::{Path as UrlPath, Query, State};
 use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery, ReplaceQuery};
-use runnerd_core::config::{Config, revision};
+use runnerd_core::config::{Config, keep_secrets, mask_secrets, revision};
 use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs, RunningSlots, Target};
 use runnerd_core::sizing::Window;
 use tracing::info;
@@ -131,13 +131,21 @@ pub(super) async fn clean_cache(
     }
 }
 
-pub(super) async fn config(_: Authenticated, State(state): State<AppState>) -> Json<ConfigFile> {
+/// The config with the notification targets' URLs and header values masked (ADR 0051): no client holds them.
+pub(super) async fn config(_: Authenticated, State(state): State<AppState>) -> Response {
     let file = state.config.lock().await;
+    let Some(text) = mask_secrets(&file.text) else {
+        return error(
+            StatusCode::INTERNAL_SERVER_ERROR,
+            "the config runnerd runs with is not TOML",
+        );
+    };
     Json(ConfigFile {
         path: file.path.display().to_string(),
-        text: file.text.clone(),
+        text,
         revision: Some(revision(&file.text)),
     })
+    .into_response()
 }
 
 /// Checks a config off the async threads: reading a slice's `MemoryMax` runs `systemctl`.
@@ -157,6 +165,7 @@ pub(super) async fn check_config(
     State(state): State<AppState>,
     text: String,
 ) -> Response {
+    let text = keep_secrets(&text, &state.config.lock().await.text);
     match check(state.memory_max, text).await {
         Ok((_, checked)) => Json(checked).into_response(),
         Err(join_error) => failed(&join_error),
@@ -173,6 +182,7 @@ pub(super) async fn replace_config(
 ) -> Response {
     // One replacement at a time, so the file and the engine end up with the same config.
     let mut file = state.config.lock().await;
+    let text = keep_secrets(&text, &file.text);
     // A text made from a config replaced since, as by auto sizing, or edited on disk since, would undo that change.
     let on_disk = match query.revision {
         None => None,

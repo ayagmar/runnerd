@@ -29,6 +29,9 @@
 //! | `GET /v1/stats?`[`StatsQuery`] | [`Stats`] |
 //! | `GET /v1/activity?`[`ActivityQuery`] | [`Activity`] |
 //! | `GET /v1/sizing?`[`SizingQuery`] | [`Sizing`] |
+//! | `GET /v1/insights?`[`InsightsQuery`] | [`Insights`] |
+//! | `GET /v1/digest` | [`Digest`] |
+//! | `POST /v1/notify/test?`[`NotifyTestQuery`] | [`NotifyTest`]; 404 without `[notify]` targets or with no such one |
 //! | `GET /v1/caches` | [`Caches`] |
 //! | `GET /v1/caches/history?`[`CacheHistoryQuery`] | [`CacheHistory`] |
 //! | `GET /v1/events?`[`EventQuery`] | `text/event-stream` of [`EventEnvelope`] |
@@ -44,6 +47,7 @@ use serde::{Deserialize, Serialize};
 mod admission;
 mod control;
 mod events;
+mod insights;
 mod jobs;
 mod records;
 mod sizing;
@@ -53,7 +57,12 @@ pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, ReplaceQuery,
     RunningJob,
 };
-pub use events::{Event, EventEnvelope, EventQuery};
+pub use events::{Event, EventEnvelope, EventQuery, RunnerFailure};
+pub use insights::{
+    AutoNote, Delivery, Digest, INSIGHT_DAYS, INSIGHT_DAYS_MAX, Insight, InsightKind, Insights,
+    InsightsQuery, LongWait, Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Priority,
+    RepositoryWaits, RunLink, Severity, WaitSpread, WeekWaits,
+};
 pub use jobs::{
     Activity, ActivityQuery, Bucket, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize,
     CacheVolume, Caches, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics, JobPage,

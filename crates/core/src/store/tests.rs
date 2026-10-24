@@ -1182,3 +1182,65 @@ async fn an_auto_sizing_change_holds_its_interval_from_before_its_file_is_writte
         }
     );
 }
+
+#[tokio::test]
+async fn what_the_notifier_delivered_outlives_a_restart_and_a_removed_target_is_forgotten() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    assert!(
+        store
+            .notify_record(
+                "phone",
+                vec![("event".to_owned(), 7), ("insight:a".to_owned(), 1)],
+                Vec::new()
+            )
+            .await
+    );
+    assert!(
+        store
+            .notify_record("relay", vec![("event".to_owned(), 3)], Vec::new())
+            .await
+    );
+    assert!(
+        store
+            .notify_record(
+                "phone",
+                vec![("event".to_owned(), 9)],
+                vec!["insight:a".to_owned()]
+            )
+            .await
+    );
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    assert!(store.notify_keep(vec!["phone".to_owned()]).await);
+    let state = store.notify_state().await.unwrap();
+    assert_eq!(
+        state,
+        BTreeMap::from([(
+            "phone".to_owned(),
+            BTreeMap::from([("event".to_owned(), 9)])
+        )])
+    );
+}
+
+#[tokio::test]
+async fn insights_read_finished_jobs_with_when_their_runner_started() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(2));
+    store.runner_started(runner("r1", 900_000));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.lost(1, 1_000_300);
+    store.flush().await;
+
+    let runs = store.insights(0).await.unwrap();
+
+    assert_eq!(runs.len(), 1, "the queued job is not finished: {runs:#?}");
+    assert_eq!(runs[0].state, JobState::Lost);
+    assert_eq!(runs[0].runner_started_at, Some(900_000));
+    assert_eq!(runs[0].profile.as_deref(), Some("app"));
+    assert!(store.last_event().await.unwrap() > 0, "events were stored");
+}

@@ -428,6 +428,28 @@ pub(super) fn auto_sizing(db: &Connection) -> rusqlite::Result<super::AutoSizing
     Ok(super::AutoSizing { last, pending })
 }
 
+/// The newest durable event's ID; 0 before the first.
+pub(super) fn last_event(db: &Connection) -> rusqlite::Result<u64> {
+    db.query_row("SELECT coalesce(max(id), 0) FROM events", [], |row| {
+        row.get(0)
+    })
+}
+
+/// What the notifier keeps for each target, by target, then key.
+pub(super) fn notify_state(
+    db: &Connection,
+) -> rusqlite::Result<std::collections::BTreeMap<String, std::collections::BTreeMap<String, u64>>> {
+    let mut targets = std::collections::BTreeMap::<_, std::collections::BTreeMap<_, _>>::new();
+    let rows = db
+        .prepare_cached("SELECT target, key, value FROM notify ORDER BY target, key")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)))?
+        .collect::<rusqlite::Result<Vec<(String, String, u64)>>>()?;
+    for (target, key, value) in rows {
+        targets.entry(target).or_default().insert(key, value);
+    }
+    Ok(targets)
+}
+
 pub(super) fn events_after(
     db: &Connection,
     after: u64,
@@ -678,6 +700,37 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
         cancelled,
         runners,
     })
+}
+
+/// The jobs completed or lost that were queued at or after `since` (ms), with their runners, as insights read them.
+pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<Vec<crate::insights::Run>> {
+    db.prepare_cached(
+        "SELECT j.id, j.repository, j.workflow, j.name, j.branch, j.url, j.run_id, j.run_attempt, j.state, \
+         j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak \
+         FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+         WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
+    )?
+    .query_map([since], |row| {
+        Ok(crate::insights::Run {
+            id: row.get(0)?,
+            repository: row.get(1)?,
+            workflow: row.get(2)?,
+            name: row.get(3)?,
+            branch: row.get(4)?,
+            url: row.get(5)?,
+            run_id: row.get(6)?,
+            run_attempt: row.get(7)?,
+            state: state(&row.get::<_, String>(8)?),
+            conclusion: row.get(9)?,
+            queued_at: row.get(10)?,
+            started_at: row.get(11)?,
+            finished_at: row.get(12)?,
+            runner_started_at: row.get(13)?,
+            profile: row.get(14)?,
+            memory_peak: row.get(15)?,
+        })
+    })?
+    .collect()
 }
 
 pub(super) fn warm(
