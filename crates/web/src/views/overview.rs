@@ -80,17 +80,21 @@ impl Overview {
             },
         };
         overview.reload_running(daemon).await?;
-        overview.reload_day(daemon).await?;
+        overview.reload_day(daemon, now).await?;
         Ok(overview)
     }
 
-    /// Reads the jobs started and finished in the last day again.
-    pub(crate) async fn reload_day(&mut self, daemon: &Client) -> Result<(), ClientError> {
+    /// Reads the jobs started and finished in the day up to `now` again.
+    pub(crate) async fn reload_day(
+        &mut self,
+        daemon: &Client,
+        now: u64,
+    ) -> Result<(), ClientError> {
         self.day = daemon
             .get_query(
                 "/v1/activity",
                 &ActivityQuery {
-                    since: Some(self.now.saturating_sub(DAY)),
+                    since: Some(now.saturating_sub(DAY)),
                 },
             )
             .await?;

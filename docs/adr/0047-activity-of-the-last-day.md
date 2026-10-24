@@ -18,7 +18,9 @@ times, whenever it was queued. There is no page limit: a start is two integers, 
 thousand.
 
 The overview reads it for the 24 hours up to now, and draws its hourly wait bars as 24 hours counted back from the
-end of that window.
+end of that window. A live overview reads it again on each job event and at least once a minute while other
+events arrive (host samples come every few seconds), with the clock at that moment, so a job ages out of the day
+on an idle evening too.
 
 ## Consequences
 

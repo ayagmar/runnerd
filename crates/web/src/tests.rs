@@ -1160,6 +1160,53 @@ async fn profiles_whose_names_differ_only_in_punctuation_keep_their_own_slots() 
 }
 
 #[tokio::test]
+async fn a_live_overview_lets_a_job_age_out_of_its_24_hours_with_no_job_event() {
+    use runnerd_core::api::{HostSample, JobState};
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        // The dashboard's clock: a job that failed a day ago less two seconds, the only one of the day.
+        let now = crate::now();
+        let mut failed = fixtures.jobs[0].clone();
+        failed.summary.state = JobState::Lost;
+        failed.summary.timeline.queued_at = now - 86_400;
+        failed.summary.timeline.started_at = Some(now - 86_400 + 1);
+        failed.summary.timeline.finished_at = Some(now - 86_400 + 2);
+        fixtures.jobs = vec![failed];
+    }
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    let failed =
+        |count: u32| format!(r#"Failed, 24 h</dt><dd><span class="figure-main">{count}</span>"#);
+    read_until(&mut stream, |text| text.contains(&failed(1))).await;
+    // Only host samples from here on, as on an idle evening.
+    let events = dashboard.fake.events.clone();
+    let samples = tokio::spawn(async move {
+        loop {
+            let at = crate::now();
+            let _ = events.send(EventEnvelope {
+                id: None,
+                at,
+                event: Event::HostSample {
+                    sample: HostSample {
+                        at,
+                        cpu: 100,
+                        memory: 1 << 30,
+                    },
+                },
+            });
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    });
+    let expired = read_until(&mut stream, |text| text.contains(&failed(0))).await;
+    samples.abort();
+    assert!(
+        expired.contains("0 jobs started"),
+        "its wait aged out too: {expired}"
+    );
+}
+
+#[tokio::test]
 async fn the_selected_blocks_readout_follows_its_jobs_new_sample() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;

@@ -660,8 +660,8 @@ impl Fixtures {
     }
 
     /// The jobs `query` lists, as the daemon pages them.
-    /// As the daemon reads it: the jobs started and finished since `since`, by those times. The fixtures' clock is
-    /// not the dashboard's, so nothing is left out for being after `now`.
+    /// As the daemon reads it: the jobs started and finished since `since`, by those times, for the day from
+    /// `since`. The fixtures' clock is not the dashboard's, so nothing is left out for being after `now`.
     fn activity(&self, since: Option<u64>) -> Activity {
         let since = since.unwrap_or(self.now.saturating_sub(24 * 3600));
         let within = |at: Option<u64>| at.is_some_and(|at| at >= since);
@@ -685,7 +685,7 @@ impl Fixtures {
             .collect();
         Activity {
             since,
-            until: self.now,
+            until: since + 24 * 3600,
             started,
             finished: finished.len() as u64,
             failed: finished
