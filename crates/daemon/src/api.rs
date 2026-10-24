@@ -99,6 +99,8 @@ struct AppState {
     /// Set when the server stops, so streams that would never end do.
     stopping: watch::Receiver<bool>,
     config: Arc<Mutex<ConfigText>>,
+    /// Signalled each time `config` is replaced, for the notifier.
+    config_replaced: Arc<tokio::sync::Notify>,
     memory_max: MemoryMax,
     cpus: SliceCpus,
     sync_dir: SyncDir,
@@ -334,6 +336,7 @@ async fn serve_for(
             path: config.path,
             text: config.text,
         })),
+        config_replaced: Arc::default(),
         memory_max: config.memory_max,
         cpus: config.cpus,
         sync_dir: config.sync_dir,
@@ -344,6 +347,7 @@ async fn serve_for(
     tokio::spawn(notify::run(notify::Notifier {
         store: state.handle.store.clone(),
         config: state.config.clone(),
+        replaced: state.config_replaced.clone(),
         stopping: state.stopping.clone(),
         setup: config.notify,
     }));

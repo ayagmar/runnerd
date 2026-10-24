@@ -311,16 +311,19 @@ impl Target {
 pub(super) struct Notifier {
     pub store: Store,
     pub config: Arc<Mutex<ConfigText>>,
+    /// Signalled each time `config` is replaced, so a target added starts from then, not from the next event.
+    pub replaced: Arc<tokio::sync::Notify>,
     pub stopping: watch::Receiver<bool>,
     pub setup: Setup,
 }
 
-/// Sends what `[notify]` asks for until the server stops; reads `[notify]` again at every wake, so a reload takes
-/// effect without a restart.
+/// Sends what `[notify]` asks for until the server stops; reads `[notify]` again at every wake and as soon as the
+/// config is replaced, so a reload takes effect without a restart.
 pub(super) async fn run(notifier: Notifier) {
     let Notifier {
         store,
         config,
+        replaced,
         mut stopping,
         setup,
     } = notifier;
@@ -362,6 +365,7 @@ pub(super) async fn run(notifier: Notifier) {
         tokio::select! {
             () = tokio::time::sleep_until(wake) => {}
             closed = durable(&mut live) => if closed { return },
+            () = replaced.notified() => {}
             _ = stopping.wait_for(|stopping| *stopping) => return,
         }
     }

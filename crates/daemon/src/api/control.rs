@@ -310,6 +310,8 @@ pub(super) async fn replace(
     checked.warnings.extend(warning);
     checked.revision = Some(revision(&text));
     file.text = text;
+    // The notifier reads it once this lock is let go: a target added starts from now.
+    state.config_replaced.notify_one();
     Ok(checked)
 }
 
