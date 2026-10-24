@@ -521,6 +521,17 @@ async fn waiting_runners_raised_past_the_budget_for_a_heavier_job_are_stopped_un
     assert_eq!(deleted.len(), 2, "two stop, so the other two's 7G fits");
     engine.publish();
     assert_eq!(handle.status.borrow().budget.memory_in_use, 2 * 3584 * M);
+    let starting = handle
+        .status
+        .borrow()
+        .queued
+        .iter()
+        .filter(|job| job.waiting == Some(api::Waiting::RunnerStarting))
+        .count();
+    assert_eq!(
+        starting, 2,
+        "only the two runners left say they start a job"
+    );
 }
 
 #[tokio::test]

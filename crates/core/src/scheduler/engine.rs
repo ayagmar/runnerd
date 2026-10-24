@@ -217,8 +217,6 @@ struct RepositoryState {
     cpu_wait: Option<CpuWait>,
     /// Whether the last plan held its next job for CPU.
     cpu_held: bool,
-    /// Why each of its queued jobs waits, by job ID, as the last plan saw it.
-    waiting: BTreeMap<u64, api::Waiting>,
 }
 
 /// A job waiting for CPU, as `RepositoryState::cpu_wait` keeps it.

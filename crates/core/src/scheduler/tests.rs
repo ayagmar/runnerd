@@ -463,7 +463,6 @@ fn each_job_left_queued_says_why_it_waits() {
         BTreeMap::from([
             (1, Waiting::Paused),
             (2, Waiting::Backoff { until: 1_000_060 }),
-            (3, Waiting::RunnerStarting),
             (
                 4,
                 Waiting::Memory {

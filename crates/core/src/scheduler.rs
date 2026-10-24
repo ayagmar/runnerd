@@ -136,8 +136,9 @@ pub enum Decision {
 pub struct Plan {
     /// What to start, hold and stop.
     pub decisions: Vec<Decision>,
-    /// Why each queued job of a repository's matching jobs waits, by job ID. A job a runner starts for, or an idle
-    /// runner will take, is `Waiting::RunnerStarting`.
+    /// Why each queued job of a repository's matching jobs waits, by job ID. A job an idle runner will take is
+    /// `Waiting::RunnerStarting`; a job this plan starts a runner for has no reason, as that runner does not exist
+    /// until the start succeeds.
     pub waiting: BTreeMap<u64, Waiting>,
 }
 
@@ -250,7 +251,6 @@ pub fn plan(
         *missing -= 1;
         free_memory = free_memory.map(|free| free - memory);
         free_cpu = free_cpu.map(|free| free - cpu);
-        decided.waiting.insert(job, Waiting::RunnerStarting);
         decided.decisions.push(Decision::Start {
             slot: SlotRef {
                 profile: repository.profile.clone(),

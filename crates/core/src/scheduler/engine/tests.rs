@@ -2813,6 +2813,65 @@ async fn the_status_lists_the_queued_jobs_runners_can_take_and_none_holds_oldest
     );
 }
 
+/// Why each queued job waits, oldest first, as the last status says.
+fn waiting(handle: &Handle) -> Vec<Option<api::Waiting>> {
+    handle
+        .status
+        .borrow()
+        .queued
+        .iter()
+        .map(|job| job.waiting.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_job_whose_runner_failed_to_start_waits_for_the_backoff_not_for_that_runner() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    docker.0.lock().unwrap().missing_images = BTreeSet::from(["runnerd-runner:app".to_owned()]);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert!(
+        matches!(waiting(&handle)[..], [Some(api::Waiting::Backoff { .. })]),
+        "{:?}",
+        waiting(&handle)
+    );
+}
+
+#[tokio::test]
+async fn a_pause_and_a_resume_change_why_jobs_wait_as_soon_as_they_are_published() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(waiting(&handle), [Some(api::Waiting::Paused)]);
+    handle.control.set_paused(&one("o/r"), false).await.unwrap();
+    engine.publish();
+    assert_eq!(
+        waiting(&handle),
+        [None],
+        "resumed, its job is about to start"
+    );
+}
+
+#[tokio::test]
+async fn a_shutdown_leaves_every_queued_job_without_a_reason() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    engine.tick(Shutdown::No).await;
+    handle.control.shutdown(RunningJobs::Keep);
+    engine.publish();
+    assert_eq!(waiting(&handle), [None]);
+}
+
 #[tokio::test]
 async fn a_pause_undone_before_it_is_published_leaves_clients_where_the_status_is() {
     let github = FakeGithub::default();

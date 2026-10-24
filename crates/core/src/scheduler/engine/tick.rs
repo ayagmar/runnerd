@@ -12,7 +12,6 @@ use tracing::{info, warn};
 
 use super::admission::Admitting;
 use super::{Engine, Occupant, RunningJobs, Shutdown};
-use crate::api;
 use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
@@ -102,7 +101,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.refresh_predictor().await;
             self.rereserve().await;
         }
-        let (Plan { decisions, waiting }, mut admitting) = match mode {
+        let (Plan { decisions, .. }, mut admitting) = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Force => (
                 Plan {
@@ -116,7 +115,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.admitting(&mut [], None),
             ),
         };
-        self.note_waiting(&waiting);
         self.note_high_water(&admitting);
         let mut held_for_cpu = BTreeSet::new();
         for decision in decisions {
@@ -160,18 +158,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.prune();
     }
 
-    /// Keeps why each repository's queued jobs wait, for the status.
-    fn note_waiting(&mut self, waiting: &BTreeMap<u64, api::Waiting>) {
-        for state in self.repositories.values_mut() {
-            state.waiting = state
-                .queued
-                .iter()
-                .filter_map(|job| Some((job.id, waiting.get(&job.id)?.clone())))
-                .collect();
-        }
-    }
-
-    fn plan(&self) -> (Plan, Admitting) {
+    pub(super) fn plan(&self) -> (Plan, Admitting) {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
