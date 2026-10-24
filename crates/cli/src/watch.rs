@@ -576,6 +576,7 @@ mod tests {
                     busy: true,
                     started_at: 1005,
                     reserved: 9 << 30,
+                    warm: false,
                 }),
             },
         }));
@@ -725,6 +726,7 @@ mod tests {
                     busy: true,
                     started_at: 1005,
                     reserved: 9 << 30,
+                    warm: false,
                 }),
             },
         }));

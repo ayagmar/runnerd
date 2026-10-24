@@ -55,6 +55,7 @@ impl Closing {
 pub(super) struct Found {
     runner: String,
     job: u64,
+    run_id: u64,
 }
 
 /// Asks GitHub for jobs, `CONCURRENT_REQUESTS` at a time; the answers come in the order asked. Owns what it needs,
@@ -139,15 +140,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn take_found(&mut self) {
         while let Ok(found) = self.found.1.try_recv() {
             self.queued_jobs.remove(&found.job);
-            if let Some(occupant) = self
+            let Some(occupant) = self
                 .slots
                 .values_mut()
                 .flatten()
                 .flatten()
                 .find(|occupant| occupant.runner_name == found.runner)
-            {
-                occupant.job = Some(found.job);
-            }
+            else {
+                continue;
+            };
+            occupant.job = Some(found.job);
+            // A warm runner takes its job before a listing shows it queued: its run is seen here first.
+            let repository = occupant.repository.clone();
+            self.note_job(&repository, found.run_id, found.job, None);
         }
     }
 
@@ -212,7 +217,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), running)).await
         {
             match answer {
-                Ok(details) => self.store.details(details),
+                Ok(details) => {
+                    // The workflow of a run first seen through a job a runner took.
+                    self.note_workflow(details.run_id, details.workflow_name.as_deref());
+                    self.store.details(details);
+                }
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
@@ -326,6 +335,7 @@ async fn capture_job<D: DockerApi>(
                         let _ = found.send(Found {
                             runner: runner.clone(),
                             job: id,
+                            run_id,
                         });
                         // After a restart, the part stored before.
                         if let Ok(Some(stored)) = store.job(id).await {

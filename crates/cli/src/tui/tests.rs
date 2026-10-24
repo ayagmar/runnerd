@@ -156,6 +156,7 @@ fn runner(busy: bool) -> RunnerStatus {
         busy,
         started_at: 1004,
         reserved: 9 << 30,
+        warm: false,
     }
 }
 

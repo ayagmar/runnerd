@@ -87,8 +87,9 @@ client → transport → principal → handler → core
    and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images and removing the published runner images none runs,
    [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
    `caches` (reseeds, the mirror, the shared caches), `records` (records of failed jobs and the shells in them),
-   `history` (what the store records), `admission` (what a new runner reserves), `control` (`Control` and the
-   commands) and `status` (what it publishes).
+   `history` (what the store records), `admission` (what a new runner reserves), `warm` (how many warm runners each
+   repository wants, from `scheduler::warm`), `control` (`Control` and the commands) and `status` (what it
+   publishes).
 
 A new transport (SSH, Tailscale) produces a `Principal` and reuses the handlers.
 
@@ -116,7 +117,12 @@ queued → slot → container → removed
    ([ADR 0038](docs/adr/0038-cpu-admission.md)). A profile whose
    `image` Docker lacks starts nothing until the engine pulled it in the background
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)). For each job it leaves queued it says
-   why, which the status passes on ([ADR 0044](docs/adr/0044-queued-jobs-say-why-they-wait.md)).
+   why, which the status passes on ([ADR 0044](docs/adr/0044-queued-jobs-say-why-they-wait.md)). A job that does
+   not fit takes the room of warm runners of other repositories, which stop; once every job it can start has its
+   runner and none waits for room, it starts the warm runners each active repository wants
+   (`scheduler::warm`: `[[repositories]] warm` in its active hours, plus the jobs its workflow runs seen so far are
+   expected to queue still), so a job finds a runner already registered
+   ([ADR 0050](docs/adr/0050-warm-runners.md)).
 3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`) and starts its
    container (`DockerApi::start`) under the profile's limits and isolation backend.
 4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials and every
@@ -159,7 +165,9 @@ nothing until Docker has listed them.
 - The engine deletes only GitHub runner registrations whose names start with this machine's prefix
   (`HostIdentity::prefix`); other machines serve the same repositories. Runner containers on the local Docker are
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
-- `scheduler::plan` does no I/O and reads no clock.
+- `scheduler::plan` and `scheduler::warm` do no I/O and read no clock.
+- A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
+  memory and CPU.
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).

@@ -311,11 +311,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// it reserved under measured admission before a reload, as memory counts it.
     pub(super) fn cpu_in_use(&self) -> u64 {
         self.occupied()
-            .map(|(_, occupant)| match self.config.host.admission {
-                Admission::Caps => occupant.cpus,
-                Admission::Measured => occupant.reserved_cpu(),
-            })
+            .map(|(_, occupant)| self.reserves_cpu(occupant))
             .sum()
+    }
+
+    /// What a runner reserves of the CPU budget, in millicores, as `cpu_in_use` counts it.
+    pub(super) fn reserves_cpu(&self, occupant: &super::Occupant) -> u64 {
+        match self.config.host.admission {
+            Admission::Caps => occupant.cpus,
+            Admission::Measured => occupant.reserved_cpu(),
+        }
     }
 
     /// Under a CPU budget, sets what each repository's next runner reserves of it, at most the whole budget so a

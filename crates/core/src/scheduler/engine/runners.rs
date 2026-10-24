@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
-use super::{Engine, Occupant, RunningJobs, unix_secs};
+use super::{Engine, Occupant, Purpose, RunningJobs, unix_secs};
 use crate::api::Admission;
 use crate::cache::{self, runner_mounts};
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
@@ -227,7 +227,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    pub(super) async fn start(&mut self, slot: &SlotRef, repository: &str, admission: Admission) {
+    pub(super) async fn start(
+        &mut self,
+        slot: &SlotRef,
+        repository: &str,
+        admission: Admission,
+        purpose: Purpose,
+    ) {
         let Some(labels) = self
             .config
             .repositories
@@ -283,8 +289,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         match self.docker.start(&spec, self.isolation).await {
             Ok(container) => {
+                let warm = match purpose {
+                    Purpose::Job => "",
+                    Purpose::Warm => " warm, for jobs not queued yet",
+                };
                 info!(
-                    "{repository}: started {name} in {} slot {number}",
+                    "{repository}: started {name} in {} slot {number}{warm}",
                     slot.profile
                 );
                 let occupant = Occupant {

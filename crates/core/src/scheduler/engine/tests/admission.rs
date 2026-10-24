@@ -941,7 +941,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
     );
     // o/r's build uses 4 CPUs over its run, o/b's lint 1, on a slice of 4 CPUs.
     let config = format!(
-        "{}\n[[repositories]]\nname = \"o/b\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"light\"]\n",
+        "{}\n[[repositories]]\nname = \"o/b\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"light\"]\nwarm = 0\n",
         cpu_measured()
             .replace("cpus = 2", "cpus = 4")
             .replace("slots = 6", "slots = 8")

@@ -244,6 +244,10 @@ pub struct RunnerStatus {
     /// and its last sampled memory. 0 from a daemon before measured admission.
     #[serde(default)]
     pub reserved: u64,
+    /// A warm runner: idle, and no queued job of its repository waits for it; it takes the next one GitHub hands
+    /// out. False from a daemon before warm runners.
+    #[serde(default)]
+    pub warm: bool,
 }
 
 /// A configured repository and its queue.

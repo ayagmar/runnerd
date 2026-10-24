@@ -677,6 +677,25 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
     })
 }
 
+pub(super) fn warm(
+    db: &Connection,
+    since: u64,
+) -> rusqlite::Result<Vec<crate::scheduler::warm::Seen>> {
+    db.prepare_cached(
+        "SELECT repository, workflow, run_id, run_attempt, queued_at FROM jobs WHERE queued_at >= ?1 ORDER BY id",
+    )?
+    .query_map([since], |row| {
+        Ok(crate::scheduler::warm::Seen {
+            repository: row.get(0)?,
+            workflow: row.get(1)?,
+            run_id: row.get(2)?,
+            run_attempt: row.get(3)?,
+            queued_at: row.get(4)?,
+        })
+    })?
+    .collect()
+}
+
 pub(super) fn latest_cache_sizes(db: &Connection) -> rusqlite::Result<super::Measured> {
     let at: Option<u64> = db.query_row("SELECT max(at) FROM cache_sizes", [], |row| row.get(0))?;
     let Some(at) = at else {

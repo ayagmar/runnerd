@@ -7,10 +7,18 @@ use super::{Engine, Shutdown, unix_secs};
 use crate::api;
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
+use crate::scheduler::{Plan, SlotRef};
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn publish(&mut self) {
         let mode = self.control.mode();
+        // Why jobs wait and which runners are warm, from a plan of the engine as it is now, not as the tick's plan
+        // saw it: a start that failed, a runner stopped over budget or a pause since then would make that one wrong.
+        // A shutdown starts nothing, so no job says why it waits and no runner is warm.
+        let plan = match mode {
+            Shutdown::No => self.plan().0,
+            Shutdown::Graceful | Shutdown::Force => Plan::default(),
+        };
         let profiles = self
             .config
             .profiles
@@ -47,6 +55,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             busy: occupant.busy,
                             started_at: unix_secs(occupant.started_at),
                             reserved: self.takes(occupant),
+                            warm: plan.warm.contains(&SlotRef {
+                                profile: name.clone(),
+                                index,
+                            }),
                         }),
                     })
                     .collect(),
@@ -76,7 +88,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             budget: self.budget(),
             profiles,
             repositories,
-            queued: self.queued(),
+            queued: self.queued(&plan.waiting),
         };
         self.announce_changes(&previous, announced.as_deref(), &status);
         self.status.send_replace(status);
@@ -117,15 +129,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// The queued jobs the repositories' runners can take and none holds, oldest first; none of a repository whose
-    /// last listing failed or was skipped. Why each waits comes from a plan of the engine as it is now, not as the
-    /// tick's plan saw it: a start that failed, a runner stopped over budget or a pause since then would make that
-    /// one wrong. A shutdown starts nothing, so no job says why it waits.
-    fn queued(&self) -> Vec<api::QueuedJob> {
-        let waiting = match self.control.mode() {
-            Shutdown::No => self.plan().0.waiting,
-            Shutdown::Graceful | Shutdown::Force => BTreeMap::new(),
-        };
+    /// The queued jobs the repositories' runners can take and none holds, oldest first, with why each `waiting`;
+    /// none of a repository whose last listing failed or was skipped.
+    fn queued(&self, waiting: &BTreeMap<u64, api::Waiting>) -> Vec<api::QueuedJob> {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)

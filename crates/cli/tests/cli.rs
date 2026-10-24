@@ -88,6 +88,7 @@ fn status() -> Status {
                         busy: true,
                         started_at: 1_700_000_000,
                         reserved: 9 << 30,
+                        warm: false,
                     }),
                 },
                 SlotStatus {

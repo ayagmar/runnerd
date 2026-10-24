@@ -269,6 +269,14 @@ pub struct Repository {
     pub profile: String,
     /// The labels its runners register with; a job runs on them when every label it asks for is one of these.
     pub labels: Vec<String>,
+    /// How many idle runners it keeps registered for jobs not queued yet while it is active (ADR 0050); 0 turns warm
+    /// runners off. Default 1.
+    #[serde(default = "default_warm")]
+    pub warm: u32,
+}
+
+fn default_warm() -> u32 {
+    1
 }
 
 /// `[history]`: the job history database and how long it keeps what. Every field has a default.

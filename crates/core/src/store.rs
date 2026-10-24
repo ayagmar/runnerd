@@ -19,6 +19,7 @@ use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
 use crate::observe::metrics::Events;
+use crate::scheduler::warm;
 use crate::sizing;
 use crate::sync::lock;
 
@@ -711,6 +712,11 @@ impl Store {
     /// What sizing reads: the finished jobs queued at or after `since` (ms) and the runners since.
     pub async fn sizing(&self, since: u64) -> Result<sizing::History, StoreError> {
         self.read(move |db| read::sizing(db, since)).await
+    }
+
+    /// The jobs queued at or after `since` (ms), whatever became of them, as warm runners learn from them.
+    pub async fn warm(&self, since: u64) -> Result<Vec<warm::Seen>, StoreError> {
+        self.read(move |db| read::warm(db, since)).await
     }
 
     /// The last measurement of every volume, with its time (seconds), by name.

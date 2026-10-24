@@ -671,6 +671,7 @@ slots = 2
 name = "o/r"
 profile = "app"
 labels = ["self-hosted", "app"]
+warm = 0
 "#;
 
 /// A pause or resume of one repository.
@@ -1235,7 +1236,7 @@ async fn mirror_bytes_the_history_failed_to_store_are_counted_on_the_next_tick()
 /// `CONFIG` with a second repository, `o/s`, on the same profile.
 fn two_repositories() -> String {
     format!(
-        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\n"
+        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\nwarm = 0\n"
     )
 }
 
@@ -1506,7 +1507,7 @@ async fn a_tick_lists_every_repository_at_once() {
     let docker = FakeDocker::default();
     let dir = TestDir::new("engine");
     let config = format!(
-        "{}\n[[repositories]]\nname = \"o/t\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\n",
+        "{}\n[[repositories]]\nname = \"o/t\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\nwarm = 0\n",
         two_repositories()
     );
     let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
@@ -2074,11 +2075,13 @@ slots = 1
 name = "o/r"
 profile = "app"
 labels = ["self-hosted", "app"]
+warm = 0
 
 [[repositories]]
 name = "o/s"
 profile = "small"
 labels = ["self-hosted", "small"]
+warm = 0
 "#,
         mirror != "0G"
     )
@@ -2516,7 +2519,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     );
 
     let with_s = format!(
-        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\"]\n"
+        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\"]\nwarm = 0\n"
     );
     engine.reload(Config::parse(&with_s).unwrap(), None, None);
     engine.publish();
@@ -3348,3 +3351,4 @@ async fn a_pull_that_lands_while_old_images_are_removed_keeps_its_image() {
 
 mod admission;
 mod records;
+mod warm;

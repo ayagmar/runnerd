@@ -8,7 +8,8 @@
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
 //! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `history` (what
-//! the store records), `control` (the API's commands) and `status` (what it publishes).
+//! the store records), `warm` (how many warm runners each repository wants), `control` (the API's commands) and
+//! `status` (what it publishes).
 
 mod admission;
 mod caches;
@@ -20,6 +21,7 @@ mod recover;
 mod runners;
 mod status;
 mod tick;
+mod warm;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -159,6 +161,15 @@ pub struct Setup {
     pub paths: Paths,
 }
 
+/// Why a runner starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// For a queued job.
+    Job,
+    /// As a warm runner, for jobs not queued yet.
+    Warm,
+}
+
 /// A slot's runner and its container.
 #[derive(Debug, Clone)]
 struct Occupant {
@@ -295,6 +306,8 @@ pub struct Engine<G = Github, D = Docker> {
     records: records::RecordState,
     /// Under measured admission, the predictor and the high-water mark.
     measured: admission::Measured,
+    /// What warm runners learned from the history, and the workflow runs seen lately.
+    warm: warm::Warm,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -352,8 +365,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         let (records, records_receiver) = records::RecordState::new();
         // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
-        let mirror = &config.caches.mirror;
-        let mirror_memory = if mirror.enabled { mirror.memory.0 } else { 0 };
+        let mirror_memory = config.mirror_memory();
         let mut engine = Engine {
             isolation: isolation::backend(config.host.isolation),
             config,
@@ -398,6 +410,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             closing: BTreeMap::new(),
             last_prune: None,
             measured: admission::Measured::default(),
+            warm: warm::Warm::default(),
             records,
         };
         engine.publish();

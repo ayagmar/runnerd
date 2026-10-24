@@ -302,6 +302,7 @@ fn slot(
             busy,
             started_at,
             reserved: if profile == "jvm" { 9 * GIB } else { 7 * GIB },
+            warm: false,
         }),
     }
 }
