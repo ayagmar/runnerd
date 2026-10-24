@@ -560,3 +560,31 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
     }
     assert_eq!(registered(&github.calls()).len(), 2, "no third");
 }
+
+#[tokio::test]
+async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_it() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, _handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    // A failure days ago, and no job since to end its streak.
+    engine.repositories.get_mut("o/r").unwrap().failures = 1;
+
+    for occupant in engine.slots.values_mut().flatten().flatten() {
+        occupant.started_at -= IDLE_TIMEOUT;
+    }
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.runner_log = Some("Listening for Jobs".to_owned());
+        for container in &mut state.containers {
+            container.running = false;
+        }
+    }
+    engine.tick(Shutdown::No).await;
+
+    assert_eq!(
+        engine.repositories["o/r"].failures, 0,
+        "the next failure is announced as a new streak's first"
+    );
+}

@@ -123,6 +123,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .is_ok_and(|waited| waited >= IDLE_TIMEOUT) =>
                 {
                     state.idle_exits += 1;
+                    // It started and connected: a failure before it is over, and the next one is a new streak's
+                    // first, announced. Not so for the second in a row, a fault of its own.
+                    if state.idle_exits == 1 {
+                        state.failures = 0;
+                    }
                     warn!(
                         "{}: {} ended without a job after waiting for one",
                         occupant.repository, occupant.runner_name
