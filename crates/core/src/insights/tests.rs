@@ -60,6 +60,7 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         profile: Some("app".to_owned()),
         memory_peak: Some(G),
         build_cache: None,
+        sock_throttled: Some(0),
     }
 }
 
@@ -307,6 +308,37 @@ fn a_warm_cache_or_runs_that_only_read_are_no_insight() {
     }
 }
 
+/// Ten runs, those at `throttled` with their sockets throttled for memory pressure.
+fn throttled_at(throttled: &[usize]) -> Vec<Run> {
+    let mut runs = history(&[240; 10]);
+    for at in throttled {
+        runs[*at].sock_throttled = Some(846);
+    }
+    runs
+}
+
+#[test]
+fn downloads_memory_pressure_throttled_in_several_runs_are_a_warning() {
+    let found = insights(&throttled_at(&[3, 8]), &config(), 14, NOW).insights;
+    assert_eq!(found.len(), 1, "{found:?}");
+    assert_eq!(found[0].severity, Severity::Warning);
+    assert_eq!(
+        found[0].kind,
+        InsightKind::Throttled {
+            throttled: 2,
+            total: 10
+        }
+    );
+    let linked: Vec<u64> = found[0].runs.iter().map(|run| run.job).collect();
+    assert_eq!(linked, [1008, 1003], "the throttled runs, newest first");
+}
+
+#[test]
+fn one_throttled_run_is_no_insight() {
+    let found = insights(&throttled_at(&[5]), &config(), 14, NOW).insights;
+    assert!(found.is_empty(), "{found:?}");
+}
+
 fn peaking(peaks_in_tenths_of_g: &[u64]) -> Vec<Run> {
     let mut runs = history(&vec![240; peaks_in_tenths_of_g.len()]);
     for (run, peak) in runs.iter_mut().zip(peaks_in_tenths_of_g) {
@@ -466,6 +498,9 @@ fn every_kind_of_insight_reads_back_as_the_daemon_sends_it() {
     for run in &mut runs {
         run.memory_peak = Some(37 * G / 10);
     }
+    for run in &mut runs[12..] {
+        run.sock_throttled = Some(12);
+    }
     let mut others = vec![attempt(900, 1, "failure"), attempt(900, 2, "success")];
     others.extend((0..6).map(|n| waited(n + 2000, 200, 20, false)));
     others.extend((10..16).map(|n| waited(n + 2000, 10, 300, false)));
@@ -483,7 +518,7 @@ fn every_kind_of_insight_reads_back_as_the_daemon_sends_it() {
         .collect();
     assert_eq!(
         kinds,
-        ["near-cap", "slower", "waits", "flaky"],
+        ["throttled", "near-cap", "slower", "waits", "flaky"],
         "warnings first: {found:#?}"
     );
 

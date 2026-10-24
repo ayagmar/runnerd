@@ -611,6 +611,7 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
             slice_cpus: None,
+            host: None,
             cpu: None,
         },
     });
@@ -905,6 +906,7 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
             events: Events {
                 oom: Some(kills),
                 oom_kill: Some(kills),
+                sock_throttled: None,
             },
             ..sample(name, 1_000_300, 0, 0)
         }]);
@@ -946,6 +948,7 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
         events: Events {
             oom: Some(1),
             oom_kill: Some(1),
+            sock_throttled: None,
         },
         ..sample("r1", 1_000_300, 0, 0)
     }]);
@@ -1067,6 +1070,7 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
             events: Events {
                 oom,
                 oom_kill: Some(0),
+                sock_throttled: None,
             },
             ..sample(name, 1_000_300, 0, 0)
         }]);
@@ -1243,4 +1247,67 @@ async fn insights_read_finished_jobs_with_when_their_runner_started() {
     assert_eq!(runs[0].runner_started_at, Some(900_000));
     assert_eq!(runs[0].profile.as_deref(), Some("app"));
     assert!(store.last_event().await.unwrap() > 0, "events were stored");
+}
+
+#[tokio::test]
+async fn a_job_whose_sockets_memory_pressure_throttled_says_so_in_its_record() {
+    let throttled = |count| SampleRecord {
+        events: Events {
+            sock_throttled: Some(count),
+            ..Events::default()
+        },
+        ..sample("r1", 1_000_300, 0, 0)
+    };
+    let metrics = metrics_of(vec![throttled(846)]).await;
+    assert_eq!(metrics.sock_throttled, Some(846));
+    let metrics = metrics_of(vec![sample("r1", 1_000_300, 0, 0)]).await;
+    assert_eq!(metrics.sock_throttled, None, "a kernel without the counter");
+}
+
+#[tokio::test]
+async fn sizing_reads_how_long_of_a_wait_the_host_held_starts_back() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    // Queued at 1 000 001 ms, started at 1 000 200.
+    store.queued("o/r", &queued(1));
+    store.runner_started(runner("r1", 1_000_100));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.samples(vec![sample("r1", 1_000_300, 0, 0)]);
+    store.lost(1, 1_000_400);
+    // Held 100 ms of the wait, and again from 20 ms before the start until the daemon stopped.
+    store.host_hold_started(1_000_050);
+    store.host_hold_ended(1_000_050, 1_000_150);
+    store.host_hold_started(1_000_180);
+    store.host_sample(HostSample {
+        at: 1_001,
+        cpu: 0,
+        memory: 0,
+    });
+    store.flush().await;
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    let held: Vec<u64> = store
+        .sizing(0)
+        .await
+        .unwrap()
+        .jobs
+        .iter()
+        .map(|job| job.host_held)
+        .collect();
+    assert_eq!(held, [120]);
+    let ended: Option<u64> = Connection::open(&path)
+        .unwrap()
+        .query_row(
+            "SELECT ended_at FROM host_holds WHERE started_at = 1000180",
+            [],
+            |row| row.get(0),
+        )
+        .unwrap();
+    assert_eq!(
+        ended,
+        Some(1_001_000),
+        "the hold the daemon did not see end ends at its last host sample"
+    );
 }

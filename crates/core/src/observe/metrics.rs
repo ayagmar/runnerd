@@ -8,7 +8,9 @@
 //! `inactive_file`, so it counts page cache read twice. The slice's memory for the high-water mark is that
 //! conservative number, `memory.current` less `inactive_file`, as it always was: it stops starts before the slice
 //! is short of memory, not after. Whether a cgroup met its limit comes from `memory.events`, never from how close
-//! a sample came to it. A container whose files vanish ends its series; that is not an error.
+//! a sample came to it. A container whose files vanish ends its series; that is not an error. Beside the slice, it
+//! reads the host's memory: `MemTotal` and `MemAvailable` from `/proc/meminfo` and the stall shares of
+//! `/proc/pressure/memory`.
 
 use std::collections::HashMap;
 use std::io;
@@ -87,6 +89,10 @@ pub struct Events {
     pub oom: Option<u64>,
     /// Processes the kernel killed in it for memory (`oom_kill`).
     pub oom_kill: Option<u64>,
+    /// Times a socket's receive window was held small because its memory, or a descendant's, was under pressure
+    /// (`sock_throttled`): reclaim that went badly, of the host or of a limit, slows its downloads. `None` on a
+    /// kernel without the counter.
+    pub sock_throttled: Option<u64>,
 }
 
 fn read(path: &Path) -> io::Result<String> {
@@ -138,7 +144,53 @@ pub fn read_events(cgroup: &Path) -> Events {
     Events {
         oom: field(&events, "oom"),
         oom_kill: field(&events, "oom_kill"),
+        sock_throttled: field(&events, "sock_throttled"),
     }
+}
+
+/// The host's memory from `/proc/meminfo` and `/proc/pressure/memory`, beside `slice` bytes the runners hold
+/// without page cache, at `at` (seconds). `None` without `MemTotal` and `MemAvailable`; the pressure lines are `None`
+/// on a kernel without pressure stall information.
+pub fn read_host_memory(paths: &Paths, slice: u64, at: u64) -> Option<api::HostMemory> {
+    let meminfo = read(&paths.proc.join("meminfo")).ok()?;
+    let kib = |key: &str| {
+        meminfo.lines().find_map(|line| {
+            let value = line.strip_prefix(key)?.strip_prefix(':')?;
+            value.trim().strip_suffix("kB")?.trim().parse::<u64>().ok()
+        })
+    };
+    let pressure = read(&paths.proc.join("pressure/memory")).unwrap_or_default();
+    let line = |kind: &str| {
+        let fields = pressure
+            .lines()
+            .find_map(|line| line.strip_prefix(kind)?.strip_prefix(' '))?;
+        let avg = |key: &str| {
+            fields.split_whitespace().find_map(|field| {
+                let value = field.strip_prefix(key)?.strip_prefix('=')?;
+                let (whole, fraction) = value.split_once('.').unwrap_or((value, "0"));
+                let hundredths: u32 = format!("{fraction:0<2}").get(..2)?.parse().ok()?;
+                Some(
+                    whole
+                        .parse::<u32>()
+                        .ok()?
+                        .saturating_mul(100)
+                        .saturating_add(hundredths),
+                )
+            })
+        };
+        Some(api::Pressure {
+            avg10: avg("avg10")?,
+            avg60: avg("avg60")?,
+        })
+    };
+    Some(api::HostMemory {
+        at,
+        total: kib("MemTotal")?.saturating_mul(1024),
+        available: kib("MemAvailable")?.saturating_mul(1024),
+        slice,
+        some: line("some"),
+        full: line("full"),
+    })
 }
 
 /// Bytes received and sent by a process's network namespace on its `eth*` interfaces: the container's own
@@ -210,6 +262,12 @@ impl Sampler {
         }
     }
 
+    /// The host's memory at `at` (ms), beside the slice's memory without page cache (0 when it can't be read).
+    pub fn host_memory(&self, at: u64) -> Option<api::HostMemory> {
+        let slice = read_usage(&self.paths.slice(&self.slice)).map_or(0, |usage| usage.memory);
+        read_host_memory(&self.paths, slice, at / 1000)
+    }
+
     /// One sample of every tracked container that still exists, and of the slice, at `at` (ms). A container
     /// whose files are gone gets no sample, and is forgotten.
     pub fn sample(
@@ -273,15 +331,20 @@ pub async fn run(state: Sampler, tracked: watch::Receiver<Vec<Tracked>>, store: 
         let containers = tracked.borrow().clone();
         let state = state.clone();
         // Reading cgroup files is quick but blocking.
-        let Ok((samples, host)) = tokio::task::spawn_blocking(move || {
+        let Ok(((samples, host), memory)) = tokio::task::spawn_blocking(move || {
             // A panic midway through a sample leaves the counters of the last or of this one, either of which the
             // next sample measures from.
-            lock(&state).sample(&containers, time::now_ms())
+            let mut state = lock(&state);
+            let at = time::now_ms();
+            (state.sample(&containers, at), state.host_memory(at))
         })
         .await
         else {
             continue;
         };
+        if let Some(memory) = memory {
+            store.host_memory(memory);
+        }
         if !samples.is_empty() {
             store.samples(samples);
         }

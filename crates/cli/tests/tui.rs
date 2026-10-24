@@ -67,6 +67,7 @@ fn serve(socket: &Path) {
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
             slice_cpus: None,
+            host: None,
             cpu: None,
         },
         profiles: Vec::new(),

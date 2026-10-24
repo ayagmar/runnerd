@@ -320,6 +320,9 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
     if let Some(cpu) = budget.cpu {
         let _ = write!(out, "; {}", cpu.line());
     }
+    if let Some(host) = budget.host {
+        let _ = write!(out, "; {}", host.line());
+    }
     if let Some(host) = &state.host {
         let _ = write!(
             out,
@@ -529,6 +532,7 @@ mod tests {
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
                     slice_cpus: None,
+                    host: None,
                     cpu: None,
                 },
                 profiles: vec![ProfileStatus {
@@ -787,6 +791,7 @@ mod tests {
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
                     slice_cpus: None,
+                    host: None,
                     cpu: None,
                 },
             },

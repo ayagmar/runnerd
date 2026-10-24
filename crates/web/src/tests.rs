@@ -2039,10 +2039,10 @@ async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved
     let sizing = dashboard.page(&cookie, "/sizing").await;
     assert_eq!(sizing.status, StatusCode::OK);
     for expected in [
-        "lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G",
+        "lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G",
         "keep 9G: its largest peak + 15% is 9G",
         r#"href="/config?resize=node""#,
-        "Review memory 2.5G, 5 slots in the config",
+        "Review memory 3.25G, 4 slots in the config",
         "integration tests",
         "halyard/storefront · CI",
         "waits for 10 jobs",
@@ -2060,13 +2060,16 @@ async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved
     let before = dashboard.fake.fixtures.lock().unwrap().config.clone();
     let editor = dashboard.page(&cookie, "/config?resize=node").await;
     assert_eq!(editor.status, StatusCode::OK);
-    let advised = before.replace("memory = \"7G\"\nslots = 2", "memory = \"2.5G\"\nslots = 5");
+    let advised = before.replace(
+        "memory = \"7G\"\nslots = 2",
+        "memory = \"3.25G\"\nslots = 4",
+    );
     assert_ne!(advised, before);
     for expected in [
-        "memory = &quot;2.5G&quot;\nslots = 5",
+        "memory = &quot;3.25G&quot;\nslots = 4",
         "Nothing is written until you save it.",
-        // 2 × 9G + 5 × 2.5G + 512M.
-        "31G",
+        // 2 × 9G + 4 × 3.25G + 512M.
+        "31.5G",
     ] {
         assert!(editor.body.contains(expected), "editor lacks {expected:?}");
     }

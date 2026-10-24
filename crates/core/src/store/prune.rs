@@ -66,6 +66,13 @@ pub(super) fn run(db: &Db<'_>, now: u64, history: &History) {
             [before(history.events)],
         ),
     );
+    logged(
+        "prune host holds",
+        db.execute(
+            "DELETE FROM host_holds WHERE ended_at < ?1",
+            [before(history.jobs)],
+        ),
+    );
     logged("prune jobs", jobs(db, before(history.jobs)));
 }
 

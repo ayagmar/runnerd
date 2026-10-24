@@ -41,6 +41,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0010_auto_sizing_cpus.sql"),
     include_str!("store/migrations/0011_notify.sql"),
     include_str!("store/migrations/0012_build_cache.sql"),
+    include_str!("store/migrations/0013_host_memory.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -206,6 +207,10 @@ enum Write {
         admission: api::Admission,
     },
     RunnerOomKilled(String),
+    HostHold {
+        started_at: u64,
+        ended_at: Option<u64>,
+    },
     BuildCache {
         runner: String,
         counts: api::BuildCacheCounts,
@@ -339,6 +344,8 @@ pub struct Store {
     held: Arc<Mutex<Vec<api::HostSample>>>,
     /// The last host sample sent, for admission to read without a query.
     latest_host: Arc<Mutex<Option<api::HostSample>>>,
+    /// The last reading of the host's memory, which is not stored.
+    latest_host_memory: Arc<Mutex<Option<api::HostMemory>>>,
     /// Each running runner's last sample, for admission to read without a query.
     latest_samples: Arc<Mutex<BTreeMap<String, SampleRecord>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
@@ -364,6 +371,12 @@ impl Store {
         let mut db = Connection::open(path)?;
         configure(&db)?;
         migrate(&mut db)?;
+        // A hold the last daemon did not see end ended by its last host sample, which came at most a minute late.
+        db.execute(
+            "UPDATE host_holds SET ended_at = max(started_at, coalesce((SELECT max(at) FROM host_samples), 0)) \
+             WHERE ended_at IS NULL",
+            [],
+        )?;
         let reader = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -386,6 +399,7 @@ impl Store {
             closed: Arc::new(AtomicBool::new(false)),
             held,
             latest_host: Arc::new(Mutex::new(None)),
+            latest_host_memory: Arc::new(Mutex::new(None)),
             latest_samples: Arc::new(Mutex::new(BTreeMap::new())),
             events,
             backlog: Arc::new(Semaphore::new(
@@ -537,6 +551,33 @@ impl Store {
         self.send(Write::BuildCache {
             runner: runner.to_owned(),
             counts,
+        });
+    }
+
+    /// Keeps the latest reading of the host's memory for admission and the status; it is not stored.
+    pub fn host_memory(&self, memory: api::HostMemory) {
+        *lock(&self.latest_host_memory) = Some(memory);
+    }
+
+    /// The latest reading of the host's memory; `None` before the first.
+    pub fn latest_host_memory(&self) -> Option<api::HostMemory> {
+        *lock(&self.latest_host_memory)
+    }
+
+    /// Records that admission began holding runners back for the host's memory at `at` (ms), which sizing does not
+    /// read as waits for a slot.
+    pub fn host_hold_started(&self, at: u64) {
+        self.send(Write::HostHold {
+            started_at: at,
+            ended_at: None,
+        });
+    }
+
+    /// Records that the hold that began at `started_at` (ms) ended at `ended_at`.
+    pub fn host_hold_ended(&self, started_at: u64, ended_at: u64) {
+        self.send(Write::HostHold {
+            started_at,
+            ended_at: Some(ended_at),
         });
     }
 
@@ -909,6 +950,9 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
         7 => "NULL AS ooms, NULL AS memory_measure",
         _ => "",
     };
+    if found < 13 {
+        db.execute_batch("CREATE TEMP TABLE host_holds (started_at INTEGER, ended_at INTEGER)")?;
+    }
     if !added.is_empty() {
         db.execute_batch(&format!(
             "CREATE TEMP VIEW runners AS SELECT *, {added} FROM main.runners"

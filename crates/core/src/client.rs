@@ -676,6 +676,7 @@ mod tests {
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
                     slice_cpus: None,
+                    host: None,
                     cpu: None,
                 },
             },

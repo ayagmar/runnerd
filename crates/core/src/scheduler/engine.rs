@@ -325,7 +325,7 @@ pub struct Engine<G = Github, D = Docker> {
     last_prune: Option<SystemTime>,
     /// The records of failed jobs and the shells open in them.
     records: records::RecordState,
-    /// Under measured admission, the predictor and the high-water mark.
+    /// The predictor and the high-water mark of measured admission, and what admission saw of the host.
     measured: admission::Measured,
     /// What warm runners learned from the history, and the workflow runs seen lately.
     warm: warm::Warm,

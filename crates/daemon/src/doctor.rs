@@ -5,9 +5,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use runnerd_core::api::{Advice, Check, CheckStatus as Status, Sizing};
+use runnerd_core::admission::host;
+use runnerd_core::api::{self, Advice, Check, CheckStatus as Status, PAGE_CACHE_ROOM, Sizing};
 use runnerd_core::config::{self, Admission, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
+use runnerd_core::observe::metrics::{self, Paths};
 use runnerd_core::record;
 use runnerd_core::sizing::{Window, advise};
 use runnerd_core::store;
@@ -33,6 +35,8 @@ pub(crate) struct Host {
     /// Whether systemd has `sysbox.service`, which Sysbox's packages install and a source build does not.
     pub sysbox_unit: bool,
     pub kvm: bool,
+    /// The host's memory and how long its tasks stalled for it; `None` when `/proc/meminfo` does not say.
+    pub memory: Option<api::HostMemory>,
 }
 
 /// The daemons sysbox-runc needs; `sysbox.service` starts both, a source build's `scr/sysbox` too.
@@ -112,6 +116,13 @@ impl Host {
                     output.status.success() && output.stdout.trim_ascii() == b"loaded"
                 }),
             kvm: Path::new("/dev/kvm").exists(),
+            memory: {
+                let paths = Paths::default();
+                let slice = config
+                    .and_then(|config| metrics::read_usage(&paths.slice(&config.host.slice)).ok())
+                    .map_or(0, |usage| usage.memory);
+                metrics::read_host_memory(&paths, slice, 0)
+            },
         }
     }
 }
@@ -439,6 +450,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     checks.extend(slice_checks(host, config));
+    checks.push(memory_check(host.memory.as_ref()));
     checks.extend(image_checks(host, config, docker));
     if let (Some(config), Some(records)) = (config, &host.records) {
         checks.push(records_check(records, config));
@@ -735,6 +747,51 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
 }
 
 /// Warns when a profile's jobs need more than its cap or than the slice holds; says which caps could be lowered.
+/// Whether the host has memory to spare beside its other programs, which runnerd starts runners only within.
+fn memory_check(memory: Option<&api::HostMemory>) -> Check {
+    let Some(memory) = memory else {
+        return skip("host memory", "/proc/meminfo has no MemAvailable");
+    };
+    let stalled = |pressure: Option<api::Pressure>| {
+        pressure.map_or_else(
+            || "unknown: the kernel has no pressure stall information".to_owned(),
+            |pressure| {
+                format!(
+                    "{} of the last 10 s, {} of the last minute",
+                    api::percent(pressure.avg10),
+                    api::percent(pressure.avg60)
+                )
+            },
+        )
+    };
+    let margin = host::margin(memory.total, false);
+    let detail = format!(
+        "{} of {} available; every task waited for memory {}",
+        ByteSize(memory.available),
+        ByteSize(memory.total),
+        stalled(memory.full)
+    );
+    let short = memory.available < margin;
+    let stalling = memory
+        .full
+        .is_some_and(|full| full.avg10 >= host::STALL_ENTER);
+    if !short && !stalling {
+        return pass("host memory", detail);
+    }
+    Check {
+        name: "host memory".to_owned(),
+        status: Status::Warn,
+        detail: format!(
+            "{detail}: the host is short of memory, so runnerd starts no runner until it has {} free again",
+            ByteSize(margin)
+        ),
+        fix: Some(
+            "close what uses the host's memory beside the runners; runnerd waits for it by itself"
+                .to_owned(),
+        ),
+    }
+}
+
 fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
     let sizing = match sizing {
         Ok(sizing) => sizing,
@@ -766,8 +823,9 @@ fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
             )
         } else {
             format!(
-                "every profile's memory fits its jobs' largest peak + {}%",
-                sizing.margin
+                "every profile's memory fits its jobs' largest peak + {}%, at least {} for page cache",
+                sizing.margin,
+                ByteSize(PAGE_CACHE_ROOM)
             )
         }
     } else {

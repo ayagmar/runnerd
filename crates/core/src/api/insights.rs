@@ -1,6 +1,6 @@
-//! Insights as clients read them: what got slower, what is flaky, what nears its memory cap and how long jobs wait,
-//! computed from the job history (ADR 0051); the daily digest; and what the daemon's notifications carry. Times are
-//! seconds since the Unix epoch, durations seconds, sizes bytes.
+//! Insights as clients read them: what got slower, what is flaky, what nears its memory cap, what memory pressure
+//! throttled and how long jobs wait, computed from the job history (ADR 0051); the daily digest; and what the
+//! daemon's notifications carry. Times are seconds since the Unix epoch, durations seconds, sizes bytes.
 
 use serde::{Deserialize, Serialize};
 
@@ -107,6 +107,14 @@ pub enum InsightKind {
         hits: u64,
         /// Lookups over those runs.
         lookups: u64,
+    },
+    /// The kernel throttled a repository's jobs' downloads for memory pressure (`JobMetrics::sock_throttled`):
+    /// the host, or a job at its cap, was short of memory.
+    Throttled {
+        /// Runs it throttled.
+        throttled: u32,
+        /// The repository's runs in the window.
+        total: u32,
     },
     /// A repository's jobs wait longer this week than the week before.
     Waits {

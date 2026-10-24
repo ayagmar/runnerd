@@ -807,6 +807,7 @@ fn insight_title(insight: &Insight) -> String {
         runnerd_core::api::InsightKind::Flaky { .. } => "is flaky",
         runnerd_core::api::InsightKind::NearCap { .. } => "nears its memory cap",
         runnerd_core::api::InsightKind::ColdCache { .. } => "misses the build cache",
+        runnerd_core::api::InsightKind::Throttled { .. } => "was slowed by memory pressure",
         runnerd_core::api::InsightKind::Waits { .. } => "waits longer",
     };
     format!("{subject} {what}")

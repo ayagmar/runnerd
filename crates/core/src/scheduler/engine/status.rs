@@ -106,6 +106,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 crate::config::Admission::Measured => api::AdmissionPolicy::Measured,
             },
             held: self.measured.high_water,
+            host: self.host_budget(),
             mirror_memory: self.mirror_memory_in_use(),
             seed_memory: self
                 .reseed_memory

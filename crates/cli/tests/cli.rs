@@ -64,6 +64,7 @@ fn status() -> Status {
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
             slice_cpus: None,
+            host: None,
             cpu: Some(runnerd_core::api::CpuBudget {
                 cpus: 32_000,
                 budget: 32_000,
@@ -300,7 +301,7 @@ async fn replace_config(
     })
 }
 
-/// `node`'s 100 builds peak at 2.1G: 2.5G with the margin, 5 of them in the 14G its 2 slots take. Auto sizing,
+/// `node`'s 100 builds peak at 2.15G: 3.25G with 1G of page cache room, 4 of them in the 14G its 2 slots take. Auto sizing,
 /// since turned off, lowered it from 9G.
 async fn get_sizing() -> axum::Json<Sizing> {
     let spread = |p50, p95, p99, max| Spread { p50, p95, p99, max };
@@ -311,8 +312,8 @@ async fn get_sizing() -> axum::Json<Sizing> {
         cpu: spread(3000, 6000, 7500, 8000),
     };
     let advice = Advice::Lower {
-        memory: 2560 << 20,
-        slots: 5,
+        memory: 3328 << 20,
+        slots: 4,
     };
     axum::Json(Sizing {
         auto_plan: None,
@@ -1110,7 +1111,7 @@ fn sizing_shows_the_advice_and_applies_it_only_when_told_to() {
     );
     assert!(
         text.contains(
-            "lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G"
+            "lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G"
         ),
         "{text}"
     );
@@ -1129,7 +1130,7 @@ fn sizing_shows_the_advice_and_applies_it_only_when_told_to() {
     let applied = runnerctl(&socket, &["sizing", "apply", "node", "--yes"]);
     assert!(applied.status.success(), "{}", stderr(&applied));
     assert!(
-        stdout(&applied).contains("node: memory 2.5G, 5 slots written"),
+        stdout(&applied).contains("node: memory 3.25G, 4 slots written"),
         "{}",
         stdout(&applied)
     );
@@ -1137,8 +1138,8 @@ fn sizing_shows_the_advice_and_applies_it_only_when_told_to() {
     assert_eq!(
         replaced,
         [CONFIG
-            .replace("memory = \"7G\"", "memory = \"2.5G\"")
-            .replace("slots = 2", "slots = 5")]
+            .replace("memory = \"7G\"", "memory = \"3.25G\"")
+            .replace("slots = 2", "slots = 4")]
     );
 }
 

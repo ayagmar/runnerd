@@ -204,8 +204,14 @@ pub struct Spread {
     pub max: u64,
 }
 
-/// What to set a profile's `memory` and `slots` to. `memory` is the largest sampled peak plus the margin, rounded
-/// up to 256M: the cap kills a job that goes over it, so it is sized for the heaviest run, not a percentile.
+/// What a cap keeps at least over the largest peak, for page cache: 1G. Peaks leave page cache out, and a container
+/// whose memory past them leaves the kernel less than about 500M of page cache to reclaim at its cap reclaims badly,
+/// which throttles its sockets and slows its downloads (ADR 0055).
+pub const PAGE_CACHE_ROOM: u64 = 1 << 30;
+
+/// What to set a profile's `memory` and `slots` to. `memory` is the largest sampled peak plus the margin, or plus
+/// `PAGE_CACHE_ROOM` when that is more, rounded up to 256M: the cap kills a job that goes over it, so it is sized for
+/// the heaviest run, not a percentile.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case", tag = "kind")]
 pub enum Advice {
@@ -369,7 +375,14 @@ impl Sizing {
     pub(crate) fn memory_line(&self, profile: &ProfileSizing) -> String {
         let size = |bytes: u64| ByteSize(bytes).to_string();
         let peaks = &profile.peaks;
-        let need = format!("its largest peak + {}%", self.margin);
+        let need = if peaks.memory.max * u64::from(self.margin) / 100 >= PAGE_CACHE_ROOM {
+            format!("its largest peak + {}%", self.margin)
+        } else {
+            format!(
+                "its largest peak + {} for page cache",
+                size(PAGE_CACHE_ROOM)
+            )
+        };
         let at_cap = format!(
             "{} of {} jobs ran out of memory at their cap",
             peaks.at_cap, peaks.jobs

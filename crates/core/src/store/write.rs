@@ -76,6 +76,10 @@ impl Writer<'_> {
             Write::RunnerStarted(runner) => self.runner_started(&runner),
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
             Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
+            Write::HostHold {
+                started_at,
+                ended_at,
+            } => self.host_hold(started_at, ended_at),
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
@@ -285,6 +289,17 @@ impl Writer<'_> {
             self.db.execute(
                 "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), 1) WHERE name = ?1",
                 [runner],
+            ),
+        );
+    }
+
+    fn host_hold(&self, started_at: u64, ended_at: Option<u64>) {
+        logged(
+            "record a hold for the host's memory",
+            self.db.execute(
+                "INSERT INTO host_holds (started_at, ended_at) VALUES (?1, ?2) \
+                 ON CONFLICT (started_at) DO UPDATE SET ended_at = excluded.ended_at",
+                params![started_at, ended_at],
             ),
         );
     }
@@ -687,6 +702,12 @@ impl Writer<'_> {
                 self.db.execute(
                     "UPDATE runners SET ooms = max(coalesce(ooms, 0), ?2) WHERE name = ?1",
                     params![sample.runner, ooms],
+                )?;
+            }
+            if let Some(throttled) = sample.events.sock_throttled {
+                self.db.execute(
+                    "UPDATE runners SET sock_throttled = max(coalesce(sock_throttled, 0), ?2) WHERE name = ?1",
+                    params![sample.runner, throttled],
                 )?;
             }
             if let Some(kills) = sample.events.oom_kill.filter(|kills| *kills > 0) {

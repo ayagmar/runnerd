@@ -84,6 +84,7 @@ async fn runs_of(
             events: Events {
                 oom: Some(0),
                 oom_kill: Some(if i == count - 1 { oom_kills } else { 0 }),
+                sock_throttled: None,
             },
         }]);
         match ended {
@@ -1062,4 +1063,157 @@ async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
         engine.repositories["o/r"].cpu_wait.is_none(),
         "a job gone from the queue no longer waits"
     );
+}
+
+/// The host's memory read now: 64G with `available` of it, the runners holding none of it yet, and its tasks
+/// stalled `stalled` hundredths of a percent of the last 10 s.
+fn host_at(store: &Store, available: u64, stalled: u32) {
+    store.host_memory(api::HostMemory {
+        at: time::now_ms() / 1000,
+        total: 64 * G,
+        available,
+        slice: 0,
+        some: Some(api::Pressure::default()),
+        full: Some(api::Pressure {
+            avg10: stalled,
+            avg60: 0,
+        }),
+    });
+}
+
+/// The host's holds in the history: when each began, and whether it ended.
+fn host_holds(dir: &TestDir) -> Vec<bool> {
+    let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    let mut statement = db
+        .prepare("SELECT ended_at IS NOT NULL FROM host_holds ORDER BY started_at")
+        .unwrap();
+    statement
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap()
+}
+
+/// What each queued job waits for, oldest first.
+fn waits(handle: &Handle) -> Vec<Option<api::Waiting>> {
+    handle
+        .status
+        .borrow()
+        .queued
+        .iter()
+        .map(|job| job.waiting.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_again() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 0);
+    // A 64G host keeps 4G free; past that it has room for two runners of 1.25G, which the slice would hold four of.
+    host_at(&handle.store, 4 * G + 2 * 1280 * M + 100 * M, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    engine.publish();
+    // Once short, the host keeps twice the margin free: nothing is to spare until it has 8G.
+    let short = Some(api::Waiting::HostMemory {
+        needs: 1280 * M,
+        free: 0,
+    });
+    assert_eq!(
+        waits(&handle)[2..],
+        [short.clone(), short],
+        "the two left wait for the host's memory"
+    );
+    let reason = {
+        let status = handle.status.borrow();
+        let job = &status.queued[2];
+        job.waiting.as_ref().unwrap().reason(job, &status, 0)
+    };
+    assert!(
+        reason.starts_with("The host is short of memory"),
+        "{reason}"
+    );
+    handle.store.flush().await;
+    assert_eq!(host_holds(&dir), [false], "a hold began and lasts");
+
+    // Room for both again by the 4G margin alone: at the edge, so they wait until the host has the margin twice.
+    host_at(&handle.store, 4 * G + 4 * 1280 * M + 100 * M, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2, "no start at the edge");
+    host_at(&handle.store, 8 * G + 4 * 1280 * M + 100 * M, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4);
+    handle.store.flush().await;
+    assert_eq!(host_holds(&dir), [true], "the hold ended once none waited");
+    assert!(removed(&docker.calls()).is_empty(), "no runner was stopped");
+}
+
+#[tokio::test]
+async fn nothing_starts_while_the_hosts_tasks_stall_for_memory_and_running_runners_stay() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 0);
+    github.0.lock().unwrap().queued = vec![job(1)];
+    host_at(&handle.store, 40 * G, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+
+    github.0.lock().unwrap().queued = (2..=4).map(job).collect();
+    // Every runnable task waited for memory 6% of the last 10 s, with memory to spare by MemAvailable.
+    host_at(&handle.store, 40 * G, 600);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1, "nothing starts");
+    engine.publish();
+    {
+        let status = handle.status.borrow();
+        assert!(
+            status.budget.host.is_some_and(|host| host.stalled),
+            "the budget says the host stalls"
+        );
+        let job = status.queued.last().unwrap();
+        let reason = job.waiting.as_ref().unwrap().reason(job, &status, 0);
+        assert!(reason.contains("stall"), "{reason}");
+    }
+    // 3%: under where starts stop, over where they resume.
+    host_at(&handle.store, 40 * G, 300);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1, "still held at 3%");
+    host_at(&handle.store, 40 * G, 50);
+    engine.tick(Shutdown::No).await;
+    // Job 1's runner waits for a job too, so two more start for the three.
+    assert_eq!(registered(&github.calls()).len(), 3, "resumed under 1%");
+    assert!(
+        removed(&docker.calls()).is_empty(),
+        "the stall stopped no runner"
+    );
+}
+
+#[tokio::test]
+async fn without_a_recent_reading_of_the_host_only_the_slice_bounds_starts() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 0);
+    handle.store.host_memory(api::HostMemory {
+        at: time::now_ms() / 1000 - 60,
+        total: 64 * G,
+        available: 0,
+        slice: 0,
+        some: None,
+        full: None,
+    });
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4);
 }

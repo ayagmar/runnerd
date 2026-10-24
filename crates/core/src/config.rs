@@ -413,7 +413,7 @@ impl Default for Records {
 #[serde(deny_unknown_fields, default)]
 pub struct Sizing {
     /// The percent added to the largest sampled memory peak: a container is sampled every 2 s, so a spike between
-    /// two samples goes unseen. Default 15.
+    /// two samples goes unseen. Default 15. Advice adds at least `api::PAGE_CACHE_ROOM`.
     pub margin: u32,
     /// The fewest jobs a profile, or a job of a repository's workflow, needs before its peaks become advice.
     /// Default 10.

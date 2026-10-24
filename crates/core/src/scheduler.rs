@@ -169,8 +169,10 @@ pub struct Budget {
     pub memory: Option<u64>,
     /// The CPU left, in millicores; `None` for no budget.
     pub cpu: Option<u64>,
-    /// Measured admission holds the slice at its high-water mark: nothing starts, so no warm runner stops to make
-    /// room.
+    /// The memory the host has to spare for new runners beside other programs (ADR 0055); `None` when not known.
+    pub host: Option<u64>,
+    /// Nothing starts, so no warm runner stops to make room: measured admission holds the slice at its high-water
+    /// mark, or the host's tasks stall for memory.
     pub held: bool,
 }
 
@@ -188,7 +190,8 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 ///
 /// Each repository gets a runner per matching queued job, less its runners still waiting for a job. Jobs are
 /// served oldest first across repositories, each in the lowest free slot of its repository's profile, while what
-/// the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `budget.memory` and its CPU
+/// the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `budget.memory` and
+/// `budget.host`, and its CPU
 /// (`Repository::runner_cpu`, by default the slot's `cpus`) fits `budget.cpu` (`None`: no budget). A job that does
 /// not fit takes the room of warm runners of other repositories, which stop. A repository whose job had a slot and
 /// memory but not CPU is held once (`Decision::HeldForCpu`). An idle runner stops once no queued job is left for it,
@@ -216,11 +219,12 @@ pub fn plan(
 
     let mut warm = Warm::new(&decided.warm, profiles, budget.held);
     let mut taken = taken_slots(profiles);
-    let mut started = Started::new(&taken, budget.memory, budget.cpu);
     let mut left = Left {
         memory: budget.memory,
         cpu: budget.cpu,
+        host: budget.host,
     };
+    let mut started = Started::new(&taken, left);
     // The job that waited long enough for CPU that no younger one takes CPU before it.
     let mut first_for_cpu = None;
     for (job, repository) in jobs {
@@ -342,8 +346,8 @@ fn why_waits(
         };
         return (reason, Short::Slot);
     }
-    match (left.memory, left.cpu) {
-        (Some(free), _) if free < memory => (
+    match (left.memory, left.host, left.cpu) {
+        (Some(free), _, _) if free < memory => (
             started.for_memory(
                 memory,
                 Waiting::Memory {
@@ -353,12 +357,22 @@ fn why_waits(
             ),
             Short::Memory,
         ),
-        (_, Some(free)) => (
+        (_, Some(free), _) if free < memory => (
+            started.for_host(
+                memory,
+                Waiting::HostMemory {
+                    needs: memory,
+                    free,
+                },
+            ),
+            Short::Memory,
+        ),
+        (_, _, Some(free)) => (
             started.for_cpu(cpu, Waiting::Cpu { needs: cpu, free }),
             Short::Cpu,
         ),
         // `fits` said otherwise.
-        (_, None) => (
+        (_, _, None) => (
             Waiting::NoSlot {
                 profile: profile_name(),
             },
@@ -404,6 +418,7 @@ fn start_warm(
             reason,
             Waiting::NoSlot { .. }
                 | Waiting::Memory { .. }
+                | Waiting::HostMemory { .. }
                 | Waiting::Cpu { .. }
                 | Waiting::BehindCpu { .. }
                 | Waiting::BehindStart { .. }
@@ -452,33 +467,42 @@ fn start_warm(
     }
 }
 
-/// The memory and CPU budgets a plan has left; `None`, no budget.
+/// The memory, CPU and host budgets a plan has left; `None`, no budget.
 #[derive(Debug, Clone, Copy)]
 struct Left {
     memory: Option<u64>,
     cpu: Option<u64>,
+    /// The host's memory to spare, which a runner's memory takes from as it does from `memory`.
+    host: Option<u64>,
 }
 
 impl Left {
     fn fits(self, memory: u64, cpu: u64) -> bool {
-        self.memory.is_none_or(|free| free >= memory) && self.cpu.is_none_or(|free| free >= cpu)
+        self.memory.is_none_or(|free| free >= memory)
+            && self.host.is_none_or(|free| free >= memory)
+            && self.cpu.is_none_or(|free| free >= cpu)
     }
 
-    /// What a runner of `memory` and `cpu` lacks: none where there is no budget.
+    /// What a runner of `memory` and `cpu` lacks, the host's memory counted with the slice's: none where there is
+    /// no budget.
     fn short(self, memory: u64, cpu: u64) -> Left {
+        let lacks = |free: Option<u64>| free.map(|free| memory.saturating_sub(free));
         Left {
-            memory: self.memory.map(|free| memory.saturating_sub(free)),
+            memory: lacks(self.memory).max(lacks(self.host)),
             cpu: self.cpu.map(|free| cpu.saturating_sub(free)),
+            host: None,
         }
     }
 
     fn take(&mut self, memory: u64, cpu: u64) {
         self.memory = self.memory.map(|free| free.saturating_sub(memory));
+        self.host = self.host.map(|free| free.saturating_sub(memory));
         self.cpu = self.cpu.map(|free| free.saturating_sub(cpu));
     }
 
     fn give(&mut self, memory: u64, cpu: u64) {
         self.memory = self.memory.map(|free| free + memory);
+        self.host = self.host.map(|free| free + memory);
         self.cpu = self.cpu.map(|free| free + cpu);
     }
 }
@@ -686,28 +710,22 @@ impl<'plan> Warm<'plan> {
 struct Started<'plan> {
     /// The profiles with a free slot before the plan's starts.
     free_slots: BTreeSet<&'plan str>,
-    /// The memory and CPU budgets left before them.
-    memory: Option<u64>,
-    cpu: Option<u64>,
+    /// The budgets left before them.
+    before: Left,
     /// The first job each profile, and any profile, starts a runner for.
     by_profile: BTreeMap<&'plan str, u64>,
     first: Option<u64>,
 }
 
 impl<'plan> Started<'plan> {
-    fn new(
-        taken: &BTreeMap<&'plan str, Vec<bool>>,
-        memory: Option<u64>,
-        cpu: Option<u64>,
-    ) -> Started<'plan> {
+    fn new(taken: &BTreeMap<&'plan str, Vec<bool>>, before: Left) -> Started<'plan> {
         Started {
             free_slots: taken
                 .iter()
                 .filter(|(_, slots)| slots.contains(&false))
                 .map(|(name, _)| *name)
                 .collect(),
-            memory,
-            cpu,
+            before,
             by_profile: BTreeMap::new(),
             first: None,
         }
@@ -731,12 +749,17 @@ impl<'plan> Started<'plan> {
 
     /// `reason` for a job whose `needs` of memory do not fit, unless they did before this plan's starts.
     fn for_memory(&self, needs: u64, reason: Waiting) -> Waiting {
-        Self::behind(self.first, self.memory, needs).unwrap_or(reason)
+        Self::behind(self.first, self.before.memory, needs).unwrap_or(reason)
+    }
+
+    /// `reason` for a job whose `needs` of memory the host cannot spare, unless it could before this plan's starts.
+    fn for_host(&self, needs: u64, reason: Waiting) -> Waiting {
+        Self::behind(self.first, self.before.host, needs).unwrap_or(reason)
     }
 
     /// `reason` for a job whose `needs` of CPU do not fit, unless they did before this plan's starts.
     fn for_cpu(&self, needs: u64, reason: Waiting) -> Waiting {
-        Self::behind(self.first, self.cpu, needs).unwrap_or(reason)
+        Self::behind(self.first, self.before.cpu, needs).unwrap_or(reason)
     }
 
     fn behind(first: Option<u64>, free: Option<u64>, needs: u64) -> Option<Waiting> {

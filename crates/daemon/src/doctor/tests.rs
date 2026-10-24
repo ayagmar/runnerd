@@ -4,7 +4,7 @@ use std::collections::BTreeMap;
 use std::io::Write as _;
 use std::process::{Command, Stdio};
 
-use runnerd_core::api::Sizing;
+use runnerd_core::api::{self, Sizing};
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::sizing;
 
@@ -82,6 +82,14 @@ fn ready_host(os_release: &str) -> Host {
         sysbox_daemons: daemons(|_| DaemonState::Unit),
         sysbox_unit: true,
         kvm: true,
+        memory: Some(api::HostMemory {
+            at: 0,
+            total: 64 << 30,
+            available: 30 << 30,
+            slice: 0,
+            some: Some(api::Pressure::default()),
+            full: Some(api::Pressure::default()),
+        }),
     }
 }
 
@@ -115,12 +123,37 @@ fn a_ready_host_passes_every_check() {
             "sysbox",
             "slice",
             "config",
+            "host memory",
             "image",
             "image",
             "records",
             "gh",
             "/dev/kvm"
         ]
+    );
+}
+
+#[test]
+fn a_host_whose_tasks_stall_for_memory_warns_that_runners_wait() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.memory = host.memory.map(|memory| api::HostMemory {
+        full: Some(api::Pressure {
+            avg10: 1250,
+            avg60: 300,
+        }),
+        ..memory
+    });
+    let checks = checks(&host, Some(&config));
+    let memory = checks
+        .iter()
+        .find(|check| check.name == "host memory")
+        .unwrap();
+    assert_eq!(memory.status, Status::Warn, "{memory}");
+    assert!(
+        memory.detail.contains("12.5% of the last 10 s")
+            && memory.detail.contains("starts no runner"),
+        "{memory}"
     );
 }
 
@@ -582,6 +615,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             finished_at: Some(1_000_000 + i + 720_000),
             oom_killed: false,
             reserved: None,
+            host_held: 0,
             hit_cap: Some(false),
             measure: sizing::Measure::WithoutPageCache,
             succeeded: true,
@@ -618,10 +652,7 @@ fn jobs_at_their_cap_warn_and_name_the_command_that_raises_it() {
     let check = sizing_check(sizing_of(jobs));
     assert_eq!(check.status, Status::Warn, "{check}");
     assert!(check.detail.contains("jvm: raise memory to"), "{check}");
-    assert!(
-        check.detail.contains("node: lower memory to 2.5G"),
-        "{check}"
-    );
+    assert!(check.detail.contains("node: lower memory to 3G"), "{check}");
     assert_eq!(
         check.fix.as_deref(),
         Some("runnerctl sizing apply jvm\nrunnerctl sizing apply node")
