@@ -136,7 +136,7 @@ impl Dashboard {
         let reply = self.request("GET", path, &[]).await;
         assert_eq!(reply.status, StatusCode::SEE_OTHER);
         let cookie = reply.headers[header::SET_COOKIE].to_str().unwrap();
-        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"));
         cookie.split(';').next().unwrap().to_owned()
     }
 
@@ -320,6 +320,37 @@ async fn a_write_from_another_origin_is_403_even_with_the_cookie() {
 }
 
 #[tokio::test]
+async fn a_link_from_another_site_opens_the_page_signed_in_and_a_write_from_it_is_still_refused() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    // Following a link on GitHub: the browser sends a `SameSite=Lax` cookie on a top-level GET.
+    let navigation = [
+        ("cookie", cookie.as_str()),
+        ("sec-fetch-site", "cross-site"),
+        ("sec-fetch-mode", "navigate"),
+    ];
+    let page = dashboard
+        .request("GET", "/jobs/120055991700", &navigation)
+        .await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(!page.body.contains("Sign in to runnerd"), "{}", page.body);
+    // A form on that site posting to the dashboard, cookie and all: its `Origin` is not the dashboard's.
+    let write = [
+        ("cookie", cookie.as_str()),
+        ("origin", "https://github.com"),
+        ("sec-fetch-site", "cross-site"),
+    ];
+    let reply = dashboard
+        .request("POST", "/v1/repositories/halyard/ledger/pause", &write)
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert!(
+        !dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused,
+        "halyard/ledger stays running"
+    );
+}
+
+#[tokio::test]
 async fn a_write_through_a_configured_proxy_reaches_the_daemon_and_others_stay_403() {
     let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
     let cookie = dashboard.sign_in().await;
@@ -389,7 +420,7 @@ async fn a_login_through_an_https_proxy_sets_a_secure_cookie_and_a_loopback_one_
     }
     assert!(!cookies[0].contains("Secure"), "{}", cookies[0]);
     assert!(
-        cookies[1].ends_with("; Secure") && cookies[1].contains("SameSite=Strict"),
+        cookies[1].ends_with("; Secure") && cookies[1].contains("SameSite=Lax"),
         "{}",
         cookies[1]
     );

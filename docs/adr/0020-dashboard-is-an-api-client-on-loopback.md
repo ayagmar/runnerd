@@ -16,7 +16,7 @@ become a second copy of the API's logic or a way around its owner check.
 `crates/web` is a client: it renders pages from `runnerd_core::api` types it reads over the daemon's socket, and
 passes writes on to the same API. The daemon runs it in its own process on `127.0.0.1:7477` (`serve --web`); it
 refuses non-loopback addresses. Every request but the login and the static assets needs a session cookie (random per
-daemon run, `HttpOnly`, `SameSite=Strict`), and every write also needs an `Origin` of the dashboard itself. A browser
+daemon run, `HttpOnly`, `SameSite=Lax` since the amendment below), and every write also needs an `Origin` of the dashboard itself. A browser
 gets the cookie from a one-time login URL that the daemon writes to `runnerd.web` next to its socket, mode 0600, and
 replaces after each use; `runnerctl web` reads that file. The pages load only what the binary serves, under a
 Content-Security-Policy that allows nothing else.
@@ -28,3 +28,9 @@ the daemon's user, so the session check is what stands between other local users
 scoped by port: a page another local user serves on `127.0.0.1` and the owner opens would receive the cookie. The
 token lasts one daemon run, which bounds that. Rejected: an API route that hands out the URL (it would add an API
 type for one client), a token in the URL of every page (it leaks into history and logs).
+
+- Amended (2026-10-24): the cookie is `SameSite=Lax`, not `Strict`. `Strict` left it off top-level navigations from
+  other sites, so a link from GitHub, a notification or the browser's history showed the sign-in page while the
+  same page reached from inside the dashboard worked. Lax sends it on those navigations (GET) only; every handler
+  that changes state is a POST, PUT or DELETE and needs the dashboard's own `Origin`, and no GET changes state
+  besides `/login` redeeming its one-time code, which is the credential itself.

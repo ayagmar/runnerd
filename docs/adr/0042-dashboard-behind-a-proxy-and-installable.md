@@ -25,7 +25,7 @@ The dashboard still listens on loopback only; a proxy in front of it is the owne
   `runnerctl web --base <origin>` swaps it for a proxy's. Cookies are scoped by host, so a browser on the proxy's
   address gets its own session.
 - A login through a proxy that sends `X-Forwarded-Proto: https` (`tailscale serve` does) gets a `Secure` cookie. The
-  header only adds that attribute, so a forged one gains nothing. `SameSite=Strict` and `HttpOnly` stay.
+  header only adds that attribute, so a forged one gains nothing. `SameSite` (`Lax` since 0020's amendment) and `HttpOnly` stay.
 - Every page links a web app manifest (`/assets/manifest.webmanifest`): name, `start_url` and `id` `/`,
   `display: standalone`, theme and background colour the mark's `#0a0a0a`, PNG icons of 192 and 512 px rendered
   from the mark, and a 512 px maskable one with the bars inside the safe zone. It and its icons are assets, served

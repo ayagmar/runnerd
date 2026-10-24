@@ -26,7 +26,7 @@ runnerctl web --sign-out-all
 
 Pages update as things happen, over one server-sent event stream per page. Memory and CPU are sampled every 2 s, so a shorter peak does not show; the dashboard calls them sampled peaks.
 
-Any local user can reach the port, so every page needs the session cookie a login link sets, and writes such as a pause also need the dashboard's own `Origin`, so another site the browser has open cannot send them. The pages load nothing from elsewhere: the Datastar script and the font are in the binary.
+Any local user can reach the port, so every page needs the session cookie a login link sets, and writes such as a pause also need the dashboard's own `Origin`, so another site the browser has open cannot send them. A link to a page from elsewhere, such as GitHub, a notification or the browser's history, opens it signed in. The pages load nothing from elsewhere: the Datastar script and the font are in the binary.
 
 ### From another device
 
