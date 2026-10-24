@@ -3126,6 +3126,23 @@ async fn a_job_whose_runner_failed_to_start_waits_for_the_backoff_not_for_that_r
 }
 
 #[tokio::test]
+async fn a_job_github_still_lists_after_a_runner_took_it_is_not_counted_queued() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_runner(&github, &docker, "@@job 1 1\n");
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let status = handle.status.borrow();
+    assert_eq!(
+        (status.queued.len(), status.repositories[0].queued_jobs),
+        (0, 0)
+    );
+}
+
+#[tokio::test]
 async fn a_job_held_by_a_backoff_says_what_failed() {
     let reason = |github: &FakeGithub, docker: &FakeDocker| {
         let (github, docker) = (github.clone(), docker.clone());

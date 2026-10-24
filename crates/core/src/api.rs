@@ -320,7 +320,7 @@ pub struct RepositoryStatus {
     pub labels: Vec<String>,
     /// Paused repositories get no new runners; their running jobs finish.
     pub paused: bool,
-    /// Queued jobs whose labels these runners match, at the last poll.
+    /// Its jobs in `Status::queued`: queued ones its runners match and none of them took yet.
     pub queued_jobs: usize,
 }
 
