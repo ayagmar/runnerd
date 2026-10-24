@@ -11,7 +11,7 @@ use super::Engine;
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
 use crate::scheduler::matches;
-use crate::scheduler::warm::{self, Learned, Runs};
+use crate::scheduler::warm::{self, Attempt, Learned, Runs};
 use crate::time;
 
 /// How often the history is read again.
@@ -51,11 +51,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.warm.runs.expire(now);
     }
 
-    /// Notes a job of `repository` queued or taken at `at` (ms), of run `run_id`, with its workflow when known.
+    /// Notes a job of `repository` queued or taken at `at` (ms), of `attempt`, with its workflow when known.
     pub(super) fn note_job(
         &mut self,
         repository: &str,
-        run_id: u64,
+        attempt: Attempt,
         job: u64,
         workflow: Option<&str>,
         at: u64,
@@ -63,7 +63,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         if let Some((learned, _)) = &mut self.warm.learned {
             learned.note(repository, at);
         }
-        self.warm.runs.note(repository, run_id, job, workflow, at);
+        self.warm.runs.note(repository, attempt, job, workflow, at);
+    }
+
+    /// The latest attempt of run `run_id` seen, or its first: a runner's capture tells only the run.
+    pub(super) fn latest_attempt(&self, run_id: u64) -> Attempt {
+        self.warm.runs.latest(run_id)
     }
 
     /// Notes the workflow of run `run_id`, if it is followed, as a running job's details say.
@@ -92,7 +97,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for (repository, job) in seen {
             self.note_job(
                 &repository,
-                job.run_id,
+                Attempt {
+                    run_id: job.run_id,
+                    run_attempt: job.run_attempt,
+                },
                 job.id,
                 job.workflow.as_deref(),
                 now,

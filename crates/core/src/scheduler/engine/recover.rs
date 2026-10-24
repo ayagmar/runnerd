@@ -15,6 +15,7 @@ use crate::docker::{self, DockerApi, is_not_found};
 use crate::github::GithubApi;
 use crate::record;
 use crate::scheduler::SlotRef;
+use crate::scheduler::warm::Attempt;
 use crate::time;
 
 /// The limits an adopted container runs with.
@@ -187,7 +188,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     if runs {
                         self.note_job(
                             &job.repository,
-                            job.run_id,
+                            Attempt {
+                                run_id: job.run_id,
+                                run_attempt: job.run_attempt,
+                            },
                             job.id,
                             job.workflow.as_deref(),
                             job.queued_at,

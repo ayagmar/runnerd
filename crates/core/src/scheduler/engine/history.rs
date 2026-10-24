@@ -153,7 +153,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // A warm runner takes its job before a listing shows it queued: its run is seen here first. After a
             // restart, `recover` noted it with its jobs' queued times.
             let repository = occupant.repository.clone();
-            self.note_job(&repository, found.run_id, found.job, None, time::now_ms());
+            let attempt = self.latest_attempt(found.run_id);
+            self.note_job(&repository, attempt, found.job, None, time::now_ms());
         }
     }
 

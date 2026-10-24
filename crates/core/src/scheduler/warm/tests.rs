@@ -1,6 +1,6 @@
 //! When a repository is active and how many jobs its runs are expected to queue still.
 
-use super::{Learned, Runs, Seen, target};
+use super::{Attempt, Learned, Runs, Seen, target};
 
 const MINUTE: u64 = 60 * 1000;
 const HOUR: u64 = 60 * MINUTE;
@@ -8,6 +8,14 @@ const DAY: u64 = 24 * HOUR;
 
 /// Some day at midnight UTC, in milliseconds.
 const MIDNIGHT: u64 = 20_000 * DAY;
+
+/// The first attempt of run `run_id`.
+fn first(run_id: u64) -> Attempt {
+    Attempt {
+        run_id,
+        run_attempt: 1,
+    }
+}
 
 fn seen(repository: &str, workflow: &str, run_id: u64, queued_at: u64) -> Seen {
     Seen {
@@ -93,13 +101,13 @@ fn a_run_seen_starting_expects_the_rest_of_its_workflows_jobs() {
         .collect();
     let learned = Learned::new(&history, now);
     let mut runs = Runs::default();
-    runs.note("o/app", 10, 100, Some("CI"), now);
+    runs.note("o/app", first(10), 100, Some("CI"), now);
     assert_eq!(
         runs.remaining("o/app", &learned, now),
         2,
         "two more jobs of the run to come"
     );
-    runs.note("o/app", 10, 101, None, now + MINUTE);
+    runs.note("o/app", first(10), 101, None, now + MINUTE);
     assert_eq!(
         runs.remaining("o/app", &learned, now + MINUTE),
         1,
@@ -126,7 +134,7 @@ fn a_workflow_with_too_few_runs_expects_nothing() {
         .collect();
     let learned = Learned::new(&history, now);
     let mut runs = Runs::default();
-    runs.note("o/app", 10, 100, Some("CI"), now);
+    runs.note("o/app", first(10), 100, Some("CI"), now);
     assert_eq!(
         runs.remaining("o/app", &learned, now),
         0,
@@ -142,13 +150,13 @@ fn a_run_whose_workflow_is_not_known_expects_nothing_until_it_is() {
         .collect();
     let learned = Learned::new(&history, now);
     let mut runs = Runs::default();
-    runs.note("o/app", 10, 100, None, now);
+    runs.note("o/app", first(10), 100, None, now);
     assert_eq!(
         runs.remaining("o/app", &learned, now),
         0,
         "its workflow is not known"
     );
-    runs.note("o/app", 10, 100, Some("CI"), now);
+    runs.note("o/app", first(10), 100, Some("CI"), now);
     assert_eq!(
         runs.remaining("o/app", &learned, now),
         1,
@@ -180,11 +188,41 @@ fn a_run_counts_from_its_first_job_however_late_it_is_seen_again() {
     let learned = Learned::new(&history, now - 2 * MINUTE);
     let mut runs = Runs::default();
     // After a restart: the history's job, queued 30 minutes ago, then its runner's capture now.
-    runs.note("o/app", 10, 100, Some("CI"), now - 30 * MINUTE);
-    runs.note("o/app", 10, 100, None, now);
+    runs.note("o/app", first(10), 100, Some("CI"), now - 30 * MINUTE);
+    runs.note("o/app", first(10), 100, None, now);
     assert_eq!(
         runs.remaining("o/app", &learned, now),
         0,
         "the run stopped counting long ago"
     );
+}
+
+#[test]
+fn a_re_run_of_a_run_that_stopped_counting_expects_its_jobs_again() {
+    let now = MIDNIGHT + 12 * HOUR;
+    let history: Vec<Seen> = (1..=3)
+        .flat_map(|run| {
+            let first = now - run * HOUR;
+            [
+                seen("o/app", "CI", run, first),
+                seen("o/app", "CI", run, first),
+                seen("o/app", "CI", run, first),
+            ]
+        })
+        .collect();
+    let learned = Learned::new(&history, now);
+    let mut runs = Runs::default();
+    runs.note("o/app", first(10), 100, Some("CI"), now - 2 * HOUR);
+    // "Re-run failed jobs": the same run, its second attempt.
+    let again = Attempt {
+        run_id: 10,
+        run_attempt: 2,
+    };
+    runs.note("o/app", again, 200, Some("CI"), now);
+    assert_eq!(
+        runs.remaining("o/app", &learned, now),
+        2,
+        "the re-run's other jobs are expected"
+    );
+    assert_eq!(runs.latest(10), again);
 }

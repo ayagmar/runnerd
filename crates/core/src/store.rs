@@ -163,6 +163,8 @@ pub struct OpenJob {
     pub runner_removed_at: Option<u64>,
     /// The workflow run it belongs to.
     pub run_id: u64,
+    /// 1 for the run's first attempt.
+    pub run_attempt: u32,
     /// The workflow's name, when known.
     pub workflow: Option<String>,
     /// When GitHub queued it, in milliseconds since the epoch.

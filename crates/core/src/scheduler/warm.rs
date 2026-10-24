@@ -168,21 +168,30 @@ struct Run {
     first: u64,
 }
 
-/// The workflow runs seen lately, by run ID: their jobs not queued yet get warm runners.
+/// An attempt of a workflow run: a re-run keeps the run's ID, with the next attempt, and queues its jobs anew.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Attempt {
+    /// The workflow run's ID.
+    pub run_id: u64,
+    /// 1 for the run's first attempt.
+    pub run_attempt: u32,
+}
+
+/// The workflow runs seen lately, by attempt: their jobs not queued yet get warm runners.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Runs(BTreeMap<u64, Run>);
+pub struct Runs(BTreeMap<Attempt, Run>);
 
 impl Runs {
-    /// Notes `job` of run `run_id` in `repository`, queued or taken at `at` (ms), and its workflow when known.
+    /// Notes `job` of `attempt` in `repository`, queued or taken at `at` (ms), and its workflow when known.
     pub fn note(
         &mut self,
         repository: &str,
-        run_id: u64,
+        attempt: Attempt,
         job: u64,
         workflow: Option<&str>,
         at: u64,
     ) {
-        let run = self.0.entry(run_id).or_insert_with(|| Run {
+        let run = self.0.entry(attempt).or_insert_with(|| Run {
             repository: repository.to_owned(),
             workflow: None,
             jobs: BTreeSet::new(),
@@ -195,13 +204,47 @@ impl Runs {
         }
     }
 
-    /// Names the workflow of run `run_id`, if it is followed and its workflow was not known.
+    /// Names the workflow of run `run_id`'s attempts followed whose workflow was not known.
     pub fn name(&mut self, run_id: u64, workflow: &str) {
-        if let Some(run) = self.0.get_mut(&run_id)
-            && run.workflow.is_none()
-        {
-            run.workflow = Some(workflow.to_owned());
+        for (_, run) in self.attempts_mut(run_id) {
+            if run.workflow.is_none() {
+                run.workflow = Some(workflow.to_owned());
+            }
         }
+    }
+
+    /// The latest attempt of run `run_id` followed, or its first.
+    pub fn latest(&self, run_id: u64) -> Attempt {
+        self.0
+            .range(
+                Attempt {
+                    run_id,
+                    run_attempt: 0,
+                }..=Attempt {
+                    run_id,
+                    run_attempt: u32::MAX,
+                },
+            )
+            .next_back()
+            .map_or(
+                Attempt {
+                    run_id,
+                    run_attempt: 1,
+                },
+                |(attempt, _)| *attempt,
+            )
+    }
+
+    fn attempts_mut(&mut self, run_id: u64) -> impl Iterator<Item = (&Attempt, &mut Run)> {
+        self.0.range_mut(
+            Attempt {
+                run_id,
+                run_attempt: 0,
+            }..=Attempt {
+                run_id,
+                run_attempt: u32::MAX,
+            },
+        )
     }
 
     /// Forgets the runs whose first job came `FORGET_AFTER` before `now` (ms). One that stopped counting is kept
