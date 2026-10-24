@@ -636,3 +636,28 @@ fn runner_ids(handle: &Handle, engine: &mut Engine<FakeGithub, FakeDocker>) -> V
         .filter_map(|slot| slot.runner.as_ref().map(|runner| runner.runner_id))
         .collect()
 }
+
+#[tokio::test]
+async fn a_cache_a_warm_runner_mounts_is_cleaned_and_the_runner_comes_back() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+
+    // A warm runner waits all day for an active repository: it gives way to the clean.
+    engine.clean_cache("runnerd-pnpm").await.unwrap();
+    assert!(
+        docker
+            .calls()
+            .contains(&"remove volume runnerd-pnpm".to_owned()),
+        "{:?}",
+        docker.calls()
+    );
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert_eq!(registered(&github.calls()).len(), 2, "a new warm runner");
+}

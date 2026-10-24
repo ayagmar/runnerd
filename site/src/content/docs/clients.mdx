@@ -157,7 +157,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl sizing undo <profile> [--yes]` | writes back the `memory` and `slots` [auto sizing](../admission/#auto-sizing) last replaced, the same way; both refuse to write over a config changed since they read it |
 | `runnerctl insights [--days 30]`, `insights --digest` | one line per [insight](../insights/), then each repository's waits this week against the last; or the last 24 hours |
 | `runnerctl notify test [--target phone]` | sends each `[notify]` target a test message and says what each did; fails unless every one got it |
-| `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
+| `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no job uses, stopping the runners that wait for one |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
 | `runnerctl web` | opens the dashboard with a one-time login link from `$XDG_RUNTIME_DIR/runnerd.web`, on `[web] open` if set, and prints one for each other address (`--local` opens the loopback address, `--base <origin>` a proxy's, `--no-open` prints them all, `--qr` shows a fresh 5-minute link on each origin as a QR code, `--sign-out-all` signs every browser out) |

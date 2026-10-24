@@ -583,6 +583,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         })
     }
 
+    /// The runner in `slot`, if one is.
+    fn occupant(&self, slot: &SlotRef) -> Option<&Occupant> {
+        self.slots
+            .get(&slot.profile)
+            .and_then(|slots| slots.get(slot.index))
+            .and_then(Option::as_ref)
+    }
+
     /// Drops the free slots past each profile's configured number, and the profiles a reload removed once nothing
     /// runs in them.
     fn drop_closed_slots(&mut self) {

@@ -669,8 +669,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         Ok(())
     }
 
-    /// Removes a slot's volume or a shared cache's, unless a runner or a reseed uses it. Snapshots are rebuilt by
-    /// reseeding instead: slot layers sit on top of them.
+    /// Removes a slot's volume or a shared cache's, unless a job or a reseed uses it; the runners that use it and
+    /// wait for a job stop first. Snapshots are rebuilt by reseeding instead: slot layers sit on top of them.
     pub(super) async fn clean_cache(&mut self, name: &str) -> Result<(), ControlError> {
         let Some(volume) = cache::volumes(&self.names, &self.config)
             .into_iter()
@@ -680,7 +680,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 "{name} is not a cache volume of this config; `runnerctl caches` lists them"
             )));
         };
-        let users: Vec<api::RunningJob> = match &volume.kind {
+        let using: Vec<SlotRef> = match &volume.kind {
             api::CacheKind::Snapshot { profile } => {
                 return Err(ControlError::Invalid(format!(
                     "{name} is {profile}'s snapshot, which every slot's layers sit on; reseed {profile} to rebuild it"
@@ -694,16 +694,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 self.occupied()
                     .filter(|(at, _)| at.profile == *profile && at.index + 1 == *slot)
-                    .map(|(_, occupant)| occupant.running_job())
+                    .map(|(at, _)| at)
                     .collect()
             }
             api::CacheKind::Pnpm
             | api::CacheKind::Maven
             | api::CacheKind::Mirror
-            | api::CacheKind::Build => self
-                .occupied()
-                .map(|(_, occupant)| occupant.running_job())
-                .collect(),
+            | api::CacheKind::Build => self.occupied().map(|(at, _)| at).collect(),
         };
         let shared = matches!(volume.kind, api::CacheKind::Pnpm | api::CacheKind::Maven);
         if shared && !self.records.shells.is_empty() {
@@ -711,6 +708,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 "a shell open in a record mounts {name}; clean it once the shell exits"
             )));
         }
+        // Runners waiting for a job, warm ones too, give way: the next plan starts them again. One GitHub gave a
+        // job meanwhile stays, and holds the clean back.
+        for slot in &using {
+            if self
+                .occupant(slot)
+                .is_some_and(|occupant| !occupant.busy && occupant.job.is_none())
+            {
+                self.stop(slot, RunningJobs::Keep).await;
+            }
+        }
+        let users: Vec<api::RunningJob> = using
+            .iter()
+            .filter_map(|slot| self.occupant(slot))
+            .map(Occupant::running_job)
+            .collect();
         if !users.is_empty() {
             return Err(ControlError::Busy {
                 message: format!(
