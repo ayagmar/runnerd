@@ -15,6 +15,8 @@ fn trigger(event: &str, branch: &str, head: &str) -> RunTrigger {
         head_branch: Some(branch.to_owned()),
         head_repository: Some(head.to_owned()),
         head_sha: "0a1b2c".to_owned(),
+        by_user: true,
+        pull_requests: Vec::new(),
     }
 }
 
@@ -24,7 +26,16 @@ fn main_only() -> Vec<String> {
 
 #[test]
 fn only_pushes_schedules_and_manual_runs_of_a_writing_branch_may_write() {
-    let decide = |trigger: &RunTrigger| writes("r1", Some("r1"), "o/app", trigger, &main_only());
+    let decide = |trigger: &RunTrigger| {
+        writes(
+            "r1",
+            Some("r1"),
+            "o/app",
+            trigger,
+            &main_only(),
+            BuildCacheWriters::DefaultBranch,
+        )
+    };
     assert_eq!(decide(&trigger("push", "main", "o/app")), Writes::Allowed);
     assert_eq!(
         decide(&trigger("schedule", "main", "o/app")),
@@ -58,13 +69,142 @@ fn only_pushes_schedules_and_manual_runs_of_a_writing_branch_may_write() {
 fn a_job_github_places_on_another_runner_never_writes() {
     let push = trigger("push", "main", "o/app");
     assert_eq!(
-        writes("r1", Some("r2"), "o/app", &push, &main_only()),
+        writes(
+            "r1",
+            Some("r2"),
+            "o/app",
+            &push,
+            &main_only(),
+            BuildCacheWriters::DefaultBranch
+        ),
         Writes::Refused,
         "a runner whose log claims another runner's job"
     );
     assert_eq!(
-        writes("r1", None, "o/app", &push, &main_only()),
+        writes(
+            "r1",
+            None,
+            "o/app",
+            &push,
+            &main_only(),
+            BuildCacheWriters::DefaultBranch
+        ),
         Writes::Undecided
+    );
+}
+
+/// A `pull_request` run of `head`'s branch `feature`, for pull request 7, that a person started.
+fn pull_request(head: &str) -> RunTrigger {
+    RunTrigger {
+        pull_requests: vec![7],
+        ..trigger(PULL_REQUEST_EVENT, "feature", head)
+    }
+}
+
+#[test]
+fn a_repository_that_lets_pull_requests_write_trusts_only_its_own_branches_and_people() {
+    let decide = |trigger: &RunTrigger| {
+        writes(
+            "r1",
+            Some("r1"),
+            "o/app",
+            trigger,
+            &main_only(),
+            BuildCacheWriters::PullRequests,
+        )
+    };
+    assert_eq!(decide(&pull_request("o/app")), Writes::Allowed);
+    assert_eq!(
+        decide(&pull_request("fork/app")),
+        Writes::Refused,
+        "a fork's pull request"
+    );
+    assert_eq!(
+        decide(&RunTrigger {
+            by_user: false,
+            ..pull_request("o/app")
+        }),
+        Writes::Refused,
+        "a run a bot pushed or re-ran"
+    );
+    assert_eq!(
+        decide(&RunTrigger {
+            pull_requests: Vec::new(),
+            ..pull_request("o/app")
+        }),
+        Writes::Refused,
+        "a run GitHub ties to no open pull request"
+    );
+    assert_eq!(
+        decide(&RunTrigger {
+            event: "pull_request_target".to_owned(),
+            ..pull_request("o/app")
+        }),
+        Writes::Refused
+    );
+    assert_eq!(
+        decide(&trigger("push", "feature", "o/app")),
+        Writes::Refused,
+        "a push to a branch that is not the default one"
+    );
+    assert_eq!(
+        writes(
+            "r1",
+            Some("r1"),
+            "o/app",
+            &pull_request("o/app"),
+            &main_only(),
+            BuildCacheWriters::DefaultBranch,
+        ),
+        Writes::Refused,
+        "a repository that did not opt in"
+    );
+}
+
+#[test]
+fn only_a_pull_request_a_person_opened_from_the_runs_branch_lets_it_write() {
+    let run = pull_request("o/app");
+    let pull = PullRequest {
+        by_user: true,
+        head_repository: Some("o/app".to_owned()),
+        head_branch: "feature".to_owned(),
+    };
+    assert!(
+        opened_by_user(&pull, "o/app", &run),
+        "a person's pull request writes"
+    );
+    assert!(
+        !opened_by_user(
+            &PullRequest {
+                by_user: false,
+                ..pull.clone()
+            },
+            "o/app",
+            &run
+        ),
+        "Renovate's pull request only reads"
+    );
+    assert!(
+        !opened_by_user(
+            &PullRequest {
+                head_repository: Some("fork/app".to_owned()),
+                ..pull.clone()
+            },
+            "o/app",
+            &run
+        ),
+        "a fork's pull request only reads"
+    );
+    assert!(
+        !opened_by_user(
+            &PullRequest {
+                head_branch: "other".to_owned(),
+                ..pull
+            },
+            "o/app",
+            &run
+        ),
+        "a pull request of another branch says nothing of this run"
     );
 }
 

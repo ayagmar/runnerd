@@ -1,6 +1,7 @@
 //! The shared build cache on the fakes (ADR 0052): a push to main's entry is a hit for a pull request's job in
 //! another slot, the pull request's uploads stay invisible, each job's record keeps what the cache did for it, a tag
-//! named like the default branch only reads, and the cache is trimmed only once no runner runs.
+//! named like the default branch only reads, the cache is trimmed only once no runner runs, and where a repository
+//! lets them (ADR 0053), its own branches' pull requests that people opened write while forks' and bots' read.
 
 use super::*;
 use crate::buildcache::{self, BuildCache};
@@ -48,6 +49,8 @@ fn trigger(event: &str, branch: &str) -> github::RunTrigger {
         head_branch: Some(branch.to_owned()),
         head_repository: Some("o/r".to_owned()),
         head_sha: "c0ffee".to_owned(),
+        by_user: true,
+        pull_requests: Vec::new(),
     }
 }
 
@@ -419,6 +422,191 @@ async fn a_push_whose_commit_github_cannot_compare_never_writes() {
     assert!(cache.undecided(&main), "main waits for GitHub to compare");
     assert_eq!(
         buildcache::request(&pull_socket, "GET", "/gradle/0a1b", b"")
+            .await
+            .0,
+        404
+    );
+}
+
+/// `CONFIG` with o/r letting its own branches' pull requests write.
+fn pull_requests_write() -> String {
+    CONFIG.replace(
+        "warm = 0\n",
+        "warm = 0\nbuild_cache_writers = \"pull-requests\"\n",
+    )
+}
+
+/// A `pull_request` run of o/r's branch `feature`, for pull request 7, that a person started.
+fn pull_request_run() -> github::RunTrigger {
+    github::RunTrigger {
+        pull_requests: vec![7],
+        ..trigger("pull_request", "feature")
+    }
+}
+
+/// Pull request 7 as GitHub describes it: a person opened it from o/r's branch `feature`.
+fn persons_pull_request() -> github::PullRequest {
+    github::PullRequest {
+        by_user: true,
+        head_repository: Some("o/r".to_owned()),
+        head_branch: "feature".to_owned(),
+    }
+}
+
+#[tokio::test]
+async fn a_persons_pull_request_writes_where_the_repository_lets_it_and_main_hits() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-pull-writes");
+    let (mut engine, _handle, cache) =
+        engine_with_cache(&github, &docker, &dir, &pull_requests_write());
+    github
+        .0
+        .lock()
+        .unwrap()
+        .pulls
+        .insert(7, persons_pull_request());
+    let [(pull, pull_socket), (main, main_socket)] = two_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        [pull_request_run(), trigger("push", "main")],
+    )
+    .await;
+    // The pull request's last run stores its outputs before GitHub has said anything of it.
+    assert_eq!(
+        buildcache::request(&pull_socket, "PUT", "/gradle/0a1b", b"classes")
+            .await
+            .0,
+        200
+    );
+    until_decided(&mut engine, &cache, &[&pull, &main]).await;
+    let calls = github.calls();
+    assert!(
+        calls.contains(&"pull request 7".to_owned())
+            && calls.contains(&"compare feature...c0ffee".to_owned()),
+        "{calls:?}"
+    );
+    assert_eq!(
+        buildcache::request(&main_socket, "GET", "/gradle/0a1b", b"").await,
+        (200, b"classes".to_vec())
+    );
+}
+
+#[tokio::test]
+async fn forks_bots_and_repositories_that_did_not_opt_in_only_read() {
+    let bots_pull_request = github::PullRequest {
+        by_user: false,
+        ..persons_pull_request()
+    };
+    let cases = [
+        (
+            "a fork's pull request, which GitHub ties to no pull request of o/r",
+            pull_requests_write(),
+            github::RunTrigger {
+                head_repository: Some("fork/r".to_owned()),
+                pull_requests: Vec::new(),
+                ..pull_request_run()
+            },
+            persons_pull_request(),
+        ),
+        (
+            "Renovate's pull request",
+            pull_requests_write(),
+            pull_request_run(),
+            bots_pull_request,
+        ),
+        (
+            "a run a bot pushed to a person's pull request",
+            pull_requests_write(),
+            github::RunTrigger {
+                by_user: false,
+                ..pull_request_run()
+            },
+            persons_pull_request(),
+        ),
+        (
+            "a person's pull request where o/r did not opt in",
+            CONFIG.to_owned(),
+            pull_request_run(),
+            persons_pull_request(),
+        ),
+        (
+            "a commit the pull request's branch does not have",
+            pull_requests_write(),
+            github::RunTrigger {
+                head_sha: "7a9".to_owned(),
+                ..pull_request_run()
+            },
+            persons_pull_request(),
+        ),
+    ];
+    for (case, config, run, pull_request) in cases {
+        let github = FakeGithub::default();
+        let docker = FakeDocker::default();
+        let dir = TestDir::new("engine-build-cache-pull-reads");
+        let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, &config);
+        {
+            let mut state = github.0.lock().unwrap();
+            state.pulls.insert(7, pull_request);
+            state.off_branch.push("7a9".to_owned());
+        }
+        let [(pull, pull_socket), (main, main_socket)] = two_jobs(
+            &github,
+            &docker,
+            &mut engine,
+            [run, trigger("push", "main")],
+        )
+        .await;
+        assert_eq!(
+            buildcache::request(&pull_socket, "PUT", "/gradle/ffff", b"poison")
+                .await
+                .0,
+            200,
+            "{case}"
+        );
+        until_decided(&mut engine, &cache, &[&pull, &main]).await;
+        assert_eq!(
+            buildcache::request(&main_socket, "GET", "/gradle/ffff", b"")
+                .await
+                .0,
+            404,
+            "{case} stored nothing"
+        );
+    }
+}
+
+#[tokio::test]
+async fn a_pull_request_github_cannot_describe_never_writes() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-pull-lookup");
+    let (mut engine, _handle, cache) =
+        engine_with_cache(&github, &docker, &dir, &pull_requests_write());
+    // GitHub does not answer for pull request 7.
+    let [(pull, pull_socket), (main, main_socket)] = two_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        [pull_request_run(), trigger("push", "main")],
+    )
+    .await;
+    assert_eq!(
+        buildcache::request(&pull_socket, "PUT", "/gradle/ffff", b"poison")
+            .await
+            .0,
+        200
+    );
+    for _ in 0..5 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(!cache.undecided(&main), "main was decided");
+    assert!(
+        cache.undecided(&pull),
+        "the pull request waits for GitHub to describe it"
+    );
+    assert_eq!(
+        buildcache::request(&main_socket, "GET", "/gradle/ffff", b"")
             .await
             .0,
         404

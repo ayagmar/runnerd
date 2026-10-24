@@ -4,8 +4,8 @@ use std::path::Path;
 use std::time::Duration;
 
 use super::{
-    ByteSize, Config, Image, Warning, keep_secrets, mask_secrets, parse_age, parse_memory_max,
-    parse_slice_cpus,
+    BuildCacheWriters, ByteSize, Config, Image, Warning, keep_secrets, mask_secrets, parse_age,
+    parse_memory_max, parse_slice_cpus,
 };
 
 const MINIMAL: &str = r#"
@@ -187,6 +187,11 @@ fn a_config_from_before_the_build_cache_gives_every_repository_one_main_writes()
     );
     assert_eq!(build.max_size, size("10G"));
     assert!(config.repositories[0].build_cache, "owner/app gets it");
+    assert_eq!(
+        config.repositories[0].build_cache_writers,
+        BuildCacheWriters::DefaultBranch,
+        "no pull request writes unless the repository says so"
+    );
 }
 
 #[test]

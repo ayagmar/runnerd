@@ -77,6 +77,8 @@ struct GithubState {
     jobs: HashMap<u64, JobDetails>,
     /// What started each workflow run, by run ID.
     triggers: HashMap<u64, github::RunTrigger>,
+    /// What `GET /pulls/{number}` answers; a number not here fails.
+    pulls: HashMap<u64, github::PullRequest>,
     /// Commits no branch has, such as a tag's of its own.
     off_branch: Vec<String>,
     /// While true, comparing a branch with a commit fails.
@@ -234,6 +236,20 @@ impl GithubApi for FakeGithub {
             .get(&run)
             .cloned()
             .ok_or(github::Error::Token(format!("no run {run}")))
+    }
+
+    async fn pull_request(
+        &self,
+        _repository: &str,
+        number: u64,
+    ) -> Result<github::PullRequest, github::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("pull request {number}"));
+        state
+            .pulls
+            .get(&number)
+            .cloned()
+            .ok_or(github::Error::Token(format!("no pull request {number}")))
     }
 
     async fn default_branch(&self, repository: &str) -> Result<String, github::Error> {

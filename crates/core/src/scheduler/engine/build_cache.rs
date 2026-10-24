@@ -1,4 +1,4 @@
-//! The shared build cache's side of a runner (ADR 0052): its socket opened before its container starts and closed
+//! The shared build cache's side of a runner (ADR 0052, 0053): its socket opened before its container starts and closed
 //! with it, what it was served stored in the history, and whether its job may write, decided once GitHub places the
 //! job on it. It must not start or remove containers, and it never trusts what a runner's log says of its job.
 
@@ -13,6 +13,7 @@ use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Occupant};
 use crate::buildcache::{self, Writes};
 use crate::cache;
+use crate::config::BuildCacheWriters;
 use crate::docker::DockerApi;
 use crate::github::{self, GithubApi, JobDetails};
 
@@ -21,6 +22,8 @@ use crate::github::{self, GithubApi, JobDetails};
 pub(super) struct Undecided {
     runner: String,
     repository: String,
+    /// Whose runs its repository lets write.
+    writers: BuildCacheWriters,
     job: JobDetails,
 }
 
@@ -104,9 +107,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 let (repository, _, job) = described
                     .iter()
                     .find(|(_, id, _)| occupant.job == Some(*id))?;
+                let writers = self
+                    .config
+                    .repositories
+                    .iter()
+                    .find(|candidate| candidate.name == *repository)
+                    .map(|candidate| candidate.build_cache_writers)
+                    .unwrap_or_default();
                 Some(Undecided {
                     runner: occupant.runner_name.clone(),
                     repository: repository.clone(),
+                    writers,
                     job: job.clone(),
                 })
             })
@@ -137,7 +148,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 }
 
 /// Asks GitHub for each undecided job's run, its repository's default branch unless `known` has it, and, for a run
-/// that may write, whether the branch has its commit: a tag's run names the tag as its branch.
+/// that may write, who opened its pull requests and whether the branch has its commit: a tag's run names the tag as
+/// its branch.
 async fn read_answers<G: GithubApi>(
     github: Arc<G>,
     undecided: Vec<Undecided>,
@@ -198,10 +210,23 @@ async fn decide<G: GithubApi>(
         repository,
         &trigger,
         &writing,
+        undecided.writers,
     );
     let (Writes::Allowed, Some(branch)) = (writes, &trigger.head_branch) else {
         return (writes != Writes::Undecided).then_some(writes);
     };
+    if trigger.event == buildcache::PULL_REQUEST_EVENT {
+        for &number in &trigger.pull_requests {
+            match github.pull_request(repository, number).await {
+                Ok(pull) if buildcache::opened_by_user(&pull, repository, &trigger) => {}
+                Ok(_) => return Some(Writes::Refused),
+                Err(error) => {
+                    warn!("{repository}: cannot read pull request #{number}: {error}");
+                    return None;
+                }
+            }
+        }
+    }
     match github
         .on_branch(repository, branch, &trigger.head_sha)
         .await

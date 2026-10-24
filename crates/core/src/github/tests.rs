@@ -1,5 +1,6 @@
 //! The GitHub client against a fake GitHub on a loopback port: queued jobs, conditional requests, rate limits,
-//! token refresh, runner registration and deletion, and that the token never shows in `Debug` output or errors.
+//! token refresh, runner registration and deletion, who started a run and opened a pull request, and that the token
+//! never shows in `Debug` output or errors.
 
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -549,5 +550,60 @@ async fn a_commit_is_on_a_branch_only_as_its_head_or_an_ancestor() {
         seen.lock().unwrap().len(),
         asked,
         "an invalid commit is never asked"
+    );
+}
+
+#[tokio::test]
+async fn a_run_and_its_pull_requests_say_whether_people_or_bots_started_them() {
+    let person = r#"{"login":"owner","type":"User"}"#;
+    let bot = r#"{"login":"renovate[bot]","type":"Bot"}"#;
+    let (url, _) = fake_github(move |request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs/1" => json(&format!(
+            r#"{{"event":"pull_request","head_branch":"feature","head_sha":"a1",
+                "head_repository":{{"full_name":"o/r"}},"actor":{person},"triggering_actor":{person},
+                "pull_requests":[{{"number":7,"head":{{"ref":"feature","sha":"a1"}}}}]}}"#
+        )),
+        // The owner re-ran a run Renovate's push started.
+        "/repos/o/r/actions/runs/2" => json(&format!(
+            r#"{{"event":"pull_request","head_branch":"renovate/x","head_sha":"b1",
+                "head_repository":{{"full_name":"o/r"}},"actor":{bot},"triggering_actor":{person},
+                "pull_requests":[]}}"#
+        )),
+        "/repos/o/r/pulls/7" => json(&format!(
+            r#"{{"number":7,"user":{person},"head":{{"ref":"feature","sha":"a1","repo":{{"full_name":"o/r"}}}}}}"#
+        )),
+        // A bot's pull request from a fork that was deleted since.
+        "/repos/o/r/pulls/8" => json(&format!(
+            r#"{{"number":8,"user":{bot},"head":{{"ref":"patch-1","sha":"c1","repo":null}}}}"#
+        )),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let github = client(&url);
+    let run = github.run_trigger("o/r", 1).await.unwrap();
+    assert!(run.by_user, "the owner pushed and started run 1");
+    assert_eq!(run.pull_requests, [7]);
+    let rerun = github.run_trigger("o/r", 2).await.unwrap();
+    assert!(!rerun.by_user, "Renovate started run 2");
+    assert_eq!(
+        rerun.pull_requests,
+        Vec::<u64>::new(),
+        "GitHub listed no pull request"
+    );
+    let pull = github.pull_request("o/r", 7).await.unwrap();
+    assert_eq!(
+        pull,
+        super::PullRequest {
+            by_user: true,
+            head_repository: Some("o/r".to_owned()),
+            head_branch: "feature".to_owned(),
+        }
+    );
+    let fork = github.pull_request("o/r", 8).await.unwrap();
+    assert!(!fork.by_user, "a bot opened pull request 8");
+    assert_eq!(fork.head_repository, None);
+    assert!(
+        github.pull_request("o/r", 9).await.is_err(),
+        "no such pull request"
     );
 }
