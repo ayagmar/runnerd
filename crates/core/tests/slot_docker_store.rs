@@ -1,5 +1,6 @@
-//! A slot's Docker Engine keeps its images and build cache between the slot's jobs, each in a new container. Needs
-//! Docker, sysbox and the runner image (`docker build --target base -t runnerd-runner:base image`):
+//! A slot's Docker Engine keeps its images and build cache between the slot's jobs, each in a new container, within
+//! the Docker budget runnerd gives it. Needs Docker, sysbox and the runner image
+//! (`docker build --target base -t runnerd-runner:base image`):
 //!
 //! ```sh
 //! cargo test -p runnerd-core --test slot_docker_store -- --ignored --nocapture
@@ -33,7 +34,12 @@ const BUILD: &str = "mkdir -p /root/app && cd /root/app && echo app > app.txt \
 /// Runs `script` as root in a new runner container of slot 1, after its layers are mounted and its Docker Engine
 /// started as the runner's entrypoint does them; returns its exit code and output. The container is removed after,
 /// as a runner's is.
-async fn job(docker: &Docker, names: &Names, script: &str) -> Result<(i64, String), String> {
+async fn job(
+    docker: &Docker,
+    names: &Names,
+    env: &[&str],
+    script: &str,
+) -> Result<(i64, String), String> {
     let spec = RunnerSpec {
         name: format!("{}-job", names.network()),
         image: image(),
@@ -41,7 +47,7 @@ async fn job(docker: &Docker, names: &Names, script: &str) -> Result<(i64, Strin
         slice: "system.slice".to_owned(),
         cpus: 1,
         memory: "1G".parse().map_err(|e: String| e)?,
-        env: Vec::new(),
+        env: env.iter().map(|&var| var.to_owned()).collect(),
         mounts: runner_mounts(names, PROFILE, 1),
         network: Some("none".to_owned()),
         labels: BTreeMap::new(),
@@ -51,7 +57,9 @@ async fn job(docker: &Docker, names: &Names, script: &str) -> Result<(i64, Strin
             "-euo".to_owned(),
             "pipefail".to_owned(),
             "-c".to_owned(),
-            format!(". /usr/local/lib/runnerd-layers.sh; mount_layers; start_docker; {script}"),
+            format!(
+                ". /usr/local/lib/runnerd-layers.sh; mount_layers; start_docker; keep_docker_budget; {script}"
+            ),
         ]),
         jit_config: None,
     };
@@ -81,6 +89,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     let (code, output) = job(
         docker,
         names,
+        &[],
         &format!(
             "{BUILD} && docker volume create store-leftover && docker create --name store-leftover \
              -v store-leftover:/data store-app /app.txt"
@@ -97,6 +106,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     let (code, output) = job(
         docker,
         names,
+        &[],
         &format!(
             "runnerd-job-cleanup \
              && test -z \"$(docker ps -aq)\" && test -z \"$(docker volume ls -q)\" \
@@ -114,6 +124,23 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     if !output.contains("CACHED") {
         return Err(format!(
             "the slot's next job built its image without the build cache:\n{output}"
+        ));
+    }
+
+    // With no Docker budget from runnerd, the job-completed hook the runner runs, as the runner and without the
+    // container's environment, empties the slot's Docker Engine.
+    let (code, output) = job(
+        docker,
+        names,
+        &["RUNNERD_DOCKER_BUDGET_GB=0"],
+        "setpriv --reuid=runner --regid=runner --init-groups -- env -i PATH=\"$PATH\" \
+         /usr/local/bin/runnerd-job-completed.sh \
+         && ! docker image inspect store-app > /dev/null 2>&1",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "the job cleanup kept the slot's images over its Docker budget (exit {code}):\n{output}"
         ));
     }
     Ok(())

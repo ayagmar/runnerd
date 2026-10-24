@@ -15,9 +15,13 @@ LAYERS=(cache:/home/runner/.cache tools:/home/runner/_work/_tool android:/opt/an
 CACHE_SECRETS=(cargo/credentials cargo/credentials.toml cargo/config cargo/config.toml gradle/gradle.properties)
 
 # Disk budgets per slot, in GB. A layer whose changes outgrow LAYER_BUDGET_GB starts over from the snapshot when
-# a container starts; Docker images and build cache beyond DOCKER_BUDGET_GB are pruned after a job.
+# a container starts; Docker images and build cache beyond DOCKER_BUDGET_GB are pruned after a job and when a
+# container starts. runnerd sets the slot's Docker budget, its share of the disk (docs/adr/0054), in the container's
+# RUNNERD_DOCKER_BUDGET_GB; the entrypoint keeps it in DOCKER_BUDGET_FILE for job-cleanup.sh, which sudo starts
+# without that environment. Without one, 20.
 LAYER_BUDGET_GB=4
-DOCKER_BUDGET_GB=20
+DOCKER_BUDGET_FILE=/run/runnerd-docker-budget-gb
+DOCKER_BUDGET_GB=$(cat "$DOCKER_BUDGET_FILE" 2> /dev/null || echo 20)
 
 # Where the slot's Docker Engine keeps its images, layers and build cache: the slot's volume.
 DOCKER_DATA_ROOT=/state/docker
@@ -47,6 +51,13 @@ start_docker() {
     done
     cat /var/log/dockerd.log
     return 1
+}
+
+# Keeps the Docker budget runnerd set in RUNNERD_DOCKER_BUDGET_GB in DOCKER_BUDGET_FILE, root's, which no job can
+# change. A value that is not a number of GB leaves the default.
+keep_docker_budget() {
+    [[ ${RUNNERD_DOCKER_BUDGET_GB:-} =~ ^[0-9]+$ ]] || return 0
+    echo "$RUNNERD_DOCKER_BUDGET_GB" > "$DOCKER_BUDGET_FILE"
 }
 
 # Mounts each layer over its path: this slot's changes in /state/<name> over the profile's snapshot in /base/<name>

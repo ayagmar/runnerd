@@ -1,7 +1,8 @@
 # 0041. A profile's snapshot and the mirror's storage have size limits
 
 Status: **Accepted** (2026-10-23), amended 2026-10-24 (see the end). Amends
-[0007](0007-warm-caches-snapshot-plus-slot-layer.md).
+[0007](0007-warm-caches-snapshot-plus-slot-layer.md). Amended by [0054](0054-slot-docker-stores-share-the-disk.md):
+`DOCKER_BUDGET_GB` is each slot's share of a quarter of the disk.
 
 ## Context
 

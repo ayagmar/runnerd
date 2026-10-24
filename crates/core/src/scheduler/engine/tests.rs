@@ -344,6 +344,8 @@ struct DockerState {
     mounts: HashMap<String, Vec<bollard::models::Mount>>,
     /// The entrypoint of each container started with its own, by name: a seed container's says its thresholds.
     entrypoints: HashMap<String, Vec<String>>,
+    /// The environment of each container started, by name.
+    envs: HashMap<String, Vec<String>>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
@@ -381,6 +383,7 @@ impl DockerApi for FakeDocker {
         }
         state.started_images.push(spec.image.clone());
         state.mounts.insert(spec.name.clone(), spec.mounts.clone());
+        state.envs.insert(spec.name.clone(), spec.env.clone());
         if let Some(entrypoint) = &spec.entrypoint {
             state
                 .entrypoints
@@ -2047,6 +2050,42 @@ async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runn
         .await;
     assert_eq!(answer.await.unwrap(), Ok(None));
     assert_eq!(engine.config.profiles["app"].slots, 1);
+}
+
+#[tokio::test]
+async fn each_slots_docker_engine_keeps_its_share_of_a_quarter_of_the_disk_not_otherwise_used() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        // 40 GiB free and 8 GiB in slot 1's volume: the 2 slots keep 12 GiB together.
+        state.free = Some(40 << 30);
+        state
+            .volume_sizes
+            .insert("runnerd-app-slot-1".to_owned(), 8 << 30);
+    }
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    // The startup check measures the disk, and is collected.
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.jobs.insert(1, details(1, "in_progress", None));
+    }
+    engine.tick(Shutdown::No).await;
+
+    let state = docker.0.lock().unwrap();
+    let started = state.started_images.len();
+    let envs: Vec<_> = state.envs.iter().collect();
+    assert_eq!(started, 1, "one runner started: {envs:?}");
+    assert_eq!(
+        envs[0].1,
+        &["RUNNERD_DOCKER_BUDGET_GB=6".to_owned()],
+        "{envs:?}"
+    );
 }
 
 #[tokio::test]

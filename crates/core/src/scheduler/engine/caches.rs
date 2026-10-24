@@ -172,8 +172,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         };
         match task.await {
-            Ok(Ok(Trimmed { sizes, emptied })) => {
+            Ok(Ok(Trimmed {
+                sizes,
+                emptied,
+                free,
+            })) => {
                 self.mark_oversized(&sizes);
+                if let Some(free) = free {
+                    self.docker_disk =
+                        Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+                }
                 let ours = self.names.network();
                 self.store.cache_sizes(
                     time::now_ms(),

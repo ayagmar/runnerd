@@ -208,6 +208,8 @@ pub struct Trimmed {
     pub sizes: BTreeMap<String, u64>,
     /// The shared caches it emptied.
     pub emptied: Vec<Emptied>,
+    /// Docker's free disk in bytes, as measured before emptying any; `None` when it could not be measured.
+    pub free: Option<u64>,
 }
 
 /// A shared cache `trim_shared` emptied.
@@ -228,6 +230,7 @@ pub async fn trim_shared(
     mirror: Mirror,
 ) -> Result<Trimmed, Error> {
     let sizes = docker.volume_sizes().await?;
+    let free = docker.free_space().await.ok();
     let mut emptied = Vec::new();
     let mut limits = vec![
         (names.pnpm(), caches.pnpm.max_size),
@@ -247,8 +250,43 @@ pub async fn trim_shared(
             });
         }
     }
-    Ok(Trimmed { sizes, emptied })
+    Ok(Trimmed {
+        sizes,
+        emptied,
+        free,
+    })
 }
+
+/// What the slots' Docker Engines may keep together, in bytes: a quarter of Docker's disk not otherwise used, which
+/// is what is free plus what the slot volumes already hold, measured together (docs/adr/0054).
+pub fn docker_disk(
+    names: &Names,
+    config: &config::Config,
+    free: u64,
+    sizes: &BTreeMap<String, u64>,
+) -> u64 {
+    let held: u64 = config
+        .profiles
+        .iter()
+        .flat_map(|(profile, settings)| {
+            (1..=settings.slots as usize).map(move |slot| names.slot(profile, slot))
+        })
+        .filter_map(|name| sizes.get(&name))
+        .sum();
+    free.saturating_add(held) / DOCKER_DISK_SHARE
+}
+
+/// One slot's share of `disk` among `slots`, in whole GiB as `image/layers.sh` takes it: at least 1, at most
+/// `DOCKER_SLOT_MAX_GIB`.
+pub fn docker_budget_gib(disk: u64, slots: u64) -> u64 {
+    ((disk / slots.max(1)) >> 30).clamp(1, DOCKER_SLOT_MAX_GIB)
+}
+
+/// The slots' Docker Engines together keep at most one part in this of Docker's disk not otherwise used.
+const DOCKER_DISK_SHARE: u64 = 4;
+
+/// The most one slot's Docker Engine keeps, in GiB: the image's own default, for a daemon that sets none.
+const DOCKER_SLOT_MAX_GIB: u64 = 20;
 
 /// Every cache volume the config's profiles use, what it holds and its limit, with size 0.
 pub fn volumes(names: &Names, config: &config::Config) -> Vec<api::CacheVolume> {
@@ -398,4 +436,25 @@ pub async fn finish_reseed(docker: &impl DockerApi, container: &str) -> Result<S
     let output = result?;
     removed?;
     Ok(output)
+}
+
+#[cfg(test)]
+mod tests {
+    use super::docker_budget_gib;
+
+    #[test]
+    fn a_slots_docker_budget_is_its_share_between_1_and_20_gib() {
+        assert_eq!(docker_budget_gib(100 << 30, 10), 10);
+        assert_eq!(
+            docker_budget_gib(1 << 40, 4),
+            20,
+            "a large disk still stops at 20 GiB"
+        );
+        assert_eq!(
+            docker_budget_gib(1 << 30, 13),
+            1,
+            "a full disk still keeps 1 GiB"
+        );
+        assert_eq!(docker_budget_gib(1 << 30, 0), 1);
+    }
 }

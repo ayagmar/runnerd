@@ -20,6 +20,7 @@ start_build_cache
 install -d -o runner -g runner -m 700 "$XDG_RUNTIME_DIR"
 
 start_docker
+keep_docker_budget
 
 # Whatever the slot's last job left in its Docker Engine, if that job's container was stopped before its cleanup.
 runnerd-job-cleanup
