@@ -1,5 +1,4 @@
 {
-  "data-root": "/state/docker",
   "registry-mirrors": ["http://mirror:5000"],
   "builder": {
     "gc": {

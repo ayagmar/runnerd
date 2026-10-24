@@ -16,5 +16,5 @@ fi
 docker ps -aq | xargs -r docker rm -f > /dev/null
 docker volume prune -af > /dev/null
 docker network prune -f > /dev/null
-[ "$(size_gb /state/docker)" -le "$DOCKER_BUDGET_GB" ] || docker system prune -af > /dev/null
+[ "$(size_gb "$DOCKER_DATA_ROOT")" -le "$DOCKER_BUDGET_GB" ] || docker system prune -af > /dev/null
 exit 0

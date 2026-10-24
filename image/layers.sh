@@ -1,6 +1,6 @@
 # shellcheck shell=bash
 # shellcheck disable=SC2034 # used by the scripts that source this file
-# Sourced by entrypoint.sh, job-started.sh, job-cleanup.sh and seed.sh, and by runnerd's cache test.
+# Sourced by entrypoint.sh, job-started.sh, job-cleanup.sh and seed.sh, and by runnerd's cache tests.
 
 # The slot's copy-on-write layers, as name:path. Each path shows the profile's read-only snapshot
 # /base/<name> (seed.sh) over what the image has there, with this slot's own changes on top in
@@ -19,6 +19,9 @@ CACHE_SECRETS=(cargo/credentials cargo/credentials.toml cargo/config cargo/confi
 LAYER_BUDGET_GB=4
 DOCKER_BUDGET_GB=20
 
+# Where the slot's Docker Engine keeps its images, layers and build cache: the slot's volume.
+DOCKER_DATA_ROOT=/state/docker
+
 # Size of a directory in GB, rounded up; 0 when it does not exist.
 size_gb() {
     local size
@@ -32,9 +35,23 @@ rx_bytes() {
     sed -n 's/^ *eth0: *\([0-9]*\).*/\1/p' /proc/net/dev
 }
 
+# Starts the container's Docker Engine on DOCKER_DATA_ROOT and waits up to a minute for it; prints its log if it
+# does not come up. The data root is a flag, never daemon.json's data-root: sysbox reads that key from the image and
+# mounts a directory of its own over it, which it deletes with the container, so no job would find the last one's
+# images.
+start_docker() {
+    dockerd --group docker --data-root "$DOCKER_DATA_ROOT" > /var/log/dockerd.log 2>&1 &
+    for _ in $(seq 60); do
+        docker info > /dev/null 2>&1 && return 0
+        sleep 1
+    done
+    cat /var/log/dockerd.log
+    return 1
+}
+
 # Mounts each layer over its path: this slot's changes in /state/<name> over the profile's snapshot in /base/<name>
 # (when there is one) over the image. /state is this slot's volume, which also holds its Docker Engine's data
-# (daemon.json). A layer whose changes outgrew LAYER_BUDGET_GB starts over from the snapshot. CACHE_SECRETS go
+# (DOCKER_DATA_ROOT). A layer whose changes outgrew LAYER_BUDGET_GB starts over from the snapshot. CACHE_SECRETS go
 # from the slot's changes while the layer is unmounted, as overlayfs does not define changes to a mounted upper;
 # the snapshot's, from a snapshot seeded before seed.sh dropped them, are then deleted through the mounted layer,
 # which leaves a whiteout in the slot's changes that the next mount drops and makes again. The whiteout would hide

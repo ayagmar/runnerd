@@ -85,5 +85,9 @@ required-features = ["host"]
 name = "build_cache_gradle"
 required-features = ["host"]
 
+[[test]]
+name = "slot_docker_store"
+required-features = ["host"]
+
 [lints]
 workspace = true

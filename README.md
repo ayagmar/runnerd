@@ -143,7 +143,7 @@ The tests that start real containers are ignored by default. They need Docker wi
 ```sh
 docker build --target jvm -t runnerd-runner:jvm image
 docker build --target base -t runnerd-runner:base image
-cargo test -p runnerd-core --test docker_smoke --test cache_reseed -- --ignored
+cargo test -p runnerd-core --test docker_smoke --test cache_reseed --test slot_docker_store -- --ignored
 ```
 
 The Gradle build cache test builds its own image from the Gradle image, so it needs the network too:
