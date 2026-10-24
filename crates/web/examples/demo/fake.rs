@@ -24,16 +24,16 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
 use runnerd_core::api::{
-    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread,
+    Activity, ActivityQuery, Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume,
+    Caches, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event,
+    EventEnvelope, EventQuery, HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery,
+    JobRunner, JobState, JobSummary, LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus,
+    QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
+    RemovedRecords, ReplaceQuery, RepositoryStatus, RunnerStatus, RunningJob, Sample, SampleSeries,
+    SlotStatus, Started, Stats, StatsRow, Status, Step, Timeline,
 };
 use runnerd_core::api::{
-    Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
-    CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, EventQuery,
-    HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary,
-    LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus, QueuedJob, Record, RecordLimits,
-    RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery,
-    RepositoryStatus, RunnerStatus, RunningJob, Sample, SampleSeries, SlotStatus, Stats, StatsRow,
-    Status, Step, Timeline,
+    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread,
 };
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -659,6 +659,44 @@ impl Fixtures {
     }
 
     /// The jobs `query` lists, as the daemon pages them.
+    /// As the daemon reads it: the jobs started and finished since `since`, by those times. The fixtures' clock is
+    /// not the dashboard's, so nothing is left out for being after `now`.
+    fn activity(&self, since: Option<u64>) -> Activity {
+        let since = since.unwrap_or(self.now.saturating_sub(24 * 3600));
+        let within = |at: Option<u64>| at.is_some_and(|at| at >= since);
+        let summaries = || self.jobs.iter().map(|job| &job.summary);
+        let mut started: Vec<Started> = summaries()
+            .filter(|job| job.state != JobState::Elsewhere && within(job.timeline.started_at))
+            .filter_map(|job| {
+                let at = job.timeline.started_at?;
+                Some(Started {
+                    at,
+                    waited: at.saturating_sub(job.timeline.queued_at),
+                })
+            })
+            .collect();
+        started.sort_by_key(|job| job.at);
+        let finished: Vec<&JobSummary> = summaries()
+            .filter(|job| {
+                matches!(job.state, JobState::Completed | JobState::Lost)
+                    && within(job.timeline.finished_at)
+            })
+            .collect();
+        Activity {
+            since,
+            until: self.now,
+            started,
+            finished: finished.len() as u64,
+            failed: finished
+                .iter()
+                .filter(|job| {
+                    job.state == JobState::Lost
+                        || matches!(job.conclusion.as_deref(), Some("failure" | "timed_out"))
+                })
+                .count() as u64,
+        }
+    }
+
     fn page(&self, query: &JobQuery) -> JobPage {
         let limit = query.limit.unwrap_or(50) as usize;
         let mut jobs: Vec<JobSummary> = self
@@ -1120,6 +1158,12 @@ fn router(fake: Fake) -> Router {
                     interval: 2,
                     samples: fake.fixtures.lock().unwrap().host.clone(),
                 })
+            }),
+        )
+        .route(
+            "/v1/activity",
+            get(|State(fake): State<Fake>, Query(query): Query<ActivityQuery>| async move {
+                Json(fake.fixtures.lock().unwrap().activity(query.since))
             }),
         )
         .route(

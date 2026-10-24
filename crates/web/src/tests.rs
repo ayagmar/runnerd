@@ -856,6 +856,71 @@ async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits
 }
 
 #[tokio::test]
+async fn the_health_figures_count_the_24_hours_up_to_now_by_when_jobs_started_and_ended() {
+    use runnerd_core::api::JobState;
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        // The dashboard's clock: the day ends now, whatever the fixtures say.
+        let now = crate::now();
+        let template = fixtures.jobs[0].clone();
+        let job = |id, state, conclusion: &str, queued_at, started_at, finished_at| {
+            let mut job = template.clone();
+            job.summary.id = id;
+            job.summary.state = state;
+            job.summary.conclusion = Some(conclusion.to_owned());
+            job.summary.timeline.queued_at = queued_at;
+            job.summary.timeline.started_at = Some(started_at);
+            job.summary.timeline.finished_at = Some(finished_at);
+            job
+        };
+        let minutes = |count: u64| count * 60;
+        fixtures.jobs = vec![
+            // Ended 10 minutes ago after waiting 10.
+            job(
+                3,
+                JobState::Completed,
+                "success",
+                now - minutes(40),
+                now - minutes(30),
+                now - minutes(10),
+            ),
+            // Queued three days before it started 23h 50m ago, lost 23h 45m ago: inside the day.
+            job(
+                2,
+                JobState::Lost,
+                "failure",
+                now - 3 * 86_400 - minutes(23 * 60 + 50),
+                now - minutes(23 * 60 + 50),
+                now - minutes(23 * 60 + 45),
+            ),
+            // Failed 24h 15m ago: a day and a quarter hour ago, outside it.
+            job(
+                1,
+                JobState::Completed,
+                "failure",
+                now - minutes(25 * 60),
+                now - minutes(24 * 60 + 30),
+                now - minutes(24 * 60 + 15),
+            ),
+        ];
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
+    let failed = &health[health.find("Failed, 24 h").unwrap()..];
+    assert!(
+        failed.contains(r#"<span class="figure-main">1</span>"#)
+            && failed.contains("of 2 finished"),
+        "one of the two jobs that ended in the day failed: {failed}"
+    );
+    assert!(
+        health.contains("2 jobs started"),
+        "the job queued days ago counts where it started: {health}"
+    );
+}
+
+#[tokio::test]
 async fn a_slot_card_counts_its_running_step_by_place_as_runnerctl_watch_does() {
     let dashboard = Dashboard::start().await;
     let (place, steps, name) = {

@@ -6,14 +6,14 @@ use std::collections::BTreeMap;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery, JobState, JobSummary,
-    ProfileStatus, QueuedJob, RepositoryStatus, Sample, SampleSeries, SlotStatus, Status, Waiting,
+    Activity, ActivityQuery, AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery,
+    JobState, JobSummary, ProfileStatus, QueuedJob, RepositoryStatus, Sample, SampleSeries,
+    SlotStatus, Started, Status, Waiting,
 };
 use runnerd_core::client::{Client, ClientError};
 
 use super::{
-    Live, Page, Parts, badge, digest, durations, js, page, profile_class, repository_id, slot_id,
-    time_ago,
+    Live, Page, Parts, badge, digest, js, page, profile_class, repository_id, slot_id, time_ago,
 };
 use crate::chart::{Base, Series, Sparkline, TimeChart, nice_top};
 use crate::format;
@@ -28,10 +28,8 @@ const SPARK_WINDOW: u64 = 5 * 60;
 const RECENT: u32 = 8;
 /// Queued jobs listed, the oldest; the history lists the rest.
 const QUEUED_SHOWN: usize = 8;
-/// How far back the health figures look.
-pub(crate) const DAY: u64 = 24 * 3600;
-/// Jobs of the last day read for them: past this many, the figures cover the newest.
-pub(crate) const DAY_JOBS: u32 = 500;
+/// How far back the health figures look: the 24 hours up to now.
+const DAY: u64 = 24 * 3600;
 
 /// Everything the overview shows.
 #[derive(Debug, Clone)]
@@ -44,8 +42,8 @@ pub(crate) struct Overview {
     pub(crate) samples: BTreeMap<u64, Vec<Sample>>,
     pub(crate) host: HostSamples,
     pub(crate) recent: Vec<JobSummary>,
-    /// The jobs queued in the last two `DAY`s, newest first, for the health figures of the last.
-    pub(crate) day: Vec<JobSummary>,
+    /// The jobs started and finished in the last `DAY`, for the health figures.
+    pub(crate) day: Activity,
 }
 
 impl Overview {
@@ -73,27 +71,29 @@ impl Overview {
             samples: BTreeMap::new(),
             host,
             recent: recent.jobs,
-            day: Vec::new(),
+            day: Activity {
+                since: now.saturating_sub(DAY),
+                until: now,
+                started: Vec::new(),
+                finished: 0,
+                failed: 0,
+            },
         };
         overview.reload_running(daemon).await?;
         overview.reload_day(daemon).await?;
         Ok(overview)
     }
 
-    /// Reads the jobs of the last day again.
+    /// Reads the jobs started and finished in the last day again.
     pub(crate) async fn reload_day(&mut self, daemon: &Client) -> Result<(), ClientError> {
-        let page: JobPage = daemon
+        self.day = daemon
             .get_query(
-                "/v1/jobs",
-                &JobQuery {
-                    // Queued a day earlier still, so a job that waited long and started today counts.
-                    since: Some(self.now.saturating_sub(2 * DAY)),
-                    limit: Some(DAY_JOBS),
-                    ..JobQuery::default()
+                "/v1/activity",
+                &ActivityQuery {
+                    since: Some(self.now.saturating_sub(DAY)),
                 },
             )
             .await?;
-        self.day = page.jobs;
         Ok(())
     }
 
@@ -983,31 +983,21 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
 }
 
 /// What the health figures count, over the jobs of the last day.
-#[derive(Debug, Default, PartialEq, Eq)]
-struct Health {
+struct Health<'overview> {
     /// Slots holding a runner that runs a job, and all slots.
     running: usize,
     slots: usize,
     /// Of the slots holding a runner, those whose runner waits for its job.
     starting: usize,
-    /// How long each job that started in the last day waited for its runner, oldest first.
-    waits: Vec<Wait>,
+    /// When each job that started in the last day did, and how long it waited for its runner, oldest first.
+    waits: &'overview [Started],
     /// Jobs that finished in the last day, and of those the ones that failed or were lost.
-    finished: usize,
-    failed: usize,
+    finished: u64,
+    failed: u64,
 }
 
-/// A job's wait: when it started, and how long it waited before.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-struct Wait {
-    started: u64,
-    waited: u64,
-}
-
-impl Health {
-    fn of(overview: &Overview) -> Health {
-        // The last 24 hours whole, as the hourly bars count them.
-        let since = (overview.now / 3600).saturating_sub(23) * 3600;
+impl<'overview> Health<'overview> {
+    fn of(overview: &'overview Overview) -> Health<'overview> {
         let runners = overview
             .status
             .profiles
@@ -1015,24 +1005,6 @@ impl Health {
             .flat_map(|profile| &profile.slots)
             .filter_map(|slot| slot.runner.as_ref());
         let starting = runners.clone().filter(|runner| !runner.busy).count();
-        let mut waits: Vec<Wait> = overview
-            .day
-            .iter()
-            .filter_map(|job| {
-                let started = job.timeline.started_at.filter(|at| *at >= since)?;
-                let waited = durations(job, overview.now).waited?;
-                Some(Wait { started, waited })
-            })
-            .collect();
-        waits.sort_by_key(|wait| wait.started);
-        let finished: Vec<&JobSummary> = overview
-            .day
-            .iter()
-            .filter(|job| {
-                matches!(job.state, JobState::Completed | JobState::Lost)
-                    && job.timeline.finished_at.is_some_and(|at| at >= since)
-            })
-            .collect();
         Health {
             running: runners.count() - starting,
             slots: overview
@@ -1042,9 +1014,9 @@ impl Health {
                 .map(|profile| profile.slots.len())
                 .sum(),
             starting,
-            waits,
-            finished: finished.len(),
-            failed: finished.iter().filter(|job| failed(job)).count(),
+            waits: &overview.day.started,
+            finished: overview.day.finished,
+            failed: overview.day.failed,
         }
     }
 
@@ -1055,12 +1027,6 @@ impl Health {
         let rank = (waits.len() * 95).div_ceil(100);
         waits.get(rank.checked_sub(1)?).copied()
     }
-}
-
-/// Whether a job counts as failed, as the history's charts count it: concluded `failure` or `timed_out`, or lost.
-fn failed(job: &JobSummary) -> bool {
-    job.state == JobState::Lost
-        || matches!(job.conclusion.as_deref(), Some("failure" | "timed_out"))
 }
 
 /// The figures that say whether CI keeps up: slots running, jobs waiting and the oldest's wait, the waits of the
@@ -1098,7 +1064,7 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                     dt { "Wait p95, 24 h" }
                     dd { span.figure-main { (p95.map_or("–".to_owned(), format::duration)) } }
                     dd.figure-note { (health.waits.len()) " job" @if health.waits.len() != 1 { "s" } " started" }
-                    (wait_hours(&health.waits, overview.now))
+                    (wait_hours(health.waits, overview.day.until))
                 }
                 div class=(if health.failed > 0 { "failing" } else { "" }) {
                     dt { "Failed, 24 h" }
@@ -1113,27 +1079,27 @@ pub(crate) fn health(overview: &Overview) -> Markup {
     }
 }
 
-/// The longest wait that started in each hour of the last day, oldest hour first, as bars against the longest.
-fn wait_hours(waits: &[Wait], now: u64) -> Markup {
-    let hour_now = now / 3600;
+/// The longest wait that started in each hour of the last day, counted back from `until` so the 24 hours are the
+/// day the figures count, oldest hour first, as bars against the longest.
+fn wait_hours(waits: &[Started], until: u64) -> Markup {
+    let since = until.saturating_sub(DAY);
     let mut hours = [0u64; 24];
-    for wait in waits {
-        let back = hour_now.saturating_sub(wait.started / 3600);
-        if let Some(hour) = usize::try_from(back)
-            .ok()
-            .and_then(|back| 23usize.checked_sub(back))
-        {
-            hours[hour] = hours[hour].max(wait.waited);
-        }
+    for wait in waits
+        .iter()
+        .filter(|wait| (since..=until).contains(&wait.at))
+    {
+        // A start exactly `DAY` ago is in the oldest hour.
+        let back = usize::try_from((until - wait.at) / 3600).map_or(23, |back| back.min(23));
+        hours[23 - back] = hours[23 - back].max(wait.waited);
     }
     let longest = hours.iter().copied().max().unwrap_or(0);
     html! {
         @if longest > 0 {
             dd.wait-hours aria-hidden="true" {
                 @for (index, wait) in hours.iter().enumerate() {
-                    @let start = (hour_now + 1 + index as u64).saturating_sub(24) * 3600;
+                    @let start = since + index as u64 * 3600;
                     span style=(format!("--h: {:.3}", crate::chart::ratio(*wait, longest)))
-                        title=(format!("{}: longest wait {}", relative_clock(start), format::duration(*wait))) {}
+                        title=(format!("From {}: longest wait {}", relative_clock(start), format::duration(*wait))) {}
                 }
             }
         }
