@@ -129,6 +129,21 @@ fn a_job_fast_again_in_its_last_two_runs_is_not_slower() {
 }
 
 #[test]
+fn a_job_that_flips_between_cache_hits_and_misses_is_not_slower() {
+    // A build cache hit takes about 40 s and a miss about 2 minutes; more misses lately move the median, not the job.
+    let durations = [
+        112, 37, 44, 46, 146, 39, 124, 134, 41, 156, 122, 126, 147, 40,
+    ];
+
+    assert!(
+        insights(&history(&durations), &config(), 14, NOW)
+            .insights
+            .is_empty(),
+        "a recent run as fast as before says the job did not get slower"
+    );
+}
+
+#[test]
 fn a_small_slowdown_is_not_a_regression() {
     // 20% up but only 24 seconds.
     let mut durations = vec![120; 8];
@@ -375,11 +390,11 @@ fn the_digest_counts_the_day_and_lists_only_new_insights() {
     for run in &mut runs {
         run.finished_at = Some(NOW - 48 * HOUR);
     }
-    let mut durations = vec![240; 10];
-    durations.extend([400; 4]);
+    let mut durations = vec![240; 9];
+    durations.extend([400; 5]);
     let mut slow = history(&durations);
-    // The last four runs, and so the slow ones, within the day.
-    for (run, hours) in slow.iter_mut().rev().zip([1, 3, 5, 7]) {
+    // The last five runs, and so the slow ones, within the day.
+    for (run, hours) in slow.iter_mut().rev().zip([1, 3, 5, 7, 9]) {
         run.finished_at = Some(NOW - hours * HOUR);
         run.started_at = Some(NOW - hours * HOUR - 400_000);
     }
@@ -391,7 +406,7 @@ fn the_digest_counts_the_day_and_lists_only_new_insights() {
 
     let day = digest(&runs, &config(), NOW);
 
-    assert_eq!((day.finished, day.failed), (5, 1));
+    assert_eq!((day.finished, day.failed), (6, 1));
     let new: Vec<&str> = day.new.iter().map(|insight| insight.key.as_str()).collect();
     assert_eq!(new, ["slower:halyard/api/CI/test"]);
     assert_eq!(day.waits.len(), 3);
