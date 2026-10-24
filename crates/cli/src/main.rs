@@ -378,12 +378,10 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
                 } else {
                     conclusion
                 },
-                workflow: None,
-                name: None,
                 since,
-                until: None,
                 before,
                 limit,
+                ..JobQuery::default()
             };
             let page: JobPage = client.get_query("/v1/jobs", &query).await?;
             if json {
