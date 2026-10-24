@@ -16,5 +16,8 @@ fi
 docker ps -aq | xargs -r docker rm -f > /dev/null
 docker volume prune -af > /dev/null
 docker network prune -f > /dev/null
+# The build cache first, least recently used first, to about half the budget: what images and running builds do not
+# use. Only a store still over its budget then goes whole, images too.
+docker builder prune -af --max-used-space "$((DOCKER_BUDGET_GB * 512))MB" > /dev/null
 [ "$(size_gb "$DOCKER_DATA_ROOT")" -le "$DOCKER_BUDGET_GB" ] || docker system prune -af > /dev/null
 exit 0

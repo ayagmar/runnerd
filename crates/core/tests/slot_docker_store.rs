@@ -1,6 +1,6 @@
 //! A slot's Docker Engine keeps its images and build cache between the slot's jobs, each in a new container, within
-//! the Docker budget runnerd gives it. Needs Docker, sysbox and the runner image
-//! (`docker build --target base -t runnerd-runner:base image`):
+//! the Docker budget runnerd gives it, and a store its engine does not start on is emptied. Needs Docker, sysbox and
+//! the runner image (`docker build --target base -t runnerd-runner:base image`):
 //!
 //! ```sh
 //! cargo test -p runnerd-core --test slot_docker_store -- --ignored --nocapture
@@ -124,6 +124,35 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     if !output.contains("CACHED") {
         return Err(format!(
             "the slot's next job built its image without the build cache:\n{output}"
+        ));
+    }
+
+    // A job damages the store's containerd database with its engine stopped, as a crash mid-write does. The next
+    // job's engine does not start on it, so the store is emptied and the engine starts on an empty one.
+    let (code, output) = job(
+        docker,
+        names,
+        &[],
+        "pkill -x dockerd; while pgrep -x 'dockerd|containerd' > /dev/null; do sleep 0.2; done; \
+         dd if=/dev/urandom bs=4096 count=2 conv=notrunc \
+         of=\"$DOCKER_DATA_ROOT/containerd/daemon/io.containerd.metadata.v1.bolt/meta.db\"",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "the job that damages the store exited {code}:\n{output}"
+        ));
+    }
+    let (code, output) = job(
+        docker,
+        names,
+        &[],
+        &format!("! docker image inspect store-app > /dev/null 2>&1 && {BUILD}"),
+    )
+    .await?;
+    if code != 0 || !output.contains("emptied it") {
+        return Err(format!(
+            "the slot's Docker Engine did not start again on an emptied store (exit {code}):\n{output}"
         ));
     }
 
