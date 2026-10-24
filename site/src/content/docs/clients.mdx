@@ -99,10 +99,11 @@ Below the steps: CPU and memory against the profile's caps; the same job's lates
 
 Above the charts, links filter by repository, workflow and outcome; each keeps the others, so a filtered page can be bookmarked. Below the charts: every job that matches. The charts count every workflow and outcome of the repository.
 
-### Caches, Sizing and Config
+### Insights, Caches, Sizing and Config
 
 | Page | Shows |
 |---|---|
+| Insights | a card per [insight](../insights/), warnings first, with links to the runs in the history and on GitHub; the last 24 hours in a line; each repository's waits this week against the week before, warm and cold apart |
 | Caches | each volume, its bound and its size over 30 days; reseed a snapshot or empty a cache; the records of failed jobs, removed one at a time or all at once |
 | Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../admission/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; whether [auto sizing](../admission/#auto-sizing) is on and, per profile, what its next look changes or until when a recent change holds it, or why no look changes anything, such as a hand edit runnerd does not run with yet; the changes it made, with a link that opens the last one undone in the editor |
 | Config | `runnerd.toml` in an editor that checks it against `MemoryMax` as you type, saves and reloads only when it fits; the doctor's checks |
@@ -148,6 +149,8 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl sizing [--since 7d]` | per profile and per job: percentiles and the largest of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../admission/#sizing) |
 | `runnerctl sizing apply <profile> [--yes]` | writes a profile's advised `memory` and `slots` into the daemon's config after showing the change and asking; the daemon checks it against the budget first |
 | `runnerctl sizing undo <profile> [--yes]` | writes back the `memory` and `slots` [auto sizing](../admission/#auto-sizing) last replaced, the same way; both refuse to write over a config changed since they read it |
+| `runnerctl insights [--days 30]`, `insights --digest` | one line per [insight](../insights/), then each repository's waits this week against the last; or the last 24 hours |
+| `runnerctl notify test [--target phone]` | sends each `[notify]` target a test message and says what each did; fails unless every one got it |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
@@ -255,7 +258,7 @@ every repository resumed
 
 The dashboard, for a host you reach over SSH. It shows what the web dashboard does, in the same words:
 
-- a health line: slots running, jobs waiting and the oldest's wait, and over the last 24 hours the p95 wait with a bar for the longest wait of each hour, and the failures;
+- a health line: slots running, jobs waiting and the oldest's wait, and over the last 24 hours the p95 wait with a bar for the longest wait of each hour, and the failures, then how many warning [insights](../insights/) hold;
 - the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container; its heading adds the CPU budget under [CPU admission](../admission/#cpu-admission);
 - a card per slot with the job, its step, run time, and memory and CPU sparklines;
 - **Waiting**: each queued job, oldest first, with how long it has waited and why runnerd has not started it;

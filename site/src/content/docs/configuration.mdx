@@ -230,3 +230,21 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 |---|---|---|
 | `origins` | `[]` | addresses of proxies in front of the dashboard whose pages may write: pause, reseed, save the config ([From another device](../clients/#from-another-device)). Each is a scheme, host and port as the browser's address bar shows them, with no path, and an IPv4 address as four decimal numbers: `https`, or `http` for a loopback host only, since the session cookie would otherwise cross the network in the clear |
 | `open` | none | the one of `origins` that `runnerctl web` opens the dashboard on, such as the tailnet's address; it still prints the loopback link. `check-config` refuses an `open` not in `origins`. `runnerctl web --local` or `--base` overrides it for one run |
+
+### `[notify]`
+
+Where runnerd sends [notifications](../insights/#notifications). Without targets nothing is sent.
+
+| Key | Default | Means |
+|---|---|---|
+| `digest_at` | `"09:00"` | when the digest goes to targets that list `digest`, `HH:MM` in the host's local time |
+
+Each `[[notify.targets]]`:
+
+| Key | Default | Means |
+|---|---|---|
+| `name` | required | what logs and `runnerctl notify test` call it; where it got to is kept under this name |
+| `kind` | required | `"ntfy"` or `"webhook"` |
+| `url` | required | an ntfy topic's URL (`https://ntfy.sh/<topic>`) or the webhook's; a secret that no log line or error shows |
+| `headers` | `{}` | sent with each post, such as `{ Authorization = "Bearer tk_…" }`; their values are secrets too |
+| `events` | `["failed", "lost", "runner", "insights"]` | what it is sent; add `"digest"` for the daily digest |
