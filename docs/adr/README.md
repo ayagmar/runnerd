@@ -12,7 +12,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md) | GPUI desktop app pinned to a Zed commit (superseded by 0034) |
 | [0005](0005-isolation-backends-sysbox-by-default.md) | Isolation backends: sysbox by default, privileged DinD only when asked |
 | [0006](0006-ephemeral-jit-runners.md) | Ephemeral JIT runners, one per job |
-| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041) |
+| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041 and 0052) |
 | [0008](0008-auth-with-the-gh-token.md) | Authenticate with the `gh` CLI's token |
 | [0009](0009-newest-stable-and-locked-dependencies.md) | Every dependency newest stable and locked (in part superseded by 0025) |
 | [0010](0010-mit-license-public-repository.md) | MIT license, public repository |
@@ -57,3 +57,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling |
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued |
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends |
+| [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch |
