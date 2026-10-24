@@ -14,8 +14,8 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use runnerd_core::api::{
-    AutoPlan, Event, EventEnvelope, HostSample, JobState, Resize, Sample, SizingChange, SizingHold,
-    Waiting,
+    AutoPlan, Event, EventEnvelope, HostSample, JobState, Resize, RunnerStatus, Sample,
+    SizingChange, SizingHold, Waiting,
 };
 
 mod fake;
@@ -38,6 +38,7 @@ async fn main() {
     let _ = std::fs::remove_file(&socket);
     let fake = fake::Fake::new(fake::Fixtures::new(now()));
     burst(&fake);
+    warm(&fake);
     auto_sizing(&fake);
     fake::serve(&socket, fake.clone());
     let listener = runnerd_web::listen(&addr).await.unwrap().unwrap();
@@ -148,6 +149,28 @@ fn burst(fake: &fake::Fake) {
             repository.queued_jobs = queued;
         }
     }
+}
+
+/// A warm runner in jvm's slot 2: ledger's last job there ended 10 minutes ago, and its runner waits for the next.
+fn warm(fake: &fake::Fake) {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let at = now() - 600;
+    let jvm = fixtures
+        .status
+        .profiles
+        .iter_mut()
+        .find(|profile| profile.name == "jvm")
+        .unwrap();
+    jvm.slots[1].runner = Some(RunnerStatus {
+        repository: "halyard/ledger".to_owned(),
+        name: format!("runnerd-3f9a-forge-jvm-2-{at}"),
+        runner_id: 4100 + at % 1000,
+        container: format!("{at:x}c0ffee"),
+        busy: false,
+        started_at: at,
+        reserved: 9 << 30,
+        warm: true,
+    });
 }
 
 /// Auto sizing on, at most once in 3 days a profile: it lowered jvm two days ago, which holds jvm a day more, and its
