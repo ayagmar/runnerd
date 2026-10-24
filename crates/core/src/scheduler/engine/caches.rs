@@ -2,16 +2,22 @@
 //! over their limit when no runner runs, and counts what the mirror served each runner. Reseeds and cache checks
 //! run as background tasks the tick collects; it must not start or stop runners.
 
+use std::time::{Duration, SystemTime};
+
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use super::{Engine, Shutdown};
+use super::{Engine, Occupant, Shutdown};
 use crate::api;
 use crate::cache::{self, Emptied, Trimmed};
 use crate::config::ByteSize;
 use crate::docker::{DockerApi, is_not_found};
 use crate::github::GithubApi;
 use crate::time;
+
+/// How long after the shared caches' last check the next stops warm runners to run (ADR 0050). Without warm runners
+/// the check runs whenever no runner runs; warm runners can keep one running all day.
+const CHECK_EVERY: Duration = Duration::from_secs(3600);
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Counts what the mirror served each runner since the last count.
@@ -82,6 +88,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // On a shutdown, left to the next start, which checks them first.
         if mode == Shutdown::No && self.trim_due && self.trim.is_none() {
             self.trim_due = false;
+            self.checked_at = SystemTime::now();
             let docker = self.docker.clone();
             let names = self.names.clone();
             let caches = self.config.caches.clone();
@@ -196,6 +203,30 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             });
         }
         self.drop_closed_slots();
+    }
+
+    /// Whether upkeep of `profile` waits only for its runners, all idle: its reseed, or the shared caches' check
+    /// (`CHECK_EVERY` after the last, or running), which waits for every profile's runners. Its warm runners then
+    /// stop and none starts.
+    pub(super) fn upkeep_waits_for_warm(&self, profile: &str) -> bool {
+        let idle = |slots: &Vec<Option<Occupant>>| {
+            slots
+                .iter()
+                .flatten()
+                .all(|occupant| !occupant.busy && occupant.job.is_none())
+        };
+        let reseed = (self.reseed_due.contains(profile) || self.reseed_requested.contains(profile))
+            && self.slots.get(profile).is_some_and(idle);
+        // Until the check ends: a runner started meanwhile mounts the volumes it may remove.
+        let check = (self.trim.is_some()
+            || self.trim_due
+                && self
+                    .checked_at
+                    .elapsed()
+                    .is_ok_and(|age| age >= CHECK_EVERY))
+            && self.records.shells.is_empty()
+            && self.slots.values().all(idle);
+        reseed || check
     }
 
     /// Whether a profile's snapshot is being rebuilt, or will be once its slots are free.

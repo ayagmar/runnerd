@@ -11,12 +11,15 @@ use futures_util::StreamExt;
 use tracing::{info, warn};
 
 use super::admission::Admitting;
-use super::{Engine, Occupant, RunningJobs, Shutdown};
+use super::{Engine, Occupant, Purpose, RunningJobs, Shutdown};
+use crate::api::Basis;
 use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
-use crate::scheduler::{Decision, Plan, Preparing, Profile, Repository, RunnerSlot, Slot, plan};
+use crate::scheduler::{
+    Budget, Decision, Plan, Preparing, Profile, Repository, RunnerSlot, Slot, SlotRef, plan,
+};
 use crate::time;
 
 /// GitHub requests a tick has in flight at most. GitHub asks clients not to flood it with concurrent requests;
@@ -88,6 +91,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.apply_runners(listings.runners).await;
         if mode == Shutdown::No {
             self.apply_queued(listings.queued);
+            self.refresh_warm().await;
+            self.note_queued();
         } else {
             for state in self.repositories.values_mut() {
                 state.listed = false;
@@ -111,12 +116,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .map(|(slot, _)| Decision::Stop { slot })
                         .collect(),
                     waiting: BTreeMap::new(),
+                    warm: BTreeSet::new(),
                 },
                 self.admitting(&mut [], None),
             ),
         };
         self.note_high_water(&admitting);
         let mut held_for_cpu = BTreeSet::new();
+        // Once a start waits for a warm runner that took a job, the plan's later starts counted on its room too.
+        let mut deferred = false;
         for decision in decisions {
             match decision {
                 Decision::Stop { slot } => {
@@ -126,22 +134,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     };
                     self.stop(&slot, jobs).await;
                 }
-                Decision::Start {
-                    slot,
-                    repository,
-                    memory,
-                    cpu,
-                } => {
-                    let mut admission = admitting.admit(&repository, memory, cpu);
-                    let held_since = self
-                        .repositories
-                        .get_mut(&repository)
-                        .and_then(|state| state.cpu_wait.take())
-                        .map(|wait| wait.since);
-                    if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
-                        cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());
-                    }
-                    self.start(&slot, &repository, admission).await;
+                Decision::Start { .. } if deferred => {}
+                start @ Decision::Start { .. } => {
+                    deferred = !self.apply_start(start, &mut admitting).await;
                 }
                 Decision::HeldForCpu { repository } => {
                     held_for_cpu.insert(repository);
@@ -158,11 +153,54 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.prune();
     }
 
+    /// Carries out a plan's `Decision::Start`, unless a warm runner it replaces is still there: that one took a job
+    /// before its stop, and the start waits for the next plan. Returns whether it went ahead.
+    async fn apply_start(&mut self, start: Decision, admitting: &mut Admitting) -> bool {
+        let Decision::Start {
+            slot,
+            repository,
+            memory,
+            cpu,
+            warm,
+            replacing,
+        } = start
+        else {
+            return true;
+        };
+        if replacing.iter().any(|slot| self.holds_runner(slot)) {
+            info!("{repository}: a warm runner it would replace took a job; starting next tick");
+            return false;
+        }
+        let mut admission = admitting.admit(&repository, memory, cpu);
+        if warm {
+            // Its profile's caps, whatever its repository's queued jobs predict.
+            admission.basis = Basis::Cap;
+            if let Some(cpu) = admission.cpu.as_mut() {
+                cpu.basis = Basis::Cap;
+            }
+            self.start(&slot, &repository, admission, Purpose::Warm)
+                .await;
+            return true;
+        }
+        let held_since = self
+            .repositories
+            .get_mut(&repository)
+            .and_then(|state| state.cpu_wait.take())
+            .map(|wait| wait.since);
+        if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
+            cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());
+        }
+        self.start(&slot, &repository, admission, Purpose::Job)
+            .await;
+        true
+    }
+
     pub(super) fn plan(&self) -> (Plan, Admitting) {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
+        let warm = self.warm_targets();
         let mut repositories: Vec<Repository> = self
             .config
             .repositories
@@ -186,6 +224,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     runner_memory: None,
                     runner_cpu: None,
                     cpu_waiting_since: state.cpu_wait.map(|wait| wait.since),
+                    warm: warm.get(&repository.name).copied().unwrap_or(0),
                 }
             })
             .collect();
@@ -193,40 +232,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .config
             .profiles
             .iter()
-            .map(|(name, profile)| {
-                let slots = &self.slots[name];
-                // A reload may have left fewer slots than runners: free slots count only up to the configured number.
-                let mut free = (profile.slots as usize)
-                    .saturating_sub(slots.iter().filter(|slot| slot.is_some()).count());
-                let slots = slots
-                    .iter()
-                    .map(|slot| match slot {
-                        None if free > 0 => {
-                            free -= 1;
-                            Slot::Free
-                        }
-                        None => Slot::Closed,
-                        Some(occupant) => Slot::Runner(RunnerSlot {
-                            repository: occupant.repository.clone(),
-                            busy: occupant.busy,
-                            started_at: occupant.started_at,
-                        }),
-                    })
-                    .collect();
-                let profile = Profile {
-                    memory: profile.memory.0,
-                    cpus: u64::from(profile.cpus) * 1000,
-                    preparing: if self.is_reseeding(name) {
-                        Some(Preparing::Reseeding)
-                    } else if self.awaits_image(&profile.image) {
-                        Some(Preparing::PullingImage)
-                    } else {
-                        None
-                    },
-                    slots,
-                };
-                (name.clone(), profile)
-            })
+            .map(|(name, profile)| (name.clone(), self.plan_profile(name, profile)))
             .collect();
         let free_memory = self
             .memory_max
@@ -235,8 +241,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut plan = plan(
             &repositories,
             &profiles,
-            admitting.free,
-            admitting.cpu.as_ref().map(|cpu| cpu.free),
+            Budget {
+                memory: admitting.free,
+                cpu: admitting.cpu.as_ref().map(|cpu| cpu.free),
+                held: admitting.held,
+            },
             SystemTime::now(),
         );
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
@@ -255,6 +264,52 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let stops = self.over_budget(&plan.decisions);
         plan.decisions.extend(stops);
         (plan, admitting)
+    }
+
+    /// A profile as `plan` sees it.
+    fn plan_profile(&self, name: &str, profile: &crate::config::Profile) -> Profile {
+        let slots = &self.slots[name];
+        // A reload may have left fewer slots than runners: free slots count only up to the configured number.
+        let mut free = (profile.slots as usize)
+            .saturating_sub(slots.iter().filter(|slot| slot.is_some()).count());
+        let slots = slots
+            .iter()
+            .map(|slot| match slot {
+                None if free > 0 => {
+                    free -= 1;
+                    Slot::Free
+                }
+                None => Slot::Closed,
+                Some(occupant) => Slot::Runner(RunnerSlot {
+                    repository: occupant.repository.clone(),
+                    busy: occupant.busy,
+                    started_at: occupant.started_at,
+                    memory: self.takes(occupant),
+                    cpu: self.reserves_cpu(occupant),
+                }),
+            })
+            .collect();
+        Profile {
+            memory: profile.memory.0,
+            cpus: (u64::from(profile.cpus) * 1000).min(self.cpu_budget().unwrap_or(u64::MAX)),
+            upkeep_due: self.upkeep_waits_for_warm(name),
+            preparing: if self.is_reseeding(name) {
+                Some(Preparing::Reseeding)
+            } else if self.awaits_image(&profile.image) {
+                Some(Preparing::PullingImage)
+            } else {
+                None
+            },
+            slots,
+        }
+    }
+
+    /// Whether a slot holds a runner.
+    fn holds_runner(&self, slot: &SlotRef) -> bool {
+        self.slots
+            .get(&slot.profile)
+            .and_then(|slots| slots.get(slot.index))
+            .is_some_and(Option::is_some)
     }
 
     /// What the runners take (`takes`), and the memory

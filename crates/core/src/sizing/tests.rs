@@ -1,7 +1,7 @@
 //! Advice from synthetic histories: two profiles of a 33G slice, jobs of fictional repositories.
 
 use super::{Held, History, Measure, Ran, Window, advise};
-use crate::api::{Advice, ProfileSizing, Sizing};
+use crate::api::{Advice, ProfileSizing, Sizing, Starts};
 use crate::config::{ByteSize, Config, resize_profile};
 
 const G: u64 = 1 << 30;
@@ -61,6 +61,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         cpu_average: Some(1000),
         queued_at: NOW - 2 * HOUR,
         started_at: Some(NOW - 2 * HOUR + wait_secs * 1000),
+        runner_started_at: NOW - 2 * HOUR,
         finished_at: Some(NOW - HOUR),
         oom_killed: false,
         reserved: None,
@@ -211,6 +212,36 @@ fn percentiles_are_nearest_rank_over_the_jobs_peaks() {
         (100 * M, 190 * M, 198 * M, 200 * M)
     );
     assert_eq!((node.wait.p50, node.wait.p95), (100, 190));
+}
+
+#[test]
+fn jobs_a_warm_runner_took_are_told_apart_with_their_waits() {
+    // Three taken by a runner up before they were queued, two whose runner started for them.
+    let warm = |wait| Ran {
+        runner_started_at: NOW - 3 * HOUR,
+        ..job("halyard/storefront", "build", "node", G, wait)
+    };
+    let jobs = vec![
+        warm(1),
+        warm(2),
+        warm(3),
+        job("halyard/storefront", "build", "node", G, 20),
+        job("halyard/storefront", "build", "node", G, 30),
+    ];
+    let sizing = sizing(&History {
+        jobs,
+        cancelled: Vec::new(),
+        runners: Vec::new(),
+    });
+    assert_eq!(
+        profile(&sizing, "node").starts,
+        Starts {
+            warm: 3,
+            warm_p50: 2,
+            cold: 2,
+            cold_p50: 20,
+        }
+    );
 }
 
 #[test]

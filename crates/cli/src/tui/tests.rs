@@ -27,7 +27,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
-use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread};
+use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread, Starts};
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
     LogSummary, ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus,
@@ -156,6 +156,7 @@ fn runner(busy: bool) -> RunnerStatus {
         busy,
         started_at: 1004,
         reserved: 9 << 30,
+        warm: false,
     }
 }
 
@@ -522,6 +523,12 @@ fn sizing() -> Sizing {
             slots: 2,
             peaks: peaks.clone(),
             wait: spread(20, 300, 400, 400),
+            starts: Starts {
+                warm: 30,
+                warm_p50: 2,
+                cold: 10,
+                cold_p50: 24,
+            },
             busy: 70,
             wants_slots: true,
             advice,
@@ -614,6 +621,11 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
     assert!(
         narrow.contains("WAIT P95") && narrow.contains("same 14G"),
         "the sizing view fits 80 columns, the advice on two lines: {narrow}"
+    );
+    let wide = screen(&app, 140, 24, false);
+    assert!(
+        wide.contains("P50 WARM/COLD") && wide.contains("2s / 24s"),
+        "wide, the waits of warm and cold starts show: {wide}"
     );
 }
 
@@ -2243,5 +2255,40 @@ fn the_open_job_s_peak_among_its_runs_rises_with_its_samples_until_its_record_is
         peaks(&app).0.contains("largest peak 7G"),
         "{:?}",
         peaks(&app)
+    );
+}
+
+#[test]
+fn a_warm_runner_reads_as_warm_not_as_a_runner_stuck_waiting_for_its_job() {
+    let mut app = app();
+    app.update(event(
+        Some(1),
+        Event::SlotChanged {
+            profile: "jvm".to_owned(),
+            slot: SlotStatus {
+                slot: 1,
+                runner: Some(RunnerStatus {
+                    warm: true,
+                    ..runner(false)
+                }),
+            },
+        },
+    ));
+    let shown = screen(&app, 160, 40, false);
+    let health = shown.lines().nth(1).unwrap();
+    assert!(
+        health.contains("0/3 running") && health.contains("1 warm"),
+        "the warm runner runs nothing and is not starting: {health}"
+    );
+    assert!(!health.contains("starting"), "{health}");
+    assert!(
+        shown.contains("Warm runner for halyard/ledger, waiting for a job"),
+        "its slot card says so: {shown}"
+    );
+    assert!(!shown.contains("waiting for its job"), "{shown}");
+    let narrow = screen(&app, 80, 20, false);
+    assert!(
+        narrow.contains("warm runner for halyard/ledger, waiting for a job"),
+        "its slot row says so: {narrow}"
     );
 }

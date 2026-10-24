@@ -19,6 +19,7 @@ use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
 use crate::observe::metrics::Events;
+use crate::scheduler::warm;
 use crate::sizing;
 use crate::sync::lock;
 
@@ -160,6 +161,14 @@ pub struct OpenJob {
     pub runner: Option<String>,
     /// When its runner was removed, in milliseconds since the epoch.
     pub runner_removed_at: Option<u64>,
+    /// The workflow run it belongs to.
+    pub run_id: u64,
+    /// 1 for the run's first attempt.
+    pub run_attempt: u32,
+    /// The workflow's name, when known.
+    pub workflow: Option<String>,
+    /// When GitHub queued it, in milliseconds since the epoch.
+    pub queued_at: u64,
 }
 
 /// Where a job's log capture continues: the runner's page file and the byte offset in it.
@@ -711,6 +720,11 @@ impl Store {
     /// What sizing reads: the finished jobs queued at or after `since` (ms) and the runners since.
     pub async fn sizing(&self, since: u64) -> Result<sizing::History, StoreError> {
         self.read(move |db| read::sizing(db, since)).await
+    }
+
+    /// The jobs queued at or after `since` (ms), whatever became of them, as warm runners learn from them.
+    pub async fn warm(&self, since: u64) -> Result<Vec<warm::Seen>, StoreError> {
+        self.read(move |db| read::warm(db, since)).await
     }
 
     /// The last measurement of every volume, with its time (seconds), by name.

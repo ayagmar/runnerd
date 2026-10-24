@@ -427,7 +427,7 @@ fn lists_height(app: &App, side_by_side: bool) -> u16 {
 
 /// The figures that say whether CI keeps up, as the dashboard opens with them: slots running, jobs waiting and the
 /// oldest's wait, then over the last 24 hours the p95 wait with the longest wait of each hour, and the failures.
-/// What does not fit goes whole, least telling first: the starting runners, the finished count, the hours, the
+/// What does not fit goes whole, least telling first: the starting and warm runners, the finished count, the hours, the
 /// oldest wait.
 fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     const SPARK_LEAST: usize = 8;
@@ -471,15 +471,34 @@ fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
 }
 
 /// The health line's figures, each with its rank for [`drop_least`]; `None` marks where the hours' bars go.
-fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
-    let status = &app.live.status;
-    let runners: Vec<_> = status
+/// How many runners run a job, and the others as `, 1 starting, 2 warm`, or nothing.
+fn runners(status: &Status) -> (usize, String) {
+    let mut running = 0;
+    let (mut starting, mut warm) = (0, 0);
+    for runner in status
         .profiles
         .iter()
         .flat_map(|profile| &profile.slots)
         .filter_map(|slot| slot.runner.as_ref())
-        .collect();
-    let starting = runners.iter().filter(|runner| !runner.busy).count();
+    {
+        match (runner.busy, runner.warm) {
+            (true, _) => running += 1,
+            (false, false) => starting += 1,
+            (false, true) => warm += 1,
+        }
+    }
+    let mut idle = String::new();
+    for (count, what) in [(starting, "starting"), (warm, "warm")] {
+        if count > 0 {
+            let _ = write!(idle, ", {count} {what}");
+        }
+    }
+    (running, idle)
+}
+
+fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
+    let status = &app.live.status;
+    let (running, idle) = runners(status);
     let slots: usize = status
         .profiles
         .iter()
@@ -495,18 +514,12 @@ fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'
     let mut items: Vec<(u8, Option<Vec<Span<'static>>>)> = vec![(
         0,
         Some(vec![
-            Span::styled((runners.len() - starting).to_string(), bold()),
+            Span::styled(running.to_string(), bold()),
             Span::raw(format!("/{slots} running")),
         ]),
     )];
-    if starting > 0 {
-        items.push((
-            4,
-            Some(vec![Span::styled(
-                format!(", {starting} starting"),
-                theme.dim(),
-            )]),
-        ));
+    if !idle.is_empty() {
+        items.push((4, Some(vec![Span::styled(idle, theme.dim())])));
     }
     items.push((
         0,
@@ -1050,6 +1063,10 @@ fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: The
                         spans.push(Span::styled(usage.cpu(6), theme.cpu()));
                     }
                 }
+                (None, Some(runner)) if runner.warm => spans.push(Span::styled(
+                    format!("warm runner for {}, waiting for a job", runner.repository),
+                    theme.dim(),
+                )),
                 (None, Some(runner)) => spans.push(Span::styled(
                     format!("runner for {} waiting for its job", runner.repository),
                     theme.dim(),
@@ -1161,7 +1178,8 @@ fn card_sizes(profile: &ProfileStatus) -> [String; 3] {
     ]
 }
 
-/// What a slot card shows: its job with step, time, memory and CPU; its runner waiting for a job; or nothing.
+/// What a slot card shows: its job with step, time, memory and CPU; its runner waiting for its job, or warm for the
+/// next one; or nothing.
 fn card(
     app: &App,
     profile: &ProfileStatus,
@@ -1213,7 +1231,11 @@ fn card(
         (None, Some(runner)) => vec![
             Line::styled(
                 fit(
-                    &format!("Runner for {} waiting for its job", runner.repository),
+                    &if runner.warm {
+                        format!("Warm runner for {}, waiting for a job", runner.repository)
+                    } else {
+                        format!("Runner for {} waiting for its job", runner.repository)
+                    },
                     width,
                 ),
                 theme.dim(),
@@ -1719,7 +1741,8 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
 }
 
 /// What each profile's jobs use and what to set its memory and slots to; the selected profile's jobs below. Under
-/// 100 columns the medians, the jobs at their cap and the largest peaks are left out.
+/// 100 columns the medians, the jobs at their cap, the largest peaks and the waits of warm and cold starts are left
+/// out.
 fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let Some(sizing) = &app.sizing else {
         let [title, rest] =
@@ -1946,7 +1969,11 @@ fn sizing_profiles(
     if wide {
         columns.push(("AT CAP", 6));
     }
-    columns.extend([("CPU P99", 7), ("BUSY", 5), ("WAIT P95", 8), ("ADVICE", 11)]);
+    columns.extend([("CPU P99", 7), ("BUSY", 5), ("WAIT P95", 8)]);
+    if wide {
+        columns.push(("P50 WARM/COLD", 13));
+    }
+    columns.push(("ADVICE", 11));
     let rows = sizing.profiles.iter().map(|profile| {
         let peaks = &profile.peaks;
         let mut cells = vec![
@@ -1976,11 +2003,23 @@ fn sizing_profiles(
             Cell::from(cores(peaks.cpu.p99)),
             Cell::from(format!("{}%", profile.busy)),
             Cell::from(duration(profile.wait.p95)),
-            Cell::from(Span::styled(
-                advice_word(profile.advice),
-                theme.tone(advice_tone(profile.advice)),
-            )),
         ]);
+        if wide {
+            let starts = &profile.starts;
+            cells.push(Cell::from(if starts.warm > 0 {
+                format!(
+                    "{} / {}",
+                    duration(starts.warm_p50),
+                    duration(starts.cold_p50)
+                )
+            } else {
+                String::new()
+            }));
+        }
+        cells.push(Cell::from(Span::styled(
+            advice_word(profile.advice),
+            theme.tone(advice_tone(profile.advice)),
+        )));
         Row::new(cells)
     });
     let table = Table::new(rows, widths(&columns))

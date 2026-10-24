@@ -66,7 +66,7 @@ pub use records::{
 };
 pub use sizing::{
     Advice, AutoPlan, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingHold,
-    SizingQuery, Spread, period,
+    SizingQuery, Spread, Starts, period,
 };
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
@@ -244,6 +244,10 @@ pub struct RunnerStatus {
     /// and its last sampled memory. 0 from a daemon before measured admission.
     #[serde(default)]
     pub reserved: u64,
+    /// A warm runner: idle, and no queued job of its repository waits for it; it takes the next one GitHub hands
+    /// out. False from a daemon before warm runners.
+    #[serde(default)]
+    pub warm: bool,
 }
 
 /// A configured repository and its queue.

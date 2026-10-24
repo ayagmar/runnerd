@@ -166,8 +166,8 @@ A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T
 | `mirror.enabled` | | whether runners pull from Docker Hub through the mirror |
 | `mirror.memory`, `mirror.cpus` | | the mirror container's limits; its `memory` counts in the budget |
 | `mirror.ttl` | | how long the mirror keeps an image no runner pulls again |
-| `mirror.max_size` | `"10G"` | the mirror's storage is emptied above this when no job runs |
-| `pnpm.max_size`, `maven.max_size` | | the shared pnpm store and Maven repository are emptied above this when no job runs |
+| `mirror.max_size` | `"10G"` | the mirror's storage is emptied above this when no runner runs, with the shared caches |
+| `pnpm.max_size`, `maven.max_size` | | the shared pnpm store and Maven repository are emptied above this when no runner runs; warm runners stop for it at most hourly, at the first moment no job runs |
 | `reseed_at` | `"2G"` | once slot 1's layers changed this much and the profile is idle, they become the profile's snapshot ([Warm caches](../running/#warm-caches)) |
 | `snapshot_max` | `"10G"` | a reseed that would make a snapshot larger starts it over from slot 1's changes alone, or from the image when those are larger too |
 
@@ -191,6 +191,7 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 | `name` | | `owner/name` on GitHub |
 | `profile` | | the profile its jobs run on |
 | `labels` | | at least one; a job runs here when every label in its `runs-on` is one of these |
+| `warm` | `1` | runners kept registered for jobs not queued yet while the repository is active ([warm runners](../running/#warm-runners)); `0` turns them off |
 
 ### `[history]`
 

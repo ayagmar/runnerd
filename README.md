@@ -122,7 +122,7 @@ The site, <https://ayagmar.github.io/runnerd/>, has the guides:
 - [Install](https://ayagmar.github.io/runnerd/install/): requirements, `runnerd init`'s output, verifying a release.
 - [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, runner images, records of failed jobs, the budget check, isolation, and every key with its default.
 - [Admission and sizing](https://ayagmar.github.io/runnerd/admission/): what a job's memory counts, sizing advice from the job history and auto sizing, measured and CPU admission, `runnerd simulate`.
-- [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled and caches kept warm, records of failed jobs and their shells, the job history, and the JSON API and its events.
+- [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled, warm runners that wait for the next job, how caches are kept warm, records of failed jobs and their shells, the job history, and the JSON API and its events.
 - [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/): the web dashboard, from another device too, every `runnerctl` command, and `runnerctl tui` with its keys.
 - [Upgrading](https://ayagmar.github.io/runnerd/upgrading/): what each release changes on an existing host, and what to do before and after.
 

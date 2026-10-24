@@ -15,6 +15,7 @@ use crate::docker::{self, DockerApi, is_not_found};
 use crate::github::GithubApi;
 use crate::record;
 use crate::scheduler::SlotRef;
+use crate::scheduler::warm::Attempt;
 use crate::time;
 
 /// The limits an adopted container runs with.
@@ -177,6 +178,25 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         match self.store.open_jobs().await {
             Ok(open) => {
                 for job in open {
+                    // Its run is as old as the job, for the warm runners its remaining jobs get, not as new as
+                    // this start.
+                    let runs = job.state == api::JobState::Queued
+                        || job
+                            .runner
+                            .as_ref()
+                            .is_some_and(|runner| running.contains(runner));
+                    if runs {
+                        self.note_job(
+                            &job.repository,
+                            Attempt {
+                                run_id: job.run_id,
+                                run_attempt: job.run_attempt,
+                            },
+                            job.id,
+                            job.workflow.as_deref(),
+                            job.queued_at,
+                        );
+                    }
                     if job.state == api::JobState::Queued {
                         self.queued_jobs.insert(job.id, job.repository);
                         continue;

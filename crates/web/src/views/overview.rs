@@ -288,6 +288,13 @@ fn slot_view<'overview>(
             figure: cap,
             text: format!("{name}, {} on {}", job.summary.name, job.summary.repository),
         },
+        (Some(runner), None, _) if runner.warm => Lens {
+            figure: cap,
+            text: format!(
+                "{name}, a warm runner for {}, waiting for a job",
+                runner.repository
+            ),
+        },
         (Some(runner), None, _) => Lens {
             figure: cap,
             text: format!(
@@ -553,6 +560,7 @@ fn block(
     let state = match (&slot.runner, view.job) {
         (None, _) => "idle",
         (Some(_), Some(_)) => "busy",
+        (Some(runner), None) if runner.warm => "starting warm",
         (Some(_), None) => "starting",
     };
     let href = view.job.map_or(format!("#{}", view.key), |job| {
@@ -613,6 +621,7 @@ fn slot_card(
     let view = slot_view(overview, profile, slot);
     let state = match (&slot.runner, view.job) {
         (None, _) => " idle",
+        (Some(runner), None) if runner.warm => " starting warm",
         (Some(_), None) => " starting",
         (Some(_), Some(_)) => "",
     };
@@ -640,7 +649,8 @@ fn slot_card(
                 (Some(runner), None) => {
                     span.repo { (runner.repository) }
                     @let id = format!("{}-waiting", view.key);
-                    p.slot-idle { "Waiting for its job " (parts.html(&id, html! { span.muted #(id) { (time_ago(runner.started_at, overview.now)) } })) }
+                    @let what = if runner.warm { "Warm, waiting for a job " } else { "Waiting for its job " };
+                    p.slot-idle { (what) (parts.html(&id, html! { span.muted #(id) { (time_ago(runner.started_at, overview.now)) } })) }
                 }
                 (Some(_), Some(job)) => { (running_job(overview, profile, job, &view.key, parts)) }
             }
@@ -1001,8 +1011,10 @@ struct Health<'overview> {
     /// Slots holding a runner that runs a job, and all slots.
     running: usize,
     slots: usize,
-    /// Of the slots holding a runner, those whose runner waits for its job.
+    /// Of the slots holding a runner, those whose runner waits for its job, and the warm ones, which wait for jobs
+    /// not queued yet.
     starting: usize,
+    warm: usize,
     /// When each job that started in the last day did, and how long it waited for its runner, oldest first.
     waits: &'overview [Started],
     /// Jobs that finished in the last day, and of those the ones that failed or were lost.
@@ -1018,9 +1030,16 @@ impl<'overview> Health<'overview> {
             .iter()
             .flat_map(|profile| &profile.slots)
             .filter_map(|slot| slot.runner.as_ref());
-        let starting = runners.clone().filter(|runner| !runner.busy).count();
+        let starting = runners
+            .clone()
+            .filter(|runner| !runner.busy && !runner.warm)
+            .count();
+        let warm = runners
+            .clone()
+            .filter(|runner| !runner.busy && runner.warm)
+            .count();
         Health {
-            running: runners.count() - starting,
+            running: runners.count() - starting - warm,
             slots: overview
                 .status
                 .profiles
@@ -1028,6 +1047,7 @@ impl<'overview> Health<'overview> {
                 .map(|profile| profile.slots.len())
                 .sum(),
             starting,
+            warm,
             waits: &overview.day.started,
             finished: overview.day.finished,
             failed: overview.day.failed,
@@ -1055,6 +1075,9 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                     dd { span.figure-main { (health.running) } span.figure-of { " of " (health.slots) " slots" } }
                     @if health.starting > 0 {
                         dd.figure-note { (health.starting) " runner" @if health.starting > 1 { "s" } " starting" }
+                    }
+                    @if health.warm > 0 {
+                        dd.figure-note { (health.warm) " warm, waiting for jobs" }
                     }
                 }
                 div class=(if queued.is_empty() { "" } else { "waiting" }) {

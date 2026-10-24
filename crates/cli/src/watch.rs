@@ -365,6 +365,8 @@ fn slots(state: &State, now: u64, paint: Paint) -> String {
             let Some(job) = state.job_in(&profile.name, slot.slot) else {
                 let what = if runner.busy {
                     format!("busy: {}", runner.repository)
+                } else if runner.warm {
+                    format!("warm, waiting for a job of {}", runner.repository)
                 } else {
                     format!("waiting for a job of {}", runner.repository)
                 };
@@ -576,6 +578,7 @@ mod tests {
                     busy: true,
                     started_at: 1005,
                     reserved: 9 << 30,
+                    warm: false,
                 }),
             },
         }));
@@ -725,6 +728,7 @@ mod tests {
                     busy: true,
                     started_at: 1005,
                     reserved: 9 << 30,
+                    warm: false,
                 }),
             },
         }));

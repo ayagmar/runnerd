@@ -2546,6 +2546,10 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     let cookie = dashboard.sign_in().await;
     let off = dashboard.page(&cookie, "/sizing").await.body;
     assert!(off.contains("Auto sizing is off"), "{off}");
+    assert!(
+        off.contains("<dt>Warm starts</dt><dd>31 of 40, p50 2s (others 21s)</dd>"),
+        "{off}"
+    );
     {
         let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
         let now = fixtures.now;
@@ -2612,5 +2616,44 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     assert!(
         !blocked.contains("Next look") && blocked.contains("Once that is fixed: memory 7G"),
         "the change is not promised for the next look: {blocked}"
+    );
+}
+
+#[tokio::test]
+async fn a_warm_runner_reads_as_warm_not_as_a_runner_waiting_for_its_job() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let now = fixtures.now;
+        let jvm = fixtures
+            .status
+            .profiles
+            .iter_mut()
+            .find(|profile| profile.name == "jvm")
+            .unwrap();
+        jvm.slots[1].runner = Some(runnerd_core::api::RunnerStatus {
+            repository: "halyard/ledger".to_owned(),
+            name: "runnerd-3f9a-forge-jvm-2-1".to_owned(),
+            runner_id: 4200,
+            container: "warm".to_owned(),
+            busy: false,
+            started_at: now - 600,
+            reserved: 9 << 30,
+            warm: true,
+        });
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    assert!(
+        body.contains("Warm, waiting for a job"),
+        "its slot card: {body}"
+    );
+    assert!(
+        body.contains("1 warm, waiting for jobs"),
+        "health counts it apart from starting runners: {body}"
+    );
+    assert!(
+        body.contains("jvm 2, a warm runner for halyard/ledger, waiting for a job"),
+        "the budget bar's block: {body}"
     );
 }

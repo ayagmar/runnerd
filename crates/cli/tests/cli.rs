@@ -24,7 +24,7 @@ use runnerd_core::api::{
     Event, EventEnvelope, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary, LogSummary,
     Pairing, Pairings, Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record,
     RecordLimits, Records, RemovedRecords, RepositoryStatus, Resize, RunnerStatus, RunningJob,
-    Sizing, SizingChange, SlotStatus, Spread, Status, Timeline, Waiting,
+    Sizing, SizingChange, SlotStatus, Spread, Starts, Status, Timeline, Waiting,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -88,6 +88,7 @@ fn status() -> Status {
                         busy: true,
                         started_at: 1_700_000_000,
                         reserved: 9 << 30,
+                        warm: false,
                     }),
                 },
                 SlotStatus {
@@ -346,6 +347,12 @@ async fn get_sizing() -> axum::Json<Sizing> {
             slots: 2,
             peaks: peaks.clone(),
             wait: spread(30, 240, 300, 320),
+            starts: Starts {
+                warm: 30,
+                warm_p50: 2,
+                cold: 10,
+                cold_p50: 24,
+            },
             busy: 80,
             wants_slots: true,
             advice,
@@ -1086,6 +1093,10 @@ fn sizing_shows_the_advice_and_applies_it_only_when_told_to() {
     let text = stdout(&shown);
     assert!(
         text.contains("node  7G × 2, 8 CPUs; 100 jobs, slots busy 80%"),
+        "{text}"
+    );
+    assert!(
+        text.contains("warm runners took 30 of 40 jobs: waited p50 2s, the others 24s"),
         "{text}"
     );
     assert!(

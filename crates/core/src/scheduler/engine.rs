@@ -8,7 +8,8 @@
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
 //! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `history` (what
-//! the store records), `control` (the API's commands) and `status` (what it publishes).
+//! the store records), `warm` (how many warm runners each repository wants), `control` (the API's commands) and
+//! `status` (what it publishes).
 
 mod admission;
 mod caches;
@@ -20,6 +21,7 @@ mod recover;
 mod runners;
 mod status;
 mod tick;
+mod warm;
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -159,6 +161,15 @@ pub struct Setup {
     pub paths: Paths,
 }
 
+/// Why a runner starts.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Purpose {
+    /// For a queued job.
+    Job,
+    /// As a warm runner, for jobs not queued yet.
+    Warm,
+}
+
 /// A slot's runner and its container.
 #[derive(Debug, Clone)]
 struct Occupant {
@@ -212,6 +223,8 @@ struct RepositoryState {
     held_until: Option<SystemTime>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
+    /// Runners in a row that ended without a job after waiting `IDLE_TIMEOUT` for one.
+    idle_exits: u32,
     /// Its oldest job held for CPU that memory and a slot had room for, and since when, kept while that job stays
     /// queued: a tick held by memory or slots in between does not make it younger.
     cpu_wait: Option<CpuWait>,
@@ -261,6 +274,9 @@ pub struct Engine<G = Github, D = Docker> {
     trim_due: bool,
     /// The running check of the shared caches: Docker takes many seconds to measure volumes.
     trim: Option<JoinHandle<Result<Trimmed, docker::Error>>>,
+    /// When the last check of the shared caches started; the daemon's start counts as one, as the first runs then
+    /// unless runners were adopted.
+    checked_at: SystemTime,
     mirror_up: bool,
     /// The memory cap the running mirror started with.
     mirror_memory: u64,
@@ -295,6 +311,8 @@ pub struct Engine<G = Github, D = Docker> {
     records: records::RecordState,
     /// Under measured admission, the predictor and the high-water mark.
     measured: admission::Measured,
+    /// What warm runners learned from the history, and the workflow runs seen lately.
+    warm: warm::Warm,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -351,11 +369,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         });
         let (caches, caches_receiver) = watch::channel(cache::volumes(&names, &config));
         let (records, records_receiver) = records::RecordState::new();
-        // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
-        let mirror = &config.caches.mirror;
-        let mirror_memory = if mirror.enabled { mirror.memory.0 } else { 0 };
         let mut engine = Engine {
             isolation: isolation::backend(config.host.isolation),
+            // Unknown: an earlier run may have left the mirror up, with the configured cap at best.
+            mirror_memory: config.mirror_memory(),
             config,
             github: Arc::new(github),
             docker: Arc::new(docker),
@@ -376,9 +393,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // So the caches are measured once at start.
             trim_due: true,
             trim: None,
+            checked_at: SystemTime::now(),
             // Unknown: an earlier run may have left it up, so the first idle tick stops it.
             mirror_up: true,
-            mirror_memory,
             rate_limit_logged: false,
             busy_orphans: BTreeSet::new(),
             status,
@@ -398,6 +415,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             closing: BTreeMap::new(),
             last_prune: None,
             measured: admission::Measured::default(),
+            warm: warm::Warm::default(),
             records,
         };
         engine.publish();

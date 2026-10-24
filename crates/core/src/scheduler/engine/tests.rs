@@ -671,6 +671,7 @@ slots = 2
 name = "o/r"
 profile = "app"
 labels = ["self-hosted", "app"]
+warm = 0
 "#;
 
 /// A pause or resume of one repository.
@@ -1158,15 +1159,20 @@ async fn a_job_whose_container_vanished_while_the_daemon_was_down_closes_after_t
 }
 
 #[tokio::test]
-async fn an_idle_runner_gone_while_the_daemon_was_down_stops_holding_its_slot_after_the_restart() {
+async fn a_runner_gone_while_the_daemon_was_down_stops_holding_its_slot_after_the_restart() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let dir = TestDir::new("restart");
-    running_runner(&github, &docker, "");
+    running_runner(&github, &docker, "@@job 1 1\n");
     let (mut engine, handle) = engine_in(&github, &docker, &dir);
     engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
     handle.store.flush().await;
     let held = handle.store.sizing(0).await.unwrap().runners;
-    assert_eq!(held.len(), 1, "the adopted idle runner holds its slot");
+    assert_eq!(
+        held.len(),
+        1,
+        "the adopted runner holds its slot for its job"
+    );
     assert_eq!(held[0].removed_at, None);
     drop((engine, handle));
     // The host rebooted: the container is gone, and no daemon saw it go.
@@ -1235,7 +1241,7 @@ async fn mirror_bytes_the_history_failed_to_store_are_counted_on_the_next_tick()
 /// `CONFIG` with a second repository, `o/s`, on the same profile.
 fn two_repositories() -> String {
     format!(
-        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\n"
+        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\nwarm = 0\n"
     )
 }
 
@@ -1506,7 +1512,7 @@ async fn a_tick_lists_every_repository_at_once() {
     let docker = FakeDocker::default();
     let dir = TestDir::new("engine");
     let config = format!(
-        "{}\n[[repositories]]\nname = \"o/t\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\n",
+        "{}\n[[repositories]]\nname = \"o/t\"\nprofile = \"app\"\nlabels = [\"self-hosted\", \"app\"]\nwarm = 0\n",
         two_repositories()
     );
     let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
@@ -2074,11 +2080,13 @@ slots = 1
 name = "o/r"
 profile = "app"
 labels = ["self-hosted", "app"]
+warm = 0
 
 [[repositories]]
 name = "o/s"
 profile = "small"
 labels = ["self-hosted", "small"]
+warm = 0
 "#,
         mirror != "0G"
     )
@@ -2516,7 +2524,7 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
     );
 
     let with_s = format!(
-        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\"]\n"
+        "{CONFIG}\n[[repositories]]\nname = \"o/s\"\nprofile = \"app\"\nlabels = [\"self-hosted\"]\nwarm = 0\n"
     );
     engine.reload(Config::parse(&with_s).unwrap(), None, None);
     engine.publish();
@@ -3348,3 +3356,4 @@ async fn a_pull_that_lands_while_old_images_are_removed_keeps_its_image() {
 
 mod admission;
 mod records;
+mod warm;
