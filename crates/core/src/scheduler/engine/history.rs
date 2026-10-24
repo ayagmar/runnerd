@@ -218,9 +218,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
+        let ended = self
+            .ended_uploads
+            .values()
+            .map(|ended| (ended.repository.clone(), ended.job));
         let running: Vec<(String, u64)> = self
             .occupied()
             .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
+            .chain(ended)
             .collect();
         let mut described = Vec::new();
         for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), running)).await
@@ -246,6 +251,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         let undecided = self.undecided(&described);
         self.decide_writes(undecided).await;
+        self.detach_ended();
         let closing: Vec<(String, u64)> = self
             .closing
             .iter()
@@ -305,8 +311,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Records a runner's removal and what the build cache served it, and stops watching it; its job, if it took
     /// one, closes once GitHub reports it completed.
     pub(super) fn forget(&mut self, occupant: &Occupant) {
+        let job = self
+            .occupied()
+            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
+            .and_then(|(_, candidate)| candidate.job)
+            .or(occupant.job);
         // Before the record of its removal, which the job's record then shows.
-        self.detach_build_cache(occupant);
+        self.detach_build_cache(occupant, job);
         let now = SystemTime::now();
         self.store
             .runner_removed(&occupant.runner_name, time::ms(now));
@@ -314,11 +325,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             tracked.retain(|container| container.runner != occupant.runner_name);
         });
         self.leases.end(&occupant.runner_name, time::ms(now));
-        let job = self
-            .occupied()
-            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
-            .and_then(|(_, candidate)| candidate.job)
-            .or(occupant.job);
         if let Some(job) = job {
             self.closing.insert(job, Closing::now(&occupant.repository));
         }

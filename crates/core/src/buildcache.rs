@@ -315,6 +315,28 @@ impl BuildCache {
         }
     }
 
+    /// Closes the socket of `runner` if its writes are undecided and it holds uploads, and says whether it did: the
+    /// uploads stay until `decide` and `detach`.
+    pub fn close(&self, runner: &str) -> bool {
+        let dir = {
+            let state = lock(&self.inner.state);
+            let Some(open) = state.runners.get(runner) else {
+                return false;
+            };
+            if open.writes != Writes::Undecided || open.held.is_empty() {
+                return false;
+            }
+            open.serving.abort();
+            open.dir.clone()
+        };
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            warn!("cannot remove {}: {error}", dir.display());
+        }
+        true
+    }
+
     /// Closes `runner`'s socket and returns what it was served and stored, and whether it could write. What it sent
     /// while undecided is dropped.
     pub fn detach(&self, runner: &str) -> Option<BuildCacheCounts> {

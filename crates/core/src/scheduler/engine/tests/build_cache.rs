@@ -667,6 +667,72 @@ async fn a_main_job_that_ends_before_its_writes_were_decided_keeps_what_it_store
 }
 
 #[tokio::test]
+async fn jobs_that_end_having_stored_nothing_are_not_asked_about_on_github() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-nothing");
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let [(main, _), (pull, _)] = main_and_pull_request(&github, &docker, &mut engine).await;
+    assert!(
+        cache.undecided(&main) && cache.undecided(&pull),
+        "GitHub has not been asked yet"
+    );
+    let before = github.calls().len();
+    jobs_end(&docker, &mut engine).await;
+    let asked: Vec<String> = github.calls()[before..]
+        .iter()
+        // Only the polls and the registrations' removal.
+        .filter(|call| {
+            !["delete ", "runners ", "queued "]
+                .iter()
+                .any(|polls| call.starts_with(polls))
+        })
+        .cloned()
+        .collect();
+    assert_eq!(
+        asked,
+        Vec::<String>::new(),
+        "nothing to keep, nothing to ask"
+    );
+}
+
+#[tokio::test]
+async fn a_stalled_github_does_not_hold_commands_while_an_ended_jobs_uploads_wait() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-stalled");
+    let (mut engine, handle, _cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let [(_, main_socket), _] = main_and_pull_request(&github, &docker, &mut engine).await;
+    assert_eq!(
+        buildcache::request(&main_socket, "PUT", "/gradle/0a1b", b"classes")
+            .await
+            .0,
+        200
+    );
+    github.hold_jobs();
+    let control = handle.control.clone();
+    tokio::join!(jobs_end(&docker, &mut engine), async {
+        github.until_waiting(1).await;
+        let answered =
+            tokio::time::timeout(Duration::from_secs(5), control.resume(one("o/r"))).await;
+        github.release_jobs();
+        answered.expect("the resume answers").unwrap();
+    });
+    handle.store.flush().await;
+    let counts = handle
+        .store
+        .job(1)
+        .await
+        .unwrap()
+        .unwrap()
+        .summary
+        .metrics
+        .build_cache;
+    assert!(counts.writer, "the push to main wrote once GitHub answered");
+    assert_eq!((counts.written_bytes, counts.refused), (7, 0));
+}
+
+#[tokio::test]
 async fn a_default_branch_renamed_while_runnerd_runs_writes_within_the_hour() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

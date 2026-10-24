@@ -365,6 +365,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// Each repository's default branch, once a job of it needed it: the branch whose builds write to the build
     /// cache when `[caches.build] branches` names none.
     default_branches: BTreeMap<String, build_cache::DefaultBranch>,
+    /// Removed runners' build cache uploads held until `follow_jobs` asks GitHub of their jobs, by runner.
+    ended_uploads: BTreeMap<String, build_cache::EndedUploads>,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -480,6 +482,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             records,
             build_cache: build_cache.clone(),
             default_branches: BTreeMap::new(),
+            ended_uploads: BTreeMap::new(),
         };
         engine.publish();
         (

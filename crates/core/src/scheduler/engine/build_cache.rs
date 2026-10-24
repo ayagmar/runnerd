@@ -29,6 +29,13 @@ pub(super) struct DefaultBranch {
     pub(super) read_at: SystemTime,
 }
 
+/// A removed runner's uploads held while its job's writes are undecided.
+#[derive(Debug)]
+pub(super) struct EndedUploads {
+    pub(super) repository: String,
+    pub(super) job: u64,
+}
+
 /// A job whose writes are undecided, with what GitHub said of it.
 #[derive(Debug)]
 pub(super) struct Undecided {
@@ -98,62 +105,60 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Closes a removed runner's build cache and records what it was served and stored.
-    pub(super) fn detach_build_cache(&self, occupant: &Occupant) {
+    /// Closes a removed runner's build cache and records what it was served and stored. One that holds uploads
+    /// while its `job`'s writes are undecided, as a job that ended before a poll asked GitHub of it, keeps them
+    /// without its socket until `follow_jobs` has asked: they are kept or dropped by GitHub's answer, not dropped
+    /// because the job was short.
+    pub(super) fn detach_build_cache(&mut self, occupant: &Occupant, job: Option<u64>) {
         let Some(cache) = &self.build_cache else {
             return;
         };
+        if let Some(job) = job
+            && cache.close(&occupant.runner_name)
+        {
+            self.ended_uploads.insert(
+                occupant.runner_name.clone(),
+                EndedUploads {
+                    repository: occupant.repository.clone(),
+                    job,
+                },
+            );
+            return;
+        }
         if let Some(counts) = cache.detach(&occupant.runner_name) {
             self.store.build_cache(&occupant.runner_name, counts);
         }
     }
 
-    /// Decides the writes of a runner whose container ended before a poll asked GitHub of its job, so what it
-    /// uploaded meanwhile is kept or dropped by GitHub's answer, not dropped because the job was short. Its job is
-    /// known from its capture, which has ended. Without an answer, its uploads go as an undecided runner's do.
-    pub(super) async fn decide_ended(&mut self, occupant: &Occupant) {
-        if !self
-            .build_cache
-            .as_ref()
-            .is_some_and(|cache| cache.undecided(&occupant.runner_name))
-        {
-            return;
-        }
-        let Some(job) = self
-            .occupied()
-            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
-            .and_then(|(_, candidate)| candidate.job)
-        else {
-            return;
-        };
-        match self.github.job(&occupant.repository, job).await {
-            Ok(details) => {
-                let undecided = self.undecided(&[(occupant.repository.clone(), job, details)]);
-                // Not through `serving`: a command served meanwhile could release this runner again.
-                let answers = read_answers(
-                    self.github.clone(),
-                    undecided,
-                    self.config.caches.build.branches.clone(),
-                    self.known_default_branches(),
-                )
-                .await;
-                self.take_answers(answers);
+    /// The removed runners `follow_jobs` asked GitHub about: their build cache closes, whatever it answered.
+    pub(super) fn detach_ended(&mut self) {
+        for runner in std::mem::take(&mut self.ended_uploads).into_keys() {
+            if let Some(counts) = self
+                .build_cache
+                .as_ref()
+                .and_then(|cache| cache.detach(&runner))
+            {
+                self.store.build_cache(&runner, counts);
             }
-            Err(error) => warn!("{}: cannot read job {job}: {error}", occupant.repository),
         }
     }
 
-    /// Of the running jobs GitHub just described, those whose runner's writes are undecided.
+    /// Of the jobs GitHub just described, running or ended with uploads held, those whose writes are undecided.
     pub(super) fn undecided(&self, described: &[(String, u64, JobDetails)]) -> Vec<Undecided> {
         let Some(cache) = &self.build_cache else {
             return Vec::new();
         };
+        let ended = self
+            .ended_uploads
+            .iter()
+            .map(|(runner, ended)| (runner.as_str(), Some(ended.job)));
         self.occupied()
-            .filter(|(_, occupant)| cache.undecided(&occupant.runner_name))
-            .filter_map(|(_, occupant)| {
-                let (repository, _, job) = described
-                    .iter()
-                    .find(|(_, id, _)| occupant.job == Some(*id))?;
+            .map(|(_, occupant)| (occupant.runner_name.as_str(), occupant.job))
+            .chain(ended)
+            .filter(|(runner, _)| cache.undecided(runner))
+            .filter_map(|(runner, job)| {
+                let (repository, _, details) =
+                    described.iter().find(|(_, id, _)| job == Some(*id))?;
                 let writers = self
                     .config
                     .repositories
@@ -162,10 +167,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .map(|candidate| candidate.build_cache_writers)
                     .unwrap_or_default();
                 Some(Undecided {
-                    runner: occupant.runner_name.clone(),
+                    runner: runner.to_owned(),
                     repository: repository.clone(),
                     writers,
-                    job: job.clone(),
+                    job: details.clone(),
                 })
             })
             .collect()

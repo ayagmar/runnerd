@@ -102,9 +102,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let took_job = logs.as_ref().map(|logs| logs.contains("Running job: "));
         // The capture ends with the container; its last lines must be stored before the job's record closes.
         self.end_capture(&occupant.runner_name).await;
-        if why == Release::Ended {
-            self.decide_ended(occupant).await;
-        }
         self.count_mirror_bytes().await;
         // A failed job's container is kept as its record, then removed, in the background.
         let recorded =
