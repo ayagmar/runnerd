@@ -12,7 +12,7 @@ const base = import.meta.env.BASE_URL.replace(/\/?$/, '/');
 const docs = `${base}install/`;
 const clientsDoc = `${base}clients/`;
 const repo = 'https://github.com/ayagmar/runnerd';
-const version = '0.0.10';
+const version = '0.0.11';
 const title = 'runnerd: GitHub Actions runners on your own Linux machine';
 const description =
   'runnerd runs GitHub Actions jobs on a Linux machine you already have: a fresh container per job, Docker inside it without --privileged, every runner inside one memory budget.';
@@ -70,7 +70,7 @@ const packs = [
 const simulateMeasured = simulateRows.at(-1);
 
 // runnerctl status against the web dashboard's demo daemon, as the clients page prints it.
-const status = `runnerd 0.0.10  23.5G of 33G reserved in runnerd.slice
+const status = `runnerd 0.0.11  23.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
 jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792814287   7m 11s
