@@ -67,7 +67,9 @@ Views of the same thing are linked. On the overview, pointing at, focusing or ta
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-Under [CPU admission](../admission/#cpu-admission) the line above the budget bar adds the CPU the runners reserve of the budget, and says when a job waits for CPU. Below the slots: the slice over the last half hour, pause and resume per repository or all at once, the queued jobs and the latest. A pause lasts until a resume, across restarts.
+The page opens with four figures: slots running, jobs waiting and how long the oldest has, the p95 wait of the jobs that started in the last 24 hours with the longest wait of each hour, and the day's failures. Under them, **Waiting** lists each queued job, oldest first, with how long it has waited and why runnerd has not started it: its repository is paused, runners failed to take a job and runnerd retries later, a runner is starting for it, its profile is reseeding or pulling its image, every slot of its profile is busy, its runner needs more memory or CPU than the budget has left, or an older job waiting for CPU goes first. The reason is the scheduler's own, as of its last poll.
+
+Under [CPU admission](../admission/#cpu-admission) the line above the budget bar adds the CPU the runners reserve of the budget, and says when a job waits for CPU. Below the slots: the latest jobs, pause and resume per repository or all at once, and the slice over the last half hour. A pause lasts until a resume, across restarts. On a phone the pages are a bar along the bottom edge.
 
 ### A job
 
@@ -77,7 +79,7 @@ Under [CPU admission](../admission/#cpu-admission) the line above the budget bar
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-Below the steps: CPU and memory against the profile's caps, and the log. A failed job kept as a [record](../running/#records-of-failed-jobs) shows the `runnerctl shell` command that opens a shell in it, with a copy button.
+Below the steps: CPU and memory against the profile's caps; the same job's latest 30 runs (same repository, workflow and name), each a column of its wait and run time in its outcome's colour over its memory peak, with the median run and wait; and the log. A failed job kept as a [record](../running/#records-of-failed-jobs) shows the `runnerctl shell` command that opens a shell in it, with a copy button.
 
 ### History
 
@@ -87,14 +89,14 @@ Below the steps: CPU and memory against the profile's caps, and the log. A faile
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-Below the charts: every job, filtered by repository and outcome.
+Above the charts, links filter by repository, workflow and outcome; each keeps the others, so a filtered page can be bookmarked. Below the charts: every job that matches. The charts count every workflow and outcome of the repository.
 
 ### Caches, Sizing and Config
 
 | Page | Shows |
 |---|---|
 | Caches | each volume, its bound and its size over 30 days; reseed a snapshot or empty a cache; the records of failed jobs, removed one at a time or all at once |
-| Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../admission/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; under [auto sizing](../admission/#auto-sizing), the changes it made, with a link that opens the last one undone in the editor |
+| Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../admission/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; whether [auto sizing](../admission/#auto-sizing) is on and, per profile, what its next look changes or until when a recent change holds it; the changes it made, with a link that opens the last one undone in the editor |
 | Config | `runnerd.toml` in an editor that checks it against `MemoryMax` as you type, saves and reloads only when it fits; the doctor's checks |
 
 ## runnerctl
