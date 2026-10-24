@@ -83,6 +83,7 @@ fn app() -> App {
                 seed_memory: Vec::new(),
                 shell_memory: Vec::new(),
                 slice_cpus: None,
+                host: None,
                 cpu: None,
             },
             profiles: vec![profile("jvm", 2, 9 << 30), profile("node", 1, 7 << 30)],
@@ -506,7 +507,7 @@ fn a_record_is_removed_only_after_y_and_the_list_follows_new_ones() {
     assert_eq!(app.update(event(Some(9), created)), vec![Effect::Records]);
 }
 
-/// jvm keeps its 9G; node's builds peak at 2.1G, so 2.5G caps fit 5 of node's 2 × 7G.
+/// jvm keeps its 9G; node's builds peak at 2.1G, so 3.25G caps, with 1G of page cache room, fit 4 of node's 2 × 7G.
 fn sizing() -> Sizing {
     let spread = |p50, p95, p99, max| Spread { p50, p95, p99, max };
     let advised = |name: &str, memory: u64, peak: u64, advice| {
@@ -560,8 +561,8 @@ fn sizing() -> Sizing {
                 7 << 30,
                 2150 << 20,
                 Advice::Lower {
-                    memory: 2560 << 20,
-                    slots: 5,
+                    memory: 3328 << 20,
+                    slots: 4,
                 },
             ),
         ],
@@ -583,17 +584,17 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
     let shown = screen(&app, 120, 24, false);
     for expected in [
         "Sizing",
-        "node: lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G",
+        "node: lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G",
         "halyard/storefront",
         "CI / build",
-        "a writes memory = \"2.5G\", slots = 5",
+        "a writes memory = \"3.25G\", slots = 4",
     ] {
         assert!(shown.contains(expected), "{expected}: {shown}");
     }
 
     app.update(key(KeyCode::Char('a')));
     assert!(
-        screen(&app, 120, 24, false).contains("y writes memory = \"2.5G\", slots = 5 for node"),
+        screen(&app, 120, 24, false).contains("y writes memory = \"3.25G\", slots = 4 for node"),
         "a asks first"
     );
     assert_eq!(app.update(key(KeyCode::Char('n'))), Vec::new());
@@ -603,8 +604,8 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
         vec![Effect::Resize(Resizing {
             profile: "node".to_owned(),
             resize: Resize {
-                memory: 2560 << 20,
-                slots: 5,
+                memory: 3328 << 20,
+                slots: 4,
                 cpus: None
             }
         })]
@@ -938,6 +939,7 @@ async fn dropping_then_back(
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
                     slice_cpus: None,
+                    host: None,
                     cpu: None,
                 },
             },

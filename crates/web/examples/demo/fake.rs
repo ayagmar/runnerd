@@ -278,6 +278,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
                 refused: 0,
                 writer: true,
             },
+            sock_throttled: Some(0),
         },
         log: LogSummary {
             lines: lines.len() as u64,
@@ -557,6 +558,7 @@ impl Fixtures {
                 seed_memory: Vec::new(),
                 shell_memory: Vec::new(),
                 slice_cpus: Some(32_000),
+                host: None,
                 cpu: None,
             },
             profiles: vec![
@@ -958,7 +960,8 @@ fn digest(fixtures: &Fixtures) -> Digest {
 
 /// The slice the fixtures' config names has a `MemoryMax` of 33G.
 /// What the history says of the config's profiles: jvm's tests peak at 7.8G of 9G, so 9G stays; node's builds
-/// peak at 2.1G of 7G and wait for a slot, so 2.5G caps fit 5 in its 2 × 7G. The end-to-end job has too few runs.
+/// peak at 2.1G of 7G and wait for a slot, so 3.25G caps, with 1G of page cache room, fit 4 in its 2 × 7G. The
+/// end-to-end job has too few runs.
 fn sizing(fixtures: &Fixtures) -> Sizing {
     let config = runnerd_core::config::Config::parse(&fixtures.config).unwrap();
     let spread = |p50, p95, p99, max| Spread { p50, p95, p99, max };
@@ -997,7 +1000,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                             spread(gib(31), gib(42), gib(45), gib(46)),
                             spread(7, 30, 66, 90),
                             Advice::Lower {
-                                memory: 5632 * MIB,
+                                memory: 5888 * MIB,
                                 slots: 2,
                             },
                         ),
@@ -1019,8 +1022,8 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                     wait,
                     memory,
                     Advice::Lower {
-                        memory: 2560 * MIB,
-                        slots: 5,
+                        memory: 3328 * MIB,
+                        slots: 4,
                     },
                     vec![
                         job(
@@ -1030,8 +1033,8 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                             memory,
                             wait,
                             Advice::Lower {
-                                memory: 2560 * MIB,
-                                slots: 5,
+                                memory: 3328 * MIB,
+                                slots: 4,
                             },
                         ),
                         job(

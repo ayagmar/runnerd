@@ -51,7 +51,7 @@ const SUMMARY: &str = "j.id, j.repository, j.run_id, j.run_attempt, j.workflow, 
      j.network_sent, coalesce(r.mirror_bytes, 0), j.log_lines, j.log_bytes, j.log_truncated, \
      r.memory_cap, r.cpu_cap, coalesce(r.build_cache_hits, 0), coalesce(r.build_cache_misses, 0), \
      coalesce(r.build_cache_read_bytes, 0), coalesce(r.build_cache_written_bytes, 0), \
-     coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0) \
+     coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled \
      FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
 
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
@@ -106,6 +106,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
                 refused: row.get(36)?,
                 writer: row.get(37)?,
             },
+            sock_throttled: row.get(38)?,
         },
         log: api::LogSummary {
             lines: row.get(27)?,
@@ -128,17 +129,21 @@ pub(super) fn summary(db: &Connection, id: u64) -> rusqlite::Result<Option<api::
         return Ok(None);
     };
     if !summary.state.is_final() {
-        let (mirror_bytes, build_cache) =
-            (summary.metrics.mirror_bytes, summary.metrics.build_cache);
+        let (mirror_bytes, build_cache, sock_throttled) = (
+            summary.metrics.mirror_bytes,
+            summary.metrics.build_cache,
+            summary.metrics.sock_throttled,
+        );
         summary.metrics = metrics(db, id)?;
         summary.metrics.mirror_bytes = mirror_bytes;
         summary.metrics.build_cache = build_cache;
+        summary.metrics.sock_throttled = sock_throttled;
     }
     Ok(Some(summary))
 }
 
 /// A job's use over its samples: from its start to its end when known, else over its container's whole life.
-/// `mirror_bytes` and `build_cache` are left 0.
+/// `mirror_bytes`, `build_cache` and `sock_throttled` are left empty.
 pub(super) fn metrics(db: &Connection, job: u64) -> rusqlite::Result<api::JobMetrics> {
     let window: Option<(Option<String>, Option<u64>, Option<u64>)> = db
         .query_row(
@@ -217,6 +222,7 @@ fn window_metrics(
                     .map(|sent| sent.saturating_sub(sent_before)),
                 mirror_bytes: 0,
                 build_cache: api::BuildCacheCounts::default(),
+                sock_throttled: None,
             })
         },
     )
@@ -668,6 +674,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             cpu_average: row.get(15)?,
             cpu_cap: row.get(16)?,
             runner_started_at: row.get(17)?,
+            host_waited: row.get(18)?,
         })
     };
     let jobs = db
@@ -676,7 +683,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), \
              j.state = 'completed' AND j.conclusion IS 'success', r.ooms, r.memory_measure IS 'without_page_cache', \
-             j.cpu_average, r.cpu_cap, r.started_at FROM jobs j JOIN runners r ON r.name = j.runner \
+             j.cpu_average, r.cpu_cap, r.started_at, j.host_waited FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
              AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
         )?
@@ -687,7 +694,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, coalesce(j.memory_peak, 0), \
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0, r.ooms, \
-             r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at \
+             r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at, j.host_waited \
              FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id",
         )?
@@ -721,7 +728,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<Vec<crat
         "SELECT j.id, j.repository, j.workflow, j.name, j.branch, j.url, j.run_id, j.run_attempt, j.state, \
          j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak, \
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
-         r.build_cache_refused, r.build_cache_writer \
+         r.build_cache_refused, r.build_cache_writer, r.sock_throttled \
          FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
     )?
@@ -754,6 +761,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<Vec<crat
                 }),
                 None => None,
             },
+            sock_throttled: row.get(22)?,
         })
     })?
     .collect()

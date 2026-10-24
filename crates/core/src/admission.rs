@@ -1,6 +1,9 @@
 //! Admission by measured peaks: a job's memory peak and average CPU predicted from the job history (`Predictor`),
 //! and the history replayed through admission by caps and by predictions, with or without a CPU budget
-//! (`simulate`), to show what each would have done with the same jobs. Pure: no I/O, no clock.
+//! (`simulate`), to show what each would have done with the same jobs; and what the host's memory leaves runners
+//! (`host`). Pure: no I/O, no clock.
+
+pub mod host;
 
 use std::collections::{BTreeMap, BTreeSet};
 

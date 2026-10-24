@@ -4,8 +4,9 @@
 use std::path::Path;
 
 use super::capture::{Captured, MAX_LINE, Parser};
-use super::metrics::{Events, Paths, Sampler, Tracked};
+use super::metrics::{Events, Paths, Sampler, Tracked, read_host_memory};
 use super::mirror::{self, Leases};
+use crate::api;
 use crate::store::{LOG_BACKLOG, LogPosition, MirrorPosition};
 use crate::testdir::TestDir;
 
@@ -147,7 +148,8 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
         events_after("low 0\nhigh 0\nmax 10171\noom 0\noom_kill 0\n", 1_000),
         Events {
             oom: Some(0),
-            oom_kill: Some(0)
+            oom_kill: Some(0),
+            sock_throttled: None,
         },
         "zero counters say the kernel never ran out of memory"
     );
@@ -155,8 +157,19 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
         events_after("low 0\nhigh 0\nmax 10173\noom 1\noom_kill 1\n", 3_000),
         Events {
             oom: Some(1),
-            oom_kill: Some(1)
+            oom_kill: Some(1),
+            sock_throttled: None,
         }
+    );
+    // Reclaim that went badly held its sockets' receive windows small: its downloads slowed.
+    assert_eq!(
+        events_after(
+            "low 0\nhigh 0\nmax 10173\noom 1\noom_kill 1\nsock_throttled 846\n",
+            4_000
+        )
+        .sock_throttled,
+        Some(846),
+        "the throttled sockets are counted"
     );
     // A counter the file lacks, or that isn't a number, says nothing either way.
     assert_eq!(
@@ -167,7 +180,8 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
         events_after("max 10173\noom many\noom_kill 2\n", 7_000),
         Events {
             oom: None,
-            oom_kill: Some(2)
+            oom_kill: Some(2),
+            sock_throttled: None,
         }
     );
     std::fs::remove_file(&events).unwrap();
@@ -193,6 +207,47 @@ fn the_slice_counts_its_active_page_cache_for_the_high_water_mark() {
     std::fs::write(slice.join("cpu.stat"), "usage_usec 0\n").unwrap();
     let (_, host) = Sampler::new(paths, "ci.slice").sample(&[], 1_000);
     assert_eq!(host.map(|host| host.memory), Some(6000));
+}
+
+#[test]
+fn beside_the_hosts_memory_the_slice_counts_no_slab_that_memavailable_counts_already() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    std::fs::create_dir_all(&paths.proc).unwrap();
+    std::fs::write(
+        slice.join("memory.current"),
+        "10000
+",
+    )
+    .unwrap();
+    std::fs::write(
+        slice.join("memory.stat"),
+        "anon 3000
+file 6000
+inactive_file 4000
+active_file 2000
+slab_reclaimable 800
+",
+    )
+    .unwrap();
+    std::fs::write(
+        slice.join("cpu.stat"),
+        "usage_usec 0
+",
+    )
+    .unwrap();
+    std::fs::write(
+        paths.proc.join("meminfo"),
+        "MemTotal: 64 kB
+MemAvailable: 32 kB
+",
+    )
+    .unwrap();
+    let memory = Sampler::new(paths, "ci.slice").host_memory(1_000);
+    // 10000 less 6000 of page cache and 800 of reclaimable slab.
+    assert_eq!(memory.map(|memory| memory.slice), Some(3200));
 }
 
 fn feed_all(chunks: &[&[u8]]) -> Vec<Captured> {
@@ -359,4 +414,46 @@ fn many_lines_in_one_chunk_come_in_batches_each_with_where_to_resume() {
         assert_eq!(position.offset, resumed_at);
     }
     assert_eq!(resumed_at, count * 1000);
+}
+
+#[test]
+fn the_hosts_memory_and_how_long_its_tasks_stalled_for_it_are_read_from_proc() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    std::fs::create_dir_all(paths.proc.join("pressure")).unwrap();
+    std::fs::write(
+        paths.proc.join("meminfo"),
+        "MemTotal:       65184256 kB\nMemFree:         1048576 kB\nMemAvailable:   27108076 kB\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read_host_memory(&paths, 5, 7).map(|memory| (memory.full, memory.some)),
+        Some((None, None)),
+        "a kernel without pressure stall information still says what is available"
+    );
+    std::fs::write(
+        paths.proc.join("pressure/memory"),
+        "some avg10=12.34 avg60=0.50 avg300=0.00 total=1626686\n\
+         full avg10=6.70 avg60=1.05 avg300=0.00 total=1535492\n",
+    )
+    .unwrap();
+    assert_eq!(
+        read_host_memory(&paths, 5 << 30, 7),
+        Some(api::HostMemory {
+            at: 7,
+            total: 65_184_256 * 1024,
+            available: 27_108_076 * 1024,
+            slice: 5 << 30,
+            some: Some(api::Pressure {
+                avg10: 1234,
+                avg60: 50
+            }),
+            full: Some(api::Pressure {
+                avg10: 670,
+                avg60: 105
+            }),
+        })
+    );
+    std::fs::write(paths.proc.join("meminfo"), "MemTotal: 1 kB\n").unwrap();
+    assert_eq!(read_host_memory(&paths, 0, 7), None, "no MemAvailable");
 }

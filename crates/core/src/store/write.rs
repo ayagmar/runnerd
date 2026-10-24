@@ -76,6 +76,7 @@ impl Writer<'_> {
             Write::RunnerStarted(runner) => self.runner_started(&runner),
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
             Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
+            Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
@@ -287,6 +288,18 @@ impl Writer<'_> {
                 [runner],
             ),
         );
+    }
+
+    fn host_waited(&self, jobs: &[u64], ms: u64) {
+        for job in jobs {
+            logged(
+                "record a wait for the host's memory",
+                self.db.execute(
+                    "UPDATE jobs SET host_waited = host_waited + ?2 WHERE id = ?1",
+                    params![job, ms],
+                ),
+            );
+        }
     }
 
     fn build_cache(&self, runner: &str, counts: &api::BuildCacheCounts) {
@@ -687,6 +700,12 @@ impl Writer<'_> {
                 self.db.execute(
                     "UPDATE runners SET ooms = max(coalesce(ooms, 0), ?2) WHERE name = ?1",
                     params![sample.runner, ooms],
+                )?;
+            }
+            if let Some(throttled) = sample.events.sock_throttled {
+                self.db.execute(
+                    "UPDATE runners SET sock_throttled = max(coalesce(sock_throttled, 0), ?2) WHERE name = ?1",
+                    params![sample.runner, throttled],
                 )?;
             }
             if let Some(kills) = sample.events.oom_kill.filter(|kills| *kills > 0) {

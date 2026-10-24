@@ -5,9 +5,11 @@ use std::collections::BTreeMap;
 use std::path::Path;
 use std::process::Command;
 
-use runnerd_core::api::{Advice, Check, CheckStatus as Status, Sizing};
+use runnerd_core::admission::host;
+use runnerd_core::api::{self, Advice, Check, CheckStatus as Status, PAGE_CACHE_ROOM, Sizing};
 use runnerd_core::config::{self, Admission, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
+use runnerd_core::observe::metrics::{self, Paths};
 use runnerd_core::record;
 use runnerd_core::sizing::{Window, advise};
 use runnerd_core::store;
@@ -33,6 +35,8 @@ pub(crate) struct Host {
     /// Whether systemd has `sysbox.service`, which Sysbox's packages install and a source build does not.
     pub sysbox_unit: bool,
     pub kvm: bool,
+    /// The host's memory and how long its tasks stalled for it; `None` when `/proc/meminfo` does not say.
+    pub memory: Option<api::HostMemory>,
 }
 
 /// The daemons sysbox-runc needs; `sysbox.service` starts both, a source build's `scr/sysbox` too.
@@ -112,6 +116,13 @@ impl Host {
                     output.status.success() && output.stdout.trim_ascii() == b"loaded"
                 }),
             kvm: Path::new("/dev/kvm").exists(),
+            memory: {
+                let paths = Paths::default();
+                let slice = config.map_or(0, |config| {
+                    metrics::read_unavailable(&paths.slice(&config.host.slice))
+                });
+                metrics::read_host_memory(&paths, slice, 0)
+            },
         }
     }
 }
@@ -439,6 +450,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     checks.extend(slice_checks(host, config));
+    checks.push(memory_check(host.memory.as_ref(), config));
     checks.extend(image_checks(host, config, docker));
     if let (Some(config), Some(records)) = (config, &host.records) {
         checks.push(records_check(records, config));
@@ -734,6 +746,66 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
     }
 }
 
+/// Warns when admission would hold runners back for the host's memory, by `host::budget` with what the slice's
+/// runners hold now and the plain margin: while the host stalls short of memory, or while it has less to spare than
+/// the smallest profile's runner may reserve. Admission keeps half a margin more after a wait and while a stall
+/// lasts, so it can still hold jobs where this passes.
+fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Check {
+    let Some(memory) = memory else {
+        return skip("host memory", "/proc/meminfo has no MemAvailable");
+    };
+    let stalled = |pressure: Option<api::Pressure>| {
+        pressure.map_or_else(
+            || "unknown: the kernel has no pressure stall information".to_owned(),
+            |pressure| {
+                format!(
+                    "{} of the last 10 s, {} of the last minute",
+                    api::percent(pressure.avg10),
+                    api::percent(pressure.avg60)
+                )
+            },
+        )
+    };
+    let budget = host::budget(*memory, memory.slice, host::Remembered::default());
+    let detail = format!(
+        "{} of {} available, {} to spare for runners past a {} margin; every task waited for memory {}",
+        ByteSize(memory.available),
+        ByteSize(memory.total),
+        ByteSize(budget.spare),
+        ByteSize(host::margin(memory.total, false)),
+        stalled(memory.full)
+    );
+    let smallest = config.and_then(|config| {
+        config
+            .profiles
+            .iter()
+            .min_by_key(|(_, profile)| profile.memory)
+    });
+    let why = if budget.stalled {
+        "the host stalls short of memory, so runnerd starts no runner until the stall passes"
+            .to_owned()
+    } else if let Some((name, profile)) =
+        smallest.filter(|(_, profile)| budget.spare < profile.memory.0)
+    {
+        format!(
+            "a {name} runner may reserve up to {}, more than the host has to spare, so runners wait for the host's \
+             memory",
+            profile.memory
+        )
+    } else {
+        return pass("host memory", detail);
+    };
+    Check {
+        name: "host memory".to_owned(),
+        status: Status::Warn,
+        detail: format!("{detail}: {why}"),
+        fix: Some(
+            "close what uses the host's memory beside the runners; runnerd waits for it by itself"
+                .to_owned(),
+        ),
+    }
+}
+
 /// Warns when a profile's jobs need more than its cap or than the slice holds; says which caps could be lowered.
 fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
     let sizing = match sizing {
@@ -766,8 +838,9 @@ fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
             )
         } else {
             format!(
-                "every profile's memory fits its jobs' largest peak + {}%",
-                sizing.margin
+                "every profile's memory fits its jobs' largest peak + {}%, at least {} for page cache",
+                sizing.margin,
+                ByteSize(PAGE_CACHE_ROOM)
             )
         }
     } else {

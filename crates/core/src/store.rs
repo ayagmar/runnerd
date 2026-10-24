@@ -41,6 +41,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0010_auto_sizing_cpus.sql"),
     include_str!("store/migrations/0011_notify.sql"),
     include_str!("store/migrations/0012_build_cache.sql"),
+    include_str!("store/migrations/0013_host_memory.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -206,6 +207,10 @@ enum Write {
         admission: api::Admission,
     },
     RunnerOomKilled(String),
+    HostWaited {
+        jobs: Vec<u64>,
+        ms: u64,
+    },
     BuildCache {
         runner: String,
         counts: api::BuildCacheCounts,
@@ -339,6 +344,8 @@ pub struct Store {
     held: Arc<Mutex<Vec<api::HostSample>>>,
     /// The last host sample sent, for admission to read without a query.
     latest_host: Arc<Mutex<Option<api::HostSample>>>,
+    /// The last reading of the host's memory, which is not stored.
+    latest_host_memory: Arc<Mutex<Option<api::HostMemory>>>,
     /// Each running runner's last sample, for admission to read without a query.
     latest_samples: Arc<Mutex<BTreeMap<String, SampleRecord>>>,
     events: broadcast::Sender<Arc<EventEnvelope>>,
@@ -386,6 +393,7 @@ impl Store {
             closed: Arc::new(AtomicBool::new(false)),
             held,
             latest_host: Arc::new(Mutex::new(None)),
+            latest_host_memory: Arc::new(Mutex::new(None)),
             latest_samples: Arc::new(Mutex::new(BTreeMap::new())),
             events,
             backlog: Arc::new(Semaphore::new(
@@ -538,6 +546,22 @@ impl Store {
             runner: runner.to_owned(),
             counts,
         });
+    }
+
+    /// Keeps the latest reading of the host's memory for admission and the status; it is not stored.
+    pub fn host_memory(&self, memory: api::HostMemory) {
+        *lock(&self.latest_host_memory) = Some(memory);
+    }
+
+    /// The latest reading of the host's memory; `None` before the first.
+    pub fn latest_host_memory(&self) -> Option<api::HostMemory> {
+        *lock(&self.latest_host_memory)
+    }
+
+    /// Adds `ms` to how long each of `jobs` waited because the host's memory could not take its runner, which
+    /// sizing does not read as a wait for a slot.
+    pub fn host_waited(&self, jobs: Vec<u64>, ms: u64) {
+        self.send(Write::HostWaited { jobs, ms });
     }
 
     /// The last host sample sent, stored or not; `None` before the first.
@@ -909,6 +933,9 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
         7 => "NULL AS ooms, NULL AS memory_measure",
         _ => "",
     };
+    if found < 13 {
+        db.execute_batch("CREATE TEMP VIEW jobs AS SELECT *, 0 AS host_waited FROM main.jobs")?;
+    }
     if !added.is_empty() {
         db.execute_batch(&format!(
             "CREATE TEMP VIEW runners AS SELECT *, {added} FROM main.runners"

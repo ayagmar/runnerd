@@ -291,6 +291,9 @@ fn budget_line(status: &Status) -> String {
     if let Some(cpu) = budget.cpu {
         let _ = write!(line, "; {}", cpu.line());
     }
+    if let Some(host) = budget.host {
+        let _ = write!(line, "; {}", host.line());
+    }
     line
 }
 
@@ -689,6 +692,9 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
             parts.push(format!("{} sent", bytes(sent)));
         }
         parts.push(format!("{} from the mirror", bytes(metrics.mirror_bytes)));
+        if let Some(throttled) = metrics.sock_throttled.filter(|count| *count > 0) {
+            parts.push(format!("throttled {throttled} times for memory pressure"));
+        }
         usage.row(vec![plain("network"), plain(parts.join(", "))]);
     }
     if let Some(line) = build_cache(&metrics.build_cache) {
@@ -971,6 +977,7 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
             InsightKind::Flaky { .. } => "flaky",
             InsightKind::NearCap { .. } => "near-cap",
             InsightKind::ColdCache { .. } => "cold-cache",
+            InsightKind::Throttled { .. } => "throttled",
             InsightKind::Waits { .. } => "waits",
         };
         let _ = writeln!(

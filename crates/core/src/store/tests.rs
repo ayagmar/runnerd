@@ -611,6 +611,7 @@ async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
             slice_cpus: None,
+            host: None,
             cpu: None,
         },
     });
@@ -905,6 +906,7 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
             events: Events {
                 oom: Some(kills),
                 oom_kill: Some(kills),
+                sock_throttled: None,
             },
             ..sample(name, 1_000_300, 0, 0)
         }]);
@@ -946,6 +948,7 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
         events: Events {
             oom: Some(1),
             oom_kill: Some(1),
+            sock_throttled: None,
         },
         ..sample("r1", 1_000_300, 0, 0)
     }]);
@@ -1067,6 +1070,7 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
             events: Events {
                 oom,
                 oom_kill: Some(0),
+                sock_throttled: None,
             },
             ..sample(name, 1_000_300, 0, 0)
         }]);
@@ -1243,4 +1247,57 @@ async fn insights_read_finished_jobs_with_when_their_runner_started() {
     assert_eq!(runs[0].runner_started_at, Some(900_000));
     assert_eq!(runs[0].profile.as_deref(), Some("app"));
     assert!(store.last_event().await.unwrap() > 0, "events were stored");
+}
+
+#[tokio::test]
+async fn a_job_whose_sockets_memory_pressure_throttled_says_so_in_its_record() {
+    let throttled = |count| SampleRecord {
+        events: Events {
+            sock_throttled: Some(count),
+            ..Events::default()
+        },
+        ..sample("r1", 1_000_300, 0, 0)
+    };
+    let metrics = metrics_of(vec![throttled(846)]).await;
+    assert_eq!(metrics.sock_throttled, Some(846));
+    let metrics = metrics_of(vec![sample("r1", 1_000_300, 0, 0)]).await;
+    assert_eq!(metrics.sock_throttled, None, "a kernel without the counter");
+}
+
+#[tokio::test]
+async fn sizing_reads_how_long_each_job_waited_for_the_hosts_memory() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(2));
+    store.runner_started(runner("r1", 1_000_100));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.samples(vec![sample("r1", 1_000_300, 0, 0)]);
+    store.lost(1, 1_000_400);
+    store.runner_started(runner("r2", 1_000_100));
+    store.claimed(2, 20, "r2", 1_000_200);
+    store.samples(vec![sample("r2", 1_000_300, 0, 0)]);
+    store.lost(2, 1_000_400);
+    // Job 1 waited over two plans; job 2 for something else.
+    store.host_waited(vec![1], 100);
+    store.host_waited(vec![1], 20);
+    store.flush().await;
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    let mut waited: Vec<u64> = store
+        .sizing(0)
+        .await
+        .unwrap()
+        .jobs
+        .iter()
+        .map(|job| job.host_waited)
+        .collect();
+    waited.sort_unstable();
+    assert_eq!(
+        waited,
+        [0, 120],
+        "job 1's two waits add up; job 2's is none"
+    );
 }

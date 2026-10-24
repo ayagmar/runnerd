@@ -69,6 +69,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         finished_at: Some(queued + minutes * MINUTE),
         oom_killed: false,
         reserved: None,
+        host_waited: 0,
         hit_cap: Some(false),
         measure: Measure::WithoutPageCache,
         succeeded: true,

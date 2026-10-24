@@ -1,6 +1,6 @@
 //! Insights from the job history (ADR 0051): jobs that got slower and stayed so, jobs that fail and pass on a re-run,
-//! jobs whose memory nears their profile's cap, jobs that find almost nothing in the build cache, and how long each
-//! repository's jobs wait, this week against the last; and the daily digest. Pure: the daemon reads the history, the
+//! jobs whose memory nears their profile's cap, jobs that find almost nothing in the build cache, repositories whose
+//! downloads memory pressure throttled, and how long each repository's jobs wait, this week against the last; and the daily digest. Pure: the daemon reads the history, the
 //! config and the clock and passes them in. It sends nothing and changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -39,6 +39,9 @@ const WAITS_PERCENT: u64 = 50;
 const WAITS_SECONDS: u64 = 60;
 const WAITS_MIN_JOBS: u32 = 5;
 
+/// A repository's runs the kernel throttled for memory pressure that make an insight.
+const THROTTLED_MIN_RUNS: u32 = 2;
+
 /// One job the history closed, as insights read it. Times in milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Run {
@@ -76,6 +79,8 @@ pub struct Run {
     pub memory_peak: Option<u64>,
     /// What the build cache served it, if its runner had the build cache.
     pub build_cache: Option<api::BuildCacheCounts>,
+    /// Times the kernel throttled its container's sockets for memory pressure, when counted.
+    pub sock_throttled: Option<u64>,
 }
 
 impl Run {
@@ -151,6 +156,7 @@ pub fn insights(runs: &[Run], config: &Config, days: u32, now: u64) -> Insights 
         found.extend(near_cap(*key, runs, config));
         found.extend(cold_cache(*key, runs));
     }
+    found.extend(throttled(&window));
     let waits = waits(runs, now);
     found.extend(waits.iter().filter_map(waits_insight));
     found.sort_by(|a, b| {
@@ -499,6 +505,43 @@ fn cold_cache(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
         },
         writers.iter().map(|run| run.link()).collect(),
     ))
+}
+
+/// One insight per repository the kernel throttled `THROTTLED_MIN_RUNS` or more of the runs of in `window`.
+fn throttled(window: &[&Run]) -> Vec<Insight> {
+    let mut repositories: BTreeMap<&str, Vec<&Run>> = BTreeMap::new();
+    for run in window {
+        repositories.entry(&run.repository).or_default().push(run);
+    }
+    repositories
+        .into_iter()
+        .filter_map(|(repository, mut runs)| {
+            runs.sort_by_key(|run| std::cmp::Reverse((run.finished(), run.id)));
+            let hit: Vec<&Run> = runs
+                .iter()
+                .filter(|run| run.sock_throttled.is_some_and(|count| count > 0))
+                .copied()
+                .collect();
+            let throttled = u32::try_from(hit.len()).unwrap_or(u32::MAX);
+            if throttled < THROTTLED_MIN_RUNS {
+                return None;
+            }
+            let total = u32::try_from(runs.len()).unwrap_or(u32::MAX);
+            Some(Insight {
+                key: format!("throttled:{repository}"),
+                severity: Severity::Warning,
+                repository: repository.to_owned(),
+                workflow: None,
+                job: None,
+                sentence: format!(
+                    "{repository}: memory pressure slowed the downloads of {throttled} of its {total} jobs: the \
+                     host, or a job at its cap, was short of memory."
+                ),
+                kind: InsightKind::Throttled { throttled, total },
+                runs: hit.iter().take(5).map(|run| run.link()).collect(),
+            })
+        })
+        .collect()
 }
 
 /// Each repository's waits in the 7 days before `now` (ms) and the 7 before those.

@@ -5,7 +5,7 @@
 
 use std::collections::BTreeMap;
 
-use crate::api::{self, Advice, Peaks, Spread};
+use crate::api::{self, Advice, PAGE_CACHE_ROOM, Peaks, Spread};
 use crate::config::{Admission, Config};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 
@@ -63,6 +63,9 @@ pub struct Ran {
     pub succeeded: bool,
     /// What measured admission reserved for it; `None` under caps or for an adopted runner.
     pub reserved: Option<u64>,
+    /// How long of its wait it waited because the host's memory could not take its runner, in ms: no more slots
+    /// would have started it sooner.
+    pub host_waited: u64,
 }
 
 /// What a run's sampled memory counts.
@@ -279,11 +282,13 @@ struct Sized {
 }
 
 impl Sized {
-    /// The memory a set of jobs needs: its largest peak plus the margin, rounded up to `GRANULE`. The largest, not
-    /// a percentile: the cap kills a job that goes over it, so a cap below a peak a job reached kills it again.
+    /// The memory a set of jobs needs: its largest peak plus the margin, or `PAGE_CACHE_ROOM` when that is more,
+    /// rounded up to `GRANULE`. The largest, not a percentile: the cap kills a job that goes over it, so a cap below
+    /// a peak a job reached kills it again.
     fn need(&self, peaks: &Peaks) -> u64 {
         let largest = peaks.memory.max;
-        let need = largest.saturating_add(largest.saturating_mul(u64::from(self.margin)) / 100);
+        let margin = (largest.saturating_mul(u64::from(self.margin)) / 100).max(PAGE_CACHE_ROOM);
+        let need = largest.saturating_add(margin);
         need.div_ceil(GRANULE).saturating_mul(GRANULE).max(GRANULE)
     }
 
@@ -337,13 +342,16 @@ fn peaks(jobs: &[&Ran]) -> Peaks {
     }
 }
 
-/// Seconds from queued to started of the jobs that started.
+/// Seconds from queued to started of the jobs that started, less what they waited for the host's memory.
 fn waits(jobs: &[&Ran]) -> Spread {
     spread(
         jobs.iter()
             .filter_map(|job| {
-                job.started_at
-                    .map(|at| at.saturating_sub(job.queued_at) / 1000)
+                job.started_at.map(|at| {
+                    at.saturating_sub(job.queued_at)
+                        .saturating_sub(job.host_waited)
+                        / 1000
+                })
             })
             .collect(),
     )

@@ -49,6 +49,7 @@ fn budget(memory: Option<u64>, cpu: Option<u64>) -> Budget {
     Budget {
         memory,
         cpu,
+        host: None,
         held: false,
     }
 }
@@ -869,6 +870,7 @@ fn while_the_slice_is_held_warm_runners_make_no_room_and_none_starts() {
     let held = Budget {
         memory: Some(0),
         cpu: None,
+        host: None,
         held: true,
     };
     let plan = plan(

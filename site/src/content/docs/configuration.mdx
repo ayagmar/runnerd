@@ -223,7 +223,7 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 
 | Key | Default | Means |
 |---|---|---|
-| `margin` | `15` | the percent added to a sampled peak, in [advice](../admission/#sizing) and predictions |
+| `margin` | `15` | the percent added to a sampled peak, in [advice](../admission/#sizing) and predictions; advice adds at least 1G |
 | `min_jobs` | `10` | the fewest runs of a profile, or of one job, before its peaks become advice or a prediction |
 | `auto` | `false` | runnerd sizes each profile's `memory`, `slots` and `cpus` itself ([Auto sizing](../admission/#auto-sizing)); `runnerd init` writes `true` |
 | `interval` | `"24h"` | auto sizing: the least time between a change of one profile and one that lowers its `memory` or `cpus` |

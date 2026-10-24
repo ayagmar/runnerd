@@ -6,7 +6,11 @@
 //! yet, is predicted with `admission::Copies::Several`.
 //! Under `[host] cpu_overcommit`, a new runner also reserves CPU: its profile's `cpus`, or measured the largest
 //! predicted average CPU of its repository's queued jobs, then its own job's once known.
-//! It reads the store and the latest host sample; it never writes the config.
+//! Under either policy a new runner also fits what the host's memory leaves the slice beside its other programs
+//! (`admission::host`), and nothing starts while the host stalls for memory; running runners are never stopped for
+//! it. The spans in which that held a job back go into the history, so sizing does not read them as waits for a
+//! slot.
+//! It reads the store and the latest host sample and reading; it never writes the config.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
@@ -14,7 +18,7 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::Engine;
-use crate::admission::{Copies, HIGH_WATER, Key, Prediction, Predictor};
+use crate::admission::{Copies, HIGH_WATER, Key, Prediction, Predictor, host};
 use crate::api::{self, AdmissionPolicy, Basis};
 use crate::config::Admission;
 use crate::docker::DockerApi;
@@ -30,9 +34,13 @@ const REREAD: Duration = Duration::from_secs(60);
 /// How far back it reads, in milliseconds: 30 days.
 const HISTORY: u64 = 30 * 24 * 3600 * 1000;
 
-/// What measured admission keeps between plans.
+/// What admission keeps between plans.
 #[derive(Debug, Default)]
 pub(super) struct Measured {
+    /// What the last plan saw of the host's memory.
+    pub host: host::Remembered,
+    /// The jobs the last plan had waiting for the host's memory, and when (ms): each waited since then.
+    host_waiting: (BTreeSet<u64>, u64),
     /// What predicts the jobs' peaks, and when it read the history.
     predictor: Option<(Predictor, SystemTime)>,
     /// Whether the slice was at the high-water mark at the last plan, so the change is logged once.
@@ -55,6 +63,8 @@ pub(super) struct Admitting {
     pub slice: Option<u64>,
     /// Whether the slice is at the high-water mark, so nothing starts.
     pub held: bool,
+    /// What the host's memory leaves new runners, from a recent reading.
+    pub host: Option<api::HostBudget>,
     /// Under `[host] cpu_overcommit`, what the plan admits by CPU.
     pub cpu: Option<CpuAdmitting>,
 }
@@ -243,6 +253,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             free,
             slice: None,
             held: false,
+            host: self.host_budget(),
             cpu: self.admitting_cpu(repositories),
         };
         if self.config.host.admission != Admission::Measured {
@@ -299,6 +310,72 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         admitting
+    }
+
+    /// What the host's memory leaves runners beside what runs now, from a reading of the last few sample intervals.
+    pub(super) fn host_budget(&self) -> Option<api::HostBudget> {
+        let fresh = (3 * SAMPLE_INTERVAL).as_secs();
+        let memory = self
+            .store
+            .latest_host_memory()
+            .filter(|memory| memory.at + fresh >= time::now_ms() / 1000)?;
+        // The larger margin keeps a start from pushing a busy host back to the edge; with no runner in the slice
+        // there is no such start to follow, so the first runner needs only the margin.
+        let remembered = host::Remembered {
+            short: self.measured.host.short && self.occupied().next().is_some(),
+            ..self.measured.host
+        };
+        Some(host::budget(memory, self.memory_in_use(), remembered))
+    }
+
+    /// Remembers what this plan saw of the host for the next: whether it stalled, and which jobs `waiting` wait for
+    /// the host's memory. Adds the time since the last plan to the waits of those that waited then, and logs when
+    /// the host becomes short and when it has room again.
+    pub(super) fn note_host(
+        &mut self,
+        admitting: &Admitting,
+        waiting: &BTreeMap<u64, api::Waiting>,
+    ) {
+        let stalled = admitting.host.is_some_and(|host| host.stalled);
+        let short = stalled
+            || waiting
+                .values()
+                .any(|reason| matches!(reason, api::Waiting::HostMemory { .. }));
+        let was_short = self.measured.host.short;
+        self.measured.host = host::Remembered { short, stalled };
+        let now = time::now_ms();
+        let waiting_now: BTreeSet<u64> = waiting
+            .iter()
+            .filter(|(_, reason)| matches!(reason, api::Waiting::HostMemory { .. }))
+            .map(|(job, _)| *job)
+            .collect();
+        let (waited, since) =
+            std::mem::replace(&mut self.measured.host_waiting, (waiting_now, now));
+        if !waited.is_empty() {
+            self.store
+                .host_waited(waited.into_iter().collect(), now.saturating_sub(since));
+        }
+        match (short, was_short) {
+            (true, false) => {
+                if let Some(host) = admitting.host {
+                    info!(
+                        "the host is short of memory ({} available{}): no runner starts that does not fit {} \
+                         beside what runs",
+                        crate::config::ByteSize(host.memory.available),
+                        if stalled {
+                            ", its tasks stall for it"
+                        } else {
+                            ""
+                        },
+                        crate::config::ByteSize(host.limit)
+                    );
+                }
+            }
+            (false, true) => {
+                info!("the host has memory to spare again: runners start as the budget allows");
+            }
+            _ => {}
+        }
     }
 
     /// The CPU budget, in millicores: the slice's CPUs times `[host] cpu_overcommit`; `None` without it.

@@ -60,3 +60,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache |
 | [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk |
+| [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache |

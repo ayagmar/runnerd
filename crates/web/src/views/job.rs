@@ -455,6 +455,9 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
                 div { dt { "Received" } dd { (optional(metrics.network_received, format::bytes)) } }
                 div { dt { "Sent" } dd { (optional(metrics.network_sent, format::bytes)) } }
                 div { dt { "From the mirror" } dd { (format::bytes(metrics.mirror_bytes)) } }
+                @if let Some(throttled) = metrics.sock_throttled {
+                    div { dt { "Throttled for memory pressure" } dd { (throttled) " times" } }
+                }
                 (build_cache(&metrics.build_cache))
             }
         }

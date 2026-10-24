@@ -135,6 +135,11 @@ pub struct JobMetrics {
     /// What the shared build cache served it and took from it.
     #[serde(default)]
     pub build_cache: BuildCacheCounts,
+    /// Times the kernel held its container's sockets' receive windows small because the container's memory was
+    /// under pressure (`memory.events` `sock_throttled`): reclaim went badly, mostly because the host was short of
+    /// memory, and its downloads slowed. `None` when the kernel does not count it, or in records from before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub sock_throttled: Option<u64>,
 }
 
 /// What the shared build cache served one runner and took from it (ADR 0052), counted by the cache itself.
@@ -285,6 +290,35 @@ pub struct HostSample {
     /// since active page cache still counts, which the high-water mark of measured admission compares to
     /// `MemoryMax`.
     pub memory: u64,
+}
+
+/// The host's memory at one moment, beside the slice's: what admission fits new runners in besides `MemoryMax`
+/// (ADR 0055). Read every few seconds; not kept in the history.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostMemory {
+    /// When it was read.
+    pub at: u64,
+    /// `MemTotal` in `/proc/meminfo`, in bytes.
+    pub total: u64,
+    /// `MemAvailable`: what the host could give without swapping, page cache it can drop included, in bytes.
+    pub available: u64,
+    /// The slice's memory without page cache and reclaimable slab: what the runners hold that `MemAvailable` leaves
+    /// out.
+    pub slice: u64,
+    /// `/proc/pressure/memory`'s `some` line: the share of time at least one task waited for memory. `None` on a
+    /// kernel without pressure stall information.
+    pub some: Option<Pressure>,
+    /// Its `full` line: the share of time every task that could run waited for memory.
+    pub full: Option<Pressure>,
+}
+
+/// One line of a pressure stall file, in hundredths of a percent: 250 is 2.5% of the time.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Pressure {
+    /// Over the last 10 seconds.
+    pub avg10: u32,
+    /// Over the last 60 seconds.
+    pub avg60: u32,
 }
 
 /// `GET /v1/host/samples` query parameters.

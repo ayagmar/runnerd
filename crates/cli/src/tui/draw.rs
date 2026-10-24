@@ -776,6 +776,9 @@ fn budget_note(app: &App) -> Vec<(u8, String)> {
     if let Some(cpu) = budget.cpu {
         parts.push((1, cpu.line()));
     }
+    if let Some(host) = budget.host {
+        parts.push((1, host.line()));
+    }
     if let Some(host) = &app.live.host {
         parts.push((2, format!("{} in use, sampled", bytes(host.memory))));
     }

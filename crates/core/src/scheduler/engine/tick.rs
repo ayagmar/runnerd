@@ -144,6 +144,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
         }
         self.note_held_for_cpu(&held_for_cpu);
+        // Whether a job waits for the host's memory once this plan's starts took theirs, as the status says it.
+        match mode {
+            Shutdown::No if admitting.host.is_some() => {
+                let (after, admitting) = self.plan();
+                self.note_host(&admitting, &after.waiting);
+            }
+            _ => self.note_host(&admitting, &BTreeMap::new()),
+        }
         self.idle_caches(mode).await;
         if self.records.listed {
             self.expire_records().await;
@@ -244,7 +252,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Budget {
                 memory: admitting.free,
                 cpu: admitting.cpu.as_ref().map(|cpu| cpu.free),
-                held: admitting.held,
+                host: admitting.host.map(|host| host.spare),
+                held: admitting.held || admitting.host.is_some_and(|host| host.stalled),
             },
             SystemTime::now(),
         );

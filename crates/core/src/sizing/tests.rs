@@ -65,6 +65,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         finished_at: Some(NOW - HOUR),
         oom_killed: false,
         reserved: None,
+        host_waited: 0,
         hit_cap: None,
         measure: Measure::WithoutPageCache,
         succeeded: true,
@@ -100,7 +101,8 @@ fn profile<'sizing>(sizing: &'sizing Sizing, name: &str) -> &'sizing ProfileSizi
 
 #[test]
 fn a_cap_far_above_the_peaks_is_lowered_and_waiting_jobs_get_the_slots_that_fit() {
-    // p99 2.1G, + 15% = 2.415G, rounded up to 2.5G; 2 × 7G = 14G holds 5 of them.
+    // The largest peak 2150M, + 1G of page cache room (more than 15%) = 3174M, rounded up to 3.25G; 2 × 7G = 14G
+    // holds 4 of them.
     let history = History {
         jobs: builds(100, 1200 * M, 2150 * M, 300),
         cancelled: Vec::new(),
@@ -111,8 +113,25 @@ fn a_cap_far_above_the_peaks_is_lowered_and_waiting_jobs_get_the_slots_that_fit(
     assert_eq!(
         node.advice,
         Advice::Lower {
-            memory: 2560 * M,
-            slots: 5
+            memory: 3328 * M,
+            slots: 4
+        }
+    );
+}
+
+#[test]
+fn small_peaks_keep_a_gigabyte_of_page_cache_room_under_the_cap() {
+    // 300M + 15% would be a 512M cap, where page cache churn leaves the kernel too little to reclaim cheaply.
+    let history = History {
+        jobs: builds(20, 300 * M, 300 * M, 5),
+        cancelled: Vec::new(),
+        runners: Vec::new(),
+    };
+    assert_eq!(
+        profile(&sizing(&history), "node").advice,
+        Advice::Lower {
+            memory: 1536 * M,
+            slots: 2
         }
     );
 }
@@ -124,11 +143,11 @@ fn a_lowered_cap_keeps_its_slots_when_no_job_waited_for_one() {
         cancelled: Vec::new(),
         runners: Vec::new(),
     };
-    // 2000M + 15% = 2300M, rounded up to 2304M.
+    // 2000M + 1G of page cache room = 3024M, rounded up to 3G.
     assert_eq!(
         profile(&sizing(&history), "node").advice,
         Advice::Lower {
-            memory: 2304 * M,
+            memory: 3 * G,
             slots: 2
         }
     );
@@ -430,7 +449,7 @@ fn capped_builds(count: u64, peak: u64, wait_secs: u64) -> Vec<Ran> {
 
 #[test]
 fn applying_memory_advice_under_measured_admission_keeps_the_profiles_slots() {
-    // Builds reach 5.4G of 5.5G: 6.21G with the margin, 6.25G rounded. Four of them at their caps would not fit
+    // Builds reach 5.4G of 5.5G: 6.4G with 1G of page cache room, 6.5G rounded. Four of them at their caps would not fit
     // beside jvm's caps, but measured admission never reserves caps, so the slots stay.
     let sizing = measured_sizing(
         &History {
@@ -444,7 +463,7 @@ fn applying_memory_advice_under_measured_admission_keeps_the_profiles_slots() {
     assert_eq!(
         node.advice,
         Advice::Raise {
-            memory: 6400 * M,
+            memory: 6656 * M,
             slots: 4
         }
     );
@@ -461,7 +480,7 @@ fn applying_memory_advice_under_measured_admission_keeps_the_profiles_slots() {
 #[test]
 fn under_measured_admission_a_raise_is_refused_only_when_one_runner_and_the_mirror_overflow_the_slice()
  {
-    // 6.25G and the 512M mirror need 6.75G: a 6.5G slice holds no runner of it.
+    // 6.5G and the 512M mirror need 7G: a 6.5G slice holds no runner of it.
     let sizing = measured_sizing(
         &History {
             jobs: capped_builds(20, 5400 * M, 0),
@@ -472,7 +491,7 @@ fn under_measured_admission_a_raise_is_refused_only_when_one_runner_and_the_mirr
     );
     assert_eq!(
         profile(&sizing, "node").advice,
-        Advice::SliceTooSmall { memory: 6400 * M }
+        Advice::SliceTooSmall { memory: 6656 * M }
     );
 }
 
@@ -497,7 +516,7 @@ fn under_measured_admission_waiting_jobs_are_told_about_slots_without_changing_t
     assert_eq!(
         node.advice,
         Advice::Lower {
-            memory: 2560 * M,
+            memory: 3 * G,
             slots: 4
         }
     );
@@ -611,7 +630,7 @@ mod auto {
 
     #[test]
     fn a_step_short_of_the_advice_says_the_memory_and_slots_it_writes_and_what_it_goes_toward() {
-        // The advice: 2.25G, and 6 slots in the same 14G, as jobs waited. A 25% step writes 5.25G, where 2 fit.
+        // The advice: 3G, and 4 slots in the same 14G, as jobs waited. A 25% step writes 5.25G, where 2 fit.
         let config = on(CONFIG, "");
         let waited = history(builds(10, 1000 * M, 2000 * M, 300));
         let changed = due(&config, &waited, 33 * G, &BTreeMap::new());
@@ -621,8 +640,8 @@ mod auto {
         assert_eq!((change.to.memory, change.to.slots), (5376 * M, 2));
         assert!(
             change.reason.starts_with("lower memory to 5.25G from 7G")
-                && change.reason.contains("a step toward 2.25G")
-                && !change.reason.contains("6 slots"),
+                && change.reason.contains("a step toward 3G")
+                && !change.reason.contains("4 slots"),
             "the reason is the change's, not the advice's: {}",
             change.reason
         );
@@ -813,8 +832,11 @@ labels = ["node"]
         jobs.extend(waited("halyard/storefront", "node"));
         let raised = due(&config, &history(jobs), 11 * G, &BTreeMap::new());
         assert_eq!(
-            raised.iter().map(|change| change.to.slots).sum::<u32>(),
-            5,
+            raised
+                .iter()
+                .filter(|change| change.to.slots > change.from.slots)
+                .count(),
+            1,
             "one profile gets the third slot: {raised:?}"
         );
     }
@@ -824,11 +846,11 @@ labels = ["node"]
      {
         let text = measured().replace("slots = 4", "slots = 4\nmax_slots = 5");
         let config = on(&text, "");
-        // Peaks of 4812M at a 5.5G cap: kept, and they waited 5 minutes.
-        let waited = history(capped_builds(10, 4812 * M, 300));
-        // jvm 2 × 9G (too few jobs: at its cap), node 5 × 4812M, the mirror 0.5G: 43004M.
-        assert_eq!(due(&config, &waited, 41 * G, &BTreeMap::new()), Vec::new());
-        let raised = due(&config, &waited, 42 * G, &BTreeMap::new());
+        // Peaks of 4500M at a 5.5G cap: kept, as 1G of page cache room rounds up to it, and they waited 5 minutes.
+        let waited = history(capped_builds(10, 4500 * M, 300));
+        // jvm 2 × 9G (too few jobs: at its cap), node 5 × 4500M, the mirror 0.5G: 41444M.
+        assert_eq!(due(&config, &waited, 40 * G, &BTreeMap::new()), Vec::new());
+        let raised = due(&config, &waited, 41 * G, &BTreeMap::new());
         assert_eq!(
             resized(&raised),
             vec![(
@@ -848,17 +870,34 @@ labels = ["node"]
     }
 
     #[test]
+    fn waits_while_the_host_was_short_of_memory_ask_for_no_more_slots() {
+        let text = measured().replace("slots = 4", "slots = 4\nmax_slots = 5");
+        let config = on(&text, "");
+        // They waited 5 minutes, all of it while admission held starts back for the host's memory.
+        let held = history(
+            capped_builds(10, 4500 * M, 300)
+                .into_iter()
+                .map(|build| Ran {
+                    host_waited: 300_000,
+                    ..build
+                })
+                .collect(),
+        );
+        assert_eq!(due(&config, &held, 64 * G, &BTreeMap::new()), Vec::new());
+    }
+
+    #[test]
     fn without_max_slots_waiting_jobs_get_a_slot_only_while_every_profiles_peaks_fit_the_slice() {
         let config = on(&measured(), "");
-        let waited = history(capped_builds(10, 4812 * M, 300));
-        // jvm 2 × 9G at its cap, node 5 × 4812M, the mirror 0.5G: 43004M.
+        let waited = history(capped_builds(10, 4500 * M, 300));
+        // jvm 2 × 9G at its cap, node 5 × 4500M, the mirror 0.5G: 41444M.
         assert_eq!(
-            due(&config, &waited, 41 * G, &BTreeMap::new()),
+            due(&config, &waited, 40 * G, &BTreeMap::new()),
             Vec::new(),
-            "a fifth slot does not fit 41G"
+            "a fifth slot does not fit 40G"
         );
         assert_eq!(
-            resized(&due(&config, &waited, 42 * G, &BTreeMap::new())),
+            resized(&due(&config, &waited, 41 * G, &BTreeMap::new())),
             vec![(
                 "node",
                 Resize {
@@ -909,7 +948,7 @@ labels = ["node"]
     #[test]
     fn a_young_profile_whose_jobs_wait_gets_a_slot_before_it_has_min_jobs_runs() {
         let config = on(&measured(), "");
-        let waited = history(capped_builds(3, 4812 * M, 300));
+        let waited = history(capped_builds(3, 4500 * M, 300));
         let raised = due(&config, &waited, 64 * G, &BTreeMap::new());
         assert_eq!(
             resized(&raised),
@@ -922,7 +961,7 @@ labels = ["node"]
                 }
             )]
         );
-        let two = history(capped_builds(2, 4812 * M, 300));
+        let two = history(capped_builds(2, 4500 * M, 300));
         assert_eq!(
             due(&config, &two, 64 * G, &BTreeMap::new()),
             Vec::new(),
@@ -960,7 +999,7 @@ labels = ["node"]
         let config = on(&measured(), "");
         // Queued half an hour ago, each waiting 5 minutes for a slot.
         let waited = history(
-            capped_builds(10, 4812 * M, 300)
+            capped_builds(10, 4500 * M, 300)
                 .into_iter()
                 .map(|build| Ran {
                     queued_at: NOW - HOUR / 2,
@@ -994,11 +1033,11 @@ labels = ["node"]
     fn a_raise_reads_only_the_waits_since_the_profiles_last_change() {
         let config = on(&measured(), "");
         // Jobs queued 2 hours ago waited; a slot was added an hour and a half ago, and nothing waited since.
-        let mut jobs = capped_builds(10, 4812 * M, 300);
+        let mut jobs = capped_builds(10, 4500 * M, 300);
         jobs.extend((0..3).map(|_| Ran {
             queued_at: NOW - HOUR,
             started_at: Some(NOW - HOUR + 2000),
-            ..capped_builds(1, 4812 * M, 0).remove(0)
+            ..capped_builds(1, 4500 * M, 0).remove(0)
         }));
         let changed = BTreeMap::from([("node".to_owned(), (NOW - 90 * 60_000) / 1000)]);
         assert_eq!(due(&config, &history(jobs), 64 * G, &changed), Vec::new());

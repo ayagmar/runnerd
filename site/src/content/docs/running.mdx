@@ -170,7 +170,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 
 | Request | Response |
 |---|---|
-| `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs and why each waits, the memory budget with the mirror's and each seed container's share, the slice's CPUs, and under `cpu_overcommit` the CPU budget |
+| `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs and why each waits, the memory budget with the mirror's and each seed container's share, what [the host's memory](../admission/#the-hosts-memory) leaves the slice, the slice's CPUs, and under `cpu_overcommit` the CPU budget |
 | `POST /v1/repositories/{owner}/{name}/pause?force=` | no new runners; `409` naming the running job, unless `force=true` cancels its run |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
 | `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every configured repository; while any runs a job, `409` naming the jobs, and none is paused |
@@ -192,7 +192,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `GET /v1/stats?repository=&since=&until=&bucket=day` | finished jobs per repository and day (or `hour`), 744 buckets back at most: counts, queue and run time, CPU, memory, mirror bytes |
 | `GET /v1/activity?since=` | every job runnerd's runners started or finished from `since` (default 24 hours ago) until now, by when it started or ended rather than when it was queued: each start with how long the job waited, and how many finished and failed |
 | `GET /v1/sizing?since=` | per configured profile and per job (repository, workflow, name): percentiles of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../admission/#sizing) for `memory` and `slots`; whether [auto sizing](../admission/#auto-sizing) is on, the changes it made, and while on what its next look would change, which profiles a recent change holds, and why no look writes anything when the file on disk was edited since runnerd read it; the last 30 days by default |
-| `GET /v1/insights?days=` | what the history says ([Insights](../insights/)): slower, flaky and near-cap jobs, waits that got longer, and each repository's waits this week against the week before; 14 days by default, 90 at most |
+| `GET /v1/insights?days=` | what the history says ([Insights](../insights/)): slower, flaky and near-cap jobs, repositories whose downloads memory pressure throttled, waits that got longer, and each repository's waits this week against the week before; 14 days by default, 90 at most |
 | `GET /v1/digest` | the last 24 hours: jobs finished and failed, the insights new since the day before, the three longest waits |
 | `POST /v1/notify/test?target=` | sends a test message to every `[notify]` target, or the one named, and says what each did; `404` without targets |
 | `GET /v1/caches`, `GET /v1/caches/history?since=` | cache volume sizes and their limits, now and over time |

@@ -65,17 +65,18 @@ pub use insights::{
 };
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
-    CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, HostSample, HostSampleQuery,
-    HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery,
-    LogSummary, Sample, SampleSeries, Started, Stats, StatsQuery, StatsRow, Step, Timeline,
+    CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, HostMemory, HostSample,
+    HostSampleQuery, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState,
+    JobSummary, LogQuery, LogSummary, Pressure, Sample, SampleSeries, Started, Stats, StatsQuery,
+    StatsRow, Step, Timeline,
 };
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
 };
 pub use sizing::{
-    Advice, AutoPlan, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingHold,
-    SizingQuery, Spread, Starts, period,
+    Advice, AutoPlan, JobSizing, PAGE_CACHE_ROOM, Peaks, ProfileSizing, Resize, Sizing,
+    SizingChange, SizingHold, SizingQuery, Spread, Starts, period,
 };
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
@@ -137,6 +138,10 @@ pub struct Budget {
     /// The shells' part of `memory_in_use`, one per shell open in a record, by job.
     #[serde(default)]
     pub shell_memory: Vec<ShellMemory>,
+    /// What the host's memory leaves runners beside its other programs, from a recent reading of it; absent
+    /// without one, and from a daemon before it read the host.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub host: Option<HostBudget>,
     /// The CPU budget, under `[host] cpu_overcommit`. Absent without one, and from a daemon before CPU admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuBudget>,
@@ -145,6 +150,51 @@ pub struct Budget {
     /// Absent when it could not be read, and from a daemon before it said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slice_cpus: Option<u64>,
+}
+
+/// What the host's memory leaves the runners (ADR 0055). New runners fit in the lower of `MemoryMax` and
+/// `limit`; running ones are never stopped for it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct HostBudget {
+    /// The reading it comes from.
+    pub memory: HostMemory,
+    /// What the slice may hold now: what its runners hold without page cache plus the host's `MemAvailable`, less
+    /// a margin kept free for the host's page cache.
+    pub limit: u64,
+    /// What that leaves new runners beside what the running ones reserve, in bytes.
+    pub spare: u64,
+    /// Whether the host's tasks stall for memory (`full` pressure), so no runner starts until they stop.
+    pub stalled: bool,
+}
+
+impl HostBudget {
+    /// The host's line as clients show it, such as `host: 31G of 64G available, 1.5% stalled for memory; leaves the
+    /// slice 40G` or, while it stalls, `…; stalling, so no runner starts`.
+    pub fn line(&self) -> String {
+        let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
+        let mut line = format!(
+            "host: {} of {} available",
+            size(self.memory.available),
+            size(self.memory.total)
+        );
+        if let Some(full) = self.memory.full.filter(|full| full.avg10 > 0) {
+            line = format!("{line}, {} stalled for memory", percent(full.avg10));
+        }
+        if self.stalled {
+            format!("{line}; stalling, so no runner starts")
+        } else {
+            format!("{line}; leaves the slice {}", size(self.limit))
+        }
+    }
+}
+
+/// Hundredths of a percent as a percentage: `1.5%`, `12%`.
+pub fn percent(hundredths: u32) -> String {
+    let whole = hundredths / 100;
+    match hundredths % 100 / 10 {
+        0 => format!("{whole}%"),
+        tenth => format!("{whole}.{tenth}%"),
+    }
 }
 
 /// The CPU budget runners share, in millicores.
@@ -340,6 +390,15 @@ pub enum Waiting {
         /// What the budget has left, in bytes.
         free: u64,
     },
+    /// What its runner would reserve does not fit what the host's memory has to spare beside its other programs
+    /// (`HostBudget::spare`), though it fits the slice's budget. `free` is 0 while the host's tasks stall for memory
+    /// (`HostBudget::stalled`).
+    HostMemory {
+        /// What its runner would reserve, in bytes.
+        needs: u64,
+        /// What the host has to spare, in bytes.
+        free: u64,
+    },
     /// What its runner would reserve does not fit the CPU budget left, in millicores.
     Cpu {
         /// What its runner would reserve.
@@ -382,6 +441,7 @@ impl Waiting {
             | Waiting::BehindStart { .. } => WaitKind::Soon,
             Waiting::NoSlot { .. }
             | Waiting::Memory { .. }
+            | Waiting::HostMemory { .. }
             | Waiting::Cpu { .. }
             | Waiting::BehindCpu { .. } => WaitKind::Full,
         }
@@ -441,6 +501,17 @@ impl Waiting {
             }
             Waiting::Memory { needs, free } => format!(
                 "Needs {} of memory; {} of the budget is free",
+                size(*needs),
+                size(*free)
+            ),
+            Waiting::HostMemory { .. }
+                if status.budget.host.as_ref().is_some_and(|host| host.stalled) =>
+            {
+                "The host is short of memory: its programs stall waiting for it, so nothing starts"
+                    .to_owned()
+            }
+            Waiting::HostMemory { needs, free } => format!(
+                "The host is short of memory: needs {}; the host has {} to spare",
                 size(*needs),
                 size(*free)
             ),

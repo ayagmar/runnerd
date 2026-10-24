@@ -436,6 +436,9 @@ fn readout(
                     @if let Some(cpu) = budget.cpu {
                         span.muted { " · " (cpu.line()) }
                     }
+                    @if let Some(host) = budget.host {
+                        span.muted { " · " (host.line()) }
+                    }
                 }
             }))
             // The blocks' descriptions, so a block's name stays what it shows.
