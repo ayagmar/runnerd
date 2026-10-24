@@ -675,6 +675,13 @@ impl Fixtures {
                     .as_ref()
                     .is_none_or(|c| job.conclusion.as_ref() == Some(c))
             })
+            .filter(|job| {
+                query
+                    .workflow
+                    .as_ref()
+                    .is_none_or(|workflow| job.workflow.as_ref() == Some(workflow))
+            })
+            .filter(|job| query.name.as_ref().is_none_or(|name| job.name == *name))
             .filter(|job| query.before.is_none_or(|before| job.id < before))
             .filter(|job| {
                 query

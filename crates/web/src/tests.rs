@@ -2335,3 +2335,29 @@ async fn a_jobs_page_compares_it_with_the_same_jobs_latest_runs_only() {
         "this run is marked among them: {runs}"
     );
 }
+
+#[tokio::test]
+async fn history_filters_are_links_that_keep_the_other_filters() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard
+        .page(&cookie, "/history?outcome=success")
+        .await
+        .body;
+    let filters = &page[page.find(r#"class="filters""#).unwrap()..];
+    let filters = &filters[..filters.find("</nav>").unwrap()];
+    assert!(
+        filters.contains(r#"<a href="/history?outcome=success&amp;workflow=E2E">E2E</a>"#),
+        "a workflow's link keeps the outcome: {filters}"
+    );
+    assert!(
+        filters.contains(r#"<a href="/history?outcome=success" aria-current="true">Succeeded</a>"#),
+        "the outcome in force is marked: {filters}"
+    );
+    let e2e = dashboard.page(&cookie, "/history?workflow=E2E").await.body;
+    let rows = &e2e[e2e.find("<tbody>").unwrap()..];
+    assert!(
+        rows.contains("playwright") && !rows.contains(">build<"),
+        "only E2E's jobs are listed: {rows}"
+    );
+}

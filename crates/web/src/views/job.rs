@@ -18,9 +18,7 @@ use crate::format;
 /// Log lines the page shows; the full log is at `/jobs/{id}/log`.
 pub(crate) const LOG_TAIL: u64 = 1000;
 /// Runs of the same job the page compares.
-const RUNS: usize = 30;
-/// The repository's jobs read to find them.
-const RUNS_READ: u32 = 500;
+const RUNS: u32 = 30;
 
 /// Everything the job page shows.
 #[derive(Debug, Clone)]
@@ -57,16 +55,18 @@ impl JobView {
                 "/v1/jobs",
                 &JobQuery {
                     repository: Some(job.summary.repository.clone()),
-                    limit: Some(RUNS_READ),
+                    workflow: job.summary.workflow.clone(),
+                    name: Some(job.summary.name.clone()),
+                    limit: Some(RUNS),
                     ..JobQuery::default()
                 },
             )
             .await?;
+        // Without a workflow the query matches every workflow's job of that name.
         let mut runs: Vec<JobSummary> = page
             .jobs
             .into_iter()
-            .filter(|run| run.workflow == job.summary.workflow && run.name == job.summary.name)
-            .take(RUNS)
+            .filter(|run| run.workflow == job.summary.workflow)
             .collect();
         runs.reverse();
         let profile_class = job.summary.runner.as_ref().map_or_else(

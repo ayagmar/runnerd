@@ -1,5 +1,6 @@
-//! `/history`: finished and running jobs, filtered by repository and outcome, a page at a time; and the trends of
-//! the last 30 days from `/v1/stats`: jobs per day by conclusion, how long they waited and ran, their memory peaks.
+//! `/history`: finished and running jobs, filtered by repository, workflow and outcome with links, a page at a time;
+//! and the trends of the last 30 days from `/v1/stats`: jobs per day by conclusion, how long they waited and ran,
+//! their memory peaks.
 
 use maud::{Markup, html};
 use runnerd_core::api::{Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsRow, Status};
@@ -13,6 +14,8 @@ use crate::format;
 /// How far back the trends reach.
 const TREND_DAYS: u64 = 30;
 const PAGE: u32 = 50;
+/// The latest jobs read for the workflows the filter offers.
+const WORKFLOWS_READ: u32 = 500;
 
 /// The outcomes the filter offers: a conclusion or a state.
 const OUTCOMES: [(&str, &str); 8] = [
@@ -41,6 +44,12 @@ pub(crate) struct Filter {
         deserialize_with = "empty_none"
     )]
     pub(crate) outcome: Option<String>,
+    #[serde(
+        default,
+        skip_serializing_if = "Option::is_none",
+        deserialize_with = "empty_none"
+    )]
+    pub(crate) workflow: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub(crate) before: Option<u64>,
 }
@@ -56,6 +65,7 @@ impl Filter {
     fn query(&self) -> JobQuery {
         let mut query = JobQuery {
             repository: self.repository.clone(),
+            workflow: self.workflow.clone(),
             before: self.before,
             limit: Some(PAGE),
             ..JobQuery::default()
@@ -80,6 +90,8 @@ pub(crate) struct History {
     pub(crate) status: Status,
     pub(crate) page: JobPage,
     pub(crate) stats: Stats,
+    /// The workflows of the repository's latest jobs (of every repository's without one), by name.
+    pub(crate) workflows: Vec<String>,
 }
 
 impl History {
@@ -101,12 +113,32 @@ impl History {
                 },
             )
             .await?;
+        let latest: JobPage = daemon
+            .get_query(
+                "/v1/jobs",
+                &JobQuery {
+                    repository: filter.repository.clone(),
+                    limit: Some(WORKFLOWS_READ),
+                    ..JobQuery::default()
+                },
+            )
+            .await?;
+        let mut workflows: Vec<String> = latest
+            .jobs
+            .into_iter()
+            .filter_map(|job| job.workflow)
+            .collect();
+        // A workflow filtered on stays offered, though none of the latest jobs ran it.
+        workflows.extend(filter.workflow.clone());
+        workflows.sort();
+        workflows.dedup();
         Ok(History {
             now,
             filter,
             status,
             page,
             stats: trends,
+            workflows,
         })
     }
 }
@@ -172,33 +204,78 @@ pub(crate) fn render(history: &History) -> Markup {
     page("History", Some(Page::History), None, &main)
 }
 
+/// The filters, as links: each sets one filter and keeps the others, so they work without scripts and a filtered
+/// page can be bookmarked or shared.
 fn filters(history: &History) -> Markup {
     let filter = &history.filter;
+    let link = |change: &dyn Fn(&mut Filter)| {
+        let mut next = Filter {
+            before: None,
+            ..filter.clone()
+        };
+        change(&mut next);
+        let query = serde_urlencoded::to_string(&next).unwrap_or_default();
+        if query.is_empty() {
+            "/history".to_owned()
+        } else {
+            format!("/history?{query}")
+        }
+    };
+    let repositories: Vec<(Option<String>, String)> = std::iter::once((None, "All".to_owned()))
+        .chain(
+            history
+                .status
+                .repositories
+                .iter()
+                .map(|repository| (Some(repository.name.clone()), repository.name.clone())),
+        )
+        .collect();
+    let workflows: Vec<(Option<String>, String)> = std::iter::once((None, "All".to_owned()))
+        .chain(
+            history
+                .workflows
+                .iter()
+                .map(|workflow| (Some(workflow.clone()), workflow.clone())),
+        )
+        .collect();
+    let outcomes: Vec<(Option<String>, String)> = std::iter::once((None, "Any".to_owned()))
+        .chain(
+            OUTCOMES
+                .iter()
+                .map(|(value, label)| (Some((*value).to_owned()), (*label).to_owned())),
+        )
+        .collect();
+    let group = |name: &str,
+                 current: &Option<String>,
+                 options: &[(Option<String>, String)],
+                 set: &dyn Fn(&mut Filter, Option<String>)| {
+        html! {
+            div.filter-group role="group" aria-labelledby=(format!("filter-{}", name.to_lowercase())) {
+                span.filter-name #(format!("filter-{}", name.to_lowercase())) { (name) }
+                ul {
+                    @for (value, label) in options {
+                        li {
+                            a href=(link(&|next| set(next, value.clone())))
+                                aria-current=[(current == value).then_some("true")] { (label) }
+                        }
+                    }
+                }
+            }
+        }
+    };
     html! {
-        // A change applies the filter; the button is for a browser without scripts.
-        form.filters method="get" action="/history" data-on:change="el.requestSubmit()" {
-            label {
-                span.visually-hidden { "Repository" }
-                select name="repository" {
-                    option value="" { "All repositories" }
-                    @for repository in &history.status.repositories {
-                        option value=(repository.name) selected[filter.repository.as_deref() == Some(repository.name.as_str())] { (repository.name) }
-                    }
+        nav.filters aria-label="Filter jobs" {
+            (group("Repository", &filter.repository, &repositories, &|next, value| {
+                // Another repository's workflows differ: its filter starts over.
+                if next.repository != value {
+                    next.workflow = None;
                 }
+                next.repository = value;
+            }))
+            @if history.workflows.len() > 1 || filter.workflow.is_some() {
+                (group("Workflow", &filter.workflow, &workflows, &|next, value| next.workflow = value))
             }
-            label {
-                span.visually-hidden { "Outcome" }
-                select name="outcome" {
-                    option value="" { "Any outcome" }
-                    @for (value, label) in OUTCOMES {
-                        option value=(value) selected[filter.outcome.as_deref() == Some(value)] { (label) }
-                    }
-                }
-            }
-            noscript { button.button type="submit" { "Filter" } }
-            @if filter.repository.is_some() || filter.outcome.is_some() {
-                a href="/history" { "Clear" }
-            }
+            (group("Outcome", &filter.outcome, &outcomes, &|next, value| next.outcome = value))
         }
     }
 }
@@ -278,6 +355,13 @@ fn trends(history: &History) -> Markup {
         section.trends aria-labelledby="trends-title" "data-signals:_day__ifmissing"="-1" "data-style:--day"="$_day" {
             h2 #trends-title data-text=(lens("Last 30 days", &dates)) { "Last 30 days" }
             p.visually-hidden { "Jobs that finished, by the day they were queued (UTC). Arrow keys step through the days." }
+            @if history.filter.workflow.is_some() || history.filter.outcome.is_some() {
+                p.muted {
+                    "These count every workflow and outcome"
+                    @if let Some(repository) = &history.filter.repository { " of " (repository) }
+                    "; the list below is filtered."
+                }
+            }
             (headline(&days))
             div.charts.three tabindex="0" role="group" aria-label="Charts per day"
                 data-on:pointermove=(DAY_UNDER_POINTER) data-on:pointerdown=(DAY_UNDER_POINTER)
@@ -414,7 +498,7 @@ fn jobs(history: &History) -> Markup {
                 p.muted { "No jobs match." }
             } @else {
                 div.table-wrap {
-                    table.job-table {
+                    table.job-table.history-table {
                         thead {
                             tr {
                                 th scope="col" { "Job" }
@@ -439,11 +523,12 @@ fn jobs(history: &History) -> Markup {
                                         }
                                     }
                                     td { (badge(job)) }
+                                    // On a phone a row is a card: each figure says what it is.
                                     td { (time_ago(job.timeline.queued_at, now)) }
-                                    td.number { (waited.map_or("–".to_owned(), format::duration)) }
-                                    td.number { (ran.map_or("–".to_owned(), format::duration)) }
-                                    td.number { (job.metrics.memory_peak.map_or("–".to_owned(), format::bytes)) }
-                                    td.number { (job.metrics.cpu_average.map_or("–".to_owned(), format::cores)) }
+                                    td.number data-label="waited" { (waited.map_or("–".to_owned(), format::duration)) }
+                                    td.number data-label="ran" { (ran.map_or("–".to_owned(), format::duration)) }
+                                    td.number data-label="peak" { (job.metrics.memory_peak.map_or("–".to_owned(), format::bytes)) }
+                                    td.number data-label="CPU" { (job.metrics.cpu_average.map_or("–".to_owned(), format::cores)) }
                                 }
                             }
                         }
