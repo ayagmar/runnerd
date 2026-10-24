@@ -168,6 +168,8 @@ nothing until Docker has listed them.
 - `scheduler::plan` and `scheduler::warm` do no I/O and read no clock.
 - A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
   memory and CPU.
+- A warm runner never holds back upkeep: a reseed, or the shared caches' check an hour after the last, stops idle
+  warm runners and starts none until it runs.
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).

@@ -54,9 +54,10 @@ A job that finds no runner waits for the next poll, a registration and a contain
 
 - Each repository keeps [`warm`](../configuration/#repositories) runners (1 by default) while it is active: a job of it was queued in the last hour, or it is an hour of the day (UTC) its jobs came in on 3 of the last 14 days. Outside those, its warm runners go after 5 minutes idle and none starts again until a job comes.
 - When a job of a workflow run is seen, the run's other jobs get runners too: as many as that workflow's runs usually have (the median of the last 14 days, from 3 runs), less the ones already seen.
-- Warm runners start last: only once every queued job that fits has its runner, and while no job waits for a slot, memory or CPU. Each reserves its profile's `memory` (and `cpus` under CPU admission).
+- Warm runners start last: only once every queued job that fits has its runner, and while no job waits for a slot, memory or CPU. Each reserves its profile's `memory` (and `cpus` under CPU admission, at most the CPU budget).
 - A queued job of another repository that needs the room takes it: runnerd removes as many warm runners as make the job fit and starts its runner in the same poll.
-- A profile due a reseed removes its warm runners once its other runners are idle, so the snapshot still gets rebuilt.
+- A profile due a reseed (slot 1 ran a job) removes its warm runners once its other runners are idle, so the snapshot still gets rebuilt. The shared caches' check does the same across all profiles, at most once an hour.
+- A warm runner that ends without a job after waiting, as when Docker restarts, does not hold its repository's next runners back.
 
 The status shows them as `warm, waiting for a job`. Sizing tells the jobs a warm runner took from the others, with each kind's median wait.
 
@@ -71,8 +72,8 @@ A slot is one concurrent job of a profile. Each job gets a new container, but th
 | the slot's Docker images, `~/.cache`, tool cache, Android SDK | per slot, between jobs |
 | cargo's credentials and config, Gradle's `gradle.properties` in `~/.cache` | never: no later job or record shell sees them, even from an older snapshot |
 | the profile's snapshot | replaced by slot 1's changes once they reach [`reseed_at`](../configuration/#caches) and the profile is idle; above `snapshot_max` it starts over from slot 1's changes alone |
-| pnpm store, Maven repository | shared by all slots, emptied above their [`max_size`](../configuration/#caches) when no job runs |
-| Docker Hub mirror | runs while any runner does; its storage is emptied above `mirror.max_size` when no job runs |
+| pnpm store, Maven repository | shared by all slots, emptied above their [`max_size`](../configuration/#caches) when no runner runs, at least hourly: idle warm runners stop for it |
+| Docker Hub mirror | runs while any runner does, warm ones too; stops, and its storage is emptied above `mirror.max_size`, with the shared caches' check |
 
 ## Records of failed jobs
 

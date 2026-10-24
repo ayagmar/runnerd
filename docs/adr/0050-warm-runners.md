@@ -36,8 +36,10 @@ restarted in a loop while no jobs come.
 When a job of a workflow run is seen, queued or taken by a runner, the run's remaining jobs get warm runners too: the
 median number of jobs per run of that workflow over the last 14 days (3 runs at least), less the run's jobs seen so
 far. A run counts for the 90th percentile of the time its workflow's runs took from their first job queued to their
-last, plus `IDLE_TIMEOUT`. Later `needs:` waves count among the run's jobs, so their runners start with the first
-wave and wait. A wrong guess costs an idle runner until the run stops counting.
+last, plus `IDLE_TIMEOUT`, from its first job queued; after a restart, from its open jobs' queued times. A run is
+remembered for a day, so a job of it seen again does not start it over. Later `needs:` waves count among the run's
+jobs, so their runners start with the first wave and wait. A wrong guess costs an idle runner until the run stops
+counting.
 
 A repository's target is its `warm` while active, plus its runs' remaining jobs.
 
@@ -54,8 +56,17 @@ A repository's target is its `warm` while active, plus its runs' remaining jobs.
   stops as many as make it fit (those in its profile first) and starts the job's runner in the same tick, in the slot
   freed. If GitHub hands a stopped runner a job first, the stop fails, and the job's start is skipped until the next
   tick. A warm runner never yields to another warm runner.
-- A profile due a reseed (slot 1 ran a job) whose runners are all idle stops its warm runners and starts none until
-  the reseed ran, so warm runners never starve its snapshot.
+- A profile due a reseed (slot 1 ran a job; a warm runner leaving slot 1 without one changed nothing) whose runners
+  are all idle stops its warm runners and starts none until the reseed ran, so warm runners never starve its
+  snapshot.
+- The shared caches' check (and the mirror's stop) waits for no runner at all, which warm runners could put off all
+  day. An hour after the last check, once a runner ended since, every profile whose runners are all idle stops its warm
+  runners and starts none until the check began. The daemon's start counts as a check.
+- When a warm runner a start replaces took a job before its stop, every later start of that plan waits for the next
+  tick too: they counted on its room.
+- A warm runner that ends without a job after waiting `IDLE_TIMEOUT` had started and connected: its end (Docker
+  restarted, the runner removed on GitHub) does not hold its repository's next runners back. Runners that fail while
+  a repository is held started before the hold, so they do not lengthen it.
 
 ### Measured
 
@@ -77,9 +88,12 @@ status's runners gain `warm`.
   needs one.
 - Under `caps`, a warm runner's cap is reserved while it waits, so the budget left for other profiles' warm runners
   is smaller; real jobs are unaffected, as they take it back.
-- The shared caches are emptied, and the mirror stopped, only when no runner runs at all, so on an active day that
-  waits for the repositories' quiet hours.
+- The shared caches are emptied, and the mirror stopped, only when no runner runs at all: on an active day, an hour
+  after the last check, at the first moment no job runs, warm runners stop for it and start again the next tick.
 - `runnerd simulate` replays admission without warm runners.
+- A warm runner may wait across a runner release. `--disableupdate` is a `config.sh` flag that `run.sh --jitconfig`
+  does not take (the JIT config's settings come from GitHub); a runner that updates exits with code 3 or 4, and
+  `run.sh` relaunches it with the same config.
 - Rejected: a fixed time to live per warm runner (it would restart one every TTL on a quiet day, or leave none on a
   busy one), a warm runner per profile (runners register per repository), starting a later `needs:` wave's runners
   only when the history says it comes (its runners would start cold whenever the history is off; an idle wait costs
