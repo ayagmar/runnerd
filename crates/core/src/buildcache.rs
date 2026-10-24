@@ -404,23 +404,23 @@ impl BuildCache {
 
 impl Inner {
     /// Makes an upload of `runner`'s, whose job may write, an entry; refuses it when the entries already take twice
-    /// the size limit, which only a busy hour between two trims reaches.
+    /// the size limit, which only a busy hour between two trims reaches. Renames under the lock: quick, on the
+    /// daemon's own file system.
     fn store(&self, runner: &str, upload: Upload) {
-        let fits = {
-            let state = lock(&self.state);
-            let replaced = state
-                .entries
-                .get(&upload.entry)
-                .map_or(0, |entry| entry.bytes);
-            state.bytes - replaced + upload.bytes <= state.max_size.saturating_mul(2)
-        };
+        // One lock from the check to the index: two uploads of one entry renamed in one order and indexed in the
+        // other would leave the index counting the size of the file replaced.
+        let mut state = lock(&self.state);
+        let replaced = state
+            .entries
+            .get(&upload.entry)
+            .map_or(0, |entry| entry.bytes);
+        let fits = state.bytes - replaced + upload.bytes <= state.max_size.saturating_mul(2);
         let path = self.root.join(&upload.entry);
         let stored = fits
             && path
                 .parent()
                 .is_none_or(|parent| std::fs::create_dir_all(parent).is_ok())
             && std::fs::rename(&upload.file, &path).is_ok();
-        let mut state = lock(&self.state);
         Self::give_back(&mut state, Some(runner), upload.bytes);
         if stored {
             let entry = Entry {

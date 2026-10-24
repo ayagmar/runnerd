@@ -563,3 +563,35 @@ async fn an_adopted_runner_the_cache_is_off_for_leaves_no_socket_once_removed() 
     assert_eq!(second.detach("app"), None, "it was not open");
     assert!(!mounted.exists(), "its directory goes with it");
 }
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn uploads_of_one_key_landing_together_leave_the_size_what_the_entry_holds() {
+    let Cache { cache, _dir } = open("same-key", 1 << 30);
+    let runners: Vec<_> = (0..8)
+        .map(|index| {
+            let name = format!("main-{index}");
+            let socket = cache.attach(&name, "o/app").unwrap();
+            cache.decide(&name, Writes::Allowed);
+            socket
+        })
+        .collect();
+    // Every slot builds the same task at once, each output its own size.
+    let puts = (0..400).map(|upload: usize| {
+        let socket = runners[upload % runners.len()].clone();
+        tokio::spawn(async move {
+            request(&socket, "PUT", "/gradle/same", &vec![b'x'; 1 + upload % 97]).await
+        })
+    });
+    for put in futures_util::future::join_all(puts).await {
+        assert_eq!(put.unwrap().0, 200);
+    }
+    let (status, body) = request(&runners[0], "GET", "/gradle/same", b"").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        cache.size(),
+        Size {
+            bytes: body.len() as u64,
+            entries: 1
+        }
+    );
+}
