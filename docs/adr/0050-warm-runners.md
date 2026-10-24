@@ -37,9 +37,9 @@ When a job of a workflow run is seen, queued or taken by a runner, the run's rem
 median number of jobs per run of that workflow over the last 14 days (3 runs at least), less the run's jobs seen so
 far. A run counts for the 90th percentile of the time its workflow's runs took from their first job queued to their
 last, plus `IDLE_TIMEOUT`, from its first job queued; after a restart, from its open jobs' queued times. A run is
-remembered for a day, so a job of it seen again does not start it over. Later `needs:` waves count among the run's
-jobs, so their runners start with the first wave and wait. A wrong guess costs an idle runner until the run stops
-counting.
+remembered for a day, so a job of it seen again does not start it over. Runs are told apart by attempt: a re-run
+gets its burst. Later `needs:` waves count among the run's jobs, so their runners start with the first wave and
+wait. A wrong guess costs an idle runner until the run stops counting.
 
 A repository's target is its `warm` while active, plus its runs' remaining jobs.
 
@@ -61,12 +61,14 @@ A repository's target is its `warm` while active, plus its runs' remaining jobs.
   snapshot.
 - The shared caches' check (and the mirror's stop) waits for no runner at all, which warm runners could put off all
   day. An hour after the last check, once a runner ended since, every profile whose runners are all idle stops its warm
-  runners and starts none until the check began. The daemon's start counts as a check.
+  runners and starts none until the check ended: a runner started meanwhile would mount the volumes it may remove.
+  The daemon's start counts as a check.
 - When a warm runner a start replaces took a job before its stop, every later start of that plan waits for the next
   tick too: they counted on its room.
 - A warm runner that ends without a job after waiting `IDLE_TIMEOUT` had started and connected: its end (Docker
-  restarted, the runner removed on GitHub) does not hold its repository's next runners back. Runners that fail while
-  a repository is held started before the hold, so they do not lengthen it.
+  restarted, the runner removed on GitHub) does not hold its repository's next runners back; the second in a row
+  does, so a fault that kills idle runners does not restart one every few minutes. Runners that fail while a
+  repository is held started before the hold, so they do not lengthen it.
 
 ### Measured
 

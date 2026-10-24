@@ -167,7 +167,7 @@ A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T
 | `mirror.memory`, `mirror.cpus` | | the mirror container's limits; its `memory` counts in the budget |
 | `mirror.ttl` | | how long the mirror keeps an image no runner pulls again |
 | `mirror.max_size` | `"10G"` | the mirror's storage is emptied above this when no runner runs, with the shared caches |
-| `pnpm.max_size`, `maven.max_size` | | the shared pnpm store and Maven repository are emptied above this when no runner runs; at least hourly, idle warm runners stop for it |
+| `pnpm.max_size`, `maven.max_size` | | the shared pnpm store and Maven repository are emptied above this when no runner runs; warm runners stop for it at most hourly, at the first moment no job runs |
 | `reseed_at` | `"2G"` | once slot 1's layers changed this much and the profile is idle, they become the profile's snapshot ([Warm caches](../running/#warm-caches)) |
 | `snapshot_max` | `"10G"` | a reseed that would make a snapshot larger starts it over from slot 1's changes alone, or from the image when those are larger too |
 
