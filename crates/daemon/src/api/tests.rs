@@ -579,9 +579,23 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
         }
     };
     assert_eq!(announced, changed.changes[0]);
-    // Many looks later, the 24h interval still holds node where it is.
+    // Many looks later, the 24h interval still holds node where it is, and the plan says until when.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(sizing().await.changes.len(), 1);
+    let later = sizing().await;
+    assert_eq!(later.changes.len(), 1);
+    let plan = later.auto_plan.expect("auto sizing says what it does next");
+    assert_eq!(
+        plan.next,
+        Vec::new(),
+        "node is held, so the next look changes nothing"
+    );
+    assert_eq!(
+        plan.held
+            .iter()
+            .map(|hold| (hold.profile.as_str(), hold.until - hold.changed))
+            .collect::<Vec<_>>(),
+        [("node", 24 * 3600)]
+    );
     assert!(daemon.reloads.try_recv().is_err(), "no second reload");
     daemon.stop().await;
 }
@@ -611,7 +625,20 @@ async fn auto_sizing_leaves_a_file_edited_on_disk_until_runnerd_runs_with_it() {
     finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), edited);
-    assert_eq!(read_sizing(&daemon).await.changes, Vec::new());
+    let sizing = read_sizing(&daemon).await;
+    assert_eq!(sizing.changes, Vec::new());
+    // What it would write once runnerd runs with the file.
+    let plan = sizing
+        .auto_plan
+        .expect("auto sizing says what it does next");
+    assert_eq!(
+        plan.next
+            .iter()
+            .map(|change| (change.profile.as_str(), change.to.memory))
+            .collect::<Vec<_>>(),
+        [("node", 5376 << 20)]
+    );
+    assert_eq!((plan.interval, plan.max_step), (24 * 3600, 25));
     assert!(daemon.reloads.try_recv().is_err(), "nothing reloaded");
     daemon.stop().await;
 }
@@ -852,6 +879,11 @@ async fn auto_sizing_off_leaves_the_file_as_written() {
     finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), EXAMPLE);
+    assert_eq!(
+        read_sizing(&daemon).await.auto_plan,
+        None,
+        "nothing is planned"
+    );
     daemon.stop().await;
 }
 

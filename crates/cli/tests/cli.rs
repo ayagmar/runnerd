@@ -311,6 +311,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
         slots: 5,
     };
     axum::Json(Sizing {
+        auto_plan: None,
         auto: false,
         changes: vec![SizingChange {
             at: 1_700_050_000,

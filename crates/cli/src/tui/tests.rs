@@ -524,6 +524,7 @@ fn sizing() -> Sizing {
         }
     };
     Sizing {
+        auto_plan: None,
         auto: false,
         changes: Vec::new(),
         since: NOW - 600,

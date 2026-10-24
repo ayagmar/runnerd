@@ -2399,6 +2399,70 @@ dl.health-figures {
   }
 }
 
+/* Auto sizing: on or off, its rules, and a line per profile on what it does next. */
+.auto-plan {
+  display: grid;
+  gap: 0.75rem;
+  padding: 1.25rem;
+  background: var(--surface);
+}
+
+.auto-plan h2 {
+  font-size: 1.25rem;
+}
+
+.auto-plan p {
+  margin: 0;
+  max-width: 75ch;
+}
+
+.plan-list {
+  list-style: none;
+  margin: 0.25rem 0 0;
+  padding: 0;
+  display: grid;
+  gap: 2px;
+}
+
+.plan-list li {
+  display: grid;
+  grid-template-columns: 8rem minmax(0, 1fr);
+  gap: 0.25rem 1rem;
+  padding: 0.75rem 0;
+  border-top: 1px solid var(--line);
+}
+
+@media (max-width: 40rem) {
+  .plan-list li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* A job's row keeps what decides its cap: runs, p99, its wait and what it needs. */
+  .sizing-table :is(th, td):is(:nth-child(3), :nth-child(6)) {
+    display: none;
+  }
+
+  .sizing-table tbody th {
+    white-space: normal;
+  }
+}
+
+.plan-name {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.5rem;
+  font-weight: 700;
+}
+
+.plan-what {
+  display: grid;
+  gap: 0.15rem;
+}
+
+.plan-what.changes strong {
+  color: var(--wait-ink);
+}
+
 .sizing-changes {
   margin: 1rem 0;
 }

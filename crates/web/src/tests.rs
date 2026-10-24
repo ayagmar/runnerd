@@ -2361,3 +2361,59 @@ async fn history_filters_are_links_that_keep_the_other_filters() {
         "only E2E's jobs are listed: {rows}"
     );
 }
+
+#[tokio::test]
+async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
+    use runnerd_core::api::{AutoPlan, Resize, SizingChange, SizingHold};
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let off = dashboard.page(&cookie, "/sizing").await.body;
+    assert!(off.contains("Auto sizing is off"), "{off}");
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let now = fixtures.now;
+        fixtures.auto_plan = Some(AutoPlan {
+            every: 300,
+            interval: 86_400,
+            max_step: 25,
+            next: vec![SizingChange {
+                at: now,
+                profile: "node".to_owned(),
+                from: Resize {
+                    memory: 7 << 30,
+                    slots: 2,
+                },
+                to: Resize {
+                    memory: 5376 << 20,
+                    slots: 2,
+                },
+                reason: "lower memory".to_owned(),
+                uncertain: false,
+            }],
+            held: vec![SizingHold {
+                profile: "jvm".to_owned(),
+                changed: now - 3600,
+                until: now + 23 * 3600,
+            }],
+        });
+    }
+    let on = dashboard.page(&cookie, "/sizing").await.body;
+    let plan = &on[on.find(r#"class="plan-list""#).unwrap()..];
+    let plan = &plan[..plan.find("</ul>").unwrap()];
+    let line = |profile: &str| {
+        let from = plan.find(&format!("</span>{profile}</span>")).unwrap();
+        plan[from..].split("</li>").next().unwrap().to_owned()
+    };
+    assert!(
+        line("node").contains("Next look, within 5 minutes: memory 7G → 5.25G, slots 2"),
+        "node changes at the next look: {plan}"
+    );
+    assert!(
+        line("jvm").contains("No change before") && !line("jvm").contains("Next look"),
+        "jvm is held: {plan}"
+    );
+    assert!(
+        on.contains("at most once every 24 hours"),
+        "the rules in words: {on}"
+    );
+}

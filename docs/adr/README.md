@@ -51,3 +51,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md) | Phones signed in by QR code, and sessions that outlive a restart |
 | [0044](0044-queued-jobs-say-why-they-wait.md) | Queued jobs say why they wait |
 | [0045](0045-jobs-filtered-by-workflow-and-name.md) | Jobs filtered by workflow and job name |
+| [0046](0046-sizing-says-what-auto-sizing-does-next.md) | Sizing says what auto sizing does next |

@@ -63,6 +63,8 @@ pub struct Fixtures {
     pub controls: Vec<String>,
     /// Whether the job history fails to record a pause or resume of every repository, as the daemon's 500.
     pub unrecorded: bool,
+    /// What `GET /v1/sizing` says auto sizing does next; `None`, auto sizing is off.
+    pub auto_plan: Option<runnerd_core::api::AutoPlan>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -652,6 +654,7 @@ impl Fixtures {
             after_put: None,
             controls: Vec::new(),
             unrecorded: false,
+            auto_plan: None,
         }
     }
 
@@ -850,8 +853,9 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
         })
         .collect();
     Sizing {
-        auto: false,
-        // Auto sizing, since turned off, lowered jvm two days ago.
+        auto_plan: fixtures.auto_plan.clone(),
+        auto: fixtures.auto_plan.is_some(),
+        // Auto sizing lowered jvm two days ago.
         changes: vec![SizingChange {
             at: fixtures.now - 2 * 86_400,
             profile: "jvm".to_owned(),

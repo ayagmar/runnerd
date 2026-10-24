@@ -152,9 +152,12 @@ pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizin
         .sizing_changes(window.since)
         .await
         .map_err(|store_error| store_error.to_string())?;
+    let memory_max = memory_max.map(|max| max.0);
+    let auto_plan = super::auto::plan(state, &config, memory_max).await?;
     Ok(Sizing {
         changes,
-        ..advise(&config, memory_max.map(|max| max.0), &history, window)
+        auto_plan,
+        ..advise(&config, memory_max, &history, window)
     })
 }
 

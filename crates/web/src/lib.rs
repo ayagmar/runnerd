@@ -250,7 +250,7 @@ async fn caches(State(app): State<App>) -> Response {
 
 async fn sizing(State(app): State<App>) -> Response {
     page(
-        SizingView::load(&app.daemon)
+        SizingView::load(&app.daemon, now())
             .await
             .map(|sizing| views::sizing::render(&sizing)),
     )

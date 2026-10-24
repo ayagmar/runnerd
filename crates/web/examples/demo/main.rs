@@ -13,7 +13,10 @@
 use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use runnerd_core::api::{Event, EventEnvelope, HostSample, JobState, Sample, Waiting};
+use runnerd_core::api::{
+    AutoPlan, Event, EventEnvelope, HostSample, JobState, Resize, Sample, SizingChange, SizingHold,
+    Waiting,
+};
 
 mod fake;
 
@@ -35,6 +38,7 @@ async fn main() {
     let _ = std::fs::remove_file(&socket);
     let fake = fake::Fake::new(fake::Fixtures::new(now()));
     burst(&fake);
+    auto_sizing(&fake);
     fake::serve(&socket, fake.clone());
     let listener = runnerd_web::listen(&addr).await.unwrap().unwrap();
     let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
@@ -144,4 +148,36 @@ fn burst(fake: &fake::Fake) {
             repository.queued_jobs = queued;
         }
     }
+}
+
+/// Auto sizing on, at most once in 3 days a profile: it lowered jvm two days ago, which holds jvm a day more, and its
+/// next look lowers node a step.
+fn auto_sizing(fake: &fake::Fake) {
+    const GIB: u64 = 1 << 30;
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let at = now();
+    fixtures.auto_plan = Some(AutoPlan {
+        every: 300,
+        interval: 3 * 86_400,
+        max_step: 25,
+        next: vec![SizingChange {
+            at,
+            profile: "node".to_owned(),
+            from: Resize {
+                memory: 7 * GIB,
+                slots: 2,
+            },
+            to: Resize {
+                memory: 5376 << 20,
+                slots: 2,
+            },
+            reason: "lower memory to 2.5G from 7G, its largest peak + 15%".to_owned(),
+            uncertain: false,
+        }],
+        held: vec![SizingHold {
+            profile: "jvm".to_owned(),
+            changed: fixtures.now - 2 * 86_400,
+            until: fixtures.now + 86_400,
+        }],
+    });
 }

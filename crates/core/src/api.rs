@@ -63,7 +63,8 @@ pub use records::{
     SHELL_PROTOCOL, ShellQuery,
 };
 pub use sizing::{
-    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingQuery, Spread,
+    Advice, AutoPlan, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingHold,
+    SizingQuery, Spread,
 };
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
