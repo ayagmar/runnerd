@@ -42,11 +42,23 @@ Runner containers live in Docker, not in the unit: a restarted runnerd adopts th
 - Every [`poll_interval`](../configuration/#host) it asks GitHub for each repository's queued jobs.
 - A job is served when every label in its `runs-on` is in its repository's `labels`.
 - For each one it registers a just-in-time runner and starts it in a free slot of the repository's profile, if the slice's `MemoryMax` still has room for the profile's `memory`, or with [measured admission](../admission/#measured-admission) for the job's predicted peak, and under [CPU admission](../admission/#cpu-admission) if the CPU budget has room for it too. Other jobs wait in GitHub's queue.
-- The runner takes one job, its container exits, and runnerd removes it. A runner with no job after 5 minutes is removed.
+- The runner takes one job, its container exits, and runnerd removes it. A runner with no job after 5 minutes is removed, unless it is a [warm runner](#warm-runners).
 - A restarted runnerd adopts the runner containers still running and deletes this host's runners that have none.
 - Before a profile's first runner it pulls the profile's `image`, logging the pull's progress.
 
 <Lifecycle />
+
+## Warm runners
+
+A job that finds no runner waits for the next poll, a registration and a container start: 15 to 25 seconds. A warm runner is already registered when GitHub queues the job, and takes it within a second or two.
+
+- Each repository keeps [`warm`](../configuration/#repositories) runners (1 by default) while it is active: a job of it was queued in the last hour, or it is an hour of the day (UTC) its jobs came in on 3 of the last 14 days. Outside those, its warm runners go after 5 minutes idle and none starts again until a job comes.
+- When a job of a workflow run is seen, the run's other jobs get runners too: as many as that workflow's runs usually have (the median of the last 14 days, from 3 runs), less the ones already seen.
+- Warm runners start last: only once every queued job that fits has its runner, and while no job waits for a slot, memory or CPU. Each reserves its profile's `memory` (and `cpus` under CPU admission).
+- A queued job of another repository that needs the room takes it: runnerd removes as many warm runners as make the job fit and starts its runner in the same poll.
+- A profile due a reseed removes its warm runners once its other runners are idle, so the snapshot still gets rebuilt.
+
+The status shows them as `warm, waiting for a job`. Sizing tells the jobs a warm runner took from the others, with each kind's median wait.
 
 ## Warm caches
 

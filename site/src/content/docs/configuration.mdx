@@ -191,6 +191,7 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 | `name` | | `owner/name` on GitHub |
 | `profile` | | the profile its jobs run on |
 | `labels` | | at least one; a job runs here when every label in its `runs-on` is one of these |
+| `warm` | `1` | runners kept registered for jobs not queued yet while the repository is active ([warm runners](../running/#warm-runners)); `0` turns them off |
 
 ### `[history]`
 
