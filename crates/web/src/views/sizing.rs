@@ -5,7 +5,7 @@
 //! above them, whether it is on and, per profile, what its next look changes or until when a recent change holds it.
 
 use maud::{Markup, html};
-use runnerd_core::api::{Advice, AutoPlan, JobSizing, ProfileSizing, Sizing};
+use runnerd_core::api::{Advice, AutoPlan, JobSizing, ProfileSizing, Sizing, period};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, page};
@@ -80,10 +80,7 @@ fn auto_plan(view: &SizingView) -> Markup {
     html! {
         section.auto-plan aria-labelledby="auto-title" {
             h2 #auto-title { "Auto sizing is on" }
-            p {
-                "runnerd looks every " (span(plan.every)) " and changes a profile at most once every "
-                (span(plan.interval)) ", moving its memory by at most " (plan.max_step) "% at a time."
-            }
+            p { "runnerd " (plan.rules()) "." }
             @if let Some(blocked) = &plan.blocked {
                 p.warning { "No look changes anything now: " (blocked) "." }
             }
@@ -96,23 +93,6 @@ fn auto_plan(view: &SizingView) -> Markup {
                 }
             }
         }
-    }
-}
-
-/// A setting's length in words: `5 minutes`, `24 hours`, `90 s`.
-fn span(seconds: u64) -> String {
-    let plural = |count: u64, unit: &str| {
-        if count == 1 {
-            format!("{count} {unit}")
-        } else {
-            format!("{count} {unit}s")
-        }
-    };
-    match seconds {
-        0 => "0 s".to_owned(),
-        _ if seconds.is_multiple_of(3600) => plural(seconds / 3600, "hour"),
-        _ if seconds.is_multiple_of(60) => plural(seconds / 60, "minute"),
-        _ => format!("{seconds} s"),
     }
 }
 
@@ -129,7 +109,7 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
                 @if plan.blocked.is_some() {
                     strong { "Once that is fixed: " (change.line()) }
                 } @else {
-                    strong { "Next look, within " (span(plan.every)) ": " (change.line()) }
+                    strong { "Next look, within " (period(plan.every)) ": " (change.line()) }
                 }
                 span.muted { (change.reason) }
             }

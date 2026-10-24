@@ -10,8 +10,8 @@ use std::time::Duration;
 
 use ratatui::crossterm::event::{self as terminal, Event as TerminalEvent};
 use runnerd_core::api::{
-    EventQuery, HostSampleQuery, HostSamples, Job, JobPage, PauseQuery, Paused, Records,
-    SampleSeries, Sizing, Status,
+    Activity, ActivityQuery, EventQuery, HostSampleQuery, HostSamples, Job, JobPage, PauseQuery,
+    Paused, Records, SampleSeries, Sizing, Status,
 };
 use runnerd_core::client::{Client, ClientError, Events, StatusCode};
 use runnerd_core::config::ByteSize;
@@ -36,6 +36,8 @@ const FRAME: Duration = Duration::from_millis(33);
 const RETRY: Duration = Duration::from_secs(2);
 /// How far back the slice's charts start.
 const HOST_HISTORY: u64 = 30 * 60;
+/// The window of the health figures: the last day.
+const DAY: u64 = 24 * 3600;
 
 /// Reads the snapshot, takes over the terminal and runs until `q`. The terminal is given back however it ends.
 pub(crate) async fn run(client: &Client, colour: bool) -> Result<(), Error> {
@@ -147,7 +149,21 @@ async fn snapshot(client: &Client) -> Result<(Events, App), Error> {
     for id in live.running.keys() {
         series.push(client.get(&format!("/v1/jobs/{id}/samples")).await?);
     }
-    Ok((events, App::new(live, host.samples, series)))
+    // A daemon before the activity API leaves the health figures out rather than the whole screen.
+    let activity = activity(client).await.ok();
+    Ok((events, App::new(live, activity, host.samples, series)))
+}
+
+/// The jobs started and finished in the last day.
+async fn activity(client: &Client) -> Result<Activity, ClientError> {
+    client
+        .get_query(
+            "/v1/activity",
+            &ActivityQuery {
+                since: Some(now().saturating_sub(DAY)),
+            },
+        )
+        .await
 }
 
 fn local(error: &std::io::Error) -> Error {
@@ -361,13 +377,10 @@ impl Requests {
                 });
             }
             Effect::History { generation, query } => {
-                tokio::spawn(async move {
-                    let page = client
-                        .get_query::<JobPage>("/v1/jobs", &query)
-                        .await
-                        .map_err(|error| error.to_string());
-                    let _ = send.send(Msg::History { generation, page });
-                });
+                tokio::spawn(read_jobs(client, send, query, move |page| Msg::History {
+                    generation,
+                    page,
+                }));
             }
             Effect::Pause { repository, force } => {
                 tokio::spawn(async move {
@@ -377,27 +390,12 @@ impl Requests {
             }
             Effect::Resume { repository } => {
                 tokio::spawn(async move {
-                    let resumed = match crate::Target::new(repository) {
-                        Ok(target) => client
-                            .post(&format!("{}/resume", target.path), &())
-                            .await
-                            .map(|_| target.name)
-                            .map_err(|error| error.to_string()),
-                        Err(error) => Err(error.to_string()),
-                    };
-                    let _ = send.send(match resumed {
-                        Ok(name) => Msg::Done(format!("{name} resumed")),
-                        Err(error) => Msg::Failed(error),
-                    });
+                    let _ = send.send(unpause(&client, repository).await);
                 });
             }
             Effect::Records => {
                 tokio::spawn(async move {
-                    answer(
-                        &send,
-                        client.get::<Records>("/v1/records").await,
-                        Msg::Records,
-                    );
+                    answer(&send, client.get("/v1/records").await, Msg::Records);
                 });
             }
             Effect::RemoveRecords(removal) => {
@@ -422,6 +420,21 @@ impl Requests {
                 tokio::spawn(async move {
                     answer(&send, client.get::<Sizing>("/v1/sizing").await, Msg::Sizing);
                 });
+            }
+            Effect::Activity { generation } => {
+                tokio::spawn(read_activity(client, send, generation));
+            }
+            Effect::Reasons => {
+                tokio::spawn(async move {
+                    let status = client.get::<Status>("/v1/status").await.ok();
+                    let _ = send.send(Msg::Reasons(status.map(Box::new)));
+                });
+            }
+            Effect::Runs { job, query } => {
+                tokio::spawn(read_jobs(client, send, query, move |page| Msg::Runs {
+                    job,
+                    page,
+                }));
             }
             Effect::Resize(resizing) => {
                 tokio::spawn(write_resize(client, send, resizing));
@@ -450,6 +463,31 @@ impl Requests {
     }
 }
 
+/// Reads the day's activity again. Like the snapshot, a daemon without it keeps the figures it has: no flash every
+/// minute.
+async fn read_activity(client: Client, send: UnboundedSender<Msg>, generation: u64) {
+    if let Ok(activity) = activity(&client).await {
+        let _ = send.send(Msg::Activity {
+            generation,
+            activity,
+        });
+    }
+}
+
+/// Reads a page of jobs and sends it, or why it could not be read, as `msg` makes it.
+async fn read_jobs(
+    client: Client,
+    send: UnboundedSender<Msg>,
+    query: runnerd_core::api::JobQuery,
+    msg: impl FnOnce(Result<JobPage, String>) -> Msg,
+) {
+    let page = client
+        .get_query::<JobPage>("/v1/jobs", &query)
+        .await
+        .map_err(|error| error.to_string());
+    let _ = send.send(msg(page));
+}
+
 /// Sends what a request answered, or why it failed.
 fn answer<T>(send: &UnboundedSender<Msg>, answer: Result<T, ClientError>, msg: fn(T) -> Msg) {
     let _ = send.send(match answer {
@@ -476,6 +514,22 @@ async fn write_resize(client: Client, send: UnboundedSender<Msg>, resizing: Resi
         Err(error) => Msg::Failed(error.to_string()),
     });
     answer(&send, client.get::<Sizing>("/v1/sizing").await, Msg::Sizing);
+}
+
+/// Resumes `repository`, or every one when `None`.
+async fn unpause(client: &Client, repository: Option<String>) -> Msg {
+    let resumed = match crate::Target::new(repository) {
+        Ok(target) => client
+            .post(&format!("{}/resume", target.path), &())
+            .await
+            .map(|_| target.name)
+            .map_err(|error| error.to_string()),
+        Err(error) => Err(error.to_string()),
+    };
+    match resumed {
+        Ok(name) => Msg::Done(format!("{name} resumed")),
+        Err(error) => Msg::Failed(error),
+    }
 }
 
 /// Pauses `repository`, or every one when `None`.

@@ -2,12 +2,13 @@
 //! requests to make. It decides what is shown and asked for; making requests is `tui`'s, drawing is `draw`'s, and
 //! the daemon's state comes from `watch::State`, the reducer `runnerctl watch` uses.
 
-use std::collections::{BTreeMap, VecDeque};
+use std::collections::{BTreeMap, BTreeSet, VecDeque};
 
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use runnerd_core::api::{
-    Event, EventEnvelope, HostSample, Job, JobMetrics, JobPage, JobQuery, JobState, JobSummary,
-    LogSummary, QueuedJob, Records, Resize, Sample, SampleSeries, Sizing, Status, Timeline,
+    Activity, Event, EventEnvelope, HostSample, Job, JobMetrics, JobPage, JobQuery, JobState,
+    JobSummary, LogSummary, QueuedJob, Records, Resize, Sample, SampleSeries, Sizing, Status,
+    Timeline,
 };
 
 use crate::watch;
@@ -22,6 +23,13 @@ pub(crate) const LOG_LINES: usize = 5000;
 pub(crate) const HISTORY_PAGE: u32 = 100;
 /// The conclusions the history filter cycles through, after "any".
 const CONCLUSIONS: [&str; 3] = ["failure", "success", "cancelled"];
+/// The most runs of the open job's own the job view compares it with, as the dashboard does.
+pub(crate) const RUNS: u32 = 30;
+/// How often the day's activity is read again while nothing starts or ends, so its 24 hours move on.
+const ACTIVITY_EVERY: u64 = 60;
+/// How often the queued jobs' reasons are read again while no job or slot changes: no event carries them (ADR 0044),
+/// so the dashboard reads the status this often too.
+const REASONS_EVERY: u64 = 10;
 
 /// What happened: a key, something from the daemon, or the answer to a request.
 #[derive(Debug)]
@@ -50,6 +58,18 @@ pub(crate) enum Msg {
     Status(Status),
     Records(Records),
     Sizing(Sizing),
+    /// The jobs started and finished in the last 24 hours, read by the request of this generation.
+    Activity {
+        generation: u64,
+        activity: Activity,
+    },
+    /// The status read again for why each queued job waits; `None` when it could not be read.
+    Reasons(Option<Box<Status>>),
+    /// The answer to the open job's request for its latest runs.
+    Runs {
+        job: u64,
+        page: Result<JobPage, String>,
+    },
     /// A request succeeded; the text says what it did.
     Done(String),
     /// A request failed.
@@ -79,29 +99,6 @@ fn queued_summary(job: &QueuedJob) -> JobSummary {
         },
         metrics: JobMetrics::default(),
         log: LogSummary::default(),
-    }
-}
-
-/// A row of the latest jobs pane.
-#[derive(Debug, Clone, Copy)]
-pub(crate) enum LatestRow<'app> {
-    Queued(&'app QueuedJob),
-    Finished(&'app JobSummary),
-}
-
-impl LatestRow<'_> {
-    fn id(self) -> u64 {
-        match self {
-            LatestRow::Queued(job) => job.id,
-            LatestRow::Finished(job) => job.id,
-        }
-    }
-
-    fn repository(&self) -> &str {
-        match self {
-            LatestRow::Queued(job) => &job.repository,
-            LatestRow::Finished(job) => &job.repository,
-        }
     }
 }
 
@@ -146,6 +143,18 @@ pub(crate) enum Effect {
     RemoveRecords(Removal),
     /// Read the sizing advice.
     Sizing,
+    /// Read the jobs started and finished in the last 24 hours; the answer carries the generation, so an older read
+    /// that answers late does not undo a newer one.
+    Activity {
+        generation: u64,
+    },
+    /// Read the status again for why each queued job waits.
+    Reasons,
+    /// Read the open job's latest runs: the same repository's, workflow's and job name's.
+    Runs {
+        job: u64,
+        query: JobQuery,
+    },
     /// Write a profile's new memory and slots into the daemon's config.
     Resize(Resizing),
     /// Give the terminal back and stop, as Ctrl-Z does in a shell.
@@ -182,7 +191,10 @@ pub(crate) enum View {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pane {
     Slots,
+    /// The queued jobs, each with why it waits.
+    Queue,
     Repositories,
+    /// The latest finished jobs.
     Latest,
 }
 
@@ -232,6 +244,46 @@ pub(crate) struct JobView {
     pub(crate) log: VecDeque<String>,
     /// Lines scrolled up from the end; 0 follows the log.
     pub(crate) scroll: usize,
+    /// The latest runs of the same job, oldest first, this one among them; `None` until read.
+    pub(crate) runs: Option<Vec<JobSummary>>,
+}
+
+impl JobView {
+    /// The request for its latest runs. Without a workflow the jobs API matches every workflow's job of that name,
+    /// so the answer is filtered again by [`JobView::keep_runs`].
+    fn runs_request(&self) -> Effect {
+        let summary = &self.job.summary;
+        Effect::Runs {
+            job: summary.id,
+            query: JobQuery {
+                repository: Some(summary.repository.clone()),
+                workflow: summary.workflow.clone(),
+                name: Some(summary.name.clone()),
+                limit: Some(RUNS),
+                ..JobQuery::default()
+            },
+        }
+    }
+
+    /// Raises its memory peak to a sample's memory while it runs: a high-water mark that dropping old samples does
+    /// not lower. A finished job's peak is its record's, as the daemon totalled it.
+    fn sampled(&mut self, memory: u64) {
+        let summary = &mut self.job.summary;
+        if !summary.state.is_final() {
+            summary.metrics.memory_peak = summary.metrics.memory_peak.max(Some(memory));
+        }
+    }
+
+    fn keep_runs(&mut self, page: JobPage) {
+        let workflow = &self.job.summary.workflow;
+        let mut runs: Vec<JobSummary> = page
+            .jobs
+            .into_iter()
+            .filter(|run| &run.workflow == workflow)
+            .collect();
+        runs.reverse();
+        self.runs = Some(runs);
+    }
 }
 
 /// The history page and its filters.
@@ -239,7 +291,10 @@ pub(crate) struct JobView {
 pub(crate) struct History {
     pub(crate) page: Option<JobPage>,
     pub(crate) repository: Option<String>,
+    pub(crate) workflow: Option<String>,
     pub(crate) conclusion: Option<String>,
+    /// Every workflow seen in a job, by repository, which `w` cycles through.
+    workflows: BTreeSet<(String, String)>,
     /// The `before` of each page read before this one; empty on the first page.
     pub(crate) previous: Vec<Option<u64>>,
     pub(crate) before: Option<u64>,
@@ -266,11 +321,35 @@ impl History {
     fn query(&self) -> JobQuery {
         JobQuery {
             repository: self.repository.clone(),
+            workflow: self.workflow.clone(),
             conclusion: self.conclusion.clone(),
             before: self.before,
             limit: Some(HISTORY_PAGE),
             ..JobQuery::default()
         }
+    }
+
+    /// Learns the workflows of `jobs`.
+    fn learn<'a>(&mut self, jobs: impl IntoIterator<Item = &'a JobSummary>) {
+        for job in jobs {
+            if let Some(workflow) = &job.workflow {
+                self.workflows
+                    .insert((job.repository.clone(), workflow.clone()));
+            }
+        }
+    }
+
+    /// The workflows `w` cycles through: those of the repository filtered by, or of every repository, by name.
+    fn workflows(&self) -> BTreeSet<&str> {
+        self.workflows
+            .iter()
+            .filter(|(repository, _)| {
+                self.repository
+                    .as_ref()
+                    .is_none_or(|filter| filter == repository)
+            })
+            .map(|(_, workflow)| workflow.as_str())
+            .collect()
     }
 }
 
@@ -288,8 +367,21 @@ pub(crate) struct App {
     back: View,
     pub(crate) pane: Pane,
     pub(crate) slot: usize,
+    pub(crate) queued: usize,
     pub(crate) repository: usize,
     pub(crate) latest: usize,
+    /// The jobs started and finished in the last 24 hours, once read.
+    pub(crate) activity: Option<Activity>,
+    /// The host sample time from which the activity is read again, unless a job starts or ends first.
+    activity_due: u64,
+    /// The generation of the last activity request, and of the read shown.
+    activity_asked: u64,
+    activity_shown: u64,
+    /// The queued jobs' reasons: from which host sample time they are read again, whether a read is under way, and
+    /// whether something changed since it began, so another follows it.
+    reasons_due: u64,
+    reasons_asked: bool,
+    reasons_stale: bool,
     pub(crate) history: History,
     pub(crate) job: Option<JobView>,
     pub(crate) flash: Option<Flash>,
@@ -308,7 +400,12 @@ pub(crate) struct App {
 }
 
 impl App {
-    pub(crate) fn new(live: watch::State, host: Vec<HostSample>, series: Vec<SampleSeries>) -> App {
+    pub(crate) fn new(
+        live: watch::State,
+        activity: Option<Activity>,
+        host: Vec<HostSample>,
+        series: Vec<SampleSeries>,
+    ) -> App {
         let mut app = App {
             live,
             series: BTreeMap::new(),
@@ -318,8 +415,18 @@ impl App {
             back: View::Overview,
             pane: Pane::Slots,
             slot: 0,
+            queued: 0,
             repository: 0,
             latest: 0,
+            activity_due: activity
+                .as_ref()
+                .map_or(0, |activity| activity.until + ACTIVITY_EVERY),
+            activity_asked: 0,
+            activity_shown: 0,
+            reasons_due: 0,
+            reasons_asked: false,
+            reasons_stale: false,
+            activity,
             history: History::default(),
             job: None,
             flash: None,
@@ -335,6 +442,7 @@ impl App {
         for sample in host {
             push(&mut app.host, sample, HOST_SAMPLES);
         }
+        app.history.learn(&app.live.recent);
         for series in series {
             let kept = app.series.entry(series.job).or_default();
             for sample in series.samples {
@@ -348,15 +456,18 @@ impl App {
         if let Msg::Key(key) = msg {
             return self.key(key);
         }
-        // Rows of the latest jobs come and go above the selected one, as queued jobs start: the selection follows its
-        // job, or stays on a row that is there when the job left.
-        let selected = self.latest_rows().nth(self.latest).map(LatestRow::id);
+        // Rows of the queue and the latest jobs come and go above the selected one, as queued jobs start and others
+        // finish: the selection follows its job, or stays on a row that is there when the job left.
+        let queued = self.live.status.queued.get(self.queued).map(|job| job.id);
+        let latest = self.live.recent.get(self.latest).map(|job| job.id);
         let effects = self.apply(msg);
-        let rows = self.latest_rows().count();
-        self.latest = selected
-            .and_then(|id| self.latest_rows().position(|row| row.id() == id))
-            .unwrap_or(self.latest)
-            .min(rows.saturating_sub(1));
+        let ids: Vec<u64> = self.live.status.queued.iter().map(|job| job.id).collect();
+        self.queued = follow(queued, self.queued, &ids);
+        let ids: Vec<u64> = self.live.recent.iter().map(|job| job.id).collect();
+        self.latest = follow(latest, self.latest, &ids);
+        if self.pane == Pane::Queue && self.live.status.queued.is_empty() {
+            self.pane = Pane::Slots;
+        }
         effects
     }
 
@@ -369,34 +480,29 @@ impl App {
             Msg::Reconnected => {
                 self.connection = Connection::Live;
                 if let Some(open) = &self.job {
-                    return vec![Effect::RefreshJob(open.job.summary.id)];
+                    // Its runs too: their end may have been missed with the job's.
+                    return vec![Effect::RefreshJob(open.job.summary.id), open.runs_request()];
                 }
             }
             Msg::Snapshot(live) => {
                 self.live = *live;
                 let running = &self.live.running;
                 self.series.retain(|id, _| running.contains_key(id));
-            }
-            Msg::Job(job) => {
-                if let Some(open) = &mut self.job
-                    && open.job.summary.id == job.summary.id
-                {
-                    open.job = job.clone();
+                self.history.learn(&self.live.recent);
+                // Jobs may have started and ended while the stream was away, and a reasons read under way is older.
+                if self.reasons_asked {
+                    self.reasons_stale = true;
                 }
-                if job.summary.state.is_final() {
-                    // Its `job.finished` was missed, as across an outage.
-                    self.live.running.remove(&job.summary.id);
-                    self.series.remove(&job.summary.id);
-                } else {
-                    self.live.refresh(job);
-                }
+                return vec![self.ask_activity()];
             }
+            Msg::Job(job) => self.job_read(job),
             Msg::Samples(series) => {
                 if let Some(open) = &mut self.job
                     && open.job.summary.id == series.job
                 {
                     open.samples.clear();
                     for sample in series.samples {
+                        open.sampled(sample.memory);
                         push(&mut open.samples, sample, JOB_SAMPLES);
                     }
                 }
@@ -407,6 +513,7 @@ impl App {
                 }
                 match page {
                     Ok(page) => {
+                        self.history.learn(&page.jobs);
                         self.history.selected =
                             self.history.selected.min(page.jobs.len().saturating_sub(1));
                         self.history.page = Some(page);
@@ -433,11 +540,107 @@ impl App {
                 self.sized = self.sized.min(sizing.profiles.len().saturating_sub(1));
                 self.sizing = Some(sizing);
             }
+            Msg::Activity {
+                generation,
+                activity,
+            } => self.activity(generation, activity),
+            Msg::Reasons(status) => return self.reasons(status.as_deref()),
+            Msg::Runs { job, page } => match page {
+                Ok(page) => {
+                    self.history.learn(&page.jobs);
+                    if let Some(open) = &mut self.job
+                        && open.job.summary.id == job
+                    {
+                        open.keep_runs(page);
+                    }
+                }
+                Err(error) => self.flash(error, Outcome::Failed),
+            },
             Msg::Done(text) => self.flash(text, Outcome::Done),
             Msg::Failed(text) => self.flash(text, Outcome::Failed),
             Msg::Busy(refused) => self.confirm = Some(refused),
         }
         Vec::new()
+    }
+
+    /// A job read again: the open job's page and the running jobs take it.
+    fn job_read(&mut self, job: Job) {
+        if let Some(open) = &mut self.job
+            && open.job.summary.id == job.summary.id
+        {
+            // While it runs the record's peak is of the samples stored so far, which may lag those seen here.
+            let peak = open.job.summary.metrics.memory_peak;
+            open.job = job.clone();
+            if !job.summary.state.is_final()
+                && let Some(peak) = peak
+            {
+                open.sampled(peak);
+            }
+        }
+        if job.summary.state.is_final() {
+            // Its `job.finished` was missed, as across an outage.
+            self.live.running.remove(&job.summary.id);
+            self.series.remove(&job.summary.id);
+        } else {
+            self.live.refresh(job);
+        }
+    }
+
+    /// Takes the reasons from a status read again, unless something changed while it was read: then they may be
+    /// wrong, so they are left out and read again. Only the reasons: the queue itself is kept from events, which may
+    /// be newer than the read.
+    fn reasons(&mut self, status: Option<&Status>) -> Vec<Effect> {
+        self.reasons_asked = false;
+        if std::mem::take(&mut self.reasons_stale) {
+            return self.ask_reasons().into_iter().collect();
+        }
+        if let Some(status) = status {
+            for job in &mut self.live.status.queued {
+                job.waiting = status
+                    .queued
+                    .iter()
+                    .find(|read| read.id == job.id)
+                    .and_then(|read| read.waiting.clone());
+            }
+        }
+        Vec::new()
+    }
+
+    /// A job or slot changed, so every reason may be wrong (a job behind one that started, a slot that freed): none
+    /// shows until a status read after the change says them again.
+    fn reasons_changed(&mut self) -> Option<Effect> {
+        for job in &mut self.live.status.queued {
+            job.waiting = None;
+        }
+        self.ask_reasons()
+    }
+
+    /// Shows the day's activity, unless a newer read already answered.
+    fn activity(&mut self, generation: u64, activity: Activity) {
+        if generation > self.activity_shown {
+            self.activity_shown = generation;
+            self.activity_due = activity.until + ACTIVITY_EVERY;
+            self.activity = Some(activity);
+        }
+    }
+
+    /// Asks for the day's activity again.
+    fn ask_activity(&mut self) -> Effect {
+        self.activity_asked += 1;
+        Effect::Activity {
+            generation: self.activity_asked,
+        }
+    }
+
+    /// Asks for the queued jobs' reasons, or, while a read is under way, for another once it answers: a burst of
+    /// events makes one read at a time.
+    fn ask_reasons(&mut self) -> Option<Effect> {
+        if self.reasons_asked {
+            self.reasons_stale = true;
+            return None;
+        }
+        self.reasons_asked = true;
+        Some(Effect::Reasons)
     }
 
     fn flash(&mut self, text: String, outcome: Outcome) {
@@ -459,9 +662,30 @@ impl App {
                     );
                 }
             }
-            Event::HostSample { sample } => push(&mut self.host, sample.clone(), HOST_SAMPLES),
+            Event::HostSample { sample } => {
+                push(&mut self.host, sample.clone(), HOST_SAMPLES);
+                if sample.at >= self.activity_due {
+                    // Asked once until the answer moves it on, however many samples come before.
+                    self.activity_due = sample.at + ACTIVITY_EVERY;
+                    effects.push(self.ask_activity());
+                }
+                if sample.at >= self.reasons_due {
+                    self.reasons_due = sample.at + REASONS_EVERY;
+                    effects.extend(self.ask_reasons());
+                }
+            }
+            Event::JobQueued { .. } | Event::SlotChanged { .. } => {
+                effects.extend(self.reasons_changed());
+            }
+            Event::JobStarted { .. } => {
+                effects.push(self.ask_activity());
+                effects.extend(self.reasons_changed());
+            }
             Event::JobFinished { job } => {
                 self.series.remove(&job.id);
+                self.history.learn([job]);
+                effects.push(self.ask_activity());
+                effects.extend(self.reasons_changed());
                 if self.view == View::History && self.history.before.is_none() {
                     effects.push(self.history.request(Rows::Keep));
                 }
@@ -509,6 +733,13 @@ impl App {
             }
             _ => {}
         }
+        effects.extend(self.job_event(envelope));
+        effects
+    }
+
+    /// What an event changes on the open job's page.
+    fn job_event(&mut self, envelope: &EventEnvelope) -> Vec<Effect> {
+        let mut effects = Vec::new();
         let Some(open) = &mut self.job else {
             return effects;
         };
@@ -519,11 +750,13 @@ impl App {
                 open.job.summary = job.clone();
                 // The final record carries the steps' last state and the job's totals.
                 effects.push(Effect::RefreshJob(id));
+                effects.push(open.runs_request());
             }
             Event::JobStep { job, step } if *job == id => {
                 watch::update_step(&mut open.job.steps, step);
             }
             Event::JobSample { job, sample } if *job == id => {
+                open.sampled(sample.memory);
                 push(&mut open.samples, sample.clone(), JOB_SAMPLES);
             }
             // The job's page says what became of its record.
@@ -567,8 +800,8 @@ impl App {
             KeyCode::Char('3') => return self.show(View::Records),
             KeyCode::Char('4') => return self.show(View::Sizing),
             KeyCode::Esc if self.view == View::Job => return self.show(self.back),
-            KeyCode::Tab => self.pane = next_pane(self.pane, Direction::Forward),
-            KeyCode::BackTab => self.pane = next_pane(self.pane, Direction::Backward),
+            KeyCode::Tab => self.next_pane(Direction::Forward),
+            KeyCode::BackTab => self.next_pane(Direction::Backward),
             KeyCode::Down | KeyCode::Char('j') => self.step(1),
             KeyCode::Up | KeyCode::Char('k') => self.step(-1),
             KeyCode::PageDown => self.step(10),
@@ -678,6 +911,18 @@ impl App {
                     .iter()
                     .map(|r| r.name.as_str());
                 self.history.repository = cycle(self.history.repository.as_deref(), names);
+                // A workflow the repository has not run would show nothing.
+                if let Some(workflow) = self.history.workflow.take()
+                    && self.history.workflows().contains(workflow.as_str())
+                {
+                    self.history.workflow = Some(workflow);
+                }
+                return self.first_page();
+            }
+            KeyCode::Char('w') => {
+                let workflows = self.history.workflows();
+                let next = cycle(self.history.workflow.as_deref(), workflows.iter().copied());
+                self.history.workflow = next;
                 return self.first_page();
             }
             KeyCode::Char(']') => {
@@ -758,12 +1003,22 @@ impl App {
             samples: self.series.get(&id).cloned().unwrap_or_default(),
             log: VecDeque::new(),
             scroll: 0,
+            runs: None,
         });
+        if let Some(open) = &mut self.job {
+            let seen: Vec<u64> = open.samples.iter().map(|sample| sample.memory).collect();
+            for memory in seen {
+                open.sampled(memory);
+            }
+        }
         if self.view != View::Job {
             self.back = self.view;
         }
         self.view = View::Job;
         effects.push(Effect::OpenJob(id));
+        if let Some(open) = &self.job {
+            effects.push(open.runs_request());
+        }
         effects
     }
 
@@ -777,7 +1032,6 @@ impl App {
 
     fn step(&mut self, by: isize) {
         let slots = self.slots().count();
-        let latest = self.latest_rows().count();
         let (selected, len) = match (self.view, self.pane) {
             (View::Job, _) => {
                 if let Some(open) = &mut self.job {
@@ -798,20 +1052,15 @@ impl App {
                 self.sizing.as_ref().map_or(0, |s| s.profiles.len()),
             ),
             (View::Overview, Pane::Slots) => (&mut self.slot, slots),
+            (View::Overview, Pane::Queue) => (&mut self.queued, self.live.status.queued.len()),
             (View::Overview, Pane::Repositories) => {
                 (&mut self.repository, self.live.status.repositories.len())
             }
-            (View::Overview, Pane::Latest) => (&mut self.latest, latest),
+            (View::Overview, Pane::Latest) => (&mut self.latest, self.live.recent.len()),
         };
         *selected = selected
             .saturating_add_signed(by)
             .min(len.saturating_sub(1));
-    }
-
-    /// The latest jobs pane's rows: the queued jobs, oldest first, then the last finished ones.
-    pub(crate) fn latest_rows(&self) -> impl Iterator<Item = LatestRow<'_>> {
-        let queued = self.live.status.queued.iter().map(LatestRow::Queued);
-        queued.chain(self.live.recent.iter().map(LatestRow::Finished))
     }
 
     /// Every slot in config order, with its profile's position.
@@ -854,9 +1103,10 @@ impl App {
                     .job_in(&profile.name, slot.slot)
                     .map(|job| job.summary.id)
             }
-            (View::Overview, Pane::Latest) => {
-                self.latest_rows().nth(self.latest).map(LatestRow::id)
+            (View::Overview, Pane::Queue) => {
+                self.live.status.queued.get(self.queued).map(|job| job.id)
             }
+            (View::Overview, Pane::Latest) => self.live.recent.get(self.latest).map(|job| job.id),
             _ => None,
         }
     }
@@ -879,10 +1129,17 @@ impl App {
                 let (_, _, slot) = self.slots().nth(self.slot)?;
                 slot.runner.as_ref().map(|runner| runner.repository.clone())
             }
+            (View::Overview, Pane::Queue) => self
+                .live
+                .status
+                .queued
+                .get(self.queued)
+                .map(|job| job.repository.clone()),
             (View::Overview, Pane::Latest) => self
-                .latest_rows()
-                .nth(self.latest)
-                .map(|row| row.repository().to_owned()),
+                .live
+                .recent
+                .get(self.latest)
+                .map(|job| job.repository.clone()),
         }
     }
 
@@ -902,6 +1159,24 @@ impl App {
         }
     }
 
+    /// Moves to the next of the overview's panes, in the order they are drawn, past the queue while it is empty.
+    fn next_pane(&mut self, direction: Direction) {
+        const ORDER: [Pane; 4] = [Pane::Slots, Pane::Queue, Pane::Repositories, Pane::Latest];
+        let at = ORDER
+            .iter()
+            .position(|pane| *pane == self.pane)
+            .unwrap_or(0);
+        let step = match direction {
+            Direction::Forward => 1,
+            Direction::Backward => ORDER.len() - 1,
+        };
+        let mut next = (at + step) % ORDER.len();
+        if ORDER[next] == Pane::Queue && self.live.status.queued.is_empty() {
+            next = (next + step) % ORDER.len();
+        }
+        self.pane = ORDER[next];
+    }
+
     /// The profile's position in config order, which picks its colour.
     pub(crate) fn profile_index(&self, profile: &str) -> Option<usize> {
         self.live
@@ -919,18 +1194,13 @@ fn push<T>(queue: &mut VecDeque<T>, item: T, keep: usize) {
     }
 }
 
-fn next_pane(pane: Pane, direction: Direction) -> Pane {
-    match (pane, direction) {
-        (Pane::Slots, Direction::Forward) | (Pane::Latest, Direction::Backward) => {
-            Pane::Repositories
-        }
-        (Pane::Repositories, Direction::Forward) | (Pane::Slots, Direction::Backward) => {
-            Pane::Latest
-        }
-        (Pane::Latest, Direction::Forward) | (Pane::Repositories, Direction::Backward) => {
-            Pane::Slots
-        }
-    }
+/// Where a selection goes when the rows change: to `selected`'s row while it is there, else the same row, kept
+/// within the rows.
+fn follow(selected: Option<u64>, row: usize, rows: &[u64]) -> usize {
+    selected
+        .and_then(|id| rows.iter().position(|candidate| *candidate == id))
+        .unwrap_or(row)
+        .min(rows.len().saturating_sub(1))
 }
 
 /// The value after `current` in `values`, then none, then the first again.

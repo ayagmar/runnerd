@@ -231,6 +231,36 @@ pub struct Resize {
     pub slots: u32,
 }
 
+impl AutoPlan {
+    /// Its rules in words, as clients say them after `runnerd`: `looks every 5 minutes and changes a profile at most
+    /// once every 24 hours, moving its memory by at most 25% at a time`.
+    pub fn rules(&self) -> String {
+        format!(
+            "looks every {} and changes a profile at most once every {}, moving its memory by at most {}% at a time",
+            period(self.every),
+            period(self.interval),
+            self.max_step
+        )
+    }
+}
+
+/// A setting's length in words, as a config's periods read: `5 minutes`, `24 hours`, `90 s`.
+pub fn period(seconds: u64) -> String {
+    let plural = |count: u64, unit: &str| {
+        if count == 1 {
+            format!("{count} {unit}")
+        } else {
+            format!("{count} {unit}s")
+        }
+    };
+    match seconds {
+        0 => "0 s".to_owned(),
+        _ if seconds.is_multiple_of(3600) => plural(seconds / 3600, "hour"),
+        _ if seconds.is_multiple_of(60) => plural(seconds / 60, "minute"),
+        _ => format!("{seconds} s"),
+    }
+}
+
 impl SizingChange {
     /// What it changed, such as `memory 9G → 6.75G, slots 2`.
     pub fn line(&self) -> String {
