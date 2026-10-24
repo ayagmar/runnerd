@@ -2140,3 +2140,103 @@ fn the_open_job_s_own_bar_among_its_runs_follows_it_through_start_and_a_missed_f
         "the finish read again counts among its runs: {shown}"
     );
 }
+
+#[test]
+fn the_open_job_s_peak_among_its_runs_rises_with_its_samples_until_its_record_is_final() {
+    let mut app = app();
+    running_job(&mut app);
+    // Opened after its record's peak was 2G, with no samples seen here yet.
+    app.series.clear();
+    app.live
+        .running
+        .get_mut(&42)
+        .unwrap()
+        .summary
+        .metrics
+        .memory_peak = Some(2 << 30);
+    let effects = app.update(key(KeyCode::Enter));
+    let Some(Effect::Runs { job, .. }) = effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::Runs { .. }))
+        .cloned()
+    else {
+        panic!("{effects:?}");
+    };
+    let mut current = summary(42, JobState::Running);
+    current.metrics.memory_peak = Some(2 << 30);
+    let mut earlier = finished(31, 500);
+    earlier.metrics.memory_peak = Some(6 << 30);
+    app.update(Msg::Runs {
+        job,
+        page: Ok(runnerd_core::api::JobPage {
+            jobs: vec![current, earlier],
+            next: None,
+        }),
+    });
+    let sample = |memory| {
+        event(
+            None,
+            Event::JobSample {
+                job: 42,
+                sample: Sample {
+                    at: 1096,
+                    cpu: 1000,
+                    memory,
+                    network_received: 0,
+                    network_sent: 0,
+                },
+            },
+        )
+    };
+    app.update(sample(8 << 30));
+    // The peaks' bars, oldest first: the earlier run's 6G, then this one's.
+    let peaks = |app: &App| {
+        let shown = screen(app, 120, 40, false);
+        let row = rows_with(&shown, "  peak ")[0].to_owned();
+        let heading = rows_with(&shown, "Latest 2 runs")[0].to_owned();
+        let bars: Vec<char> = row
+            .split("  peak ")
+            .nth(1)
+            .unwrap()
+            .trim_end()
+            .chars()
+            .collect();
+        (heading, bars)
+    };
+    let (heading, bars) = peaks(&app);
+    assert!(heading.contains("largest peak 8G"), "{heading}");
+    assert_eq!(bars, ['▆', '█'], "this run's 8G tops the earlier 6G");
+
+    // A lower sample, or a refresh of the record while it runs, does not lower the mark.
+    app.update(sample(1 << 30));
+    let mut refreshed = summary(42, JobState::Running);
+    refreshed.metrics.memory_peak = Some(3 << 30);
+    app.update(Msg::Job(Job {
+        admission: None,
+        summary: refreshed,
+        steps: Vec::new(),
+        record: None,
+    }));
+    assert!(
+        peaks(&app).0.contains("largest peak 8G"),
+        "{:?}",
+        peaks(&app)
+    );
+
+    // The final record's totals win.
+    let mut done = summary(42, JobState::Completed);
+    done.conclusion = Some("success".to_owned());
+    done.timeline.finished_at = Some(1098);
+    done.metrics.memory_peak = Some(7 << 30);
+    app.update(Msg::Job(Job {
+        admission: None,
+        summary: done,
+        steps: Vec::new(),
+        record: None,
+    }));
+    assert!(
+        peaks(&app).0.contains("largest peak 7G"),
+        "{:?}",
+        peaks(&app)
+    );
+}

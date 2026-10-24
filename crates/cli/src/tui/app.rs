@@ -265,6 +265,15 @@ impl JobView {
         }
     }
 
+    /// Raises its memory peak to a sample's memory while it runs: a high-water mark that dropping old samples does
+    /// not lower. A finished job's peak is its record's, as the daemon totalled it.
+    fn sampled(&mut self, memory: u64) {
+        let summary = &mut self.job.summary;
+        if !summary.state.is_final() {
+            summary.metrics.memory_peak = summary.metrics.memory_peak.max(Some(memory));
+        }
+    }
+
     fn keep_runs(&mut self, page: JobPage) {
         let workflow = &self.job.summary.workflow;
         let mut runs: Vec<JobSummary> = page
@@ -486,26 +495,14 @@ impl App {
                 }
                 return vec![self.ask_activity()];
             }
-            Msg::Job(job) => {
-                if let Some(open) = &mut self.job
-                    && open.job.summary.id == job.summary.id
-                {
-                    open.job = job.clone();
-                }
-                if job.summary.state.is_final() {
-                    // Its `job.finished` was missed, as across an outage.
-                    self.live.running.remove(&job.summary.id);
-                    self.series.remove(&job.summary.id);
-                } else {
-                    self.live.refresh(job);
-                }
-            }
+            Msg::Job(job) => self.job_read(job),
             Msg::Samples(series) => {
                 if let Some(open) = &mut self.job
                     && open.job.summary.id == series.job
                 {
                     open.samples.clear();
                     for sample in series.samples {
+                        open.sampled(sample.memory);
                         push(&mut open.samples, sample, JOB_SAMPLES);
                     }
                 }
@@ -564,6 +561,29 @@ impl App {
             Msg::Busy(refused) => self.confirm = Some(refused),
         }
         Vec::new()
+    }
+
+    /// A job read again: the open job's page and the running jobs take it.
+    fn job_read(&mut self, job: Job) {
+        if let Some(open) = &mut self.job
+            && open.job.summary.id == job.summary.id
+        {
+            // While it runs the record's peak is of the samples stored so far, which may lag those seen here.
+            let peak = open.job.summary.metrics.memory_peak;
+            open.job = job.clone();
+            if !job.summary.state.is_final()
+                && let Some(peak) = peak
+            {
+                open.sampled(peak);
+            }
+        }
+        if job.summary.state.is_final() {
+            // Its `job.finished` was missed, as across an outage.
+            self.live.running.remove(&job.summary.id);
+            self.series.remove(&job.summary.id);
+        } else {
+            self.live.refresh(job);
+        }
     }
 
     /// Takes the reasons from a status read again, unless something changed while it was read: then they may be
@@ -736,6 +756,7 @@ impl App {
                 watch::update_step(&mut open.job.steps, step);
             }
             Event::JobSample { job, sample } if *job == id => {
+                open.sampled(sample.memory);
                 push(&mut open.samples, sample.clone(), JOB_SAMPLES);
             }
             // The job's page says what became of its record.
@@ -984,6 +1005,12 @@ impl App {
             scroll: 0,
             runs: None,
         });
+        if let Some(open) = &mut self.job {
+            let seen: Vec<u64> = open.samples.iter().map(|sample| sample.memory).collect();
+            for memory in seen {
+                open.sampled(memory);
+            }
+        }
         if self.view != View::Job {
             self.back = self.view;
         }

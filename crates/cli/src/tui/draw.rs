@@ -2317,20 +2317,15 @@ fn timeline(
 }
 
 /// The open job's latest runs with this run as the page has it now, not as the runs were read: it may have started
-/// or finished since, and while it runs its peak is its samples'.
+/// or finished since, and while it runs its peak rises with its samples.
 fn current_runs(open: &JobView) -> Vec<JobSummary> {
     let summary = &open.job.summary;
-    let mut current = summary.clone();
-    current.metrics.memory_peak = summary
-        .metrics
-        .memory_peak
-        .or_else(|| open.samples.iter().map(|sample| sample.memory).max());
     open.runs
         .iter()
         .flatten()
         .map(|run| {
             if run.id == summary.id {
-                current.clone()
+                summary.clone()
             } else {
                 run.clone()
             }
