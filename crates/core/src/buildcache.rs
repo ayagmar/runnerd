@@ -318,7 +318,16 @@ impl BuildCache {
     /// Closes `runner`'s socket and returns what it was served and stored, and whether it could write. What it sent
     /// while undecided is dropped.
     pub fn detach(&self, runner: &str) -> Option<BuildCacheCounts> {
-        let mut open = lock(&self.inner.state).runners.remove(runner)?;
+        let Some(mut open) = lock(&self.inner.state).runners.remove(runner) else {
+            // One a restart kept the directory of without opening it again, as with the cache turned off since.
+            let dir = self.inner.sockets.join(socket_dir(runner));
+            if let Err(error) = std::fs::remove_dir_all(&dir)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                warn!("cannot remove {}: {error}", dir.display());
+            }
+            return None;
+        };
         open.serving.abort();
         self.inner.remove_uploads(None, &open.held);
         open.counts.refused += open.held.len() as u64;

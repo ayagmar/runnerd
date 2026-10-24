@@ -548,3 +548,18 @@ fn a_repository_named_in_other_case_than_githubs_still_writes() {
         "a person's pull request writes"
     );
 }
+
+#[tokio::test]
+async fn an_adopted_runner_the_cache_is_off_for_leaves_no_socket_once_removed() {
+    let dir = TestDir::new("adopted-off");
+    let (entries, sockets) = (dir.0.join("entries"), dir.0.join("sockets"));
+    let first = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
+    let mounted = first.attach("app", "o/app").unwrap();
+    drop(first);
+    // After the restart the build cache is off, so the adopted runner is not attached again, only kept.
+    let second = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
+    second.forget_others(&["app"]);
+    assert!(mounted.exists(), "its container still mounts it");
+    assert_eq!(second.detach("app"), None, "it was not open");
+    assert!(!mounted.exists(), "its directory goes with it");
+}
