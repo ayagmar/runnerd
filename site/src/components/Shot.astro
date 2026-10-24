@@ -1,6 +1,7 @@
 ---
 // A dashboard screenshot in the page's theme: one <picture> per theme, AVIF then WebP, and a phone crop below
-// 600px when there is one. The picture of the other theme is display: none, so its lazy image never loads.
+// 600px when there is one. The picture of the other theme is display: none, so its lazy image never loads. Each
+// links to its full-size file, which scripts/zoom.ts opens in an overlay.
 import type { ImageMetadata } from 'astro';
 import { getImage } from 'astro:assets';
 
@@ -47,29 +48,42 @@ const themes = await Promise.all(
 
 {
   themes.map(({ theme, desktop, fallback, phone, sources }) => (
-    <picture class="shot" data-shot-theme={theme}>
-      {phone &&
-        phone.sources.map((s) => (
-          <source
-            media="(max-width: 600px)"
-            type={s.type}
-            srcset={s.srcset}
-            sizes="calc(100vw - 3rem)"
-            width={phone.image.width}
-            height={phone.image.height}
-          />
+    <a
+      class="shot"
+      data-shot-theme={theme}
+      href={desktop.src}
+      data-zoom
+      data-zoom-width={desktop.width}
+      data-zoom-height={desktop.height}
+    >
+      <picture>
+        {phone &&
+          phone.sources.map((s) => (
+            <source
+              media="(max-width: 600px)"
+              type={s.type}
+              srcset={s.srcset}
+              sizes="calc(100vw - 3rem)"
+              width={phone.image.width}
+              height={phone.image.height}
+            />
+          ))}
+        {sources.map((s) => (
+          <source type={s.type} srcset={s.srcset} sizes={sizes} />
         ))}
-      {sources.map((s) => (
-        <source type={s.type} srcset={s.srcset} sizes={sizes} />
-      ))}
-      <img
-        src={fallback.src}
-        alt={alt}
-        width={desktop.width}
-        height={desktop.height}
-        loading={eager ? 'eager' : 'lazy'}
-        decoding="async"
-      />
-    </picture>
+        <img
+          src={fallback.src}
+          alt={alt}
+          width={desktop.width}
+          height={desktop.height}
+          loading={eager ? 'eager' : 'lazy'}
+          decoding="async"
+        />
+      </picture>
+    </a>
   ))
 }
+
+<script>
+  import '../scripts/zoom';
+</script>
