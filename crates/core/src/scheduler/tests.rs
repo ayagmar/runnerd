@@ -4,8 +4,8 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    CPU_PRIORITY_AFTER, Decision, IDLE_TIMEOUT, Preparing, Profile, Repository, RunnerSlot, Slot,
-    SlotRef, plan,
+    CPU_PRIORITY_AFTER, Decision, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository, RunnerSlot,
+    Slot, SlotRef, plan,
 };
 use crate::api::Waiting;
 use crate::github::QueuedJob;
@@ -455,7 +455,7 @@ fn each_job_left_queued_says_why_it_waits() {
             slots: vec![Slot::Free],
         },
     );
-    // Room for one 4G runner of app's, then 1G.
+    // Room for one 4G runner of app's, then 1G: job 3's start takes what job 4 would need.
     let plan = plan(&repositories, &profiles, Some(5 * GIB), None, now());
     assert_eq!(starts(&plan.decisions), [(0, "o/a")]);
     assert_eq!(
@@ -463,13 +463,7 @@ fn each_job_left_queued_says_why_it_waits() {
         BTreeMap::from([
             (1, Waiting::Paused),
             (2, Waiting::Backoff { until: 1_000_060 }),
-            (
-                4,
-                Waiting::Memory {
-                    needs: 4 * GIB,
-                    free: GIB
-                }
-            ),
+            (4, Waiting::BehindStart { job: 3 }),
             (
                 5,
                 Waiting::NoSlot {
@@ -484,6 +478,79 @@ fn each_job_left_queued_says_why_it_waits() {
             ),
         ])
     );
+}
+
+#[test]
+fn a_job_held_only_by_an_older_jobs_start_waits_behind_it_not_for_what_runs() {
+    let two = |id| repository(&format!("o/{id}"), "app", vec![job(id, &["app"])]);
+    // One free slot of two: job 1 takes it, job 2 is behind that start, not short of a busy slot.
+    let busy = Slot::Runner(RunnerSlot {
+        repository: "o/other".to_owned(),
+        busy: true,
+        started_at: now(),
+    });
+    let plan = plan(
+        &[two(1), two(2)],
+        &profiles(vec![busy.clone(), Slot::Free]),
+        None,
+        None,
+        now(),
+    );
+    assert_eq!(starts(&plan.decisions), [(1, "o/1")]);
+    assert_eq!(
+        plan.waiting,
+        BTreeMap::from([(2, Waiting::BehindStart { job: 1 })])
+    );
+    // With no slot free before the plan, the slots are busy.
+    let plan = plan_of(&[two(1)], &profiles(vec![busy]), None, None);
+    assert_eq!(
+        plan.waiting,
+        BTreeMap::from([(
+            1,
+            Waiting::NoSlot {
+                profile: "app".to_owned()
+            }
+        )])
+    );
+    // Memory for one 4G runner: the second is behind the first; with 1G free, memory is short.
+    let slots = || profiles(vec![Slot::Free, Slot::Free]);
+    let behind = plan_of(&[two(1), two(2)], &slots(), Some(5 * GIB), None);
+    assert_eq!(
+        behind.waiting,
+        BTreeMap::from([(2, Waiting::BehindStart { job: 1 })])
+    );
+    let short = plan_of(&[two(1)], &slots(), Some(GIB), None);
+    assert_eq!(
+        short.waiting,
+        BTreeMap::from([(
+            1,
+            Waiting::Memory {
+                needs: 4 * GIB,
+                free: GIB
+            }
+        )])
+    );
+    // CPU likewise, while decisions stay as before: the second repository is held for CPU.
+    let behind = plan_of(&[two(1), two(2)], &slots(), None, Some(3000));
+    assert_eq!(
+        behind.waiting,
+        BTreeMap::from([(2, Waiting::BehindStart { job: 1 })])
+    );
+    assert!(
+        behind.decisions.contains(&Decision::HeldForCpu {
+            repository: "o/2".to_owned()
+        }),
+        "o/2 is held for CPU as before"
+    );
+}
+
+fn plan_of(
+    repositories: &[Repository],
+    profiles: &BTreeMap<String, Profile>,
+    memory: Option<u64>,
+    cpu: Option<u64>,
+) -> Plan {
+    plan(repositories, profiles, memory, cpu, now())
 }
 
 #[test]

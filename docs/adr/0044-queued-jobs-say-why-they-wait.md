@@ -18,7 +18,8 @@ with numbers (predicted peaks, the high-water mark, CPU priority) the status doe
   a pause or resume a moment ago), and `GET /v1/status` gives each job in `queued` an optional `waiting` (`api::Waiting`):
   `paused`, `backoff` (until when), `runner-starting`, `reseeding` and `pulling-image` (of which profile),
   `no-slot` (of which profile), `memory` and `cpu` (what the runner would reserve and what is left), and
-  `behind-cpu` (the older job starved of CPU that goes first).
+  `behind-cpu` (the older job starved of CPU that goes first), and `behind-start` (the older job a runner starts for
+  first, which takes the slot, memory or CPU this one lacks).
 - A job that an idle runner will take is `runner-starting`: GitHub hands a runner any job its labels match, so the
   reason is about the repository's next job, not this one in particular. A job the plan would start a runner for has
   no reason yet: that runner does not exist until the start succeeds.
@@ -38,3 +39,7 @@ with numbers (predicted peaks, the high-water mark, CPU priority) the status doe
 - The planner's tests assert the reasons beside the decisions, so a change to the order of its checks shows up there.
 - Rejected: an event per reason change (noise on every tick of a long queue), and working the reason out in each
   client from the budget and slots (wrong as soon as admission measures, and duplicated in three clients).
+- Amended again (2026-10-24, round 2 review): planning for the status alone takes slots, memory and CPU for starts
+  it never runs, so a younger job said "all slots busy" beside a free slot, right after a resume or after a slot's
+  caches could not be prepared. A job held only by the plan's own starts now says `behind-start`; `no-slot`,
+  `memory` and `cpu` mean what runs now. The plan's decisions are unchanged.

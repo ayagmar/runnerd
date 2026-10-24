@@ -260,6 +260,8 @@ struct DockerState {
     missing_images: BTreeSet<String>,
     /// Every pull fails, as when the registry does not answer.
     fail_pulls: bool,
+    /// How many volumes fail to be made next, as when the disk is full.
+    fail_volumes: u32,
     /// Pulls do not finish while this is set, as when a large image downloads.
     block_pulls: bool,
     /// The image of each runner container started, in order.
@@ -500,7 +502,15 @@ impl DockerApi for FakeDocker {
         Ok(())
     }
 
-    async fn ensure_volume(&self, _name: &str) -> Result<(), docker::Error> {
+    async fn ensure_volume(&self, name: &str) -> Result<(), docker::Error> {
+        let mut state = self.0.lock().unwrap();
+        if state.fail_volumes > 0 {
+            state.fail_volumes -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: format!("cannot create volume {name}: no space left on device"),
+            });
+        }
         Ok(())
     }
 
@@ -2856,6 +2866,67 @@ async fn a_pause_and_a_resume_change_why_jobs_wait_as_soon_as_they_are_published
         waiting(&handle),
         [None],
         "resumed, its job is about to start"
+    );
+}
+
+/// One app slot, so a second job has to wait for the first's.
+fn one_slot(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    engine_with(
+        github,
+        docker,
+        dir,
+        &CONFIG.replace("slots = 2", "slots = 1"),
+    )
+}
+
+#[tokio::test]
+async fn right_after_a_resume_the_younger_job_waits_behind_the_older_not_for_a_busy_slot() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    github.0.lock().unwrap().queued = vec![job(1), job(2)];
+    let (mut engine, handle) = one_slot(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    engine.tick(Shutdown::No).await;
+    // As a command publishes, before the next tick starts anything.
+    handle.control.set_paused(&one("o/r"), false).await.unwrap();
+    engine.publish();
+    assert_eq!(
+        waiting(&handle),
+        [None, Some(api::Waiting::BehindStart { job: 1 })],
+        "the slot is free: job 1 starts next, job 2 after it"
+    );
+}
+
+#[tokio::test]
+async fn after_a_slot_whose_caches_cannot_be_prepared_the_younger_job_waits_behind_the_older() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    github.0.lock().unwrap().queued = vec![job(1), job(2)];
+    docker.0.lock().unwrap().fail_volumes = 1;
+    let (mut engine, handle) = one_slot(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(
+        registered(&github.calls()),
+        Vec::<&String>::new(),
+        "no runner started"
+    );
+    assert_eq!(
+        waiting(&handle),
+        [None, Some(api::Waiting::BehindStart { job: 1 })],
+        "the slot stayed free"
     );
 }
 

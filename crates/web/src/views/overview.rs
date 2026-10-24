@@ -1174,9 +1174,10 @@ fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
 fn reason_class(waiting: &Waiting) -> &'static str {
     match waiting {
         Waiting::Paused | Waiting::Backoff { .. } => "act",
-        Waiting::RunnerStarting | Waiting::Reseeding { .. } | Waiting::PullingImage { .. } => {
-            "soon"
-        }
+        Waiting::RunnerStarting
+        | Waiting::Reseeding { .. }
+        | Waiting::PullingImage { .. }
+        | Waiting::BehindStart { .. } => "soon",
         Waiting::NoSlot { .. }
         | Waiting::Memory { .. }
         | Waiting::Cpu { .. }
@@ -1234,14 +1235,28 @@ fn reason(overview: &Overview, job: &QueuedJob, waiting: &Waiting) -> String {
             format::cores(*free)
         ),
         Waiting::BehindCpu { job: older } => {
-            let name = status
-                .queued
-                .iter()
-                .find(|candidate| candidate.id == *older)
-                .map_or_else(|| "an older job".to_owned(), |older| older.name.clone());
-            format!("Behind {name}, which waits for CPU")
+            format!(
+                "Behind {}, which waits for CPU",
+                older_name(overview, *older)
+            )
+        }
+        Waiting::BehindStart { job: older } => {
+            format!(
+                "Next after {}, whose runner starts first",
+                older_name(overview, *older)
+            )
         }
     }
+}
+
+/// The name of the queued job `id`, which a reason names.
+fn older_name(overview: &Overview, id: u64) -> String {
+    overview
+        .status
+        .queued
+        .iter()
+        .find(|candidate| candidate.id == id)
+        .map_or_else(|| "an older job".to_owned(), |older| older.name.clone())
 }
 
 /// A job's name after its workflow's, which reads quieter: `CI / build`, as every client names a job.

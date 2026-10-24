@@ -339,6 +339,12 @@ pub enum Waiting {
         /// The older job's ID.
         job: u64,
     },
+    /// An older job is about to have a runner start for it, which takes the slot, memory or CPU this one would
+    /// otherwise start with: what holds it is that start, not what runs now.
+    BehindStart {
+        /// The older job's ID.
+        job: u64,
+    },
 }
 
 /// `GET /v1/dashboard`: the dashboard's `[web]` settings, as the daemon read them when it started.

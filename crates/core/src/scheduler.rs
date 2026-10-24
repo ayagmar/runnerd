@@ -1,7 +1,7 @@
 //! Which runners to start and stop, as a pure function of queued jobs, slots and the memory and CPU budgets (`plan`), and
 //! the loop that applies those decisions with GitHub and Docker (`engine`). `plan` does no I/O and reads no clock.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use crate::api::Waiting;
@@ -180,6 +180,7 @@ pub fn plan(
     jobs.sort_by_key(|(id, _)| *id);
 
     let mut taken = taken_slots(profiles);
+    let mut started = Started::new(&taken, free_memory, free_cpu);
     let mut free_memory = free_memory;
     let mut free_cpu = free_cpu;
     // The job that waited long enough for CPU that no younger one takes CPU before it.
@@ -212,22 +213,25 @@ pub fn plan(
                 Some(Preparing::PullingImage) => Waiting::PullingImage {
                     profile: profile_name(),
                 },
-                None => Waiting::NoSlot {
-                    profile: profile_name(),
-                },
+                None => started.for_slot(
+                    &repository.profile,
+                    Waiting::NoSlot {
+                        profile: profile_name(),
+                    },
+                ),
             };
             decided.waiting.insert(job, reason);
             continue;
         };
         let memory = repository.runner_memory.unwrap_or(profile.memory);
         if let Some(free) = free_memory.filter(|free| *free < memory) {
-            decided.waiting.insert(
-                job,
-                Waiting::Memory {
-                    needs: memory,
-                    free,
-                },
-            );
+            let reason = Waiting::Memory {
+                needs: memory,
+                free,
+            };
+            decided
+                .waiting
+                .insert(job, started.for_memory(memory, reason));
             continue;
         }
         let cpu = repository.runner_cpu.unwrap_or(profile.cpus);
@@ -238,9 +242,8 @@ pub fn plan(
             if !decided.decisions.contains(&held) {
                 decided.decisions.push(held);
             }
-            decided
-                .waiting
-                .insert(job, Waiting::Cpu { needs: cpu, free });
+            let reason = Waiting::Cpu { needs: cpu, free };
+            decided.waiting.insert(job, started.for_cpu(cpu, reason));
             // It waited long enough: no younger job takes CPU until it fits.
             if repository.starved_of_cpu(now) {
                 first_for_cpu = Some(job);
@@ -249,6 +252,7 @@ pub fn plan(
         }
         taken[index] = true;
         *missing -= 1;
+        started.note(&repository.profile, job);
         free_memory = free_memory.map(|free| free - memory);
         free_cpu = free_cpu.map(|free| free - cpu);
         decided.decisions.push(Decision::Start {
@@ -328,6 +332,71 @@ fn sort_out(
             None
         }
         None => Some(serve.collect()),
+    }
+}
+
+/// What a plan's own starts took, so a job held only by them waits behind them rather than for a slot, memory or CPU
+/// in use. The status explains with a plan it does not run, whose starts may never happen.
+struct Started<'plan> {
+    /// The profiles with a free slot before the plan's starts.
+    free_slots: BTreeSet<&'plan str>,
+    /// The memory and CPU budgets left before them.
+    memory: Option<u64>,
+    cpu: Option<u64>,
+    /// The first job each profile, and any profile, starts a runner for.
+    by_profile: BTreeMap<&'plan str, u64>,
+    first: Option<u64>,
+}
+
+impl<'plan> Started<'plan> {
+    fn new(
+        taken: &BTreeMap<&'plan str, Vec<bool>>,
+        memory: Option<u64>,
+        cpu: Option<u64>,
+    ) -> Started<'plan> {
+        Started {
+            free_slots: taken
+                .iter()
+                .filter(|(_, slots)| slots.contains(&false))
+                .map(|(name, _)| *name)
+                .collect(),
+            memory,
+            cpu,
+            by_profile: BTreeMap::new(),
+            first: None,
+        }
+    }
+
+    /// The plan starts a runner for `job` in `profile`.
+    fn note(&mut self, profile: &'plan str, job: u64) {
+        self.by_profile.entry(profile).or_insert(job);
+        self.first.get_or_insert(job);
+    }
+
+    /// `reason` for a job `profile` has no slot for, unless only this plan's starts took its free slots.
+    fn for_slot(&self, profile: &str, reason: Waiting) -> Waiting {
+        match self.by_profile.get(profile) {
+            Some(older) if self.free_slots.contains(profile) => {
+                Waiting::BehindStart { job: *older }
+            }
+            _ => reason,
+        }
+    }
+
+    /// `reason` for a job whose `needs` of memory do not fit, unless they did before this plan's starts.
+    fn for_memory(&self, needs: u64, reason: Waiting) -> Waiting {
+        Self::behind(self.first, self.memory, needs).unwrap_or(reason)
+    }
+
+    /// `reason` for a job whose `needs` of CPU do not fit, unless they did before this plan's starts.
+    fn for_cpu(&self, needs: u64, reason: Waiting) -> Waiting {
+        Self::behind(self.first, self.cpu, needs).unwrap_or(reason)
+    }
+
+    fn behind(first: Option<u64>, free: Option<u64>, needs: u64) -> Option<Waiting> {
+        first
+            .filter(|_| free.is_some_and(|free| free >= needs))
+            .map(|job| Waiting::BehindStart { job })
     }
 }
 
