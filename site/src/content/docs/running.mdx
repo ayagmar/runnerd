@@ -235,4 +235,4 @@ A pause lasts until a resume, across restarts: the job history records the pause
 
 ### Reloading
 
-A new config takes effect without a restart, and running jobs keep running. A removed profile, or slots past a lowered `slots`, stay until their runners finish, and no runner starts in a profile while it runs as many as its `slots`. A runner still waiting for a job of a removed repository, or of one moved to another profile, is removed. Runners started afterwards get the new limits, image and labels. `history.database` changes only at the next start.
+A new config takes effect without a restart, and running jobs keep running. A removed profile, or slots past a lowered `slots`, stay until their runners finish, and no runner starts in a profile while it runs as many as its `slots`. A runner still waiting for a job, warm ones included, is removed when its repository is removed or moved to another profile, or when the repository's `labels` or its profile's `memory` or `cpus` changed, by hand or by auto sizing. Runners started afterwards get the new limits, image and labels. `history.database` changes only at the next start.

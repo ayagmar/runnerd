@@ -257,7 +257,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             },
             SystemTime::now(),
         );
-        // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
+        // Waiting runners a reload left outside the config: their repository is gone or uses another profile now,
+        // or its runners start with other labels or limits, which a job queued since may need.
         plan.decisions.extend(
             self.occupied()
                 .filter(|(slot, occupant)| {
@@ -266,6 +267,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         && !self.config.repositories.iter().any(|repository| {
                             repository.name == occupant.repository
                                 && repository.profile == slot.profile
+                                && self
+                                    .config
+                                    .profiles
+                                    .get(&slot.profile)
+                                    .is_some_and(|profile| !occupant.outdated(repository, profile))
                         })
                 })
                 .map(|(slot, _)| Decision::Stop { slot }),

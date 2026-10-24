@@ -397,6 +397,9 @@ async fn back_under_caps_every_runner_counts_at_its_cap_whatever_it_reserved() {
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 2, "2 × 1.25G reserved");
     // Back to caps with 3 × 3G, which fits the 10G slice; the two running containers keep their 4G caps.
+    for runner in &mut github.0.lock().unwrap().runners {
+        runner.busy = true;
+    }
     let caps = CONFIG
         .replace("slots = 2", "slots = 3")
         .replace("memory = \"4G\"", "memory = \"3G\"");

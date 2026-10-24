@@ -74,6 +74,37 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// What a runner container left running by an earlier daemon runs as, from its labels, Docker and its record.
+    async fn adopted(&self, container: &docker::Container, profile: &str) -> Occupant {
+        let label = |name: &str| container.labels.get(name).cloned().unwrap_or_default();
+        let caps = self.running_caps(&container.id, profile).await;
+        Occupant {
+            repository: label("runnerd.repository"),
+            runner_name: container.name.clone(),
+            runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
+            container: container.id.clone(),
+            busy: true,
+            // Its uptime goes on from its container's start, not from this restart.
+            started_at: caps.started_at.unwrap_or_else(SystemTime::now),
+            memory: caps.memory,
+            cpus: caps.cpus,
+            // What it reserved before the restart, as its record kept it; its cap if the record has none.
+            admission: self
+                .store
+                .runner_admitted(&container.name)
+                .await
+                .ok()
+                .flatten(),
+            // Its capture reports it again; until then, or if it cannot, the history knows it.
+            job: self.store.runner_job(&container.name).await.ok().flatten(),
+            key: None,
+            labels: container
+                .labels
+                .get(super::runners::LABELS)
+                .map(|labels| labels.split(',').map(str::to_owned).collect()),
+        }
+    }
+
     /// Adopts the runner and seed containers a previous daemon left running, and removes the runners that
     /// stopped, or that run under this machine's names for no free slot. Their registrations, and any of this host's runners without a container, go at the first poll.
     /// Changes nothing unless Docker lists both kinds, so it can be tried again.
@@ -114,28 +145,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .parse::<usize>()
                 .ok()
                 .and_then(|slot| slot.checked_sub(1));
-            let caps = self.running_caps(&container.id, &profile).await;
-            let occupant = Occupant {
-                repository: label("runnerd.repository"),
-                runner_name: container.name.clone(),
-                runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
-                container: container.id.clone(),
-                busy: true,
-                // Its uptime goes on from its container's start, not from this restart.
-                started_at: caps.started_at.unwrap_or_else(SystemTime::now),
-                memory: caps.memory,
-                cpus: caps.cpus,
-                // What it reserved before the restart, as its record kept it; its cap if the record has none.
-                admission: self
-                    .store
-                    .runner_admitted(&container.name)
-                    .await
-                    .ok()
-                    .flatten(),
-                // Its capture reports it again; until then, or if it cannot, the history knows it.
-                job: self.store.runner_job(&container.name).await.ok().flatten(),
-                key: None,
-            };
+            let occupant = self.adopted(&container, &profile).await;
             let known_repository = self.repositories.contains_key(&occupant.repository);
             let free = index.and_then(|index| {
                 self.slots

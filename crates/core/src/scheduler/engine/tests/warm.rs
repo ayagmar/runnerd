@@ -588,3 +588,51 @@ async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_i
         "the next failure is announced as a new streak's first"
     );
 }
+
+#[tokio::test]
+async fn a_warm_runner_whose_labels_or_limits_a_reload_changed_makes_way_for_one_that_has_them() {
+    let gpu = warm_config().replace(
+        "labels = [\"self-hosted\", \"app\"]",
+        "labels = [\"self-hosted\", \"app\", \"gpu\"]",
+    );
+    let more_memory = warm_config().replace("memory = \"4G\"", "memory = \"6G\"");
+    for config in [gpu, more_memory] {
+        let github = FakeGithub::default();
+        let docker = FakeDocker::default();
+        let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+        engine.recover().await.unwrap();
+        engine.tick(Shutdown::No).await;
+        let before = runner_ids(&handle, &mut engine);
+        assert_eq!(before.len(), 1, "a warm runner waits");
+        engine.reload(Config::parse(&config).unwrap(), None, None);
+        // A job only a runner with the new labels can take, or one that needs the raised memory.
+        let labels = Config::parse(&config).unwrap().repositories[0]
+            .labels
+            .clone();
+        github.0.lock().unwrap().queued = vec![QueuedJob {
+            labels,
+            ..ci_job(2, 2, time::now_ms())
+        }];
+        engine.tick(Shutdown::No).await;
+        engine.tick(Shutdown::No).await;
+        let after = runner_ids(&handle, &mut engine);
+        assert!(
+            !after.contains(&before[0]),
+            "the warm runner from before the reload is gone: {after:?}"
+        );
+        assert!(
+            !after.is_empty(),
+            "a runner with the new config waits for the job"
+        );
+    }
+}
+
+/// The GitHub IDs of the runners in `app`'s slots.
+fn runner_ids(handle: &Handle, engine: &mut Engine<FakeGithub, FakeDocker>) -> Vec<u64> {
+    engine.publish();
+    handle.status.borrow().profiles[0]
+        .slots
+        .iter()
+        .filter_map(|slot| slot.runner.as_ref().map(|runner| runner.runner_id))
+        .collect()
+}

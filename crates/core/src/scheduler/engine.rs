@@ -197,9 +197,30 @@ struct Occupant {
     job: Option<u64>,
     /// That job as admission tells jobs apart, once the history had its record.
     key: Option<Key>,
+    /// The labels it registered with; `None` for one adopted from a container that does not say.
+    labels: Option<Vec<String>>,
 }
 
 impl Occupant {
+    /// Whether it no longer is what `repository`'s runners in `profile` start as: other labels, or other limits
+    /// than the profile's. An unknown label set counts as the same.
+    fn outdated(
+        &self,
+        repository: &crate::config::Repository,
+        profile: &crate::config::Profile,
+    ) -> bool {
+        let differ = self.labels.as_ref().is_some_and(|labels| {
+            let set = |labels: &[String]| -> BTreeSet<String> {
+                labels
+                    .iter()
+                    .map(|label| label.to_ascii_lowercase())
+                    .collect()
+            };
+            set(labels) != set(&repository.labels)
+        });
+        differ || self.memory != profile.memory.0 || self.cpus != u64::from(profile.cpus) * 1000
+    }
+
     /// What it reserves of the budget under measured admission: its cap if it has no admission.
     fn reserved(&self) -> u64 {
         self.admission

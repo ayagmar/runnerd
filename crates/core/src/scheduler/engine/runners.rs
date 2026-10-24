@@ -15,6 +15,10 @@ use crate::github::{Deleted, GithubApi};
 use crate::record;
 use crate::scheduler::{IDLE_TIMEOUT, SlotRef};
 
+/// The runner container's label with the labels its runner registered with, comma-separated as GitHub's runner
+/// takes them, so a restart knows them.
+pub(super) const LABELS: &str = "runnerd.labels";
+
 /// Why a slot's runner is removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Release {
@@ -22,6 +26,23 @@ enum Release {
     Ended,
     /// It was idle and is no longer needed.
     Idle,
+}
+
+/// The labels of a runner container: what a restart adopts it by.
+fn container_labels(
+    name: &str,
+    repository: &str,
+    slot: usize,
+    runner_id: u64,
+    labels: &[String],
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("runnerd.job".to_owned(), name.to_owned()),
+        ("runnerd.repository".to_owned(), repository.to_owned()),
+        ("runnerd.slot".to_owned(), slot.to_string()),
+        ("runnerd.runner-id".to_owned(), runner_id.to_string()),
+        (LABELS.to_owned(), labels.join(",")),
+    ])
 }
 
 /// Where the next backoff of a repository whose runners keep failing ends.
@@ -355,12 +376,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             env: self.runner_env(),
             mounts: self.runner_mounts(&slot.profile, number, &name, repository),
             network: Some(self.names.network()),
-            labels: BTreeMap::from([
-                ("runnerd.job".to_owned(), name.clone()),
-                ("runnerd.repository".to_owned(), repository.to_owned()),
-                ("runnerd.slot".to_owned(), number.to_string()),
-                ("runnerd.runner-id".to_owned(), runner.id.to_string()),
-            ]),
+            labels: container_labels(&name, repository, number, runner.id, &labels),
             entrypoint: None,
             jit_config: Some(jit_config),
         };
@@ -386,6 +402,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     admission: Some(admission),
                     job: None,
                     key: None,
+                    labels: Some(labels),
                 };
                 if let Some(entry) = self
                     .slots
