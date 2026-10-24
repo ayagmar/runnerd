@@ -2681,3 +2681,34 @@ async fn the_insights_page_shows_each_insight_and_the_week_s_waits() {
         );
     }
 }
+
+#[tokio::test]
+async fn the_latest_jobs_still_show_while_a_burst_of_jobs_waits() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        // A matrix push queues ten jobs, newer than every job that ran: the history lists them first.
+        let newest = fixtures
+            .jobs
+            .iter()
+            .map(|job| job.summary.id)
+            .max()
+            .unwrap();
+        for offset in 1..=10 {
+            let mut queued = fixtures.jobs[0].clone();
+            queued.summary.id = newest + offset;
+            queued.summary.state = JobState::Queued;
+            fixtures.jobs.insert(0, queued);
+            let mut waiting = fixtures.status.queued[0].clone();
+            waiting.id = newest + offset;
+            fixtures.status.queued.push(waiting);
+        }
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let recent = &body[body.find(r#"id="recent""#).unwrap()..];
+    assert!(
+        !recent.contains("No jobs yet"),
+        "the jobs that ran still show: {recent}"
+    );
+}

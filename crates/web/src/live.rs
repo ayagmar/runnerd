@@ -393,17 +393,7 @@ async fn run_overview(
         }
         if jobs_changed {
             data.reload_running(&app.daemon).await?;
-            data.recent = app
-                .daemon
-                .get_query::<runnerd_core::api::JobPage>(
-                    "/v1/jobs",
-                    &runnerd_core::api::JobQuery {
-                        limit: Some(8),
-                        ..Default::default()
-                    },
-                )
-                .await?
-                .jobs;
+            data.recent = overview::read_recent(&app.daemon, &data.status).await?;
         }
         if day_changed {
             data.reload_day(&app.daemon, crate::now()).await?;

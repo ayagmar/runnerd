@@ -26,6 +26,8 @@ const HOST_MARGIN: u64 = 5 * 60;
 const SPARK_WINDOW: u64 = 5 * 60;
 /// Latest jobs listed.
 const RECENT: u32 = 8;
+/// The most jobs `GET /v1/jobs` lists at once.
+const MAX_JOBS: u32 = 500;
 /// Queued jobs listed, the oldest; the history lists the rest.
 const QUEUED_SHOWN: usize = 8;
 /// How far back the health figures look: the 24 hours up to now.
@@ -55,22 +57,14 @@ impl Overview {
                 now.saturating_sub(HOST_WINDOW + HOST_MARGIN)
             ))
             .await?;
-        let recent: JobPage = daemon
-            .get_query(
-                "/v1/jobs",
-                &JobQuery {
-                    limit: Some(RECENT),
-                    ..JobQuery::default()
-                },
-            )
-            .await?;
+        let recent = read_recent(daemon, &status).await?;
         let mut overview = Overview {
             now,
             status,
             running: Vec::new(),
             samples: BTreeMap::new(),
             host,
-            recent: recent.jobs,
+            recent,
             day: Activity {
                 since: now.saturating_sub(DAY),
                 until: now,
@@ -962,6 +956,25 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
     }
 }
 
+/// The newest jobs of the history, enough that `RECENT` are left once `recent` drops the ones `status` lists queued:
+/// a burst of queued jobs has the newest IDs.
+pub(crate) async fn read_recent(
+    daemon: &Client,
+    status: &Status,
+) -> Result<Vec<JobSummary>, ClientError> {
+    let queued = u32::try_from(status.queued.len()).unwrap_or(u32::MAX);
+    let page: JobPage = daemon
+        .get_query(
+            "/v1/jobs",
+            &JobQuery {
+                limit: Some(RECENT.saturating_add(queued).min(MAX_JOBS)),
+                ..JobQuery::default()
+            },
+        )
+        .await?;
+    Ok(page.jobs)
+}
+
 /// The latest jobs, any state but queued, which the queue lists. A running job's row lights up its slot.
 pub(crate) fn recent(overview: &Overview) -> Markup {
     let queued = &overview.status.queued;
@@ -972,6 +985,7 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
         .filter(|job| {
             job.state != JobState::Queued && !queued.iter().any(|known| known.id == job.id)
         })
+        .take(RECENT as usize)
         .collect();
     html! {
         section #recent .recent aria-labelledby="recent-title" {
