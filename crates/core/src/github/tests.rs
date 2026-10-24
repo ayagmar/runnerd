@@ -561,7 +561,20 @@ async fn a_run_and_its_pull_requests_say_whether_people_or_bots_started_them() {
         "/repos/o/r/actions/runs/1" => json(&format!(
             r#"{{"event":"pull_request","head_branch":"feature","head_sha":"a1",
                 "head_repository":{{"full_name":"o/r"}},"actor":{person},"triggering_actor":{person},
-                "pull_requests":[{{"number":7,"head":{{"ref":"feature","sha":"a1"}}}}]}}"#
+                "pull_requests":[
+                    {{"number":7,"head":{{"ref":"feature","sha":"a1"}},
+                      "base":{{"repo":{{"url":"https://api.github.com/repos/O/R"}}}}}},
+                    {{"number":3,"head":{{"ref":"feature","sha":"a1"}},
+                      "base":{{"repo":{{"url":"https://api.github.com/repos/upstream/r"}}}}}},
+                    {{"number":4,"head":{{"ref":"feature","sha":"a1"}},
+                      "base":{{"repo":{{"url":"https://api.github.com/repos/o/r2"}}}}}}
+                ]}}"#
+        )),
+        // A GitHub App re-ran a run the owner's push started.
+        "/repos/o/r/actions/runs/3" => json(&format!(
+            r#"{{"event":"pull_request","head_branch":"feature","head_sha":"a1",
+                "head_repository":{{"full_name":"o/r"}},"actor":{person},"triggering_actor":{bot},
+                "pull_requests":[]}}"#
         )),
         // The owner re-ran a run Renovate's push started.
         "/repos/o/r/actions/runs/2" => json(&format!(
@@ -582,7 +595,11 @@ async fn a_run_and_its_pull_requests_say_whether_people_or_bots_started_them() {
     let github = client(&url);
     let run = github.run_trigger("o/r", 1).await.unwrap();
     assert!(run.by_user, "the owner pushed and started run 1");
-    assert_eq!(run.pull_requests, [7]);
+    assert_eq!(
+        run.pull_requests,
+        [7],
+        "pull requests into other repositories of the network are left out"
+    );
     let rerun = github.run_trigger("o/r", 2).await.unwrap();
     assert!(!rerun.by_user, "Renovate started run 2");
     assert_eq!(
@@ -590,6 +607,8 @@ async fn a_run_and_its_pull_requests_say_whether_people_or_bots_started_them() {
         Vec::<u64>::new(),
         "GitHub listed no pull request"
     );
+    let app_rerun = github.run_trigger("o/r", 3).await.unwrap();
+    assert!(!app_rerun.by_user, "a GitHub App re-ran run 3");
     let pull = github.pull_request("o/r", 7).await.unwrap();
     assert_eq!(
         pull,

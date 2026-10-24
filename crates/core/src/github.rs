@@ -186,8 +186,9 @@ pub struct RunTrigger {
     /// Whether people, not bots or apps, started it: GitHub's `actor` and `triggering_actor`, who re-ran it, are
     /// both of type `User`.
     pub by_user: bool,
-    /// The pull requests it runs, by number. GitHub lists only those whose head branch is in the repository
-    /// itself, and none once they are closed.
+    /// The pull requests into the repository it runs, by number. GitHub lists only those whose head branch is in
+    /// the repository itself, and may list none once they are closed; those it lists into another repository of a
+    /// fork network are left out.
     pub pull_requests: Vec<u64>,
 }
 
@@ -389,6 +390,33 @@ impl Account {
 #[derive(Deserialize)]
 struct PullRequestNumber {
     number: u64,
+    base: Option<PullRequestBase>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestBase {
+    repo: Option<RepositoryUrl>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryUrl {
+    url: String,
+}
+
+impl PullRequestNumber {
+    /// Whether it is a pull request into `repository`: in a fork network, a run can also list one into another
+    /// repository whose head is the same branch.
+    fn targets(&self, repository: &str) -> bool {
+        let Some(url) = self
+            .base
+            .as_ref()
+            .and_then(|base| base.repo.as_ref())
+            .map(|repo| repo.url.to_ascii_lowercase())
+        else {
+            return false;
+        };
+        url.ends_with(&format!("/repos/{}", repository.to_ascii_lowercase()))
+    }
 }
 
 #[derive(Deserialize)]
@@ -701,6 +729,7 @@ impl GithubApi for Github {
             pull_requests: run
                 .pull_requests
                 .into_iter()
+                .filter(|pull| pull.targets(repository))
                 .map(|pull| pull.number)
                 .collect(),
         })
