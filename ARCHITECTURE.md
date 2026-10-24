@@ -178,10 +178,9 @@ nothing until Docker has listed them.
   ([ADR 0051](docs/adr/0051-insights-and-notifications.md)).
 - A runner's build cache uploads become entries only once GitHub says its job runs on that runner and is a push,
   schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`, of a
-  commit that branch has; until then they are held, at most `max_size` of them in all, and otherwise dropped,
-  answered as stored. A runner reads only its repository's entries, through its own socket. The cache is trimmed
-  only while no runner runs
-  ([ADR 0052](docs/adr/0052-shared-build-cache.md)).
+  commit that branch has; until then they are held, at most `max_size` of them in all and a quarter of it per job,
+  and otherwise dropped, answered as stored. A runner reads only its repository's entries, through its own socket.
+  The cache is trimmed only while no runner runs ([ADR 0052](docs/adr/0052-shared-build-cache.md)).
 - A JIT config reaches a container only as a root-only file (`docker::JIT_CONFIG_PATH`), never the create request
   or a log line.
 - The engine deletes only GitHub runner registrations whose names start with this machine's prefix

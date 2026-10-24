@@ -190,6 +190,7 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
     }
     let mut receiving = Receiving {
         inner,
+        runner,
         file: upload,
         bytes: 0,
     };
@@ -218,7 +219,7 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
         inner.store(runner, upload);
         accepted()
     } else {
-        inner.remove_uploads(&[upload]);
+        inner.remove_uploads(Some(runner), &[upload]);
         refused()
     }
 }
@@ -227,6 +228,7 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
 /// back, also when its connection is cut midway, as when its runner is removed.
 struct Receiving<'inner> {
     inner: &'inner Inner,
+    runner: &'inner str,
     file: PathBuf,
     bytes: u64,
 }
@@ -246,7 +248,7 @@ impl Drop for Receiving<'_> {
     fn drop(&mut self) {
         if !self.file.as_os_str().is_empty() {
             let _ = std::fs::remove_file(&self.file);
-            self.inner.release(self.bytes);
+            self.inner.release(Some(self.runner), self.bytes);
         }
     }
 }
@@ -258,7 +260,8 @@ async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming, max: u64) ->
         let frame = frame.map_err(io::Error::other)?;
         if let Ok(data) = frame.into_data() {
             let length = data.len() as u64;
-            if receiving.bytes + length > max || !receiving.inner.reserve(length) {
+            if receiving.bytes + length > max || !receiving.inner.reserve(receiving.runner, length)
+            {
                 drop(out);
                 drain(body).await;
                 return Ok(false);

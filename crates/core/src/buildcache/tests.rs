@@ -276,25 +276,56 @@ async fn sockets_are_reachable_by_a_containers_root_and_entries_by_no_one_else()
     assert_eq!(mode(cache.directory()), 0o700);
 }
 
+/// How many uploads wait on disk to become entries.
+fn waiting(cache: &BuildCache) -> usize {
+    std::fs::read_dir(cache.directory().with_file_name(UPLOADS))
+        .unwrap()
+        .count()
+}
+
 #[tokio::test]
 async fn undecided_jobs_uploads_take_at_most_the_size_limit() {
     let Cache { cache, _dir } = open("held-limit", 400);
+    let mut forks = Vec::new();
+    for fork in 0..5 {
+        let name = format!("fork-{fork}");
+        let socket = cache.attach(&name, "o/app").unwrap();
+        assert_eq!(request(&socket, "PUT", "/gradle/a", &[0; 100]).await.0, 200);
+        forks.push(name);
+    }
+    assert_eq!(waiting(&cache), 4, "the fifth upload was not kept on disk");
+    for fork in &forks[..4] {
+        cache.decide(fork, Writes::Refused);
+    }
+    // The room the held uploads took is free again.
+    let last = cache.attach("fork-4", "o/app").unwrap();
+    assert_eq!(request(&last, "PUT", "/gradle/a", &[0; 100]).await.0, 200);
+    assert_eq!(waiting(&cache), 1);
+    assert_eq!(cache.detach("fork-4").unwrap().refused, 1);
+}
+
+#[tokio::test]
+async fn one_undecided_job_takes_at_most_a_quarter_of_the_uploads_room() {
+    let Cache { cache, _dir } = open("held-share", 800);
     let fork = cache.attach("fork", "o/app").unwrap();
-    for key in ["a", "b", "c", "d", "e"] {
+    for key in 0..8 {
         let path = format!("/gradle/{key}");
         assert_eq!(request(&fork, "PUT", &path, &[0; 100]).await.0, 200);
     }
-    let waiting = std::fs::read_dir(cache.directory().with_file_name(UPLOADS))
-        .unwrap()
-        .count();
-    assert_eq!(waiting, 4, "the fifth upload was not kept on disk");
-    cache.decide("fork", Writes::Allowed);
-    assert_eq!(cache.size().entries, 4);
-    assert_eq!(request(&fork, "GET", "/gradle/e", b"").await.0, 404);
-    // The room the held uploads took is free again.
-    assert_eq!(request(&fork, "PUT", "/gradle/e", &[0; 100]).await.0, 200);
-    assert_eq!(request(&fork, "GET", "/gradle/e", b"").await.0, 200);
-    assert_eq!(cache.detach("fork").unwrap().refused, 1);
+    assert_eq!(waiting(&cache), 2, "the fork kept a quarter of the room");
+    // Other jobs GitHub has not answered for yet, main's among them, find the rest.
+    for other in ["main", "nightly", "release"] {
+        let socket = cache.attach(other, "o/app").unwrap();
+        for key in ["a", "b"] {
+            let path = format!("/gradle/{key}");
+            assert_eq!(request(&socket, "PUT", &path, &[0; 100]).await.0, 200);
+        }
+    }
+    assert_eq!(waiting(&cache), 8, "every other job's uploads were kept");
+    cache.decide("main", Writes::Allowed);
+    assert_eq!(cache.size().entries, 2);
+    cache.decide("fork", Writes::Refused);
+    assert_eq!(cache.detach("fork").unwrap().refused, 8);
 }
 
 #[tokio::test]

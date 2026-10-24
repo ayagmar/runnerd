@@ -48,8 +48,9 @@ its own code into that job's build. A fork's pull request must not be able to wr
 - **Size.** `[caches.build] max_size` (default `10G`): the shared caches' check, at most hourly when no runner runs
   (ADR 0050), removes the entries used least recently until the rest fit. Between checks an upload that would take
   the cache past twice the limit, or an entry over a quarter of it, is refused. Uploads not yet entries, being
-  received or held for an undecided job, take at most the limit together and are refused past it, so a fork's job
-  cannot fill the disk before GitHub has answered. Entries are last used when last written, read or sent again; that
+  received or held, take at most the limit together, and one undecided job's at most a quarter of it; past either,
+  uploads are refused. So a fork's job can neither fill the disk before GitHub has answered nor take the room
+  another job's uploads need. Entries are last used when last written, read or sent again; that
   sets the file's time, so the order outlives a restart. `runnerctl caches clean runnerd-build-cache` empties it
   while no runner runs.
 - **Tools**, wired by the image with no change to a repository, each only where the repository configures no

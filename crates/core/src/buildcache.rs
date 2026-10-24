@@ -137,6 +137,9 @@ struct Runner {
     counts: BuildCacheCounts,
     /// Uploads waiting for `Writes` to be decided.
     held: Vec<Upload>,
+    /// The bytes of its uploads not yet entries, being received or held: at most a quarter of `max_size` while its
+    /// writes are undecided, so one job cannot take the room another's uploads need.
+    uploading: u64,
     dir: PathBuf,
     serving: JoinHandle<()>,
 }
@@ -218,13 +221,14 @@ impl BuildCache {
                 writes: Writes::Undecided,
                 counts: BuildCacheCounts::default(),
                 held: Vec::new(),
+                uploading: 0,
                 dir: dir.clone(),
                 serving,
             },
         );
         if let Some(old) = old {
             old.serving.abort();
-            self.inner.remove_uploads(&old.held);
+            self.inner.remove_uploads(None, &old.held);
         }
         Ok(dir)
     }
@@ -276,7 +280,7 @@ impl BuildCache {
                 if let Some(open) = lock(&self.inner.state).runners.get_mut(runner) {
                     open.counts.refused += held.len() as u64;
                 }
-                self.inner.remove_uploads(&held);
+                self.inner.remove_uploads(Some(runner), &held);
             }
         }
     }
@@ -286,7 +290,7 @@ impl BuildCache {
     pub fn detach(&self, runner: &str) -> Option<BuildCacheCounts> {
         let mut open = lock(&self.inner.state).runners.remove(runner)?;
         open.serving.abort();
-        self.inner.remove_uploads(&open.held);
+        self.inner.remove_uploads(None, &open.held);
         open.counts.refused += open.held.len() as u64;
         open.counts.writer = open.writes == Writes::Allowed;
         if let Err(error) = std::fs::remove_dir_all(&open.dir)
@@ -378,7 +382,7 @@ impl Inner {
                 .is_none_or(|parent| std::fs::create_dir_all(parent).is_ok())
             && std::fs::rename(&upload.file, &path).is_ok();
         let mut state = lock(&self.state);
-        state.uploading = state.uploading.saturating_sub(upload.bytes);
+        Self::give_back(&mut state, Some(runner), upload.bytes);
         if stored {
             let entry = Entry {
                 bytes: upload.bytes,
@@ -400,26 +404,41 @@ impl Inner {
         }
     }
 
-    /// Takes `bytes` more of the uploads' room, unless they would take more than `max_size`.
-    fn reserve(&self, bytes: u64) -> bool {
+    /// Takes `bytes` more of the uploads' room for `runner`, unless they would take more than `max_size`, or, while
+    /// its writes are undecided, its own more than a quarter of it.
+    fn reserve(&self, runner: &str, bytes: u64) -> bool {
         let mut state = lock(&self.state);
-        let fits = state.uploading + bytes <= state.max_size;
+        let (total, max_size) = (state.uploading, state.max_size);
+        let Some(open) = state.runners.get_mut(runner) else {
+            return false;
+        };
+        let fits = total + bytes <= max_size
+            && (open.writes != Writes::Undecided || open.uploading + bytes <= max_size / 4);
         if fits {
+            open.uploading += bytes;
             state.uploading += bytes;
         }
         fits
     }
 
-    /// Gives back what `reserve` took for an upload removed before it became an entry.
-    fn release(&self, bytes: u64) {
-        let mut state = lock(&self.state);
-        state.uploading = state.uploading.saturating_sub(bytes);
+    /// Gives back what `reserve` took for an upload of `runner`'s, if it is still open, that became an entry or was
+    /// removed.
+    fn release(&self, runner: Option<&str>, bytes: u64) {
+        Self::give_back(&mut lock(&self.state), runner, bytes);
     }
 
-    fn remove_uploads(&self, uploads: &[Upload]) {
+    fn give_back(state: &mut State, runner: Option<&str>, bytes: u64) {
+        state.uploading = state.uploading.saturating_sub(bytes);
+        if let Some(open) = runner.and_then(|runner| state.runners.get_mut(runner)) {
+            open.uploading = open.uploading.saturating_sub(bytes);
+        }
+    }
+
+    /// Removes uploads of `runner`'s, or of a runner no longer open, and gives back their room.
+    fn remove_uploads(&self, runner: Option<&str>, uploads: &[Upload]) {
         for upload in uploads {
             let _ = std::fs::remove_file(&upload.file);
-            self.release(upload.bytes);
+            self.release(runner, upload.bytes);
         }
     }
 
