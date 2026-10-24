@@ -146,9 +146,9 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every configured repository; while any runs a job, `409` naming the jobs, and none is paused |
 | `POST /v1/profiles/{name}/reseed` | `202`; the profile starts no runner until its slots are free and slot 1 became its snapshot; `409` while it reseeds or a shell is open in one of its records |
 | `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache; `409` naming the jobs that use it |
-| `GET /v1/config` | the config file's path, text and revision |
-| `POST /v1/config/check` with TOML | what `runnerd check-config` says about it |
-| `PUT /v1/config?revision=` with TOML | checks it, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
+| `GET /v1/config` | the config file's path, text and revision; notification targets' `url` and header values read `"<secret>"` |
+| `POST /v1/config/check` with TOML | what `runnerd check-config` says about it, each `"<secret>"` read as the value it stands for |
+| `PUT /v1/config?revision=` with TOML | checks it, with each `"<secret>"` read as the value it stands for, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
 | `GET /v1/doctor` | `runnerd doctor`'s checks, for the config runnerd runs with |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
 | `GET /v1/dashboard` | the dashboard's `[web] open`, as runnerd read it at start |
@@ -190,7 +190,7 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 | `budget.changed`, `cache.reseeded` | the budget changed; a profile has a new snapshot |
 | `record.created`, `record.deleted` | a failed job's runner was kept as a record; a record went, and why |
 | `sizing.changed` | [auto sizing](../admission/#auto-sizing) wrote a profile's new `memory` and `slots`; it carries the old ones |
-| `runner.failed` | a runner could not be registered or started, and the repository gets none for a while; once per hold |
+| `runner.failed` | a runner could not be registered or started, and the repository gets none for a while; once until one of its runners takes a job again |
 | `job.sample`, `host.sample`, `log.line` | live: a sample, or a log line with `logs=true` |
 
 Every event but the live ones has an ID: send the last one seen as `Last-Event-ID` and the stream resumes after it, across daemon restarts. Live events are not stored; a client that missed some reads the job's samples or log.

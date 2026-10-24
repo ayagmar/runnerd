@@ -9,12 +9,12 @@ runnerd reads its [job history](../running/#job-history) for what changed in you
 
 | Insight | When |
 |---|---|
-| Slower | the median of a job's last 5 successful runs on its busiest branch is 20% and 30 s or more above the median of its runs before them, and its last two runs were not both fast. It names the first slow run. One slow run among fast ones is not enough. |
-| Flaky | a job failed or timed out, then passed on a re-run of the same run. A job that fails again on the re-run is broken, not flaky. A job whose runner vanished is not counted. |
-| Near its cap | the 95th percentile of a job's memory peaks over its last 10 runs is 85% or more of its profile's `memory`. It says whether [auto sizing](../admission/#auto-sizing) raises the profile, cannot, or is off. |
+| Slower | the median of a job's last 5 successful runs on `main` or `master`, or its busiest branch when those have too few runs, is 20% and 30 s or more above the median of its runs before them, and its last two runs were not both fast. It names the first slow run. One slow run among fast ones is not enough. |
+| Flaky | a job failed or timed out, then passed on a re-run of the same run. Once is a notice; twice or more, a warning. A job that fails again on the re-run is broken, not flaky. A job whose runner vanished is not counted. |
+| Near its cap | the 95th percentile of a job's memory peaks over its last 10 runs is 85% or more of its profile's `memory`. It says whether [auto sizing](../admission/#auto-sizing) raises the profile, cannot, or is off. A notice when auto sizing raises it or only one run came that close; a warning otherwise. |
 | Waits | a repository's 95th-percentile wait this week is half again and a minute more than the week before. A notice, not a warning. |
 
-A job is its repository, workflow and job name. The busiest branch is the one with the most runs of that job: the default branch on a repository that runs CI on pushes. A slower job stops being reported once its slower runs are most of the runs before the last five, which with a few runs a day is about a week.
+A job is its repository, workflow and job name. Warnings are what notifications send; notices only show. A slower job stops being reported once its slower runs are most of the runs before the last five, which with a few runs a day is about a week.
 
 ```sh
 runnerctl insights
@@ -38,15 +38,15 @@ The dashboard's Insights page shows the same as cards, with links to each run in
 
 ## Notifications
 
-Each `[[notify.targets]]` entry is a place messages go. A burst is one message: runnerd waits 10 seconds after the first event, then sends to a target at most once a minute, so twenty jobs failing on a broken main arrive as "20 jobs failed" with the first five named. A failed delivery is retried, from 5 seconds up to every 10 minutes, with what came meanwhile folded in. Where each target got to is kept in the job history, so a restart neither drops nor repeats a message. A target added later starts with the events from then on.
+Each `[[notify.targets]]` entry is a place messages go. A burst is one message: runnerd waits 10 seconds after the first event, then sends to a target at most once a minute, so twenty jobs failing on a broken main arrive as "20 jobs failed" with the first five named; a webhook's body carries the first 20 of each kind. A failed delivery is retried, from 5 seconds up to every 10 minutes, with what came meanwhile folded in. Where each target got to is kept in the job history, so a restart drops no message; one stopped between sending and recording may send it again. A target added later starts with the events from then on.
 
 | Event | Sent when | Default |
 |---|---|---|
 | `failed` | a job failed or timed out | on |
 | `lost` | a job's runner vanished before GitHub said the job completed | on |
-| `runner` | a runner could not be registered or started, and the repository gets none for a while | on |
+| `runner` | a runner could not be registered or started; once until a runner of that repository takes a job again | on |
 | `insights` | a new warning insight. Each one is told once, and again only after it went away for a day. | on |
-| `digest` | at `digest_at`: the day's finished and failed jobs, new insights and longest waits | off |
+| `digest` | at `digest_at`, once a day: the day's finished and failed jobs, new insights and longest waits. A target added today gets its first tomorrow. | off |
 
 ### On your phone with ntfy
 
@@ -83,4 +83,4 @@ On a self-hosted ntfy server with access control, add its token: `headers = { Au
 }
 ```
 
-The URL and header values are secrets: no log line, error or `runnerctl notify test` answer shows them, only the target's name and the HTTP status or what failed. `GET /v1/config` and the dashboard's config editor show the file to its owner, as before.
+The URL and header values are secrets: no log line, error or `runnerctl notify test` answer shows them, only the target's name and the HTTP status or what failed. The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show them as `"<secret>"`, and saving keeps them; read or change them in `runnerd.toml` itself. One exception: a TOML syntax error on a `url` or `headers` line quotes that line in the error, as it would any line.
