@@ -219,7 +219,15 @@ impl CpuAdmission {
 
 /// Millicores as a number of CPUs to a tenth, rounded up: `2.5`, `32`.
 pub fn cores(millicores: u64) -> String {
-    let tenths = millicores.div_ceil(100);
+    tenths(millicores.div_ceil(100))
+}
+
+/// Millicores as `cores` writes them, to a tenth rounded down, so free CPU never reads as more than it is.
+pub(super) fn free_cores(millicores: u64) -> String {
+    tenths(millicores / 100)
+}
+
+fn tenths(tenths: u64) -> String {
     if tenths.is_multiple_of(10) {
         (tenths / 10).to_string()
     } else {

@@ -539,7 +539,11 @@ impl Waiting {
                 size(*free)
             ),
             Waiting::Cpu { needs, free } => {
-                format!("Needs {}; {} are free", cpus(*needs), cores(*free))
+                format!(
+                    "Needs {}; {} are free",
+                    cpus(*needs),
+                    admission::free_cores(*free)
+                )
             }
             Waiting::BehindCpu { job: older } => {
                 format!("Behind {}, which waits for CPU", older_name(*older))

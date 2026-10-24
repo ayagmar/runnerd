@@ -836,6 +836,21 @@ async fn every_page_renders_from_the_daemons_data() {
 }
 
 #[tokio::test]
+async fn a_job_waiting_for_cpu_never_reads_as_needing_what_is_free() {
+    let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().status.queued[0].waiting = Some(Waiting::Cpu {
+        needs: 2000,
+        free: 1950,
+    });
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    assert!(
+        body.contains("Needs 2 CPUs; 1.9 are free"),
+        "free CPU rounds down, needed CPU up: {body}"
+    );
+}
+
+#[tokio::test]
 async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits_once_each() {
     let dashboard = Dashboard::start().await;
     {
