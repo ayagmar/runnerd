@@ -40,6 +40,11 @@ A profile whose jobs waited a minute or more at p95, or whose slots were busy ha
 - under `caps`, when every profile's `slots × memory` and the mirror fit `MemoryMax` with it. A lowering adds as
   many as the memory the slots took holds, as the advice says.
 
+Under `caps` with `cpu_overcommit` set, every slot added, by either rule, must also keep every profile's
+`slots × cpus` within the CPU budget, each change against what the ones before it in the look left: under caps a
+runner reserves its `cpus`, so a slot past the budget would only wait for CPU, and its waits would ask for another.
+A lowering keeps its memory change and adds only the slots the budget holds.
+
 `max_slots`, set, still bounds it. Without `max_slots` and without a `MemoryMax` nothing bounds slots, so none is
 added. Slots are never lowered under what runs.
 

@@ -95,11 +95,6 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
                 measured_slots(config, &sizing.profiles, advised, &fresh, &context, &budget)
             }
         };
-        // Under caps a lowered memory's slots are the advice's, which its line says.
-        let advised_slots = config.host.admission == Admission::Caps && memory < profile.memory.0;
-        if slots > profile.slots && !advised_slots {
-            reasons.push(fresh.waited(last.is_some()));
-        }
         let cpus = cpus(
             config,
             profile,
@@ -111,6 +106,19 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
             slots,
             lowering,
         );
+        let cpus_to = cpus.as_ref().map_or(profile.cpus, |cpus| cpus.to);
+        // Slots the CPU budget cannot hold would wait for CPU anyway, and their waits would ask for more.
+        let slots = if slots > profile.slots {
+            cpu_slots(config, profile, &context, &budget, cpus_to)
+                .map_or(slots, |fit| slots.min(fit.max(profile.slots)))
+        } else {
+            slots
+        };
+        // Under caps a lowered memory's slots are the advice's, which its line says.
+        let advised_slots = config.host.admission == Admission::Caps && memory < profile.memory.0;
+        if slots > profile.slots && !advised_slots {
+            reasons.push(fresh.waited(last.is_some()));
+        }
         if let Some(cpus) = &cpus {
             reasons.push(cpus.reason.clone());
         }
@@ -127,18 +135,7 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
         if to == from || slots == 0 || !within(profile, from, to) {
             continue;
         }
-        budget.caps = budget
-            .caps
-            .saturating_sub(from.memory.saturating_mul(u64::from(from.slots)))
-            .saturating_add(to.memory.saturating_mul(u64::from(to.slots)));
-        let millicores = |resize: Resize| {
-            u64::from(resize.cpus.unwrap_or(profile.cpus)) * 1000 * u64::from(resize.slots)
-        };
-        budget.cpus = budget
-            .cpus
-            .saturating_sub(millicores(from))
-            .saturating_add(millicores(to));
-        budget.slots.insert(advised.name.clone(), to.slots);
+        budget.take(&advised.name, profile, from, to);
         changes.push(SizingChange {
             at: now,
             profile: advised.name.clone(),
@@ -169,6 +166,22 @@ struct Budget {
 }
 
 impl Budget {
+    /// Takes what a change of `profile` from `from` to `to` adds, and gives back what it frees.
+    fn take(&mut self, name: &str, profile: &Profile, from: Resize, to: Resize) {
+        self.caps = self
+            .caps
+            .saturating_sub(from.memory.saturating_mul(u64::from(from.slots)))
+            .saturating_add(to.memory.saturating_mul(u64::from(to.slots)));
+        let millicores = |resize: Resize| {
+            u64::from(resize.cpus.unwrap_or(profile.cpus)) * 1000 * u64::from(resize.slots)
+        };
+        self.cpus = self
+            .cpus
+            .saturating_sub(millicores(from))
+            .saturating_add(millicores(to));
+        self.slots.insert(name.to_owned(), to.slots);
+    }
+
     /// The budget the config takes as it is.
     fn new(config: &Config, profiles: &[ProfileSizing]) -> Budget {
         Budget {
@@ -386,6 +399,30 @@ fn measured_slots(
     } else {
         current
     }
+}
+
+/// Under `caps` admission with a CPU budget, the most slots of the profile at `cpus` each that fit the budget beside
+/// every other profile's `slots × cpus`, as the changes before it left them; none more than it has when the slice's
+/// CPUs are unknown. `None` when no CPU budget bounds slots.
+fn cpu_slots(
+    config: &Config,
+    profile: &Profile,
+    context: &Context<'_>,
+    budget: &Budget,
+    cpus: u32,
+) -> Option<u32> {
+    let (Admission::Caps, Some(overcommit)) = (config.host.admission, config.host.cpu_overcommit)
+    else {
+        return None;
+    };
+    let Some(slice) = context.cpus else {
+        return Some(profile.slots);
+    };
+    let others = budget
+        .cpus
+        .saturating_sub(u64::from(profile.cpus) * 1000 * u64::from(profile.slots));
+    let room = cpu_budget(slice, overcommit).saturating_sub(others);
+    Some(u32::try_from(room / (u64::from(cpus.max(1)) * 1000)).unwrap_or(u32::MAX))
 }
 
 /// A new `cpus` and why.

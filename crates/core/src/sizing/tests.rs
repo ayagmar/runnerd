@@ -1052,6 +1052,87 @@ labels = ["node"]
         );
     }
 
+    /// `CONFIG` (jvm and node 2 × 8 CPUs each) under a CPU budget of the slice's CPUs.
+    fn cpu_budget(rules: &str) -> Config {
+        on(
+            &CONFIG.replace(
+                "isolation = \"sysbox\"",
+                "isolation = \"sysbox\"\ncpu_overcommit = 1.0",
+            ),
+            rules,
+        )
+    }
+
+    /// The changes due at `NOW` in a slice of `memory_max` and `cpus` millicores, with nothing changed before.
+    fn due_in(config: &Config, history: &History, memory_max: u64, cpus: u64) -> Vec<SizingChange> {
+        changes(
+            config,
+            history,
+            Context {
+                memory_max: Some(memory_max),
+                cpus: Some(cpus),
+                window: window(),
+                last: &BTreeMap::new(),
+                running: &BTreeMap::new(),
+            },
+        )
+    }
+
+    #[test]
+    fn under_caps_a_waiting_profile_gets_no_slot_the_cpu_budget_cannot_hold() {
+        // node's builds fit its 7G and waited 5 minutes; 2 × 8 + 2 × 8 CPUs fill a 32-CPU budget.
+        let waited = history(builds(10, 5632 * M, 6 * G, 300));
+        assert_eq!(due_in(&cpu_budget(""), &waited, 64 * G, 32_000), Vec::new());
+        assert_eq!(
+            resized(&due_in(&cpu_budget(""), &waited, 64 * G, 40_000)),
+            vec![(
+                "node",
+                Resize {
+                    memory: 7 * G,
+                    slots: 3,
+                    cpus: None
+                }
+            )],
+            "40 CPUs hold one more slot of 8"
+        );
+    }
+
+    #[test]
+    fn under_caps_a_lowering_keeps_its_memory_but_adds_only_the_slots_the_cpu_budget_holds() {
+        // The advice: 2.5G and 5 slots in the same 14G. A full 32-CPU budget keeps 2; 40 CPUs hold a third.
+        let waited = history(builds(100, 1200 * M, 2150 * M, 300));
+        let config = cpu_budget("max_step = 100");
+        let full = due_in(&config, &waited, 64 * G, 32_000);
+        assert_eq!(
+            full.iter()
+                .map(|change| (change.to.memory < change.from.memory, change.to.slots))
+                .collect::<Vec<_>>(),
+            [(true, 2)],
+            "{full:?}"
+        );
+        let room = due_in(&config, &waited, 64 * G, 40_000);
+        assert_eq!(
+            room.iter()
+                .map(|change| change.to.slots)
+                .collect::<Vec<_>>(),
+            [3]
+        );
+    }
+
+    #[test]
+    fn two_profiles_never_both_take_the_cpus_only_one_slot_fits() {
+        let mut jobs: Vec<Ran> = (0..10)
+            .map(|_| job("halyard/ledger", "test", "jvm", 7 * G, 300))
+            .collect();
+        jobs.extend(builds(10, 5632 * M, 6 * G, 300));
+        let raised = due_in(&cpu_budget(""), &history(jobs), 64 * G, 40_000);
+        assert_eq!(
+            raised.iter().map(|change| change.to.slots).sum::<u32>(),
+            3,
+            "one profile gets the slot 8 more CPUs hold: {raised:?}"
+        );
+    }
+
     /// Three ledger tests pinned at jvm's 8 CPUs, queued `hours_ago`.
     fn pinned_hours_ago(hours_ago: u64) -> Vec<Ran> {
         ledger_cpu(3, 7900, 8000)
