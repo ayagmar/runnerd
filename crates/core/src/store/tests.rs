@@ -702,22 +702,23 @@ async fn pruning_keeps_an_idle_runner_that_has_been_up_longer_than_job_records_a
     store.runner_removed("gone", 1_000_100);
     store.flush().await;
 
+    let now = 1_000_100 + 91 * DAY_MS;
     store
-        .prune(1_000_100 + 91 * DAY_MS, &crate::config::History::default())
+        .prune(now, &crate::config::History::default())
         .await
         .unwrap();
-    let held: Vec<_> = store
-        .sizing(0)
-        .await
-        .unwrap()
-        .runners
-        .into_iter()
-        .map(|runner| runner.removed_at)
-        .collect();
+    // A job a runner takes is recorded only while the history has its runner.
+    store.claimed(5, 10, "idle", now);
+    store.claimed(6, 10, "gone", now);
+    store.flush().await;
+    assert!(
+        store.job(5).await.unwrap().is_some(),
+        "the idle runner is kept and records its job"
+    );
     assert_eq!(
-        held,
-        [None],
-        "the idle runner is still held, the removed one is pruned"
+        store.job(6).await.unwrap(),
+        None,
+        "the removed runner is pruned"
     );
 }
 
@@ -867,6 +868,29 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
     // `runnerd doctor` reads the same without a daemon.
     assert_eq!(super::sizing_at(&path, 0).unwrap(), Some(history));
     assert_eq!(super::sizing_at(&dir.0.join("none.db"), 0).unwrap(), None);
+}
+
+#[tokio::test]
+async fn a_warm_runner_holds_its_slot_for_its_job_from_when_the_job_was_queued() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    // Up at 400_000, its job queued at 1_000_001 and taken right away: it waited warm before.
+    store.runner_started(runner("warm", 400_000));
+    store.queued("o/r", &queued(1));
+    store.claimed(1, 10, "warm", 1_000_002);
+    store.lost(1, 1_000_400);
+    store.runner_removed("warm", 1_000_400);
+    // Up and gone without a job: it held no slot for one.
+    store.runner_started(runner("idle", 1_000_000));
+    store.runner_removed("idle", 1_000_300);
+    store.flush().await;
+    let history = store.sizing(0).await.unwrap();
+    let held: Vec<(u64, Option<u64>)> = history
+        .runners
+        .iter()
+        .map(|runner| (runner.started_at, runner.removed_at))
+        .collect();
+    assert_eq!(held, [(1_000_001, Some(1_000_400))]);
 }
 
 #[tokio::test]

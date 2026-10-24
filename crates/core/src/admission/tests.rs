@@ -65,6 +65,7 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         cpu_average: Some(1000),
         queued_at: queued,
         started_at: Some(queued),
+        runner_started_at: queued,
         finished_at: Some(queued + minutes * MINUTE),
         oom_killed: false,
         reserved: None,

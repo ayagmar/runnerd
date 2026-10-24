@@ -27,7 +27,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
-use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread};
+use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread, Starts};
 use runnerd_core::api::{
     Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
     LogSummary, ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus,
@@ -523,6 +523,12 @@ fn sizing() -> Sizing {
             slots: 2,
             peaks: peaks.clone(),
             wait: spread(20, 300, 400, 400),
+            starts: Starts {
+                warm: 30,
+                warm_p50: 2,
+                cold: 10,
+                cold_p50: 24,
+            },
             busy: 70,
             wants_slots: true,
             advice,
@@ -615,6 +621,11 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
     assert!(
         narrow.contains("WAIT P95") && narrow.contains("same 14G"),
         "the sizing view fits 80 columns, the advice on two lines: {narrow}"
+    );
+    let wide = screen(&app, 140, 24, false);
+    assert!(
+        wide.contains("P50 WARM/COLD") && wide.contains("2s / 24s"),
+        "wide, the waits of warm and cold starts show: {wide}"
     );
 }
 

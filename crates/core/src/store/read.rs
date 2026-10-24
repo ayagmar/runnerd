@@ -632,6 +632,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             },
             cpu_average: row.get(15)?,
             cpu_cap: row.get(16)?,
+            runner_started_at: row.get(17)?,
         })
     };
     let jobs = db
@@ -640,7 +641,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), \
              j.state = 'completed' AND j.conclusion IS 'success', r.ooms, r.memory_measure IS 'without_page_cache', \
-             j.cpu_average, r.cpu_cap FROM jobs j JOIN runners r ON r.name = j.runner \
+             j.cpu_average, r.cpu_cap, r.started_at FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
              AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
         )?
@@ -651,7 +652,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, coalesce(j.memory_peak, 0), \
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0, r.ooms, \
-             r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap \
+             r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at \
              FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id",
         )?
@@ -659,8 +660,10 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
         .collect::<rusqlite::Result<_>>()?;
     let runners = db
         .prepare_cached(
-            "SELECT profile, started_at, removed_at FROM runners \
-             WHERE removed_at IS NULL OR removed_at >= ?1",
+            // From its job's queueing when it came later, as for a warm runner; a runner that took no job held
+            // no slot for one.
+            "SELECT r.profile, max(r.started_at, j.queued_at), r.removed_at FROM runners r \
+             JOIN jobs j ON j.runner = r.name WHERE r.removed_at IS NULL OR r.removed_at >= ?1",
         )?
         .query_map([since], |row| {
             Ok(sizing::Held {

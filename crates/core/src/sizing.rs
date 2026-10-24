@@ -48,6 +48,8 @@ pub struct Ran {
     pub queued_at: u64,
     /// When it started; `None` for a job lost before.
     pub started_at: Option<u64>,
+    /// When its runner's container started: before `queued_at`, it was a warm runner.
+    pub runner_started_at: u64,
     /// When it finished, or was found lost.
     pub finished_at: Option<u64>,
     /// Whether the kernel killed a process in its container for memory.
@@ -85,12 +87,13 @@ impl Ran {
     }
 }
 
-/// One runner container's time in a slot. Times in milliseconds.
+/// One runner container's time in a slot for a job. Times in milliseconds.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Held {
     /// Its profile.
     pub profile: String,
-    /// When it started.
+    /// When it started holding the slot for a job: its start, or when its job was queued if that came later, as for
+    /// a warm runner.
     pub started_at: u64,
     /// When it was removed; `None` while it runs.
     pub removed_at: Option<u64>,
@@ -164,6 +167,7 @@ pub fn advise(
                     .push(job);
             }
             let wait = waits(&jobs);
+            let starts = starts(&jobs);
             let sized = Sized {
                 cap: profile.memory.0,
                 slots: profile.slots,
@@ -204,6 +208,7 @@ pub fn advise(
                 advice: sized.advice(&peaks, sized.wants_slots),
                 peaks,
                 wait,
+                starts,
                 busy,
                 wants_slots: sized.wants_slots,
                 jobs: job_sizings,
@@ -342,6 +347,21 @@ fn waits(jobs: &[&Ran]) -> Spread {
             })
             .collect(),
     )
+}
+
+/// The jobs that started on a warm runner and the others, and their median waits.
+fn starts(jobs: &[&Ran]) -> api::Starts {
+    let (warm, cold): (Vec<&Ran>, Vec<&Ran>) = jobs
+        .iter()
+        .filter(|job| job.started_at.is_some())
+        .partition(|job| job.runner_started_at < job.queued_at);
+    let count = |jobs: &[&Ran]| u32::try_from(jobs.len()).unwrap_or(u32::MAX);
+    api::Starts {
+        warm: count(&warm),
+        warm_p50: waits(&warm).p50,
+        cold: count(&cold),
+        cold_p50: waits(&cold).p50,
+    }
 }
 
 /// Nearest-rank percentiles; all zero for no values.

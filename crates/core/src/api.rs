@@ -66,7 +66,7 @@ pub use records::{
 };
 pub use sizing::{
     Advice, AutoPlan, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingHold,
-    SizingQuery, Spread, period,
+    SizingQuery, Spread, Starts, period,
 };
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only

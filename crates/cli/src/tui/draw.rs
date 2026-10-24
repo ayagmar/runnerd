@@ -1719,7 +1719,8 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
 }
 
 /// What each profile's jobs use and what to set its memory and slots to; the selected profile's jobs below. Under
-/// 100 columns the medians, the jobs at their cap and the largest peaks are left out.
+/// 100 columns the medians, the jobs at their cap, the largest peaks and the waits of warm and cold starts are left
+/// out.
 fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let Some(sizing) = &app.sizing else {
         let [title, rest] =
@@ -1946,7 +1947,11 @@ fn sizing_profiles(
     if wide {
         columns.push(("AT CAP", 6));
     }
-    columns.extend([("CPU P99", 7), ("BUSY", 5), ("WAIT P95", 8), ("ADVICE", 11)]);
+    columns.extend([("CPU P99", 7), ("BUSY", 5), ("WAIT P95", 8)]);
+    if wide {
+        columns.push(("P50 WARM/COLD", 13));
+    }
+    columns.push(("ADVICE", 11));
     let rows = sizing.profiles.iter().map(|profile| {
         let peaks = &profile.peaks;
         let mut cells = vec![
@@ -1976,11 +1981,23 @@ fn sizing_profiles(
             Cell::from(cores(peaks.cpu.p99)),
             Cell::from(format!("{}%", profile.busy)),
             Cell::from(duration(profile.wait.p95)),
-            Cell::from(Span::styled(
-                advice_word(profile.advice),
-                theme.tone(advice_tone(profile.advice)),
-            )),
         ]);
+        if wide {
+            let starts = &profile.starts;
+            cells.push(Cell::from(if starts.warm > 0 {
+                format!(
+                    "{} / {}",
+                    duration(starts.warm_p50),
+                    duration(starts.cold_p50)
+                )
+            } else {
+                String::new()
+            }));
+        }
+        cells.push(Cell::from(Span::styled(
+            advice_word(profile.advice),
+            theme.tone(advice_tone(profile.advice)),
+        )));
         Row::new(cells)
     });
     let table = Table::new(rows, widths(&columns))

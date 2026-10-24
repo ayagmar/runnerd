@@ -33,7 +33,7 @@ use runnerd_core::api::{
     SlotStatus, Started, Stats, StatsRow, Status, Step, Timeline,
 };
 use runnerd_core::api::{
-    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread,
+    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread, Starts,
 };
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -885,6 +885,12 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                     cpu: spread(3100, 6900, 7600, 7900),
                 },
                 wait,
+                starts: Starts {
+                    warm: 31,
+                    warm_p50: 2,
+                    cold: 9,
+                    cold_p50: 21,
+                },
                 busy,
                 wants_slots: busy >= 50,
                 advice,

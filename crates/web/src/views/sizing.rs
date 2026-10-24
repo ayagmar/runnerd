@@ -173,6 +173,16 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                     div { dt { "Jobs" } dd { (peaks.jobs) } }
                     div { dt { "Slots busy" } dd { (profile.busy) "%" } }
                     div { dt { "Waited p50 / p95" } dd { (format::duration(profile.wait.p50)) " / " (format::duration(profile.wait.p95)) } }
+                    @if profile.starts.warm > 0 {
+                        div {
+                            dt { "Warm starts" }
+                            dd {
+                                (profile.starts.warm) " of " (profile.starts.warm + profile.starts.cold)
+                                ", p50 " (format::duration(profile.starts.warm_p50))
+                                " (others " (format::duration(profile.starts.cold_p50)) ")"
+                            }
+                        }
+                    }
                     div { dt { "CPU p99" } dd { (format::cores(peaks.cpu.p99)) " of " (profile.cpus) } }
                 }
             }

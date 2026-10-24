@@ -127,7 +127,12 @@ pub struct ProfileSizing {
     pub peaks: Peaks,
     /// Seconds from queued to started.
     pub wait: Spread,
-    /// The percent of the time since `since` its slots held a runner, over its `slots` now.
+    /// Its jobs by whether a warm runner took them, and how long each kind waited. Empty from a daemon before warm
+    /// runners.
+    #[serde(default)]
+    pub starts: Starts,
+    /// The percent of the time since `since` its slots held a runner for a job, from when the job was queued, over
+    /// its `slots` now.
     pub busy: u32,
     /// Whether its jobs waited a minute or more for a slot at p95, or its slots were busy half the time: more slots
     /// would help.
@@ -137,6 +142,19 @@ pub struct ProfileSizing {
     pub advice: Advice,
     /// Each job that ran in it, by repository, workflow and name.
     pub jobs: Vec<JobSizing>,
+}
+
+/// A profile's jobs by whether their runner was already up when GitHub queued them (ADR 0050).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Starts {
+    /// Jobs that started on a warm runner: one that started before the job was queued.
+    pub warm: u32,
+    /// Their median wait from queued to started, in seconds.
+    pub warm_p50: u64,
+    /// Jobs whose runner started after they were queued.
+    pub cold: u32,
+    /// Their median wait, in seconds.
+    pub cold_p50: u64,
 }
 
 /// The jobs of one name in one workflow of one repository.

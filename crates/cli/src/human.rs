@@ -745,6 +745,17 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             duration(profile.wait.p50),
             duration(profile.wait.p95),
         );
+        let starts = &profile.starts;
+        if starts.warm > 0 {
+            let _ = writeln!(
+                out,
+                "  warm runners took {} of {} jobs: waited p50 {}, the others {}",
+                starts.warm,
+                starts.warm + starts.cold,
+                duration(starts.warm_p50),
+                duration(starts.cold_p50),
+            );
+        }
         if peaks.jobs > 0 {
             let at_cap = if peaks.at_cap > 0 {
                 paint.paint(Tone::Bad, &format!(", {} at the cap", peaks.at_cap))

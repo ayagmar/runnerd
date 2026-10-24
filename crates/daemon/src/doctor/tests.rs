@@ -577,6 +577,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             cpu_peak: 4000,
             cpu_average: Some(1000),
             queued_at: 1_000_000 + i,
+            runner_started_at: 1_000_000 + i + 60_000,
             started_at: Some(1_000_000 + i + 120_000),
             finished_at: Some(1_000_000 + i + 720_000),
             oom_killed: false,
