@@ -96,6 +96,41 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// Decides the writes of a runner whose container ended before a poll asked GitHub of its job, so what it
+    /// uploaded meanwhile is kept or dropped by GitHub's answer, not dropped because the job was short. Its job is
+    /// known from its capture, which has ended. Without an answer, its uploads go as an undecided runner's do.
+    pub(super) async fn decide_ended(&mut self, occupant: &Occupant) {
+        if !self
+            .build_cache
+            .as_ref()
+            .is_some_and(|cache| cache.undecided(&occupant.runner_name))
+        {
+            return;
+        }
+        let Some(job) = self
+            .occupied()
+            .find(|(_, candidate)| candidate.runner_name == occupant.runner_name)
+            .and_then(|(_, candidate)| candidate.job)
+        else {
+            return;
+        };
+        match self.github.job(&occupant.repository, job).await {
+            Ok(details) => {
+                let undecided = self.undecided(&[(occupant.repository.clone(), job, details)]);
+                // Not through `serving`: a command served meanwhile could release this runner again.
+                let answers = read_answers(
+                    self.github.clone(),
+                    undecided,
+                    self.config.caches.build.branches.clone(),
+                    self.default_branches.clone(),
+                )
+                .await;
+                self.take_answers(answers);
+            }
+            Err(error) => warn!("{}: cannot read job {job}: {error}", occupant.repository),
+        }
+    }
+
     /// Of the running jobs GitHub just described, those whose runner's writes are undecided.
     pub(super) fn undecided(&self, described: &[(String, u64, JobDetails)]) -> Vec<Undecided> {
         let Some(cache) = &self.build_cache else {
@@ -135,6 +170,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let answers = self
             .serving(read_answers(github, undecided, branches, known))
             .await;
+        self.take_answers(answers);
+    }
+
+    /// Records what GitHub answered of undecided jobs: their repositories' default branches, and each job's writes.
+    fn take_answers(&mut self, answers: Vec<Answer>) {
         for answer in answers {
             if let Some(branch) = answer.default_branch {
                 self.default_branches

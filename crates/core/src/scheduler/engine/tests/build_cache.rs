@@ -612,3 +612,33 @@ async fn a_pull_request_github_cannot_describe_never_writes() {
         404
     );
 }
+
+#[tokio::test]
+async fn a_main_job_that_ends_before_its_writes_were_decided_keeps_what_it_stored() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache");
+    let (mut engine, handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let [(main, main_socket), _] = main_and_pull_request(&github, &docker, &mut engine).await;
+    assert!(cache.undecided(&main), "GitHub has not been asked yet");
+    // A quick job: it stores its outputs and ends before the next poll asks GitHub about it.
+    assert_eq!(
+        buildcache::request(&main_socket, "PUT", "/gradle/0a1b", b"classes")
+            .await
+            .0,
+        200
+    );
+    jobs_end(&docker, &mut engine).await;
+    handle.store.flush().await;
+    let counts = handle
+        .store
+        .job(1)
+        .await
+        .unwrap()
+        .unwrap()
+        .summary
+        .metrics
+        .build_cache;
+    assert!(counts.writer, "the push to main wrote");
+    assert_eq!((counts.written_bytes, counts.refused), (7, 0));
+}
