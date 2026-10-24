@@ -1518,6 +1518,102 @@ async fn a_valid_config_replaces_the_file_it_links_to_with_its_permissions_and_i
 }
 
 #[tokio::test]
+async fn the_config_api_never_shows_a_notify_secret_and_saving_what_it_shows_keeps_them() {
+    let dir = Dir::new();
+    let mut daemon = start(&dir.0, None).await;
+    let secrets = format!(
+        "{EXAMPLE}\n[[notify.targets]]\nname = \"phone\"\nkind = \"ntfy\"\n\
+         url = \"http://127.0.0.1:9/s3cret-topic\" # the topic\n\
+         headers = {{ Authorization = \"Bearer tk_hunter2\" }}\n"
+    );
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(secrets.clone())
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    daemon.reloads.recv().await.unwrap();
+
+    let shown: ConfigFile = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .get("http://runnerd/v1/config")
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    for secret in ["s3cret", "hunter2"] {
+        assert!(!shown.text.contains(secret), "{}", shown.text);
+    }
+    assert!(
+        shown
+            .text
+            .contains("url = \"<secret>\" # the topic\nheaders = { Authorization = \"<secret>\" }"),
+        "{}",
+        shown.text
+    );
+
+    // What a browser checks and saves: the text it was shown, with a change.
+    let edited = shown.text.replacen("slots = 2", "slots = 1", 1);
+    let checked: ConfigCheck = serde_json::from_slice(
+        &body(
+            daemon
+                .client
+                .post("http://runnerd/v1/config/check")
+                .body(edited.clone())
+                .send()
+                .await
+                .unwrap(),
+        )
+        .await,
+    )
+    .unwrap();
+    assert!(checked.valid, "{}", checked.message);
+    let response = daemon
+        .client
+        .put(format!(
+            "http://runnerd/v1/config?revision={}",
+            shown.revision.unwrap()
+        ))
+        .body(edited)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    assert_eq!(
+        std::fs::read_to_string(&daemon.config).unwrap(),
+        secrets.replacen("slots = 2", "slots = 1", 1),
+        "the file keeps its secrets"
+    );
+
+    // A target renamed in the editor has no secret to keep: refused, without the value.
+    let renamed = shown.text.replace("name = \"phone\"", "name = \"desk\"");
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(renamed)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let refused: ConfigCheck = serde_json::from_slice(&body(response).await).unwrap();
+    assert!(
+        refused
+            .message
+            .contains("notify target \"desk\": url is <secret>"),
+        "{}",
+        refused.message
+    );
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn a_second_daemon_does_not_take_over_a_live_socket() {
     let (_client, _, dir) = daemon().await;
     assert!(bind(&dir.0.join("runnerd.sock")).await.is_err());

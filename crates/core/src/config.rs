@@ -453,6 +453,12 @@ impl Notify {
                 return refuse(name, "another target has this name");
             }
             let url = target.url.expose();
+            if url == SECRET_SHOWN {
+                return refuse(
+                    name,
+                    "url is <secret>, which runnerd fills in only for a target of the same name that had one; write the url",
+                );
+            }
             let Some(rest) = url
                 .strip_prefix("https://")
                 .or_else(|| url.strip_prefix("http://"))
@@ -472,6 +478,12 @@ impl Notify {
                 );
             }
             for (header, value) in &target.headers {
+                if value.expose() == SECRET_SHOWN {
+                    return refuse(
+                        name,
+                        "a header is <secret>, which runnerd fills in only for a target of the same name that had it; write its value",
+                    );
+                }
                 let token = |c: char| c.is_ascii_alphanumeric() || "!#$%&'*+-.^_`|~".contains(c);
                 if header.is_empty() || !header.chars().all(token) {
                     return refuse(name, "a header's name is not a header name");
@@ -1164,6 +1176,129 @@ pub fn resize_profile(
         table.insert(key, toml_edit::Item::Value(value));
     }
     Ok(document.to_string())
+}
+
+/// What `GET /v1/config` shows in place of a notification target's URL and header values (ADR 0051).
+pub const SECRET_SHOWN: &str = "<secret>";
+
+/// `text` with each `[[notify.targets]]` entry's `url` and header values shown as [`SECRET_SHOWN`], everything else
+/// as written: what `GET /v1/config` answers, so no client, the dashboard's browsers included, holds them. `None`
+/// when `text` is not TOML.
+pub fn mask_secrets(text: &str) -> Option<String> {
+    let mut document: toml_edit::DocumentMut = text.parse().ok()?;
+    let mut masked = false;
+    for target in notify_targets(&mut document) {
+        for (_, value) in secrets_of(target) {
+            replace_value(value, toml_edit::Value::from(SECRET_SHOWN));
+            masked = true;
+        }
+    }
+    Some(if masked {
+        document.to_string()
+    } else {
+        text.to_owned()
+    })
+}
+
+/// `text` with each [`SECRET_SHOWN`] in a target's `url` or headers replaced by the value `stored` has for the target
+/// of the same name, everything else as written: what `PUT /v1/config` and `POST /v1/config/check` read, so a config
+/// shown masked saves with its secrets. A value with nothing to keep stays [`SECRET_SHOWN`], which `Config::validate`
+/// refuses.
+pub fn keep_secrets(text: &str, stored: &str) -> String {
+    if !text.contains(SECRET_SHOWN) {
+        return text.to_owned();
+    }
+    let (Ok(mut document), Ok(mut old)) = (
+        text.parse::<toml_edit::DocumentMut>(),
+        stored.parse::<toml_edit::DocumentMut>(),
+    ) else {
+        return text.to_owned();
+    };
+    let mut kept: BTreeMap<String, Vec<(SecretField, toml_edit::Value)>> = BTreeMap::new();
+    for target in notify_targets(&mut old) {
+        let Some(name) = target_name(target) else {
+            continue;
+        };
+        let secrets = secrets_of(target)
+            .into_iter()
+            .map(|(field, value)| (field, value.clone()))
+            .collect();
+        kept.insert(name, secrets);
+    }
+    for target in notify_targets(&mut document) {
+        let Some(secrets) = target_name(target).and_then(|name| kept.get(&name)) else {
+            continue;
+        };
+        for (field, value) in secrets_of(target) {
+            if value.as_str() != Some(SECRET_SHOWN) {
+                continue;
+            }
+            if let Some((_, old)) = secrets.iter().find(|(kept, _)| *kept == field) {
+                replace_value(value, old.clone());
+            }
+        }
+    }
+    document.to_string()
+}
+
+/// Where a target keeps a secret.
+#[derive(Debug, PartialEq, Eq)]
+enum SecretField {
+    Url,
+    Header(String),
+}
+
+/// The tables of `[[notify.targets]]`, or of an inline `targets = [...]`.
+fn notify_targets(document: &mut toml_edit::DocumentMut) -> Vec<&mut dyn toml_edit::TableLike> {
+    match document
+        .get_mut("notify")
+        .and_then(|notify| notify.get_mut("targets"))
+    {
+        Some(toml_edit::Item::ArrayOfTables(tables)) => tables
+            .iter_mut()
+            .map(|table| table as &mut dyn toml_edit::TableLike)
+            .collect(),
+        Some(toml_edit::Item::Value(toml_edit::Value::Array(array))) => array
+            .iter_mut()
+            .filter_map(toml_edit::Value::as_inline_table_mut)
+            .map(|table| table as &mut dyn toml_edit::TableLike)
+            .collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn target_name(target: &dyn toml_edit::TableLike) -> Option<String> {
+    target
+        .get("name")
+        .and_then(toml_edit::Item::as_str)
+        .map(str::to_owned)
+}
+
+/// A target's `url` and header values.
+fn secrets_of(target: &mut dyn toml_edit::TableLike) -> Vec<(SecretField, &mut toml_edit::Value)> {
+    let mut found = Vec::new();
+    for (key, item) in target.iter_mut() {
+        match key.get() {
+            "url" => found.extend(item.as_value_mut().map(|value| (SecretField::Url, value))),
+            "headers" => {
+                let Some(headers) = item.as_table_like_mut() else {
+                    continue;
+                };
+                for (name, item) in headers.iter_mut() {
+                    let field = SecretField::Header(name.get().to_owned());
+                    found.extend(item.as_value_mut().map(|value| (field, value)));
+                }
+            }
+            _ => {}
+        }
+    }
+    found
+}
+
+/// Puts `new` in place of `value`, with the spaces and comment around it as they were.
+fn replace_value(value: &mut toml_edit::Value, mut new: toml_edit::Value) {
+    *new.decor_mut() = value.decor().clone();
+    *value = new;
 }
 
 /// A config text's revision: a hash of its bytes (64-bit FNV-1a, in hex), the same in every runnerd. `PUT

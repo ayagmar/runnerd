@@ -164,7 +164,9 @@ nothing until Docker has listed them.
 - API types live only in `runnerd-core::api`. Clients deserialize the same types the daemon serializes.
 - Clients never talk to Docker or GitHub; they talk to the daemon.
 - The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A `[notify]`
-  target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them.
+  target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them,
+  and `GET /v1/config` answers them as `<secret>` (`config::mask_secrets`), which `PUT /v1/config` and the check
+  put back (`config::keep_secrets`), so no client holds them.
 - Nothing leaves the machine but GitHub's and Docker's requests, unless `[notify]` names targets. The notifier
   (`api/notify`) reads the store's durable events and the history off the engine's loop; the engine never waits
   for it, and a target's cursor moves only once a delivery succeeded

@@ -3,7 +3,10 @@
 use std::path::Path;
 use std::time::Duration;
 
-use super::{ByteSize, Config, Image, Warning, parse_age, parse_memory_max, parse_slice_cpus};
+use super::{
+    ByteSize, Config, Image, Warning, keep_secrets, mask_secrets, parse_age, parse_memory_max,
+    parse_slice_cpus,
+};
 
 const MINIMAL: &str = r#"
 [host]
@@ -719,5 +722,39 @@ fn an_ntfy_target_needs_a_topic_and_targets_need_their_own_names() {
     assert!(
         Config::parse(&format!("{MINIMAL}{}", NOTIFY.replace("07:30", "7:30"))).is_err(),
         "a time of day is HH:MM"
+    );
+}
+
+#[test]
+fn a_config_shown_with_its_notify_secrets_masked_saves_with_them_kept() {
+    // Headers as a table of their own too, with the targets swapped round in the edit.
+    let stored = format!(
+        "{MINIMAL}{}\n[notify.targets.headers]\nX-Key = \"k3y\"\n",
+        NOTIFY.replace("events = [\"failed\", \"digest\"]\n", "")
+    );
+
+    let shown = mask_secrets(&stored).unwrap();
+
+    for secret in ["halyard-ci-6f3a", "hunter2", "s3cret", "k3y"] {
+        assert!(!shown.contains(secret), "shows {secret}: {shown}");
+    }
+    assert_eq!(
+        mask_secrets(MINIMAL).as_deref(),
+        Some(MINIMAL),
+        "a config without targets is shown as written"
+    );
+    assert_eq!(keep_secrets(&shown, &stored), stored);
+    let edited = shown.replace("07:30", "08:00");
+    assert_eq!(
+        keep_secrets(&edited, &stored),
+        stored.replace("07:30", "08:00")
+    );
+    let rewritten = shown.replace(
+        "url = \"<secret>\"\nheaders",
+        "url = \"https://ntfy.example/new-topic\"\nheaders",
+    );
+    assert!(
+        keep_secrets(&rewritten, &stored).contains("https://ntfy.example/new-topic"),
+        "a value written over the mask is the new one"
     );
 }
