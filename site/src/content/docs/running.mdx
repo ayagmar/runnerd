@@ -61,7 +61,7 @@ A job that finds no runner waits for the next poll, a registration and a contain
 - A profile due a reseed (slot 1 ran a job) removes its warm runners once its other runners are idle, so the snapshot still gets rebuilt. The shared caches' check does the same across all profiles, at most once an hour, until it ends.
 - A warm runner that ends without a job after waiting, as when Docker restarts, does not hold its repository's next runners back; a second in a row does.
 
-The status shows them as `warm, waiting for a job`. Sizing tells the jobs a warm runner took from the others, with each kind's median wait.
+`runnerctl watch`, the TUI and the dashboard show them as warm runners waiting for a job; `runnerctl status` shows them `idle`. Sizing tells the jobs a warm runner took from the others, with each kind's median wait.
 
 ## Warm caches
 
