@@ -13,6 +13,8 @@ maven = { max_size = "5G" }
 reseed_at = "2G"
 # A reseed that would make a snapshot larger than this starts it over from slot 1's changes.
 snapshot_max = "10G"
+# The build cache every runner shares, written by pushes to each repository's default branch (the default).
+build = { max_size = "10G" }
 
 # Job history, with its defaults: where it lives and how long samples, logs and events are kept.
 [history]

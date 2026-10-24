@@ -76,6 +76,30 @@ A slot is one concurrent job of a profile. Each job gets a new container, but th
 | the profile's snapshot | replaced by slot 1's changes once they reach [`reseed_at`](../configuration/#caches) and the profile is idle; above `snapshot_max` it starts over from slot 1's changes alone |
 | pnpm store, Maven repository | shared by all slots, emptied above their [`max_size`](../configuration/#caches) when no runner runs: warm runners stop for it at most hourly, at the first moment no job runs |
 | Docker Hub mirror | runs while any runner does, warm ones too; stops, and its storage is emptied above `mirror.max_size`, with the shared caches' check |
+| [build cache](#build-cache) | per repository, shared by every slot; written only by pushes to the default branch; its least recently used entries go above [`build.max_size`](../configuration/#caches) with the shared caches' check |
+
+## Build cache
+
+A Gradle task built in slot 2 is a cache miss in slot 3: each slot has its own `~/.cache`. The build cache is one store every runner reaches, kept by the daemon in `~/.cache/runnerd/build-cache`, one per repository. A pull request's build gets what `main` built, whichever slot built it.
+
+| Tool | What it gets | When |
+|---|---|---|
+| Gradle | its [HTTP build cache](https://docs.gradle.org/current/userguide/build_cache.html) as the remote cache, through an init script in `$GRADLE_USER_HOME/init.d` | the build turns the build cache on (`org.gradle.caching=true` or `--build-cache`) and configures no remote cache of its own |
+| sccache | its WebDAV backend (`SCCACHE_WEBDAV_ENDPOINT`) | the workflow runs it (`RUSTC_WRAPPER=sccache`) with no other backend: S3, GCS, GitHub Actions' cache and the rest take precedence |
+| Bazel | `--remote_cache` in `/etc/bazel.bazelrc`, with `--remote_download_outputs=all` | the workspace's `.bazelrc` sets no `--remote_cache` of its own |
+
+Who writes:
+
+- A job writes only when GitHub says it runs a push, a schedule or a manual run (`workflow_dispatch`) of the repository's default branch, or of one of [`build.branches`](../configuration/#caches). runnerd asks GitHub which runner holds the job and what started its run; what the job writes in its runner's log or environment counts for nothing.
+- Every other job, pull requests from forks or not, reads. Its uploads are answered as stored and dropped, so Gradle keeps the cache on for the rest of the build.
+- What a job uploads before GitHub has answered, usually its first seconds, waits and is kept or dropped once it has.
+- A repository reads only its own entries.
+
+Each runner reaches the cache through a socket of its own, which no other runner sees; the image forwards it to `127.0.0.1:41771`. A cache that does not answer, as while runnerd restarts, fails no build: Gradle warns and builds without it. Containers a job starts itself, such as a `container:` job's or `docker build`'s, do not reach it.
+
+The job page and `runnerctl job` show each job's hits and what it read and stored; the Caches page and `runnerctl caches`, the cache's size and its hit rate over 7 days. The [Cold cache](../insights/#insights) insight names a job whose writing runs find almost nothing in it.
+
+To keep a repository out, set `build_cache = false` under it. A workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` in its `env`, and any tool's by configuring a remote cache of its own. `runnerctl caches clean runnerd-build-cache` empties it while no runner runs.
 
 ## Records of failed jobs
 

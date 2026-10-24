@@ -146,7 +146,7 @@ Never serve public repositories from self-hosted runners: anyone who can open a 
 
 ## Every key
 
-A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them; durations a number and `s`, `m`, `h` or `d`, such as `"168h"` or `"7d"`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, `poll_interval`, `records.max_total` and `max_count`, and `sizing.min_jobs`, `interval`, `raise_interval` and `max_step`. A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]` and `history.database`, which runnerd reads when it starts.
+A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them; durations a number and `s`, `m`, `h` or `d`, such as `"168h"` or `"7d"`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, an enabled build cache's `max_size`, `poll_interval`, `records.max_total` and `max_count`, and `sizing.min_jobs`, `interval`, `raise_interval` and `max_step`. A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]`, `history.database` and `caches.build.directory`, which runnerd reads when it starts.
 
 ### `[host]`
 
@@ -170,6 +170,10 @@ A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T
 | `pnpm.max_size`, `maven.max_size` | | the shared pnpm store and Maven repository are emptied above this when no runner runs; warm runners stop for it at most hourly, at the first moment no job runs |
 | `reseed_at` | `"2G"` | once slot 1's layers changed this much and the profile is idle, they become the profile's snapshot ([Warm caches](../running/#warm-caches)) |
 | `snapshot_max` | `"10G"` | a reseed that would make a snapshot larger starts it over from slot 1's changes alone, or from the image when those are larger too |
+| `build.enabled` | `true` | whether runners get the shared [build cache](../running/#build-cache) |
+| `build.max_size` | `"10G"` | above this, the build cache's least recently used entries go when no runner runs, with the shared caches; between two checks it grows to twice this at most |
+| `build.branches` | `[]` | the branches whose pushes, scheduled and manual runs write to the build cache; empty for each repository's default branch |
+| `build.directory` | `$XDG_CACHE_HOME/runnerd/build-cache` | where the build cache's entries are kept; read when runnerd starts |
 
 ### `[profiles.<name>]`
 
@@ -192,6 +196,7 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 | `profile` | | the profile its jobs run on |
 | `labels` | | at least one; a job runs here when every label in its `runs-on` is one of these |
 | `warm` | `1` | runners kept registered for jobs not queued yet while the repository is active ([warm runners](../running/#warm-runners)); `0` turns them off |
+| `build_cache` | `true` | whether its runners get the shared [build cache](../running/#build-cache) |
 
 ### `[history]`
 
