@@ -643,9 +643,10 @@ async fn a_change_a_crash_left_pending_is_resolved_from_the_file_and_holds_its_i
     // The file has node's change: the daemon stopped after writing it, before recording it as done.
     let written = auto_sizing().replacen("memory = \"7G\"", "memory = \"5.25G\"", 1);
     let mut daemon = start_serving(&dir.0, None, true, sync_dir, memory_max, &written).await;
-    let change = |profile: &str| SizingChange {
+    // One value, so its `at` can't move to the next second between the record and the assertion.
+    let change = SizingChange {
         at: super::history::now(),
-        profile: profile.to_owned(),
+        profile: "node".to_owned(),
         from: Resize {
             memory: 7 << 30,
             slots: 2,
@@ -657,7 +658,7 @@ async fn a_change_a_crash_left_pending_is_resolved_from_the_file_and_holds_its_i
         reason: "lower memory".to_owned(),
         uncertain: false,
     };
-    daemon.store.sizing_intent(change("node")).await.unwrap();
+    daemon.store.sizing_intent(change.clone()).await.unwrap();
     finished_jobs(&daemon.store, "node", 5376 << 20, 2 << 30).await;
     let resolved = tokio::time::timeout(Duration::from_secs(10), async {
         loop {
@@ -670,7 +671,7 @@ async fn a_change_a_crash_left_pending_is_resolved_from_the_file_and_holds_its_i
     })
     .await
     .expect("the pending change is resolved within 10 s");
-    assert_eq!(resolved, vec![change("node")]);
+    assert_eq!(resolved, vec![change]);
     assert_eq!(
         daemon.store.auto_sizing().await.unwrap().pending,
         Vec::new()
