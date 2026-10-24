@@ -5,11 +5,40 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.10 to 0.0.11
+
+### Before
+
+The first start of 0.0.11 migrates the job history to version 12, and 0.0.10 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-2), into a directory such as `~/runnerd-0.0.10`.
+
+### Upgrade
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.11/install.sh | sh -s -- --version v0.0.11
+```
+
+Move each profile's published `image` to its `-0.0.11` tag, then check the file and start runnerd:
+
+```sh
+runnerd check-config
+systemctl --user start runnerd
+runnerctl doctor
+```
+
+Jobs reach the build cache only from the 0.0.11 images; an older image ignores it.
+
+### What changes on its own
+
+- **The [build cache](../running/#build-cache)** is on, up to 10G in `~/.cache/runnerd/build-cache`. Gradle builds that turn on their build cache (`org.gradle.caching=true`) and set no remote cache of their own share what the default branch built, whichever slot built it; sccache and Bazel get it too. Only pushes, schedules and manual runs of the default branch write. Set `build_cache = false` under a repository to keep it out, or `[caches.build] enabled = false` to turn it off.
+- Each job that may write costs up to three GitHub reads, once per job: its run, the branch's head, and a compare of the two.
+- The job page, the TUI and `runnerctl job` show each job's build cache hits; the Caches page shows the cache's size and hit rate. A new insight, Cold cache, names jobs whose writing runs find almost nothing in it.
+- The "slower" insight no longer reports a job that only flips between build cache hits and misses.
+
 ## 0.0.9 to 0.0.10
 
 ### Before
 
-The first start of 0.0.10 migrates the job history to version 11, and 0.0.9 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-1), into a directory such as `~/runnerd-0.0.9`.
+The first start of 0.0.10 migrates the job history to version 11, and 0.0.9 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-2), into a directory such as `~/runnerd-0.0.9`.
 
 ### Upgrade
 
