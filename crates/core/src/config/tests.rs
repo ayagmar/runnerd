@@ -457,6 +457,7 @@ fn a_resized_profile_keeps_the_rest_of_the_file_as_written() {
         crate::api::Resize {
             memory: 2560 << 20,
             slots: 3,
+            cpus: None,
         },
     )
     .unwrap();
@@ -467,6 +468,22 @@ fn a_resized_profile_keeps_the_rest_of_the_file_as_written() {
     );
     let profile = &Config::parse(&resized).unwrap().profiles["app"];
     assert_eq!((profile.memory, profile.slots), (size("2.5G"), 3));
+    let cpus = Config::parse(&text).unwrap().profiles["app"].cpus;
+    assert_eq!(profile.cpus, cpus, "a resize without cpus leaves them");
+    let with_cpus = super::resize_profile(
+        &text,
+        "app",
+        crate::api::Resize {
+            memory: 4 << 30,
+            slots: 1,
+            cpus: Some(cpus + 2),
+        },
+    )
+    .unwrap();
+    assert_eq!(
+        Config::parse(&with_cpus).unwrap().profiles["app"].cpus,
+        cpus + 2
+    );
 }
 
 #[test]
@@ -477,6 +494,7 @@ fn resizing_a_profile_the_config_lacks_names_it() {
         crate::api::Resize {
             memory: 1 << 30,
             slots: 1,
+            cpus: None,
         },
     )
     .unwrap_err();

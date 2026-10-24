@@ -495,7 +495,7 @@ async fn finished_jobs(store: &Store, profile: &str, cap: u64, peak: u64) {
             events: runnerd_core::observe::metrics::Events::default(),
             runner: runner.clone(),
             at: now - 30_000,
-            cpu: 0,
+            cpu: 6000,
             cpu_usage: 0,
             memory: peak,
             network_received: 0,
@@ -593,6 +593,7 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
     let resized = Resize {
         memory: 5376 << 20,
         slots: 2,
+        cpus: None,
     };
     assert_eq!(
         changed
@@ -604,7 +605,8 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
             "node",
             Resize {
                 memory: 7 << 30,
-                slots: 2
+                slots: 2,
+                cpus: None
             },
             resized
         )]
@@ -630,7 +632,7 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
         }
     };
     assert_eq!(announced, changed.changes[0]);
-    // Many looks later, the 24h interval still holds node where it is, and the plan says until when.
+    // Many looks later, the intervals still hold node where it is, and the plan says until when.
     tokio::time::sleep(Duration::from_millis(300)).await;
     let later = sizing().await;
     assert_eq!(later.changes.len(), 1);
@@ -643,9 +645,14 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
     assert_eq!(
         plan.held
             .iter()
-            .map(|hold| (hold.profile.as_str(), hold.until - hold.changed))
+            .map(|hold| (
+                hold.profile.as_str(),
+                hold.until - hold.changed,
+                hold.lower_until - hold.changed
+            ))
             .collect::<Vec<_>>(),
-        [("node", 24 * 3600)]
+        [("node", 3600, 24 * 3600)],
+        "node may be raised after an hour and lowered after a day"
     );
     assert_eq!(
         plan.blocked, None,
@@ -735,10 +742,12 @@ async fn a_change_a_crash_left_pending_is_resolved_from_the_file_and_holds_its_i
         from: Resize {
             memory: 7 << 30,
             slots: 2,
+            cpus: None,
         },
         to: Resize {
             memory: 5376 << 20,
             slots: 2,
+            cpus: None,
         },
         reason: "lower memory".to_owned(),
         uncertain: false,
@@ -849,10 +858,12 @@ async fn a_change_left_pending_is_settled_with_auto_sizing_turned_off() {
         from: Resize {
             memory: 7 << 30,
             slots: 2,
+            cpus: None,
         },
         to: Resize {
             memory: 5376 << 20,
             slots: 2,
+            cpus: None,
         },
         reason: "lower memory".to_owned(),
         uncertain: false,

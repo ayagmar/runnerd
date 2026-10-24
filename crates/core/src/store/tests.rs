@@ -1087,12 +1087,14 @@ fn sizing_change(profile: &str, at: u64) -> crate::api::SizingChange {
         from: crate::api::Resize {
             memory: 7 << 30,
             slots: 2,
+            cpus: Some(8),
         },
         to: crate::api::Resize {
             memory: 5376 << 20,
             slots: 2,
+            cpus: Some(6),
         },
-        reason: "lower memory".to_owned(),
+        reason: "lower memory and cpus".to_owned(),
         uncertain: false,
     }
 }

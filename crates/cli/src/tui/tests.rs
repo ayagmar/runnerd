@@ -597,7 +597,8 @@ fn sizing_advice_is_written_into_the_config_only_after_y() {
             profile: "node".to_owned(),
             resize: Resize {
                 memory: 2560 << 20,
-                slots: 5
+                slots: 5,
+                cpus: None
             }
         })]
     );
@@ -1833,6 +1834,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
     sizing.auto_plan = Some(AutoPlan {
         every: 300,
         interval: 86_400,
+        raise_interval: 3600,
         max_step: 25,
         next: vec![SizingChange {
             at: NOW,
@@ -1840,10 +1842,12 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
             from: Resize {
                 memory: 7 << 30,
                 slots: 2,
+                cpus: None,
             },
             to: Resize {
                 memory: 5376 << 20,
                 slots: 2,
+                cpus: None,
             },
             reason: "lower memory".to_owned(),
             uncertain: false,
@@ -1852,6 +1856,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
             profile: "jvm".to_owned(),
             changed: NOW - 600,
             until: NOW + 7200,
+            lower_until: NOW + 86_400 - 600,
         }],
         blocked: None,
     });
@@ -1859,7 +1864,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
     for width in [80, 120] {
         let shown = screen(&app, width, 24, false);
         assert!(
-            shown.contains("looks every 5 minutes") && shown.contains("at most 25%"),
+            shown.contains("looks every 5 minutes") && shown.contains("25% at a time"),
             "the rules, wrapped rather than cut: {shown}"
         );
         let jvm = rows_with(&shown, "■ jvm")[0];

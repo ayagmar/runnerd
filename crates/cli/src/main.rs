@@ -86,11 +86,12 @@ enum Command {
         #[arg(long)]
         from: Option<u64>,
     },
-    /// Live view of slots, running jobs and their steps, queued and finished jobs.
+    /// Live view of slots, running jobs and their steps, queued jobs with why each waits, and finished jobs.
     ///
     /// Redraws in place on a terminal; otherwise prints one line per event.
     Watch,
-    /// Full-screen dashboard: budget, slots with their memory and CPU, history, and each job's steps and log.
+    /// Full-screen dashboard: a line on CI's health (what runs, what waits and for how long), the budget, slots with
+    /// their memory and CPU, the queue with why each job waits, history, and each job's steps and log.
     ///
     /// Keys: 1 overview, 2 history, tab and j/k to move, enter to open a job, p/r to pause or resume, ? for all.
     #[cfg(feature = "tui")]
@@ -717,17 +718,7 @@ async fn sizing(
             ));
         }
         output::line(&line);
-        output::text(&format!(
-            "[profiles.{profile}]\n  memory = \"{}\" -> \"{}\"\n  slots = {} -> {}\nWrite it into the daemon's config? [y/N] ",
-            ByteSize(advised.memory),
-            ByteSize(resize.memory),
-            advised.slots,
-            resize.slots
-        ));
-        let mut answer = String::new();
-        std::io::stdin()
-            .read_line(&mut answer)
-            .map_err(|error| Error::Local(error.to_string()))?;
+        let answer = ask_resize(&profile, advised, resize)?;
         if !matches!(answer.trim(), "y" | "Y" | "yes") {
             output::line("not written");
             return Ok(ExitCode::FAILURE);
@@ -740,18 +731,46 @@ async fn sizing(
     for warning in &checked.warnings {
         output::line(format_args!("warning: {warning}"));
     }
+    let cpus = resize
+        .cpus
+        .map(|cpus| format!(", {cpus} cpus"))
+        .unwrap_or_default();
     output::line(format_args!(
-        "{profile}: memory {}, {} slots written; the daemon runs with them",
+        "{profile}: memory {}, {} slots{cpus} written; the daemon runs with them",
         ByteSize(resize.memory),
         resize.slots
     ));
     if undo && sizing.auto {
         output::line(
-            "auto sizing is on: it may change them again after [sizing] interval; bound the profile with \
-             min_memory, max_memory or max_slots to keep them",
+            "auto sizing is on: it may raise them again after [sizing] raise_interval and lower them after \
+             interval; bound the profile with min_memory, max_memory or max_slots to keep them",
         );
     }
     Ok(ExitCode::SUCCESS)
+}
+
+/// Shows the values a resize of `profile` writes over `advised`'s and reads the answer to whether to write them.
+fn ask_resize(
+    profile: &str,
+    advised: &runnerd_core::api::ProfileSizing,
+    resize: Resize,
+) -> Result<String, Error> {
+    let cpus = resize
+        .cpus
+        .map(|cpus| format!("  cpus = {} -> {cpus}\n", advised.cpus))
+        .unwrap_or_default();
+    output::text(&format!(
+        "[profiles.{profile}]\n  memory = \"{}\" -> \"{}\"\n  slots = {} -> {}\n{cpus}Write it into the daemon's config? [y/N] ",
+        ByteSize(advised.memory),
+        ByteSize(resize.memory),
+        advised.slots,
+        resize.slots
+    ));
+    let mut answer = String::new();
+    std::io::stdin()
+        .read_line(&mut answer)
+        .map_err(|error| Error::Local(error.to_string()))?;
+    Ok(answer)
 }
 
 /// Writes a profile's new memory and slots into the daemon's config through `PUT /v1/config`, which checks it

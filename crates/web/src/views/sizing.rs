@@ -113,13 +113,22 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
                 }
                 span.muted { (change.reason) }
             }
-        } @else if let Some(hold) = held {
+        } @else if let Some(hold) = held.filter(|hold| view.sizing.until < hold.until) {
             span.plan-what.held {
                 strong {
                     "No change before " (format::short_date(hold.until)) " " (format::clock(hold.until)) " UTC"
                     span.muted { ", in " (format::duration(hold.until.saturating_sub(view.now))) }
                 }
                 span.muted { "Changed " (format::ago(hold.changed, view.now)) "; the interval holds it until then." }
+            }
+        } @else if let Some(hold) = held {
+            span.plan-what.held {
+                strong {
+                    "No lowering before " (format::short_date(hold.lowered_after())) " "
+                    (format::clock(hold.lowered_after())) " UTC"
+                    span.muted { ", in " (format::duration(hold.lowered_after().saturating_sub(view.now))) }
+                }
+                span.muted { "Changed " (format::ago(hold.changed, view.now)) "; a raise may come before then." }
             }
         } @else {
             span.plan-what {

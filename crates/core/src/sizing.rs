@@ -36,6 +36,8 @@ pub struct Ran {
     pub profile: String,
     /// Its container's memory cap, when recorded.
     pub memory_cap: Option<u64>,
+    /// Its container's CPU cap, millicores, when recorded.
+    pub cpu_cap: Option<u64>,
     /// Its sampled memory peak, bytes, as `measure` counts memory.
     pub memory_peak: u64,
     /// Its sampled CPU peak, millicores.
@@ -140,13 +142,7 @@ pub fn advise(
     history: &History,
     window: Window,
 ) -> api::Sizing {
-    let since = history
-        .runners
-        .iter()
-        .map(|runner| runner.started_at)
-        .min()
-        .map_or(window.since, |first| first.max(window.since));
-    let span = window.now.saturating_sub(since).max(1);
+    let since = first_runner(history, window.since);
     let caps = config.memory_caps().map_or(u64::MAX, |caps| caps.0);
     let mirror = config.mirror_memory();
     let rules = &config.sizing;
@@ -160,20 +156,7 @@ pub fn advise(
                 .filter(|job| job.profile == *name)
                 .collect();
             let share = profile.memory.0.saturating_mul(u64::from(profile.slots));
-            let held: u64 = history
-                .runners
-                .iter()
-                .filter(|runner| runner.profile == *name)
-                .map(|runner| {
-                    let end = runner.removed_at.unwrap_or(window.now).min(window.now);
-                    end.saturating_sub(runner.started_at.max(since))
-                })
-                .sum();
-            let busy = u32::try_from(
-                (held.saturating_mul(100) / span.saturating_mul(u64::from(profile.slots).max(1)))
-                    .min(100),
-            )
-            .unwrap_or(100);
+            let busy = busy(history, name, profile.slots, since, window.now);
             let mut keys: BTreeMap<(&str, Option<&str>, &str), Vec<&Ran>> = BTreeMap::new();
             for job in &jobs {
                 keys.entry((&job.repository, job.workflow.as_deref(), &job.name))
@@ -243,6 +226,35 @@ pub fn advise(
         changes: Vec::new(),
         auto_plan: None,
     }
+}
+
+/// Where a history read from `start` (ms) begins: at its first runner when that started later, as a new daemon's
+/// history does.
+fn first_runner(history: &History, start: u64) -> u64 {
+    history
+        .runners
+        .iter()
+        .map(|runner| runner.started_at)
+        .min()
+        .map_or(start, |first| first.max(start))
+}
+
+/// The percent of the time from `since` to `now` (ms) that the profile's runners held its `slots`.
+fn busy(history: &History, profile: &str, slots: u32, since: u64, now: u64) -> u32 {
+    let span = now.saturating_sub(since).max(1);
+    let held: u64 = history
+        .runners
+        .iter()
+        .filter(|runner| runner.profile == profile)
+        .map(|runner| {
+            let end = runner.removed_at.unwrap_or(now).min(now);
+            end.saturating_sub(runner.started_at.max(since))
+        })
+        .sum();
+    u32::try_from(
+        (held.saturating_mul(100) / span.saturating_mul(u64::from(slots).max(1))).min(100),
+    )
+    .unwrap_or(100)
 }
 
 /// A profile's limits and the rules advice follows.

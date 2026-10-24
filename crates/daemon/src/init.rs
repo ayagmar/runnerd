@@ -360,6 +360,11 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          pnpm = {{ max_size = \"5G\" }}\n\
          maven = {{ max_size = \"5G\" }}\n\
          \n\
+         # runnerd changes each profile's memory, slots and cpus from what its jobs use and how long they wait,\n\
+         # a step at a time: https://ayagmar.github.io/runnerd/admission/#auto-sizing\n\
+         [sizing]\n\
+         auto = true\n\
+         \n\
          # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of the host's\n\
          # memory, or the slice's MemoryMax if that is smaller. runnerd pulls the image before the first runner.\n\
          [profiles.default]\n\

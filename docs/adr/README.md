@@ -54,3 +54,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0046](0046-sizing-says-what-auto-sizing-does-next.md) | Sizing says what auto sizing does next |
 | [0047](0047-activity-of-the-last-day.md) | The jobs started and ended in a window, by those times |
 | [0048](0048-slice-charts-scaled-to-the-slice.md) | The slice's charts reach up to the slice |
+| [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling |

@@ -63,6 +63,18 @@ pub struct Host {
     pub cpu_overcommit: Option<f64>,
 }
 
+impl Host {
+    /// Refuses a `cpu_overcommit` that is not above 0 and at most `MAX_CPU_OVERCOMMIT`.
+    fn check_cpu_overcommit(&self) -> Result<(), ConfigError> {
+        match self.cpu_overcommit {
+            Some(value) if !(value > 0.0 && value <= MAX_CPU_OVERCOMMIT) => {
+                Err(ConfigError::CpuOvercommit { value })
+            }
+            _ => Ok(()),
+        }
+    }
+}
+
 /// The largest `cpu_overcommit` the config check takes.
 pub const MAX_CPU_OVERCOMMIT: f64 = 16.0;
 
@@ -173,7 +185,7 @@ pub struct Profile {
     pub min_memory: Option<ByteSize>,
     /// The most `memory` auto sizing raises it to; `None` for what the slice's `MemoryMax` holds.
     pub max_memory: Option<ByteSize>,
-    /// The most `slots` auto sizing raises them to; `None` leaves raising them to the owner.
+    /// The most `slots` auto sizing raises them to; `None` for as many as the slice's `MemoryMax` holds.
     pub max_slots: Option<u32>,
 }
 
@@ -335,11 +347,24 @@ pub struct Sizing {
     /// Whether the daemon writes each profile's advice into the config itself, within each profile's
     /// `min_memory`, `max_memory` and `max_slots`. Default off.
     pub auto: bool,
-    /// The least time between two changes auto sizing makes to one profile. Default 24 hours.
+    /// The least time between a change auto sizing makes to one profile and one that lowers anything in it. Default
+    /// 24 hours.
     #[serde(deserialize_with = "duration")]
     pub interval: Duration,
-    /// The most a change moves a profile's `memory`, in percent of it. Default 25.
+    /// The least time between a change auto sizing makes to one profile and one that only raises its `memory`,
+    /// `slots` or `cpus`; at most `interval`, which a longer one counts as. Default 1 hour.
+    #[serde(deserialize_with = "duration")]
+    pub raise_interval: Duration,
+    /// The most a change moves a profile's `memory` or `cpus`, in percent of them. Default 25.
     pub max_step: u32,
+}
+
+impl Sizing {
+    /// The least time between a change to one profile and one that only raises it: `raise_interval`, at most
+    /// `interval`.
+    pub fn raise_after(&self) -> Duration {
+        self.raise_interval.min(self.interval)
+    }
 }
 
 impl Default for Sizing {
@@ -349,6 +374,7 @@ impl Default for Sizing {
             min_jobs: 10,
             auto: false,
             interval: Duration::from_hours(24),
+            raise_interval: Duration::from_hours(1),
             max_step: 25,
         }
     }
@@ -823,6 +849,10 @@ impl Config {
             (self.records.max_count == 0, "records.max_count".to_owned()),
             (self.sizing.min_jobs == 0, "sizing.min_jobs".to_owned()),
             (self.sizing.interval.is_zero(), "sizing.interval".to_owned()),
+            (
+                self.sizing.raise_interval.is_zero(),
+                "sizing.raise_interval".to_owned(),
+            ),
             (self.sizing.max_step == 0, "sizing.max_step".to_owned()),
             (
                 self.records.max_total.0 == 0,
@@ -836,13 +866,7 @@ impl Config {
             return Err(ConfigError::ZeroLimit { field });
         }
         self.check_sizing_bounds()?;
-        if let Some(value) = self
-            .host
-            .cpu_overcommit
-            .filter(|value| !(*value > 0.0 && *value <= MAX_CPU_OVERCOMMIT))
-        {
-            return Err(ConfigError::CpuOvercommit { value });
-        }
+        self.host.check_cpu_overcommit()?;
         self.web.validate()?;
         for repository in &self.repositories {
             if !self.profiles.contains_key(&repository.profile) {
@@ -908,8 +932,8 @@ pub enum ResizeError {
     NoProfile(String),
 }
 
-/// `text` with the profile's `memory` and `slots` replaced, everything else as written, comments included: what
-/// applying a sizing suggestion sends to `PUT /v1/config`, which validates it.
+/// `text` with the profile's `memory` and `slots` replaced, and its `cpus` when `resize` has them, everything else as
+/// written, comments included: what applying a sizing suggestion sends to `PUT /v1/config`, which validates it.
 pub fn resize_profile(
     text: &str,
     profile: &str,
@@ -928,7 +952,10 @@ pub fn resize_profile(
         ),
         ("slots", toml_edit::Value::from(i64::from(resize.slots))),
     ];
-    for (key, mut value) in values {
+    let cpus = resize
+        .cpus
+        .map(|cpus| ("cpus", toml_edit::Value::from(i64::from(cpus))));
+    for (key, mut value) in values.into_iter().chain(cpus) {
         // The comment after the old value stays after the new one.
         if let Some(old) = table.get(key).and_then(toml_edit::Item::as_value) {
             *value.decor_mut() = old.decor().clone();

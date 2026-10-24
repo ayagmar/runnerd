@@ -24,7 +24,7 @@ use runnerd_core::api::{
     Event, EventEnvelope, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary, LogSummary,
     Pairing, Pairings, Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record,
     RecordLimits, Records, RemovedRecords, RepositoryStatus, Resize, RunnerStatus, RunningJob,
-    Sizing, SizingChange, SlotStatus, Spread, Status, Timeline,
+    Sizing, SizingChange, SlotStatus, Spread, Status, Timeline, Waiting,
 };
 
 /// A fresh directory under the system temp dir, removed on drop.
@@ -113,7 +113,9 @@ fn status() -> Status {
             branch: Some("main".to_owned()),
             url: None,
             queued_at: 1_000_000,
-            waiting: None,
+            waiting: Some(Waiting::NoSlot {
+                profile: "jvm".to_owned(),
+            }),
         }],
     }
 }
@@ -320,10 +322,12 @@ async fn get_sizing() -> axum::Json<Sizing> {
             from: Resize {
                 memory: 9 << 30,
                 slots: 2,
+                cpus: Some(6),
             },
             to: Resize {
                 memory: 7 << 30,
                 slots: 2,
+                cpus: Some(8),
             },
             reason: "lower memory to 2.5G from 9G, its largest peak + 15%".to_owned(),
             uncertain: false,
@@ -693,12 +697,17 @@ fn status_piped_to_another_program_is_aligned_text_without_colour() {
         slots[1].find("free"),
         "the state column lines up:\n{text}"
     );
+    let status = status();
+    let reason = Waiting::NoSlot {
+        profile: "jvm".to_owned(),
+    }
+    .reason(&status.queued[0], &status, 0);
     assert!(
         text.lines().any(
             |line| line.starts_with("9002  halyard/ledger  build / lint  ")
-                && line.ends_with(" ago")
+                && line.ends_with(&format!(" ago  {reason}"))
         ),
-        "the queued job is listed under the repositories:\n{text}"
+        "the queued job is listed under the repositories with why it waits, as every client says it:\n{text}"
     );
 }
 
@@ -1120,7 +1129,10 @@ fn sizing_shows_what_auto_sizing_changed_and_undoes_it_back_to_what_it_replaced(
     let fake = serve(&socket);
     let shown = runnerctl(&socket, &["sizing"]);
     let text = stdout(&shown);
-    assert!(text.contains("memory 9G → 7G, slots 2"), "{text}");
+    assert!(
+        text.contains("memory 9G → 7G, slots 2, cpus 6 → 8"),
+        "{text}"
+    );
     assert!(text.contains("runnerctl sizing undo node"), "{text}");
 
     let undone = runnerctl(&socket, &["sizing", "undo", "node", "--yes"]);
@@ -1133,6 +1145,9 @@ fn sizing_shows_what_auto_sizing_changed_and_undoes_it_back_to_what_it_replaced(
     let replaced = fake.lock().unwrap().replaced.clone();
     assert_eq!(
         replaced,
-        [CONFIG.replace("memory = \"7G\"", "memory = \"9G\"")]
+        [CONFIG
+            .replace("memory = \"7G\"", "memory = \"9G\"")
+            .replace("cpus = 8", "cpus = 6")],
+        "memory and the cpus it changed are back to what it replaced"
     );
 }

@@ -52,6 +52,10 @@ fn the_starter_config_passes_check_config_before_and_after_the_slice_exists() {
         .collect();
     assert_eq!(names, ["halyard/ledger", "halyard/storefront"]);
     assert_eq!(config.host.slice, "runnerd.slice");
+    assert!(
+        config.sizing.auto,
+        "a new config has auto sizing on, so nobody sizes profiles by hand"
+    );
     assert_eq!(
         config.profiles["default"].image,
         Image::Pulled(format!(

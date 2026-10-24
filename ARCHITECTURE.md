@@ -181,8 +181,10 @@ nothing until Docker has listed them.
 - Sizing advice (`GET /v1/sizing`, `sizing::advise`) is computed from the job history. A client applies it on
   request, after a confirmation, through `PUT /v1/config`
   ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)). Under `[sizing] auto` the daemon applies what
-  `sizing::auto::changes` picks through the same check and commit (`api::control::replace`), at most one change per
-  profile per `[sizing] interval`, never lowering a profile a run met the cap of, never leaving a profile's bounds,
+  `sizing::auto::changes` picks through the same check and commit (`api::control::replace`): `memory`, `slots` and
+  `cpus`, one change per profile at a time, a raise at most once per `[sizing] raise_interval` and a lowering once
+  per `interval` ([ADR 0049](docs/adr/0049-auto-sizing-without-hand-tuning.md)), never lowering a profile a run met
+  the cap of, never leaving a profile's bounds,
   and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
   before the commit). Each change is recorded as pending in the history, synced to disk, before its file is written,
   then done (with a durable `sizing.changed` event) or failed; a pending one is settled at every look, auto sizing

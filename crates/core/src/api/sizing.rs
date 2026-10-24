@@ -53,14 +53,18 @@ pub struct Sizing {
 pub struct AutoPlan {
     /// Seconds between two looks of the daemon's.
     pub every: u64,
-    /// `[sizing] interval`: the least time between two changes to one profile, in seconds.
+    /// `[sizing] interval`: the least time between a change to one profile and one that lowers it, in seconds.
     pub interval: u64,
+    /// `[sizing] raise_interval`: the least time between a change to one profile and one that only raises it, in
+    /// seconds. 0 from a daemon before it said: `interval` then holds every change.
+    #[serde(default)]
+    pub raise_interval: u64,
     /// `[sizing] max_step`: the most one change moves a profile's `memory`, in percent of it.
     pub max_step: u32,
     /// The changes the next look would make, in the order it would make them; `at` is when this was worked out.
     /// None of them is made while `blocked` says why.
     pub next: Vec<SizingChange>,
-    /// The profiles a change in the last `interval` holds, oldest hold first.
+    /// The profiles a change in the last `interval` holds from some change, the hold that ends first first.
     pub held: Vec<SizingHold>,
     /// Why no look changes anything until the owner acts, as when the file on disk differs from the config runnerd
     /// runs with. `None` when the next look may write `next`, and from a daemon before it said.
@@ -68,15 +72,25 @@ pub struct AutoPlan {
     pub blocked: Option<String>,
 }
 
-/// A profile auto sizing changes nothing in before `until`.
+/// A profile auto sizing changes nothing in before `until`, and lowers nothing in before `lower_until`.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SizingHold {
     /// The profile.
     pub profile: String,
     /// When its last change was made.
     pub changed: u64,
-    /// When its interval ends, in seconds since the Unix epoch.
+    /// When it may be raised again, in seconds since the Unix epoch.
     pub until: u64,
+    /// When it may be lowered again; 0 from a daemon before it said, which held every change until `until`.
+    #[serde(default)]
+    pub lower_until: u64,
+}
+
+impl SizingHold {
+    /// When it may be lowered again.
+    pub fn lowered_after(&self) -> u64 {
+        self.lower_until.max(self.until)
+    }
 }
 
 /// A profile's `memory` and `slots` as auto sizing changed them in the config file.
@@ -214,30 +228,48 @@ impl Advice {
     /// The `memory` and `slots` to write, when they differ from the profile's.
     pub fn change(&self) -> Option<Resize> {
         match *self {
-            Advice::Lower { memory, slots } | Advice::Raise { memory, slots } => {
-                Some(Resize { memory, slots })
-            }
+            Advice::Lower { memory, slots } | Advice::Raise { memory, slots } => Some(Resize {
+                memory,
+                slots,
+                cpus: None,
+            }),
             Advice::TooFew { .. } | Advice::Keep { .. } | Advice::SliceTooSmall { .. } => None,
         }
     }
 }
 
-/// A profile's new `memory` and `slots`.
+/// A profile's new `memory`, `slots` and, when auto sizing changed them, `cpus`.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Resize {
     /// Bytes.
     pub memory: u64,
     /// Slots.
     pub slots: u32,
+    /// CPUs per slot; `None` leaves them as they are, as advice does and as auto sizing's changes recorded before it
+    /// changed them.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpus: Option<u32>,
 }
 
 impl AutoPlan {
-    /// Its rules in words, as clients say them after `runnerd`: `looks every 5 minutes and changes a profile at most
-    /// once every 24 hours, moving its memory by at most 25% at a time`.
+    /// Its rules in words, as clients say them after `runnerd`: `looks every 5 minutes, raises a profile at most
+    /// once every 1 hour and lowers it at most once every 24 hours, moving its memory and CPUs by at most 25% at a
+    /// time`.
     pub fn rules(&self) -> String {
+        if self.raise_interval == 0 || self.raise_interval >= self.interval {
+            return format!(
+                "looks every {} and changes a profile at most once every {}, moving its memory by at most {}% at a \
+                 time",
+                period(self.every),
+                period(self.interval),
+                self.max_step
+            );
+        }
         format!(
-            "looks every {} and changes a profile at most once every {}, moving its memory by at most {}% at a time",
+            "looks every {}, raises a profile at most once every {} and lowers it at most once every {}, moving its \
+             memory and CPUs by at most {}% at a time",
             period(self.every),
+            period(self.raise_interval),
             period(self.interval),
             self.max_step
         )
@@ -262,7 +294,7 @@ pub fn period(seconds: u64) -> String {
 }
 
 impl SizingChange {
-    /// What it changed, such as `memory 9G → 6.75G, slots 2`.
+    /// What it changed, such as `memory 9G → 6.75G, slots 2`, and `cpus 12 → 15` when it changed them.
     pub fn line(&self) -> String {
         let memory = if self.from.memory == self.to.memory {
             format!("memory {}", ByteSize(self.to.memory))
@@ -278,10 +310,14 @@ impl SizingChange {
         } else {
             format!("slots {} → {}", self.from.slots, self.to.slots)
         };
+        let cpus = match (self.from.cpus, self.to.cpus) {
+            (Some(from), Some(to)) if from != to => format!(", cpus {from} → {to}"),
+            _ => String::new(),
+        };
         if self.uncertain {
-            format!("{memory}, {slots} (may not have been written)")
+            format!("{memory}, {slots}{cpus} (may not have been written)")
         } else {
-            format!("{memory}, {slots}")
+            format!("{memory}, {slots}{cpus}")
         }
     }
 }
@@ -289,16 +325,21 @@ impl SizingChange {
 impl Sizing {
     /// One line on what to do with a profile and why, as `runnerctl sizing`, the dashboard and `runnerd doctor`
     /// say it, such as `lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G`.
-    /// Under `measured` admission, when jobs wanted more slots, it adds that `slots` is not bought with caps there.
+    /// Under `measured` admission, when jobs wanted more slots, it adds that `slots` is not bought with caps there, or
+    /// with auto sizing on, that it adds them.
     pub fn advice_line(&self, profile: &ProfileSizing) -> String {
         let line = self.memory_line(profile);
         if self.admission == AdmissionPolicy::Measured
             && profile.wants_slots
             && !matches!(profile.advice, Advice::TooFew { .. })
         {
+            let then = if self.auto {
+                "auto sizing adds one at a time while every profile's slots fit the slice at their jobs' peaks"
+            } else {
+                "measured admission reserves predicted peaks, not caps, so more slots may fit: raise slots by hand"
+            };
             format!(
-                "{line}; jobs waited {}s for a slot (p95) and slots were busy {}%: measured admission reserves \
-                 predicted peaks, not caps, so more slots may fit: raise slots by hand",
+                "{line}; jobs waited {}s for a slot (p95) and slots were busy {}%: {then}",
                 profile.wait.p95, profile.busy
             )
         } else {

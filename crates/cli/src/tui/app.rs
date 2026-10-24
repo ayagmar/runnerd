@@ -595,13 +595,7 @@ impl App {
             return self.ask_reasons().into_iter().collect();
         }
         if let Some(status) = status {
-            for job in &mut self.live.status.queued {
-                job.waiting = status
-                    .queued
-                    .iter()
-                    .find(|read| read.id == job.id)
-                    .and_then(|read| read.waiting.clone());
-            }
+            self.live.take_reasons(status);
         }
         Vec::new()
     }

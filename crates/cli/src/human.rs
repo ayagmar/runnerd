@@ -227,6 +227,14 @@ fn named(workflow: Option<&str>, name: &str, id: u64) -> String {
     }
 }
 
+/// Why a queued job waits, as the dashboard and the TUI say it; nothing when the daemon did not say.
+pub(crate) fn waiting(job: &QueuedJob, status: &Status, now: u64) -> String {
+    job.waiting
+        .as_ref()
+        .map(|waiting| waiting.reason(job, status, now))
+        .unwrap_or_default()
+}
+
 /// How long ago a queued job was queued; nothing when GitHub did not say.
 pub(crate) fn queued_ago(job: &QueuedJob, now: u64) -> String {
     if job.queued_at == 0 {
@@ -356,13 +364,20 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
     out.push_str(&repositories.render(paint, ""));
     if !status.queued.is_empty() {
         out.push('\n');
-        let mut queued = Table::new(&["JOB", "REPOSITORY", "WORKFLOW / NAME", "QUEUED"]);
+        let mut queued = Table::new(&[
+            "JOB",
+            "REPOSITORY",
+            "WORKFLOW / NAME",
+            "QUEUED",
+            "WAITS FOR",
+        ]);
         for job in &status.queued {
             queued.row(vec![
                 plain(job.id.to_string()),
                 plain(&job.repository),
                 plain(queued_title(job)),
                 cell(queued_ago(job, now), Tone::Dim),
+                plain(waiting(job, status, now)),
             ]);
         }
         out.push_str(&queued.render(paint, ""));

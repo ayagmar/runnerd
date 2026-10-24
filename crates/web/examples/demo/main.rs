@@ -159,6 +159,7 @@ fn auto_sizing(fake: &fake::Fake) {
     fixtures.auto_plan = Some(AutoPlan {
         every: 300,
         interval: 3 * 86_400,
+        raise_interval: 3600,
         max_step: 25,
         next: vec![SizingChange {
             at,
@@ -166,10 +167,12 @@ fn auto_sizing(fake: &fake::Fake) {
             from: Resize {
                 memory: 7 * GIB,
                 slots: 2,
+                cpus: None,
             },
             to: Resize {
                 memory: 5376 << 20,
                 slots: 2,
+                cpus: None,
             },
             reason: "lower memory to 2.5G from 7G, its largest peak + 15%".to_owned(),
             uncertain: false,
@@ -178,6 +181,7 @@ fn auto_sizing(fake: &fake::Fake) {
             profile: "jvm".to_owned(),
             changed: fixtures.now - 2 * 86_400,
             until: fixtures.now + 86_400,
+            lower_until: fixtures.now + 86_400,
         }],
         blocked: None,
     });

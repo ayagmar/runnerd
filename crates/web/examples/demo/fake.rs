@@ -901,10 +901,12 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
             from: Resize {
                 memory: 10 * GIB,
                 slots: 2,
+                cpus: None,
             },
             to: Resize {
                 memory: 9 * GIB,
                 slots: 2,
+                cpus: None,
             },
             reason: "lower memory to 9G from 10G, its largest peak + 15%".to_owned(),
             uncertain: false,

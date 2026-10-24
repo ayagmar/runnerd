@@ -146,7 +146,7 @@ Never serve public repositories from self-hosted runners: anyone who can open a 
 
 ## Every key
 
-A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them; durations a number and `s`, `m`, `h` or `d`, such as `"168h"` or `"7d"`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, `poll_interval`, `records.max_total` and `max_count`, and `sizing.min_jobs`, `interval` and `max_step`. A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]` and `history.database`, which runnerd reads when it starts.
+A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them; durations a number and `s`, `m`, `h` or `d`, such as `"168h"` or `"7d"`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, `poll_interval`, `records.max_total` and `max_count`, and `sizing.min_jobs`, `interval`, `raise_interval` and `max_step`. A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]` and `history.database`, which runnerd reads when it starts.
 
 ### `[host]`
 
@@ -180,7 +180,7 @@ A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T
 | `slots` | | the most runners of the profile at once |
 | `record_failures` | `false` | keep each failed job's runner as a [record](#records-of-failed-jobs), to open a shell in |
 | `min_memory`, `max_memory` | unset | the bounds [auto sizing](../admission/#auto-sizing) keeps `memory` in; unset, as low as its jobs need and as high as `MemoryMax` holds |
-| `max_slots` | unset | the most `slots` auto sizing raises the profile to; unset, it adds none |
+| `max_slots` | unset | the most `slots` auto sizing raises the profile to; unset, as many as `MemoryMax` holds |
 
 The config check refuses a `memory` or `slots` outside the profile's own bounds.
 
@@ -218,9 +218,10 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 |---|---|---|
 | `margin` | `15` | the percent added to a sampled peak, in [advice](../admission/#sizing) and predictions |
 | `min_jobs` | `10` | the fewest runs of a profile, or of one job, before its peaks become advice or a prediction |
-| `auto` | `false` | runnerd writes the advice into the config itself ([Auto sizing](../admission/#auto-sizing)) |
-| `interval` | `"24h"` | auto sizing: the least time between two changes of one profile |
-| `max_step` | `25` | auto sizing: the most one change moves a profile's `memory`, in percent of it |
+| `auto` | `false` | runnerd sizes each profile's `memory`, `slots` and `cpus` itself ([Auto sizing](../admission/#auto-sizing)); `runnerd init` writes `true` |
+| `interval` | `"24h"` | auto sizing: the least time between a change of one profile and one that lowers its `memory` or `cpus` |
+| `raise_interval` | `"1h"` | auto sizing: the least time between a change of one profile and one that only raises it; at most `interval` |
+| `max_step` | `25` | auto sizing: the most one change moves a profile's `memory` or `cpus`, in percent of them |
 
 ### `[web]`
 
