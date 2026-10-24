@@ -66,7 +66,7 @@ const packs = [
   const reserved = pack.runners.reduce((sum, r) => sum + r.size, 0) + mirror;
   const atOnce = Number(cell(pack.policy, 'AT ONCE'));
   if (atOnce !== pack.runners.length) throw new Error(`${pack.policy}: ${pack.runners.length} blocks, simulate says ${atOnce}`);
-  return { ...pack, free: max - reserved, atOnce, wait: cell(pack.policy, 'WAIT P95') };
+  return { ...pack, free: max - reserved, atOnce, p95: cell(pack.policy, 'WAIT P95'), longest: cell(pack.policy, 'WAIT MAX') };
 });
 const simulateMeasured = simulateRows.at(-1);
 
@@ -215,11 +215,8 @@ const phones = await Promise.all(
                       <dt>runners at once</dt>
                       <dd>{pack.atOnce}</dd>
                     </div>
-                    <div>
-                      <dt>wait p95</dt>
-                      <dd>{pack.wait}</dd>
-                    </div>
                   </dl>
+                  <p class="pack-waits">waits: p95 {pack.p95}, longest {pack.longest}</p>
                 </figcaption>
                 <ul class="pack-bar" style={`--total: ${max}`}>
                   {pack.runners.map((runner) => (
@@ -247,10 +244,9 @@ const phones = await Promise.all(
           }
         </div>
         <p class="pack-note">
-          The busiest burst of a 28-day history, replayed. Each block is what its runner reserves, shaded to its job's
-          p95 peak. A job with fewer than 10 runs, or one that ran out of memory, <a
-            href={`${base}admission/#measured-admission`}>reserves more</a
-          >.
+          A synthetic 28-day history, replayed: the bars are its busiest burst, each block what its runner reserves,
+          shaded to its job's p95 peak. Measured's longest wait is the longer one: until a job has 10 runs, or after it
+          runs out of memory, it <a href={`${base}admission/#measured-admission`}>reserves more</a>.
         </p>
         <details class="replay">
           <summary>The whole replay</summary>
@@ -294,8 +290,12 @@ const phones = await Promise.all(
           <li class="client client-phone">
             <div class="phone-text">
               <h3><a href={`${clientsDoc}#from-another-device`}>Phone</a></h3>
+              <p>
+                First put the dashboard behind an HTTPS proxy, such as <code>tailscale serve</code>, and list its address in
+                <a href={`${clientsDoc}#from-another-device`}><code>[web] origins</code></a>.
+              </p>
               <code class="prompt-line">$ runnerctl web --qr</code>
-              <p>Scan the code once and the phone stays signed in. Add the dashboard to the home screen from the browser's menu.</p>
+              <p>Scan the code and the phone stays signed in for 30 days after its last visit.</p>
             </div>
             <div class="phone-frame">
               {
@@ -707,20 +707,6 @@ runnerd doctor:
     width: 100%;
   }
 
-  .pack-row {
-    display: grid;
-    gap: 0.6rem;
-    margin: 0;
-  }
-
-  .pack-row figcaption {
-    display: flex;
-    flex-wrap: wrap;
-    align-items: baseline;
-    gap: 0.25rem 1rem;
-    font-family: var(--font-display);
-  }
-
   .pack-row figcaption code {
     font-size: 0.9375rem;
     color: var(--muted);
@@ -1010,6 +996,8 @@ runnerd doctor:
 
   /* Admission: caps against measured, each row its two numbers beside the slice packed as that policy packs it. */
   .pack-row {
+    display: grid;
+    margin: 0;
     grid-template-columns: minmax(15rem, 3fr) minmax(0, 9fr);
     align-items: stretch;
     gap: var(--gap) clamp(1rem, 2.5vw, 2.5rem);
@@ -1019,6 +1007,8 @@ runnerd doctor:
     display: grid;
     align-content: space-between;
     gap: 0.75rem;
+    min-width: 0;
+    font-family: var(--font-display);
   }
 
   .pack-figures {
@@ -1037,6 +1027,12 @@ runnerd doctor:
     font-size: 0.9375rem;
     font-weight: 600;
     color: var(--muted);
+  }
+
+  .pack-waits {
+    font-size: 1rem;
+    font-weight: 600;
+    font-variant-numeric: tabular-nums;
   }
 
   .pack-figures dd {
@@ -1165,6 +1161,10 @@ runnerd doctor:
 
   .phone-text p {
     font-size: 1rem;
+  }
+
+  .phone-text code {
+    white-space: nowrap;
   }
 
   .phone-frame {
