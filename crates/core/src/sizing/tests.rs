@@ -1052,6 +1052,38 @@ labels = ["node"]
         );
     }
 
+    /// Three ledger tests pinned at jvm's 8 CPUs, queued `hours_ago`.
+    fn pinned_hours_ago(hours_ago: u64) -> Vec<Ran> {
+        ledger_cpu(3, 7900, 8000)
+            .into_iter()
+            .map(|run| Ran {
+                queued_at: NOW - hours_ago * HOUR,
+                started_at: Some(NOW - hours_ago * HOUR + 5000),
+                ..run
+            })
+            .collect()
+    }
+
+    #[test]
+    fn cpus_lowered_or_undone_back_to_a_cap_are_not_raised_again_by_its_old_runs() {
+        let config = on(CONFIG, "");
+        // Runs pinned at 8 CPUs raised jvm to 10 three days ago; ten light runs at 10 lowered it back to 8 two hours
+        // ago (or an undo did). The pinned runs are from before that change: nothing new says 8 is too few.
+        let mut jobs = pinned_hours_ago(80);
+        jobs.extend(ledger_cpu(10, 2000, 10_000));
+        let lowered = BTreeMap::from([("jvm".to_owned(), (NOW - 2 * HOUR) / 1000)]);
+        assert_eq!(
+            due_cpus(&config, &history(jobs.clone()), Some(32_000), &lowered),
+            Vec::new()
+        );
+        jobs.extend(pinned_hours_ago(1));
+        assert_eq!(
+            cpus_to(&due_cpus(&config, &history(jobs), Some(32_000), &lowered)),
+            vec![("jvm", Some(8), Some(10))],
+            "runs pinned since the change raise it"
+        );
+    }
+
     #[test]
     fn cpus_far_above_every_peak_are_lowered_after_the_interval_by_at_most_a_step() {
         let config = on(CONFIG, "");

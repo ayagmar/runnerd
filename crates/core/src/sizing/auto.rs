@@ -11,7 +11,9 @@ use std::collections::BTreeMap;
 use crate::api::{Advice, ProfileSizing, Resize, SizingChange, cores};
 use crate::config::{Admission, Config, Profile, cpu_budget};
 
-use super::{BUSY, GRANULE, History, WAITED, Window, advise, busy, first_runner, spread, waits};
+use super::{
+    BUSY, GRANULE, History, Ran, WAITED, Window, advise, busy, first_runner, spread, waits,
+};
 
 /// The fewest runs a raise of `slots` or `cpus` reads: the jobs queued since the profile's last change, or its runs
 /// at its current `cpus`. A wrong raise costs a wait or a slower run, not a kill, so it does not wait for `min_jobs`.
@@ -99,7 +101,15 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
             reasons.push(fresh.waited(last.is_some()));
         }
         let cpus = cpus(
-            config, profile, advised, history, &context, &budget, slots, lowering,
+            config,
+            profile,
+            advised,
+            history,
+            fresh.start,
+            &context,
+            &budget,
+            slots,
+            lowering,
         );
         if let Some(cpus) = &cpus {
             reasons.push(cpus.reason.clone());
@@ -179,6 +189,8 @@ impl Budget {
 /// What the jobs queued since a profile's last change say about its slots: a raise reads only them, so one slot
 /// that fixed a month's waits is not followed by another every `raise_interval`.
 struct Fresh {
+    /// When the evidence starts, in milliseconds: the last change, or the window's start.
+    start: u64,
     jobs: u64,
     /// Seconds from queued to started, p95.
     wait: u64,
@@ -200,6 +212,7 @@ impl Fresh {
             .filter(|job| job.profile == advised.name && job.queued_at >= start)
             .collect();
         Fresh {
+            start,
             jobs: jobs.len() as u64,
             wait: waits(&jobs).p95,
             busy: busy(
@@ -383,7 +396,7 @@ struct Cpus {
 
 /// The profile's next `cpus`, from the CPU peaks of its runs whose container had them; `None` to keep them.
 ///
-/// With `RAISE_RUNS` such runs peaking within `AT_CAP` percent of the cap at p95, `max_step` percent more, at least
+/// With `RAISE_RUNS` such runs queued since `since` (ms), the last change, peaking within `AT_CAP` percent of the cap at p95, `max_step` percent more, at least
 /// 1, up to the slice's CPUs; under `caps` admission with a CPU budget, only as many as every profile's `slots ×
 /// cpus` fit in it, at the `slots` this change gives. With `min_jobs` runs whose largest peak plus the margin is at
 /// most `FAR_UNDER` percent of the cap, down to that, rounded up, by at most `max_step` percent, while `lowering`
@@ -397,6 +410,7 @@ fn cpus(
     profile: &Profile,
     advised: &ProfileSizing,
     history: &History,
+    since: u64,
     context: &Context<'_>,
     budget: &Budget,
     slots: u32,
@@ -404,16 +418,21 @@ fn cpus(
 ) -> Option<Cpus> {
     let current = profile.cpus;
     let cap = u64::from(current) * 1000;
-    let peaks: Vec<u64> = history
+    let at_cap: Vec<&Ran> = history
         .jobs
         .iter()
         .filter(|job| job.profile == advised.name && job.cpu_cap == Some(cap))
+        .collect();
+    let step = (current.saturating_mul(config.sizing.max_step) / 100).max(1);
+    // A raise reads only runs since the last change: runs at a cap the profile had before, and went back to by a
+    // lowering or an undo, would raise it again with nothing new.
+    let recent: Vec<u64> = at_cap
+        .iter()
+        .filter(|job| job.queued_at >= since)
         .map(|job| job.cpu_peak)
         .collect();
-    let runs = peaks.len() as u64;
-    let spread = spread(peaks);
-    let step = (current.saturating_mul(config.sizing.max_step) / 100).max(1);
-    if runs >= RAISE_RUNS && spread.p95.saturating_mul(100) >= cap.saturating_mul(AT_CAP) {
+    let (runs, p95) = (recent.len() as u64, spread(recent).p95);
+    if runs >= RAISE_RUNS && p95.saturating_mul(100) >= cap.saturating_mul(AT_CAP) {
         let slice = context.cpus?;
         let mut to = current
             .saturating_add(step)
@@ -432,14 +451,15 @@ fn cpus(
             to,
             reason: format!(
                 "{runs} runs at its {current} CPUs peaked at {} CPUs (p95), at the cap",
-                cores(spread.p95)
+                cores(p95)
             ),
         });
     }
+    let runs = at_cap.len() as u64;
     if lowering == Lowering::Held || runs < u64::from(config.sizing.min_jobs) {
         return None;
     }
-    let largest = spread.max;
+    let largest = at_cap.iter().map(|job| job.cpu_peak).max().unwrap_or(0);
     let need =
         largest.saturating_add(largest.saturating_mul(u64::from(config.sizing.margin)) / 100);
     if need.saturating_mul(100) > cap.saturating_mul(FAR_UNDER) {

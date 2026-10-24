@@ -26,8 +26,9 @@ as the jobs it is for were killed or held at their cap. Still one change per pro
 counted however old, pending or written, and each undoable.
 
 A raise reads only the evidence since the profile's last change: the waits and slot use of the jobs queued after
-it, and the CPU peaks of runs at the profile's current `cpus`. Otherwise a 30-day p95 wait that a slot already fixed
-would add one slot an hour until the budget ran out.
+it, and the CPU peaks of the runs after it at the profile's current `cpus`. Otherwise a 30-day p95 wait that a slot
+already fixed would add one slot an hour until the budget ran out, and runs pinned at a cap the profile went back to,
+by a lowering or an undo, would raise it again with nothing new: raise, lower, raise, every 24 hours.
 
 ### Slots without a hand-set ceiling
 
@@ -47,7 +48,7 @@ added. Slots are never lowered under what runs.
 `cpus` follows the CPU peak runs reach under it. Only runs whose container had the profile's current `cpus` count
 (the runner's recorded CPU cap); a run under another cap says nothing about this one.
 
-- Raise: with 3 or more such runs and their CPU peak at p95 within 5% of the cap, `cpus` goes up by `max_step`
+- Raise: with 3 or more such runs since the last change and their CPU peak at p95 within 5% of the cap, `cpus` goes up by `max_step`
   percent, at least 1, up to the slice's CPUs. Under `caps` admission with `cpu_overcommit` set, every profile's
   `slots × cpus` must also fit the CPU budget: a raise there trades concurrency for speed, which auto sizing does not
   decide.
