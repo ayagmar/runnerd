@@ -85,6 +85,8 @@ struct GithubState {
     off_branch: Vec<String>,
     /// While true, comparing a branch with a commit fails.
     compare_fails: bool,
+    /// While true, registering a runner fails.
+    register_fails: bool,
     calls: Vec<String>,
     /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
     held: tokio::sync::watch::Sender<bool>,
@@ -195,6 +197,9 @@ impl GithubApi for FakeGithub {
     ) -> Result<(Runner, JitConfig), github::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("register {name}"));
+        if state.register_fails {
+            return Err(github::Error::Token("register fails".to_owned()));
+        }
         let runner = Runner {
             id: 100 + state.runners.len() as u64,
             name: name.to_owned(),
@@ -3121,6 +3126,33 @@ async fn a_job_whose_runner_failed_to_start_waits_for_the_backoff_not_for_that_r
 }
 
 #[tokio::test]
+async fn a_job_held_by_a_backoff_says_what_failed() {
+    let reason = |github: &FakeGithub, docker: &FakeDocker| {
+        let (github, docker) = (github.clone(), docker.clone());
+        async move {
+            github.0.lock().unwrap().queued = vec![job(1)];
+            let (mut engine, handle, _dir) = engine(&github, &docker);
+            engine.recover().await.unwrap();
+            engine.tick(Shutdown::No).await;
+            engine.publish();
+            let status = handle.status.borrow();
+            let queued = &status.queued[0];
+            let reason = queued.waiting.as_ref().unwrap().reason(queued, &status, 0);
+            reason.split(';').next().unwrap().to_owned()
+        }
+    };
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().register_fails = true;
+    assert_eq!(
+        reason(&github, &docker).await,
+        "Runners cannot register with GitHub"
+    );
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().missing_images = BTreeSet::from(["runnerd-runner:app".to_owned()]);
+    assert_eq!(reason(&github, &docker).await, "Runners cannot start");
+}
+
+#[tokio::test]
 async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     github.0.lock().unwrap().queued = vec![job(1)];
@@ -3132,8 +3164,7 @@ async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
     engine.tick(Shutdown::No).await;
     // Still broken once the hold ends: held longer, without another announcement.
     for _ in 0..3 {
-        engine.repositories.get_mut("o/r").unwrap().held_until =
-            Some(std::time::SystemTime::UNIX_EPOCH);
+        engine.repositories.get_mut("o/r").unwrap().held = None;
         engine.tick(Shutdown::No).await;
     }
     handle.store.flush().await;

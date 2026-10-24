@@ -351,6 +351,21 @@ pub struct QueuedJob {
     pub waiting: Option<Waiting>,
 }
 
+/// What failed, that holds a repository's runners back for a while.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum HoldCause {
+    /// Its runners ended without taking a job.
+    #[default]
+    NoJob,
+    /// Its runners ended without a job after waiting for one, twice in a row.
+    IdleExits,
+    /// GitHub did not register its runner.
+    Register,
+    /// Docker did not start its runner's container.
+    Start,
+}
+
 /// Why a queued job has no runner of its own yet. Jobs are served oldest first; each takes the first of these that
 /// holds for it.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
@@ -358,11 +373,13 @@ pub struct QueuedJob {
 pub enum Waiting {
     /// Its repository is paused.
     Paused,
-    /// Runners of its repository ended without taking a job, so none starts before `until` (seconds since the Unix
-    /// epoch).
+    /// Runners of its repository failed, so none starts before `until` (seconds since the Unix epoch).
     Backoff {
         /// When runners may start again.
         until: u64,
+        /// What failed; `NoJob` from a daemon before it said.
+        #[serde(default)]
+        cause: HoldCause,
     },
     /// A runner started for it and waits for GitHub to hand it the job: a runner takes any job its labels match,
     /// so not necessarily this one.
@@ -461,8 +478,14 @@ impl Waiting {
         };
         match self {
             Waiting::Paused => format!("{} is paused", job.repository),
-            Waiting::Backoff { until } => format!(
-                "Runners failed to take a job; retrying in {}",
+            Waiting::Backoff { until, cause } => format!(
+                "{}; retrying in {}",
+                match cause {
+                    HoldCause::NoJob => "Runners failed to take a job",
+                    HoldCause::IdleExits => "Runners ended without a job after waiting for one",
+                    HoldCause::Register => "Runners cannot register with GitHub",
+                    HoldCause::Start => "Runners cannot start",
+                },
                 admission::wait(until.saturating_sub(now))
             ),
             Waiting::RunnerStarting => {

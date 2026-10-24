@@ -39,7 +39,7 @@ pub use self::control::{
 use self::history::{Closing, Found};
 use self::images::Images;
 pub use self::records::RecordSelection;
-use super::SlotRef;
+use super::{Hold, SlotRef};
 use crate::admission::Key;
 use crate::api;
 use crate::buildcache::BuildCache;
@@ -256,7 +256,7 @@ struct RepositoryState {
     queued: Vec<QueuedJob>,
     /// Whether the last poll of its queued jobs succeeded.
     listed: bool,
-    held_until: Option<SystemTime>,
+    held: Option<Hold>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
     /// Runners in a row that ended without a job after waiting `IDLE_TIMEOUT` for one.

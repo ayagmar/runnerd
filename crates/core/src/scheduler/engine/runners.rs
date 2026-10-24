@@ -8,12 +8,12 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::{Engine, Occupant, Purpose, RunningJobs, unix_secs};
-use crate::api::{Admission, Event, RunnerFailure};
+use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
 use crate::record;
-use crate::scheduler::{IDLE_TIMEOUT, SlotRef};
+use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef};
 
 /// The runner container's label with the labels its runner registered with, comma-separated as GitHub's runner
 /// takes them, so a restart knows them.
@@ -140,7 +140,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Some(true) => {
                     state.failures = 0;
                     state.idle_exits = 0;
-                    state.held_until = None;
+                    state.held = None;
                 }
                 // One that waited `IDLE_TIMEOUT` had started and connected: a warm runner whose container went
                 // once (a restart of Docker, the runner removed on GitHub) says nothing of the next one's start. The
@@ -165,6 +165,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         self.hold(
                             &occupant.repository,
                             &slot.profile,
+                            HoldCause::IdleExits,
                             "its runners end without a job after waiting for one".to_owned(),
                         );
                     }
@@ -177,6 +178,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.hold(
                         &occupant.repository,
                         &slot.profile,
+                        HoldCause::NoJob,
                         format!("{} ended without taking a job", occupant.runner_name),
                     );
                 }
@@ -291,15 +293,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Holds back a repository's next runners after one failed, longer each time in a row, and announces the first
     /// hold of a streak as `runner.failed`: a repository that stays broken says so once, not every 10 minutes, until
     /// a runner takes a job. Runners that fail while it is held started before the hold, so they do not lengthen it.
-    fn hold(&mut self, repository: &str, profile: &str, error: String) {
+    fn hold(&mut self, repository: &str, profile: &str, cause: HoldCause, error: String) {
         if let Some(state) = self.repositories.get_mut(repository)
             && state
-                .held_until
-                .is_none_or(|until| until <= SystemTime::now())
+                .held
+                .is_none_or(|held| held.until <= SystemTime::now())
         {
             state.failures += 1;
             let wait = backoff(state.failures);
-            state.held_until = Some(SystemTime::now() + wait);
+            state.held = Some(Hold {
+                until: SystemTime::now() + wait,
+                cause,
+            });
             warn!("{repository}: no runner starts for {}s", wait.as_secs());
             if state.failures > 1 {
                 return;
@@ -370,7 +375,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Err(error) => {
                 let failure = format!("cannot register a runner: {error}");
                 warn!("{repository}: {failure}");
-                self.hold(repository, &slot.profile, failure);
+                self.hold(repository, &slot.profile, HoldCause::Register, failure);
                 return;
             }
         };
@@ -431,7 +436,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 if let Err(error) = self.github.delete_runner(repository, runner.id).await {
                     warn!("{repository}: cannot delete {name}: {error}");
                 }
-                self.hold(repository, &slot.profile, failure);
+                self.hold(repository, &slot.profile, HoldCause::Start, failure);
             }
         }
     }

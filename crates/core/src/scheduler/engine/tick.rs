@@ -221,7 +221,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     profile: repository.profile.clone(),
                     labels: repository.labels.clone(),
                     paused: self.control.is_paused(&repository.name),
-                    held_until: state.held_until,
+                    held: state.held,
                     // GitHub lists a job queued for a few seconds after a runner took it: without this, a tick in
                     // between starts a second runner for it.
                     queued: state

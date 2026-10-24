@@ -553,7 +553,7 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
         }
         engine.tick(Shutdown::No).await;
         assert_eq!(
-            engine.repositories["o/r"].held_until.is_some(),
+            engine.repositories["o/r"].held.is_some(),
             exits == 2,
             "held after the second in a row, not the first"
         );

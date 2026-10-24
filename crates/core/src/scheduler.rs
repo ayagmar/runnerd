@@ -19,6 +19,15 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// time would otherwise take every CPU that frees up before it.
 pub const CPU_PRIORITY_AFTER: Duration = Duration::from_secs(120);
 
+/// A repository's runners held back after they failed.
+#[derive(Debug, Clone, Copy)]
+pub struct Hold {
+    /// No runner starts for it before then.
+    pub until: SystemTime,
+    /// What failed.
+    pub cause: crate::api::HoldCause,
+}
+
 /// A repository as the planner sees it.
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -30,8 +39,8 @@ pub struct Repository {
     pub labels: Vec<String>,
     /// Paused repositories get no new runners; their running jobs finish.
     pub paused: bool,
-    /// No runner starts for this repository before then, after runners failed to take a job.
-    pub held_until: Option<SystemTime>,
+    /// No runner starts for this repository before then, after its runners failed.
+    pub held: Option<Hold>,
     /// Its queued jobs at the last poll.
     pub queued: Vec<QueuedJob>,
     /// What a new runner of it takes of the budget: `None`, its profile's `memory`. Under measured admission, the
@@ -599,12 +608,18 @@ fn sort_out(
             .map(|job| (job.id, Waiting::RunnerStarting)),
     );
     let serve = matching.iter().skip(skip).map(|job| job.id);
-    match repository.held_until.filter(|until| *until > now) {
-        Some(until) => {
-            let until = crate::time::ms(until) / 1000;
-            decided
-                .waiting
-                .extend(serve.map(|job| (job, Waiting::Backoff { until })));
+    match repository.held.filter(|held| held.until > now) {
+        Some(held) => {
+            let until = crate::time::ms(held.until) / 1000;
+            decided.waiting.extend(serve.map(|job| {
+                (
+                    job,
+                    Waiting::Backoff {
+                        until,
+                        cause: held.cause,
+                    },
+                )
+            }));
             None
         }
         None => Some(Sorted {

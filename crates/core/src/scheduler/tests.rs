@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Budget, CPU_PRIORITY_AFTER, Decision, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository,
+    Budget, CPU_PRIORITY_AFTER, Decision, Hold, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository,
     RunnerSlot, Slot, SlotRef, plan,
 };
-use crate::api::Waiting;
+use crate::api::{HoldCause, Waiting};
 use crate::github::QueuedJob;
 
 const GIB: u64 = 1 << 30;
@@ -36,7 +36,7 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
             profile.to_owned(),
         ],
         paused: false,
-        held_until: None,
+        held: None,
         queued,
         runner_memory: None,
         runner_cpu: None,
@@ -265,7 +265,10 @@ fn paused_held_and_reseeding_start_nothing() {
     let mut paused = repository("o/a", "app", queued());
     paused.paused = true;
     let mut held = repository("o/a", "app", queued());
-    held.held_until = Some(now() + Duration::from_secs(1));
+    held.held = Some(Hold {
+        until: now() + Duration::from_secs(1),
+        cause: HoldCause::NoJob,
+    });
     for repositories in [[paused], [held]] {
         assert_eq!(
             plan(
@@ -440,7 +443,10 @@ fn each_job_left_queued_says_why_it_waits() {
             ..repository("o/paused", "app", vec![job(1, &["app"])])
         },
         Repository {
-            held_until: Some(later),
+            held: Some(Hold {
+                until: later,
+                cause: HoldCause::NoJob,
+            }),
             ..repository("o/failing", "app", vec![job(2, &["app"])])
         },
         repository("o/a", "app", vec![job(3, &["app"]), job(4, &["app"])]),
@@ -484,7 +490,13 @@ fn each_job_left_queued_says_why_it_waits() {
         plan.waiting,
         BTreeMap::from([
             (1, Waiting::Paused),
-            (2, Waiting::Backoff { until: 1_000_060 }),
+            (
+                2,
+                Waiting::Backoff {
+                    until: 1_000_060,
+                    cause: HoldCause::NoJob
+                }
+            ),
             (4, Waiting::BehindStart { job: 3 }),
             (
                 5,
