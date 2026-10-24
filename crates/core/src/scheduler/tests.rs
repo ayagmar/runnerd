@@ -745,7 +745,7 @@ fn a_queued_job_counts_on_the_idle_runner_and_a_new_warm_runner_starts_beside_it
 }
 
 #[test]
-fn a_queued_job_takes_the_slot_of_another_repositorys_warm_runner_in_the_same_plan() {
+fn a_queued_job_takes_the_slot_of_a_warm_runner_of_another_repository_in_the_same_plan() {
     let repositories = [
         warm("o/a", "app", 1),
         repository("o/b", "app", vec![job(1, &["app"])]),

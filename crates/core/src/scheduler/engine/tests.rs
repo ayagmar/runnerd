@@ -1159,15 +1159,20 @@ async fn a_job_whose_container_vanished_while_the_daemon_was_down_closes_after_t
 }
 
 #[tokio::test]
-async fn an_idle_runner_gone_while_the_daemon_was_down_stops_holding_its_slot_after_the_restart() {
+async fn a_runner_gone_while_the_daemon_was_down_stops_holding_its_slot_after_the_restart() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let dir = TestDir::new("restart");
-    running_runner(&github, &docker, "");
+    running_runner(&github, &docker, "@@job 1 1\n");
     let (mut engine, handle) = engine_in(&github, &docker, &dir);
     engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
     handle.store.flush().await;
     let held = handle.store.sizing(0).await.unwrap().runners;
-    assert_eq!(held.len(), 1, "the adopted idle runner holds its slot");
+    assert_eq!(
+        held.len(),
+        1,
+        "the adopted runner holds its slot for its job"
+    );
     assert_eq!(held[0].removed_at, None);
     drop((engine, handle));
     // The host rebooted: the container is gone, and no daemon saw it go.
