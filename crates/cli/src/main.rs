@@ -10,8 +10,8 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use runnerd_core::api::{
-    Caches, CheckStatus, ConfigCheck, ConfigFile, Doctor, Event, EventQuery, Job, JobPage,
-    JobQuery, JobState, LogQuery, PairingQuery, Pairings, PauseQuery, Paused, Records,
+    Caches, CheckStatus, ConfigCheck, ConfigFile, Dashboard, Doctor, Event, EventQuery, Job,
+    JobPage, JobQuery, JobState, LogQuery, PairingQuery, Pairings, PauseQuery, Paused, Records,
     RemoveRecordsQuery, RemovedRecords, Resize, ShellQuery, Sizing, SizingQuery, Status,
 };
 use runnerd_core::config::{self, ByteSize, resize_profile};
@@ -166,20 +166,27 @@ enum Command {
 
 /// `runnerctl web`'s flags.
 #[derive(clap::Args)]
+#[allow(
+    clippy::struct_excessive_bools,
+    reason = "command-line switches, one field each as clap declares them"
+)]
 struct WebArgs {
     /// Print the links instead of opening one.
     #[arg(long)]
     no_open: bool,
     /// The address of a proxy in front of the dashboard to log in through instead, such as
-    /// `https://host.example.ts.net:8443`. `[web] origins` need not be named here.
-    #[arg(long, value_name = "ORIGIN")]
+    /// `https://host.example.ts.net:8443`, over `[web] open`. `[web] origins` need not be named here.
+    #[arg(long, value_name = "ORIGIN", conflicts_with = "local")]
     base: Option<config::Origin>,
+    /// Open the dashboard on its loopback address, over `[web] open`.
+    #[arg(long)]
+    local: bool,
     /// Print a QR code of a fresh link on each of `[web] origins`, or on `--base`, that signs a phone in within 5
     /// minutes.
     #[arg(long)]
     qr: bool,
     /// Sign every browser out of the dashboard, with a new session secret.
-    #[arg(long, conflicts_with_all = ["no_open", "base", "qr"])]
+    #[arg(long, conflicts_with_all = ["no_open", "base", "local", "qr"])]
     sign_out_all: bool,
 }
 
@@ -870,6 +877,23 @@ impl Links {
         };
         Some(Links { local, remote })
     }
+
+    /// The link on `origin`, one of `[web] origins`, to open, and the others to print, the loopback one first; the
+    /// loopback link to open when the file has none on `origin`.
+    fn open_on(self, origin: &config::Origin) -> (String, Vec<String>) {
+        let prefix = format!("{origin}/login?");
+        let Some(index) = self
+            .remote
+            .iter()
+            .position(|link| link.starts_with(&prefix))
+        else {
+            return (self.local, self.remote);
+        };
+        let mut others = self.remote;
+        let open = others.remove(index);
+        others.insert(0, self.local);
+        (open, others)
+    }
 }
 
 /// `text` as a QR code of half-height blocks. With `colour`, dark blocks on a white background whatever the
@@ -946,12 +970,25 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
             file.display()
         )));
     };
-    let (open, others) = match base {
-        Some(_) => (
+    // `[web] open`, as the daemon started with it. None from a daemon that does not answer or predates it: the
+    // login file alone says where to sign in.
+    let configured = if base.is_none() && !args.local {
+        client
+            .get::<Dashboard>("/v1/dashboard")
+            .await
+            .ok()
+            .and_then(|dashboard| dashboard.open?.parse::<config::Origin>().ok())
+    } else {
+        None
+    };
+    let loopback = links.local.clone();
+    let (open, others) = match (base, &configured) {
+        (Some(_), _) => (
             links.remote.into_iter().next().unwrap_or(links.local),
             Vec::new(),
         ),
-        None => (links.local, links.remote),
+        (None, Some(origin)) => links.open_on(origin),
+        (None, None) => (links.local, links.remote),
     };
     if args.no_open {
         output::line(&open);
@@ -971,9 +1008,15 @@ async fn web(client: &Client, args: &WebArgs) -> Result<ExitCode, Error> {
         }
     }
     for link in &others {
-        output::line(format_args!(
-            "on another device, open this link, which works once (or run `runnerctl web --qr`): {link}"
-        ));
+        if *link == loopback {
+            output::line(format_args!(
+                "on this computer's own address, this link works once (or run `runnerctl web --local`): {link}"
+            ));
+        } else {
+            output::line(format_args!(
+                "on another device, open this link, which works once (or run `runnerctl web --qr`): {link}"
+            ));
+        }
     }
     Ok(ExitCode::SUCCESS)
 }

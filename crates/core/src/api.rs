@@ -18,6 +18,7 @@
 //! | `PUT /v1/config` | TOML in, [`ConfigCheck`]; 422 [`ConfigCheck`] when invalid |
 //! | `GET /v1/doctor` | [`Doctor`] |
 //! | `POST /v1/shutdown` | [`ShutdownRequest`] in, 202 |
+//! | `GET /v1/dashboard` | [`Dashboard`] |
 //! | `POST /v1/dashboard/sign-out` | none, 204 |
 //! | `POST /v1/dashboard/pairings?`[`PairingQuery`] | [`Pairings`]; 409 when the dashboard is off or has no `[web] origins` |
 //! | `GET /v1/jobs?`[`JobQuery`] | [`JobPage`] |
@@ -333,6 +334,15 @@ pub enum Waiting {
         /// The older job's ID.
         job: u64,
     },
+}
+
+/// `GET /v1/dashboard`: the dashboard's `[web]` settings, as the daemon read them when it started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dashboard {
+    /// `[web] open`: the one of `[web] origins` that `runnerctl web` opens the dashboard on; the loopback address
+    /// when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<String>,
 }
 
 /// `POST /v1/dashboard/pairings`: which of `[web] origins` to make a link for.

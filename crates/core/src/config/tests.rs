@@ -208,6 +208,36 @@ fn the_dashboard_takes_writes_from_no_other_origin_unless_configured() {
     assert!(config.web.origins.is_empty(), "no extra origins by default");
 }
 
+#[test]
+fn the_dashboard_opens_on_one_of_its_origins_or_the_config_is_refused() {
+    let web = |lines: &str| {
+        Config::parse(&format!("{MINIMAL}\n[web]\n{lines}\n"))
+            .unwrap()
+            .validate(None)
+            .map_err(|error| error.to_string())
+    };
+    assert_eq!(
+        Config::parse(MINIMAL).unwrap().web.open,
+        None,
+        "loopback by default"
+    );
+    let tailnet = r#"origins = ["https://forge.tail0b5e.ts.net:8443"]"#;
+    web(&format!(
+        "{tailnet}\nopen = \"https://forge.tail0b5e.ts.net:8443\""
+    ))
+    .unwrap();
+    let error = web(&format!(
+        "{tailnet}\nopen = \"https://other.tail0b5e.ts.net\""
+    ))
+    .unwrap_err();
+    assert!(
+        error.contains("https://other.tail0b5e.ts.net")
+            && error.contains("not one of [web] origins"),
+        "{error}"
+    );
+    web(r#"open = "https://forge.tail0b5e.ts.net:8443""#).unwrap_err();
+}
+
 /// Each input and what `new URL(input).origin` gives for it in Node 24, which follows the WHATWG URL standard as
 /// browsers do: the `Origin` header a page at that address sends.
 const BROWSER_ORIGINS: [(&str, &str); 11] = [

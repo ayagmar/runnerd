@@ -49,6 +49,14 @@ Now `runnerctl web` prints a one-time link for each address in `[web] origins` t
 runnerctl web --qr
 ```
 
+If you always reach the dashboard through the proxy, even on this computer, name it in `open` too, and `runnerctl web` opens it there instead of on `127.0.0.1`, still printing the loopback link. `runnerctl web --local` opens the loopback address for one run:
+
+```toml
+[web]
+origins = ["https://forge.tail0b5e.ts.net:8443"]
+open = "https://forge.tail0b5e.ts.net:8443"
+```
+
 A QR code works once, within 5 minutes, and only on the address it shows; each one is new. A link from `runnerctl web` works once, and the daemon writes a new one in its place. Each address has its own link, so using one leaves the others working. `--base <origin>` prints the link for a proxy not in `[web] origins`, which can then only read. Behind a proxy that says it took the request over HTTPS (`X-Forwarded-Proto`, which `tailscale serve` sends), the session cookie is `Secure`. Anyone who can reach the proxy sees the sign-in page and nothing else without a link.
 
 runnerd does not trust Tailscale's identity headers such as `Tailscale-User-Login`: any local user could send them straight to `127.0.0.1:7477`.
@@ -140,7 +148,7 @@ JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no runner uses |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
 | `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
-| `runnerctl web` | opens the dashboard with a one-time login link from `$XDG_RUNTIME_DIR/runnerd.web` and prints one for each of `[web] origins` (`--no-open` prints them all, `--qr` shows a fresh 5-minute link on each origin as a QR code, `--sign-out-all` signs every browser out) |
+| `runnerctl web` | opens the dashboard with a one-time login link from `$XDG_RUNTIME_DIR/runnerd.web`, on `[web] open` if set, and prints one for each other address (`--local` opens the loopback address, `--base <origin>` a proxy's, `--no-open` prints them all, `--qr` shows a fresh 5-minute link on each origin as a QR code, `--sign-out-all` signs every browser out) |
 
 ### Sizing
 

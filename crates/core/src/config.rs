@@ -361,6 +361,21 @@ pub struct Web {
     /// The origins, besides the dashboard's own loopback address, whose pages may write: pause, reseed, save the
     /// config. Default none.
     pub origins: Vec<Origin>,
+    /// The one of `origins` that `runnerctl web` opens the dashboard on, such as a tailnet's address. Default none:
+    /// it opens the loopback address.
+    pub open: Option<Origin>,
+}
+
+impl Web {
+    /// Refuses an `open` that is not one of `origins`.
+    fn validate(&self) -> Result<(), ConfigError> {
+        match &self.open {
+            Some(open) if !self.origins.contains(open) => {
+                Err(ConfigError::OpenNotListed { open: open.clone() })
+            }
+            _ => Ok(()),
+        }
+    }
 }
 
 /// An origin as a browser sends it in `Origin`: `https://host[:port]`, or `http://` for a loopback host, in lower
@@ -568,6 +583,14 @@ pub enum ConfigError {
     CpuOvercommit {
         /// The value set.
         value: f64,
+    },
+    /// `[web] open` is not one of `[web] origins`.
+    #[error(
+        "web.open is {open}, which is not one of [web] origins; add it to origins, or remove open"
+    )]
+    OpenNotListed {
+        /// The origin `open` names.
+        open: Origin,
     },
     /// A profile's `memory` or `slots` are outside its `min_memory`, `max_memory` or `max_slots`, or its
     /// `min_memory` is above its `max_memory`.
@@ -820,6 +843,7 @@ impl Config {
         {
             return Err(ConfigError::CpuOvercommit { value });
         }
+        self.web.validate()?;
         for repository in &self.repositories {
             if !self.profiles.contains_key(&repository.profile) {
                 return Err(ConfigError::UnknownProfile {

@@ -506,6 +506,31 @@ async fn finished_jobs(store: &Store, profile: &str, cap: u64, peak: u64) {
 }
 
 #[tokio::test]
+async fn the_dashboard_says_which_origin_runnerctl_web_opens_as_the_daemon_started_with_it() {
+    let dashboard = async |text: &str| -> runnerd_core::api::Dashboard {
+        let dir = Dir::new();
+        let daemon = start_serving(&dir.0, None, false, sync_dir, memory_max, text).await;
+        let response = daemon
+            .client
+            .get("http://runnerd/v1/dashboard")
+            .send()
+            .await
+            .unwrap();
+        let dashboard = serde_json::from_slice(&body(response).await).unwrap();
+        daemon.stop().await;
+        dashboard
+    };
+    assert_eq!(dashboard(EXAMPLE).await.open, None, "loopback unless asked");
+    let tailnet = format!(
+        "{EXAMPLE}\n[web]\norigins = [\"https://forge.tail0b5e.ts.net:8443\"]\nopen = \"https://forge.tail0b5e.ts.net:8443\"\n"
+    );
+    assert_eq!(
+        dashboard(&tailnet).await.open.as_deref(),
+        Some("https://forge.tail0b5e.ts.net:8443")
+    );
+}
+
+#[tokio::test]
 async fn activity_counts_the_jobs_started_and_ended_in_the_last_24_hours() {
     let dir = Dir::new();
     let daemon = start_serving(&dir.0, None, false, sync_dir, memory_max, &auto_sizing()).await;
@@ -1209,6 +1234,7 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/host/samples"),
         client.get("http://runnerd/v1/stats"),
         client.get("http://runnerd/v1/activity"),
+        client.get("http://runnerd/v1/dashboard"),
         client.get("http://runnerd/v1/sizing"),
         client.get("http://runnerd/v1/caches"),
         client.get("http://runnerd/v1/caches/history"),

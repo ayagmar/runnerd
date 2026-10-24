@@ -53,3 +53,9 @@ The dashboard still listens on loopback only; a proxy in front of it is the owne
 - Rejected: listening on a non-loopback address with TLS of runnerd's own (certificates to manage, and the proxy
   already does it); accepting any `Origin` that matches the request's `Host` (the check would then rest on a header
   the proxy sets; a list the owner writes says which addresses they meant).
+- Amended (2026-10-24): `[web] open` names the one of `origins` that `runnerctl web` opens, for an owner who always
+  goes through the proxy, such as a tailnet's address. It must be one of `origins` (`check-config` refuses it
+  otherwise), so the opened page can write. The daemon reads it at start with the rest of `[web]` and serves it at
+  `GET /v1/dashboard`; `runnerctl web` opens that origin's link from `runnerd.web` and still prints the loopback
+  one. `--local` and `--base` override it for one run. Rejected: runnerctl reading `runnerd.toml` itself (it may
+  not be able to, and would see an edit the running dashboard does not use yet).
