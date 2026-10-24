@@ -5,6 +5,27 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.11 to 0.0.12
+
+The job history stays at version 12, so either version reads it. Install 0.0.12, move each profile's published `image` to its `-0.0.12` tag, and restart runnerd:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.12/install.sh | sh -s -- --version v0.0.12
+runnerd check-config
+systemctl --user restart runnerd
+runnerctl doctor
+```
+
+### What changes on its own
+
+- **Each slot keeps its Docker images and build cache** between jobs, which needs the 0.0.12 images. Each slot's first job after the upgrade still starts cold. The slots' Docker stores together take at most a quarter of the disk not otherwise used, so `runnerctl caches` shows larger slot volumes than before ([Warm caches](../running/#warm-caches)).
+- **The volumes of slots past a profile's slot count** are removed at the next moment no job runs, such as `node-slot-9` once `node` has 8 slots.
+- **A snapshot over its `snapshot_max`** starts over at its profile's next idle moment.
+
+### New, off until you set them
+
+- `build_cache_writers = "pull-requests"` under a repository lets pull requests from its own branches, opened by people, write to the [build cache](../running/#build-cache); forks and bots still only read.
+
 ## 0.0.10 to 0.0.11
 
 ### Before

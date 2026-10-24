@@ -31,14 +31,14 @@ log_max = "50M"
 
 # Gradle, Android, Quarkus and Testcontainers PostgreSQL; a busy runner peaked at 6.8G without page cache.
 [profiles.jvm]
-image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.11"
+image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.12"
 cpus = 8
 memory = "9G"
 slots = 2
 
 # Maven, pnpm, Next.js image builds, Testcontainers, Playwright, Flutter; a busy runner peaked at 6.0G.
 [profiles.node]
-image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.11"
+image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.12"
 cpus = 8
 memory = "7G"
 slots = 2
