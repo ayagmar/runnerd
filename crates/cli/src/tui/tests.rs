@@ -1953,6 +1953,62 @@ fn a_frame_without_columns_or_rows_draws_nothing_and_does_not_panic() {
 }
 
 #[test]
+fn a_reason_read_before_a_job_or_slot_changed_is_not_shown() {
+    let mut app = app();
+    let mut a = queued(51, "halyard/ledger", "build", 1000);
+    a.workflow = Some("CI".to_owned());
+    let mut b = queued(52, "halyard/ledger", "test", 1001);
+    b.waiting = Some(Waiting::BehindStart { job: 51 });
+    app.live.status.queued = vec![a, b];
+    let before = app.live.status.clone();
+    let shown = screen(&app, 120, 24, false);
+    assert!(
+        shown.contains("Next after build, whose runner starts first"),
+        "{shown}"
+    );
+
+    // A periodic read is under way when A starts.
+    let host = event(
+        None,
+        Event::HostSample {
+            sample: runnerd_core::api::HostSample {
+                at: NOW,
+                cpu: 0,
+                memory: 0,
+            },
+        },
+    );
+    assert!(app.update(host).contains(&Effect::Reasons));
+    app.update(event(
+        Some(9),
+        Event::JobStarted {
+            job: summary(51, JobState::Running),
+        },
+    ));
+    let shown = screen(&app, 120, 24, false);
+    assert!(
+        !shown.contains("Next after"),
+        "a start may change every reason: none shows until read again: {shown}"
+    );
+    assert_eq!(
+        app.update(Msg::Reasons(Some(Box::new(before)))),
+        vec![Effect::Reasons],
+        "the read from before the start is dropped and another made"
+    );
+    let shown = screen(&app, 120, 24, false);
+    assert!(!shown.contains("Next after"), "{shown}");
+    assert!(
+        app.update(Msg::Reasons(None)).is_empty(),
+        "a read after the start that fails asks for nothing until the next sample or change"
+    );
+    let shown = screen(&app, 120, 24, false);
+    assert!(
+        !shown.contains("Next after"),
+        "a failed read leaves no reason rather than the old one: {shown}"
+    );
+}
+
+#[test]
 fn a_queued_job_s_reason_is_read_again_one_read_at_a_time_since_no_event_carries_it() {
     let mut app = app();
     let queued_event = |id| {
@@ -1968,15 +2024,20 @@ fn a_queued_job_s_reason_is_read_again_one_read_at_a_time_since_no_event_carries
         app.update(queued_event(52)).is_empty(),
         "a burst makes one read at a time"
     );
+    assert_eq!(
+        app.update(Msg::Reasons(None)),
+        vec![Effect::Reasons],
+        "the second job queued during the read: read again"
+    );
     let mut read = app.live.status.clone();
     read.queued[0].waiting = Some(Waiting::NoSlot {
         profile: "jvm".to_owned(),
     });
-    // The read is older than the second job's event: the queue keeps it, and the read asks again for it.
+    // The read only knows the first job; the queue keeps the second from its event.
     read.queued.truncate(1);
-    assert_eq!(
-        app.update(Msg::Reasons(Some(Box::new(read)))),
-        vec![Effect::Reasons]
+    assert!(
+        app.update(Msg::Reasons(Some(Box::new(read)))).is_empty(),
+        "nothing changed during this read"
     );
     assert_eq!(
         app.live.status.queued.len(),
@@ -1987,7 +2048,6 @@ fn a_queued_job_s_reason_is_read_again_one_read_at_a_time_since_no_event_carries
     let shown = screen(&app, 120, 24, false);
     assert!(shown.contains("All 2 jvm slots are busy"), "{shown}");
 
-    app.update(Msg::Reasons(None));
     let host = |at| {
         event(
             None,

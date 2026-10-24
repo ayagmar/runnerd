@@ -479,7 +479,10 @@ impl App {
                 let running = &self.live.running;
                 self.series.retain(|id, _| running.contains_key(id));
                 self.history.learn(&self.live.recent);
-                // Jobs may have started and ended while the stream was away.
+                // Jobs may have started and ended while the stream was away, and a reasons read under way is older.
+                if self.reasons_asked {
+                    self.reasons_stale = true;
+                }
                 return vec![self.ask_activity()];
             }
             Msg::Job(job) => {
@@ -562,10 +565,14 @@ impl App {
         Vec::new()
     }
 
-    /// Takes the reasons from a status read again, and asks again if something changed while it was read. Only the
-    /// reasons: the queue itself is kept from events, which may be newer than the read.
+    /// Takes the reasons from a status read again, unless something changed while it was read: then they may be
+    /// wrong, so they are left out and read again. Only the reasons: the queue itself is kept from events, which may
+    /// be newer than the read.
     fn reasons(&mut self, status: Option<&Status>) -> Vec<Effect> {
         self.reasons_asked = false;
+        if std::mem::take(&mut self.reasons_stale) {
+            return self.ask_reasons().into_iter().collect();
+        }
         if let Some(status) = status {
             for job in &mut self.live.status.queued {
                 job.waiting = status
@@ -575,10 +582,16 @@ impl App {
                     .and_then(|read| read.waiting.clone());
             }
         }
-        if std::mem::take(&mut self.reasons_stale) {
-            return self.ask_reasons().into_iter().collect();
-        }
         Vec::new()
+    }
+
+    /// A job or slot changed, so every reason may be wrong (a job behind one that started, a slot that freed): none
+    /// shows until a status read after the change says them again.
+    fn reasons_changed(&mut self) -> Option<Effect> {
+        for job in &mut self.live.status.queued {
+            job.waiting = None;
+        }
+        self.ask_reasons()
     }
 
     /// Shows the day's activity, unless a newer read already answered.
@@ -641,17 +654,17 @@ impl App {
                 }
             }
             Event::JobQueued { .. } | Event::SlotChanged { .. } => {
-                effects.extend(self.ask_reasons());
+                effects.extend(self.reasons_changed());
             }
             Event::JobStarted { .. } => {
                 effects.push(self.ask_activity());
-                effects.extend(self.ask_reasons());
+                effects.extend(self.reasons_changed());
             }
             Event::JobFinished { job } => {
                 self.series.remove(&job.id);
                 self.history.learn([job]);
                 effects.push(self.ask_activity());
-                effects.extend(self.ask_reasons());
+                effects.extend(self.reasons_changed());
                 if self.view == View::History && self.history.before.is_none() {
                     effects.push(self.history.request(Rows::Keep));
                 }
