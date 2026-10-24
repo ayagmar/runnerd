@@ -99,7 +99,9 @@ a write only with the dashboard's own `Origin` or one of `[web] origins`, the pr
 own user. A browser signed in stays signed in across restarts: the session secret is a file the daemon keeps,
 and `POST /v1/dashboard/sign-out` on the socket replaces it with every code made before;
 `POST /v1/dashboard/pairings` makes 5-minute links bound to one of `[web] origins` for `runnerctl web --qr`
-([ADR 0043](docs/adr/0043-phones-paired-by-qr-code-and-sessions-that-last.md)).
+([ADR 0043](docs/adr/0043-phones-paired-by-qr-code-and-sessions-that-last.md)). `GET /v1/dashboard` serves `[web] open`
+as the daemon read it at start, the origin `runnerctl web` opens
+([ADR 0042](docs/adr/0042-dashboard-behind-a-proxy-and-installable.md)).
 
 ## Job lifecycle
 

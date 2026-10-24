@@ -73,14 +73,14 @@ const simulateMeasured = simulateRows.at(-1);
 const status = `runnerd 0.0.9  23.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
-jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792741296   7m 12s
+jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792814287   7m 11s
 jvm         2  free
-node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792741414  5m 14s
-node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792741711     17s
+node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792814405  5m 13s
+node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792814702     16s
 
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
 halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
-halyard/storefront  node     active       1  self-hosted,linux,x64,node`;
+halyard/storefront  node     active       4  self-hosted,linux,x64,node`;
 
 // runnerctl sizing's node profile, as the clients page prints it.
 const sizing = `node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
@@ -272,7 +272,7 @@ const phoneShot = await capture('overview-phone', [390, 480, 640, 780]);
             <code class="prompt-line">$ runnerctl tui</code>
             <Tui
               name="overview-96"
-              label="The overview at 96 by 26: the budget bar with jvm slot 1 at 3.89G and node slot 1 at 2.47G used, node slot 2's idle runner and the mirror, one line per slot, the slice's memory and CPU charts, the repositories and the latest jobs."
+              label="The overview at 96 by 26: a health line with 2 of 4 slots running and 4 jobs waiting, the budget bar with jvm slot 1 at 4.05G and node slot 1 at 2.58G used, one line per slot, the four waiting jobs with why each waits, a runner starting for the oldest and every node slot busy for the rest, then the repositories and the latest jobs."
             />
           </li>
           <li class="client client-web">
@@ -334,7 +334,7 @@ const phoneShot = await capture('overview-phone', [390, 480, 640, 780]);
                 }
                 <img
                   src={phoneShot.fallback.src}
-                  alt="The dashboard's overview on a phone: the budget bar with two jvm and two node slots, then jvm slot 1's card running halyard/ledger's build, with its memory and CPU charts."
+                  alt="The dashboard's overview on a phone: four tiles, 2 of 4 slots running, 4 waiting, a p95 wait of 29s and 3 failed in 24 hours, then the waiting jobs, each with why it waits."
                   width={phoneShot.src.width}
                   height={phoneShot.src.height}
                   loading="lazy"

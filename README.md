@@ -9,7 +9,7 @@
 
 runnerd runs ephemeral GitHub Actions runners on a Linux host: one fresh container per job, from one pool shared by the repositories you configure, kept inside a memory and CPU budget.
 
-It is in early development: the daemon schedules runners, records every job, can keep a failed job's runner to open a shell in, advises on each profile's memory and slots from past jobs' peaks and can apply that advice itself, can admit runners by those peaks instead of their caps and by CPU, serves a JSON API and a web dashboard you can install as an app and reach through a proxy, and `runnerctl` reads and controls it from a terminal.
+It is in early development: the daemon schedules runners, records every job, can keep a failed job's runner to open a shell in, advises on each profile's memory and slots from past jobs' peaks and can apply that advice itself, can admit runners by those peaks instead of their caps and by CPU, says why each queued job waits, serves a JSON API and a web dashboard you can install as an app and reach through a proxy, and `runnerctl` reads and controls it from a terminal.
 
 ```mermaid
 flowchart TB
