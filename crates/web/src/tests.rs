@@ -789,7 +789,7 @@ async fn every_page_renders_from_the_daemons_data() {
         "halyard/ledger",
         "halyard/storefront",
         "Integration tests (Testcontainers)",
-        "MemoryMax 33G",
+        "up to its MemoryMax of 33G",
         "peak",
     ] {
         assert!(
@@ -884,6 +884,40 @@ async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits
         health.contains(r##"<a class="figure-main" href="#queue">2</a>"##),
         "the health figures count both waiting: {health}"
     );
+}
+
+#[tokio::test]
+async fn the_slices_charts_reach_up_to_the_slice_not_to_what_its_slots_add_up_to() {
+    let dashboard = Dashboard::start().await;
+    {
+        // 32 threads, 33G; the slots' CPU limits add up past the CPUs, as quotas may.
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let profiles = &mut fixtures.status.profiles;
+        for profile in profiles.iter_mut() {
+            profile.cpus = 12;
+        }
+        let slots: usize = profiles.iter().map(|profile| profile.slots.len()).sum();
+        assert!(
+            slots * 12 > 32,
+            "the slots ask for more CPUs than the slice has"
+        );
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let host = &body[body.find(r#"id="host""#).unwrap()..];
+    let axes: Vec<&str> = host
+        .match_indices(r#"<div class="chart-y" aria-hidden="true"><span>"#)
+        .map(|(at, prefix)| {
+            let top = &host[at + prefix.len()..];
+            &top[..top.find("</span>").unwrap()]
+        })
+        .collect();
+    assert_eq!(
+        axes,
+        ["33G", "32 cores"],
+        "MemoryMax and the slice's CPUs top the axes"
+    );
+    assert!(!host.contains("of all slots"), "{host}");
 }
 
 #[tokio::test]

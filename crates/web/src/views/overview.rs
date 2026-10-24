@@ -747,18 +747,21 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
             .max()
             .unwrap_or(0)
     };
-    let cpus: u64 = status
-        .profiles
-        .iter()
-        .map(|profile| u64::from(profile.cpus) * profile.slots.len() as u64)
-        .sum();
     let gap = overview.host.interval.max(1) * 3;
     let memory_peak = shown(&memory);
     let cpu_peak = shown(&cpu);
+    let (slice, interval) = (&status.budget.slice, overview.host.interval);
+    let up_to =
+        |limit: Option<String>| limit.map_or(String::new(), |limit| format!(", up to its {limit}"));
     let memory_chart = TimeChart {
         title: format!(
-            "Memory of {} over the last 30 minutes, sampled every {} s",
-            status.budget.slice, overview.host.interval
+            "Memory of {slice} over the last 30 minutes, sampled every {interval} s{}",
+            up_to(
+                status
+                    .budget
+                    .memory_max
+                    .map(|max| format!("MemoryMax of {}", format::bytes(max)))
+            )
         ),
         start: 0,
         end: now,
@@ -770,22 +773,26 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
             points: memory,
             area: true,
         }],
-        limit: status
-            .budget
-            .memory_max
-            .map(|max| (max, format!("MemoryMax {}", format::bytes(max)))),
+        limit: None,
         value: format::bytes,
         time: relative_clock,
         gap,
     };
-    let memory_top = nice_top(
-        memory_peak.max(status.budget.memory_max.unwrap_or(0)),
-        Base::Binary,
+    // The slice's own limits top the axes when they are known: the slots' memory caps and CPU limits may add up
+    // past them, and a rounded-up top would draw the slice's whole as a part.
+    let memory_top = status.budget.memory_max.map_or_else(
+        || nice_top(memory_peak, Base::Binary),
+        |max| max.max(memory_peak),
     );
     let cpu_chart = TimeChart {
         title: format!(
-            "CPU of {} over the last 30 minutes, sampled every {} s",
-            status.budget.slice, overview.host.interval
+            "CPU of {slice} over the last 30 minutes, sampled every {interval} s{}",
+            up_to(
+                status
+                    .budget
+                    .slice_cpus
+                    .map(|cpus| format!("{} CPUs", format::cores(cpus)))
+            )
         ),
         start: 0,
         end: now,
@@ -797,12 +804,15 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
             points: cpu,
             area: true,
         }],
-        limit: (cpus > 0).then(|| (cpus * 1000, format!("{cpus} CPUs of all slots"))),
+        limit: None,
         value: |millicores| format!("{} cores", format::cores(millicores)),
         time: relative_clock,
         gap,
     };
-    let cpu_top = nice_top(cpu_peak.max(cpus * 1000), Base::Decimal);
+    let cpu_top = status.budget.slice_cpus.map_or_else(
+        || nice_top(cpu_peak, Base::Decimal),
+        |cpus| cpus.max(cpu_peak),
+    );
     html! {
         section #host .host aria-labelledby="host-title" {
             h2 #host-title .visually-hidden { "Slice" }

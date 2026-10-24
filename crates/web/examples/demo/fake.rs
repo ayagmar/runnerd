@@ -524,6 +524,7 @@ impl Fixtures {
                 mirror_memory: 512 * MIB,
                 seed_memory: Vec::new(),
                 shell_memory: Vec::new(),
+                slice_cpus: Some(32_000),
                 cpu: None,
             },
             profiles: vec![
