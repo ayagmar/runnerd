@@ -471,7 +471,8 @@ impl App {
             Msg::Reconnected => {
                 self.connection = Connection::Live;
                 if let Some(open) = &self.job {
-                    return vec![Effect::RefreshJob(open.job.summary.id)];
+                    // Its runs too: their end may have been missed with the job's.
+                    return vec![Effect::RefreshJob(open.job.summary.id), open.runs_request()];
                 }
             }
             Msg::Snapshot(live) => {

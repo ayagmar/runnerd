@@ -2149,8 +2149,16 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
         now,
         theme,
     );
-    if let Some(runs) = open.runs.as_ref().filter(|_| runs_height > 0) {
-        job_runs(frame, runs_area, app, summary, runs, now, theme);
+    if runs_height > 0 {
+        job_runs(
+            frame,
+            runs_area,
+            app,
+            summary,
+            &current_runs(open),
+            now,
+            theme,
+        );
     }
     steps(frame, steps_area, job, now, theme);
     match (charted, full_charts) {
@@ -2306,6 +2314,28 @@ fn timeline(
         ]);
     }
     frame.render_widget(Line::from(spans), legend);
+}
+
+/// The open job's latest runs with this run as the page has it now, not as the runs were read: it may have started
+/// or finished since, and while it runs its peak is its samples'.
+fn current_runs(open: &JobView) -> Vec<JobSummary> {
+    let summary = &open.job.summary;
+    let mut current = summary.clone();
+    current.metrics.memory_peak = summary
+        .metrics
+        .memory_peak
+        .or_else(|| open.samples.iter().map(|sample| sample.memory).max());
+    open.runs
+        .iter()
+        .flatten()
+        .map(|run| {
+            if run.id == summary.id {
+                current.clone()
+            } else {
+                run.clone()
+            }
+        })
+        .collect()
 }
 
 /// The same job's latest runs, oldest first, as the dashboard's job page compares them: a heading with the median

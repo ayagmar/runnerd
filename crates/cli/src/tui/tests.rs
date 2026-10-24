@@ -2068,3 +2068,75 @@ fn a_queued_job_s_reason_is_read_again_one_read_at_a_time_since_no_event_carries
     );
     assert!(app.update(host(NOW + 10)).contains(&Effect::Reasons));
 }
+
+#[test]
+fn the_open_job_s_own_bar_among_its_runs_follows_it_through_start_and_a_missed_finish() {
+    let mut app = app();
+    let mut waiting = queued(42, "halyard/ledger", "build", 1000);
+    waiting.workflow = Some("CI".to_owned());
+    app.live.status.queued = vec![waiting];
+    app.update(key(KeyCode::Tab));
+    let effects = app.update(key(KeyCode::Enter));
+    let Some(Effect::Runs { job, .. }) = effects
+        .iter()
+        .find(|effect| matches!(effect, Effect::Runs { .. }))
+        .cloned()
+    else {
+        panic!("{effects:?}");
+    };
+    let earlier = |id| {
+        let mut run = finished(id, 500);
+        run.timeline.queued_at = 0;
+        run.timeline.started_at = Some(10);
+        run.timeline.finished_at = Some(110);
+        run
+    };
+    app.update(Msg::Runs {
+        job,
+        page: Ok(runnerd_core::api::JobPage {
+            jobs: vec![summary(42, JobState::Queued), earlier(32), earlier(31)],
+            next: None,
+        }),
+    });
+    // The newest run's bar is the last before the waits.
+    let ran_bar = |app: &App| {
+        let shown = screen(app, 120, 40, false);
+        let row = rows_with(&shown, "  waited ")[0].to_owned();
+        let before = row.split("  waited ").next().unwrap().to_owned();
+        (before.chars().last().unwrap(), shown)
+    };
+    assert_eq!(ran_bar(&app).0, ' ', "queued, it has not run");
+
+    app.update(event(
+        Some(1),
+        Event::JobStarted {
+            job: summary(42, JobState::Running),
+        },
+    ));
+    let (bar, shown) = ran_bar(&app);
+    assert_ne!(bar, ' ', "started, it shows its run so far: {shown}");
+
+    app.update(Msg::Disconnected("runnerd is not running".to_owned()));
+    let effects = app.update(Msg::Reconnected);
+    assert!(effects.contains(&Effect::RefreshJob(42)), "{effects:?}");
+    assert!(
+        effects
+            .iter()
+            .any(|effect| matches!(effect, Effect::Runs { job: 42, .. })),
+        "its runs are read again too: {effects:?}"
+    );
+    let mut done = summary(42, JobState::Completed);
+    done.conclusion = Some("failure".to_owned());
+    done.timeline.finished_at = Some(1090);
+    app.update(Msg::Job(Job {
+        admission: None,
+        summary: done,
+        steps: Vec::new(),
+        record: None,
+    }));
+    let shown = screen(&app, 120, 40, false);
+    assert!(
+        rows_with(&shown, "Latest 3 runs")[0].contains("1 of 3 failed"),
+        "the finish read again counts among its runs: {shown}"
+    );
+}
