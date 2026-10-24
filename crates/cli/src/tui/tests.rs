@@ -1882,6 +1882,25 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
 }
 
 #[test]
+fn a_frame_without_columns_or_rows_draws_nothing_and_does_not_panic() {
+    let mut app = app();
+    running_job(&mut app);
+    app.activity = Some(day());
+    app.live.status.queued = vec![queued(51, "halyard/storefront", "visual-diff", 1041)];
+    for view in ['1', '2', '3', '4'] {
+        app.update(key(KeyCode::Char(view)));
+        for (width, height) in [(0, 24), (80, 0), (0, 0), (1, 1)] {
+            screen(&app, width, height, true);
+        }
+    }
+    app.update(key(KeyCode::Char('1')));
+    app.update(key(KeyCode::Enter));
+    for (width, height) in [(0, 24), (80, 0), (0, 0), (1, 1)] {
+        screen(&app, width, height, true);
+    }
+}
+
+#[test]
 fn a_queued_job_s_reason_is_read_again_one_read_at_a_time_since_no_event_carries_it() {
     let mut app = app();
     let queued_event = |id| {

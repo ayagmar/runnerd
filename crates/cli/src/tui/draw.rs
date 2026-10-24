@@ -206,7 +206,10 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         Line::styled(format!(" {}", flash.text), style)
     } else {
         Line::styled(
-            format!(" {}", footer_keys(app, usize::from(area.width) - 1)),
+            format!(
+                " {}",
+                footer_keys(app, usize::from(area.width).saturating_sub(1))
+            ),
             theme.dim(),
         )
     };
@@ -441,8 +444,9 @@ fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
             .sum()
     };
     drop_least(&mut items, 1, |items| used(items) <= width);
+    // What the hours' bars may take: the line's room less the other items and a space.
     let room = width
-        .saturating_sub(used(&items) - (1 + SPARK_LEAST))
+        .saturating_sub(used(&items).saturating_sub(1 + SPARK_LEAST))
         .saturating_sub(1);
     let hours = app
         .activity
