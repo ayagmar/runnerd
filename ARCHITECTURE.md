@@ -157,7 +157,7 @@ nothing until Docker has listed them.
 | Config | `runnerd.toml`, default `$XDG_CONFIG_HOME/runnerd/runnerd.toml` ([`crates/core/src/config.rs`](crates/core/src/config.rs)) |
 | Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart, except paused repositories, which the job history keeps |
 | Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
-| Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `<owner>/<name>/<tool>/<key>`; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
+| Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl` |
@@ -177,9 +177,10 @@ nothing until Docker has listed them.
   for it, and a target's cursor moves only once a delivery succeeded
   ([ADR 0051](docs/adr/0051-insights-and-notifications.md)).
 - A runner's build cache uploads become entries only once GitHub says its job runs on that runner and is a push,
-  schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`; until
-  then they are held, and otherwise dropped, answered as stored. A runner reads only its repository's entries,
-  through its own socket. The cache is trimmed only while no runner runs
+  schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`, of a
+  commit that branch has; until then they are held, at most `max_size` of them in all, and otherwise dropped,
+  answered as stored. A runner reads only its repository's entries, through its own socket. The cache is trimmed
+  only while no runner runs
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)).
 - A JIT config reaches a container only as a root-only file (`docker::JIT_CONFIG_PATH`), never the create request
   or a log line.

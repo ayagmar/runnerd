@@ -17,8 +17,9 @@ its own code into that job's build. A fork's pull request must not be able to wr
 - **In the daemon.** runnerd serves the build cache itself (`runnerd_core::buildcache`), not an off-the-shelf
   server in a container: whether a write is kept depends on the job behind it, which only the daemon knows. It
   needs no image to pin and no container lifecycle; hyper, already in the build, serves it. Entries are files in
-  `[caches.build] directory` (default `$XDG_CACHE_HOME/runnerd/build-cache`), under `<owner>/<name>/<tool>/<key>`,
-  not a Docker volume: the daemon's user writes them.
+  `[caches.build] directory` (default `$XDG_CACHE_HOME/runnerd/build-cache`), under
+  `entries/<owner>/<name>/<tool>/<key>`, not a Docker volume: the daemon's user writes them. Only `entries` and
+  `uploads`, which runnerd creates, are its own; nothing else in the directory is counted or trimmed.
 - **One socket per runner.** Before a runner's container starts, the engine opens a Unix socket for it in a
   directory beside the API socket, and the container mounts that directory read-only at `/run/runnerd-build-cache`.
   Which socket a request comes in on is who sent it, so a job cannot speak as another runner: no token to leak, no
@@ -30,7 +31,10 @@ its own code into that job's build. A fork's pull request must not be able to wr
 - **Who writes.** A job's uploads are kept only when GitHub says, through `GET /actions/jobs/{id}`, that the job
   runs on that runner, and through `GET /actions/runs/{id}` that its run is a `push`, `schedule` or
   `workflow_dispatch` of the repository itself on its default branch (`GET /repos/{repo}`, asked once per
-  repository) or on one of `[caches.build] branches`. The job's own runner log, which its capture reads, names the
+  repository) or on one of `[caches.build] branches`, which add to the default branch. A tag's run gives the tag's
+  name as its branch, so a tag called `main` would pass for the branch: the run's commit must also be on the branch,
+  its head or an ancestor (`GET /compare/{branch}...{sha}` says `identical` or `behind`). A lookup that fails
+  decides nothing, so it never lets a job write. The job's own runner log, which its capture reads, names the
   job, but a job can write that log, so it decides nothing. Every other job reads. Uploads that come before GitHub
   has answered, typically the first poll interval of a job, are held and become entries or are dropped once it has.
   A pull request whose head branch is called `main` is still a pull request.
@@ -41,9 +45,11 @@ its own code into that job's build. A fork's pull request must not be able to wr
   repositories is left until someone needs it.
 - **Size.** `[caches.build] max_size` (default `10G`): the shared caches' check, at most hourly when no runner runs
   (ADR 0050), removes the entries used least recently until the rest fit. Between checks an upload that would take
-  the cache past twice the limit, or an entry over a quarter of it, is refused. Entries are last used when last
-  written or read; a read sets the file's time, so the order outlives a restart. `runnerctl caches clean
-  runnerd-build-cache` empties it while no runner runs.
+  the cache past twice the limit, or an entry over a quarter of it, is refused. Uploads not yet entries, being
+  received or held for an undecided job, take at most the limit together and are refused past it, so a fork's job
+  cannot fill the disk before GitHub has answered. Entries are last used when last written, read or sent again; that
+  sets the file's time, so the order outlives a restart. `runnerctl caches clean runnerd-build-cache` empties it
+  while no runner runs.
 - **Tools**, wired by the image with no change to a repository, each only where the repository configures no
   remote cache of its own:
   - Gradle: an init script in `$GRADLE_USER_HOME/init.d` sets an `HttpBuildCache` remote with `push = true` when

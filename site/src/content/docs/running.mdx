@@ -90,10 +90,12 @@ A Gradle task built in slot 2 is a cache miss in slot 3: each slot has its own `
 
 Who writes:
 
-- A job writes only when GitHub says it runs a push, a schedule or a manual run (`workflow_dispatch`) of the repository's default branch, or of one of [`build.branches`](../configuration/#caches). runnerd asks GitHub which runner holds the job and what started its run; what the job writes in its runner's log or environment counts for nothing.
+- A job writes only when GitHub says it runs a push, a schedule or a manual run (`workflow_dispatch`) of the repository's default branch, or of one of [`build.branches`](../configuration/#caches), which add to it. runnerd asks GitHub which runner holds the job, what started its run, and whether the branch has the run's commit, so a tag named `main` does not pass for the branch; what the job writes in its runner's log or environment counts for nothing.
 - Every other job, pull requests from forks or not, reads. Its uploads are answered as stored and dropped, so Gradle keeps the cache on for the rest of the build.
 - What a job uploads before GitHub has answered, usually its first seconds, waits and is kept or dropped once it has.
 - A repository reads only its own entries.
+
+sccache uses the shared cache instead of its disk cache in the slot, not as well as: a pull request's own compilations are not kept, so a second push to it compiles again what the first did. A Rust repository with many pull requests may do better with its own backend, or `build_cache = false`.
 
 Each runner reaches the cache through a socket of its own, which no other runner sees; the image forwards it to `127.0.0.1:41771`. A cache that does not answer, as while runnerd restarts, fails no build: Gradle warns and builds without it. Containers a job starts itself, such as a `container:` job's or `docker build`'s, do not reach it.
 
