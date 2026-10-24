@@ -44,7 +44,7 @@ pub(crate) struct Overview {
     pub(crate) samples: BTreeMap<u64, Vec<Sample>>,
     pub(crate) host: HostSamples,
     pub(crate) recent: Vec<JobSummary>,
-    /// The jobs queued in the last `DAY`, newest first, for the health figures.
+    /// The jobs queued in the last two `DAY`s, newest first, for the health figures of the last.
     pub(crate) day: Vec<JobSummary>,
 }
 
@@ -86,7 +86,8 @@ impl Overview {
             .get_query(
                 "/v1/jobs",
                 &JobQuery {
-                    since: Some(self.now.saturating_sub(DAY)),
+                    // Queued a day earlier still, so a job that waited long and started today counts.
+                    since: Some(self.now.saturating_sub(2 * DAY)),
                     limit: Some(DAY_JOBS),
                     ..JobQuery::default()
                 },
@@ -1005,7 +1006,8 @@ struct Wait {
 
 impl Health {
     fn of(overview: &Overview) -> Health {
-        let since = overview.now.saturating_sub(DAY);
+        // The last 24 hours whole, as the hourly bars count them.
+        let since = (overview.now / 3600).saturating_sub(23) * 3600;
         let runners = overview
             .status
             .profiles
@@ -1100,8 +1102,8 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                 }
                 div class=(if health.failed > 0 { "failing" } else { "" }) {
                     dt { "Failed, 24 h" }
-                    dd { a.figure-main href="/history?outcome=failure" { (health.failed) } }
-                    dd.figure-note { "of " (health.finished) " finished" }
+                    dd { span.figure-main { (health.failed) } }
+                    dd.figure-note { "of " (health.finished) " finished; " a href="/history?outcome=failure" { "failures" } }
                 }
             }
             @if overview.status.shutting_down {

@@ -32,7 +32,8 @@ pub(crate) struct JobView {
     /// The number of the first line in `log`.
     pub(crate) log_from: u64,
     pub(crate) log: Vec<String>,
-    /// The latest runs of the same job (repository, workflow and name), this one included, oldest first.
+    /// The latest runs of the same job (repository, workflow and name), oldest first: this one among them unless 30
+    /// newer ran since.
     pub(crate) runs: Vec<JobSummary>,
     /// The colour class of the job's profile, which its runs' memory peaks are drawn in.
     pub(crate) profile_class: String,
