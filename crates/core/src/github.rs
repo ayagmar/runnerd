@@ -183,6 +183,24 @@ pub struct RunTrigger {
     /// The commit it ran. A tag's run gives the tag's name as `head_branch`, so only this says whether the
     /// branch has it.
     pub head_sha: String,
+    /// Whether people, not bots or apps, started it: GitHub's `actor` and `triggering_actor`, who re-ran it, are
+    /// both of type `User`.
+    pub by_user: bool,
+    /// The pull requests into the repository it runs, by number. GitHub lists only those whose head branch is in
+    /// the repository itself, and may list none once they are closed; those it lists into another repository of a
+    /// fork network are left out.
+    pub pull_requests: Vec<u64>,
+}
+
+/// A pull request, as `GET /repos/{owner}/{repo}/pulls/{number}` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct PullRequest {
+    /// Whether a person, not a bot or an app, opened it: its `user` is of type `User`.
+    pub by_user: bool,
+    /// `owner/name` of the repository its head branch is in; `None` once that is deleted.
+    pub head_repository: Option<String>,
+    /// Its head branch.
+    pub head_branch: String,
 }
 
 fn first_attempt() -> u32 {
@@ -264,6 +282,12 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         run: u64,
     ) -> impl Future<Output = Result<RunTrigger, Error>> + Send;
+    /// One pull request: who opened it and where its head branch is.
+    fn pull_request(
+        &self,
+        repository: &str,
+        number: u64,
+    ) -> impl Future<Output = Result<PullRequest, Error>> + Send;
     /// The repository's default branch.
     fn default_branch(
         &self,
@@ -344,6 +368,68 @@ struct RunBody {
     head_branch: Option<String>,
     head_repository: Option<RepositoryName>,
     head_sha: String,
+    actor: Option<Account>,
+    triggering_actor: Option<Account>,
+    #[serde(default)]
+    pull_requests: Vec<PullRequestNumber>,
+}
+
+#[derive(Deserialize)]
+struct Account {
+    #[serde(rename = "type")]
+    kind: String,
+}
+
+impl Account {
+    /// Whether GitHub says `account` is a person's: `Bot` is a GitHub App's or a bot's.
+    fn is_user(account: Option<&Account>) -> bool {
+        account.is_some_and(|account| account.kind == "User")
+    }
+}
+
+#[derive(Deserialize)]
+struct PullRequestNumber {
+    number: u64,
+    base: Option<PullRequestBase>,
+}
+
+#[derive(Deserialize)]
+struct PullRequestBase {
+    repo: Option<RepositoryUrl>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryUrl {
+    url: String,
+}
+
+impl PullRequestNumber {
+    /// Whether it is a pull request into `repository`: in a fork network, a run can also list one into another
+    /// repository whose head is the same branch.
+    fn targets(&self, repository: &str) -> bool {
+        let Some(url) = self
+            .base
+            .as_ref()
+            .and_then(|base| base.repo.as_ref())
+            .map(|repo| repo.url.to_ascii_lowercase())
+        else {
+            return false;
+        };
+        url.ends_with(&format!("/repos/{}", repository.to_ascii_lowercase()))
+    }
+}
+
+#[derive(Deserialize)]
+struct PullRequestBody {
+    user: Option<Account>,
+    head: PullRequestHead,
+}
+
+#[derive(Deserialize)]
+struct PullRequestHead {
+    #[serde(rename = "ref")]
+    branch: String,
+    repo: Option<RepositoryName>,
 }
 
 #[derive(Deserialize)]
@@ -638,6 +724,26 @@ impl GithubApi for Github {
             head_branch: run.head_branch,
             head_repository: run.head_repository.map(|head| head.full_name),
             head_sha: run.head_sha,
+            by_user: Account::is_user(run.actor.as_ref())
+                && Account::is_user(run.triggering_actor.as_ref()),
+            pull_requests: run
+                .pull_requests
+                .into_iter()
+                .filter(|pull| pull.targets(repository))
+                .map(|pull| pull.number)
+                .collect(),
+        })
+    }
+
+    async fn pull_request(&self, repository: &str, number: u64) -> Result<PullRequest, Error> {
+        let path = format!("/repos/{repository}/pulls/{number}");
+        let pull: Result<PullRequestBody, Error> = self.get(&path).await;
+        lock(&self.etags).remove(&path);
+        let pull = pull?;
+        Ok(PullRequest {
+            by_user: Account::is_user(pull.user.as_ref()),
+            head_repository: pull.head.repo.map(|repo| repo.full_name),
+            head_branch: pull.head.branch,
         })
     }
 

@@ -320,6 +320,21 @@ pub struct Repository {
     /// Whether its runners get the shared build cache, when `[caches.build]` is enabled. Default true.
     #[serde(default = "default_true")]
     pub build_cache: bool,
+    /// Whose runs may write to the shared build cache besides the branches' (ADR 0053). Default
+    /// `"default-branch"`.
+    #[serde(default)]
+    pub build_cache_writers: BuildCacheWriters,
+}
+
+/// `build_cache_writers` of a `[[repositories]]`: whose jobs' uploads the shared build cache keeps (ADR 0053).
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum BuildCacheWriters {
+    /// Pushes, scheduled and manually started runs of the default branch and of `[caches.build] branches`.
+    #[default]
+    DefaultBranch,
+    /// Those, and `pull_request` runs of the repository's own branches that people, not bots, opened and pushed.
+    PullRequests,
 }
 
 fn default_true() -> bool {

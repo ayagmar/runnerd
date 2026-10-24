@@ -1,6 +1,6 @@
-//! The build cache every runner shares (ADR 0052): the entries of Gradle's HTTP build cache, and of the other tools
-//! the runner image points at it, kept per repository in a directory of the daemon's and served to each runner on a
-//! Unix socket of its own, which the runner image forwards to `127.0.0.1`. Owns the entries, the size limit, the
+//! The build cache every runner shares (ADR 0052, 0053): the entries of Gradle's HTTP build cache, and of the other
+//! tools the runner image points at it, kept per repository in a directory of the daemon's and served to each runner
+//! on a Unix socket of its own, which the runner image forwards to `127.0.0.1`. Owns the entries, the size limit, the
 //! sockets, and what each runner was served and stored. Which socket a request came in on is who sent it; no job can
 //! claim another's. It never decides whether a job may write: the engine tells it (`Writes`), from what GitHub says
 //! of the job. It never logs a request's headers, which may carry a tool's token.
@@ -18,7 +18,8 @@ use tokio::task::{JoinHandle, JoinSet};
 use tracing::warn;
 
 use crate::api::BuildCacheCounts;
-use crate::github::RunTrigger;
+use crate::config::BuildCacheWriters;
+use crate::github::{PullRequest, RunTrigger};
 use crate::sync::lock;
 
 /// Where a runner container mounts its socket's directory, read-only (`image/entrypoint.sh`).
@@ -38,40 +39,62 @@ const UPLOADS: &str = "uploads";
 pub enum Writes {
     /// Not known yet: what it sends is held until it is.
     Undecided,
-    /// GitHub says it runs a push, scheduled or manually started run of a branch that may write.
+    /// GitHub says it runs a push, scheduled or manually started run of a branch that may write, or, where the
+    /// repository lets them, a pull request of its own branches that people opened.
     Allowed,
-    /// Anything else: a pull request, another branch, or a job GitHub does not place on this runner.
+    /// Anything else: another pull request, another branch, or a job GitHub does not place on this runner.
     Refused,
 }
 
 /// The events whose runs may write: they run code that reached a branch, never a pull request's.
 const WRITING_EVENTS: [&str; 3] = ["push", "schedule", "workflow_dispatch"];
 
+/// The event of a pull request's run that `BuildCacheWriters::PullRequests` lets write. Never
+/// `pull_request_target`, which runs with the repository's secrets whatever the pull request's head is.
+pub const PULL_REQUEST_EVENT: &str = "pull_request";
+
 /// Whether `runner`'s job may write, from what GitHub says: the runner it placed the job on (`job_runner`, which
-/// a job cannot forge as it can its runner's log), and its run's trigger. Only a push, scheduled or manually started
-/// run of `repository` itself on one of `branches` may; `Undecided` while GitHub places the job on no runner.
+/// a job cannot forge as it can its runner's log), and its run's trigger. A push, scheduled or manually started run
+/// of `repository` itself on one of `branches` may. With `writers` at `PullRequests`, so may a `pull_request` run of
+/// one of the repository's own branches that people started, once GitHub also says each of its pull requests was
+/// opened by one (`opened_by_user`). `Undecided` while GitHub places the job on no runner.
 pub fn writes(
     runner: &str,
     job_runner: Option<&str>,
     repository: &str,
     trigger: &RunTrigger,
     branches: &[String],
+    writers: BuildCacheWriters,
 ) -> Writes {
     match job_runner {
         None => Writes::Undecided,
         Some(placed) if placed != runner => Writes::Refused,
-        Some(_)
-            if WRITING_EVENTS.contains(&trigger.event.as_str())
-                && trigger.head_repository.as_deref() == Some(repository)
-                && trigger
-                    .head_branch
-                    .as_ref()
-                    .is_some_and(|branch| branches.contains(branch)) =>
-        {
-            Writes::Allowed
+        Some(_) if trigger.head_repository.as_deref() != Some(repository) => Writes::Refused,
+        Some(_) => {
+            let Some(branch) = &trigger.head_branch else {
+                return Writes::Refused;
+            };
+            let event = trigger.event.as_str();
+            let branch_run = WRITING_EVENTS.contains(&event) && branches.contains(branch);
+            let pull_request = writers == BuildCacheWriters::PullRequests
+                && event == PULL_REQUEST_EVENT
+                && trigger.by_user
+                && !trigger.pull_requests.is_empty();
+            if branch_run || pull_request {
+                Writes::Allowed
+            } else {
+                Writes::Refused
+            }
         }
-        Some(_) => Writes::Refused,
     }
+}
+
+/// Whether a pull request `trigger` runs lets it write: a person opened it, from `trigger`'s head branch in
+/// `repository` itself. A bot's, such as Renovate's or Dependabot's, only reads.
+pub fn opened_by_user(pull: &PullRequest, repository: &str, trigger: &RunTrigger) -> bool {
+    pull.by_user
+        && pull.head_repository.as_deref() == Some(repository)
+        && trigger.head_branch.as_ref() == Some(&pull.head_branch)
 }
 
 /// The build cache's size now.

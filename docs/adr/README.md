@@ -58,3 +58,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued |
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends |
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch |
+| [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache |
