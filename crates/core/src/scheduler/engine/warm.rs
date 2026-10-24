@@ -71,6 +71,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.warm.runs.latest(run_id)
     }
 
+    /// Moves a job a runner took to the attempt its details say, if it was noted under another of its run's.
+    pub(super) fn place_job(
+        &mut self,
+        repository: &str,
+        attempt: Attempt,
+        job: u64,
+        workflow: Option<&str>,
+    ) {
+        self.warm
+            .runs
+            .place(repository, attempt, job, workflow, time::now_ms());
+    }
+
     /// Notes the workflow of run `run_id`, if it is followed, as a running job's details say.
     pub(super) fn note_workflow(&mut self, run_id: u64, workflow: Option<&str>) {
         if let Some(workflow) = workflow {

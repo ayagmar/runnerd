@@ -204,6 +204,40 @@ impl Runs {
         }
     }
 
+    /// Moves `job` to `attempt` once GitHub said which attempt it is of, when it was noted under another of the
+    /// run's: a job a runner took is first noted under its run's latest attempt known, which for a re-run's first
+    /// job is the attempt before. An attempt it alone made is forgotten, and its time goes with the job; a job that
+    /// joined an older attempt counts from `at` (ms). A job not followed stays so, so a run forgotten while its job
+    /// ran is not counted again.
+    pub fn place(
+        &mut self,
+        repository: &str,
+        attempt: Attempt,
+        job: u64,
+        workflow: Option<&str>,
+        at: u64,
+    ) {
+        // When the job was seen: an attempt it alone made began with it, while one it joined began before it.
+        let mut seen: Option<u64> = None;
+        let mut emptied = Vec::new();
+        for (other, run) in self.attempts_mut(attempt.run_id) {
+            if *other != attempt && run.jobs.remove(&job) {
+                if run.jobs.is_empty() {
+                    emptied.push(*other);
+                    seen = Some(run.first.min(seen.unwrap_or(at)));
+                } else {
+                    seen = Some(seen.unwrap_or(at));
+                }
+            }
+        }
+        for other in emptied {
+            self.0.remove(&other);
+        }
+        if let Some(seen) = seen {
+            self.note(repository, attempt, job, workflow, seen);
+        }
+    }
+
     /// Names the workflow of run `run_id`'s attempts followed whose workflow was not known.
     pub fn name(&mut self, run_id: u64, workflow: &str) {
         for (_, run) in self.attempts_mut(run_id) {

@@ -17,6 +17,7 @@ use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
 use crate::scheduler::SlotRef;
+use crate::scheduler::warm::Attempt;
 use crate::store::{LogPosition, RunnerRecord, Store};
 use crate::time;
 
@@ -158,14 +159,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Records the queued jobs the repositories' runners may run, and closes those that left the queue for another
-    /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
-    /// runners completed.
-    pub(super) async fn follow_jobs(&mut self) {
-        let taken: BTreeSet<u64> = self
-            .occupied()
-            .filter_map(|(_, occupant)| occupant.job)
-            .collect();
+    /// Records the jobs the last poll listed queued that no runner in `taken` has, and follows them.
+    fn record_listed(&mut self, taken: &BTreeSet<u64>) {
         for repository in &self.config.repositories {
             let Some(state) = self.repositories.get(&repository.name) else {
                 continue;
@@ -182,6 +177,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
+    }
+
+    /// Records the queued jobs the repositories' runners may run, and closes those that left the queue for another
+    /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
+    /// runners completed.
+    pub(super) async fn follow_jobs(&mut self) {
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
+        self.record_listed(&taken);
         let left: Vec<(String, u64)> = self
             .queued_jobs
             .iter()
@@ -221,7 +227,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         {
             match answer {
                 Ok(details) => {
-                    // The workflow of a run first seen through a job a runner took.
+                    // The attempt and workflow of a run first seen through a job a runner took.
+                    self.place_job(
+                        &repository,
+                        Attempt {
+                            run_id: details.run_id,
+                            run_attempt: details.run_attempt,
+                        },
+                        id,
+                        details.workflow_name.as_deref(),
+                    );
                     self.note_workflow(details.run_id, details.workflow_name.as_deref());
                     described.push((repository, id, details.clone()));
                     self.store.details(details);
