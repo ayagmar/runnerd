@@ -69,7 +69,9 @@ pub fn writes(
     match job_runner {
         None => Writes::Undecided,
         Some(placed) if placed != runner => Writes::Refused,
-        Some(_) if trigger.head_repository.as_deref() != Some(repository) => Writes::Refused,
+        Some(_) if !same_repository(trigger.head_repository.as_deref(), repository) => {
+            Writes::Refused
+        }
         Some(_) => {
             let Some(branch) = &trigger.head_branch else {
                 return Writes::Refused;
@@ -93,8 +95,13 @@ pub fn writes(
 /// `repository` itself. A bot's, such as Renovate's or Dependabot's, only reads.
 pub fn opened_by_user(pull: &PullRequest, repository: &str, trigger: &RunTrigger) -> bool {
     pull.by_user
-        && pull.head_repository.as_deref() == Some(repository)
+        && same_repository(pull.head_repository.as_deref(), repository)
         && trigger.head_branch.as_ref() == Some(&pull.head_branch)
+}
+
+/// Whether GitHub's `head` names `repository`, as GitHub does whatever the case.
+fn same_repository(head: Option<&str>, repository: &str) -> bool {
+    head.is_some_and(|head| head.eq_ignore_ascii_case(repository))
 }
 
 /// The build cache's size now.

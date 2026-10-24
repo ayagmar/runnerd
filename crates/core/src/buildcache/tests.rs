@@ -523,3 +523,28 @@ async fn files_runnerd_did_not_write_in_its_directory_are_never_counted_or_remov
     assert!(dir.0.join("o/app/gradle/notes").exists(), "notes stay");
     assert!(dir.0.join("photo.jpg").exists(), "the photo stays");
 }
+
+#[test]
+fn a_repository_named_in_other_case_than_githubs_still_writes() {
+    // The config names `Acme/App`; GitHub spells it `acme/app`, and its API paths ignore the case.
+    assert_eq!(
+        writes(
+            "r1",
+            Some("r1"),
+            "Acme/App",
+            &trigger("push", "main", "acme/app"),
+            &main_only(),
+            BuildCacheWriters::DefaultBranch,
+        ),
+        Writes::Allowed
+    );
+    let pull = PullRequest {
+        by_user: true,
+        head_repository: Some("acme/app".to_owned()),
+        head_branch: "feature".to_owned(),
+    };
+    assert!(
+        opened_by_user(&pull, "Acme/App", &pull_request("acme/app")),
+        "a person's pull request writes"
+    );
+}
