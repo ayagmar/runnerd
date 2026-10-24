@@ -523,3 +523,75 @@ async fn files_runnerd_did_not_write_in_its_directory_are_never_counted_or_remov
     assert!(dir.0.join("o/app/gradle/notes").exists(), "notes stay");
     assert!(dir.0.join("photo.jpg").exists(), "the photo stays");
 }
+
+#[test]
+fn a_repository_named_in_other_case_than_githubs_still_writes() {
+    // The config names `Acme/App`; GitHub spells it `acme/app`, and its API paths ignore the case.
+    assert_eq!(
+        writes(
+            "r1",
+            Some("r1"),
+            "Acme/App",
+            &trigger("push", "main", "acme/app"),
+            &main_only(),
+            BuildCacheWriters::DefaultBranch,
+        ),
+        Writes::Allowed
+    );
+    let pull = PullRequest {
+        by_user: true,
+        head_repository: Some("acme/app".to_owned()),
+        head_branch: "feature".to_owned(),
+    };
+    assert!(
+        opened_by_user(&pull, "Acme/App", &pull_request("acme/app")),
+        "a person's pull request writes"
+    );
+}
+
+#[tokio::test]
+async fn an_adopted_runner_the_cache_is_off_for_leaves_no_socket_once_removed() {
+    let dir = TestDir::new("adopted-off");
+    let (entries, sockets) = (dir.0.join("entries"), dir.0.join("sockets"));
+    let first = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
+    let mounted = first.attach("app", "o/app").unwrap();
+    drop(first);
+    // After the restart the build cache is off, so the adopted runner is not attached again, only kept.
+    let second = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
+    second.forget_others(&["app"]);
+    assert!(mounted.exists(), "its container still mounts it");
+    assert_eq!(second.detach("app"), None, "it was not open");
+    assert!(!mounted.exists(), "its directory goes with it");
+}
+
+#[tokio::test(flavor = "multi_thread", worker_threads = 8)]
+async fn uploads_of_one_key_landing_together_leave_the_size_what_the_entry_holds() {
+    let Cache { cache, _dir } = open("same-key", 1 << 30);
+    let runners: Vec<_> = (0..8)
+        .map(|index| {
+            let name = format!("main-{index}");
+            let socket = cache.attach(&name, "o/app").unwrap();
+            cache.decide(&name, Writes::Allowed);
+            socket
+        })
+        .collect();
+    // Every slot builds the same task at once, each output its own size.
+    let puts = (0..400).map(|upload: usize| {
+        let socket = runners[upload % runners.len()].clone();
+        tokio::spawn(async move {
+            request(&socket, "PUT", "/gradle/same", &vec![b'x'; 1 + upload % 97]).await
+        })
+    });
+    for put in futures_util::future::join_all(puts).await {
+        assert_eq!(put.unwrap().0, 200);
+    }
+    let (status, body) = request(&runners[0], "GET", "/gradle/same", b"").await;
+    assert_eq!(status, 200);
+    assert_eq!(
+        cache.size(),
+        Size {
+            bytes: body.len() as u64,
+            entries: 1
+        }
+    );
+}

@@ -471,8 +471,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Under measured admission, sets what each running runner reserves: once its job is known, that job's
     /// prediction; until then, the larger of what it reserved and the largest prediction among its repository's
-    /// queued jobs, since GitHub may still give it any of them. A runner a restart adopted keeps its cap. Each
-    /// change goes into the runner's row.
+    /// queued jobs, since GitHub may still give it any of them. A runner a restart adopted without a record of its
+    /// admission keeps its cap. Each change goes into the runner's row.
     pub(super) async fn rereserve(&mut self) {
         self.measured.raised.clear();
         if self.config.host.admission != Admission::Measured {

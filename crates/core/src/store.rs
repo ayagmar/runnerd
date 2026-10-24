@@ -107,7 +107,7 @@ pub struct RunnerRecord {
     pub memory_cap: Option<u64>,
     /// The container's CPU limit in millicores.
     pub cpu_cap: Option<u64>,
-    /// How it was admitted; `None` for one a restart adopted.
+    /// How it was admitted; `None` for one a restart adopted without a record of it.
     pub admission: Option<api::Admission>,
 }
 
@@ -856,6 +856,16 @@ impl Store {
     pub async fn runner_job(&self, runner: &str) -> Result<Option<u64>, StoreError> {
         let runner = runner.to_owned();
         self.read(move |db| read::runner_job(db, &runner)).await
+    }
+
+    /// How a runner was admitted, with what it reserves since, if the history knows it.
+    pub async fn runner_admitted(
+        &self,
+        runner: &str,
+    ) -> Result<Option<api::Admission>, StoreError> {
+        let runner = runner.to_owned();
+        self.read(move |db| read::runner_admission(db, &runner))
+            .await
     }
 
     /// Where a job's log capture continues.

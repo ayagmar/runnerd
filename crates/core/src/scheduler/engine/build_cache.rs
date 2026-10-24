@@ -4,6 +4,7 @@
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
+use std::time::{Duration, SystemTime};
 
 use bollard::models::{Mount, MountType};
 use futures_util::StreamExt;
@@ -16,6 +17,24 @@ use crate::cache;
 use crate::config::BuildCacheWriters;
 use crate::docker::DockerApi;
 use crate::github::{self, GithubApi, JobDetails};
+
+/// How long a repository's default branch is taken as known: one renamed while runnerd runs writes within the hour,
+/// and the old name stops writing.
+const DEFAULT_BRANCH_FOR: Duration = Duration::from_secs(3600);
+
+/// A repository's default branch, and when GitHub said it.
+#[derive(Debug, Clone)]
+pub(super) struct DefaultBranch {
+    branch: String,
+    pub(super) read_at: SystemTime,
+}
+
+/// A removed runner's uploads held while its job's writes are undecided.
+#[derive(Debug)]
+pub(super) struct EndedUploads {
+    pub(super) repository: String,
+    pub(super) job: u64,
+}
 
 /// A job whose writes are undecided, with what GitHub said of it.
 #[derive(Debug)]
@@ -86,27 +105,60 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Closes a removed runner's build cache and records what it was served and stored.
-    pub(super) fn detach_build_cache(&self, occupant: &Occupant) {
+    /// Closes a removed runner's build cache and records what it was served and stored. One that holds uploads
+    /// while its `job`'s writes are undecided, as a job that ended before a poll asked GitHub of it, keeps them
+    /// without its socket until `follow_jobs` has asked: they are kept or dropped by GitHub's answer, not dropped
+    /// because the job was short.
+    pub(super) fn detach_build_cache(&mut self, occupant: &Occupant, job: Option<u64>) {
         let Some(cache) = &self.build_cache else {
             return;
         };
+        if let Some(job) = job
+            && cache.close(&occupant.runner_name)
+        {
+            self.ended_uploads.insert(
+                occupant.runner_name.clone(),
+                EndedUploads {
+                    repository: occupant.repository.clone(),
+                    job,
+                },
+            );
+            return;
+        }
         if let Some(counts) = cache.detach(&occupant.runner_name) {
             self.store.build_cache(&occupant.runner_name, counts);
         }
     }
 
-    /// Of the running jobs GitHub just described, those whose runner's writes are undecided.
+    /// The removed runners `follow_jobs` asked GitHub about: their build cache closes, whatever it answered.
+    pub(super) fn detach_ended(&mut self) {
+        for runner in std::mem::take(&mut self.ended_uploads).into_keys() {
+            if let Some(counts) = self
+                .build_cache
+                .as_ref()
+                .and_then(|cache| cache.detach(&runner))
+            {
+                self.store.build_cache(&runner, counts);
+            }
+        }
+    }
+
+    /// Of the jobs GitHub just described, running or ended with uploads held, those whose writes are undecided.
     pub(super) fn undecided(&self, described: &[(String, u64, JobDetails)]) -> Vec<Undecided> {
         let Some(cache) = &self.build_cache else {
             return Vec::new();
         };
+        let ended = self
+            .ended_uploads
+            .iter()
+            .map(|(runner, ended)| (runner.as_str(), Some(ended.job)));
         self.occupied()
-            .filter(|(_, occupant)| cache.undecided(&occupant.runner_name))
-            .filter_map(|(_, occupant)| {
-                let (repository, _, job) = described
-                    .iter()
-                    .find(|(_, id, _)| occupant.job == Some(*id))?;
+            .map(|(_, occupant)| (occupant.runner_name.as_str(), occupant.job))
+            .chain(ended)
+            .filter(|(runner, _)| cache.undecided(runner))
+            .filter_map(|(runner, job)| {
+                let (repository, _, details) =
+                    described.iter().find(|(_, id, _)| job == Some(*id))?;
                 let writers = self
                     .config
                     .repositories
@@ -115,10 +167,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .map(|candidate| candidate.build_cache_writers)
                     .unwrap_or_default();
                 Some(Undecided {
-                    runner: occupant.runner_name.clone(),
+                    runner: runner.to_owned(),
                     repository: repository.clone(),
                     writers,
-                    job: job.clone(),
+                    job: details.clone(),
                 })
             })
             .collect()
@@ -130,15 +182,39 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         }
         let branches = self.config.caches.build.branches.clone();
-        let known = self.default_branches.clone();
+        let known = self.known_default_branches();
         let github = self.github.clone();
         let answers = self
             .serving(read_answers(github, undecided, branches, known))
             .await;
+        self.take_answers(answers);
+    }
+
+    /// The default branches read in the last `DEFAULT_BRANCH_FOR`, by repository; the others are asked again.
+    fn known_default_branches(&self) -> BTreeMap<String, String> {
+        self.default_branches
+            .iter()
+            .filter(|(_, known)| {
+                known
+                    .read_at
+                    .elapsed()
+                    .is_ok_and(|age| age < DEFAULT_BRANCH_FOR)
+            })
+            .map(|(repository, known)| (repository.clone(), known.branch.clone()))
+            .collect()
+    }
+
+    /// Records what GitHub answered of undecided jobs: their repositories' default branches, and each job's writes.
+    fn take_answers(&mut self, answers: Vec<Answer>) {
         for answer in answers {
             if let Some(branch) = answer.default_branch {
-                self.default_branches
-                    .insert(answer.repository.clone(), branch);
+                self.default_branches.insert(
+                    answer.repository.clone(),
+                    DefaultBranch {
+                        branch,
+                        read_at: SystemTime::now(),
+                    },
+                );
             }
             if let (Some(writes), Some(cache)) = (answer.writes, &self.build_cache) {
                 cache.decide(&answer.runner, writes);

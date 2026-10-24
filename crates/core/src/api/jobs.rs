@@ -113,6 +113,15 @@ pub struct Timeline {
     pub cleaned_at: Option<u64>,
 }
 
+impl Timeline {
+    /// When the runner that took it began to start for it: its container's start, or the job's queueing when that
+    /// container waited for jobs before, as a warm runner does. `None` until a runner took it.
+    pub fn runner_from(&self) -> Option<u64> {
+        self.container_started_at
+            .map(|started| started.max(self.queued_at))
+    }
+}
+
 /// What a job used, over the samples taken while it ran (every few seconds). `None` until a sample exists.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobMetrics {

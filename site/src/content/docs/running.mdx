@@ -61,7 +61,7 @@ A job that finds no runner waits for the next poll, a registration and a contain
 - A profile due a reseed (slot 1 ran a job) removes its warm runners once its other runners are idle, so the snapshot still gets rebuilt. The shared caches' check does the same across all profiles, at most once an hour, until it ends.
 - A warm runner that ends without a job after waiting, as when Docker restarts, does not hold its repository's next runners back; a second in a row does.
 
-The status shows them as `warm, waiting for a job`. Sizing tells the jobs a warm runner took from the others, with each kind's median wait.
+`runnerctl watch`, the TUI and the dashboard show them as warm runners waiting for a job; `runnerctl status` shows them `idle`. Sizing tells the jobs a warm runner took from the others, with each kind's median wait.
 
 ## Warm caches
 
@@ -77,7 +77,7 @@ A slot is one concurrent job of a profile. Each job gets a new container, but th
 | the profile's snapshot | replaced by slot 1's changes once they reach [`reseed_at`](../configuration/#caches) and the profile is idle; above `snapshot_max` it starts over from slot 1's changes alone; once measured above `snapshot_max`, it starts over at the next moment the profile is idle, however little slot 1 changed |
 | pnpm store, Maven repository | shared by all slots, emptied above their [`max_size`](../configuration/#caches) when no runner runs: warm runners stop for it at most hourly, at the first moment no job runs |
 | Docker Hub mirror | runs while any runner does, warm ones too; stops, and its storage is emptied above `mirror.max_size`, with the shared caches' check |
-| [build cache](#build-cache) | per repository, shared by every slot; written only by pushes to the default branch; its least recently used entries go above [`build.max_size`](../configuration/#caches) with the shared caches' check |
+| [build cache](#build-cache) | per repository, shared by every slot; written only by [the jobs that may](#build-cache): pushes, schedules and manual runs of the default branch or `build.branches`, and opted-in pull requests; its least recently used entries go above [`build.max_size`](../configuration/#caches) with the shared caches' check |
 
 ## Build cache
 
@@ -91,10 +91,10 @@ A Gradle task built in slot 2 is a cache miss in slot 3: each slot has its own `
 
 Who writes:
 
-- A job writes only when GitHub says it runs a push, a schedule or a manual run (`workflow_dispatch`) of the repository's default branch, or of one of [`build.branches`](../configuration/#caches), which add to it. runnerd asks GitHub which runner holds the job, what started its run, and whether the branch has the run's commit, so a tag named `main` does not pass for the branch; what the job writes in its runner's log or environment counts for nothing.
+- A job writes only when GitHub says it runs a push, a schedule or a manual run (`workflow_dispatch`) of the repository's default branch, as GitHub said it within the last hour, or of one of [`build.branches`](../configuration/#caches), which add to it. runnerd asks GitHub which runner holds the job, what started its run, and whether the branch has the run's commit, so a tag named `main` does not pass for the branch; what the job writes in its runner's log or environment counts for nothing.
 - A repository with `build_cache_writers = "pull-requests"` ([Configuration](../configuration/#repositories)) also lets its own branches' pull requests write, on the `pull_request` event only. GitHub must say a person, not a bot, opened the pull request, opened, reopened or pushed to it for this run, and started or re-ran the run, and the branch must still have the run's commit. Who made the commits is not checked: a person's pull request from a branch a bot pushed writes. A fork's pull request, Renovate's or Dependabot's, and a run a bot pushed to a person's pull request read only. Whoever can push a branch to the repository can then change what `main` builds load, so turn it on only where that is you. With strict up-to-date pull requests it pays: the merge builds the tree the pull request's last run built, so `main` finds every task in the cache. It helps only where a job's build goes through the cache, with Gradle, sccache or Bazel; Maven, Turborepo and Flutter builds gain nothing from it.
 - Every other job, pull requests from forks or not, reads. Its uploads are answered as stored and dropped, so Gradle keeps the cache on for the rest of the build.
-- What a job uploads before GitHub has answered, usually its first seconds, waits and is kept or dropped once it has.
+- What a job uploads before GitHub has answered, usually its first seconds, waits and is kept or dropped once it has. A job that ends first and uploaded something is asked about right after its runner is removed; its uploads are dropped only if GitHub does not answer then.
 - A repository reads only its own entries.
 
 sccache uses the shared cache instead of its disk cache in the slot, not as well as: a pull request's own compilations are not kept, so a second push to it compiles again what the first did. A Rust repository with many pull requests may do better with its own backend, or `build_cache = false`.
@@ -103,7 +103,7 @@ Each runner reaches the cache through a socket of its own, which no other runner
 
 The job page and `runnerctl job` show each job's hits and what it read and stored; the Caches page and `runnerctl caches`, the cache's size and its hit rate over 7 days. The [Cold cache](../insights/#insights) insight names a job whose writing runs find almost nothing in it.
 
-To keep a repository out, set `build_cache = false` under it. A workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` in its `env`, and any tool's by configuring a remote cache of its own. `runnerctl caches clean runnerd-build-cache` empties it while no runner runs.
+To keep a repository out, set `build_cache = false` under it. A workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` in its `env`, and any tool's by configuring a remote cache of its own. `runnerctl caches clean runnerd-build-cache` empties it while no runner runs a job.
 
 ## Records of failed jobs
 
@@ -175,7 +175,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
 | `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every configured repository; while any runs a job, `409` naming the jobs, and none is paused |
 | `POST /v1/profiles/{name}/reseed` | `202`; the profile starts no runner until its slots are free and slot 1 became its snapshot; `409` while it reseeds or a shell is open in one of its records |
-| `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache; `409` naming the jobs that use it |
+| `POST /v1/caches/{name}/clean` | `204`; removes a slot's volume or a shared cache, stopping the runners that wait for a job and use it, warm ones too; `409` naming the jobs that use it |
 | `GET /v1/config` | the config file's path, text and revision; notification targets' `url` and header values read `"<secret>"` |
 | `POST /v1/config/check` with TOML | what `runnerd check-config` says about it, each `"<secret>"` read as the value it stands for |
 | `PUT /v1/config?revision=` with TOML | checks it, with each `"<secret>"` read as the value it stands for, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
@@ -231,8 +231,8 @@ Every event but the live ones has an ID: send the last one seen as `Last-Event-I
 
 A forced pause cancels the run of each of the repository's running jobs. GitHub cancels runs, not single jobs, so the run's other jobs are cancelled too. The runner reports the job cancelled, which takes under a minute; one still running 90 s later is removed, and its registration is deleted once GitHub lets go of it.
 
-A pause lasts until a resume, across restarts: the job history records the paused repositories, and a restarted daemon starts no runner for them. If the history cannot record a pause or resume, the change holds until the daemon restarts, and the request fails with `500` saying so. A reload that removes a paused repository forgets its pause; added back, it starts active.
+A paused repository's runners still waiting for a job, warm ones included, stop at once, so none takes a job queued before the pause. A pause lasts until a resume, across restarts: the job history records the paused repositories, and a restarted daemon starts no runner for them. If the history cannot record a pause or resume, the change holds until the daemon restarts, and the request fails with `500` saying so. A reload that removes a paused repository forgets its pause; added back, it starts active.
 
 ### Reloading
 
-A new config takes effect without a restart, and running jobs keep running. A removed profile, or slots past a lowered `slots`, stay until their runners finish, and no runner starts in a profile while it runs as many as its `slots`. A runner still waiting for a job of a removed repository, or of one moved to another profile, is removed. Runners started afterwards get the new limits, image and labels. `history.database` changes only at the next start.
+A new config takes effect without a restart, and running jobs keep running. A removed profile, or slots past a lowered `slots`, stay until their runners finish their jobs, and no runner starts in a profile while it runs as many as its `slots`. A runner waiting for a job in a slot past a lowered `slots` is removed. A runner still waiting for a job, warm ones included, is removed when its repository is removed or moved to another profile, or when the repository's `labels` or its profile's `image`, `memory` or `cpus` changed, by hand or by auto sizing. For a new `image`, that waits until Docker has it, so the old runners serve jobs while it pulls. Runners started afterwards get the new limits, image and labels. `history.database` changes only at the next start.

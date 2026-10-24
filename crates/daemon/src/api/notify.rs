@@ -159,6 +159,8 @@ struct Target {
     present: Option<(u64, BTreeSet<String>)>,
     /// When each insight told of was last seen to hold (ms), by key.
     told: BTreeMap<String, u64>,
+    /// Whether it has looked since the daemon started: until then, `told` is as an earlier run last saw it.
+    looked: bool,
     digest: Option<Digest>,
     /// When the last digest went (ms).
     last_digest: u64,
@@ -223,6 +225,13 @@ impl Target {
     /// Takes in the warning insights that hold at `now` (ms): those not told, or gone for a day since, wait to be.
     fn look(&mut self, warnings: &[Insight], now: u64) {
         let before = self.waiting();
+        // A daemon that was off did not see any go away: what was told before counts as seen at the first look.
+        if !self.looked {
+            self.looked = true;
+            for seen in self.told.values_mut() {
+                *seen = (*seen).max(now);
+            }
+        }
         self.insights = warnings
             .iter()
             .filter(|insight| {
@@ -302,16 +311,19 @@ impl Target {
 pub(super) struct Notifier {
     pub store: Store,
     pub config: Arc<Mutex<ConfigText>>,
+    /// Signalled each time `config` is replaced, so a target added starts from then, not from the next event.
+    pub replaced: Arc<tokio::sync::Notify>,
     pub stopping: watch::Receiver<bool>,
     pub setup: Setup,
 }
 
-/// Sends what `[notify]` asks for until the server stops; reads `[notify]` again at every wake, so a reload takes
-/// effect without a restart.
+/// Sends what `[notify]` asks for until the server stops; reads `[notify]` again at every wake and as soon as the
+/// config is replaced, so a reload takes effect without a restart.
 pub(super) async fn run(notifier: Notifier) {
     let Notifier {
         store,
         config,
+        replaced,
         mut stopping,
         setup,
     } = notifier;
@@ -353,6 +365,7 @@ pub(super) async fn run(notifier: Notifier) {
         tokio::select! {
             () = tokio::time::sleep_until(wake) => {}
             closed = durable(&mut live) => if closed { return },
+            () = replaced.notified() => {}
             _ = stopping.wait_for(|stopping| *stopping) => return,
         }
     }
@@ -438,6 +451,7 @@ async fn start(
         insights: Vec::new(),
         present: None,
         told,
+        looked: false,
         digest: None,
         last_digest,
         since: None,
@@ -849,12 +863,15 @@ fn digest_message(digest: Digest) -> Notification {
     }
 }
 
-/// An HTTP client for targets, with the daemon's TLS provider and `timeout` per request.
+/// An HTTP client for targets, with the daemon's TLS provider and `timeout` per request. It follows no redirect:
+/// a POST followed on a 301 or 302 arrives as a GET without its body, which a server can answer with 200, and its
+/// headers would go on to the other host.
 fn client(timeout: Duration) -> Result<reqwest::Client, String> {
     runnerd_core::github::install_crypto_provider();
     reqwest::Client::builder()
         .user_agent(concat!("runnerd/", env!("CARGO_PKG_VERSION")))
         .timeout(timeout)
+        .redirect(reqwest::redirect::Policy::none())
         .build()
         // Built before any URL is set, so its error names none.
         .map_err(|build_error| build_error.to_string())
@@ -970,8 +987,8 @@ pub(super) async fn test(
         Err(why) => return error(StatusCode::INTERNAL_SERVER_ERROR, &why),
     };
     info!("notify: test message requested by {principal:?}");
-    let mut deliveries = Vec::new();
-    for target in &targets {
+    // All at once, so slow targets together still answer within the client's wait.
+    let deliveries = futures_util::future::join_all(targets.iter().map(|target| async {
         let notification = Notification {
             event: NotifyEvent::Test,
             title: "runnerd can reach you".to_owned(),
@@ -990,11 +1007,12 @@ pub(super) async fn test(
         if let Some(why) = &error {
             warn!("notify {}: test not delivered: {why}", target.name);
         }
-        deliveries.push(Delivery {
+        Delivery {
             target: target.name.clone(),
             error,
-        });
-    }
+        }
+    }))
+    .await;
     Json(NotifyTest {
         targets: deliveries,
     })

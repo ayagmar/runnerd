@@ -65,6 +65,8 @@ fn runner_names_are_short_safe_and_hide_the_machine_id() {
 /// What the fake GitHub serves and what it was asked.
 #[derive(Default)]
 struct GithubState {
+    /// Every repository's default branch; `main` when unset.
+    default_branch: Option<String>,
     queued: Vec<QueuedJob>,
     runners: Vec<Runner>,
     /// GitHub gives this queued job to this runner right after the first poll that sees them.
@@ -83,6 +85,8 @@ struct GithubState {
     off_branch: Vec<String>,
     /// While true, comparing a branch with a commit fails.
     compare_fails: bool,
+    /// While true, registering a runner fails.
+    register_fails: bool,
     calls: Vec<String>,
     /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
     held: tokio::sync::watch::Sender<bool>,
@@ -193,6 +197,9 @@ impl GithubApi for FakeGithub {
     ) -> Result<(Runner, JitConfig), github::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("register {name}"));
+        if state.register_fails {
+            return Err(github::Error::Token("register fails".to_owned()));
+        }
         let runner = Runner {
             id: 100 + state.runners.len() as u64,
             name: name.to_owned(),
@@ -255,7 +262,10 @@ impl GithubApi for FakeGithub {
     async fn default_branch(&self, repository: &str) -> Result<String, github::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("default branch {repository}"));
-        Ok("main".to_owned())
+        Ok(state
+            .default_branch
+            .clone()
+            .unwrap_or_else(|| "main".to_owned()))
     }
 
     async fn on_branch(
@@ -318,6 +328,8 @@ struct DockerState {
     fail_pulls: bool,
     /// How many volumes fail to be made next, as when the disk is full.
     fail_volumes: u32,
+    /// Volumes a container still uses, which Docker refuses to remove.
+    volumes_in_use: BTreeSet<String>,
     /// Pulls do not finish while this is set, as when a large image downloads.
     block_pulls: bool,
     /// The image of each runner container started, in order.
@@ -590,11 +602,14 @@ impl DockerApi for FakeDocker {
     }
 
     async fn remove_volume(&self, name: &str) -> Result<(), docker::Error> {
-        self.0
-            .lock()
-            .unwrap()
-            .calls
-            .push(format!("remove volume {name}"));
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("remove volume {name}"));
+        if state.volumes_in_use.contains(name) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 409,
+                message: format!("remove {name}: volume is in use"),
+            });
+        }
         Ok(())
     }
 
@@ -2110,6 +2125,14 @@ async fn a_runner_started_before_any_check_of_the_caches_gets_its_slots_docker_b
     running_job(&github, &docker, "o/r", 1, 1);
     let (mut engine, _handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
+    // Docker's measure, started by the recovery, lands before the job is queued.
+    while !engine
+        .disk
+        .as_ref()
+        .is_some_and(tokio::task::JoinHandle::is_finished)
+    {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
     github.0.lock().unwrap().queued = vec![job(2)];
     engine.tick(Shutdown::No).await;
 
@@ -2388,7 +2411,14 @@ async fn a_running_mirror_keeps_its_memory_when_a_reload_lowers_it() {
 
 /// An idle runner of `o/r` in slot 1 of `app`: registered, not busy, no job.
 fn idle_runner(github: &FakeGithub, docker: &FakeDocker) {
-    docker.0.lock().unwrap().containers = vec![runner_container(1, 7, true)];
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![runner_container(1, 7, true)];
+        // It started waiting just now, well within `IDLE_TIMEOUT`.
+        state
+            .started
+            .insert("container-1".to_owned(), crate::time::now_ms());
+    }
     let mut state = github.0.lock().unwrap();
     state.runners = vec![runner(
         7,
@@ -3096,6 +3126,50 @@ async fn a_job_whose_runner_failed_to_start_waits_for_the_backoff_not_for_that_r
 }
 
 #[tokio::test]
+async fn a_job_github_still_lists_after_a_runner_took_it_is_not_counted_queued() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_runner(&github, &docker, "@@job 1 1\n");
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_state(&handle, 1, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let status = handle.status.borrow();
+    assert_eq!(
+        (status.queued.len(), status.repositories[0].queued_jobs),
+        (0, 0)
+    );
+}
+
+#[tokio::test]
+async fn a_job_held_by_a_backoff_says_what_failed() {
+    let reason = |github: &FakeGithub, docker: &FakeDocker| {
+        let (github, docker) = (github.clone(), docker.clone());
+        async move {
+            github.0.lock().unwrap().queued = vec![job(1)];
+            let (mut engine, handle, _dir) = engine(&github, &docker);
+            engine.recover().await.unwrap();
+            engine.tick(Shutdown::No).await;
+            engine.publish();
+            let status = handle.status.borrow();
+            let queued = &status.queued[0];
+            let reason = queued.waiting.as_ref().unwrap().reason(queued, &status, 0);
+            reason.split(';').next().unwrap().to_owned()
+        }
+    };
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().register_fails = true;
+    assert_eq!(
+        reason(&github, &docker).await,
+        "Runners cannot register with GitHub"
+    );
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().missing_images = BTreeSet::from(["runnerd-runner:app".to_owned()]);
+    assert_eq!(reason(&github, &docker).await, "Runners cannot start");
+}
+
+#[tokio::test]
 async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     github.0.lock().unwrap().queued = vec![job(1)];
@@ -3107,8 +3181,7 @@ async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
     engine.tick(Shutdown::No).await;
     // Still broken once the hold ends: held longer, without another announcement.
     for _ in 0..3 {
-        engine.repositories.get_mut("o/r").unwrap().held_until =
-            Some(std::time::SystemTime::UNIX_EPOCH);
+        engine.repositories.get_mut("o/r").unwrap().held = None;
         engine.tick(Shutdown::No).await;
     }
     handle.store.flush().await;
@@ -3639,3 +3712,101 @@ mod admission;
 mod build_cache;
 mod records;
 mod warm;
+
+#[tokio::test]
+async fn a_runner_a_restart_adopts_keeps_the_time_its_container_started() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    docker.0.lock().unwrap().containers = vec![runner_container(1, 7, true)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.publish();
+    let status = handle.status.borrow();
+    let adopted = status.profiles[0].slots[0].runner.as_ref().unwrap();
+    // The fake's seeded containers started a second after the epoch, long before this restart.
+    assert_eq!(adopted.started_at, 1);
+}
+
+#[tokio::test]
+async fn a_runner_waiting_for_a_job_of_a_repository_paused_since_stops_before_github_gives_it_one()
+{
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "a runner starts for it"
+    );
+
+    // Paused seconds later, before GitHub gave the runner the job: the job is not to run.
+    engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(waiting(&handle), [Some(api::Waiting::Paused)]);
+    assert_eq!(
+        handle.status.borrow().profiles[0].slots[0].runner,
+        None,
+        "its runner stopped"
+    );
+}
+
+#[tokio::test]
+async fn a_start_schedules_while_docker_still_measures_the_volumes() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    {
+        let mut state = docker.0.lock().unwrap();
+        // Docker measures every slot's Docker store: minutes, on a host with many.
+        state.volume_sizes_held.send_replace(true);
+        state.free = Some(100 << 30);
+    }
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    tokio::time::timeout(Duration::from_secs(2), engine.recover())
+        .await
+        .expect("recovery does not wait for the measure")
+        .unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "the job's runner starts"
+    );
+
+    // The measure lands: the slots' Docker stores get their share from then on.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volume_sizes_held
+        .send_replace(false);
+    for _ in 0..100 {
+        engine.tick(Shutdown::No).await;
+        if engine.docker_disk.is_some() {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    assert!(engine.docker_disk.is_some(), "the measure is taken in");
+}
+
+#[tokio::test]
+async fn a_closed_slots_volume_a_kept_record_still_uses_does_not_keep_the_others() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        // app has 2 slots; slots 3 and 4 were open before, and slot 3's failed job is kept as its record.
+        let mut state = docker.0.lock().unwrap();
+        for slot in 1..=4 {
+            state
+                .volume_sizes
+                .insert(format!("runnerd-app-slot-{slot}"), 5 << 30);
+        }
+        state.volumes_in_use.insert("runnerd-app-slot-3".to_owned());
+    }
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_called(&mut engine, &docker, "remove volume runnerd-app-slot-4").await;
+}

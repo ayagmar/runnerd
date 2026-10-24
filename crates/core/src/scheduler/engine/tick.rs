@@ -63,6 +63,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn tick(&mut self, mode: Shutdown) {
         self.collect_reseeds().await;
         self.collect_trim().await;
+        self.collect_disk().await;
         self.collect_recordings().await;
         self.collect_finished().await;
         self.collect_shells().await;
@@ -220,7 +221,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     profile: repository.profile.clone(),
                     labels: repository.labels.clone(),
                     paused: self.control.is_paused(&repository.name),
-                    held_until: state.held_until,
+                    held: state.held,
                     // GitHub lists a job queued for a few seconds after a runner took it: without this, a tick in
                     // between starts a second runner for it.
                     queued: state
@@ -257,7 +258,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             },
             SystemTime::now(),
         );
-        // Waiting runners a reload left outside the config: their repository is gone or uses another profile now.
+        // Waiting runners a reload left outside the config: their repository is gone or uses another profile now,
+        // or its runners start with other labels, image or limits, which a job queued since may need.
         plan.decisions.extend(
             self.occupied()
                 .filter(|(slot, occupant)| {
@@ -266,6 +268,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         && !self.config.repositories.iter().any(|repository| {
                             repository.name == occupant.repository
                                 && repository.profile == slot.profile
+                                && self
+                                    .config
+                                    .profiles
+                                    .get(&slot.profile)
+                                    .is_some_and(|profile| {
+                                        // The old image still runs jobs: kept until the new one is present.
+                                        !occupant.outdated(repository, profile)
+                                            && (!occupant.other_image(profile)
+                                                || self.awaits_image(&profile.image))
+                                    })
                         })
                 })
                 .map(|(slot, _)| Decision::Stop { slot }),
@@ -299,6 +311,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             })
             .collect();
         Profile {
+            count: profile.slots as usize,
             memory: profile.memory.0,
             cpus: (u64::from(profile.cpus) * 1000).min(self.cpu_budget().unwrap_or(u64::MAX)),
             upkeep_due: self.upkeep_waits_for_warm(name),

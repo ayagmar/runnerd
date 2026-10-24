@@ -38,6 +38,8 @@ const FLAKY_WARNING: u32 = 2;
 const WAITS_PERCENT: u64 = 50;
 const WAITS_SECONDS: u64 = 60;
 const WAITS_MIN_JOBS: u32 = 5;
+/// The jobs a week needs for its p95 to be other than its longest wait, the nearest rank `spread` takes.
+const WAITS_ONE_IN_20: u32 = 20;
 
 /// A repository's runs the kernel throttled for memory pressure that make an insight.
 const THROTTLED_MIN_RUNS: u32 = 2;
@@ -602,12 +604,21 @@ fn waits_insight(waits: &RepositoryWaits) -> Option<Insight> {
         repository: waits.repository.clone(),
         workflow: None,
         job: None,
-        sentence: format!(
-            "{}: 1 job in 20 waits {} or more for a runner this week, up from {} the week before.",
-            waits.repository,
-            span(now),
-            span(before)
-        ),
+        sentence: if waits.now.all.jobs < WAITS_ONE_IN_20 {
+            format!(
+                "{}: the longest wait for a runner this week is {}, up from {} the week before.",
+                waits.repository,
+                span(now),
+                span(before)
+            )
+        } else {
+            format!(
+                "{}: 1 job in 20 waits {} or more for a runner this week, up from {} the week before.",
+                waits.repository,
+                span(now),
+                span(before)
+            )
+        },
         kind: InsightKind::Waits { before, now },
         runs: Vec::new(),
     })

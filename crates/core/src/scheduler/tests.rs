@@ -4,10 +4,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    Budget, CPU_PRIORITY_AFTER, Decision, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository,
+    Budget, CPU_PRIORITY_AFTER, Decision, Hold, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository,
     RunnerSlot, Slot, SlotRef, plan,
 };
-use crate::api::Waiting;
+use crate::api::{HoldCause, Waiting};
 use crate::github::QueuedJob;
 
 const GIB: u64 = 1 << 30;
@@ -36,7 +36,7 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
             profile.to_owned(),
         ],
         paused: false,
-        held_until: None,
+        held: None,
         queued,
         runner_memory: None,
         runner_cpu: None,
@@ -62,6 +62,7 @@ fn profiles(slots: Vec<Slot>) -> BTreeMap<String, Profile> {
             cpus: 2000,
             preparing: None,
             upkeep_due: false,
+            count: slots.len(),
             slots,
         },
     )])
@@ -264,7 +265,10 @@ fn paused_held_and_reseeding_start_nothing() {
     let mut paused = repository("o/a", "app", queued());
     paused.paused = true;
     let mut held = repository("o/a", "app", queued());
-    held.held_until = Some(now() + Duration::from_secs(1));
+    held.held = Some(Hold {
+        until: now() + Duration::from_secs(1),
+        cause: HoldCause::NoJob,
+    });
     for repositories in [[paused], [held]] {
         assert_eq!(
             plan(
@@ -439,7 +443,10 @@ fn each_job_left_queued_says_why_it_waits() {
             ..repository("o/paused", "app", vec![job(1, &["app"])])
         },
         Repository {
-            held_until: Some(later),
+            held: Some(Hold {
+                until: later,
+                cause: HoldCause::NoJob,
+            }),
             ..repository("o/failing", "app", vec![job(2, &["app"])])
         },
         repository("o/a", "app", vec![job(3, &["app"]), job(4, &["app"])]),
@@ -461,6 +468,7 @@ fn each_job_left_queued_says_why_it_waits() {
             cpus: 1000,
             preparing: None,
             upkeep_due: false,
+            count: 1,
             slots: vec![busy],
         },
     );
@@ -471,6 +479,7 @@ fn each_job_left_queued_says_why_it_waits() {
             cpus: 1000,
             preparing: Some(Preparing::Reseeding),
             upkeep_due: false,
+            count: 1,
             slots: vec![Slot::Free],
         },
     );
@@ -481,7 +490,13 @@ fn each_job_left_queued_says_why_it_waits() {
         plan.waiting,
         BTreeMap::from([
             (1, Waiting::Paused),
-            (2, Waiting::Backoff { until: 1_000_060 }),
+            (
+                2,
+                Waiting::Backoff {
+                    until: 1_000_060,
+                    cause: HoldCause::NoJob
+                }
+            ),
             (4, Waiting::BehindStart { job: 3 }),
             (
                 5,
@@ -784,6 +799,7 @@ fn a_queued_job_takes_the_memory_and_cpu_of_warm_runners_of_another_profile() {
             cpus: 2000,
             preparing: None,
             upkeep_due: false,
+            count: 2,
             slots: vec![idle_runner("o/w", now()), idle_runner("o/w", now())],
         },
     );
@@ -941,4 +957,38 @@ fn a_paused_repository_keeps_no_warm_runner() {
         now(),
     );
     assert_eq!(plan.decisions, [Decision::Stop { slot: slot(0) }]);
+}
+
+#[test]
+fn a_warm_runner_in_a_slot_a_lowered_count_closed_stops_and_its_slot_serves_no_job() {
+    // `slots` went from 2 to 1 while o/a's warm runner waited in slot 2; slot 1 is closed while it runs there.
+    let mut profiles = profiles(vec![Slot::Closed, idle_runner("o/a", now())]);
+    profiles.get_mut("app").unwrap().count = 1;
+    let stopped = plan(
+        &[warm("o/a", "app", 1)],
+        &profiles,
+        budget(None, None),
+        now(),
+    );
+    assert_eq!(
+        stopped.decisions,
+        [Decision::Stop { slot: slot(1) }],
+        "it stops, and slot 1 takes the next warm runner"
+    );
+
+    // Another repository's job finds no room in it either.
+    let other = plan(
+        &[
+            warm("o/a", "app", 1),
+            repository("o/b", "app", vec![job(1, &["self-hosted", "linux", "app"])]),
+        ],
+        &profiles,
+        budget(None, None),
+        now(),
+    );
+    assert!(
+        starts(&other.decisions).is_empty(),
+        "no runner starts in a closed slot: {:?}",
+        other.decisions
+    );
 }

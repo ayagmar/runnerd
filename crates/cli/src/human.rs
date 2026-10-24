@@ -618,23 +618,25 @@ fn timeline(summary: &JobSummary, now: u64, paint: Paint) -> String {
         )
     );
     let mut table = Table::default().right(&[1]);
-    let phases = [
+    let mut phases: Vec<(&str, u64)> = [
         ("queued", Some(timeline.queued_at)),
         ("container started", timeline.container_started_at),
         ("job started", timeline.started_at),
         ("finished", timeline.finished_at),
         ("cleaned up", timeline.cleaned_at),
-    ];
+    ]
+    .into_iter()
+    .filter_map(|(name, at)| at.map(|at| (name, at)))
+    .collect();
+    // A warm runner's container started before the job was queued: it comes first, before `+0s`.
+    phases.sort_by_key(|(_, at)| *at);
     for (name, at) in phases {
-        if let Some(at) = at {
-            table.row(vec![
-                plain(name),
-                plain(format!(
-                    "+{}",
-                    duration(at.saturating_sub(timeline.queued_at))
-                )),
-            ]);
-        }
+        let offset = if at < timeline.queued_at {
+            format!("-{}", duration(timeline.queued_at - at))
+        } else {
+            format!("+{}", duration(at - timeline.queued_at))
+        };
+        table.row(vec![plain(name), plain(offset)]);
     }
     out.push_str(&table.render(paint, "  "));
     out

@@ -19,6 +19,15 @@ pub const IDLE_TIMEOUT: Duration = Duration::from_secs(300);
 /// time would otherwise take every CPU that frees up before it.
 pub const CPU_PRIORITY_AFTER: Duration = Duration::from_secs(120);
 
+/// A repository's runners held back after they failed.
+#[derive(Debug, Clone, Copy)]
+pub struct Hold {
+    /// No runner starts for it before then.
+    pub until: SystemTime,
+    /// What failed.
+    pub cause: crate::api::HoldCause,
+}
+
 /// A repository as the planner sees it.
 #[derive(Debug, Clone)]
 pub struct Repository {
@@ -30,8 +39,8 @@ pub struct Repository {
     pub labels: Vec<String>,
     /// Paused repositories get no new runners; their running jobs finish.
     pub paused: bool,
-    /// No runner starts for this repository before then, after runners failed to take a job.
-    pub held_until: Option<SystemTime>,
+    /// No runner starts for this repository before then, after its runners failed.
+    pub held: Option<Hold>,
     /// Its queued jobs at the last poll.
     pub queued: Vec<QueuedJob>,
     /// What a new runner of it takes of the budget: `None`, its profile's `memory`. Under measured admission, the
@@ -68,6 +77,8 @@ pub struct Profile {
     /// Upkeep waits for its runners, all idle: its reseed (slot 1 ran a job since the last), or the shared caches'
     /// check, which waits for every profile's. Its warm runners stop, and none starts, so the upkeep can run.
     pub upkeep_due: bool,
+    /// Its configured `slots`. A reload that lowered them leaves runners past them, whose slots close once they end.
+    pub count: usize,
     /// Index 0 is slot 1.
     pub slots: Vec<Slot>,
 }
@@ -533,16 +544,18 @@ fn sort_out(
         decided
             .waiting
             .extend(matching.iter().map(|job| (job.id, Waiting::Paused)));
-        // None is left for its idle runners, which stop.
+        // None is left for its idle runners, which stop at once.
         matching.clear();
         warm = 0;
     }
-    // Upkeep waits for its profile's runners: none is kept, and none waits out `IDLE_TIMEOUT` first.
+    // Upkeep waits for its profile's runners: none is kept, and none waits out `IDLE_TIMEOUT` first. Nor does a
+    // paused repository's: GitHub would give it a job queued before the pause.
     let upkeep_due = profile.is_some_and(|profile| profile.upkeep_due);
+    let stop_now = upkeep_due || repository.paused;
     if upkeep_due {
         warm = 0;
     }
-    let idle: Vec<(SlotRef, &RunnerSlot)> = profile
+    let (idle, closing): (Vec<(SlotRef, &RunnerSlot)>, Vec<_>) = profile
         .into_iter()
         .flat_map(|profile| profile.slots.iter().enumerate())
         .filter_map(|(index, slot)| match slot {
@@ -555,12 +568,16 @@ fn sort_out(
             )),
             _ => None,
         })
-        .collect();
+        .partition(|(slot, _)| profile.is_none_or(|profile| slot.index < profile.count));
+    // Idle runners in slots a lowered `slots` closed stop now: neither warm nor room for a job, their slots close.
+    decided
+        .decisions
+        .extend(closing.into_iter().map(|(slot, _)| Decision::Stop { slot }));
     let surplus = idle.len().saturating_sub(matching.len());
     let stops: Vec<SlotRef> = idle
         .iter()
         .filter(|(_, runner)| {
-            upkeep_due
+            stop_now
                 || now
                     .duration_since(runner.started_at)
                     .is_ok_and(|waited| waited >= IDLE_TIMEOUT)
@@ -591,12 +608,18 @@ fn sort_out(
             .map(|job| (job.id, Waiting::RunnerStarting)),
     );
     let serve = matching.iter().skip(skip).map(|job| job.id);
-    match repository.held_until.filter(|until| *until > now) {
-        Some(until) => {
-            let until = crate::time::ms(until) / 1000;
-            decided
-                .waiting
-                .extend(serve.map(|job| (job, Waiting::Backoff { until })));
+    match repository.held.filter(|held| held.until > now) {
+        Some(held) => {
+            let until = crate::time::ms(held.until) / 1000;
+            decided.waiting.extend(serve.map(|job| {
+                (
+                    job,
+                    Waiting::Backoff {
+                        until,
+                        cause: held.cause,
+                    },
+                )
+            }));
             None
         }
         None => Some(Sorted {

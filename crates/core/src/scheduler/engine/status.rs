@@ -64,6 +64,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .collect(),
             })
             .collect();
+        // The queue as clients list it: a job a runner took, which GitHub still lists for a few seconds, is not counted.
+        let queued = self.queued(&plan.waiting);
         let repositories = self
             .config
             .repositories
@@ -73,10 +75,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 profile: repository.profile.clone(),
                 labels: repository.labels.clone(),
                 paused: self.control.is_paused(&repository.name),
-                queued_jobs: self.repositories[&repository.name]
-                    .queued
+                queued_jobs: queued
                     .iter()
-                    .filter(|job| crate::scheduler::matches(job, &repository.labels))
+                    .filter(|job| job.repository == repository.name)
                     .count(),
             })
             .collect();
@@ -88,7 +89,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             budget: self.budget(),
             profiles,
             repositories,
-            queued: self.queued(&plan.waiting),
+            queued,
         };
         self.announce_changes(&previous, announced.as_deref(), &status);
         self.status.send_replace(status);

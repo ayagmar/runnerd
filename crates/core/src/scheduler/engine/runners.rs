@@ -8,12 +8,19 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::{Engine, Occupant, Purpose, RunningJobs, unix_secs};
-use crate::api::{Admission, Event, RunnerFailure};
+use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
 use crate::record;
-use crate::scheduler::{IDLE_TIMEOUT, SlotRef};
+use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef};
+
+/// The runner container's label with the labels its runner registered with, comma-separated as GitHub's runner
+/// takes them, so a restart knows them.
+pub(super) const LABELS: &str = "runnerd.labels";
+
+/// The runner container's label with the image it runs, as the config named it, so a restart knows it.
+pub(super) const IMAGE: &str = "runnerd.image";
 
 /// Why a slot's runner is removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -22,6 +29,25 @@ enum Release {
     Ended,
     /// It was idle and is no longer needed.
     Idle,
+}
+
+/// The labels of a runner container: what a restart adopts it by.
+fn container_labels(
+    name: &str,
+    repository: &str,
+    slot: usize,
+    runner_id: u64,
+    labels: &[String],
+    image: &str,
+) -> BTreeMap<String, String> {
+    BTreeMap::from([
+        ("runnerd.job".to_owned(), name.to_owned()),
+        ("runnerd.repository".to_owned(), repository.to_owned()),
+        ("runnerd.slot".to_owned(), slot.to_string()),
+        ("runnerd.runner-id".to_owned(), runner_id.to_string()),
+        (LABELS.to_owned(), labels.join(",")),
+        (IMAGE.to_owned(), image.to_owned()),
+    ])
 }
 
 /// Where the next backoff of a repository whose runners keep failing ends.
@@ -111,7 +137,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Some(true) => {
                     state.failures = 0;
                     state.idle_exits = 0;
-                    state.held_until = None;
+                    state.held = None;
                 }
                 // One that waited `IDLE_TIMEOUT` had started and connected: a warm runner whose container went
                 // once (a restart of Docker, the runner removed on GitHub) says nothing of the next one's start. The
@@ -136,6 +162,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         self.hold(
                             &occupant.repository,
                             &slot.profile,
+                            HoldCause::IdleExits,
                             "its runners end without a job after waiting for one".to_owned(),
                         );
                     }
@@ -148,6 +175,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.hold(
                         &occupant.repository,
                         &slot.profile,
+                        HoldCause::NoJob,
                         format!("{} ended without taking a job", occupant.runner_name),
                     );
                 }
@@ -262,15 +290,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Holds back a repository's next runners after one failed, longer each time in a row, and announces the first
     /// hold of a streak as `runner.failed`: a repository that stays broken says so once, not every 10 minutes, until
     /// a runner takes a job. Runners that fail while it is held started before the hold, so they do not lengthen it.
-    fn hold(&mut self, repository: &str, profile: &str, error: String) {
+    fn hold(&mut self, repository: &str, profile: &str, cause: HoldCause, error: String) {
         if let Some(state) = self.repositories.get_mut(repository)
             && state
-                .held_until
-                .is_none_or(|until| until <= SystemTime::now())
+                .held
+                .is_none_or(|held| held.until <= SystemTime::now())
         {
             state.failures += 1;
             let wait = backoff(state.failures);
-            state.held_until = Some(SystemTime::now() + wait);
+            state.held = Some(Hold {
+                until: SystemTime::now() + wait,
+                cause,
+            });
             warn!("{repository}: no runner starts for {}s", wait.as_secs());
             if state.failures > 1 {
                 return;
@@ -341,13 +372,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Err(error) => {
                 let failure = format!("cannot register a runner: {error}");
                 warn!("{repository}: {failure}");
-                self.hold(repository, &slot.profile, failure);
+                self.hold(repository, &slot.profile, HoldCause::Register, failure);
                 return;
             }
         };
+        let image = profile.image.reference();
         let spec = RunnerSpec {
             name: name.clone(),
-            image: profile.image.reference(),
+            image: image.clone(),
             profile: slot.profile.clone(),
             slice: self.config.host.slice.clone(),
             cpus: profile.cpus,
@@ -355,12 +387,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             env: self.runner_env(),
             mounts: self.runner_mounts(&slot.profile, number, &name, repository),
             network: Some(self.names.network()),
-            labels: BTreeMap::from([
-                ("runnerd.job".to_owned(), name.clone()),
-                ("runnerd.repository".to_owned(), repository.to_owned()),
-                ("runnerd.slot".to_owned(), number.to_string()),
-                ("runnerd.runner-id".to_owned(), runner.id.to_string()),
-            ]),
+            labels: container_labels(&name, repository, number, runner.id, &labels, &image),
             entrypoint: None,
             jit_config: Some(jit_config),
         };
@@ -386,6 +413,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     admission: Some(admission),
                     job: None,
                     key: None,
+                    labels: Some(labels),
+                    image: Some(image),
                 };
                 if let Some(entry) = self
                     .slots
@@ -404,7 +433,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 if let Err(error) = self.github.delete_runner(repository, runner.id).await {
                     warn!("{repository}: cannot delete {name}: {error}");
                 }
-                self.hold(repository, &slot.profile, failure);
+                self.hold(repository, &slot.profile, HoldCause::Start, failure);
             }
         }
     }

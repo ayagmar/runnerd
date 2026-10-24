@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use super::{Engine, Occupant, Shutdown};
 use crate::api;
-use crate::cache::{self, Emptied, Trimmed};
+use crate::cache::{self, Emptied, Refused, Trimmed};
 use crate::config::ByteSize;
 use crate::docker::{DockerApi, is_not_found};
 use crate::github::GithubApi;
@@ -185,6 +185,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 sizes,
                 emptied,
                 closed,
+                refused,
                 free,
             })) => {
                 self.mark_oversized(&sizes);
@@ -206,28 +207,49 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 for Emptied { name, size } in closed {
                     info!("removed {name} ({size}): its profile has fewer slots now");
                 }
+                for Refused { name, error } in refused {
+                    warn!("cannot remove {name}, tried again at the next check: {error}");
+                }
             }
             Ok(Err(error)) => warn!("cannot check the shared caches: {error}"),
             Err(error) => warn!("checking the shared caches stopped: {error}"),
         }
     }
 
-    /// Measures what the slots' Docker Engines may keep (`cache::docker_disk`), for the runners that start before the
-    /// first check of the caches, which waits for no runner to run: after a restart that adopted some, that can be
-    /// long.
-    pub(super) async fn measure_docker_disk(&mut self) {
-        let free = self.docker.free_space().await;
-        let sizes = self.docker.volume_sizes().await;
-        match (free, sizes) {
-            (Ok(free), Ok(sizes)) => {
-                self.docker_disk =
-                    Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+    /// Starts measuring what the slots' Docker Engines may keep (`cache::docker_disk`), for the runners that start
+    /// before the first check of the caches, which waits for no runner to run: after a restart that adopted some,
+    /// that can be long. Docker measures every volume, which takes minutes on a host whose slots hold Docker stores,
+    /// so it runs in the background; until it ends, each image keeps its own default.
+    pub(super) fn measure_docker_disk(&mut self) {
+        let docker = self.docker.clone();
+        self.disk = Some(tokio::spawn(async move {
+            Ok(Disk {
+                free: docker.free_space().await?,
+                sizes: docker.volume_sizes().await?,
+            })
+        }));
+    }
+
+    /// Takes in the measure `measure_docker_disk` started, once it ended. A check of the caches since measured
+    /// later, so it wins.
+    pub(super) async fn collect_disk(&mut self) {
+        if !self.disk.as_ref().is_some_and(JoinHandle::is_finished) {
+            return;
+        }
+        let Some(task) = self.disk.take() else {
+            return;
+        };
+        match task.await {
+            Ok(Ok(Disk { free, sizes })) => {
+                if self.docker_disk.is_none() {
+                    self.docker_disk =
+                        Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+                }
             }
-            (Err(error), _) | (_, Err(error)) => {
-                warn!(
-                    "cannot measure Docker's disk, so runners keep their image's Docker budget: {error}"
-                );
-            }
+            Ok(Err(error)) => warn!(
+                "cannot measure Docker's disk, so runners keep their image's Docker budget: {error}"
+            ),
+            Err(error) => warn!("measuring Docker's disk stopped: {error}"),
         }
     }
 
@@ -302,7 +324,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .flatten()
                 .all(|occupant| !occupant.busy && occupant.job.is_none())
         };
+        // A shell holds back the reseed until it closes, so runners keep serving meanwhile.
         let reseed = (self.reseed_due.contains(profile) || self.reseed_requested.contains(profile))
+            && !self.shell_profiles().contains(profile)
             && self.slots.get(profile).is_some_and(idle);
         // Until the check ends: a runner started meanwhile mounts the volumes it may remove.
         let check = (self.trim.is_some()
@@ -320,4 +344,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn is_reseeding(&self, profile: &str) -> bool {
         self.reseeds.contains_key(profile) || self.reseed_requested.contains(profile)
     }
+}
+
+/// Docker's free disk and the volumes' sizes, as `measure_docker_disk` read them.
+#[derive(Debug)]
+pub(super) struct Disk {
+    free: u64,
+    sizes: BTreeMap<String, u64>,
 }

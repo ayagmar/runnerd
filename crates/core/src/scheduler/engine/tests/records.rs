@@ -55,7 +55,7 @@ async fn until_recorded(engine: &mut Engine<FakeGithub, FakeDocker>) {
 }
 
 /// A record image an earlier job left, made `age` seconds ago.
-fn record_image(job: u64, age: u64) -> docker::Image {
+pub(super) fn record_image(job: u64, age: u64) -> docker::Image {
     let created = crate::time::now_ms() / 1000 - age;
     docker::Image {
         reference: record::image(job),

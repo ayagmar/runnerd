@@ -553,7 +553,7 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
         }
         engine.tick(Shutdown::No).await;
         assert_eq!(
-            engine.repositories["o/r"].held_until.is_some(),
+            engine.repositories["o/r"].held.is_some(),
             exits == 2,
             "held after the second in a row, not the first"
         );
@@ -586,5 +586,165 @@ async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_i
     assert_eq!(
         engine.repositories["o/r"].failures, 0,
         "the next failure is announced as a new streak's first"
+    );
+}
+
+#[tokio::test]
+async fn a_warm_runner_whose_labels_image_or_limits_a_reload_changed_makes_way_for_one_that_has_them()
+ {
+    let gpu = warm_config().replace(
+        "labels = [\"self-hosted\", \"app\"]",
+        "labels = [\"self-hosted\", \"app\", \"gpu\"]",
+    );
+    let more_memory = warm_config().replace("memory = \"4G\"", "memory = \"6G\"");
+    let other_image = warm_config().replace("image_stage = \"app\"", "image_stage = \"app-next\"");
+    for config in [gpu, more_memory, other_image] {
+        let github = FakeGithub::default();
+        let docker = FakeDocker::default();
+        let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+        engine.recover().await.unwrap();
+        engine.tick(Shutdown::No).await;
+        let before = runner_ids(&handle, &mut engine);
+        assert_eq!(before.len(), 1, "a warm runner waits");
+        engine.reload(Config::parse(&config).unwrap(), None, None);
+        // A job only a runner with the new labels can take, or one that needs the raised memory.
+        let labels = Config::parse(&config).unwrap().repositories[0]
+            .labels
+            .clone();
+        github.0.lock().unwrap().queued = vec![QueuedJob {
+            labels,
+            ..ci_job(2, 2, time::now_ms())
+        }];
+        engine.tick(Shutdown::No).await;
+        engine.tick(Shutdown::No).await;
+        let after = runner_ids(&handle, &mut engine);
+        assert!(
+            !after.contains(&before[0]),
+            "the warm runner from before the reload is gone: {after:?}"
+        );
+        assert!(
+            !after.is_empty(),
+            "a runner with the new config waits for the job"
+        );
+    }
+}
+
+/// The GitHub IDs of the runners in `app`'s slots.
+fn runner_ids(handle: &Handle, engine: &mut Engine<FakeGithub, FakeDocker>) -> Vec<u64> {
+    engine.publish();
+    handle.status.borrow().profiles[0]
+        .slots
+        .iter()
+        .filter_map(|slot| slot.runner.as_ref().map(|runner| runner.runner_id))
+        .collect()
+}
+
+#[tokio::test]
+async fn a_cache_a_warm_runner_mounts_is_cleaned_and_the_runner_comes_back() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+
+    // A warm runner waits all day for an active repository: it gives way to the clean.
+    engine.clean_cache("runnerd-pnpm").await.unwrap();
+    assert!(
+        docker
+            .calls()
+            .contains(&"remove volume runnerd-pnpm".to_owned()),
+        "{:?}",
+        docker.calls()
+    );
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert_eq!(registered(&github.calls()).len(), 2, "a new warm runner");
+}
+
+#[tokio::test]
+async fn a_warm_runner_waits_while_a_shell_holds_back_its_profiles_reseed() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    docker.0.lock().unwrap().images = vec![records::record_image(10, 60)];
+    let config = warm_config().replace("slots = 2", "slots = 2\nrecord_failures = true");
+    let (mut engine, handle, _dir) = active(&github, &docker, &config).await;
+    engine.recover().await.unwrap();
+    engine
+        .open_shell(10, docker::TtySize { cols: 80, rows: 24 })
+        .await
+        .unwrap();
+
+    // The shell mounts the snapshot, so the reseed waits for it to close, and the warm runner with it.
+    engine.reseed_due.insert("app".to_owned());
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert!(
+        engine.reseeds.is_empty(),
+        "no reseed runs while the shell is open"
+    );
+}
+
+#[tokio::test]
+async fn a_warm_runner_on_the_old_image_waits_until_the_new_one_is_pulled() {
+    const NEXT: &str = "ghcr.io/ayagmar/runnerd-runner:app-0.0.6";
+    let on = |image: &str| {
+        warm_config().replace("image_stage = \"app\"", &format!("image = \"{image}\""))
+    };
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &on(PUBLISHED)).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let before = runner_ids(&handle, &mut engine);
+    assert_eq!(before.len(), 1, "a warm runner waits");
+
+    // A reload names the next release's image, which takes a while to pull: the old runner still serves meanwhile.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.missing_images.insert(NEXT.to_owned());
+        state.block_pulls = true;
+    }
+    engine.reload(Config::parse(&on(NEXT)).unwrap(), None, None);
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(
+        runner_ids(&handle, &mut engine),
+        before,
+        "it waits on the old image"
+    );
+
+    // Once pulled, it makes way for one on the new image.
+    docker.0.lock().unwrap().block_pulls = false;
+    for _ in 0..100 {
+        if docker
+            .0
+            .lock()
+            .unwrap()
+            .started_images
+            .last()
+            .map(String::as_str)
+            == Some(NEXT)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(
+        docker.0.lock().unwrap().started_images,
+        [PUBLISHED, NEXT],
+        "the old runner made way for one on the new image"
+    );
+    assert_eq!(
+        runner_ids(&handle, &mut engine).len(),
+        1,
+        "one runner waits"
     );
 }

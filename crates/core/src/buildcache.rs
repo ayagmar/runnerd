@@ -69,7 +69,9 @@ pub fn writes(
     match job_runner {
         None => Writes::Undecided,
         Some(placed) if placed != runner => Writes::Refused,
-        Some(_) if trigger.head_repository.as_deref() != Some(repository) => Writes::Refused,
+        Some(_) if !same_repository(trigger.head_repository.as_deref(), repository) => {
+            Writes::Refused
+        }
         Some(_) => {
             let Some(branch) = &trigger.head_branch else {
                 return Writes::Refused;
@@ -93,8 +95,13 @@ pub fn writes(
 /// `repository` itself. A bot's, such as Renovate's or Dependabot's, only reads.
 pub fn opened_by_user(pull: &PullRequest, repository: &str, trigger: &RunTrigger) -> bool {
     pull.by_user
-        && pull.head_repository.as_deref() == Some(repository)
+        && same_repository(pull.head_repository.as_deref(), repository)
         && trigger.head_branch.as_ref() == Some(&pull.head_branch)
+}
+
+/// Whether GitHub's `head` names `repository`, as GitHub does whatever the case.
+fn same_repository(head: Option<&str>, repository: &str) -> bool {
+    head.is_some_and(|head| head.eq_ignore_ascii_case(repository))
 }
 
 /// The build cache's size now.
@@ -308,10 +315,41 @@ impl BuildCache {
         }
     }
 
+    /// Closes the socket of `runner` if its writes are undecided and it holds uploads, and says whether it did: the
+    /// uploads stay until `decide` and `detach`.
+    pub fn close(&self, runner: &str) -> bool {
+        let dir = {
+            let state = lock(&self.inner.state);
+            let Some(open) = state.runners.get(runner) else {
+                return false;
+            };
+            if open.writes != Writes::Undecided || open.held.is_empty() {
+                return false;
+            }
+            open.serving.abort();
+            open.dir.clone()
+        };
+        if let Err(error) = std::fs::remove_dir_all(&dir)
+            && error.kind() != io::ErrorKind::NotFound
+        {
+            warn!("cannot remove {}: {error}", dir.display());
+        }
+        true
+    }
+
     /// Closes `runner`'s socket and returns what it was served and stored, and whether it could write. What it sent
     /// while undecided is dropped.
     pub fn detach(&self, runner: &str) -> Option<BuildCacheCounts> {
-        let mut open = lock(&self.inner.state).runners.remove(runner)?;
+        let Some(mut open) = lock(&self.inner.state).runners.remove(runner) else {
+            // One a restart kept the directory of without opening it again, as with the cache turned off since.
+            let dir = self.inner.sockets.join(socket_dir(runner));
+            if let Err(error) = std::fs::remove_dir_all(&dir)
+                && error.kind() != io::ErrorKind::NotFound
+            {
+                warn!("cannot remove {}: {error}", dir.display());
+            }
+            return None;
+        };
         open.serving.abort();
         self.inner.remove_uploads(None, &open.held);
         open.counts.refused += open.held.len() as u64;
@@ -388,23 +426,23 @@ impl BuildCache {
 
 impl Inner {
     /// Makes an upload of `runner`'s, whose job may write, an entry; refuses it when the entries already take twice
-    /// the size limit, which only a busy hour between two trims reaches.
+    /// the size limit, which only a busy hour between two trims reaches. Renames under the lock: quick, on the
+    /// daemon's own file system.
     fn store(&self, runner: &str, upload: Upload) {
-        let fits = {
-            let state = lock(&self.state);
-            let replaced = state
-                .entries
-                .get(&upload.entry)
-                .map_or(0, |entry| entry.bytes);
-            state.bytes - replaced + upload.bytes <= state.max_size.saturating_mul(2)
-        };
+        // One lock from the check to the index: two uploads of one entry renamed in one order and indexed in the
+        // other would leave the index counting the size of the file replaced.
+        let mut state = lock(&self.state);
+        let replaced = state
+            .entries
+            .get(&upload.entry)
+            .map_or(0, |entry| entry.bytes);
+        let fits = state.bytes - replaced + upload.bytes <= state.max_size.saturating_mul(2);
         let path = self.root.join(&upload.entry);
         let stored = fits
             && path
                 .parent()
                 .is_none_or(|parent| std::fs::create_dir_all(parent).is_ok())
             && std::fs::rename(&upload.file, &path).is_ok();
-        let mut state = lock(&self.state);
         Self::give_back(&mut state, Some(runner), upload.bytes);
         if stored {
             let entry = Entry {

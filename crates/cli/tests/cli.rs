@@ -144,8 +144,10 @@ fn job(state: JobState) -> Job {
                 memory_cap: Some(6 << 30),
                 cpu_cap: Some(4000),
             }),
+            // A warm runner's: its container started before the job was queued.
             timeline: Timeline {
                 queued_at: 1_700_000_000,
+                container_started_at: Some(1_699_997_600),
                 started_at: Some(1_700_000_004),
                 ..Timeline::default()
             },
@@ -1040,6 +1042,35 @@ fn a_job_shows_the_caps_its_container_ran_with() {
         stdout(&output).contains("(profile jvm, slot 1, capped at 6G and 4 CPUs)"),
         "{}",
         stdout(&output)
+    );
+}
+
+#[test]
+fn a_job_a_warm_runner_took_shows_its_container_started_before_it_was_queued() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let output = stdout(&runnerctl(&socket, &["job", "9001"]));
+    let timeline = &output[output.find("Timeline").unwrap()..];
+    let rows: Vec<Vec<&str>> = timeline
+        .lines()
+        .skip(1)
+        .take_while(|line| !line.trim().is_empty())
+        .map(|line| {
+            line.split("  ")
+                .map(str::trim)
+                .filter(|cell| !cell.is_empty())
+                .collect()
+        })
+        .collect();
+    assert_eq!(
+        rows,
+        [
+            ["container started", "-40m 0s"],
+            ["queued", "+0s"],
+            ["job started", "+4s"]
+        ],
+        "{output}"
     );
 }
 

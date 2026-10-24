@@ -39,7 +39,7 @@ pub use self::control::{
 use self::history::{Closing, Found};
 use self::images::Images;
 pub use self::records::RecordSelection;
-use super::SlotRef;
+use super::{Hold, SlotRef};
 use crate::admission::Key;
 use crate::api;
 use crate::buildcache::BuildCache;
@@ -190,17 +190,47 @@ struct Occupant {
     memory: u64,
     /// Its container's CPU limit in millicores, which a reload does not change.
     cpus: u64,
-    /// How it was admitted, with what it reserved of the budget; `None` for one a restart adopted, which reserves
-    /// its cap.
+    /// How it was admitted, with what it reserved of the budget, kept through a restart by its record; `None` for
+    /// one whose record says nothing of it, which reserves its cap.
     admission: Option<api::Admission>,
     /// The job it took, once its log capture found it.
     job: Option<u64>,
     /// That job as admission tells jobs apart, once the history had its record.
     key: Option<Key>,
+    /// The labels it registered with; `None` for one adopted from a container that does not say.
+    labels: Option<Vec<String>>,
+    /// The image it runs; `None` for one adopted from a container that does not say.
+    image: Option<String>,
 }
 
 impl Occupant {
-    /// What it reserves of the budget under measured admission: its cap if a restart adopted it.
+    /// Whether it no longer is what `repository`'s runners in `profile` start as: other labels, or other limits than
+    /// the profile's. An unknown label set counts as the same.
+    fn outdated(
+        &self,
+        repository: &crate::config::Repository,
+        profile: &crate::config::Profile,
+    ) -> bool {
+        let differ = self.labels.as_ref().is_some_and(|labels| {
+            let set = |labels: &[String]| -> BTreeSet<String> {
+                labels
+                    .iter()
+                    .map(|label| label.to_ascii_lowercase())
+                    .collect()
+            };
+            set(labels) != set(&repository.labels)
+        });
+        differ || self.memory != profile.memory.0 || self.cpus != u64::from(profile.cpus) * 1000
+    }
+
+    /// Whether it runs another image than `profile` names. An unknown image counts as the same.
+    fn other_image(&self, profile: &crate::config::Profile) -> bool {
+        self.image
+            .as_ref()
+            .is_some_and(|image| *image != profile.image.reference())
+    }
+
+    /// What it reserves of the budget under measured admission: its cap if it has no admission.
     fn reserved(&self) -> u64 {
         self.admission
             .map_or(self.memory, |admission| admission.reserved)
@@ -227,7 +257,7 @@ struct RepositoryState {
     queued: Vec<QueuedJob>,
     /// Whether the last poll of its queued jobs succeeded.
     listed: bool,
-    held_until: Option<SystemTime>,
+    held: Option<Hold>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
     /// Runners in a row that ended without a job after waiting `IDLE_TIMEOUT` for one.
@@ -286,6 +316,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// What the slots' Docker Engines may keep together, from the last check of the caches (`cache::docker_disk`);
     /// `None` until one measured Docker's disk, when each image keeps its own default.
     docker_disk: Option<u64>,
+    /// The measure of Docker's disk recovery started, in the background: Docker measures every volume.
+    disk: Option<JoinHandle<Result<caches::Disk, docker::Error>>>,
     /// Whether a job ended since the shared caches were last checked.
     trim_due: bool,
     /// The running check of the shared caches: Docker takes many seconds to measure volumes.
@@ -333,7 +365,9 @@ pub struct Engine<G = Github, D = Docker> {
     build_cache: Option<BuildCache>,
     /// Each repository's default branch, once a job of it needed it: the branch whose builds write to the build
     /// cache when `[caches.build] branches` names none.
-    default_branches: BTreeMap<String, String>,
+    default_branches: BTreeMap<String, build_cache::DefaultBranch>,
+    /// Removed runners' build cache uploads held until `follow_jobs` asks GitHub of their jobs, by runner.
+    ended_uploads: BTreeMap<String, build_cache::EndedUploads>,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -419,6 +453,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             oversized: BTreeSet::new(),
             reseeded_at: BTreeMap::new(),
             docker_disk: None,
+            disk: None,
             // So the caches are measured once at start.
             trim_due: true,
             trim: None,
@@ -448,6 +483,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             records,
             build_cache: build_cache.clone(),
             default_branches: BTreeMap::new(),
+            ended_uploads: BTreeMap::new(),
         };
         engine.publish();
         (
@@ -560,6 +596,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
             })
         })
+    }
+
+    /// The runner in `slot`, if one is.
+    fn occupant(&self, slot: &SlotRef) -> Option<&Occupant> {
+        self.slots
+            .get(&slot.profile)
+            .and_then(|slots| slots.get(slot.index))
+            .and_then(Option::as_ref)
     }
 
     /// Drops the free slots past each profile's configured number, and the profiles a reload removed once nothing

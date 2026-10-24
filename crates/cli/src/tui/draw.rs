@@ -2351,7 +2351,7 @@ fn timeline(
     let timeline = &job.timeline;
     let end = timeline.finished_at.unwrap_or(now);
     let started = timeline.started_at;
-    let container = timeline.container_started_at.or(started);
+    let container = timeline.runner_from().or(started);
     let waiting = container.unwrap_or(end).saturating_sub(timeline.queued_at);
     let starting = match (container, started) {
         (Some(container), Some(started)) => started.saturating_sub(container),

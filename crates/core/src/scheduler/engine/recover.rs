@@ -3,7 +3,7 @@
 //! it must not delete GitHub registrations: the first poll does.
 
 use std::collections::BTreeSet;
-use std::time::SystemTime;
+use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
@@ -18,12 +18,14 @@ use crate::scheduler::SlotRef;
 use crate::scheduler::warm::Attempt;
 use crate::time;
 
-/// The limits an adopted container runs with.
+/// The limits an adopted container runs with, and when it started.
 struct Caps {
     /// Bytes.
     memory: u64,
     /// Millicores.
     cpus: u64,
+    /// When Docker started it; `None` when Docker cannot tell.
+    started_at: Option<SystemTime>,
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -51,7 +53,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// The memory and CPU caps a container left by an earlier daemon runs with, which a reload since may have
-    /// changed in the config; the profile's configured caps only when Docker cannot tell.
+    /// changed in the config; the profile's configured caps only when Docker cannot tell. Also when it started.
     async fn running_caps(&self, container: &str, profile: &str) -> Caps {
         let state = self.docker.inspect(container).await.ok();
         let configured = self.config.profiles.get(profile);
@@ -62,9 +64,45 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .or_else(|| configured.map(|settings| settings.memory.0))
                 .unwrap_or(0),
             cpus: state
+                .as_ref()
                 .and_then(|state| state.cpus)
                 .or_else(|| configured.map(|settings| u64::from(settings.cpus) * 1000))
                 .unwrap_or(0),
+            started_at: state
+                .and_then(|state| state.started_at)
+                .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+        }
+    }
+
+    /// What a runner container left running by an earlier daemon runs as, from its labels, Docker and its record.
+    async fn adopted(&self, container: &docker::Container, profile: &str) -> Occupant {
+        let label = |name: &str| container.labels.get(name).cloned().unwrap_or_default();
+        let caps = self.running_caps(&container.id, profile).await;
+        Occupant {
+            repository: label("runnerd.repository"),
+            runner_name: container.name.clone(),
+            runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
+            container: container.id.clone(),
+            busy: true,
+            // Its uptime goes on from its container's start, not from this restart.
+            started_at: caps.started_at.unwrap_or_else(SystemTime::now),
+            memory: caps.memory,
+            cpus: caps.cpus,
+            // What it reserved before the restart, as its record kept it; its cap if the record has none.
+            admission: self
+                .store
+                .runner_admitted(&container.name)
+                .await
+                .ok()
+                .flatten(),
+            // Its capture reports it again; until then, or if it cannot, the history knows it.
+            job: self.store.runner_job(&container.name).await.ok().flatten(),
+            key: None,
+            labels: container
+                .labels
+                .get(super::runners::LABELS)
+                .map(|labels| labels.split(',').map(str::to_owned).collect()),
+            image: container.labels.get(super::runners::IMAGE).cloned(),
         }
     }
 
@@ -108,21 +146,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .parse::<usize>()
                 .ok()
                 .and_then(|slot| slot.checked_sub(1));
-            let caps = self.running_caps(&container.id, &profile).await;
-            let occupant = Occupant {
-                repository: label("runnerd.repository"),
-                runner_name: container.name.clone(),
-                runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
-                container: container.id.clone(),
-                busy: true,
-                started_at: SystemTime::now(),
-                memory: caps.memory,
-                cpus: caps.cpus,
-                admission: None,
-                // Its capture reports it again; until then, or if it cannot, the history knows it.
-                job: self.store.runner_job(&container.name).await.ok().flatten(),
-                key: None,
-            };
+            let occupant = self.adopted(&container, &profile).await;
             let known_repository = self.repositories.contains_key(&occupant.repository);
             let free = index.and_then(|index| {
                 self.slots
@@ -172,7 +196,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             cache.forget_others(&keep);
         }
         self.recover_history(&running).await;
-        self.measure_docker_disk().await;
+        self.measure_docker_disk();
         Ok(())
     }
 

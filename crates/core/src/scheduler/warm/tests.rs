@@ -226,3 +226,40 @@ fn a_re_run_of_a_run_that_stopped_counting_expects_its_jobs_again() {
     );
     assert_eq!(runs.latest(10), again);
 }
+
+#[test]
+fn a_re_runs_first_job_taken_before_its_attempt_was_known_counts_for_the_re_run() {
+    let now = MIDNIGHT + 12 * HOUR;
+    let history: Vec<Seen> = (1..=3)
+        .flat_map(|run| {
+            let first = now - run * HOUR;
+            [
+                seen("o/app", "CI", run, first),
+                seen("o/app", "CI", run, first),
+                seen("o/app", "CI", run, first),
+            ]
+        })
+        .collect();
+    let learned = Learned::new(&history, now);
+    let mut runs = Runs::default();
+    runs.note("o/app", first(10), 100, Some("CI"), now - 2 * HOUR);
+    // A warm runner takes the re-run's first job: its capture names only the run, so it goes to the attempt known.
+    runs.note("o/app", runs.latest(10), 200, None, now);
+    assert_eq!(
+        runs.remaining("o/app", &learned, now),
+        0,
+        "booked to attempt 1"
+    );
+    // GitHub's details of the job say attempt 2.
+    let again = Attempt {
+        run_id: 10,
+        run_attempt: 2,
+    };
+    runs.place("o/app", again, 200, Some("CI"), now);
+    assert_eq!(
+        runs.remaining("o/app", &learned, now),
+        2,
+        "the re-run's other jobs are expected"
+    );
+    assert_eq!(runs.latest(10), again);
+}

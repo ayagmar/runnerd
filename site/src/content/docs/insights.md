@@ -12,7 +12,7 @@ runnerd reads its [job history](../running/#job-history) for what changed in you
 | Slower | the median of a job's last 5 successful runs on `main` or `master`, or its busiest branch when those have too few runs, is 20% and 30 s or more above the median of its runs before them, and each of those 5 runs is slower than that earlier median. A job that flips between two speeds, such as build cache hits and misses, is not slower. It names the first slow run. One slow run among fast ones is not enough. |
 | Flaky | a job failed or timed out, then passed on a re-run of the same run. Once is a notice; twice or more, a warning. A job that fails again on the re-run is broken, not flaky. A job whose runner vanished is not counted. |
 | Near its cap | the 95th percentile of a job's memory peaks over its last 10 runs is 85% or more of its profile's `memory`. It says whether [auto sizing](../admission/#auto-sizing) raises the profile, cannot, or is off. A notice when auto sizing raises it or only one run came that close; a warning otherwise. |
-| Cold cache | a job's last 5 runs that could write to the [build cache](../running/#build-cache), at least 3 of them with 10 lookups or more, found 10% or less of what they looked up: the runs before them stored what they built, so their cache keys differ from run to run, such as from a timestamp or an absolute path among a task's inputs. A notice. |
+| Cold cache | a job's last 5 runs that could write to the [build cache](../running/#build-cache) and looked up 10 entries or more, at least 3 such runs, found 10% or less of what they looked up: the runs before them stored what they built, so their cache keys differ from run to run, such as from a timestamp or an absolute path among a task's inputs. A notice. |
 | Memory pressure | the kernel throttled the downloads of 2 or more of a repository's jobs in the window because their memory was under pressure (`sock_throttled`): the host was short of memory, or a job sat at its cap. A warning. runnerd already [holds starts back](../admission/#the-hosts-memory) while the host is short; this says it still happened. |
 | Waits | a repository's 95th-percentile wait this week is half again and a minute more than the week before. A notice, not a warning. |
 
@@ -47,7 +47,7 @@ Each `[[notify.targets]]` entry is a place messages go. A burst is one message: 
 | `failed` | a job failed or timed out | on |
 | `lost` | a job's runner vanished before GitHub said the job completed | on |
 | `runner` | a runner could not be registered or started; once until a runner of that repository takes a job again | on |
-| `insights` | a new warning insight. Each one is told once, and again only after it went away for a day. | on |
+| `insights` | a new warning insight. Each one is told once, and again only after runnerd saw it gone for a day: time the daemon was stopped does not count. | on |
 | `digest` | at `digest_at`, once a day: the day's finished and failed jobs, new insights and longest waits. A target added today gets its first tomorrow. | off |
 
 ### On your phone with ntfy

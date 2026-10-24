@@ -237,8 +237,9 @@ nothing until Docker has listed them.
   reservation follows its repository's queue until its job is known, then that job's prediction, and a waiting
   runner raised past what is free is stopped. The config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing
   starts while the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample,
-  after a run of its job out of memory at its cap or killed for memory, or when a restart adopted it
-  ([ADR 0033](docs/adr/0033-measured-admission.md)). Job memory samples leave out page cache, and
+  after a run of its job out of memory at its cap or killed for memory, or when a restart adopted it without a
+  record of what it reserved ([ADR 0033](docs/adr/0033-measured-admission.md),
+  [ADR 0056](docs/adr/0056-adopted-runners-keep-their-reservations.md)). Job memory samples leave out page cache, and
   predictions learn peaks only from runners sampled that way ([ADR 0037](docs/adr/0037-memory-without-page-cache.md)). Each runner's record keeps what it reserves and why.
 - Under either policy, what the running containers reserve, a new runner's reservation with them, also fits what
   the host's memory leaves the slice, from a reading of the last three intervals: the slice's memory without page

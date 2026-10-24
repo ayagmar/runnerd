@@ -17,7 +17,7 @@ use runnerd_core::api::{
 };
 use runnerd_core::config::{Config, DayTime};
 use runnerd_core::store::Store;
-use tokio::sync::{Mutex, watch};
+use tokio::sync::{Mutex, Notify, watch};
 
 use super::{
     ConfigText, Notifier, Setup, Timing, client, digest_due, parse_offset, run, send_due, start,
@@ -160,20 +160,28 @@ fn failed(id: u64) -> Event {
 struct Running {
     stop: watch::Sender<bool>,
     task: tokio::task::JoinHandle<()>,
+    /// What a replaced config signals, as `PUT /v1/config` and auto sizing do.
+    replaced: Arc<Notify>,
 }
 
 impl Running {
     async fn start(store: &Store, config: &Arc<Mutex<ConfigText>>) -> Running {
         let (stop, stopping) = watch::channel(false);
+        let replaced = Arc::new(Notify::new());
         let task = tokio::spawn(run(Notifier {
             store: store.clone(),
             config: config.clone(),
+            replaced: replaced.clone(),
             stopping,
             setup: SETUP,
         }));
         // Lets it read where each target got to before the test stores events.
         tokio::time::sleep(Duration::from_millis(100)).await;
-        Running { stop, task }
+        Running {
+            stop,
+            task,
+            replaced,
+        }
     }
 
     async fn stop(self) {
@@ -609,4 +617,123 @@ fn the_digest_goes_once_a_day_after_its_local_time() {
         DayTime { minutes: 16 * 60 },
         midnight + 8 * HOUR
     ));
+}
+
+#[tokio::test]
+async fn a_target_that_redirects_is_not_counted_as_delivered() {
+    // A proxy in front of ntfy that sends http to https: a POST followed there would arrive as a GET without its
+    // body, which the server's web page answers with 200.
+    let (dir, received) = (Dir::new(), Received::default());
+    let (posts, gets) = (received.clone(), received.clone());
+    let app = Router::new()
+        .route(
+            "/hook",
+            post(move || {
+                let posts = posts.clone();
+                async move {
+                    posts.lock().unwrap().push((
+                        "/hook".to_owned(),
+                        HeaderMap::new(),
+                        Vec::new(),
+                        301,
+                    ));
+                    (StatusCode::MOVED_PERMANENTLY, [("location", "/moved")])
+                }
+            }),
+        )
+        .route(
+            "/moved",
+            axum::routing::get(move || {
+                let gets = gets.clone();
+                async move {
+                    gets.lock().unwrap().push((
+                        "/moved".to_owned(),
+                        HeaderMap::new(),
+                        Vec::new(),
+                        200,
+                    ));
+                    StatusCode::OK
+                }
+            }),
+        );
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let address = listener.local_addr().unwrap().to_string();
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = config_text(&dir, &webhook(&format!("http://{address}/hook")));
+    let notifier = Running::start(&store, &config).await;
+
+    store.event(failed(1));
+    for _ in 0..200 {
+        if received.lock().unwrap().len() >= 2 {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
+    notifier.stop().await;
+
+    let paths: Vec<String> = received
+        .lock()
+        .unwrap()
+        .iter()
+        .map(|post| post.0.clone())
+        .collect();
+    assert!(
+        paths.len() >= 2 && paths.iter().all(|path| path == "/hook"),
+        "the failure is posted again, never followed to a GET: {paths:?}"
+    );
+}
+
+#[tokio::test]
+async fn an_insight_told_before_a_long_downtime_is_not_told_again_while_it_holds() {
+    const HOUR: u64 = 3_600_000;
+    let timing = Timing {
+        gather: Duration::ZERO,
+        gap: Duration::ZERO,
+        ..SETUP.timing
+    };
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = Config::parse(&webhook(&format!("http://{}/hook", endpoint.address))).unwrap();
+    let phone = &config.notify.targets[0];
+    let http = client(timing.timeout).unwrap();
+    let mut target = start(&store, None, phone, &config).await.unwrap();
+    let t0 = 1_800_000_000_000;
+    target.look(&[flaky()], t0);
+    send_due(&store, &http, &timing, &mut target).await;
+    assert_eq!(endpoint.count(), 1, "told once");
+
+    // The host is off for a weekend; the job is still flaky when the daemon starts again.
+    let kept = store.notify_state().await.unwrap().remove("phone");
+    let mut target = start(&store, kept, phone, &config).await.unwrap();
+    target.look(&[flaky()], t0 + 60 * HOUR);
+    send_due(&store, &http, &timing, &mut target).await;
+    assert_eq!(
+        endpoint.count(),
+        1,
+        "a daemon that was off did not see it go away"
+    );
+}
+
+#[tokio::test]
+async fn a_target_added_by_a_reload_gets_the_first_failure_after_it() {
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = config_text(&dir, CONFIG);
+    let notifier = Running::start(&store, &config).await;
+
+    // A phone added while a job runs; that job's failure is the next event.
+    config.lock().await.text = webhook(&format!("http://{}/hook", endpoint.address));
+    notifier.replaced.notify_one();
+    tokio::time::sleep(Duration::from_millis(200)).await;
+    store.event(failed(1));
+    endpoint.wait_for(1).await;
+    notifier.stop().await;
+
+    let jobs: Vec<Vec<u64>> = endpoint
+        .notifications()
+        .iter()
+        .map(|sent| sent.jobs.iter().map(|job| job.id).collect())
+        .collect();
+    assert_eq!(jobs, [vec![1]], "the failure after the reload is sent");
 }

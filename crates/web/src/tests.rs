@@ -836,6 +836,21 @@ async fn every_page_renders_from_the_daemons_data() {
 }
 
 #[tokio::test]
+async fn a_job_waiting_for_cpu_never_reads_as_needing_what_is_free() {
+    let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().status.queued[0].waiting = Some(Waiting::Cpu {
+        needs: 2000,
+        free: 1950,
+    });
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    assert!(
+        body.contains("Needs 2 CPUs; 1.9 are free"),
+        "free CPU rounds down, needed CPU up: {body}"
+    );
+}
+
+#[tokio::test]
 async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits_once_each() {
     let dashboard = Dashboard::start().await;
     {
@@ -2662,13 +2677,13 @@ async fn a_warm_runner_reads_as_warm_not_as_a_runner_waiting_for_its_job() {
 }
 
 #[tokio::test]
-async fn the_insights_page_shows_each_insight_and_the_week_s_waits() {
+async fn the_insights_page_counts_and_shows_each_insight_and_the_week_s_waits() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let page = dashboard.page(&cookie, "/insights").await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     for expected in [
-        "3 insights",
+        ">4 insights<",
         "Last 24 hours: 57 jobs finished, 3 failed, 1 new insight.",
         "halyard/ledger: CI / test on main takes 6m 10s now, up from 4m 40s.",
         "failed and then passed on a re-run in 2 of its 31 runs",
@@ -2680,4 +2695,64 @@ async fn the_insights_page_shows_each_insight_and_the_week_s_waits() {
             "insights page lacks {expected:?}"
         );
     }
+}
+
+#[tokio::test]
+async fn the_latest_jobs_still_show_while_a_burst_of_jobs_waits() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        // A matrix push queues ten jobs, newer than every job that ran: the history lists them first.
+        let newest = fixtures
+            .jobs
+            .iter()
+            .map(|job| job.summary.id)
+            .max()
+            .unwrap();
+        for offset in 1..=10 {
+            let mut queued = fixtures.jobs[0].clone();
+            queued.summary.id = newest + offset;
+            queued.summary.state = JobState::Queued;
+            fixtures.jobs.insert(0, queued);
+            let mut waiting = fixtures.status.queued[0].clone();
+            waiting.id = newest + offset;
+            fixtures.status.queued.push(waiting);
+        }
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let recent = &body[body.find(r#"id="recent""#).unwrap()..];
+    assert!(
+        !recent.contains("No jobs yet"),
+        "the jobs that ran still show: {recent}"
+    );
+}
+
+#[tokio::test]
+async fn a_job_a_warm_runner_took_waited_seconds_not_the_runners_uptime() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        let timeline = &mut job.summary.timeline;
+        // Its runner waited 40 minutes for it; it started 2 s after it was queued.
+        timeline.container_started_at = Some(timeline.queued_at - 2400);
+        timeline.started_at = Some(timeline.queued_at + 2);
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    let legend = &body[body.find(r#"id="phase-legend""#).unwrap()..];
+    let legend = &legend[..legend.find("</ol>").unwrap()];
+    let starting = &legend[legend.find("Runner starting").unwrap()..];
+    assert!(
+        starting.contains(r#"id="phase-start-time" class="figure">2s<"#),
+        "the 2 s from queued to started are the runner's start: {legend}"
+    );
 }
