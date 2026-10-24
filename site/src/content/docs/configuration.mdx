@@ -197,6 +197,7 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 | `labels` | | at least one; a job runs here when every label in its `runs-on` is one of these |
 | `warm` | `1` | runners kept registered for jobs not queued yet while the repository is active ([warm runners](../running/#warm-runners)); `0` turns them off |
 | `build_cache` | `true` | whether its runners get the shared [build cache](../running/#build-cache) |
+| `build_cache_writers` | `"default-branch"` | whose jobs write to the build cache: `"default-branch"`, the default branch's and `build.branches`' pushes, schedules and manual runs; `"pull-requests"`, those and [pull requests people opened from the repository's own branches](../running/#build-cache) |
 
 ### `[history]`
 
