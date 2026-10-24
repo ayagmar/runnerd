@@ -159,6 +159,8 @@ struct Target {
     present: Option<(u64, BTreeSet<String>)>,
     /// When each insight told of was last seen to hold (ms), by key.
     told: BTreeMap<String, u64>,
+    /// Whether it has looked since the daemon started: until then, `told` is as an earlier run last saw it.
+    looked: bool,
     digest: Option<Digest>,
     /// When the last digest went (ms).
     last_digest: u64,
@@ -223,6 +225,13 @@ impl Target {
     /// Takes in the warning insights that hold at `now` (ms): those not told, or gone for a day since, wait to be.
     fn look(&mut self, warnings: &[Insight], now: u64) {
         let before = self.waiting();
+        // A daemon that was off did not see any go away: what was told before counts as seen at the first look.
+        if !self.looked {
+            self.looked = true;
+            for seen in self.told.values_mut() {
+                *seen = (*seen).max(now);
+            }
+        }
         self.insights = warnings
             .iter()
             .filter(|insight| {
@@ -438,6 +447,7 @@ async fn start(
         insights: Vec::new(),
         present: None,
         told,
+        looked: false,
         digest: None,
         last_digest,
         since: None,

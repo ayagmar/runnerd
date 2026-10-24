@@ -47,7 +47,7 @@ Each `[[notify.targets]]` entry is a place messages go. A burst is one message: 
 | `failed` | a job failed or timed out | on |
 | `lost` | a job's runner vanished before GitHub said the job completed | on |
 | `runner` | a runner could not be registered or started; once until a runner of that repository takes a job again | on |
-| `insights` | a new warning insight. Each one is told once, and again only after it went away for a day. | on |
+| `insights` | a new warning insight. Each one is told once, and again only after runnerd saw it gone for a day: time the daemon was stopped does not count. | on |
 | `digest` | at `digest_at`, once a day: the day's finished and failed jobs, new insights and longest waits. A target added today gets its first tomorrow. | off |
 
 ### On your phone with ntfy

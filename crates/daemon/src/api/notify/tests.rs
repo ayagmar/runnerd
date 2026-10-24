@@ -675,3 +675,34 @@ async fn a_target_that_redirects_is_not_counted_as_delivered() {
         "the failure is posted again, never followed to a GET: {paths:?}"
     );
 }
+
+#[tokio::test]
+async fn an_insight_told_before_a_long_downtime_is_not_told_again_while_it_holds() {
+    const HOUR: u64 = 3_600_000;
+    let timing = Timing {
+        gather: Duration::ZERO,
+        gap: Duration::ZERO,
+        ..SETUP.timing
+    };
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = Config::parse(&webhook(&format!("http://{}/hook", endpoint.address))).unwrap();
+    let phone = &config.notify.targets[0];
+    let http = client(timing.timeout).unwrap();
+    let mut target = start(&store, None, phone, &config).await.unwrap();
+    let t0 = 1_800_000_000_000;
+    target.look(&[flaky()], t0);
+    send_due(&store, &http, &timing, &mut target).await;
+    assert_eq!(endpoint.count(), 1, "told once");
+
+    // The host is off for a weekend; the job is still flaky when the daemon starts again.
+    let kept = store.notify_state().await.unwrap().remove("phone");
+    let mut target = start(&store, kept, phone, &config).await.unwrap();
+    target.look(&[flaky()], t0 + 60 * HOUR);
+    send_due(&store, &http, &timing, &mut target).await;
+    assert_eq!(
+        endpoint.count(),
+        1,
+        "a daemon that was off did not see it go away"
+    );
+}
