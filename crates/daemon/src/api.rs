@@ -71,7 +71,7 @@ pub(crate) struct ConfigSource {
     /// As the daemon read it.
     pub text: String,
     pub memory_max: MemoryMax,
-    /// Read when a new config sets `cpu_overcommit`.
+    /// Read when a new config is applied: a config that sets `cpu_overcommit` needs them, others show them.
     pub cpus: SliceCpus,
     pub sync_dir: SyncDir,
     /// How often auto sizing looks at the advice: `auto::EVERY`, or a test's.

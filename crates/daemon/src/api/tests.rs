@@ -166,6 +166,7 @@ fn status() -> Status {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            slice_cpus: None,
             cpu: None,
         },
         profiles: vec![ProfileStatus {
@@ -1507,6 +1508,7 @@ fn budget(memory_in_use: u64) -> Event {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            slice_cpus: None,
             cpu: None,
         },
     }

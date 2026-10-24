@@ -131,6 +131,11 @@ pub struct Budget {
     /// The CPU budget, under `[host] cpu_overcommit`. Absent without one, and from a daemon before CPU admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuBudget>,
+    /// The CPUs the slice may use, in millicores: its `AllowedCPUs` or the host's, less under a lower `CPUQuota`,
+    /// whether or not a CPU budget admits runners. The runners' CPU limits are quotas that may add up past it.
+    /// Absent when it could not be read, and from a daemon before it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slice_cpus: Option<u64>,
 }
 
 /// The CPU budget runners share, in millicores.

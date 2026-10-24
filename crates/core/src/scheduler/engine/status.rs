@@ -104,6 +104,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .collect(),
             shell_memory: self.shell_budget(),
+            slice_cpus: self.cpus,
             cpu: self
                 .cpus
                 .zip(self.cpu_budget())

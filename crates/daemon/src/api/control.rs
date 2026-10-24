@@ -247,10 +247,12 @@ pub(super) async fn replace(
     let Some(config) = config else {
         return Err(Refusal::Invalid(checked));
     };
-    // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs.
+    // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs, and the
+    // CPUs read only scale the dashboard's CPU chart.
+    let (read, slice) = (state.cpus, config.host.slice.clone());
+    let read = tokio::task::spawn_blocking(move || read(&slice));
     let cpus = if config.host.cpu_overcommit.is_some() {
-        let (read, slice) = (state.cpus, config.host.slice.clone());
-        match tokio::task::spawn_blocking(move || read(&slice)).await {
+        match read.await {
             Ok(Ok(cpus)) => Some(cpus),
             Ok(Err(io_error)) => {
                 checked.valid = false;
@@ -263,7 +265,7 @@ pub(super) async fn replace(
             Err(join_error) => return Err(Refusal::Join(join_error)),
         }
     } else {
-        None
+        read.await.ok().and_then(Result::ok)
     };
     let database = |config: &Config| config.history.database.clone();
     if Config::parse(&file.text).ok().as_ref().map(database) != Some(database(&config)) {

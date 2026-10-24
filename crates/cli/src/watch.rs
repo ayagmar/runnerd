@@ -492,6 +492,7 @@ mod tests {
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
+                    slice_cpus: None,
                     cpu: None,
                 },
                 profiles: vec![ProfileStatus {
@@ -721,6 +722,7 @@ mod tests {
                     mirror_memory: 0,
                     seed_memory: Vec::new(),
                     shell_memory: Vec::new(),
+                    slice_cpus: None,
                     cpu: None,
                 },
             },

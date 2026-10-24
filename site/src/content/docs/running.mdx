@@ -127,7 +127,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 
 | Request | Response |
 |---|---|
-| `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs and why each waits, the memory budget with the mirror's and each seed container's share, and under `cpu_overcommit` the CPU budget |
+| `GET /v1/status` | profiles and their slots, running runners, repositories with their queued jobs and why each waits, the memory budget with the mirror's and each seed container's share, the slice's CPUs, and under `cpu_overcommit` the CPU budget |
 | `POST /v1/repositories/{owner}/{name}/pause?force=` | no new runners; `409` naming the running job, unless `force=true` cancels its run |
 | `POST /v1/repositories/{owner}/{name}/resume` | `204` |
 | `POST /v1/repositories/pause?force=`, `POST /v1/repositories/resume` | the same for every configured repository; while any runs a job, `409` naming the jobs, and none is paused |
