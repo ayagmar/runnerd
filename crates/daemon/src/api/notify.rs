@@ -1,8 +1,9 @@
 //! Notifications (ADR 0051): under `[notify]`, sends failed and lost jobs, runners that cannot start, new warning
 //! insights and the daily digest to webhook and ntfy targets. A reader of the store's durable events beside auto
 //! sizing, off the engine's loop: the engine never waits for it. Each target's cursor, the insights it was told and
-//! its last digest are stored once a delivery succeeds, so a restart neither drops nor repeats a message. It folds a
-//! burst into one message, retries with backoff, and never logs or returns a target's URL or header values.
+//! its last digest are stored once a delivery succeeds, so a restart drops no message, and repeats one only if it stops
+//! between sending and storing: at least once. It folds a burst into one message, keeping the first `KEEP` of each
+//! kind and counting the rest, retries with backoff, and never logs or returns a target's URL or header values.
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -59,7 +60,7 @@ pub(crate) const TIMING: Timing = Timing {
 pub(crate) type LocalOffset = fn() -> Option<i64>;
 
 /// The host's offset from UTC now, in seconds, as `date +%z` prints it, so it follows the zone and daylight saving;
-/// `None` when it cannot be read, and the digest goes by UTC.
+/// `None` when it cannot be read, and the digest waits for a look that can.
 pub(crate) fn local_offset() -> Option<i64> {
     let output = std::process::Command::new("date")
         .arg("+%z")
@@ -84,13 +85,14 @@ fn parse_offset(text: &str) -> Option<i64> {
 }
 
 /// Whether the digest due at `at` local time is due at `now` (seconds) in a zone `offset` seconds from UTC, when the
-/// last went at `last`: once a day, at the first look after its time.
+/// last went at `last`: once a local day, at the first look after its time. One that went earlier today counts, so
+/// moving `at` later does not send a second.
 fn digest_due(now: u64, offset: i64, at: DayTime, last: u64) -> bool {
     const DAY: i64 = 24 * 3600;
     let now = i64::try_from(now).unwrap_or(i64::MAX);
-    let today = (now + offset).div_euclid(DAY) * DAY;
-    let due = today + i64::from(at.minutes) * 60 - offset;
-    now >= due && i64::try_from(last).unwrap_or(i64::MAX) < due
+    let midnight = (now + offset).div_euclid(DAY) * DAY - offset;
+    let due = midnight + i64::from(at.minutes) * 60;
+    now >= due && i64::try_from(last).unwrap_or(i64::MAX) < midnight
 }
 
 /// What the notifier needs: `TIMING` and `local_offset` in the daemon.
@@ -110,6 +112,38 @@ pub(crate) const SETUP: Setup = Setup {
 
 const DAY_MS: u64 = 24 * 3600 * 1000;
 
+/// How many jobs or runners of each kind a message names and carries; the rest are counted. Bounds what a target
+/// keeps while its endpoint refuses, and the body it is sent.
+const KEEP: usize = 20;
+
+/// Things of one kind waiting to be sent: the first `KEEP`, and how many came.
+struct Kept<T> {
+    first: Vec<T>,
+    count: usize,
+}
+
+impl<T> Default for Kept<T> {
+    fn default() -> Self {
+        Kept {
+            first: Vec::new(),
+            count: 0,
+        }
+    }
+}
+
+impl<T> Kept<T> {
+    fn push(&mut self, item: T) {
+        if self.first.len() < KEEP {
+            self.first.push(item);
+        }
+        self.count += 1;
+    }
+
+    fn is_empty(&self) -> bool {
+        self.count == 0
+    }
+}
+
 /// One target's state: what it was sent, what waits to be, and when it may be sent.
 struct Target {
     config: NotifyTarget,
@@ -117,9 +151,9 @@ struct Target {
     cursor: u64,
     /// The cursor as stored.
     stored: u64,
-    failed: Vec<JobSummary>,
-    lost: Vec<JobSummary>,
-    runners: Vec<RunnerFailure>,
+    failed: Kept<JobSummary>,
+    lost: Kept<JobSummary>,
+    runners: Kept<RunnerFailure>,
     /// New warning insights to tell, and when the warning insights held at the last look (ms).
     insights: Vec<Insight>,
     present: Option<(u64, BTreeSet<String>)>,
@@ -238,17 +272,23 @@ impl Target {
     }
 
     fn failed_to_send(&mut self, timing: &Timing, why: &str) {
+        let wait = self.back_off(timing);
+        warn!(
+            "notify {}: not delivered: {why}; retrying in {}s",
+            self.config.name,
+            wait.as_secs()
+        );
+    }
+
+    /// Waits longer after each failure in a row, to send or to read the history.
+    fn back_off(&mut self, timing: &Timing) -> Duration {
         self.failures += 1;
         let wait = timing
             .retry
             .saturating_mul(1 << self.failures.saturating_sub(1).min(16))
             .min(timing.retry_max);
         self.retry_at = Some(Instant::now() + wait);
-        warn!(
-            "notify {}: not delivered: {why}; retrying in {}s",
-            self.config.name,
-            wait.as_secs()
-        );
+        wait
     }
 
     fn delivered(&mut self) {
@@ -392,9 +432,9 @@ async fn start(
         config: config.clone(),
         cursor,
         stored: cursor,
-        failed: Vec::new(),
-        lost: Vec::new(),
-        runners: Vec::new(),
+        failed: Kept::default(),
+        lost: Kept::default(),
+        runners: Kept::default(),
         insights: Vec::new(),
         present: None,
         told,
@@ -481,7 +521,16 @@ async fn step(
     };
     let warned = runs.as_ref().map(|runs| warnings(runs, config, now_ms));
     for target in targets.values_mut() {
+        if target.retry_at.is_some_and(|at| at > Instant::now()) {
+            continue;
+        }
         if !read_events(store, target).await {
+            let wait = target.back_off(&setup.timing);
+            warn!(
+                "notify {}: reading the history again in {}s",
+                target.config.name,
+                wait.as_secs()
+            );
             continue;
         }
         if let Some(warned) = warned
@@ -491,11 +540,12 @@ async fn step(
             target.look(warned, now_ms);
         }
         if let Some(runs) = &runs
+            && let Some(offset) = offset
             && target.wants(NotifyEvent::Digest)
             && target.digest.is_none()
             && digest_due(
                 now_ms / 1000,
-                offset.unwrap_or(0),
+                offset,
                 config.notify.digest_at,
                 target.last_digest / 1000,
             )
@@ -563,12 +613,14 @@ async fn send_due(
                         target.config.name
                     );
                 }
-                target.failed.clear();
-                target.lost.clear();
-                target.runners.clear();
+                target.failed = Kept::default();
+                target.lost = Kept::default();
+                target.runners = Kept::default();
                 target.insights.clear();
                 target.since = None;
                 target.delivered();
+                // A digest due too waits for the gap.
+                return;
             }
             Err(why) => return target.failed_to_send(timing, &why),
         }
@@ -615,9 +667,8 @@ fn on_branch(job: &JobSummary) -> String {
         .map_or_else(String::new, |branch| format!(" on {branch}"))
 }
 
-/// Up to five lines, and how many more.
-fn lines(all: impl ExactSizeIterator<Item = String>) -> Vec<String> {
-    let count = all.len();
+/// Up to five lines of `count`, and how many more.
+fn lines(all: impl Iterator<Item = String>, count: usize) -> Vec<String> {
     let mut lines: Vec<String> = all.take(5).collect();
     if count > 5 {
         lines.push(format!("and {} more", count - 5));
@@ -641,30 +692,28 @@ fn message(target: &Target) -> Notification {
         &target.runners,
         &target.insights,
     );
-    let kinds = [
-        !failed.is_empty(),
-        !lost.is_empty(),
-        !runners.is_empty(),
-        !found.is_empty(),
-    ]
-    .iter()
-    .filter(|present| **present)
-    .count();
-    let title = match (&failed[..], &lost[..], &runners[..], &found[..]) {
-        ([job], [], [], []) => format!("{} failed", job_line(job)),
-        (jobs, [], [], []) => format!("{} jobs failed", jobs.len()),
-        ([], [job], [], []) => format!("{} lost its runner", job_line(job)),
-        ([], jobs, [], []) if kinds == 1 => format!("{} jobs lost their runner", jobs.len()),
-        ([], [], [failure], []) => format!("{}: no runner starts", failure.repository),
-        ([], [], failures, []) if kinds == 1 => {
-            format!("Runners cannot start for {} repositories", failures.len())
+    let title = match (
+        (failed.count, failed.first.first()),
+        (lost.count, lost.first.first()),
+        (runners.count, runners.first.first()),
+        (found.len(), found.first()),
+    ) {
+        ((1, Some(job)), (0, _), (0, _), (0, _)) => format!("{} failed", job_line(job)),
+        ((jobs, _), (0, _), (0, _), (0, _)) => format!("{jobs} jobs failed"),
+        ((0, _), (1, Some(job)), (0, _), (0, _)) => format!("{} lost its runner", job_line(job)),
+        ((0, _), (jobs, _), (0, _), (0, _)) => format!("{jobs} jobs lost their runner"),
+        ((0, _), (0, _), (1, Some(failure)), (0, _)) => {
+            format!("{}: no runner starts", failure.repository)
         }
-        ([], [], [], [insight]) => insight_title(insight),
-        ([], [], [], insights) if kinds == 1 => format!("{} new insights", insights.len()),
+        ((0, _), (0, _), (failures, _), (0, _)) => {
+            format!("Runners cannot start for {failures} repositories")
+        }
+        ((0, _), (0, _), (0, _), (1, Some(insight))) => insight_title(insight),
+        ((0, _), (0, _), (0, _), (insights, _)) => format!("{insights} new insights"),
         _ => [
-            (!failed.is_empty()).then(|| plural(failed.len(), "job failed", "jobs failed")),
-            (!lost.is_empty()).then(|| plural(lost.len(), "job lost", "jobs lost")),
-            (!runners.is_empty()).then(|| plural(runners.len(), "runner failed", "runners failed")),
+            (!failed.is_empty()).then(|| plural(failed.count, "job failed", "jobs failed")),
+            (!lost.is_empty()).then(|| plural(lost.count, "job lost", "jobs lost")),
+            (!runners.is_empty()).then(|| plural(runners.count, "runner failed", "runners failed")),
             (!found.is_empty()).then(|| plural(found.len(), "new insight", "new insights")),
         ]
         .into_iter()
@@ -673,24 +722,36 @@ fn message(target: &Target) -> Notification {
         .join(", "),
     };
     let mut body = Vec::new();
-    body.extend(lines(failed.iter().map(|job| {
-        let how = if job.conclusion.as_deref() == Some("timed_out") {
-            "timed out"
-        } else {
-            "failed"
-        };
-        format!("{} {how}{}", job_line(job), on_branch(job))
-    })));
-    body.extend(lines(lost.iter().map(|job| {
-        format!("{} lost its runner{}", job_line(job), on_branch(job))
-    })));
-    body.extend(lines(runners.iter().map(|failure| {
-        format!(
-            "{} ({}): {}; no runner for {}s",
-            failure.repository, failure.profile, failure.error, failure.held_for
-        )
-    })));
-    body.extend(lines(found.iter().map(|insight| insight.sentence.clone())));
+    body.extend(lines(
+        failed.first.iter().map(|job| {
+            let how = if job.conclusion.as_deref() == Some("timed_out") {
+                "timed out"
+            } else {
+                "failed"
+            };
+            format!("{} {how}{}", job_line(job), on_branch(job))
+        }),
+        failed.count,
+    ));
+    body.extend(lines(
+        lost.first
+            .iter()
+            .map(|job| format!("{} lost its runner{}", job_line(job), on_branch(job))),
+        lost.count,
+    ));
+    body.extend(lines(
+        runners.first.iter().map(|failure| {
+            format!(
+                "{} ({}): {}; no runner for {}s",
+                failure.repository, failure.profile, failure.error, failure.held_for
+            )
+        }),
+        runners.count,
+    ));
+    body.extend(lines(
+        found.iter().map(|insight| insight.sentence.clone()),
+        found.len(),
+    ));
     let event = if !failed.is_empty() {
         NotifyEvent::Failed
     } else if !runners.is_empty() {
@@ -701,8 +762,9 @@ fn message(target: &Target) -> Notification {
         NotifyEvent::Insights
     };
     let url = failed
+        .first
         .iter()
-        .chain(lost)
+        .chain(&lost.first)
         .find_map(|job| job.url.clone())
         .or_else(|| {
             found
@@ -720,8 +782,8 @@ fn message(target: &Target) -> Notification {
         } else {
             Priority::High
         },
-        jobs: failed.iter().chain(lost).cloned().collect(),
-        runners: runners.clone(),
+        jobs: failed.first.iter().chain(&lost.first).cloned().collect(),
+        runners: runners.first.clone(),
         insights: found.clone(),
         digest: None,
     }
@@ -754,6 +816,7 @@ fn digest_message(digest: Digest) -> Notification {
     )];
     body.extend(lines(
         digest.new.iter().map(|insight| insight.sentence.clone()),
+        digest.new.len(),
     ));
     if !digest.waits.is_empty() {
         body.push("Longest waits:".to_owned());

@@ -1,6 +1,6 @@
 //! The notifier against a fake HTTP endpoint on loopback: a failure delivered once across a restart, a burst folded
 //! into one message, a failing endpoint retried while the history goes on, a target added later replaying nothing,
-//! ntfy's JSON, and no URL or token in a log line.
+//! an insight told once, the daily digest, ntfy's JSON, and no URL or token in a log line.
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -12,14 +12,16 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
 use runnerd_core::api::{
-    Event, JobMetrics, JobState, JobSummary, LogSummary, Notification, NotifyEvent, Priority,
-    Timeline,
+    Event, Insight, InsightKind, JobMetrics, JobState, JobSummary, LogSummary, Notification,
+    NotifyEvent, Priority, Severity, Timeline,
 };
-use runnerd_core::config::DayTime;
+use runnerd_core::config::{Config, DayTime};
 use runnerd_core::store::Store;
 use tokio::sync::{Mutex, watch};
 
-use super::{ConfigText, Notifier, Setup, Timing, digest_due, parse_offset, run};
+use super::{
+    ConfigText, Notifier, Setup, Timing, client, digest_due, parse_offset, run, send_due, start,
+};
 use crate::testdir::Dir;
 
 const SETUP: Setup = Setup {
@@ -231,24 +233,140 @@ async fn a_burst_of_failures_is_one_message() {
     let config = config_text(&dir, &webhook(&format!("http://{}/hook", endpoint.address)));
     let notifier = Running::start(&store, &config).await;
 
-    for id in 1..=20 {
+    for id in 1..=30 {
         store.event(failed(id));
     }
-    store.event(finished(21, JobState::Lost, None));
+    store.event(finished(31, JobState::Lost, None));
     endpoint.wait_for(1).await;
     notifier.stop().await;
 
     let sent = endpoint.notifications();
     assert_eq!(sent.len(), 1, "{sent:#?}");
-    assert_eq!(sent[0].title, "20 jobs failed, 1 job lost");
-    assert_eq!(sent[0].jobs.len(), 21);
+    assert_eq!(sent[0].title, "30 jobs failed, 1 job lost");
+    assert_eq!(
+        sent[0].jobs.len(),
+        21,
+        "the first 20 failures and the lost job: a red main does not grow the body without end"
+    );
     let lines: Vec<&str> = sent[0].message.lines().collect();
     assert_eq!(
         lines.len(),
         7,
         "five failures, how many more, the lost one: {lines:#?}"
     );
-    assert_eq!(lines[5], "and 15 more");
+    assert_eq!(lines[5], "and 25 more");
+}
+
+/// A warning that `halyard/api`'s test is flaky.
+fn flaky() -> Insight {
+    Insight {
+        key: "flaky:halyard/api/CI/test".to_owned(),
+        severity: Severity::Warning,
+        repository: "halyard/api".to_owned(),
+        workflow: Some("CI".to_owned()),
+        job: Some("test".to_owned()),
+        sentence: "halyard/api: CI / test failed and then passed on a re-run in 2 of its 9 runs."
+            .to_owned(),
+        kind: InsightKind::Flaky { flaky: 2, total: 9 },
+        runs: Vec::new(),
+    }
+}
+
+#[tokio::test]
+async fn an_insight_is_told_once_and_again_only_after_it_went_away_for_a_day() {
+    const MINUTE: u64 = 60_000;
+    const HOUR: u64 = 60 * MINUTE;
+    let timing = Timing {
+        gather: Duration::ZERO,
+        gap: Duration::ZERO,
+        ..SETUP.timing
+    };
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = Config::parse(&webhook(&format!("http://{}/hook", endpoint.address))).unwrap();
+    let phone = &config.notify.targets[0];
+    let http = client(timing.timeout).unwrap();
+    let mut target = start(&store, None, phone, &config).await.unwrap();
+    let t0 = 1_800_000_000_000;
+    let looks = async |target: &mut super::Target, held: Vec<Insight>, at: u64| {
+        target.look(&held, at);
+        send_due(&store, &http, &timing, target, at).await;
+    };
+
+    looks(&mut target, vec![flaky()], t0).await;
+    for minutes in [5, 10, 15] {
+        looks(&mut target, vec![flaky()], t0 + minutes * MINUTE).await;
+    }
+    assert_eq!(endpoint.count(), 1, "held across several looks: told once");
+
+    // A restart remembers it was told.
+    let kept = store.notify_state().await.unwrap().remove("phone");
+    let mut target = start(&store, kept, phone, &config).await.unwrap();
+    looks(&mut target, vec![flaky()], t0 + 20 * MINUTE).await;
+    // Gone for less than a day and back: not again.
+    looks(&mut target, Vec::new(), t0 + HOUR).await;
+    looks(&mut target, vec![flaky()], t0 + 12 * HOUR).await;
+    // Held for more than a day since it was told: still not again.
+    looks(&mut target, vec![flaky()], t0 + 30 * HOUR).await;
+    assert_eq!(
+        endpoint.count(),
+        1,
+        "told once across a restart, a short gap and a long hold"
+    );
+
+    // Gone for more than a day and back: told again.
+    looks(&mut target, Vec::new(), t0 + 31 * HOUR).await;
+    looks(&mut target, Vec::new(), t0 + 56 * HOUR).await;
+    looks(&mut target, vec![flaky()], t0 + 57 * HOUR).await;
+    let sent = endpoint.notifications();
+    assert_eq!(sent.len(), 2, "{sent:#?}");
+    assert_eq!(sent[1].event, NotifyEvent::Insights);
+    assert_eq!(sent[1].title, "halyard/api: CI / test is flaky");
+}
+
+#[tokio::test]
+async fn the_digest_goes_once_at_its_time_across_a_restart() {
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    // It last went long ago, and is due from midnight.
+    assert!(
+        store
+            .notify_record(
+                "phone",
+                vec![("event".to_owned(), 0), ("digest".to_owned(), 0)],
+                Vec::new()
+            )
+            .await,
+        "recorded"
+    );
+    let text = format!(
+        "{CONFIG}\n[notify]\ndigest_at = \"00:00\"\n\n[[notify.targets]]\nname = \"phone\"\n\
+         kind = \"webhook\"\nurl = \"http://{}/hook\"\nevents = [\"digest\"]\n",
+        endpoint.address
+    );
+    let config = config_text(&dir, &text);
+    let notifier = Running::start(&store, &config).await;
+    store.event(failed(1));
+    endpoint.wait_for(1).await;
+    notifier.stop().await;
+    let notifier = Running::start(&store, &config).await;
+    endpoint.wait_for(2).await;
+    notifier.stop().await;
+
+    let sent = endpoint.notifications();
+    assert_eq!(
+        sent.len(),
+        1,
+        "once a day, not again after a restart: {sent:#?}"
+    );
+    assert_eq!(sent[0].event, NotifyEvent::Digest);
+    assert_eq!(sent[0].title, "CI in the last 24 hours");
+    assert_eq!(sent[0].priority, Priority::Low);
+    assert!(sent[0].jobs.is_empty(), "failed is not among its events");
+    assert!(
+        sent[0].digest.is_some(),
+        "the digest's figures come with it"
+    );
 }
 
 #[tokio::test]
@@ -450,6 +568,13 @@ fn the_digest_goes_once_a_day_after_its_local_time() {
         midnight + 14 * HOUR,
         paris,
         nine,
+        midnight + 8 * HOUR
+    ));
+    // Sent at 09:00, then moved to 16:00: not a second today.
+    assert!(!digest_due(
+        midnight + 15 * HOUR,
+        paris,
+        DayTime { minutes: 16 * 60 },
         midnight + 8 * HOUR
     ));
 }
