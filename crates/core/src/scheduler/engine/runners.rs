@@ -235,8 +235,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Holds back a repository's next runners after one failed, longer each time in a row, and announces it as
-    /// `runner.failed`. Runners that fail while it is held started before the hold, so they do not lengthen it.
+    /// Holds back a repository's next runners after one failed, longer each time in a row, and announces the first
+    /// hold of a streak as `runner.failed`: a repository that stays broken says so once, not every 10 minutes, until
+    /// a runner takes a job. Runners that fail while it is held started before the hold, so they do not lengthen it.
     fn hold(&mut self, repository: &str, profile: &str, error: String) {
         if let Some(state) = self.repositories.get_mut(repository)
             && state
@@ -247,6 +248,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let wait = backoff(state.failures);
             state.held_until = Some(SystemTime::now() + wait);
             warn!("{repository}: no runner starts for {}s", wait.as_secs());
+            if state.failures > 1 {
+                return;
+            }
             self.store.event(Event::RunnerFailed {
                 failure: RunnerFailure {
                     repository: repository.to_owned(),

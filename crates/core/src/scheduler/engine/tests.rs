@@ -6,6 +6,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap};
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::sync::{Arc, Mutex};
 use std::time::Duration;
+use std::time::SystemTime;
 
 use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
@@ -2859,7 +2860,7 @@ async fn a_job_whose_runner_failed_to_start_waits_for_the_backoff_not_for_that_r
 }
 
 #[tokio::test]
-async fn a_runner_that_cannot_start_is_announced_once_per_hold() {
+async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     github.0.lock().unwrap().queued = vec![job(1)];
     docker.0.lock().unwrap().missing_images = BTreeSet::from(["runnerd-runner:app".to_owned()]);
@@ -2868,6 +2869,11 @@ async fn a_runner_that_cannot_start_is_announced_once_per_hold() {
     engine.tick(Shutdown::No).await;
     // Held back: the next tick starts nothing, and says nothing again.
     engine.tick(Shutdown::No).await;
+    // Still broken once the hold ends: held longer, without another announcement.
+    for _ in 0..3 {
+        engine.repositories.get_mut("o/r").unwrap().held_until = Some(SystemTime::UNIX_EPOCH);
+        engine.tick(Shutdown::No).await;
+    }
     handle.store.flush().await;
     let failures: Vec<api::RunnerFailure> = handle
         .store
