@@ -24,13 +24,13 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
 use runnerd_core::api::{
-    Activity, ActivityQuery, Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume,
-    Caches, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event,
-    EventEnvelope, EventQuery, HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery,
-    JobRunner, JobState, JobSummary, LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus,
-    QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
-    RemovedRecords, ReplaceQuery, RepositoryStatus, RunnerStatus, RunningJob, Sample, SampleSeries,
-    SlotStatus, Started, Stats, StatsRow, Status, Step, Timeline,
+    Activity, ActivityQuery, Bucket, Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory,
+    CacheKind, CacheSize, CacheVolume, Caches, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor,
+    ErrorResponse, Event, EventEnvelope, EventQuery, HostSample, HostSamples, Job, JobMetrics,
+    JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery, LogSummary, PauseQuery, Paused,
+    ProfileStatus, QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records,
+    RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus, RunnerStatus, RunningJob,
+    Sample, SampleSeries, SlotStatus, Started, Stats, StatsRow, Status, Step, Timeline,
 };
 use runnerd_core::api::{
     Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread, Starts,
@@ -270,6 +270,14 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             network_received: Some(received),
             network_sent: Some(received / 9),
             mirror_bytes: received / 3,
+            build_cache: BuildCacheCounts {
+                hits: count % 40 + 10,
+                misses: count % 7 + 2,
+                read_bytes: received / 5,
+                written_bytes: received / 40,
+                refused: 0,
+                writer: true,
+            },
         },
         log: LogSummary {
             lines: lines.len() as u64,
@@ -488,6 +496,12 @@ impl Fixtures {
                 Some(5 * GIB),
             ),
             ("runnerd-mirror", CacheKind::Mirror, 7 * GIB, None),
+            (
+                "runnerd-build-cache",
+                CacheKind::Build,
+                6 * GIB + 300 * MIB,
+                Some(10 * GIB),
+            ),
         ];
         let mut cache_history = Vec::new();
         for (name, _, bytes, limit) in &volumes {
@@ -516,6 +530,19 @@ impl Fixtures {
                     limit,
                 })
                 .collect(),
+            build: Some(BuildCacheStats {
+                bytes: 6 * GIB + 300 * MIB,
+                entries: 18_412,
+                limit: 10 * GIB,
+                week: BuildCacheCounts {
+                    hits: 41_870,
+                    misses: 9_215,
+                    read_bytes: 38 * GIB,
+                    written_bytes: 5 * GIB,
+                    refused: 1_204,
+                    writer: false,
+                },
+            }),
         };
         let status = Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),

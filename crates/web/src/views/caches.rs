@@ -2,7 +2,9 @@
 //! the records of failed jobs, the other disk runnerd keeps, with their limits.
 
 use maud::{Markup, html};
-use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Records, Status};
+use runnerd_core::api::{
+    BuildCacheStats, CacheHistory, CacheKind, CacheVolume, Caches, Records, Status,
+};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, Parts, page, profile_class, time_ago};
@@ -53,6 +55,7 @@ fn kind(volume: &CacheVolume) -> Kind<'_> {
         CacheKind::Pnpm => ("pnpm store, shared".to_owned(), None),
         CacheKind::Maven => ("Maven repository, shared".to_owned(), None),
         CacheKind::Mirror => ("Docker Hub mirror".to_owned(), None),
+        CacheKind::Build => ("Build cache, shared".to_owned(), None),
     };
     Kind {
         label,
@@ -121,6 +124,9 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                         span.big { (format::bytes(volume.bytes)) }
                         @if let Some(limit) = volume.limit { span.muted { " of " (format::bytes(limit)) } }
                     }
+                    @if volume.kind == CacheKind::Build && let Some(build) = &view.caches.build {
+                        (build_cache(build))
+                    }
                     @if points.len() > 1 {
                         (TimeChart {
                             title: format!("Size of {} over 30 days", volume.name),
@@ -129,7 +135,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                             window: None,
                             live: None,
                             series: vec![Series { label: "size".to_owned(), class: "memory", points, area: true }],
-                            limit: volume.limit.map(|limit| (limit, format!("emptied above {}", format::bytes(limit)))),
+                            limit: volume.limit.map(|limit| (limit, limit_label(volume, limit))),
                             value: format::bytes,
                             time: format::short_date,
                             gap: u64::MAX,
@@ -138,6 +144,33 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                         p.muted { "One measurement so far." }
                     }
                 }
+            }
+        }
+    }
+}
+
+/// What the chart calls a volume's limit: the build cache is trimmed to it, the rest emptied above it.
+fn limit_label(volume: &CacheVolume, limit: u64) -> String {
+    if volume.kind == CacheKind::Build {
+        format!("trimmed to {}", format::bytes(limit))
+    } else {
+        format!("emptied above {}", format::bytes(limit))
+    }
+}
+
+/// The build cache's entries and what it served the last 7 days' jobs.
+fn build_cache(build: &BuildCacheStats) -> Markup {
+    let week = &build.week;
+    html! {
+        p.muted {
+            (build.entries) " entries; "
+            @match week.hit_percent() {
+                Some(percent) => {
+                    (percent) "% of " (week.lookups()) " lookups hit in 7 days, "
+                    (format::bytes(week.read_bytes)) " served, " (format::bytes(week.written_bytes)) " stored"
+                    @if week.refused > 0 { ", " (week.refused) " uploads refused" }
+                }
+                None => "no lookups in 7 days",
             }
         }
     }

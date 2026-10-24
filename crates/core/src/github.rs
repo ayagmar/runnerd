@@ -171,6 +171,17 @@ pub struct JobDetails {
     pub steps: Vec<JobStep>,
 }
 
+/// What started a workflow run, as `GET /repos/{owner}/{repo}/actions/runs/{id}` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RunTrigger {
+    /// `push`, `pull_request`, `schedule`, `workflow_dispatch`, ….
+    pub event: String,
+    /// The branch it ran on: a pull request's head branch, which may be a fork's.
+    pub head_branch: Option<String>,
+    /// `owner/name` of the repository its commit came from: a fork's, for a pull request from one.
+    pub head_repository: Option<String>,
+}
+
 fn first_attempt() -> u32 {
     1
 }
@@ -244,6 +255,17 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         id: u64,
     ) -> impl Future<Output = Result<JobDetails, Error>> + Send;
+    /// What started a workflow run.
+    fn run_trigger(
+        &self,
+        repository: &str,
+        run: u64,
+    ) -> impl Future<Output = Result<RunTrigger, Error>> + Send;
+    /// The repository's default branch.
+    fn default_branch(
+        &self,
+        repository: &str,
+    ) -> impl Future<Output = Result<String, Error>> + Send;
     /// Cancels a workflow run, and so every job in it: GitHub cancels runs, not single jobs. A run that already
     /// completed is left as it is.
     fn cancel_run(
@@ -303,6 +325,23 @@ struct Job {
     workflow_name: Option<String>,
     head_branch: Option<String>,
     html_url: Option<String>,
+}
+
+#[derive(Deserialize)]
+struct RunBody {
+    event: String,
+    head_branch: Option<String>,
+    head_repository: Option<RepositoryName>,
+}
+
+#[derive(Deserialize)]
+struct RepositoryName {
+    full_name: String,
+}
+
+#[derive(Deserialize)]
+struct RepositoryBody {
+    default_branch: String,
 }
 
 #[derive(Deserialize)]
@@ -559,6 +598,24 @@ impl GithubApi for Github {
     async fn job(&self, repository: &str, id: u64) -> Result<JobDetails, Error> {
         self.get(&format!("/repos/{repository}/actions/jobs/{id}"))
             .await
+    }
+
+    async fn run_trigger(&self, repository: &str, run: u64) -> Result<RunTrigger, Error> {
+        let path = format!("/repos/{repository}/actions/runs/{run}");
+        let run: Result<RunBody, Error> = self.get(&path).await;
+        // Asked once per job: its large answer is not worth keeping for a conditional request.
+        lock(&self.etags).remove(&path);
+        let run = run?;
+        Ok(RunTrigger {
+            event: run.event,
+            head_branch: run.head_branch,
+            head_repository: run.head_repository.map(|head| head.full_name),
+        })
+    }
+
+    async fn default_branch(&self, repository: &str) -> Result<String, Error> {
+        let body: RepositoryBody = self.get(&format!("/repos/{repository}")).await?;
+        Ok(body.default_branch)
     }
 
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), Error> {

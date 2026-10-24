@@ -1,7 +1,7 @@
 //! Insights from the job history (ADR 0051): jobs that got slower and stayed so, jobs that fail and pass on a re-run,
-//! jobs whose memory nears their profile's cap, and how long each repository's jobs wait, this week against the
-//! last; and the daily digest. Pure: the daemon reads the history, the config and the clock and passes them in. It
-//! sends nothing and changes nothing.
+//! jobs whose memory nears their profile's cap, jobs that find almost nothing in the build cache, and how long each
+//! repository's jobs wait, this week against the last; and the daily digest. Pure: the daemon reads the history, the
+//! config and the clock and passes them in. It sends nothing and changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -74,6 +74,8 @@ pub struct Run {
     pub profile: Option<String>,
     /// Its sampled memory peak.
     pub memory_peak: Option<u64>,
+    /// What the build cache served it, if its runner had the build cache.
+    pub build_cache: Option<api::BuildCacheCounts>,
 }
 
 impl Run {
@@ -147,6 +149,7 @@ pub fn insights(runs: &[Run], config: &Config, days: u32, now: u64) -> Insights 
         found.extend(slower(*key, runs));
         found.extend(flaky(*key, runs));
         found.extend(near_cap(*key, runs, config));
+        found.extend(cold_cache(*key, runs));
     }
     let waits = waits(runs, now);
     found.extend(waits.iter().filter_map(waits_insight));
@@ -440,6 +443,61 @@ fn near_cap(key: JobKey<'_>, runs: &[&Run], config: &Config) -> Option<Insight> 
             auto,
         },
         measured.iter().take(5).map(|run| run.link()).collect(),
+    ))
+}
+
+/// A job's last runs that could write to the build cache, each with this many lookups at least…
+const COLD_RUNS: usize = 5;
+const COLD_MIN_RUNS: usize = 3;
+const COLD_MIN_LOOKUPS: u64 = 10;
+/// …found at most this share of their lookups, in percent: the runs before them stored what they built, so the
+/// next should find most of it.
+const COLD_PERCENT: u64 = 10;
+
+fn cold_cache(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
+    let writers: Vec<&Run> = runs
+        .iter()
+        .rev()
+        .filter(|run| {
+            run.build_cache
+                .is_some_and(|cache| cache.writer && cache.lookups() >= COLD_MIN_LOOKUPS)
+        })
+        .take(COLD_RUNS)
+        .copied()
+        .collect();
+    if writers.len() < COLD_MIN_RUNS {
+        return None;
+    }
+    let mut total = api::BuildCacheCounts::default();
+    for run in &writers {
+        total.add(&run.build_cache.unwrap_or_default());
+    }
+    let percent = total.hit_percent()?;
+    if percent > COLD_PERCENT {
+        return None;
+    }
+    let branch = writers.first()?.branch.clone();
+    let sentence = format!(
+        "{} got {percent}% of its build cache lookups from the cache{} over its last {} runs: its tasks' inputs \
+         differ from run to run.",
+        subject(key),
+        branch
+            .as_deref()
+            .map(|branch| format!(" on {branch}"))
+            .unwrap_or_default(),
+        writers.len()
+    );
+    Some(insight(
+        key,
+        "cold-cache",
+        Severity::Notice,
+        sentence,
+        InsightKind::ColdCache {
+            branch,
+            hits: total.hits,
+            lookups: total.lookups(),
+        },
+        writers.iter().map(|run| run.link()).collect(),
     ))
 }
 

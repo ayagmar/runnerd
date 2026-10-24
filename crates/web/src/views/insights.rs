@@ -73,6 +73,7 @@ fn card(insight: &Insight, now: u64) -> Markup {
         InsightKind::Slower { .. } => ("slower", "Slower"),
         InsightKind::Flaky { .. } => ("flaky", "Flaky"),
         InsightKind::NearCap { .. } => ("near-cap", "Near its cap"),
+        InsightKind::ColdCache { .. } => ("cold-cache", "Cold cache"),
         InsightKind::Waits { .. } => ("waits", "Waits"),
     };
     let severity = match insight.severity {

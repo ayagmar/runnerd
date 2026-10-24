@@ -9,7 +9,7 @@ use tracing::{info, warn};
 
 use super::{Engine, Occupant, Purpose, RunningJobs, unix_secs};
 use crate::api::{Admission, Event, RunnerFailure};
-use crate::cache::{self, runner_mounts};
+use crate::cache;
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi};
 use crate::record;
@@ -334,7 +334,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             cpus: profile.cpus,
             memory: profile.memory,
             env: Vec::new(),
-            mounts: runner_mounts(&self.names, &slot.profile, number),
+            mounts: self.runner_mounts(&slot.profile, number, &name, repository),
             network: Some(self.names.network()),
             labels: BTreeMap::from([
                 ("runnerd.job".to_owned(), name.clone()),
@@ -378,6 +378,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.observe(slot, &occupant).await;
             }
             Err(error) => {
+                self.close_build_cache(&name);
                 warn!("{repository}: cannot start {name}: {error}");
                 self.recheck_image(&spec.image);
                 let failure = format!("cannot start {name}: {error}");

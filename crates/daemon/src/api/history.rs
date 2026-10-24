@@ -11,9 +11,9 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use runnerd_core::api::{
-    ActivityQuery, CacheHistory, CacheHistoryQuery, Caches, Event, HostSampleQuery, HostSamples,
-    INSIGHT_DAYS, INSIGHT_DAYS_MAX, InsightsQuery, JobQuery, LogQuery, Sizing, SizingQuery,
-    StatsQuery,
+    ActivityQuery, BuildCacheStats, CacheHistory, CacheHistoryQuery, CacheKind, Caches, Event,
+    HostSampleQuery, HostSamples, INSIGHT_DAYS, INSIGHT_DAYS_MAX, InsightsQuery, JobQuery,
+    LogQuery, Sizing, SizingQuery, StatsQuery,
 };
 use runnerd_core::config::Config;
 use runnerd_core::insights::{self, Run};
@@ -233,6 +233,38 @@ pub(super) async fn insight_runs_of(
 }
 
 pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> Response {
+    const WEEK: u64 = 7 * 24 * 3600 * 1000;
+    let build = match &state.handle.build_cache {
+        Some(cache) => {
+            let limit = state
+                .handle
+                .caches
+                .borrow()
+                .iter()
+                .find(|volume| volume.kind == CacheKind::Build)
+                .and_then(|volume| volume.limit);
+            match limit {
+                Some(limit) => {
+                    let since = (now() * 1000).saturating_sub(WEEK);
+                    match state.handle.store.build_cache_since(since).await {
+                        Ok(week) => {
+                            let size = cache.size();
+                            Some(BuildCacheStats {
+                                bytes: size.bytes,
+                                entries: size.entries,
+                                limit,
+                                week,
+                            })
+                        }
+                        Err(store_error) => return failed(&store_error),
+                    }
+                }
+                // Off in the config.
+                None => None,
+            }
+        }
+        None => None,
+    };
     match state.handle.store.cache_sizes_now().await {
         Ok(measured) => {
             let volumes = state
@@ -242,13 +274,18 @@ pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> R
                 .iter()
                 .cloned()
                 .map(|mut volume| {
-                    volume.bytes = measured.bytes.get(&volume.name).copied().unwrap_or(0);
+                    volume.bytes = match (&volume.kind, build) {
+                        // Its size now, which the daemon keeps without measuring.
+                        (CacheKind::Build, Some(build)) => build.bytes,
+                        _ => measured.bytes.get(&volume.name).copied().unwrap_or(0),
+                    };
                     volume
                 })
                 .collect();
             Json(Caches {
                 measured_at: measured.at,
                 volumes,
+                build,
             })
             .into_response()
         }

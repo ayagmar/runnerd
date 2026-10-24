@@ -62,6 +62,10 @@ fn removal_name(by: api::RecordRemoval) -> String {
 }
 
 impl Writer<'_> {
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per kind of write, each a call; split, it would only move the match"
+    )]
     fn apply(&self, write: Write) {
         match write {
             Write::Queued { repository, job } => {
@@ -72,6 +76,7 @@ impl Writer<'_> {
             Write::RunnerStarted(runner) => self.runner_started(&runner),
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
             Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
+            Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
                     self.runner_removed(&runner, at, announced)
@@ -140,7 +145,7 @@ impl Writer<'_> {
             Write::CacheSizes { at, sizes } => self.cache_sizes(at, sizes),
             Write::Event(event) => {
                 self.change("store an event", |announced| {
-                    announced.push(event);
+                    announced.push(*event);
                     Ok(())
                 });
             }
@@ -280,6 +285,29 @@ impl Writer<'_> {
             self.db.execute(
                 "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), 1) WHERE name = ?1",
                 [runner],
+            ),
+        );
+    }
+
+    fn build_cache(&self, runner: &str, counts: &api::BuildCacheCounts) {
+        logged(
+            "record the build cache's counts",
+            self.db.execute(
+                "UPDATE runners SET build_cache_hits = build_cache_hits + ?2, \
+                 build_cache_misses = build_cache_misses + ?3, \
+                 build_cache_read_bytes = build_cache_read_bytes + ?4, \
+                 build_cache_written_bytes = build_cache_written_bytes + ?5, \
+                 build_cache_refused = build_cache_refused + ?6, \
+                 build_cache_writer = max(coalesce(build_cache_writer, 0), ?7) WHERE name = ?1",
+                params![
+                    runner,
+                    counts.hits,
+                    counts.misses,
+                    counts.read_bytes,
+                    counts.written_bytes,
+                    counts.refused,
+                    counts.writer
+                ],
             ),
         );
     }

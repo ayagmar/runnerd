@@ -139,6 +139,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     );
                     *slot = Some(occupant.clone());
                     running.insert(occupant.runner_name.clone());
+                    // Its socket back in the directory its container mounts, if it does; its job's writes are
+                    // decided again.
+                    drop(self.attach_build_cache(&occupant.runner_name, &occupant.repository));
                     let slot = SlotRef {
                         profile,
                         index: index.unwrap_or(0),
@@ -163,6 +166,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     }
                 }
             }
+        }
+        if let Some(cache) = &self.build_cache {
+            let keep: Vec<&str> = running.iter().map(String::as_str).collect();
+            cache.forget_others(&keep);
         }
         self.recover_history(&running).await;
         Ok(())

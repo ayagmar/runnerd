@@ -1511,6 +1511,7 @@ fn the_open_job_metrics_drop_whole_figures_to_fit() {
         network_received: Some(329 << 20),
         network_sent: Some(37 << 20),
         mirror_bytes: 110 << 20,
+        ..JobMetrics::default()
     };
     app.update(key(KeyCode::Enter));
     let full = screen(&app, 240, 40, false);

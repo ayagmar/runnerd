@@ -75,6 +75,8 @@ struct GithubState {
     busy_deletes: u32,
     /// What `GET /actions/jobs/{id}` answers.
     jobs: HashMap<u64, JobDetails>,
+    /// What started each workflow run, by run ID.
+    triggers: HashMap<u64, github::RunTrigger>,
     calls: Vec<String>,
     /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
     held: tokio::sync::watch::Sender<bool>,
@@ -216,6 +218,26 @@ impl GithubApi for FakeGithub {
             .ok_or(github::Error::Token(format!("no job {id}")))
     }
 
+    async fn run_trigger(
+        &self,
+        _repository: &str,
+        run: u64,
+    ) -> Result<github::RunTrigger, github::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("run {run}"));
+        state
+            .triggers
+            .get(&run)
+            .cloned()
+            .ok_or(github::Error::Token(format!("no run {run}")))
+    }
+
+    async fn default_branch(&self, repository: &str) -> Result<String, github::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("default branch {repository}"));
+        Ok("main".to_owned())
+    }
+
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), github::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("cancel {repository} {run}"));
@@ -284,6 +306,8 @@ struct DockerState {
     refused_tags: BTreeSet<String>,
     /// Removals of these tags do not finish while they are listed, as when Docker deletes a large image's layers.
     held_removals: BTreeSet<String>,
+    /// The mounts of each runner container started, by name.
+    mounts: HashMap<String, Vec<bollard::models::Mount>>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
@@ -320,6 +344,7 @@ impl DockerApi for FakeDocker {
             });
         }
         state.started_images.push(spec.image.clone());
+        state.mounts.insert(spec.name.clone(), spec.mounts.clone());
         state.memory.insert(spec.name.clone(), spec.memory.0);
         state
             .started
@@ -711,6 +736,7 @@ fn engine_with(
                 cgroup: dir.0.join("cgroup"),
                 proc: dir.0.join("proc"),
             },
+            build_cache: None,
         },
     )
 }
@@ -3399,5 +3425,6 @@ async fn a_pull_that_lands_while_old_images_are_removed_keeps_its_image() {
 }
 
 mod admission;
+mod build_cache;
 mod records;
 mod warm;

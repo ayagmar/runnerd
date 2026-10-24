@@ -1,0 +1,16 @@
+// runnerd's shared build cache (docs/adr/0052) as Gradle's remote build cache. Gradle uses it only for builds that
+// turn the build cache on (org.gradle.caching=true or --build-cache), and only when the build configures no remote
+// cache of its own. runnerd keeps what a push to the default branch stores and drops the rest; a cache that does not
+// answer turns itself off for the build, which goes on without it. A workflow turns it off with
+// RUNNERD_BUILD_CACHE_URL set empty.
+def runnerdBuildCache = System.getenv('RUNNERD_BUILD_CACHE_URL')
+if (runnerdBuildCache) {
+    gradle.settingsEvaluated { settings ->
+        if (settings.buildCache.remote == null) {
+            settings.buildCache.remote(HttpBuildCache) {
+                url = "${runnerdBuildCache}/gradle/"
+                push = true
+            }
+        }
+    }
+}

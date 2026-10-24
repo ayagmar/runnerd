@@ -216,17 +216,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .filter_map(|(_, occupant)| Some((occupant.repository.clone(), occupant.job?)))
             .collect();
+        let mut described = Vec::new();
         for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), running)).await
         {
             match answer {
                 Ok(details) => {
                     // The workflow of a run first seen through a job a runner took.
                     self.note_workflow(details.run_id, details.workflow_name.as_deref());
+                    described.push((repository, id, details.clone()));
                     self.store.details(details);
                 }
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
+        let undecided = self.undecided(&described);
+        self.decide_writes(undecided).await;
         let closing: Vec<(String, u64)> = self
             .closing
             .iter()
@@ -283,9 +287,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.take_found();
     }
 
-    /// Records a runner's removal and stops watching it; its job, if it took one, closes once GitHub reports it
-    /// completed.
+    /// Records a runner's removal and what the build cache served it, and stops watching it; its job, if it took
+    /// one, closes once GitHub reports it completed.
     pub(super) fn forget(&mut self, occupant: &Occupant) {
+        // Before the record of its removal, which the job's record then shows.
+        self.detach_build_cache(occupant);
         let now = SystemTime::now();
         self.store
             .runner_removed(&occupant.runner_name, time::ms(now));

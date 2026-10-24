@@ -7,11 +7,13 @@
 //!
 //! This module holds `Engine`'s state, its construction and its loop; the submodules each add one concern's
 //! methods: `recover` (startup), `tick` (polling and planning), `runners` (a slot's runner from start to removal),
-//! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `history` (what
+//! `images` (pulling the profiles' images), `caches` (reseeds, the mirror and the shared caches), `build_cache` (each
+//! runner's side of the shared build cache and whether its job may write), `history` (what
 //! the store records), `warm` (how many warm runners each repository wants), `control` (the API's commands) and
 //! `status` (what it publishes).
 
 mod admission;
+mod build_cache;
 mod caches;
 mod control;
 mod history;
@@ -40,6 +42,7 @@ pub use self::records::RecordSelection;
 use super::SlotRef;
 use crate::admission::Key;
 use crate::api;
+use crate::buildcache::BuildCache;
 use crate::cache::{self, Names, Trimmed};
 use crate::config::Config;
 use crate::docker::{self, Docker, DockerApi};
@@ -137,6 +140,8 @@ pub struct Handle {
     pub caches: watch::Receiver<Vec<api::CacheVolume>>,
     /// The records of failed jobs, replaced whenever one is made or removed.
     pub records: watch::Receiver<api::Records>,
+    /// The shared build cache, for its size now.
+    pub build_cache: Option<BuildCache>,
 }
 
 /// Where the engine runs, besides its config and its GitHub and Docker clients.
@@ -159,6 +164,8 @@ pub struct Setup {
     pub paused: Vec<String>,
     /// Where the cgroup and proc file systems are.
     pub paths: Paths,
+    /// The shared build cache, unless the daemon could not open it.
+    pub build_cache: Option<BuildCache>,
 }
 
 /// Why a runner starts.
@@ -313,6 +320,11 @@ pub struct Engine<G = Github, D = Docker> {
     measured: admission::Measured,
     /// What warm runners learned from the history, and the workflow runs seen lately.
     warm: warm::Warm,
+    /// The shared build cache.
+    build_cache: Option<BuildCache>,
+    /// Each repository's default branch, once a job of it needed it: the branch whose builds write to the build
+    /// cache when `[caches.build] branches` names none.
+    default_branches: BTreeMap<String, String>,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -324,6 +336,10 @@ fn unix_secs(time: SystemTime) -> u64 {
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// An engine for a validated config. `identity` names this machine's runners, so a restarted daemon recognizes
     /// them; `memory_max` is the slice's.
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one line per field of the engine's state, which split up would only be listed twice"
+    )]
     pub fn new(config: Config, github: G, docker: D, setup: Setup) -> (Engine<G, D>, Handle) {
         let Setup {
             names,
@@ -334,6 +350,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             announced,
             paused,
             paths,
+            build_cache,
         } = setup;
         let slots = config
             .profiles
@@ -417,6 +434,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             measured: admission::Measured::default(),
             warm: warm::Warm::default(),
             records,
+            build_cache: build_cache.clone(),
+            default_branches: BTreeMap::new(),
         };
         engine.publish();
         (
@@ -427,6 +446,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 store,
                 caches: caches_receiver,
                 records: records_receiver,
+                build_cache,
             },
         )
     }
