@@ -9,7 +9,7 @@ runnerd reads its [job history](../running/#job-history) for what changed in you
 
 | Insight | When |
 |---|---|
-| Slower | the median of a job's last 5 successful runs on `main` or `master`, or its busiest branch when those have too few runs, is 20% and 30 s or more above the median of its runs before them, and its last two runs were not both fast. It names the first slow run. One slow run among fast ones is not enough. |
+| Slower | the median of a job's last 5 successful runs on `main` or `master`, or its busiest branch when those have too few runs, is 20% and 30 s or more above the median of its runs before them, and each of those 5 runs is slower than that earlier median. A job that flips between two speeds, such as build cache hits and misses, is not slower. It names the first slow run. One slow run among fast ones is not enough. |
 | Flaky | a job failed or timed out, then passed on a re-run of the same run. Once is a notice; twice or more, a warning. A job that fails again on the re-run is broken, not flaky. A job whose runner vanished is not counted. |
 | Near its cap | the 95th percentile of a job's memory peaks over its last 10 runs is 85% or more of its profile's `memory`. It says whether [auto sizing](../admission/#auto-sizing) raises the profile, cannot, or is off. A notice when auto sizing raises it or only one run came that close; a warning otherwise. |
 | Waits | a repository's 95th-percentile wait this week is half again and a minute more than the week before. A notice, not a warning. |

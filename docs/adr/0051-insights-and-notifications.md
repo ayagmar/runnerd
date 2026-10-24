@@ -21,7 +21,10 @@ repository, workflow and job name. No new data is collected.
 - **Slower**: a job's successful runs on `main` or `master` when it has 10 of them, else on its busiest branch,
   oldest first. The last 5 are recent, the ones before
   are the baseline, 5 at least. The job is slower when the median of the recent runs is 20% and 30 seconds or more
-  above the baseline's median. A run is slow when it is above that threshold too. "Since" is the first slow run
+  above the baseline's median and every recent run is slower than the baseline's median: a job that flips between
+  two speeds, such as build cache hits and misses, moves its median with a few more slow runs in a row without
+  getting slower (amended 2026-10-24, after a Gradle job read as slower on cache misses alone). A run is slow when
+  it is above that threshold too. "Since" is the first slow run
   after which no two runs in a row were fast; a job whose last two runs were fast is not slower, whatever the median.
   One slow run never moves a median of five, so a one-off is not reported. Once more than half the baseline is slow,
   the slower time is the new normal and the insight goes; with a run or two a day that is about a week.

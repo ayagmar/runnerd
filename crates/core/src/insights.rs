@@ -291,7 +291,9 @@ fn slower(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
     let before = median(&took(baseline));
     let now = median(&took(recent));
     let threshold = (before + before * SLOWER_PERCENT / 100).max(before + SLOWER_SECONDS);
-    if now < threshold {
+    // Every recent run slower than the baseline's median: a job that flips between two speeds, such as build cache
+    // hits and misses, moves its median with a few more slow runs in a row without getting slower.
+    if now < threshold || recent.iter().any(|(_, took)| *took <= before) {
         return None;
     }
     // The first slow run after which no two runs in a row were fast.
