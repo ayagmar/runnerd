@@ -39,7 +39,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets |
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check (amended by 0037, 0039) |
 | [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag (amended by 0036, 0037) |
-| [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit (installable dashboard built in 0042) |
+| [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit (installable dashboard built in 0042, notifications in 0051) |
 | [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time |
 | [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |
@@ -56,3 +56,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0048](0048-slice-charts-scaled-to-the-slice.md) | The slice's charts reach up to the slice |
 | [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling |
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued |
+| [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends |
