@@ -1314,3 +1314,36 @@ async fn without_a_recent_reading_of_the_host_only_the_slice_bounds_starts() {
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4);
 }
+
+#[tokio::test]
+async fn runners_a_restart_adopts_keep_the_cpu_they_reserved_not_their_limits() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &cpu_measured());
+    engine.cpus = Some(4000);
+    history(&handle.store, G, 0).await;
+    // Each build used half a CPU over its run.
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute("UPDATE jobs SET cpu_average = 500", [])
+        .unwrap();
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4, "4 × 0.5 CPU fit 4");
+    handle.store.flush().await;
+    drop((engine, handle));
+
+    // The daemon restarts while the four run: each still reserves half a CPU, not its 2-CPU limit.
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &cpu_measured());
+    engine.cpus = Some(4000);
+    engine.recover().await.unwrap();
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.cpu.map(|cpu| cpu.in_use),
+        Some(2000)
+    );
+}

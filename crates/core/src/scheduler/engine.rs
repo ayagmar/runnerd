@@ -190,8 +190,8 @@ struct Occupant {
     memory: u64,
     /// Its container's CPU limit in millicores, which a reload does not change.
     cpus: u64,
-    /// How it was admitted, with what it reserved of the budget; `None` for one a restart adopted, which reserves
-    /// its cap.
+    /// How it was admitted, with what it reserved of the budget, kept through a restart by its record; `None` for
+    /// one whose record says nothing of it, which reserves its cap.
     admission: Option<api::Admission>,
     /// The job it took, once its log capture found it.
     job: Option<u64>,
@@ -200,7 +200,7 @@ struct Occupant {
 }
 
 impl Occupant {
-    /// What it reserves of the budget under measured admission: its cap if a restart adopted it.
+    /// What it reserves of the budget under measured admission: its cap if it has no admission.
     fn reserved(&self) -> u64 {
         self.admission
             .map_or(self.memory, |admission| admission.reserved)

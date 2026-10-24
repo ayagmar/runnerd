@@ -866,6 +866,21 @@ pub(super) fn runner_job(db: &Connection, runner: &str) -> rusqlite::Result<Opti
     .optional()
 }
 
+pub(super) fn runner_admission(
+    db: &Connection,
+    runner: &str,
+) -> rusqlite::Result<Option<api::Admission>> {
+    let admission: Option<String> = db
+        .query_row(
+            "SELECT admission FROM runners WHERE name = ?1",
+            [runner],
+            |row| row.get(0),
+        )
+        .optional()?
+        .flatten();
+    Ok(admission.and_then(|admission| serde_json::from_str(&admission).ok()))
+}
+
 pub(super) fn log_position(db: &Connection, job: u64) -> rusqlite::Result<LogPosition> {
     Ok(db
         .query_row(

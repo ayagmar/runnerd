@@ -125,7 +125,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 started_at: caps.started_at.unwrap_or_else(SystemTime::now),
                 memory: caps.memory,
                 cpus: caps.cpus,
-                admission: None,
+                // What it reserved before the restart, as its record kept it; its cap if the record has none.
+                admission: self
+                    .store
+                    .runner_admitted(&container.name)
+                    .await
+                    .ok()
+                    .flatten(),
                 // Its capture reports it again; until then, or if it cannot, the history knows it.
                 job: self.store.runner_job(&container.name).await.ok().flatten(),
                 key: None,
