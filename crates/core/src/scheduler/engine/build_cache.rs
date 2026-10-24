@@ -14,7 +14,7 @@ use super::{Engine, Occupant};
 use crate::buildcache::{self, Writes};
 use crate::cache;
 use crate::docker::DockerApi;
-use crate::github::{self, GithubApi, JobDetails, RunTrigger};
+use crate::github::{self, GithubApi, JobDetails};
 
 /// A job whose writes are undecided, with what GitHub said of it.
 #[derive(Debug)]
@@ -24,12 +24,13 @@ pub(super) struct Undecided {
     job: JobDetails,
 }
 
-/// What GitHub says of an undecided job's run, and of its repository's default branch when the config names no
-/// branches.
+/// What GitHub said of an undecided job: whether it may write, `None` when GitHub could not say, and its
+/// repository's default branch, once known.
 struct Answer {
-    undecided: Undecided,
-    trigger: Result<RunTrigger, github::Error>,
-    default_branch: Option<Result<String, github::Error>>,
+    runner: String,
+    repository: String,
+    writes: Option<Writes>,
+    default_branch: Option<String>,
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -121,86 +122,98 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let known = self.default_branches.clone();
         let github = self.github.clone();
         let answers = self
-            .serving(read_triggers(github, undecided, branches.is_empty(), known))
+            .serving(read_answers(github, undecided, branches, known))
             .await;
         for answer in answers {
-            let Answer {
-                undecided,
-                trigger,
-                default_branch,
-            } = answer;
-            let trigger = match trigger {
-                Ok(trigger) => trigger,
-                Err(error) => {
-                    warn!(
-                        "{}: cannot read run {}: {error}",
-                        undecided.repository, undecided.job.run_id
-                    );
-                    continue;
-                }
-            };
-            let branches = match default_branch {
-                None => branches.clone(),
-                Some(Ok(branch)) => {
-                    self.default_branches
-                        .insert(undecided.repository.clone(), branch.clone());
-                    vec![branch]
-                }
-                Some(Err(error)) => {
-                    warn!(
-                        "{}: cannot read its default branch: {error}",
-                        undecided.repository
-                    );
-                    continue;
-                }
-            };
-            let writes = buildcache::writes(
-                &undecided.runner,
-                undecided.job.runner_name.as_deref(),
-                &undecided.repository,
-                &trigger,
-                &branches,
-            );
-            if writes == Writes::Undecided {
-                continue;
+            if let Some(branch) = answer.default_branch {
+                self.default_branches
+                    .insert(answer.repository.clone(), branch);
             }
-            if let Some(cache) = &self.build_cache {
-                cache.decide(&undecided.runner, writes);
+            if let (Some(writes), Some(cache)) = (answer.writes, &self.build_cache) {
+                cache.decide(&answer.runner, writes);
             }
         }
     }
 }
 
-/// Asks GitHub for each undecided job's run, and for its repository's default branch unless `known` has it or
-/// none is needed.
-async fn read_triggers<G: GithubApi>(
+/// Asks GitHub for each undecided job's run, its repository's default branch unless `known` has it, and, for a run
+/// that may write, whether the branch has its commit: a tag's run names the tag as its branch.
+async fn read_answers<G: GithubApi>(
     github: Arc<G>,
     undecided: Vec<Undecided>,
-    needs_default_branch: bool,
+    branches: Vec<String>,
     known: BTreeMap<String, String>,
 ) -> Vec<Answer> {
-    let github = &*github;
-    let known = &known;
+    let (github, branches, known) = (&*github, &branches, &known);
     futures_util::stream::iter(undecided)
         .map(|undecided| async move {
-            let trigger = github
-                .run_trigger(&undecided.repository, undecided.job.run_id)
-                .await;
-            let default_branch = if needs_default_branch {
-                Some(match known.get(&undecided.repository) {
-                    Some(branch) => Ok(branch.clone()),
-                    None => github.default_branch(&undecided.repository).await,
-                })
-            } else {
-                None
+            let default_branch = match known.get(&undecided.repository) {
+                Some(branch) => Ok(branch.clone()),
+                None => github.default_branch(&undecided.repository).await,
             };
+            let writes = decide(github, &undecided, branches, default_branch.as_ref()).await;
             Answer {
-                undecided,
-                trigger,
-                default_branch,
+                runner: undecided.runner,
+                repository: undecided.repository,
+                writes,
+                default_branch: default_branch.ok(),
             }
         })
         .buffered(CONCURRENT_REQUESTS)
         .collect()
         .await
+}
+
+/// Whether an undecided job may write: `Undecided` stays so, and `None` while GitHub does not answer. A job is never
+/// allowed on a lookup that failed.
+async fn decide<G: GithubApi>(
+    github: &G,
+    undecided: &Undecided,
+    branches: &[String],
+    default_branch: Result<&String, &github::Error>,
+) -> Option<Writes> {
+    let repository = &undecided.repository;
+    let trigger = match github.run_trigger(repository, undecided.job.run_id).await {
+        Ok(trigger) => trigger,
+        Err(error) => {
+            warn!(
+                "{repository}: cannot read run {}: {error}",
+                undecided.job.run_id
+            );
+            return None;
+        }
+    };
+    let default_branch = match default_branch {
+        Ok(branch) => branch,
+        Err(error) => {
+            warn!("{repository}: cannot read its default branch: {error}");
+            return None;
+        }
+    };
+    let mut writing = vec![default_branch.clone()];
+    writing.extend(branches.iter().cloned());
+    let writes = buildcache::writes(
+        &undecided.runner,
+        undecided.job.runner_name.as_deref(),
+        repository,
+        &trigger,
+        &writing,
+    );
+    let (Writes::Allowed, Some(branch)) = (writes, &trigger.head_branch) else {
+        return (writes != Writes::Undecided).then_some(writes);
+    };
+    match github
+        .on_branch(repository, branch, &trigger.head_sha)
+        .await
+    {
+        Ok(true) => Some(Writes::Allowed),
+        Ok(false) => Some(Writes::Refused),
+        Err(error) => {
+            warn!(
+                "{repository}: cannot compare {branch} with run {}: {error}",
+                undecided.job.run_id
+            );
+            None
+        }
+    }
 }

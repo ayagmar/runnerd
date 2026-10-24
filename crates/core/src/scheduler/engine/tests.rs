@@ -77,6 +77,10 @@ struct GithubState {
     jobs: HashMap<u64, JobDetails>,
     /// What started each workflow run, by run ID.
     triggers: HashMap<u64, github::RunTrigger>,
+    /// Commits no branch has, such as a tag's of its own.
+    off_branch: Vec<String>,
+    /// While true, comparing a branch with a commit fails.
+    compare_fails: bool,
     calls: Vec<String>,
     /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
     held: tokio::sync::watch::Sender<bool>,
@@ -236,6 +240,20 @@ impl GithubApi for FakeGithub {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("default branch {repository}"));
         Ok("main".to_owned())
+    }
+
+    async fn on_branch(
+        &self,
+        _repository: &str,
+        branch: &str,
+        sha: &str,
+    ) -> Result<bool, github::Error> {
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("compare {branch}...{sha}"));
+        if state.compare_fails {
+            return Err(github::Error::Token("compare fails".to_owned()));
+        }
+        Ok(!state.off_branch.iter().any(|off| off == sha))
     }
 
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), github::Error> {

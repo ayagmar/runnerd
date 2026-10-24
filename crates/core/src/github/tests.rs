@@ -429,3 +429,48 @@ async fn a_run_that_left_the_queue_is_no_longer_cached() {
     assert_eq!(jobs_requests.len(), 2);
     assert!(!jobs_requests[1].headers.contains_key("if-none-match"));
 }
+
+#[tokio::test]
+async fn a_commit_is_on_a_branch_only_as_its_head_or_an_ancestor() {
+    let (url, seen) = fake_github(|request| {
+        let status = match request.uri.as_str() {
+            "/repos/o/r/compare/main...aa?per_page=1" => "identical",
+            "/repos/o/r/compare/main...bb?per_page=1" => "behind",
+            "/repos/o/r/compare/main...cc?per_page=1" => "ahead",
+            "/repos/o/r/compare/release/1%231...dd?per_page=1" => "diverged",
+            _ => return StatusCode::NOT_FOUND.into_response(),
+        };
+        json(&format!(r#"{{"status":"{status}"}}"#))
+    })
+    .await;
+    let github = client(&url);
+    assert!(
+        github.on_branch("o/r", "main", "aa").await.unwrap(),
+        "main's head"
+    );
+    assert!(
+        github.on_branch("o/r", "main", "bb").await.unwrap(),
+        "an ancestor"
+    );
+    assert!(
+        !github.on_branch("o/r", "main", "cc").await.unwrap(),
+        "a tag's commit main never had"
+    );
+    assert!(
+        !github.on_branch("o/r", "release/1#1", "dd").await.unwrap(),
+        "diverged"
+    );
+    assert!(
+        github.on_branch("o/r", "main", "ee").await.is_err(),
+        "unknown commit"
+    );
+    assert!(
+        !github.on_branch("o/r", "main", "../x").await.unwrap(),
+        "not a commit"
+    );
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        5,
+        "an invalid commit is never asked"
+    );
+}

@@ -139,8 +139,8 @@ pub struct BuildCache {
     pub enabled: bool,
     /// Above this size, the entries used least recently go when no job runs. Default 10G.
     pub max_size: ByteSize,
-    /// The branches whose pushes, scheduled and manually started runs may write to it; empty for each repository's
-    /// default branch. Every other job only reads. Default empty.
+    /// The branches whose pushes, scheduled and manually started runs may write to it besides each repository's
+    /// default branch, which always may. Every other job only reads. Default empty.
     pub branches: Vec<String>,
     /// Where its entries are kept; default `$XDG_CACHE_HOME/runnerd/build-cache`.
     pub directory: Option<PathBuf>,

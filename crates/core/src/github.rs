@@ -180,6 +180,9 @@ pub struct RunTrigger {
     pub head_branch: Option<String>,
     /// `owner/name` of the repository its commit came from: a fork's, for a pull request from one.
     pub head_repository: Option<String>,
+    /// The commit it ran. A tag's run gives the tag's name as `head_branch`, so only this says whether the
+    /// branch has it.
+    pub head_sha: String,
 }
 
 fn first_attempt() -> u32 {
@@ -266,6 +269,13 @@ pub trait GithubApi: Send + Sync {
         &self,
         repository: &str,
     ) -> impl Future<Output = Result<String, Error>> + Send;
+    /// Whether `branch` of the repository has the commit `sha`: its head or an ancestor of it.
+    fn on_branch(
+        &self,
+        repository: &str,
+        branch: &str,
+        sha: &str,
+    ) -> impl Future<Output = Result<bool, Error>> + Send;
     /// Cancels a workflow run, and so every job in it: GitHub cancels runs, not single jobs. A run that already
     /// completed is left as it is.
     fn cancel_run(
@@ -332,11 +342,17 @@ struct RunBody {
     event: String,
     head_branch: Option<String>,
     head_repository: Option<RepositoryName>,
+    head_sha: String,
 }
 
 #[derive(Deserialize)]
 struct RepositoryName {
     full_name: String,
+}
+
+#[derive(Deserialize)]
+struct CompareBody {
+    status: String,
 }
 
 #[derive(Deserialize)]
@@ -610,12 +626,36 @@ impl GithubApi for Github {
             event: run.event,
             head_branch: run.head_branch,
             head_repository: run.head_repository.map(|head| head.full_name),
+            head_sha: run.head_sha,
         })
     }
 
     async fn default_branch(&self, repository: &str) -> Result<String, Error> {
         let body: RepositoryBody = self.get(&format!("/repos/{repository}")).await?;
         Ok(body.default_branch)
+    }
+
+    async fn on_branch(&self, repository: &str, branch: &str, sha: &str) -> Result<bool, Error> {
+        if sha.is_empty() || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+            return Ok(false);
+        }
+        // A branch name may hold `#`, `%` or `?`, which would end or change the path.
+        let base: String = branch
+            .bytes()
+            .map(|byte| {
+                if byte.is_ascii_alphanumeric() || matches!(byte, b'/' | b'-' | b'_' | b'.') {
+                    char::from(byte).to_string()
+                } else {
+                    format!("%{byte:02X}")
+                }
+            })
+            .collect();
+        // The commits it lists are not needed: one is the fewest it sends.
+        let path = format!("/repos/{repository}/compare/{base}...{sha}?per_page=1");
+        let body: Result<CompareBody, Error> = self.get(&path).await;
+        lock(&self.etags).remove(&path);
+        // `behind`: the branch has moved on past it.
+        Ok(matches!(body?.status.as_str(), "identical" | "behind"))
     }
 
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), Error> {

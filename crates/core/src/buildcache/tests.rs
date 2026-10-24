@@ -14,6 +14,7 @@ fn trigger(event: &str, branch: &str, head: &str) -> RunTrigger {
         event: event.to_owned(),
         head_branch: Some(branch.to_owned()),
         head_repository: Some(head.to_owned()),
+        head_sha: "0a1b2c".to_owned(),
     }
 }
 

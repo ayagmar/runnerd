@@ -1,6 +1,6 @@
 //! The shared build cache on the fakes (ADR 0052): a push to main's entry is a hit for a pull request's job in
-//! another slot, the pull request's uploads stay invisible, each job's record keeps what the cache did for it, and
-//! the cache is trimmed only once no runner runs.
+//! another slot, the pull request's uploads stay invisible, each job's record keeps what the cache did for it, a tag
+//! named like the default branch only reads, and the cache is trimmed only once no runner runs.
 
 use super::*;
 use crate::buildcache::{self, BuildCache};
@@ -47,6 +47,7 @@ fn trigger(event: &str, branch: &str) -> github::RunTrigger {
         event: event.to_owned(),
         head_branch: Some(branch.to_owned()),
         head_repository: Some("o/r".to_owned()),
+        head_sha: "c0ffee".to_owned(),
     }
 }
 
@@ -77,6 +78,23 @@ async fn main_and_pull_request(
     docker: &FakeDocker,
     engine: &mut Engine<FakeGithub, FakeDocker>,
 ) -> [(String, std::path::PathBuf); 2] {
+    two_jobs(
+        github,
+        docker,
+        engine,
+        [trigger("push", "main"), trigger("pull_request", "main")],
+    )
+    .await
+}
+
+/// Starts a runner per queued job, job 1 of run 1 in slot 1 and job 2 of run 2 in slot 2, their runs started as
+/// `triggers` say. GitHub places each on its runner.
+async fn two_jobs(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    triggers: [github::RunTrigger; 2],
+) -> [(String, std::path::PathBuf); 2] {
     {
         let mut state = github.0.lock().unwrap();
         state.queued = vec![
@@ -86,8 +104,9 @@ async fn main_and_pull_request(
                 ..job(2)
             },
         ];
-        state.triggers.insert(1, trigger("push", "main"));
-        state.triggers.insert(2, trigger("pull_request", "main"));
+        let [first, second] = triggers;
+        state.triggers.insert(1, first);
+        state.triggers.insert(2, second);
     }
     {
         let mut state = docker.0.lock().unwrap();
@@ -311,5 +330,97 @@ async fn a_repository_that_opts_out_gets_no_build_cache() {
             .iter()
             .all(|mount| mount.target.as_deref() != Some(buildcache::MOUNT)),
         "o/r opted out"
+    );
+}
+
+#[tokio::test]
+async fn branches_the_config_names_write_besides_the_default_branch() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-branches");
+    let config = CONFIG.replace(
+        "maven = { max_size = \"5G\" }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { branches = [\"release\"] }\n",
+    );
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, &config);
+    let [(main, main_socket), (release, release_socket)] = two_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        [trigger("push", "main"), trigger("push", "release")],
+    )
+    .await;
+    until_decided(&mut engine, &cache, &[&main, &release]).await;
+    for (socket, key) in [(&main_socket, "aa"), (&release_socket, "bb")] {
+        let path = format!("/gradle/{key}");
+        assert_eq!(
+            buildcache::request(socket, "PUT", &path, b"classes")
+                .await
+                .0,
+            200
+        );
+    }
+    assert_eq!(cache.size().entries, 2, "main and release both wrote");
+}
+
+#[tokio::test]
+async fn a_tag_named_like_the_default_branch_only_reads() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-tag");
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    // A tag called main on a commit main never had: GitHub names the tag as the run's head branch.
+    github.0.lock().unwrap().off_branch.push("7a9".to_owned());
+    let tag = github::RunTrigger {
+        head_sha: "7a9".to_owned(),
+        ..trigger("push", "main")
+    };
+    let [(tagged, tagged_socket), (pull, _)] = two_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        [tag, trigger("pull_request", "main")],
+    )
+    .await;
+    until_decided(&mut engine, &cache, &[&tagged, &pull]).await;
+    assert!(
+        github.calls().contains(&"compare main...7a9".to_owned()),
+        "{:?}",
+        github.calls()
+    );
+    assert_eq!(
+        buildcache::request(&tagged_socket, "PUT", "/gradle/0a1b", b"poison")
+            .await
+            .0,
+        200
+    );
+    assert_eq!(cache.size().entries, 0, "the tag's run stored nothing");
+}
+
+#[tokio::test]
+async fn a_push_whose_commit_github_cannot_compare_never_writes() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-build-cache-compare");
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    github.0.lock().unwrap().compare_fails = true;
+    let [(main, main_socket), (pull, pull_socket)] =
+        main_and_pull_request(&github, &docker, &mut engine).await;
+    assert_eq!(
+        buildcache::request(&main_socket, "PUT", "/gradle/0a1b", b"classes")
+            .await
+            .0,
+        200
+    );
+    for _ in 0..5 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(!cache.undecided(&pull), "the pull request was decided");
+    assert!(cache.undecided(&main), "main waits for GitHub to compare");
+    assert_eq!(
+        buildcache::request(&pull_socket, "GET", "/gradle/0a1b", b"")
+            .await
+            .0,
+        404
     );
 }
