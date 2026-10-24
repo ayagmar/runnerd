@@ -648,10 +648,6 @@ pub(super) fn stats(
     })
 }
 
-/// How long of a job `j`'s wait, from queued to started, admission held runners back for the host's memory, in ms.
-const HOST_HELD: &str = "(SELECT coalesce(sum(max(0, min(coalesce(h.ended_at, j.started_at), j.started_at) \
-     - max(h.started_at, j.queued_at))), 0) FROM host_holds h WHERE h.started_at < j.started_at)";
-
 /// The finished jobs queued at or after `since` (ms) with their peaks, and the runners that held a slot after it.
 pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::History> {
     let ran = |row: &Row<'_>| {
@@ -678,30 +674,30 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             cpu_average: row.get(15)?,
             cpu_cap: row.get(16)?,
             runner_started_at: row.get(17)?,
-            host_held: row.get(18)?,
+            host_waited: row.get(18)?,
         })
     };
     let jobs = db
-        .prepare_cached(&format!(
+        .prepare_cached(
             "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, j.memory_peak, \
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), \
              j.state = 'completed' AND j.conclusion IS 'success', r.ooms, r.memory_measure IS 'without_page_cache', \
-             j.cpu_average, r.cpu_cap, r.started_at, {HOST_HELD} FROM jobs j JOIN runners r ON r.name = j.runner \
+             j.cpu_average, r.cpu_cap, r.started_at, j.host_waited FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
-             AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id"
-        ))?
+             AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
+        )?
         .query_map([since], ran)?
         .collect::<rusqlite::Result<_>>()?;
     let cancelled = db
-        .prepare_cached(&format!(
+        .prepare_cached(
             "SELECT j.repository, j.workflow, j.name, r.profile, r.memory_cap, coalesce(j.memory_peak, 0), \
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0, r.ooms, \
-             r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at, {HOST_HELD} \
+             r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at, j.host_waited \
              FROM jobs j JOIN runners r ON r.name = j.runner \
-             WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id"
-        ))?
+             WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id",
+        )?
         .query_map([since], ran)?
         .collect::<rusqlite::Result<_>>()?;
     let runners = db

@@ -136,6 +136,16 @@ pub fn read_usage(cgroup: &Path) -> io::Result<Usage> {
     })
 }
 
+/// What a cgroup holds that `MemAvailable` does not count as available: its memory without page cache less its
+/// reclaimable slab (`slab_reclaimable`), which `MemAvailable` counts already. 0 when it can't be read.
+pub fn read_unavailable(cgroup: &Path) -> u64 {
+    let slab = read(&cgroup.join("memory.stat"))
+        .ok()
+        .and_then(|stat| field(&stat, "slab_reclaimable"))
+        .unwrap_or(0);
+    read_usage(cgroup).map_or(0, |usage| usage.memory.saturating_sub(slab))
+}
+
 /// A cgroup's `memory.events`; every counter `None` when the file can't be read.
 pub fn read_events(cgroup: &Path) -> Events {
     let Ok(events) = read(&cgroup.join("memory.events")) else {
@@ -262,9 +272,10 @@ impl Sampler {
         }
     }
 
-    /// The host's memory at `at` (ms), beside the slice's memory without page cache (0 when it can't be read).
+    /// The host's memory at `at` (ms), beside what the slice holds that `MemAvailable` leaves out
+    /// (`read_unavailable`).
     pub fn host_memory(&self, at: u64) -> Option<api::HostMemory> {
-        let slice = read_usage(&self.paths.slice(&self.slice)).map_or(0, |usage| usage.memory);
+        let slice = read_unavailable(&self.paths.slice(&self.slice));
         read_host_memory(&self.paths, slice, at / 1000)
     }
 

@@ -302,7 +302,8 @@ pub struct HostMemory {
     pub total: u64,
     /// `MemAvailable`: what the host could give without swapping, page cache it can drop included, in bytes.
     pub available: u64,
-    /// The slice's memory without page cache: what the runners hold that the host cannot take back.
+    /// The slice's memory without page cache and reclaimable slab: what the runners hold that `MemAvailable` leaves
+    /// out.
     pub slice: u64,
     /// `/proc/pressure/memory`'s `some` line: the share of time at least one task waited for memory. `None` on a
     /// kernel without pressure stall information.

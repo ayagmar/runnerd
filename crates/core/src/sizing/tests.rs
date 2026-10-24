@@ -65,7 +65,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         finished_at: Some(NOW - HOUR),
         oom_killed: false,
         reserved: None,
-        host_held: 0,
+        host_waited: 0,
         hit_cap: None,
         measure: Measure::WithoutPageCache,
         succeeded: true,
@@ -878,7 +878,7 @@ labels = ["node"]
             capped_builds(10, 4500 * M, 300)
                 .into_iter()
                 .map(|build| Ran {
-                    host_held: 300_000,
+                    host_waited: 300_000,
                     ..build
                 })
                 .collect(),

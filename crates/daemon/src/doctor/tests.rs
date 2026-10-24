@@ -133,28 +133,53 @@ fn a_ready_host_passes_every_check() {
     );
 }
 
-#[test]
-fn a_host_whose_tasks_stall_for_memory_warns_that_runners_wait() {
+/// The `host memory` check of a 64G host with `available` of it, its tasks stalled `stalled` hundredths of a percent
+/// of the last 10 s, and the example's profiles, the smallest of which reserves up to 7G.
+fn host_memory_check(available: u64, stalled: u32) -> Check {
     let config = config("sysbox");
     let mut host = ready_host(ARCH);
     host.memory = host.memory.map(|memory| api::HostMemory {
+        available,
         full: Some(api::Pressure {
-            avg10: 1250,
+            avg10: stalled,
             avg60: 300,
         }),
         ..memory
     });
-    let checks = checks(&host, Some(&config));
-    let memory = checks
-        .iter()
+    checks(&host, Some(&config))
+        .into_iter()
         .find(|check| check.name == "host memory")
-        .unwrap();
+        .unwrap()
+}
+
+#[test]
+fn a_host_that_stalls_short_of_memory_warns_that_no_runner_starts() {
+    let memory = host_memory_check(7 << 30, 1250);
     assert_eq!(memory.status, Status::Warn, "{memory}");
     assert!(
         memory.detail.contains("12.5% of the last 10 s")
             && memory.detail.contains("starts no runner"),
         "{memory}"
     );
+}
+
+#[test]
+fn a_stall_with_memory_to_spare_passes_as_admission_starts_runners_through_it() {
+    let memory = host_memory_check(30 << 30, 1250);
+    assert_eq!(memory.status, Status::Pass, "{memory}");
+}
+
+#[test]
+fn a_host_with_less_to_spare_than_the_smallest_runner_warns_that_runners_wait() {
+    // 10G available less the 4G margin leaves 6G, under node's 7G.
+    let memory = host_memory_check(10 << 30, 0);
+    assert_eq!(memory.status, Status::Warn, "{memory}");
+    assert!(
+        memory.detail.contains("6G to spare") && memory.detail.contains("a node runner"),
+        "{memory}"
+    );
+    let memory = host_memory_check(12 << 30, 0);
+    assert_eq!(memory.status, Status::Pass, "8G to spare fits node's 7G");
 }
 
 /// Asserts that every line of `check`'s fix after the first, which says what to do, is shell a user can paste:
@@ -615,7 +640,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             finished_at: Some(1_000_000 + i + 720_000),
             oom_killed: false,
             reserved: None,
-            host_held: 0,
+            host_waited: 0,
             hit_cap: Some(false),
             measure: sizing::Measure::WithoutPageCache,
             succeeded: true,

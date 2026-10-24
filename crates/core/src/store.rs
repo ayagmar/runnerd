@@ -207,9 +207,9 @@ enum Write {
         admission: api::Admission,
     },
     RunnerOomKilled(String),
-    HostHold {
-        started_at: u64,
-        ended_at: Option<u64>,
+    HostWaited {
+        jobs: Vec<u64>,
+        ms: u64,
     },
     BuildCache {
         runner: String,
@@ -371,12 +371,6 @@ impl Store {
         let mut db = Connection::open(path)?;
         configure(&db)?;
         migrate(&mut db)?;
-        // A hold the last daemon did not see end ended by its last host sample, which came at most a minute late.
-        db.execute(
-            "UPDATE host_holds SET ended_at = max(started_at, coalesce((SELECT max(at) FROM host_samples), 0)) \
-             WHERE ended_at IS NULL",
-            [],
-        )?;
         let reader = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -564,21 +558,10 @@ impl Store {
         *lock(&self.latest_host_memory)
     }
 
-    /// Records that admission began holding runners back for the host's memory at `at` (ms), which sizing does not
-    /// read as waits for a slot.
-    pub fn host_hold_started(&self, at: u64) {
-        self.send(Write::HostHold {
-            started_at: at,
-            ended_at: None,
-        });
-    }
-
-    /// Records that the hold that began at `started_at` (ms) ended at `ended_at`.
-    pub fn host_hold_ended(&self, started_at: u64, ended_at: u64) {
-        self.send(Write::HostHold {
-            started_at,
-            ended_at: Some(ended_at),
-        });
+    /// Adds `ms` to how long each of `jobs` waited because the host's memory could not take its runner, which
+    /// sizing does not read as a wait for a slot.
+    pub fn host_waited(&self, jobs: Vec<u64>, ms: u64) {
+        self.send(Write::HostWaited { jobs, ms });
     }
 
     /// The last host sample sent, stored or not; `None` before the first.
@@ -951,7 +934,7 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
         _ => "",
     };
     if found < 13 {
-        db.execute_batch("CREATE TEMP TABLE host_holds (started_at INTEGER, ended_at INTEGER)")?;
+        db.execute_batch("CREATE TEMP VIEW jobs AS SELECT *, 0 AS host_waited FROM main.jobs")?;
     }
     if !added.is_empty() {
         db.execute_batch(&format!(

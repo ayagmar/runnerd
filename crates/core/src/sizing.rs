@@ -63,9 +63,9 @@ pub struct Ran {
     pub succeeded: bool,
     /// What measured admission reserved for it; `None` under caps or for an adopted runner.
     pub reserved: Option<u64>,
-    /// How long of its wait admission held runners back because the host was short of memory, in ms: no more
-    /// slots would have started it sooner.
-    pub host_held: u64,
+    /// How long of its wait it waited because the host's memory could not take its runner, in ms: no more slots
+    /// would have started it sooner.
+    pub host_waited: u64,
 }
 
 /// What a run's sampled memory counts.
@@ -342,14 +342,14 @@ fn peaks(jobs: &[&Ran]) -> Peaks {
     }
 }
 
-/// Seconds from queued to started of the jobs that started, less what admission held them for the host's memory.
+/// Seconds from queued to started of the jobs that started, less what they waited for the host's memory.
 fn waits(jobs: &[&Ran]) -> Spread {
     spread(
         jobs.iter()
             .filter_map(|job| {
                 job.started_at.map(|at| {
                     at.saturating_sub(job.queued_at)
-                        .saturating_sub(job.host_held)
+                        .saturating_sub(job.host_waited)
                         / 1000
                 })
             })

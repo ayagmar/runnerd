@@ -209,6 +209,47 @@ fn the_slice_counts_its_active_page_cache_for_the_high_water_mark() {
     assert_eq!(host.map(|host| host.memory), Some(6000));
 }
 
+#[test]
+fn beside_the_hosts_memory_the_slice_counts_no_slab_that_memavailable_counts_already() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    let slice = paths.slice("ci.slice");
+    std::fs::create_dir_all(&slice).unwrap();
+    std::fs::create_dir_all(&paths.proc).unwrap();
+    std::fs::write(
+        slice.join("memory.current"),
+        "10000
+",
+    )
+    .unwrap();
+    std::fs::write(
+        slice.join("memory.stat"),
+        "anon 3000
+file 6000
+inactive_file 4000
+active_file 2000
+slab_reclaimable 800
+",
+    )
+    .unwrap();
+    std::fs::write(
+        slice.join("cpu.stat"),
+        "usage_usec 0
+",
+    )
+    .unwrap();
+    std::fs::write(
+        paths.proc.join("meminfo"),
+        "MemTotal: 64 kB
+MemAvailable: 32 kB
+",
+    )
+    .unwrap();
+    let memory = Sampler::new(paths, "ci.slice").host_memory(1_000);
+    // 10000 less 6000 of page cache and 800 of reclaimable slab.
+    assert_eq!(memory.map(|memory| memory.slice), Some(3200));
+}
+
 fn feed_all(chunks: &[&[u8]]) -> Vec<Captured> {
     let mut parser = Parser::default();
     chunks.iter().flat_map(|chunk| parser.feed(chunk)).collect()

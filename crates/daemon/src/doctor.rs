@@ -118,9 +118,9 @@ impl Host {
             kvm: Path::new("/dev/kvm").exists(),
             memory: {
                 let paths = Paths::default();
-                let slice = config
-                    .and_then(|config| metrics::read_usage(&paths.slice(&config.host.slice)).ok())
-                    .map_or(0, |usage| usage.memory);
+                let slice = config.map_or(0, |config| {
+                    metrics::read_unavailable(&paths.slice(&config.host.slice))
+                });
                 metrics::read_host_memory(&paths, slice, 0)
             },
         }
@@ -450,7 +450,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     checks.extend(slice_checks(host, config));
-    checks.push(memory_check(host.memory.as_ref()));
+    checks.push(memory_check(host.memory.as_ref(), config));
     checks.extend(image_checks(host, config, docker));
     if let (Some(config), Some(records)) = (config, &host.records) {
         checks.push(records_check(records, config));
@@ -746,9 +746,10 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
     }
 }
 
-/// Warns when a profile's jobs need more than its cap or than the slice holds; says which caps could be lowered.
-/// Whether the host has memory to spare beside its other programs, which runnerd starts runners only within.
-fn memory_check(memory: Option<&api::HostMemory>) -> Check {
+/// Warns when admission would hold runners back for the host's memory, by `host::budget` with what the slice's
+/// runners hold now: while the host stalls short of memory, or while it has less to spare than the smallest
+/// profile's runner may reserve.
+fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Check {
     let Some(memory) = memory else {
         return skip("host memory", "/proc/meminfo has no MemAvailable");
     };
@@ -764,27 +765,39 @@ fn memory_check(memory: Option<&api::HostMemory>) -> Check {
             },
         )
     };
-    let margin = host::margin(memory.total, false);
+    let budget = host::budget(*memory, memory.slice, host::Remembered::default());
     let detail = format!(
-        "{} of {} available; every task waited for memory {}",
+        "{} of {} available, {} to spare for runners past a {} margin; every task waited for memory {}",
         ByteSize(memory.available),
         ByteSize(memory.total),
+        ByteSize(budget.spare),
+        ByteSize(host::margin(memory.total, false)),
         stalled(memory.full)
     );
-    let short = memory.available < margin;
-    let stalling = memory
-        .full
-        .is_some_and(|full| full.avg10 >= host::STALL_ENTER);
-    if !short && !stalling {
+    let smallest = config.and_then(|config| {
+        config
+            .profiles
+            .iter()
+            .min_by_key(|(_, profile)| profile.memory)
+    });
+    let why = if budget.stalled {
+        "the host stalls short of memory, so runnerd starts no runner until the stall passes"
+            .to_owned()
+    } else if let Some((name, profile)) =
+        smallest.filter(|(_, profile)| budget.spare < profile.memory.0)
+    {
+        format!(
+            "a {name} runner may reserve up to {}, more than the host has to spare, so runners wait for the host's \
+             memory",
+            profile.memory
+        )
+    } else {
         return pass("host memory", detail);
-    }
+    };
     Check {
         name: "host memory".to_owned(),
         status: Status::Warn,
-        detail: format!(
-            "{detail}: the host is short of memory, so runnerd starts no runner until it has {} free again",
-            ByteSize(margin)
-        ),
+        detail: format!("{detail}: {why}"),
         fix: Some(
             "close what uses the host's memory beside the runners; runnerd waits for it by itself"
                 .to_owned(),
@@ -792,6 +805,7 @@ fn memory_check(memory: Option<&api::HostMemory>) -> Check {
     }
 }
 
+/// Warns when a profile's jobs need more than its cap or than the slice holds; says which caps could be lowered.
 fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
     let sizing = match sizing {
         Ok(sizing) => sizing,

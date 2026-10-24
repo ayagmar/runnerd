@@ -1065,14 +1065,14 @@ async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
     );
 }
 
-/// The host's memory read now: 64G with `available` of it, the runners holding none of it yet, and its tasks
-/// stalled `stalled` hundredths of a percent of the last 10 s.
-fn host_at(store: &Store, available: u64, stalled: u32) {
+/// The host's memory read now: 64G with `available` of it, the slice's runners holding `slice` of it without page
+/// cache, and its tasks stalled `stalled` hundredths of a percent of the last 10 s.
+fn host_at(store: &Store, slice: u64, available: u64, stalled: u32) {
     store.host_memory(api::HostMemory {
         at: time::now_ms() / 1000,
         total: 64 * G,
         available,
-        slice: 0,
+        slice,
         some: Some(api::Pressure::default()),
         full: Some(api::Pressure {
             avg10: stalled,
@@ -1081,11 +1081,11 @@ fn host_at(store: &Store, available: u64, stalled: u32) {
     });
 }
 
-/// The host's holds in the history: when each began, and whether it ended.
-fn host_holds(dir: &TestDir) -> Vec<bool> {
+/// How long each of the jobs 1 to 4 waited for the host's memory, in ms, by the history.
+fn host_waited(dir: &TestDir) -> Vec<u64> {
     let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
     let mut statement = db
-        .prepare("SELECT ended_at IS NOT NULL FROM host_holds ORDER BY started_at")
+        .prepare("SELECT host_waited FROM jobs WHERE id <= 4 ORDER BY id")
         .unwrap();
     statement
         .query_map([], |row| row.get(0))
@@ -1115,11 +1115,11 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
     let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
     slice_at(&handle.store, 0);
     // A 64G host keeps 4G free; past that it has room for two runners of 1.25G, which the slice would hold four of.
-    host_at(&handle.store, 4 * G + 2 * 1280 * M + 100 * M, 0);
+    host_at(&handle.store, 0, 4 * G + 2 * 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 2);
     engine.publish();
-    // Once short, the host keeps twice the margin free: nothing is to spare until it has 8G.
+    // Once short with runners running, the host keeps half the margin more free: nothing is to spare until 6G.
     let short = Some(api::Waiting::HostMemory {
         needs: 1280 * M,
         free: 0,
@@ -1138,23 +1138,28 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
         reason.starts_with("The host is short of memory"),
         "{reason}"
     );
-    handle.store.flush().await;
-    assert_eq!(host_holds(&dir), [false], "a hold began and lasts");
 
-    // Room for both again by the 4G margin alone: at the edge, so they wait until the host has the margin twice.
-    host_at(&handle.store, 4 * G + 4 * 1280 * M + 100 * M, 0);
+    // Room for both again by the 4G margin alone: at the edge, so they wait until the host has the larger margin.
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    host_at(&handle.store, 0, 4 * G + 4 * 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 2, "no start at the edge");
-    host_at(&handle.store, 8 * G + 4 * 1280 * M + 100 * M, 0);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    host_at(&handle.store, 0, 6 * G + 4 * 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4);
     handle.store.flush().await;
-    assert_eq!(host_holds(&dir), [true], "the hold ended once none waited");
+    let waited = host_waited(&dir);
+    assert_eq!(waited[..2], [0, 0], "the jobs that started waited not");
+    assert!(
+        waited[2..].iter().all(|&ms| ms >= 40),
+        "the two that waited count both ticks: {waited:?}"
+    );
     assert!(removed(&docker.calls()).is_empty(), "no runner was stopped");
 }
 
 #[tokio::test]
-async fn nothing_starts_while_the_hosts_tasks_stall_for_memory_and_running_runners_stay() {
+async fn the_first_runner_into_an_empty_slice_needs_only_the_margin_after_a_wait() {
     let (github, docker, dir) = (
         FakeGithub::default(),
         FakeDocker::default(),
@@ -1162,16 +1167,77 @@ async fn nothing_starts_while_the_hosts_tasks_stall_for_memory_and_running_runne
     );
     let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
     slice_at(&handle.store, 0);
-    github.0.lock().unwrap().queued = vec![job(1)];
-    host_at(&handle.store, 40 * G, 0);
+    host_at(&handle.store, 0, 4 * G + 1000 * M, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 0, "1.25G does not fit");
+    // The jobs waited, but nothing runs that a start would follow: the 4G margin alone holds.
+    host_at(&handle.store, 0, 4 * G + 1280 * M + 100 * M, 0);
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 1);
+}
 
-    github.0.lock().unwrap().queued = (2..=4).map(job).collect();
-    // Every runnable task waited for memory 6% of the last 10 s, with memory to spare by MemAvailable.
-    host_at(&handle.store, 40 * G, 600);
+#[tokio::test]
+async fn a_runner_using_more_than_it_reserved_takes_what_it_uses_from_the_host() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    github.0.lock().unwrap().queued = vec![job(1)];
+    slice_at(&handle.store, 0);
+    host_at(&handle.store, 0, 40 * G, 0);
     engine.tick(Shutdown::No).await;
-    assert_eq!(registered(&github.calls()).len(), 1, "nothing starts");
+    assert_eq!(registered(&github.calls()).len(), 1);
+    // It reserved 1.25G and holds 3G, which the host no longer has available: what is left beside it is
+    // MemAvailable less the 4G margin, room for one more 1.25G runner, not two.
+    runners_use(&github, &handle.store, 3 * G);
+    slice_at(&handle.store, 3 * G);
+    host_at(&handle.store, 3 * G, 4 * G + 1280 * M + 100 * M, 0);
+    github.0.lock().unwrap().queued = (1..=3).map(job).collect();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+}
+
+#[tokio::test]
+async fn under_caps_a_runner_starts_only_if_its_cap_fits_what_the_host_leaves() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.memory_max = Some(20 * G);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    // The slice fits both 4G caps; the host past its 4G margin fits one.
+    host_at(&handle.store, 0, 8 * G + 100 * M, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+    engine.publish();
+    assert_eq!(
+        waits(&handle)[1],
+        Some(api::Waiting::HostMemory {
+            needs: 4 * G,
+            free: 0
+        })
+    );
+}
+
+#[tokio::test]
+async fn nothing_starts_while_the_host_stalls_short_of_memory() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 0);
+    // 7.5G available is under twice the 4G margin, and every runnable task waited for memory 6% of the last 10 s:
+    // nothing starts, though even the larger margin leaves room for one.
+    host_at(&handle.store, 0, 7 * G + 512 * M, 600);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 0, "nothing starts");
     engine.publish();
     {
         let status = handle.status.borrow();
@@ -1184,17 +1250,48 @@ async fn nothing_starts_while_the_hosts_tasks_stall_for_memory_and_running_runne
         assert!(reason.contains("stall"), "{reason}");
     }
     // 3%: under where starts stop, over where they resume.
-    host_at(&handle.store, 40 * G, 300);
+    host_at(&handle.store, 0, 7 * G + 512 * M, 300);
     engine.tick(Shutdown::No).await;
-    assert_eq!(registered(&github.calls()).len(), 1, "still held at 3%");
-    host_at(&handle.store, 40 * G, 50);
+    assert_eq!(registered(&github.calls()).len(), 0, "still held at 3%");
+    host_at(&handle.store, 0, 7 * G + 512 * M, 50);
     engine.tick(Shutdown::No).await;
-    // Job 1's runner waits for a job too, so two more start for the three.
-    assert_eq!(registered(&github.calls()).len(), 3, "resumed under 1%");
-    assert!(
-        removed(&docker.calls()).is_empty(),
-        "the stall stopped no runner"
+    // 3.5G past the margin: two 1.25G runners.
+    assert_eq!(registered(&github.calls()).len(), 2, "resumed under 1%");
+}
+
+#[tokio::test]
+async fn a_stall_with_memory_to_spare_holds_no_start_and_stops_no_runner() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
     );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    slice_at(&handle.store, 0);
+    github.0.lock().unwrap().queued = vec![job(1)];
+    host_at(&handle.store, 0, 40 * G, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+    // 6% with 40G available: runners reclaiming at their own caps, not a host short of memory.
+    github.0.lock().unwrap().queued = (1..=3).map(job).collect();
+    host_at(&handle.store, 0, 40 * G, 600);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        3,
+        "the stall holds nothing"
+    );
+    engine.publish();
+    assert!(
+        handle
+            .status
+            .borrow()
+            .budget
+            .host
+            .is_some_and(|host| !host.stalled),
+        "the budget says the host does not stall"
+    );
+    assert!(removed(&docker.calls()).is_empty(), "no runner was stopped");
 }
 
 #[tokio::test]

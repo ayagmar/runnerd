@@ -1265,49 +1265,39 @@ async fn a_job_whose_sockets_memory_pressure_throttled_says_so_in_its_record() {
 }
 
 #[tokio::test]
-async fn sizing_reads_how_long_of_a_wait_the_host_held_starts_back() {
+async fn sizing_reads_how_long_each_job_waited_for_the_hosts_memory() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    // Queued at 1 000 001 ms, started at 1 000 200.
     store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(2));
     store.runner_started(runner("r1", 1_000_100));
     store.claimed(1, 10, "r1", 1_000_200);
     store.samples(vec![sample("r1", 1_000_300, 0, 0)]);
     store.lost(1, 1_000_400);
-    // Held 100 ms of the wait, and again from 20 ms before the start until the daemon stopped.
-    store.host_hold_started(1_000_050);
-    store.host_hold_ended(1_000_050, 1_000_150);
-    store.host_hold_started(1_000_180);
-    store.host_sample(HostSample {
-        at: 1_001,
-        cpu: 0,
-        memory: 0,
-    });
+    store.runner_started(runner("r2", 1_000_100));
+    store.claimed(2, 20, "r2", 1_000_200);
+    store.samples(vec![sample("r2", 1_000_300, 0, 0)]);
+    store.lost(2, 1_000_400);
+    // Job 1 waited over two plans; job 2 for something else.
+    store.host_waited(vec![1], 100);
+    store.host_waited(vec![1], 20);
     store.flush().await;
     drop(store);
 
     let store = Store::open(&path).unwrap();
-    let held: Vec<u64> = store
+    let mut waited: Vec<u64> = store
         .sizing(0)
         .await
         .unwrap()
         .jobs
         .iter()
-        .map(|job| job.host_held)
+        .map(|job| job.host_waited)
         .collect();
-    assert_eq!(held, [120]);
-    let ended: Option<u64> = Connection::open(&path)
-        .unwrap()
-        .query_row(
-            "SELECT ended_at FROM host_holds WHERE started_at = 1000180",
-            [],
-            |row| row.get(0),
-        )
-        .unwrap();
+    waited.sort_unstable();
     assert_eq!(
-        ended,
-        Some(1_001_000),
-        "the hold the daemon did not see end ends at its last host sample"
+        waited,
+        [0, 120],
+        "job 1's two waits add up; job 2's is none"
     );
 }
