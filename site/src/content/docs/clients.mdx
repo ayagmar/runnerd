@@ -71,7 +71,7 @@ Views of the same thing are linked. On the overview, pointing at, focusing or ta
 
 <Shot
   name="overview"
-  alt="The overview: 23.5G of 33G reserved in runnerd.slice, jvm slot 1 running halyard/ledger's build, node slot 1 running halyard/storefront's playwright job, jvm slot 2 free, node slot 2 with a runner waiting."
+  alt="The overview: 2 of 4 slots running, 4 jobs waiting, a p95 wait of 29s over 24 hours and 3 failed of 24 finished, then the four waiting halyard/storefront jobs, the oldest with a runner starting for it in node 2 and the others waiting because both node slots are busy."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
@@ -116,17 +116,20 @@ $ runnerctl status
 runnerd 0.0.9  23.5G of 33G reserved in runnerd.slice
 
 PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                    UP
-jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792741296   7m 12s
+jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792814287   7m 11s
 jvm         2  free
-node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792741414  5m 14s
-node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792741711     17s
+node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792814405  5m 13s
+node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792814702     16s
 
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
 halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
-halyard/storefront  node     active       1  self-hosted,linux,x64,node
+halyard/storefront  node     active       4  self-hosted,linux,x64,node
 
 JOB           REPOSITORY          WORKFLOW / NAME    QUEUED
-120055991710  halyard/storefront  E2E / visual-diff  46s ago
+120055991710  halyard/storefront  E2E / visual-diff  45s ago
+120055991711  halyard/storefront  E2E / a11y         39s ago
+120055991712  halyard/storefront  E2E / lighthouse   26s ago
+120055991713  halyard/storefront  E2E / unit         13s ago
 ```
 
 | Command | What it shows or does |
@@ -202,21 +205,24 @@ older jobs: --before 120055991489
 One frame of `runnerctl watch`:
 
 ```console wrap=false
-runnerd 0.0.9  23.5G of 33G reserved  runnerd.slice uses 5.75 cores, 11.04G
+runnerd 0.0.9  23.5G of 33G reserved  runnerd.slice uses 3.07 cores, 11.25G
 
 SLOT    JOB                                      STEP                                         RAN   CPU    MEM
-jvm 1   halyard/ledger CI / build                Integration tests (Testcontainers) (7/9)  7m 13s  2.51  4.26G
+jvm 1   halyard/ledger CI / build                Integration tests (Testcontainers) (7/9)   7m 9s  3.91  3.91G
 jvm 2   free
-node 1  halyard/storefront E2E / playwright      Playwright e2e (6/8)                      5m 16s  2.51  2.71G
+node 1  halyard/storefront E2E / playwright      Playwright e2e (6/8)                      5m 12s  3.91  2.49G
 node 2  waiting for a job of halyard/storefront
 
 Queued
-  halyard/storefront  E2E / visual-diff  52s ago
+  halyard/storefront  E2E / visual-diff  48s ago
+  halyard/storefront  E2E / a11y         42s ago
+  halyard/storefront  E2E / lighthouse   29s ago
+  halyard/storefront  E2E / unit         16s ago
 
 Finished
-  success  halyard/ledger      CI / build        11m 5s  19m 8s ago
+  success  halyard/ledger      CI / build        11m 5s  19m 4s ago
   success  halyard/storefront  E2E / playwright  8m 57s  1h 1m ago
-  success  halyard/ledger      CI / build        11m 5s  1h 41m ago
+  success  halyard/ledger      CI / build        11m 5s  1h 40m ago
   failure  halyard/ledger      CI / build        11m 5s  2h 20m ago
   success  halyard/storefront  E2E / playwright  8m 57s  3h 5m ago
 
@@ -227,7 +233,7 @@ CPU and MEM are the last sample, taken every 2 s. Ctrl-C quits.
 
 ```console
 $ runnerctl pause halyard/ledger
-error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792741296
+error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792814287
 `runnerctl pause --force halyard/ledger` cancels its run and removes its runner
 ```
 
@@ -235,12 +241,12 @@ error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-17927412
 
 ```console wrap=false
 $ runnerctl pause --all
-error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792741296; halyard/storefront runs job 120055991650 on runnerd-3f9a-forge-node-1-1792741414
+error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1792814287; halyard/storefront runs job 120055991650 on runnerd-3f9a-forge-node-1-1792814405
 `runnerctl pause --force --all` cancels their runs and removes their runners
 $ runnerctl pause --all --force
 every repository paused: it gets no new runners
-stopped job 120055991700 on runnerd-3f9a-forge-jvm-1-1792741296
-stopped job 120055991650 on runnerd-3f9a-forge-node-1-1792741414
+stopped job 120055991700 on runnerd-3f9a-forge-jvm-1-1792814287
+stopped job 120055991650 on runnerd-3f9a-forge-node-1-1792814405
 $ runnerctl resume --all
 every repository resumed
 ```
@@ -265,20 +271,20 @@ runnerctl tui
 
 <Tui
   name="overview-96"
-  label="The overview at 96 by 26: the budget bar with jvm slot 1 at 3.89G and node slot 1 at 2.47G used, node slot 2's idle runner and the mirror, one line per slot, the slice's memory and CPU charts, the repositories and the latest jobs."
+  label="The overview at 96 by 26: a health line with 2 of 4 slots running and 4 jobs waiting, the budget bar with jvm slot 1 at 4.05G and node slot 1 at 2.58G used, one line per slot, the four waiting jobs with why each waits, a runner starting for the oldest and every node slot busy for the rest, then the repositories and the latest jobs."
 />
 
 Profiles take the dashboard's colours in config order, mint first and pink second. `NO_COLOR` leaves bold, dim and block glyphs. On a narrow terminal the slots become one line each and the charts, last on the page, drop out first; what does not fit a line goes as a whole figure or column, and a name that is cut ends in `…`. A wide terminal adds columns, and the charts take the rows the lists leave.
 
 <Tui
   name="job"
-  label="halyard/ledger's CI / build job at 120 by 30: waited 4s, started in 5s, nine steps on one time axis with integration tests running, memory and CPU against the 9G and 8-CPU caps, and the log, followed."
+  label="halyard/ledger's CI / build job at 120 by 30: waited 4s, started in 5s, its latest 17 runs with a median run of 11m 5s, nine steps on one time axis with integration tests running, memory and CPU sparklines, and the log, followed."
 />
 
 | Key | |
 |---|---|
-| `1` `2` `3` `4` | overview, history, records, sizing |
-| `tab`, `j` `k` (or arrows) | the overview's pane (slots, waiting, repositories, latest jobs); move in it, or scroll a log |
+| `1` `2` `3` `4` | overview, history, records, sizing; `o` and `h` open the first two too |
+| `tab`, `j` `k` (or arrows) | the overview's pane (slots, waiting, repositories, latest jobs); move in it, or scroll a log; `PgDn` `PgUp` move by ten |
 | `enter`, `esc` | open the selected job; back |
 | `p` `r` | pause or resume the selected repository; a pause refused while it runs a job asks before forcing it |
 | `P` `U` | pause or resume every repository, asking the same way |
