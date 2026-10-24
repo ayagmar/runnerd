@@ -20,9 +20,9 @@ use axum::routing::{delete, get, post, put};
 use axum::serve::IncomingStream;
 use axum::{Json, Router};
 use runnerd_core::api::{
-    ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownRequest, Status,
+    Dashboard, ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownRequest, Status,
 };
-use runnerd_core::config::ByteSize;
+use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::scheduler::engine::{Handle, RunningJobs};
 use runnerd_web::{PAIRING_LIFETIME, PAIRING_MAX, PairError, Sessions};
 use tokio::net::UnixListener;
@@ -71,7 +71,7 @@ pub(crate) struct ConfigSource {
     /// As the daemon read it.
     pub text: String,
     pub memory_max: MemoryMax,
-    /// Read when a new config sets `cpu_overcommit`.
+    /// Read when a new config is applied: a config that sets `cpu_overcommit` needs them, others show them.
     pub cpus: SliceCpus,
     pub sync_dir: SyncDir,
     /// How often auto sizing looks at the advice: `auto::EVERY`, or a test's.
@@ -99,6 +99,8 @@ struct AppState {
     sync_dir: SyncDir,
     /// The dashboard's session secret.
     sessions: Arc<Sessions>,
+    /// `[web]` as the config read at start said, which the dashboard runs with until a restart.
+    dashboard: Dashboard,
 }
 
 /// The authenticated sender of a request.
@@ -153,6 +155,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/config/check", post(control::check_config))
         .route("/v1/doctor", get(control::doctor))
         .route("/v1/shutdown", post(shutdown))
+        .route("/v1/dashboard", get(dashboard))
         .route("/v1/dashboard/sign-out", post(sign_out_dashboard))
         .route("/v1/dashboard/pairings", post(pair_dashboard))
         .route("/v1/jobs", get(history::jobs))
@@ -162,6 +165,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/host/samples", get(history::host_samples))
         .route("/v1/stats", get(history::stats))
         .route("/v1/sizing", get(history::sizing))
+        .route("/v1/activity", get(history::activity))
         .route("/v1/caches", get(history::caches))
         .route("/v1/caches/history", get(history::cache_history))
         .route("/v1/events", get(events::events))
@@ -193,6 +197,11 @@ async fn shutdown(
         RunningJobs::Keep
     });
     StatusCode::ACCEPTED
+}
+
+/// `GET /v1/dashboard`: the dashboard's `[web]` settings as the daemon started with them.
+async fn dashboard(_: Authenticated, State(state): State<AppState>) -> Json<Dashboard> {
+    Json(state.dashboard)
 }
 
 /// `POST /v1/dashboard/sign-out`: signs every browser out of the dashboard, with a new session secret.
@@ -303,6 +312,12 @@ async fn serve_for(
     stop: impl Future<Output = ()> + Send + 'static,
 ) -> io::Result<()> {
     let (stopping, stopping_receiver) = watch::channel(false);
+    let dashboard = Dashboard {
+        open: Config::parse(&config.text)
+            .ok()
+            .and_then(|parsed| parsed.web.open)
+            .map(|open| open.to_string()),
+    };
     let state = AppState {
         handle,
         owner,
@@ -315,6 +330,7 @@ async fn serve_for(
         cpus: config.cpus,
         sync_dir: config.sync_dir,
         sessions,
+        dashboard,
     };
     tokio::spawn(auto::run(state.clone(), config.auto_every));
     let app = router(state).into_make_service_with_connect_info::<Peer>();

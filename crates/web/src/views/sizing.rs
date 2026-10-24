@@ -1,10 +1,11 @@
 //! `/sizing`: per profile, what its jobs use of their memory cap (sampled peaks by percentile, and what the advice
 //! sizes for: the largest with the margin), how long they waited and how busy the slots were, the advice, and a row per job. Applying advice
 //! opens the config editor with the profile's new `memory` and `slots` in it; nothing is written until it is saved.
-//! What auto sizing changed is listed under each profile, with a link that opens the last change undone the same way.
+//! What auto sizing changed is listed under each profile, with a link that opens the last change undone the same way;
+//! above them, whether it is on and, per profile, what its next look changes or until when a recent change holds it.
 
 use maud::{Markup, html};
-use runnerd_core::api::{Advice, JobSizing, ProfileSizing, Sizing};
+use runnerd_core::api::{Advice, AutoPlan, JobSizing, ProfileSizing, Sizing};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, page};
@@ -14,12 +15,14 @@ use crate::format;
 /// Everything the sizing page shows.
 #[derive(Debug, Clone)]
 pub(crate) struct SizingView {
+    pub(crate) now: u64,
     pub(crate) sizing: Sizing,
 }
 
 impl SizingView {
-    pub(crate) async fn load(daemon: &Client) -> Result<SizingView, ClientError> {
+    pub(crate) async fn load(daemon: &Client, now: u64) -> Result<SizingView, ClientError> {
         Ok(SizingView {
+            now,
             sizing: daemon.get("/v1/sizing").await?,
         })
     }
@@ -37,16 +40,114 @@ pub(crate) fn render(view: &SizingView) -> Markup {
                 span.muted { " since " (format::date(sizing.since)) }
             }
             p.muted {
-                "Peaks are sampled every " (sizing.sample_interval) " s, so a shorter spike goes unseen:  advice adds "
+                "Peaks are sampled every " (sizing.sample_interval) " s, so a shorter spike goes unseen: advice adds "
                 (sizing.margin) "% to the largest, and waits for " (sizing.min_jobs) " jobs."
-                @if sizing.auto { " Auto sizing is on: runnerd writes the advice into the config itself, a step at a time." }
             }
         }
+        (auto_plan(view))
         @for (index, profile) in sizing.profiles.iter().enumerate() {
             (profile_section(sizing, profile, index))
         }
     };
     page("Sizing", Some(Page::Sizing), None, &main)
+}
+
+/// Whether auto sizing is on, its rules in words, and per profile what its next look changes, or until when a recent
+/// change holds it, or that the advice asks for nothing.
+fn auto_plan(view: &SizingView) -> Markup {
+    let sizing = &view.sizing;
+    let Some(plan) = sizing.auto_plan.as_ref().filter(|_| sizing.auto) else {
+        if sizing.auto {
+            // A daemon that does not say what it does next.
+            return html! {
+                section.auto-plan aria-labelledby="auto-title" {
+                    h2 #auto-title { "Auto sizing is on" }
+                    p { "runnerd writes the advice into the config itself, a step at a time." }
+                }
+            };
+        }
+        return html! {
+            section.auto-plan.off aria-labelledby="auto-title" {
+                h2 #auto-title { "Auto sizing is off" }
+                p {
+                    "The advice below changes nothing until you review it in the config. With "
+                    code { "auto = true" } " under " code { "[sizing]" }
+                    ", runnerd applies it itself, a step at a time."
+                }
+            }
+        };
+    };
+    html! {
+        section.auto-plan aria-labelledby="auto-title" {
+            h2 #auto-title { "Auto sizing is on" }
+            p {
+                "runnerd looks every " (span(plan.every)) " and changes a profile at most once every "
+                (span(plan.interval)) ", moving its memory by at most " (plan.max_step) "% at a time."
+            }
+            @if let Some(blocked) = &plan.blocked {
+                p.warning { "No look changes anything now: " (blocked) "." }
+            }
+            ul.plan-list {
+                @for (index, profile) in sizing.profiles.iter().enumerate() {
+                    li class=(format!("p{}", index % 6)) {
+                        span.plan-name { span.swatch aria-hidden="true" {} (profile.name) }
+                        (plan_line(view, plan, profile))
+                    }
+                }
+            }
+        }
+    }
+}
+
+/// A setting's length in words: `5 minutes`, `24 hours`, `90 s`.
+fn span(seconds: u64) -> String {
+    let plural = |count: u64, unit: &str| {
+        if count == 1 {
+            format!("{count} {unit}")
+        } else {
+            format!("{count} {unit}s")
+        }
+    };
+    match seconds {
+        0 => "0 s".to_owned(),
+        _ if seconds.is_multiple_of(3600) => plural(seconds / 3600, "hour"),
+        _ if seconds.is_multiple_of(60) => plural(seconds / 60, "minute"),
+        _ => format!("{seconds} s"),
+    }
+}
+
+/// What auto sizing does next with one profile.
+fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Markup {
+    let next = plan
+        .next
+        .iter()
+        .find(|change| change.profile == profile.name);
+    let held = plan.held.iter().find(|hold| hold.profile == profile.name);
+    html! {
+        @if let Some(change) = next {
+            span.plan-what.changes {
+                @if plan.blocked.is_some() {
+                    strong { "Once that is fixed: " (change.line()) }
+                } @else {
+                    strong { "Next look, within " (span(plan.every)) ": " (change.line()) }
+                }
+                span.muted { (change.reason) }
+            }
+        } @else if let Some(hold) = held {
+            span.plan-what.held {
+                strong {
+                    "No change before " (format::short_date(hold.until)) " " (format::clock(hold.until)) " UTC"
+                    span.muted { ", in " (format::duration(hold.until.saturating_sub(view.now))) }
+                }
+                span.muted { "Changed " (format::ago(hold.changed, view.now)) "; the interval holds it until then." }
+            }
+        } @else {
+            span.plan-what {
+                strong { "Nothing to change" }
+                span.muted { (view.sizing.advice_line(profile)) }
+            }
+        }
+    }
 }
 
 fn advice_class(advice: Advice) -> &'static str {
@@ -62,7 +163,7 @@ fn advice_class(advice: Advice) -> &'static str {
 fn needs(job: &JobSizing) -> Markup {
     match job.advice {
         Advice::TooFew { jobs } => {
-            html! { span.muted title=(format!("{jobs} runs; largest peak shown")) { "max " (format::bytes(job.peaks.memory.max)) } }
+            html! { span.muted title=(format!("{jobs} runs, too few to advise on; the largest peak")) { "too few runs; max " (format::bytes(job.peaks.memory.max)) } }
         }
         Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
             html! { strong.over { (format::bytes(memory)) ", over the cap" } }
@@ -149,7 +250,7 @@ fn changes(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
     html! {
         @if !changes.is_empty() {
             div.sizing-changes {
-                h3 { "Auto sizing" }
+                h3 { "Changed by auto sizing" }
                 ol {
                     @for change in &changes {
                         li {

@@ -63,6 +63,7 @@ fn status() -> Status {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            slice_cpus: None,
             cpu: Some(runnerd_core::api::CpuBudget {
                 cpus: 32_000,
                 budget: 32_000,
@@ -112,6 +113,7 @@ fn status() -> Status {
             branch: Some("main".to_owned()),
             url: None,
             queued_at: 1_000_000,
+            waiting: None,
         }],
     }
 }
@@ -310,6 +312,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
         slots: 5,
     };
     axum::Json(Sizing {
+        auto_plan: None,
         auto: false,
         changes: vec![SizingChange {
             at: 1_700_050_000,
@@ -488,6 +491,11 @@ fn serve(socket: &Path) -> Shared {
         .route("/v1/records", delete(remove_records))
         .route("/v1/records/{job}", delete(remove_record))
         .route("/v1/dashboard/pairings", post(pairings))
+        // `[web] open` names the second proxy of `LOGIN_LINKS`.
+        .route(
+            "/v1/dashboard",
+            get(async || axum::Json(serde_json::json!({ "open": "https://forge.lan" }))),
+        )
         .route(
             "/v1/records/{job}/shell",
             post(async || {
@@ -923,6 +931,33 @@ fn web_prints_its_own_link_and_one_for_each_configured_proxy() {
         let output = runnerctl(&socket, &["web", "--no-open", "--base", base]);
         assert_eq!(stdout(&output), format!("{link}\n"), "--base {base}");
     }
+}
+
+#[test]
+fn web_opens_the_origin_web_open_names_unless_told_otherwise_for_one_run() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    let _fake = serve(&socket);
+    std::fs::write(dir.0.join("runnerd.web"), LOGIN_LINKS).unwrap();
+    let links = |args: &[&str]| {
+        let output = runnerctl(&socket, &[&["web", "--no-open"], args].concat());
+        assert!(output.status.success(), "{}", stderr(&output));
+        stdout(&output)
+    };
+    assert_eq!(
+        links(&[]),
+        "https://forge.lan/login?code=cc\n\
+         http://127.0.0.1:7477/login?code=aa\n\
+         https://forge.example.ts.net:8443/login?code=bb\n",
+        "the tailnet's link first, the loopback one still printed"
+    );
+    assert_eq!(links(&["--local"]), LOGIN_LINKS, "--local opens loopback");
+    assert_eq!(
+        links(&["--base", "https://forge.example.ts.net:8443"]),
+        "https://forge.example.ts.net:8443/login?code=bb\n"
+    );
+    let both = runnerctl(&socket, &["web", "--local", "--base", "https://forge.lan"]);
+    assert!(!both.status.success(), "--local and --base conflict");
 }
 
 #[test]

@@ -437,11 +437,12 @@ async fn serve(
         .map_err(|error| fail(&format_args!("cannot read {}: {error}", path.display())))?;
     let config = Config::parse(&text).map_err(|error| fail(&error))?;
     let memory_max = slice_memory_max(&config.host.slice).map_err(|error| fail(&error))?;
-    // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs.
+    // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs, and the
+    // CPUs read only scale the dashboard's CPU chart.
     let cpus = if config.host.cpu_overcommit.is_some() {
         Some(slice_cpus(&config.host.slice).map_err(|error| fail(&error))?)
     } else {
-        None
+        slice_cpus(&config.host.slice).ok()
     };
     for warning in config.validate(memory_max).map_err(|error| fail(&error))? {
         warn!("{warning}");

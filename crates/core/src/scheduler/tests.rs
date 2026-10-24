@@ -4,9 +4,10 @@ use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
 use super::{
-    CPU_PRIORITY_AFTER, Decision, IDLE_TIMEOUT, Profile, Repository, RunnerSlot, Slot, SlotRef,
-    plan,
+    CPU_PRIORITY_AFTER, Decision, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository, RunnerSlot,
+    Slot, SlotRef, plan,
 };
+use crate::api::Waiting;
 use crate::github::QueuedJob;
 
 const GIB: u64 = 1 << 30;
@@ -49,7 +50,7 @@ fn profiles(slots: Vec<Slot>) -> BTreeMap<String, Profile> {
         Profile {
             memory: 4 * GIB,
             cpus: 2000,
-            preparing: false,
+            preparing: None,
             slots,
         },
     )])
@@ -91,7 +92,8 @@ fn two_repositories_sharing_two_slots_start_two_of_three_jobs_oldest_first() {
         None,
         None,
         now(),
-    );
+    )
+    .decisions;
     assert_eq!(starts(&decisions), [(0, "o/b"), (1, "o/b")]);
 }
 
@@ -108,7 +110,8 @@ fn a_job_whose_labels_match_no_repository_never_starts() {
         None,
         None,
         now(),
-    );
+    )
+    .decisions;
     assert_eq!(decisions, []);
 }
 
@@ -125,7 +128,8 @@ fn labels_match_regardless_of_case() {
         None,
         None,
         now(),
-    );
+    )
+    .decisions;
     assert_eq!(starts(&decisions), [(0, "o/a")]);
 }
 
@@ -138,7 +142,8 @@ fn a_full_budget_starts_nothing() {
         Some(4 * GIB - 1),
         None,
         now(),
-    );
+    )
+    .decisions;
     assert_eq!(decisions, []);
 }
 
@@ -155,7 +160,8 @@ fn the_budget_caps_starts_within_one_plan() {
         Some(5 * GIB),
         None,
         now(),
-    );
+    )
+    .decisions;
     assert_eq!(starts(&decisions), [(0, "o/a")]);
 }
 
@@ -176,7 +182,8 @@ fn runners_that_reserve_their_predicted_peak_start_more_within_the_same_budget()
         Some(5 * GIB),
         None,
         now(),
-    );
+    )
+    .decisions;
     assert_eq!(starts(&decisions), [(0, "o/a"), (1, "o/a")]);
     assert!(
         decisions.iter().all(
@@ -195,7 +202,8 @@ fn a_runner_still_waiting_for_its_job_is_not_started_twice() {
         None,
         None,
         now(),
-    );
+    )
+    .decisions;
     assert_eq!(decisions, []);
 }
 
@@ -211,7 +219,8 @@ fn an_idle_runner_stops_only_after_its_timeout_with_nothing_queued() {
             None,
             None,
             now()
-        ),
+        )
+        .decisions,
         []
     );
     let long_ago = now() - IDLE_TIMEOUT;
@@ -222,12 +231,12 @@ fn an_idle_runner_stops_only_after_its_timeout_with_nothing_queued() {
         },
     };
     assert_eq!(
-        plan(&nothing_queued, &profiles_with(long_ago), None, None, now()),
+        plan(&nothing_queued, &profiles_with(long_ago), None, None, now()).decisions,
         [stop]
     );
     let still_queued = [repository("o/a", "app", vec![job(1, &["app"])])];
     assert_eq!(
-        plan(&still_queued, &profiles_with(long_ago), None, None, now()),
+        plan(&still_queued, &profiles_with(long_ago), None, None, now()).decisions,
         []
     );
 }
@@ -247,14 +256,18 @@ fn paused_held_and_reseeding_start_nothing() {
                 None,
                 None,
                 now()
-            ),
+            )
+            .decisions,
             []
         );
     }
     let mut reseeding = profiles(vec![Slot::Free]);
-    reseeding.get_mut("app").unwrap().preparing = true;
+    reseeding.get_mut("app").unwrap().preparing = Some(Preparing::Reseeding);
     let repositories = [repository("o/a", "app", queued())];
-    assert_eq!(plan(&repositories, &reseeding, None, None, now()), []);
+    assert_eq!(
+        plan(&repositories, &reseeding, None, None, now()).decisions,
+        []
+    );
 }
 
 #[test]
@@ -280,7 +293,8 @@ fn a_job_with_a_slot_and_memory_but_no_cpu_waits_and_its_repository_is_held_for_
         None,
         Some(4000),
         now(),
-    );
+    )
+    .decisions;
     assert_eq!(starts(&decisions), [(0, "o/a"), (1, "o/a"), (2, "o/b")]);
     assert!(
         decisions.contains(&Decision::HeldForCpu {
@@ -303,7 +317,8 @@ fn a_runner_at_its_profiles_cpus_that_do_not_fit_holds_its_repository_once() {
         None,
         Some(1000),
         now(),
-    );
+    )
+    .decisions;
     // A runner reserves the slot's 2 CPUs by default, which do not fit 1: one hold, not one per job.
     assert_eq!(
         decisions,
@@ -365,7 +380,8 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
             None,
             Some(4000 - in_use),
             at,
-        );
+        )
+        .decisions;
         for (_, repository) in starts(&decisions) {
             if repository == "o/heavy" {
                 return (Some(tick), light_after_limit);
@@ -397,4 +413,218 @@ fn a_job_held_for_cpu_long_enough_starts_once_younger_jobs_stop_taking_the_cpu_i
     let started = started.expect("o/heavy's job starts");
     assert!(started <= 1 + 8 + 4, "started at tick {started}");
     assert_eq!(light_after_limit, 0, "no light job started past the limit");
+}
+
+#[test]
+fn each_job_left_queued_says_why_it_waits() {
+    let later = now() + Duration::from_secs(60);
+    let repositories = [
+        Repository {
+            paused: true,
+            ..repository("o/paused", "app", vec![job(1, &["app"])])
+        },
+        Repository {
+            held_until: Some(later),
+            ..repository("o/failing", "app", vec![job(2, &["app"])])
+        },
+        repository("o/a", "app", vec![job(3, &["app"]), job(4, &["app"])]),
+        repository("o/web", "web", vec![job(5, &["web"])]),
+        repository("o/seeded", "seeded", vec![job(6, &["seeded"])]),
+    ];
+    let busy = Slot::Runner(RunnerSlot {
+        repository: "o/web".to_owned(),
+        busy: true,
+        started_at: now(),
+    });
+    let mut profiles = profiles(vec![Slot::Free, Slot::Free]);
+    profiles.insert(
+        "web".to_owned(),
+        Profile {
+            memory: GIB,
+            cpus: 1000,
+            preparing: None,
+            slots: vec![busy],
+        },
+    );
+    profiles.insert(
+        "seeded".to_owned(),
+        Profile {
+            memory: GIB,
+            cpus: 1000,
+            preparing: Some(Preparing::Reseeding),
+            slots: vec![Slot::Free],
+        },
+    );
+    // Room for one 4G runner of app's, then 1G: job 3's start takes what job 4 would need.
+    let plan = plan(&repositories, &profiles, Some(5 * GIB), None, now());
+    assert_eq!(starts(&plan.decisions), [(0, "o/a")]);
+    assert_eq!(
+        plan.waiting,
+        BTreeMap::from([
+            (1, Waiting::Paused),
+            (2, Waiting::Backoff { until: 1_000_060 }),
+            (4, Waiting::BehindStart { job: 3 }),
+            (
+                5,
+                Waiting::NoSlot {
+                    profile: "web".to_owned()
+                }
+            ),
+            (
+                6,
+                Waiting::Reseeding {
+                    profile: "seeded".to_owned()
+                }
+            ),
+        ])
+    );
+}
+
+#[test]
+fn a_job_held_only_by_an_older_jobs_start_waits_behind_it_not_for_what_runs() {
+    let two = |id| repository(&format!("o/{id}"), "app", vec![job(id, &["app"])]);
+    // One free slot of two: job 1 takes it, job 2 is behind that start, not short of a busy slot.
+    let busy = Slot::Runner(RunnerSlot {
+        repository: "o/other".to_owned(),
+        busy: true,
+        started_at: now(),
+    });
+    let plan = plan(
+        &[two(1), two(2)],
+        &profiles(vec![busy.clone(), Slot::Free]),
+        None,
+        None,
+        now(),
+    );
+    assert_eq!(starts(&plan.decisions), [(1, "o/1")]);
+    assert_eq!(
+        plan.waiting,
+        BTreeMap::from([(2, Waiting::BehindStart { job: 1 })])
+    );
+    // With no slot free before the plan, the slots are busy.
+    let plan = plan_of(&[two(1)], &profiles(vec![busy]), None, None);
+    assert_eq!(
+        plan.waiting,
+        BTreeMap::from([(
+            1,
+            Waiting::NoSlot {
+                profile: "app".to_owned()
+            }
+        )])
+    );
+    // Memory for one 4G runner: the second is behind the first; with 1G free, memory is short.
+    let slots = || profiles(vec![Slot::Free, Slot::Free]);
+    let behind = plan_of(&[two(1), two(2)], &slots(), Some(5 * GIB), None);
+    assert_eq!(
+        behind.waiting,
+        BTreeMap::from([(2, Waiting::BehindStart { job: 1 })])
+    );
+    let short = plan_of(&[two(1)], &slots(), Some(GIB), None);
+    assert_eq!(
+        short.waiting,
+        BTreeMap::from([(
+            1,
+            Waiting::Memory {
+                needs: 4 * GIB,
+                free: GIB
+            }
+        )])
+    );
+    // CPU likewise, while decisions stay as before: the second repository is held for CPU.
+    let behind = plan_of(&[two(1), two(2)], &slots(), None, Some(3000));
+    assert_eq!(
+        behind.waiting,
+        BTreeMap::from([(2, Waiting::BehindStart { job: 1 })])
+    );
+    assert!(
+        behind.decisions.contains(&Decision::HeldForCpu {
+            repository: "o/2".to_owned()
+        }),
+        "o/2 is held for CPU as before"
+    );
+}
+
+fn plan_of(
+    repositories: &[Repository],
+    profiles: &BTreeMap<String, Profile>,
+    memory: Option<u64>,
+    cpu: Option<u64>,
+) -> Plan {
+    plan(repositories, profiles, memory, cpu, now())
+}
+
+#[test]
+fn a_job_an_idle_runner_will_take_waits_for_that_runner() {
+    let repositories = [repository("o/a", "app", vec![job(1, &["app"])])];
+    let plan = plan(
+        &repositories,
+        &profiles(vec![idle_runner("o/a", now())]),
+        None,
+        None,
+        now(),
+    );
+    assert_eq!(plan.decisions, []);
+    assert_eq!(plan.waiting, BTreeMap::from([(1, Waiting::RunnerStarting)]));
+}
+
+#[test]
+fn younger_jobs_wait_behind_one_starved_of_cpu() {
+    let long_ago = now() - CPU_PRIORITY_AFTER;
+    let repositories = [
+        Repository {
+            runner_cpu: Some(4000),
+            cpu_waiting_since: Some(long_ago),
+            ..repository("o/heavy", "app", vec![job(1, &["app"])])
+        },
+        Repository {
+            runner_cpu: Some(500),
+            ..repository("o/light", "app", vec![job(2, &["app"])])
+        },
+    ];
+    let plan = plan(
+        &repositories,
+        &profiles(vec![Slot::Free, Slot::Free]),
+        None,
+        Some(1000),
+        now(),
+    );
+    assert_eq!(starts(&plan.decisions), []);
+    assert_eq!(
+        plan.waiting,
+        BTreeMap::from([
+            (
+                1,
+                Waiting::Cpu {
+                    needs: 4000,
+                    free: 1000
+                }
+            ),
+            (2, Waiting::BehindCpu { job: 1 }),
+        ])
+    );
+}
+
+#[test]
+fn the_idle_runner_of_a_paused_repository_stops_though_its_jobs_stay_queued() {
+    let repositories = [Repository {
+        paused: true,
+        ..repository("o/a", "app", vec![job(1, &["app"])])
+    }];
+    let plan = plan(
+        &repositories,
+        &profiles(vec![idle_runner("o/a", now() - IDLE_TIMEOUT)]),
+        None,
+        None,
+        now(),
+    );
+    assert_eq!(
+        plan.decisions,
+        [Decision::Stop {
+            slot: SlotRef {
+                profile: "app".to_owned(),
+                index: 0
+            }
+        }]
+    );
+    assert_eq!(plan.waiting, BTreeMap::from([(1, Waiting::Paused)]));
 }

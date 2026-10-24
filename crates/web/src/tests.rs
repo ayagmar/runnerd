@@ -39,7 +39,7 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{
-    Event, EventEnvelope, HostSample, JobState, Sample, SeedMemory, ShellMemory,
+    Event, EventEnvelope, HostSample, JobState, Sample, SeedMemory, ShellMemory, Waiting,
 };
 
 use crate::views::{repository_id, slot_id};
@@ -136,7 +136,7 @@ impl Dashboard {
         let reply = self.request("GET", path, &[]).await;
         assert_eq!(reply.status, StatusCode::SEE_OTHER);
         let cookie = reply.headers[header::SET_COOKIE].to_str().unwrap();
-        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Strict"));
+        assert!(cookie.contains("HttpOnly") && cookie.contains("SameSite=Lax"));
         cookie.split(';').next().unwrap().to_owned()
     }
 
@@ -320,6 +320,37 @@ async fn a_write_from_another_origin_is_403_even_with_the_cookie() {
 }
 
 #[tokio::test]
+async fn a_link_from_another_site_opens_the_page_signed_in_and_a_write_from_it_is_still_refused() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    // Following a link on GitHub: the browser sends a `SameSite=Lax` cookie on a top-level GET.
+    let navigation = [
+        ("cookie", cookie.as_str()),
+        ("sec-fetch-site", "cross-site"),
+        ("sec-fetch-mode", "navigate"),
+    ];
+    let page = dashboard
+        .request("GET", "/jobs/120055991700", &navigation)
+        .await;
+    assert_eq!(page.status, StatusCode::OK, "{}", page.body);
+    assert!(!page.body.contains("Sign in to runnerd"), "{}", page.body);
+    // A form on that site posting to the dashboard, cookie and all: its `Origin` is not the dashboard's.
+    let write = [
+        ("cookie", cookie.as_str()),
+        ("origin", "https://github.com"),
+        ("sec-fetch-site", "cross-site"),
+    ];
+    let reply = dashboard
+        .request("POST", "/v1/repositories/halyard/ledger/pause", &write)
+        .await;
+    assert_eq!(reply.status, StatusCode::FORBIDDEN);
+    assert!(
+        !dashboard.fake.fixtures.lock().unwrap().status.repositories[0].paused,
+        "halyard/ledger stays running"
+    );
+}
+
+#[tokio::test]
 async fn a_write_through_a_configured_proxy_reaches_the_daemon_and_others_stay_403() {
     let dashboard = Dashboard::behind(&["https://forge.example.ts.net:8443"]).await;
     let cookie = dashboard.sign_in().await;
@@ -389,7 +420,7 @@ async fn a_login_through_an_https_proxy_sets_a_secure_cookie_and_a_loopback_one_
     }
     assert!(!cookies[0].contains("Secure"), "{}", cookies[0]);
     assert!(
-        cookies[1].ends_with("; Secure") && cookies[1].contains("SameSite=Strict"),
+        cookies[1].ends_with("; Secure") && cookies[1].contains("SameSite=Lax"),
         "{}",
         cookies[1]
     );
@@ -758,7 +789,7 @@ async fn every_page_renders_from_the_daemons_data() {
         "halyard/ledger",
         "halyard/storefront",
         "Integration tests (Testcontainers)",
-        "MemoryMax 33G",
+        "up to its MemoryMax of 33G",
         "peak",
     ] {
         assert!(
@@ -805,8 +836,7 @@ async fn every_page_renders_from_the_daemons_data() {
 }
 
 #[tokio::test]
-async fn queued_jobs_lead_the_overviews_jobs_oldest_first_once_each_linked_to_github_and_their_repository()
- {
+async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits_once_each() {
     let dashboard = Dashboard::start().await;
     {
         let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
@@ -815,6 +845,9 @@ async fn queued_jobs_lead_the_overviews_jobs_oldest_first_once_each_linked_to_gi
         older.name = "lint".to_owned();
         older.url = Some("https://github.com/halyard/storefront/actions/runs/1/job/2".to_owned());
         older.queued_at -= 300;
+        older.waiting = Some(Waiting::NoSlot {
+            profile: "node".to_owned(),
+        });
         fixtures.status.queued.insert(0, older);
         // The history keeps the newer one queued too.
         let mut recorded = fixtures.jobs[0].clone();
@@ -824,21 +857,131 @@ async fn queued_jobs_lead_the_overviews_jobs_oldest_first_once_each_linked_to_gi
     }
     let cookie = dashboard.sign_in().await;
     let overview = dashboard.page(&cookie, "/").await;
-    let jobs = &overview.body[overview.body.find(r#"id="recent""#).unwrap()..];
-    let lint = jobs.find("https://github.com/halyard/storefront/actions/runs/1/job/2");
-    let visual_diff = jobs.find("/job/120055991710");
+    let body = &overview.body;
+    let queue = &body[body.find(r#"id="queue""#).unwrap()..body.find(r#"id="budget""#).unwrap()];
+    let lint = queue.find("https://github.com/halyard/storefront/actions/runs/1/job/2");
+    let visual_diff = queue.find("/job/120055991710");
     assert!(
         lint.is_some() && lint < visual_diff,
-        "the oldest queued job comes first: {jobs}"
-    );
-    assert_eq!(
-        jobs.matches("120055991710").count(),
-        1,
-        "a queued job the history also has shows once: {jobs}"
+        "the oldest queued job comes first: {queue}"
     );
     assert!(
-        jobs.contains(r#"<li class="queued" data-class:linked="$_repo == 'halyard/storefront'""#),
-        "a queued row lights up with its repository: {jobs}"
+        queue.contains("All 2 node slots are busy")
+            && queue.contains("A runner is starting for it in node\u{a0}2"),
+        "each queued job says why it waits: {queue}"
+    );
+    assert!(
+        queue.contains(r#"<li data-class:linked="$_repo == 'halyard/storefront'""#),
+        "a queued row lights up with its repository: {queue}"
+    );
+    assert_eq!(
+        body.matches("120055991710").count(),
+        1,
+        "a queued job the history also has shows once, in the queue: {body}"
+    );
+    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
+    assert!(
+        health.contains(r##"<a class="figure-main" href="#queue">2</a>"##),
+        "the health figures count both waiting: {health}"
+    );
+}
+
+#[tokio::test]
+async fn the_slices_charts_reach_up_to_the_slice_not_to_what_its_slots_add_up_to() {
+    let dashboard = Dashboard::start().await;
+    {
+        // 32 threads, 33G; the slots' CPU limits add up past the CPUs, as quotas may.
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let profiles = &mut fixtures.status.profiles;
+        for profile in profiles.iter_mut() {
+            profile.cpus = 12;
+        }
+        let slots: usize = profiles.iter().map(|profile| profile.slots.len()).sum();
+        assert!(
+            slots * 12 > 32,
+            "the slots ask for more CPUs than the slice has"
+        );
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let host = &body[body.find(r#"id="host""#).unwrap()..];
+    let axes: Vec<&str> = host
+        .match_indices(r#"<div class="chart-y" aria-hidden="true"><span>"#)
+        .map(|(at, prefix)| {
+            let top = &host[at + prefix.len()..];
+            &top[..top.find("</span>").unwrap()]
+        })
+        .collect();
+    assert_eq!(
+        axes,
+        ["33G", "32 cores"],
+        "MemoryMax and the slice's CPUs top the axes"
+    );
+    assert!(!host.contains("of all slots"), "{host}");
+}
+
+#[tokio::test]
+async fn the_health_figures_count_the_24_hours_up_to_now_by_when_jobs_started_and_ended() {
+    use runnerd_core::api::JobState;
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        // The dashboard's clock: the day ends now, whatever the fixtures say.
+        let now = crate::now();
+        let template = fixtures.jobs[0].clone();
+        let job = |id, state, conclusion: &str, queued_at, started_at, finished_at| {
+            let mut job = template.clone();
+            job.summary.id = id;
+            job.summary.state = state;
+            job.summary.conclusion = Some(conclusion.to_owned());
+            job.summary.timeline.queued_at = queued_at;
+            job.summary.timeline.started_at = Some(started_at);
+            job.summary.timeline.finished_at = Some(finished_at);
+            job
+        };
+        let minutes = |count: u64| count * 60;
+        fixtures.jobs = vec![
+            // Ended 10 minutes ago after waiting 10.
+            job(
+                3,
+                JobState::Completed,
+                "success",
+                now - minutes(40),
+                now - minutes(30),
+                now - minutes(10),
+            ),
+            // Queued three days before it started 23h 50m ago, lost 23h 45m ago: inside the day.
+            job(
+                2,
+                JobState::Lost,
+                "failure",
+                now - 3 * 86_400 - minutes(23 * 60 + 50),
+                now - minutes(23 * 60 + 50),
+                now - minutes(23 * 60 + 45),
+            ),
+            // Failed 24h 15m ago: a day and a quarter hour ago, outside it.
+            job(
+                1,
+                JobState::Completed,
+                "failure",
+                now - minutes(25 * 60),
+                now - minutes(24 * 60 + 30),
+                now - minutes(24 * 60 + 15),
+            ),
+        ];
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
+    let failed = &health[health.find("Failed, 24 h").unwrap()..];
+    assert!(
+        failed.contains(r#"<span class="figure-main">1</span>"#)
+            && failed.contains("of 2 finished"),
+        "one of the two jobs that ended in the day failed: {failed}"
+    );
+    assert!(
+        health.contains("2 jobs started"),
+        "the job queued days ago counts where it started: {health}"
     );
 }
 
@@ -1014,6 +1157,53 @@ async fn profiles_whose_names_differ_only_in_punctuation_keep_their_own_slots() 
             "the block for {id} points at its own card"
         );
     }
+}
+
+#[tokio::test]
+async fn a_live_overview_lets_a_job_age_out_of_its_24_hours_with_no_job_event() {
+    use runnerd_core::api::{HostSample, JobState};
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        // The dashboard's clock: a job that failed a day ago less two seconds, the only one of the day.
+        let now = crate::now();
+        let mut failed = fixtures.jobs[0].clone();
+        failed.summary.state = JobState::Lost;
+        failed.summary.timeline.queued_at = now - 86_400;
+        failed.summary.timeline.started_at = Some(now - 86_400 + 1);
+        failed.summary.timeline.finished_at = Some(now - 86_400 + 2);
+        fixtures.jobs = vec![failed];
+    }
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard.stream(&cookie, "/live/overview").await;
+    let failed =
+        |count: u32| format!(r#"Failed, 24 h</dt><dd><span class="figure-main">{count}</span>"#);
+    read_until(&mut stream, |text| text.contains(&failed(1))).await;
+    // Only host samples from here on, as on an idle evening.
+    let events = dashboard.fake.events.clone();
+    let samples = tokio::spawn(async move {
+        loop {
+            let at = crate::now();
+            let _ = events.send(EventEnvelope {
+                id: None,
+                at,
+                event: Event::HostSample {
+                    sample: HostSample {
+                        at,
+                        cpu: 100,
+                        memory: 1 << 30,
+                    },
+                },
+            });
+            tokio::time::sleep(Duration::from_millis(250)).await;
+        }
+    });
+    let expired = read_until(&mut stream, |text| text.contains(&failed(0))).await;
+    samples.abort();
+    assert!(
+        expired.contains("0 jobs started"),
+        "its wait aged out too: {expired}"
+    );
 }
 
 #[tokio::test]
@@ -1266,7 +1456,7 @@ async fn a_stream_opened_by_the_page_it_just_rendered_sends_none_of_its_regions_
     // A page that names no regions gets them all.
     let mut fresh = dashboard.stream(&cookie, "/live/overview").await;
     let first = read_until(&mut fresh, |text| text.contains("datastar-patch-signals")).await;
-    assert_eq!(first.matches("<section").count(), 5, "{first}");
+    assert_eq!(first.matches("<section").count(), 7, "{first}");
 }
 
 #[tokio::test]
@@ -2265,5 +2455,158 @@ async fn resuming_every_repository_when_the_history_cannot_record_it_says_so() {
                 .contains("cannot record it, so a restart pauses it again"),
         "{}",
         reply.body
+    );
+}
+
+#[tokio::test]
+async fn a_jobs_page_compares_it_with_the_same_jobs_latest_runs_only() {
+    let dashboard = Dashboard::start().await;
+    let (this, same, others) = {
+        let fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let this = fixtures.jobs[0].summary.clone();
+        let same_job = |job: &&runnerd_core::api::Job| {
+            job.summary.repository == this.repository
+                && job.summary.workflow == this.workflow
+                && job.summary.name == this.name
+        };
+        let same: Vec<u64> = fixtures
+            .jobs
+            .iter()
+            .filter(same_job)
+            .map(|job| job.summary.id)
+            .collect();
+        let others: Vec<u64> = fixtures
+            .jobs
+            .iter()
+            .filter(|job| !same_job(job))
+            .map(|job| job.summary.id)
+            .collect();
+        (this, same, others)
+    };
+    assert!(
+        same.len() > 1 && !others.is_empty(),
+        "the fixtures have both"
+    );
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard
+        .page(&cookie, &format!("/jobs/{}", this.id))
+        .await
+        .body;
+    let runs = &page[page.find(r#"id="runs""#).unwrap()..];
+    let runs = &runs[..runs.find("</section>").unwrap()];
+    for id in same.iter().take(30) {
+        assert!(
+            runs.contains(&format!(r#"href="/jobs/{id}""#)),
+            "run {id} is compared: {runs}"
+        );
+    }
+    for id in &others {
+        assert!(
+            !runs.contains(&format!("/jobs/{id}\"")),
+            "job {id} is another job: {runs}"
+        );
+    }
+    assert!(
+        runs.contains(&format!(r#"href="/jobs/{}" aria-label="#, this.id))
+            && runs.contains(r#"aria-current="page""#),
+        "this run is marked among them: {runs}"
+    );
+}
+
+#[tokio::test]
+async fn history_filters_are_links_that_keep_the_other_filters() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let page = dashboard
+        .page(&cookie, "/history?outcome=success")
+        .await
+        .body;
+    let filters = &page[page.find(r#"class="filters""#).unwrap()..];
+    let filters = &filters[..filters.find("</nav>").unwrap()];
+    assert!(
+        filters.contains(r#"<a href="/history?outcome=success&amp;workflow=E2E">E2E</a>"#),
+        "a workflow's link keeps the outcome: {filters}"
+    );
+    assert!(
+        filters.contains(r#"<a href="/history?outcome=success" aria-current="true">Succeeded</a>"#),
+        "the outcome in force is marked: {filters}"
+    );
+    let e2e = dashboard.page(&cookie, "/history?workflow=E2E").await.body;
+    let rows = &e2e[e2e.find("<tbody>").unwrap()..];
+    assert!(
+        rows.contains("playwright") && !rows.contains(">build<"),
+        "only E2E's jobs are listed: {rows}"
+    );
+}
+
+#[tokio::test]
+async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
+    use runnerd_core::api::{AutoPlan, Resize, SizingChange, SizingHold};
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let off = dashboard.page(&cookie, "/sizing").await.body;
+    assert!(off.contains("Auto sizing is off"), "{off}");
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let now = fixtures.now;
+        fixtures.auto_plan = Some(AutoPlan {
+            every: 300,
+            interval: 86_400,
+            max_step: 25,
+            next: vec![SizingChange {
+                at: now,
+                profile: "node".to_owned(),
+                from: Resize {
+                    memory: 7 << 30,
+                    slots: 2,
+                },
+                to: Resize {
+                    memory: 5376 << 20,
+                    slots: 2,
+                },
+                reason: "lower memory".to_owned(),
+                uncertain: false,
+            }],
+            held: vec![SizingHold {
+                profile: "jvm".to_owned(),
+                changed: now - 3600,
+                until: now + 23 * 3600,
+            }],
+            blocked: None,
+        });
+    }
+    let on = dashboard.page(&cookie, "/sizing").await.body;
+    let plan = &on[on.find(r#"class="plan-list""#).unwrap()..];
+    let plan = &plan[..plan.find("</ul>").unwrap()];
+    let line = |profile: &str| {
+        let from = plan.find(&format!("</span>{profile}</span>")).unwrap();
+        plan[from..].split("</li>").next().unwrap().to_owned()
+    };
+    assert!(
+        line("node").contains("Next look, within 5 minutes: memory 7G → 5.25G, slots 2"),
+        "node changes at the next look: {plan}"
+    );
+    assert!(
+        line("jvm").contains("No change before") && !line("jvm").contains("Next look"),
+        "jvm is held: {plan}"
+    );
+    assert!(
+        on.contains("at most once every 24 hours"),
+        "the rules in words: {on}"
+    );
+    // The file was edited by hand: no look writes the change, so the page says why instead of promising it.
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let plan = fixtures.auto_plan.as_mut().unwrap();
+        plan.blocked = Some("the file changed on disk since runnerd read it".to_owned());
+    }
+    let blocked = dashboard.page(&cookie, "/sizing").await.body;
+    assert!(
+        blocked.contains("No look changes anything now: the file changed on disk"),
+        "the blocker shows: {blocked}"
+    );
+    assert!(
+        !blocked.contains("Next look") && blocked.contains("Once that is fixed: memory 7G"),
+        "the change is not promised for the next look: {blocked}"
     );
 }

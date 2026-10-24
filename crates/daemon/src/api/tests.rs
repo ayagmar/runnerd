@@ -166,6 +166,7 @@ fn status() -> Status {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            slice_cpus: None,
             cpu: None,
         },
         profiles: vec![ProfileStatus {
@@ -506,6 +507,56 @@ async fn finished_jobs(store: &Store, profile: &str, cap: u64, peak: u64) {
 }
 
 #[tokio::test]
+async fn the_dashboard_says_which_origin_runnerctl_web_opens_as_the_daemon_started_with_it() {
+    let dashboard = async |text: &str| -> runnerd_core::api::Dashboard {
+        let dir = Dir::new();
+        let daemon = start_serving(&dir.0, None, false, sync_dir, memory_max, text).await;
+        let response = daemon
+            .client
+            .get("http://runnerd/v1/dashboard")
+            .send()
+            .await
+            .unwrap();
+        let dashboard = serde_json::from_slice(&body(response).await).unwrap();
+        daemon.stop().await;
+        dashboard
+    };
+    assert_eq!(dashboard(EXAMPLE).await.open, None, "loopback unless asked");
+    let tailnet = format!(
+        "{EXAMPLE}\n[web]\norigins = [\"https://forge.tail0b5e.ts.net:8443\"]\nopen = \"https://forge.tail0b5e.ts.net:8443\"\n"
+    );
+    assert_eq!(
+        dashboard(&tailnet).await.open.as_deref(),
+        Some("https://forge.tail0b5e.ts.net:8443")
+    );
+}
+
+#[tokio::test]
+async fn activity_counts_the_jobs_started_and_ended_in_the_last_24_hours() {
+    let dir = Dir::new();
+    let daemon = start_serving(&dir.0, None, false, sync_dir, memory_max, &auto_sizing()).await;
+    // Ten jobs that waited 20 s, started 40 s ago and were lost 20 s ago.
+    finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
+    let response = daemon
+        .client
+        .get("http://runnerd/v1/activity")
+        .send()
+        .await
+        .unwrap();
+    let activity: runnerd_core::api::Activity =
+        serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!(activity.until - activity.since, 24 * 3600);
+    assert_eq!(activity.started.len(), 10);
+    assert!(
+        activity.started.iter().all(|job| job.waited == 20),
+        "each waited 20 s: {:?}",
+        activity.started
+    );
+    assert_eq!((activity.finished, activity.failed), (10, 10));
+    daemon.stop().await;
+}
+
+#[tokio::test]
 async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_the_interval() {
     let dir = Dir::new();
     let text = auto_sizing();
@@ -579,9 +630,27 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
         }
     };
     assert_eq!(announced, changed.changes[0]);
-    // Many looks later, the 24h interval still holds node where it is.
+    // Many looks later, the 24h interval still holds node where it is, and the plan says until when.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    assert_eq!(sizing().await.changes.len(), 1);
+    let later = sizing().await;
+    assert_eq!(later.changes.len(), 1);
+    let plan = later.auto_plan.expect("auto sizing says what it does next");
+    assert_eq!(
+        plan.next,
+        Vec::new(),
+        "node is held, so the next look changes nothing"
+    );
+    assert_eq!(
+        plan.held
+            .iter()
+            .map(|hold| (hold.profile.as_str(), hold.until - hold.changed))
+            .collect::<Vec<_>>(),
+        [("node", 24 * 3600)]
+    );
+    assert_eq!(
+        plan.blocked, None,
+        "the file runnerd wrote is the one it runs with"
+    );
     assert!(daemon.reloads.try_recv().is_err(), "no second reload");
     daemon.stop().await;
 }
@@ -611,7 +680,23 @@ async fn auto_sizing_leaves_a_file_edited_on_disk_until_runnerd_runs_with_it() {
     finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
     tokio::time::sleep(Duration::from_millis(300)).await;
     assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), edited);
-    assert_eq!(read_sizing(&daemon).await.changes, Vec::new());
+    let sizing = read_sizing(&daemon).await;
+    assert_eq!(sizing.changes, Vec::new());
+    // What it would write once runnerd runs with the file.
+    let plan = sizing
+        .auto_plan
+        .expect("auto sizing says what it does next");
+    assert_eq!(
+        plan.next
+            .iter()
+            .map(|change| (change.profile.as_str(), change.to.memory))
+            .collect::<Vec<_>>(),
+        [("node", 5376 << 20)]
+    );
+    assert_eq!((plan.interval, plan.max_step), (24 * 3600, 25));
+    // But no look writes it: the forecast says so instead of promising it.
+    let blocked = plan.blocked.expect("the edited file blocks every look");
+    assert!(blocked.contains("changed on disk"), "{blocked}");
     assert!(daemon.reloads.try_recv().is_err(), "nothing reloaded");
     daemon.stop().await;
 }
@@ -852,6 +937,11 @@ async fn auto_sizing_off_leaves_the_file_as_written() {
     finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
     tokio::time::sleep(Duration::from_millis(200)).await;
     assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), EXAMPLE);
+    assert_eq!(
+        read_sizing(&daemon).await.auto_plan,
+        None,
+        "nothing is planned"
+    );
     daemon.stop().await;
 }
 
@@ -1144,6 +1234,8 @@ async fn every_route_refuses_other_users() {
         client.get("http://runnerd/v1/jobs/1/logs"),
         client.get("http://runnerd/v1/host/samples"),
         client.get("http://runnerd/v1/stats"),
+        client.get("http://runnerd/v1/activity"),
+        client.get("http://runnerd/v1/dashboard"),
         client.get("http://runnerd/v1/sizing"),
         client.get("http://runnerd/v1/caches"),
         client.get("http://runnerd/v1/caches/history"),
@@ -1416,6 +1508,7 @@ fn budget(memory_in_use: u64) -> Event {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
+            slice_cpus: None,
             cpu: None,
         },
     }

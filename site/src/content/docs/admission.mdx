@@ -129,7 +129,7 @@ admission = "measured"
 cpu_overcommit = 1.0
 ```
 
-- The slice's CPUs are its `AllowedCPUs`, or the host's, and fewer when its `CPUQuota` allows less. runnerd reads them from systemd only while `cpu_overcommit` is set: at start, and again whenever a config that sets it is applied. A config that sets it is refused when they cannot be read.
+- The slice's CPUs are its `AllowedCPUs`, or the host's, and fewer when its `CPUQuota` allows less. runnerd reads them from systemd at start, and again whenever a config is applied. A config that sets `cpu_overcommit` is refused when they cannot be read; without it they only scale the dashboard's CPU chart.
 - Under `admission = "measured"` a runner reserves its job's average CPU, its CPU time over its run time, predicted from the job history as memory is: with `[sizing] min_jobs` runs of the job, their p95; with fewer, its own largest once 2 succeeded, else the larger of that and its profile's p95; with none, its profile's largest. Without `min_jobs` runs of the profile, its `cpus`. There is no margin: the factor is the margin.
 - Under `admission = "caps"` every runner reserves its profile's `cpus`, and every running one counts at its container's CPU limit, also one admitted by its prediction before a reload.
 - A runner reserves the largest of its repository's queued jobs until it knows its job, then that job's; never more than the whole budget, so one runner can always start.

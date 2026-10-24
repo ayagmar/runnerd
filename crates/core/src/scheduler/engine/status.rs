@@ -1,7 +1,7 @@
 //! Publishes `api::Status` after each tick and command, and records the profiles, slots, budget and repositories
 //! that changed as events. It reads engine state and must not change it, besides the status channel.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 
 use super::{Engine, Shutdown, unix_secs};
 use crate::api;
@@ -104,6 +104,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .collect(),
             shell_memory: self.shell_budget(),
+            slice_cpus: self.cpus,
             cpu: self
                 .cpus
                 .zip(self.cpu_budget())
@@ -117,8 +118,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// The queued jobs the repositories' runners can take and none holds, oldest first; none of a repository whose
-    /// last listing failed or was skipped.
+    /// last listing failed or was skipped. Why each waits comes from a plan of the engine as it is now, not as the
+    /// tick's plan saw it: a start that failed, a runner stopped over budget or a pause since then would make that
+    /// one wrong. A shutdown starts nothing, so no job says why it waits.
     fn queued(&self) -> Vec<api::QueuedJob> {
+        let waiting = match self.control.mode() {
+            Shutdown::No => self.plan().0.waiting,
+            Shutdown::Graceful | Shutdown::Force => BTreeMap::new(),
+        };
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
@@ -147,6 +154,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         branch: job.branch.clone(),
                         url: job.url.clone(),
                         queued_at: job.created_at / 1000,
+                        waiting: waiting.get(&job.id).cloned(),
                     })
             })
             .collect();

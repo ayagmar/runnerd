@@ -11,8 +11,8 @@ use axum::http::{StatusCode, header};
 use axum::response::{IntoResponse, Response};
 use futures_util::stream;
 use runnerd_core::api::{
-    CacheHistory, CacheHistoryQuery, Caches, Event, HostSampleQuery, HostSamples, JobQuery,
-    LogQuery, Sizing, SizingQuery, StatsQuery,
+    ActivityQuery, CacheHistory, CacheHistoryQuery, Caches, Event, HostSampleQuery, HostSamples,
+    JobQuery, LogQuery, Sizing, SizingQuery, StatsQuery,
 };
 use runnerd_core::config::Config;
 use runnerd_core::observe::metrics::SAMPLE_INTERVAL;
@@ -113,6 +113,19 @@ pub(super) async fn stats(
     }
 }
 
+pub(super) async fn activity(
+    _: Authenticated,
+    State(state): State<AppState>,
+    Query(query): Query<ActivityQuery>,
+) -> Response {
+    let now = now();
+    let since = query.since.unwrap_or(now.saturating_sub(24 * 3600));
+    match state.handle.store.activity(since, now).await {
+        Ok(activity) => Json(activity).into_response(),
+        Err(store_error) => failed(&store_error),
+    }
+}
+
 pub(super) async fn sizing(
     _: Authenticated,
     State(state): State<AppState>,
@@ -152,9 +165,18 @@ pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizin
         .sizing_changes(window.since)
         .await
         .map_err(|store_error| store_error.to_string())?;
+    let memory_max = memory_max.map(|max| max.0);
+    // A forecast: the advice stands without it.
+    let auto_plan = super::auto::plan(state, &config, memory_max)
+        .await
+        .unwrap_or_else(|message| {
+            tracing::warn!("auto sizing: cannot work out its next look: {message}");
+            None
+        });
     Ok(Sizing {
         changes,
-        ..advise(&config, memory_max.map(|max| max.0), &history, window)
+        auto_plan,
+        ..advise(&config, memory_max, &history, window)
     })
 }
 

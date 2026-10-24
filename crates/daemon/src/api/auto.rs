@@ -8,7 +8,7 @@
 use std::collections::BTreeMap;
 use std::time::Duration;
 
-use runnerd_core::api::SizingChange;
+use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
 use runnerd_core::config::{Config, resize_profile};
 use runnerd_core::scheduler::engine::RunningSlots;
 use runnerd_core::sizing::auto::{Context, changes};
@@ -106,17 +106,7 @@ struct Read {
 /// Checks the file on disk is the one runnerd runs with, and reads the history, the
 /// slice's `MemoryMax` and what runs; `Err` says why nothing can change now.
 async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Read, String> {
-    match std::fs::read_to_string(&file.path) {
-        Ok(text) if text == file.text => {}
-        Ok(_) => {
-            return Err(
-                "the file changed on disk since runnerd read it; nothing is changed until runnerd runs with it \
-                 (restart it, or make the edit in the dashboard's editor)"
-                    .to_owned(),
-            );
-        }
-        Err(io_error) => return Err(format!("cannot read it: {io_error}")),
-    }
+    on_disk(file)?;
     let history_error =
         |store_error: StoreError| format!("cannot read the job history: {store_error}");
     let window = Window::new(None, now());
@@ -132,7 +122,32 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
         .map_err(|join_error| join_error.to_string())?
         .map_err(|io_error| format!("cannot read {}'s MemoryMax: {io_error}", config.host.slice))?
         .map(|max| max.0);
-    let running = state
+    Ok(Read {
+        window,
+        history,
+        memory_max,
+        running: running(state),
+    })
+}
+
+/// Whether the file on disk is the one runnerd runs with; `Err` says why a look writes nothing when it is not.
+fn on_disk(file: &ConfigText) -> Result<(), String> {
+    match std::fs::read_to_string(&file.path) {
+        Ok(text) if text == file.text => Ok(()),
+        Ok(_) => {
+            Err(
+                "the file changed on disk since runnerd read it; nothing is changed until runnerd runs with it \
+                 (restart it, or make the edit in the dashboard's editor)"
+                    .to_owned(),
+            )
+        }
+        Err(io_error) => Err(format!("cannot read the file: {io_error}")),
+    }
+}
+
+/// How many runners each profile runs now, by name.
+fn running(state: &AppState) -> BTreeMap<String, u32> {
+    state
         .handle
         .status
         .borrow()
@@ -145,13 +160,65 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
                 u32::try_from(running.count()).unwrap_or(u32::MAX),
             )
         })
-        .collect();
-    Ok(Read {
-        window,
-        history,
+        .collect()
+}
+
+/// What auto sizing's next look would change as the history and config are now, and which profiles a recent change
+/// holds, for `GET /v1/sizing`, and what blocks every look, by the same check a look makes; `None` while it is off.
+/// It settles nothing and writes nothing.
+pub(super) async fn plan(
+    state: &AppState,
+    config: &Config,
+    memory_max: Option<u64>,
+) -> Result<Option<AutoPlan>, String> {
+    if !config.sizing.auto {
+        return Ok(None);
+    }
+    let history_error =
+        |store_error: StoreError| format!("cannot read the job history: {store_error}");
+    let auto = state
+        .handle
+        .store
+        .auto_sizing()
+        .await
+        .map_err(history_error)?;
+    let window = Window::new(None, now());
+    let history = state
+        .handle
+        .store
+        .sizing(window.since)
+        .await
+        .map_err(history_error)?;
+    let running = running(state);
+    let blocked = on_disk(&*state.config.lock().await).err();
+    let context = Context {
         memory_max,
-        running,
-    })
+        window,
+        last: &auto.last,
+        running: &running,
+    };
+    let interval = config.sizing.interval.as_secs();
+    let at = window.now / 1000;
+    let mut held: Vec<SizingHold> = auto
+        .last
+        .iter()
+        .filter(|(profile, _)| config.profiles.contains_key(*profile))
+        .map(|(profile, changed)| SizingHold {
+            profile: profile.clone(),
+            changed: *changed,
+            until: changed.saturating_add(interval),
+        })
+        .filter(|hold| hold.until > at)
+        .collect();
+    held.sort_by_key(|hold| hold.until);
+    Ok(Some(AutoPlan {
+        every: EVERY.as_secs(),
+        interval,
+        max_step: config.sizing.max_step,
+        next: changes(config, &history, context),
+        held,
+        blocked,
+    }))
 }
 
 /// Records `change` as pending, writes it, and records what became of it; whether the history recorded both, so

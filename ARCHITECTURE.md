@@ -113,7 +113,8 @@ queued → slot → container → removed
    [ADR 0033](docs/adr/0033-measured-admission.md)), and under `cpu_overcommit` within the CPU budget too
    ([ADR 0038](docs/adr/0038-cpu-admission.md)). A profile whose
    `image` Docker lacks starts nothing until the engine pulled it in the background
-   ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)).
+   ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)). For each job it leaves queued it says
+   why, which the status passes on ([ADR 0044](docs/adr/0044-queued-jobs-say-why-they-wait.md)).
 3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`) and starts its
    container (`DockerApi::start`) under the profile's limits and isolation backend.
 4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials and every

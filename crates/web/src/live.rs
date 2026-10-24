@@ -38,6 +38,10 @@ const SETTLE: Duration = Duration::from_millis(250);
 /// (`shutting_down`, a repository's queue listing failing or recovering), so it is read again this often.
 const STATUS_AGE: Duration = Duration::from_secs(10);
 
+/// How old the overview's health figures may get while other events arrive: their 24 hours move on without a job
+/// event, and jobs age out of them. A second in tests, which wait for that.
+const DAY_AGE: Duration = Duration::from_secs(if cfg!(test) { 1 } else { 60 });
+
 type Patches = mpsc::Sender<SseEvent>;
 
 /// How a page's stream ended.
@@ -325,6 +329,7 @@ async fn run_overview(
     let mut stopping = app.stopping.clone();
     let mut data = overview::Overview::load(&app.daemon, crate::now()).await?;
     let mut status_read = Instant::now();
+    let mut day_read = Instant::now();
     let mut sent = Sent::default();
     if let Some(shown) = shown {
         data.now = shown.at;
@@ -347,6 +352,7 @@ async fn run_overview(
         let open = settle(&mut events, &mut batch).await;
         let mut jobs_changed = false;
         let mut status_changed = false;
+        let mut day_changed = day_read.elapsed() >= DAY_AGE;
         for event in batch {
             match event {
                 Event::JobSample { job, sample } => data.add_job_sample(job, sample),
@@ -366,12 +372,15 @@ async fn run_overview(
                 | Event::RepositoryRemoved { .. } => status_changed = true,
                 Event::JobStep { .. } => jobs_changed = true,
                 // The status's queue and slots follow jobs.
-                Event::JobQueued { .. }
-                | Event::JobStarted { .. }
-                | Event::JobFinished { .. }
-                | Event::SlotChanged { .. } => {
+                Event::SlotChanged { .. } => {
                     jobs_changed = true;
                     status_changed = true;
+                }
+                // The health figures count the day's jobs too.
+                Event::JobQueued { .. } | Event::JobStarted { .. } | Event::JobFinished { .. } => {
+                    jobs_changed = true;
+                    status_changed = true;
+                    day_changed = true;
                 }
             }
         }
@@ -394,6 +403,10 @@ async fn run_overview(
                 )
                 .await?
                 .jobs;
+        }
+        if day_changed {
+            data.reload_day(&app.daemon, crate::now()).await?;
+            day_read = Instant::now();
         }
         if !open {
             return Ok(End::Lost);

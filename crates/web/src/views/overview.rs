@@ -1,12 +1,14 @@
-//! `/`: the memory budget as blocks, every slot and the job it runs, the slice's CPU and memory over the last half
-//! hour, the repositories with pause and resume, and the latest jobs.
+//! `/`: first whether CI is keeping up (the slots running, the jobs waiting, the waits and failures of the last
+//! day) and every queued job with why it waits; then the memory budget as blocks, every slot and the job it runs,
+//! the latest jobs, the repositories with pause and resume, and the slice's CPU and memory over the last half hour.
 
 use std::collections::BTreeMap;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery, JobState, JobSummary,
-    ProfileStatus, RepositoryStatus, Sample, SampleSeries, SlotStatus, Status,
+    Activity, ActivityQuery, AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery,
+    JobState, JobSummary, ProfileStatus, QueuedJob, RepositoryStatus, Sample, SampleSeries,
+    SlotStatus, Started, Status, Waiting,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -26,6 +28,8 @@ const SPARK_WINDOW: u64 = 5 * 60;
 const RECENT: u32 = 8;
 /// Queued jobs listed, the oldest; the history lists the rest.
 const QUEUED_SHOWN: usize = 8;
+/// How far back the health figures look: the 24 hours up to now.
+const DAY: u64 = 24 * 3600;
 
 /// Everything the overview shows.
 #[derive(Debug, Clone)]
@@ -38,6 +42,8 @@ pub(crate) struct Overview {
     pub(crate) samples: BTreeMap<u64, Vec<Sample>>,
     pub(crate) host: HostSamples,
     pub(crate) recent: Vec<JobSummary>,
+    /// The jobs started and finished in the last `DAY`, for the health figures.
+    pub(crate) day: Activity,
 }
 
 impl Overview {
@@ -65,9 +71,34 @@ impl Overview {
             samples: BTreeMap::new(),
             host,
             recent: recent.jobs,
+            day: Activity {
+                since: now.saturating_sub(DAY),
+                until: now,
+                started: Vec::new(),
+                finished: 0,
+                failed: 0,
+            },
         };
         overview.reload_running(daemon).await?;
+        overview.reload_day(daemon, now).await?;
         Ok(overview)
+    }
+
+    /// Reads the jobs started and finished in the day up to `now` again.
+    pub(crate) async fn reload_day(
+        &mut self,
+        daemon: &Client,
+        now: u64,
+    ) -> Result<(), ClientError> {
+        self.day = daemon
+            .get_query(
+                "/v1/activity",
+                &ActivityQuery {
+                    since: Some(now.saturating_sub(DAY)),
+                },
+            )
+            .await?;
+        Ok(())
     }
 
     /// Reads the running jobs again, and the samples of those not seen before.
@@ -131,13 +162,15 @@ impl Overview {
 }
 
 /// The live regions, by id, in the order the page has them, with their parts.
-pub(crate) fn regions(overview: &Overview) -> [(&'static str, Markup, Parts); 5] {
+pub(crate) fn regions(overview: &Overview) -> [(&'static str, Markup, Parts); 7] {
     let region = |id, render: &dyn Fn(&Parts) -> Markup| {
         let parts = Parts::default();
         let markup = render(&parts);
         (id, markup, parts)
     };
     [
+        region("health", &|_| health(overview)),
+        region("queue", &|_| queue(overview)),
         region("budget", &|parts| budget(overview, parts)),
         region("slots", &|parts| slots(overview, parts)),
         region("host", &|parts| host(overview, parts)),
@@ -148,25 +181,35 @@ pub(crate) fn regions(overview: &Overview) -> [(&'static str, Markup, Parts); 5]
 
 /// The whole page.
 pub(crate) fn render(overview: &Overview) -> Markup {
-    let [budget, slots, host, repositories, recent] = regions(overview);
+    let [health, queue, budget, slots, host, repositories, recent] = regions(overview);
     let live = Live {
         url: "/live/overview",
         at: overview.now,
         log: None,
-        regions: [&budget, &slots, &host, &repositories, &recent]
-            .iter()
-            .map(|(id, markup, _)| (*id, digest(&markup.0)))
-            .collect(),
+        regions: [
+            &health,
+            &queue,
+            &budget,
+            &slots,
+            &host,
+            &repositories,
+            &recent,
+        ]
+        .iter()
+        .map(|(id, markup, _)| (*id, digest(&markup.0)))
+        .collect(),
     };
     let main = html! {
         h1.visually-hidden { "Overview" }
+        (health.1)
+        (queue.1)
         (budget.1)
         (slots.1)
-        (host.1)
         div.split {
-            (repositories.1)
             (recent.1)
+            (repositories.1)
         }
+        (host.1)
     };
     page("Overview", Some(Page::Overview), Some(&live), &main)
 }
@@ -358,9 +401,6 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                 }
             }
             (bar_keys(&held, free_lens.as_ref()))
-            @if status.shutting_down {
-                p.warning { "runnerd is shutting down: it starts no new runners and stops once running jobs finish." }
-            }
         }
     }
 }
@@ -711,18 +751,21 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
             .max()
             .unwrap_or(0)
     };
-    let cpus: u64 = status
-        .profiles
-        .iter()
-        .map(|profile| u64::from(profile.cpus) * profile.slots.len() as u64)
-        .sum();
     let gap = overview.host.interval.max(1) * 3;
     let memory_peak = shown(&memory);
     let cpu_peak = shown(&cpu);
+    let (slice, interval) = (&status.budget.slice, overview.host.interval);
+    let up_to =
+        |limit: Option<String>| limit.map_or(String::new(), |limit| format!(", up to its {limit}"));
     let memory_chart = TimeChart {
         title: format!(
-            "Memory of {} over the last 30 minutes, sampled every {} s",
-            status.budget.slice, overview.host.interval
+            "Memory of {slice} over the last 30 minutes, sampled every {interval} s{}",
+            up_to(
+                status
+                    .budget
+                    .memory_max
+                    .map(|max| format!("MemoryMax of {}", format::bytes(max)))
+            )
         ),
         start: 0,
         end: now,
@@ -734,22 +777,26 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
             points: memory,
             area: true,
         }],
-        limit: status
-            .budget
-            .memory_max
-            .map(|max| (max, format!("MemoryMax {}", format::bytes(max)))),
+        limit: None,
         value: format::bytes,
         time: relative_clock,
         gap,
     };
-    let memory_top = nice_top(
-        memory_peak.max(status.budget.memory_max.unwrap_or(0)),
-        Base::Binary,
+    // The slice's own limits top the axes when they are known: the slots' memory caps and CPU limits may add up
+    // past them, and a rounded-up top would draw the slice's whole as a part.
+    let memory_top = status.budget.memory_max.map_or_else(
+        || nice_top(memory_peak, Base::Binary),
+        |max| max.max(memory_peak),
     );
     let cpu_chart = TimeChart {
         title: format!(
-            "CPU of {} over the last 30 minutes, sampled every {} s",
-            status.budget.slice, overview.host.interval
+            "CPU of {slice} over the last 30 minutes, sampled every {interval} s{}",
+            up_to(
+                status
+                    .budget
+                    .slice_cpus
+                    .map(|cpus| format!("{} CPUs", format::cores(cpus)))
+            )
         ),
         start: 0,
         end: now,
@@ -761,12 +808,15 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
             points: cpu,
             area: true,
         }],
-        limit: (cpus > 0).then(|| (cpus * 1000, format!("{cpus} CPUs of all slots"))),
+        limit: None,
         value: |millicores| format!("{} cores", format::cores(millicores)),
         time: relative_clock,
         gap,
     };
-    let cpu_top = nice_top(cpu_peak.max(cpus * 1000), Base::Decimal);
+    let cpu_top = status.budget.slice_cpus.map_or_else(
+        || nice_top(cpu_peak, Base::Decimal),
+        |cpus| cpus.max(cpu_peak),
+    );
     html! {
         section #host .host aria-labelledby="host-title" {
             h2 #host-title .visually-hidden { "Slice" }
@@ -899,43 +949,27 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
     }
 }
 
-/// The jobs: those queued, oldest first, then the latest ones, any state. A queued job's row opens it on GitHub and
-/// lights up its repository; a running job's row lights up its slot.
+/// The latest jobs, any state but queued, which the queue lists. A running job's row lights up its slot.
 pub(crate) fn recent(overview: &Overview) -> Markup {
     let queued = &overview.status.queued;
-    let more_queued = queued.len().saturating_sub(QUEUED_SHOWN);
-    // The history has queued jobs too; the status's queue shows them.
-    let latest = overview
+    // The history has queued jobs too; the queue shows them.
+    let latest: Vec<&JobSummary> = overview
         .recent
         .iter()
-        .filter(|job| !queued.iter().any(|known| known.id == job.id));
+        .filter(|job| {
+            job.state != JobState::Queued && !queued.iter().any(|known| known.id == job.id)
+        })
+        .collect();
     html! {
         section #recent .recent aria-labelledby="recent-title" {
-            h2 #recent-title .visually-hidden { "Latest jobs" }
-            @if overview.recent.is_empty() && queued.is_empty() {
+            div.section-head {
+                h2 #recent-title { "Latest jobs" }
+                a href="/history" { "All history" }
+            }
+            @if latest.is_empty() {
                 p.muted { "No jobs yet. Jobs show here once a runner of this machine takes one." }
             } @else {
                 ul.job-list {
-                    @for job in queued.iter().take(QUEUED_SHOWN) {
-                        @let repository = js(&job.repository);
-                        @let enter = format!("$_repo = {repository}");
-                        li.queued data-class:linked=(format!("$_repo == {repository}"))
-                            data-on:pointerenter=(enter) data-on:focusin=(enter)
-                            data-on:pointerleave="evt.pointerType == 'mouse' && ($_repo = '')"
-                            data-on:focusout="$_repo = ''" {
-                            a href=(job.url.clone().unwrap_or_else(|| format!("/jobs/{}", job.id))) {
-                                span.badge.queued { "queued" }
-                                (job_name(job.workflow.as_deref(), &job.name))
-                                span.repo { (job.repository) }
-                                @if job.queued_at > 0 {
-                                    span.when { (time_ago(job.queued_at, overview.now)) }
-                                }
-                            }
-                        }
-                    }
-                    @if more_queued > 0 {
-                        li.all { a href="/history?outcome=queued" { (more_queued) " more queued" } }
-                    }
                     @for job in latest {
                         @let running = job.runner.as_ref().filter(|_| job.state == JobState::Running);
                         @let key = running.map(|runner| js(&slot_id(&runner.profile, runner.slot)));
@@ -956,11 +990,277 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
                             }
                         }
                     }
-                    li.all { a href="/history" { "All history" } }
                 }
             }
         }
     }
+}
+
+/// What the health figures count, over the jobs of the last day.
+struct Health<'overview> {
+    /// Slots holding a runner that runs a job, and all slots.
+    running: usize,
+    slots: usize,
+    /// Of the slots holding a runner, those whose runner waits for its job.
+    starting: usize,
+    /// When each job that started in the last day did, and how long it waited for its runner, oldest first.
+    waits: &'overview [Started],
+    /// Jobs that finished in the last day, and of those the ones that failed or were lost.
+    finished: u64,
+    failed: u64,
+}
+
+impl<'overview> Health<'overview> {
+    fn of(overview: &'overview Overview) -> Health<'overview> {
+        let runners = overview
+            .status
+            .profiles
+            .iter()
+            .flat_map(|profile| &profile.slots)
+            .filter_map(|slot| slot.runner.as_ref());
+        let starting = runners.clone().filter(|runner| !runner.busy).count();
+        Health {
+            running: runners.count() - starting,
+            slots: overview
+                .status
+                .profiles
+                .iter()
+                .map(|profile| profile.slots.len())
+                .sum(),
+            starting,
+            waits: &overview.day.started,
+            finished: overview.day.finished,
+            failed: overview.day.failed,
+        }
+    }
+
+    /// The 95th percentile of the waits, by nearest rank as the sizing page's are.
+    fn wait_p95(&self) -> Option<u64> {
+        let mut waits: Vec<u64> = self.waits.iter().map(|wait| wait.waited).collect();
+        waits.sort_unstable();
+        let rank = (waits.len() * 95).div_ceil(100);
+        waits.get(rank.checked_sub(1)?).copied()
+    }
+}
+
+/// The figures that say whether CI keeps up: slots running, jobs waiting and the oldest's wait, the waits of the
+/// last day with the longest of each hour, and the failures of the last day.
+pub(crate) fn health(overview: &Overview) -> Markup {
+    let health = Health::of(overview);
+    let queued = &overview.status.queued;
+    let oldest = queued
+        .iter()
+        .filter(|job| job.queued_at > 0)
+        .map(|job| job.queued_at)
+        .min();
+    let p95 = health.wait_p95();
+    html! {
+        section #health .health aria-labelledby="health-title" {
+            h2 #health-title .visually-hidden { "Health" }
+            dl.headline.health-figures {
+                div {
+                    dt { "Running" }
+                    dd { span.figure-main { (health.running) } span.figure-of { " of " (health.slots) " slots" } }
+                    @if health.starting > 0 {
+                        dd.figure-note { (health.starting) " runner" @if health.starting > 1 { "s" } " starting" }
+                    }
+                }
+                div class=(if queued.is_empty() { "" } else { "waiting" }) {
+                    dt { "Waiting" }
+                    dd { a.figure-main href="#queue" { (queued.len()) } }
+                    @if let Some(oldest) = oldest {
+                        dd.figure-note { "oldest " (format::duration(overview.now.saturating_sub(oldest))) }
+                    } @else if queued.is_empty() {
+                        dd.figure-note { "none queued" }
+                    }
+                }
+                div {
+                    dt { "Wait p95, 24 h" }
+                    dd { span.figure-main { (p95.map_or("–".to_owned(), format::duration)) } }
+                    dd.figure-note { (health.waits.len()) " job" @if health.waits.len() != 1 { "s" } " started" }
+                    (wait_hours(health.waits, overview.day.until))
+                }
+                div class=(if health.failed > 0 { "failing" } else { "" }) {
+                    dt { "Failed, 24 h" }
+                    dd { span.figure-main { (health.failed) } }
+                    dd.figure-note { "of " (health.finished) " finished; " a href="/history?outcome=failure" { "failures" } }
+                }
+            }
+            @if overview.status.shutting_down {
+                p.warning { "runnerd is shutting down: it starts no new runners and stops once running jobs finish." }
+            }
+        }
+    }
+}
+
+/// The longest wait that started in each hour of the last day, counted back from `until` so the 24 hours are the
+/// day the figures count, oldest hour first, as bars against the longest.
+fn wait_hours(waits: &[Started], until: u64) -> Markup {
+    let since = until.saturating_sub(DAY);
+    let mut hours = [0u64; 24];
+    for wait in waits
+        .iter()
+        .filter(|wait| (since..=until).contains(&wait.at))
+    {
+        // A start exactly `DAY` ago is in the oldest hour.
+        let back = usize::try_from((until - wait.at) / 3600).map_or(23, |back| back.min(23));
+        hours[23 - back] = hours[23 - back].max(wait.waited);
+    }
+    let longest = hours.iter().copied().max().unwrap_or(0);
+    html! {
+        @if longest > 0 {
+            dd.wait-hours aria-hidden="true" {
+                @for (index, wait) in hours.iter().enumerate() {
+                    @let start = since + index as u64 * 3600;
+                    span style=(format!("--h: {:.3}", crate::chart::ratio(*wait, longest)))
+                        title=(format!("From {}: longest wait {}", relative_clock(start), format::duration(*wait))) {}
+                }
+            }
+        }
+    }
+}
+
+/// Every queued job, oldest first, how long it has waited and why. A row opens the job on GitHub and lights up its
+/// repository.
+pub(crate) fn queue(overview: &Overview) -> Markup {
+    let queued = &overview.status.queued;
+    let more = queued.len().saturating_sub(QUEUED_SHOWN);
+    html! {
+        section #queue .queue aria-labelledby="queue-title" {
+            div.section-head {
+                h2 #queue-title { "Waiting" }
+                @if more > 0 { a href="/history?outcome=queued" { "All " (queued.len()) " queued" } }
+            }
+            @if queued.is_empty() {
+                p.muted { "Nothing waiting: every queued job has a runner." }
+            } @else {
+                ol.queue-list {
+                    @for job in queued.iter().take(QUEUED_SHOWN) {
+                        (queued_row(overview, job))
+                    }
+                }
+            }
+        }
+    }
+}
+
+fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
+    let repository = js(&job.repository);
+    let enter = format!("$_repo = {repository}");
+    html! {
+        li data-class:linked=(format!("$_repo == {repository}"))
+            data-on:pointerenter=(enter) data-on:focusin=(enter)
+            data-on:pointerleave="evt.pointerType == 'mouse' && ($_repo = '')"
+            data-on:focusout="$_repo = ''" {
+            a href=(job.url.clone().unwrap_or_else(|| format!("/jobs/{}", job.id))) {
+                span.waited {
+                    @if job.queued_at > 0 {
+                        span.visually-hidden { "Waited " }
+                        (format::duration(overview.now.saturating_sub(job.queued_at)))
+                    } @else {
+                        "–"
+                    }
+                }
+                (job_name(job.workflow.as_deref(), &job.name))
+                span.repo {
+                    (job.repository)
+                    @if let Some(branch) = &job.branch { " · " (branch) }
+                }
+                @if let Some(waiting) = &job.waiting {
+                    span class=(format!("reason {}", reason_class(waiting))) { (reason(overview, job, waiting)) }
+                }
+            }
+        }
+    }
+}
+
+/// How a reason is drawn: one the owner can act on, one that clears by itself, or what is full.
+fn reason_class(waiting: &Waiting) -> &'static str {
+    match waiting {
+        Waiting::Paused | Waiting::Backoff { .. } => "act",
+        Waiting::RunnerStarting
+        | Waiting::Reseeding { .. }
+        | Waiting::PullingImage { .. }
+        | Waiting::BehindStart { .. } => "soon",
+        Waiting::NoSlot { .. }
+        | Waiting::Memory { .. }
+        | Waiting::Cpu { .. }
+        | Waiting::BehindCpu { .. } => "full",
+    }
+}
+
+/// Why a queued job waits, in the owner's words, with the numbers that hold it.
+fn reason(overview: &Overview, job: &QueuedJob, waiting: &Waiting) -> String {
+    let status = &overview.status;
+    match waiting {
+        Waiting::Paused => format!("{} is paused", job.repository),
+        Waiting::Backoff { until } => format!(
+            "Runners failed to take a job; retrying in {}",
+            format::duration(until.saturating_sub(overview.now))
+        ),
+        Waiting::RunnerStarting => {
+            let slot = status.profiles.iter().find_map(|profile| {
+                profile
+                    .slots
+                    .iter()
+                    .find(|slot| {
+                        slot.runner.as_ref().is_some_and(|runner| {
+                            runner.repository == job.repository && !runner.busy
+                        })
+                    })
+                    .map(|slot| format!("{}\u{a0}{}", profile.name, slot.slot))
+            });
+            match slot {
+                Some(slot) => format!("A runner is starting for it in {slot}"),
+                None => "A runner is starting for it".to_owned(),
+            }
+        }
+        Waiting::Reseeding { profile } => format!("{profile} is rebuilding its snapshot"),
+        Waiting::PullingImage { profile } => format!("Pulling {profile}'s image"),
+        Waiting::NoSlot { profile } => {
+            let slots = status
+                .profiles
+                .iter()
+                .find(|candidate| &candidate.name == profile)
+                .map_or(0, |profile| profile.slots.len());
+            format!("All {slots} {profile} slots are busy")
+        }
+        Waiting::Memory { .. } if status.budget.held => {
+            "The slice is past 90% of its MemoryMax, so nothing starts".to_owned()
+        }
+        Waiting::Memory { needs, free } => format!(
+            "Needs {} of memory; {} of the budget is free",
+            format::bytes(*needs),
+            format::bytes(*free)
+        ),
+        Waiting::Cpu { needs, free } => format!(
+            "Needs {} CPUs; {} are free",
+            format::cores(*needs),
+            format::cores(*free)
+        ),
+        Waiting::BehindCpu { job: older } => {
+            format!(
+                "Behind {}, which waits for CPU",
+                older_name(overview, *older)
+            )
+        }
+        Waiting::BehindStart { job: older } => {
+            format!(
+                "Next after {}, whose runner starts first",
+                older_name(overview, *older)
+            )
+        }
+    }
+}
+
+/// The name of the queued job `id`, which a reason names.
+fn older_name(overview: &Overview, id: u64) -> String {
+    overview
+        .status
+        .queued
+        .iter()
+        .find(|candidate| candidate.id == id)
+        .map_or_else(|| "an older job".to_owned(), |older| older.name.clone())
 }
 
 /// A job's name after its workflow's, which reads quieter: `CI / build`, as every client names a job.

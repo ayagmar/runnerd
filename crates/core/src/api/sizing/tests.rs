@@ -43,6 +43,7 @@ fn sizing() -> Sizing {
             reason: "lower memory to 2.25G from 7G, its largest peak + 15%".to_owned(),
             uncertain: false,
         }],
+        auto_plan: None,
     }
 }
 

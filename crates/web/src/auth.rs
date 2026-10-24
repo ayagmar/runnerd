@@ -502,14 +502,16 @@ impl Auth {
             .is_some_and(|origin| self.origins.iter().any(|allowed| allowed == origin))
     }
 
-    /// The session cookie holding `secret`. Through a proxy that says it took the request over https
+    /// The session cookie holding `secret`. `SameSite=Lax`: a link from another site (GitHub, a notification, the
+    /// browser's history) opens the page signed in, while a write from another site still lacks the dashboard's
+    /// `Origin` and is refused. Through a proxy that says it took the request over https
     /// (`X-Forwarded-Proto`, as `tailscale serve` sends), it is `Secure`.
     fn cookie(&self, headers: &HeaderMap, secret: &str) -> Option<HeaderValue> {
         let https = headers
             .get("x-forwarded-proto")
             .is_some_and(|proto| proto.as_bytes().eq_ignore_ascii_case(b"https"));
         HeaderValue::try_from(format!(
-            "{}={secret}; Path=/; Max-Age={}; HttpOnly; SameSite=Strict{}",
+            "{}={secret}; Path=/; Max-Age={}; HttpOnly; SameSite=Lax{}",
             self.cookie,
             SESSION_LIFETIME.as_secs(),
             if https { "; Secure" } else { "" }

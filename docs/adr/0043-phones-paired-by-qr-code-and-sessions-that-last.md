@@ -43,7 +43,7 @@ signed in again after each upgrade.
   refused, and a file other users can read, or one that is malformed, is replaced. The cookie gets `Max-Age` of 30
   days, set again on every authenticated response with the secret that request was checked against, never a newer
   one, so a phone used once a month stays signed in and one left unused for a month signs out. `HttpOnly`,
-  `SameSite=Strict`, `Secure` behind https and host-only stay.
+  `SameSite` (`Lax` since 0020's amendment), `Secure` behind https and host-only stay.
 - **Signing every device out.** `runnerctl web --sign-out-all` goes through `POST /v1/dashboard/sign-out` on the
   socket, which the daemon answers with `runnerd_web::Sessions`, the object that owns the secret, the login links
   and the pairing codes under one lock. It replaces the secret, drops every pairing code and writes new login

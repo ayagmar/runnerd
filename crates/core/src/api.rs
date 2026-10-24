@@ -18,6 +18,7 @@
 //! | `PUT /v1/config` | TOML in, [`ConfigCheck`]; 422 [`ConfigCheck`] when invalid |
 //! | `GET /v1/doctor` | [`Doctor`] |
 //! | `POST /v1/shutdown` | [`ShutdownRequest`] in, 202 |
+//! | `GET /v1/dashboard` | [`Dashboard`] |
 //! | `POST /v1/dashboard/sign-out` | none, 204 |
 //! | `POST /v1/dashboard/pairings?`[`PairingQuery`] | [`Pairings`]; 409 when the dashboard is off or has no `[web] origins` |
 //! | `GET /v1/jobs?`[`JobQuery`] | [`JobPage`] |
@@ -26,6 +27,7 @@
 //! | `GET /v1/jobs/{id}/logs?`[`LogQuery`] | `text/plain`, one line per log line |
 //! | `GET /v1/host/samples?`[`HostSampleQuery`] | [`HostSamples`] |
 //! | `GET /v1/stats?`[`StatsQuery`] | [`Stats`] |
+//! | `GET /v1/activity?`[`ActivityQuery`] | [`Activity`] |
 //! | `GET /v1/sizing?`[`SizingQuery`] | [`Sizing`] |
 //! | `GET /v1/caches` | [`Caches`] |
 //! | `GET /v1/caches/history?`[`CacheHistoryQuery`] | [`CacheHistory`] |
@@ -53,17 +55,18 @@ pub use control::{
 };
 pub use events::{Event, EventEnvelope, EventQuery};
 pub use jobs::{
-    Bucket, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, HostSample,
-    HostSampleQuery, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState,
-    JobSummary, LogQuery, LogSummary, Sample, SampleSeries, Stats, StatsQuery, StatsRow, Step,
-    Timeline,
+    Activity, ActivityQuery, Bucket, CacheHistory, CacheHistoryQuery, CacheKind, CacheSize,
+    CacheVolume, Caches, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics, JobPage,
+    JobQuery, JobRunner, JobState, JobSummary, LogQuery, LogSummary, Sample, SampleSeries, Started,
+    Stats, StatsQuery, StatsRow, Step, Timeline,
 };
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
 };
 pub use sizing::{
-    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingQuery, Spread,
+    Advice, AutoPlan, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, SizingHold,
+    SizingQuery, Spread,
 };
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
@@ -128,6 +131,11 @@ pub struct Budget {
     /// The CPU budget, under `[host] cpu_overcommit`. Absent without one, and from a daemon before CPU admission.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuBudget>,
+    /// The CPUs the slice may use, in millicores: its `AllowedCPUs` or the host's, less under a lower `CPUQuota`,
+    /// whether or not a CPU budget admits runners. The runners' CPU limits are quotas that may add up past it.
+    /// Absent when it could not be read, and from a daemon before it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub slice_cpus: Option<u64>,
 }
 
 /// The CPU budget runners share, in millicores.
@@ -274,6 +282,78 @@ pub struct QueuedJob {
     pub url: Option<String>,
     /// When GitHub queued it, in seconds since the Unix epoch; 0 if GitHub did not say.
     pub queued_at: u64,
+    /// Why no runner has it yet, as the last plan saw it. `None` before the daemon has planned with it, while it
+    /// shuts down, and from a daemon before it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub waiting: Option<Waiting>,
+}
+
+/// Why a queued job has no runner of its own yet. Jobs are served oldest first; each takes the first of these that
+/// holds for it.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum Waiting {
+    /// Its repository is paused.
+    Paused,
+    /// Runners of its repository ended without taking a job, so none starts before `until` (seconds since the Unix
+    /// epoch).
+    Backoff {
+        /// When runners may start again.
+        until: u64,
+    },
+    /// A runner started for it and waits for GitHub to hand it the job: a runner takes any job its labels match,
+    /// so not necessarily this one.
+    RunnerStarting,
+    /// Slot 1 of its profile is becoming the profile's snapshot, so none of the profile's slots starts.
+    Reseeding {
+        /// The profile.
+        profile: String,
+    },
+    /// Its profile's image is being pulled, so none of the profile's slots starts.
+    PullingImage {
+        /// The profile.
+        profile: String,
+    },
+    /// Every slot of its profile holds a runner.
+    NoSlot {
+        /// The profile.
+        profile: String,
+    },
+    /// What its runner would reserve does not fit the memory budget left. Under measured admission, `free` is 0
+    /// while the slice is at the high-water mark (`Budget::held`).
+    Memory {
+        /// What its runner would reserve, in bytes.
+        needs: u64,
+        /// What the budget has left, in bytes.
+        free: u64,
+    },
+    /// What its runner would reserve does not fit the CPU budget left, in millicores.
+    Cpu {
+        /// What its runner would reserve.
+        needs: u64,
+        /// What the CPU budget has left.
+        free: u64,
+    },
+    /// An older job has waited long enough for CPU that no younger one takes CPU before it.
+    BehindCpu {
+        /// The older job's ID.
+        job: u64,
+    },
+    /// An older job is about to have a runner start for it, which takes the slot, memory or CPU this one would
+    /// otherwise start with: what holds it is that start, not what runs now.
+    BehindStart {
+        /// The older job's ID.
+        job: u64,
+    },
+}
+
+/// `GET /v1/dashboard`: the dashboard's `[web]` settings, as the daemon read them when it started.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Dashboard {
+    /// `[web] open`: the one of `[web] origins` that `runnerctl web` opens the dashboard on; the loopback address
+    /// when none.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub open: Option<String>,
 }
 
 /// `POST /v1/dashboard/pairings`: which of `[web] origins` to make a link for.

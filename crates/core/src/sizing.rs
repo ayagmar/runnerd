@@ -241,6 +241,7 @@ pub fn advise(
         profiles,
         auto: config.sizing.auto,
         changes: Vec::new(),
+        auto_plan: None,
     }
 }
 

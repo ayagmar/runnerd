@@ -24,16 +24,16 @@ use axum::routing::{delete, get, post};
 use axum::{Json, Router};
 use futures_util::{Stream, stream};
 use runnerd_core::api::{
-    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread,
+    Activity, ActivityQuery, Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume,
+    Caches, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event,
+    EventEnvelope, EventQuery, HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery,
+    JobRunner, JobState, JobSummary, LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus,
+    QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
+    RemovedRecords, ReplaceQuery, RepositoryStatus, RunnerStatus, RunningJob, Sample, SampleSeries,
+    SlotStatus, Started, Stats, StatsRow, Status, Step, Timeline,
 };
 use runnerd_core::api::{
-    Bucket, Budget, Busy, CacheHistory, CacheKind, CacheSize, CacheVolume, Caches, Check,
-    CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse, Event, EventEnvelope, EventQuery,
-    HostSample, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState, JobSummary,
-    LogQuery, LogSummary, PauseQuery, Paused, ProfileStatus, QueuedJob, Record, RecordLimits,
-    RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery,
-    RepositoryStatus, RunnerStatus, RunningJob, Sample, SampleSeries, SlotStatus, Stats, StatsRow,
-    Status, Step, Timeline,
+    Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, SizingChange, Spread,
 };
 use tokio::net::UnixListener;
 use tokio::sync::broadcast;
@@ -63,6 +63,8 @@ pub struct Fixtures {
     pub controls: Vec<String>,
     /// Whether the job history fails to record a pause or resume of every repository, as the daemon's 500.
     pub unrecorded: bool,
+    /// What `GET /v1/sizing` says auto sizing does next; `None`, auto sizing is off.
+    pub auto_plan: Option<runnerd_core::api::AutoPlan>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -522,6 +524,7 @@ impl Fixtures {
                 mirror_memory: 512 * MIB,
                 seed_memory: Vec::new(),
                 shell_memory: Vec::new(),
+                slice_cpus: Some(32_000),
                 cpu: None,
             },
             profiles: vec![
@@ -593,6 +596,7 @@ impl Fixtures {
                         .to_owned(),
                 ),
                 queued_at: now - 41,
+                waiting: Some(runnerd_core::api::Waiting::RunnerStarting),
             }],
         };
         jobs.sort_by_key(|job| std::cmp::Reverse(job.summary.id));
@@ -651,10 +655,49 @@ impl Fixtures {
             after_put: None,
             controls: Vec::new(),
             unrecorded: false,
+            auto_plan: None,
         }
     }
 
     /// The jobs `query` lists, as the daemon pages them.
+    /// As the daemon reads it: the jobs started and finished since `since`, by those times, for the day from
+    /// `since`. The fixtures' clock is not the dashboard's, so nothing is left out for being after `now`.
+    fn activity(&self, since: Option<u64>) -> Activity {
+        let since = since.unwrap_or(self.now.saturating_sub(24 * 3600));
+        let within = |at: Option<u64>| at.is_some_and(|at| at >= since);
+        let summaries = || self.jobs.iter().map(|job| &job.summary);
+        let mut started: Vec<Started> = summaries()
+            .filter(|job| job.state != JobState::Elsewhere && within(job.timeline.started_at))
+            .filter_map(|job| {
+                let at = job.timeline.started_at?;
+                Some(Started {
+                    at,
+                    waited: at.saturating_sub(job.timeline.queued_at),
+                })
+            })
+            .collect();
+        started.sort_by_key(|job| job.at);
+        let finished: Vec<&JobSummary> = summaries()
+            .filter(|job| {
+                matches!(job.state, JobState::Completed | JobState::Lost)
+                    && within(job.timeline.finished_at)
+            })
+            .collect();
+        Activity {
+            since,
+            until: since + 24 * 3600,
+            started,
+            finished: finished.len() as u64,
+            failed: finished
+                .iter()
+                .filter(|job| {
+                    job.state == JobState::Lost
+                        || matches!(job.conclusion.as_deref(), Some("failure" | "timed_out"))
+                })
+                .count() as u64,
+        }
+    }
+
     fn page(&self, query: &JobQuery) -> JobPage {
         let limit = query.limit.unwrap_or(50) as usize;
         let mut jobs: Vec<JobSummary> = self
@@ -674,7 +717,24 @@ impl Fixtures {
                     .as_ref()
                     .is_none_or(|c| job.conclusion.as_ref() == Some(c))
             })
+            .filter(|job| {
+                query
+                    .workflow
+                    .as_ref()
+                    .is_none_or(|workflow| job.workflow.as_ref() == Some(workflow))
+            })
+            .filter(|job| query.name.as_ref().is_none_or(|name| job.name == *name))
             .filter(|job| query.before.is_none_or(|before| job.id < before))
+            .filter(|job| {
+                query
+                    .since
+                    .is_none_or(|since| job.timeline.queued_at >= since)
+            })
+            .filter(|job| {
+                query
+                    .until
+                    .is_none_or(|until| job.timeline.queued_at < until)
+            })
             .collect();
         let next = (jobs.len() > limit).then(|| jobs[limit - 1].id);
         jobs.truncate(limit);
@@ -832,8 +892,9 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
         })
         .collect();
     Sizing {
-        auto: false,
-        // Auto sizing, since turned off, lowered jvm two days ago.
+        auto_plan: fixtures.auto_plan.clone(),
+        auto: fixtures.auto_plan.is_some(),
+        // Auto sizing lowered jvm two days ago.
         changes: vec![SizingChange {
             at: fixtures.now - 2 * 86_400,
             profile: "jvm".to_owned(),
@@ -1098,6 +1159,12 @@ fn router(fake: Fake) -> Router {
                     interval: 2,
                     samples: fake.fixtures.lock().unwrap().host.clone(),
                 })
+            }),
+        )
+        .route(
+            "/v1/activity",
+            get(|State(fake): State<Fake>, Query(query): Query<ActivityQuery>| async move {
+                Json(fake.fixtures.lock().unwrap().activity(query.since))
             }),
         )
         .route(

@@ -227,3 +227,4 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 | Key | Default | Means |
 |---|---|---|
 | `origins` | `[]` | addresses of proxies in front of the dashboard whose pages may write: pause, reseed, save the config ([From another device](../clients/#from-another-device)). Each is a scheme, host and port as the browser's address bar shows them, with no path, and an IPv4 address as four decimal numbers: `https`, or `http` for a loopback host only, since the session cookie would otherwise cross the network in the clear |
+| `open` | none | the one of `origins` that `runnerctl web` opens the dashboard on, such as the tailnet's address; it still prints the loopback link. `check-config` refuses an `open` not in `origins`. `runnerctl web --local` or `--base` overrides it for one run |
