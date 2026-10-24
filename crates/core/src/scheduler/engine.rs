@@ -280,6 +280,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// Profiles whose snapshot the last check of the caches measured over `snapshot_max`: due, and reseeded however
     /// little slot 1 changed.
     oversized: BTreeSet<String>,
+    /// When each profile's last reseed finished: a check of the caches that started before then measured the old
+    /// snapshot.
+    reseeded_at: BTreeMap<String, SystemTime>,
     /// What the slots' Docker Engines may keep together, from the last check of the caches (`cache::docker_disk`);
     /// `None` until one measured Docker's disk, when each image keeps its own default.
     docker_disk: Option<u64>,
@@ -414,6 +417,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             draining: BTreeSet::new(),
             reseed_due: BTreeSet::new(),
             oversized: BTreeSet::new(),
+            reseeded_at: BTreeMap::new(),
             docker_disk: None,
             // So the caches are measured once at start.
             trim_due: true,

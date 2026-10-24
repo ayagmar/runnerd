@@ -257,7 +257,9 @@ nothing until Docker has listed them.
 - A slot's Docker Engine keeps its images and build cache on the slot's volume, given to dockerd as `--data-root`
   and never in `daemon.json`, where sysbox would mount a directory of its own over it. The slots' stores together
   stay within a quarter of Docker's disk not otherwise used: the engine gives each runner its share as
-  `RUNNERD_DOCKER_BUDGET_GB` and the image's job cleanup empties a store over it
+  `RUNNERD_DOCKER_BUDGET_GB` (measured at start and with every check of the caches), the image's job cleanup trims
+  the build cache and then empties a store still over it, and the check removes the volumes of slots past their
+  profile's count. A store whose engine does not start is emptied
   ([ADR 0054](docs/adr/0054-slot-docker-stores-share-the-disk.md)).
 - A shell's container counts against the budget like a slot and is refused when the budget cannot hold it. It
   mounts the shared caches read-only, and its profile does not reseed while it is open. It is removed when its shell

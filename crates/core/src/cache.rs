@@ -63,6 +63,14 @@ impl Names {
         format!("{}-maven", self.prefix)
     }
 
+    /// The slot (1-based) of the profile whose volume `volume` is, if it is one of its slots'.
+    pub fn slot_of(&self, profile: &str, volume: &str) -> Option<usize> {
+        volume
+            .strip_prefix(&format!("{}-{profile}-slot-", self.prefix))?
+            .parse()
+            .ok()
+    }
+
     /// The container that rebuilds the profile's snapshot.
     pub fn seed(&self, profile: &str) -> String {
         format!("{}-{profile}-seed", self.prefix)
@@ -208,6 +216,8 @@ pub struct Trimmed {
     pub sizes: BTreeMap<String, u64>,
     /// The shared caches it emptied.
     pub emptied: Vec<Emptied>,
+    /// The slot volumes past their profile's slot count it removed.
+    pub closed: Vec<Emptied>,
     /// Docker's free disk in bytes, as measured before emptying any; `None` when it could not be measured.
     pub free: Option<u64>,
 }
@@ -222,12 +232,15 @@ pub struct Emptied {
 }
 
 /// Empties the shared caches that outgrew their limit, the mirror's storage among them once the mirror is down
-/// (`Mirror::Down`); call only while no runner runs.
+/// (`Mirror::Down`), and removes the volumes of slots past the count `slots` gives their profile, as a lowered count
+/// leaves them: each holds a slot's layers and Docker store, which no job prunes again (docs/adr/0054). Call only
+/// while no runner runs, and leave out of `slots` a profile whose reseed runs, which mounts its slots' volumes.
 pub async fn trim_shared(
     docker: &impl DockerApi,
     names: &Names,
     caches: &config::Caches,
     mirror: Mirror,
+    slots: &BTreeMap<String, usize>,
 ) -> Result<Trimmed, Error> {
     let sizes = docker.volume_sizes().await?;
     let free = docker.free_space().await.ok();
@@ -250,9 +263,25 @@ pub async fn trim_shared(
             });
         }
     }
+    let mut closed = Vec::new();
+    for (name, &size) in &sizes {
+        let past = slots.iter().any(|(profile, &count)| {
+            names
+                .slot_of(profile, name)
+                .is_some_and(|slot| slot > count)
+        });
+        if past {
+            docker.remove_volume(name).await?;
+            closed.push(Emptied {
+                name: name.clone(),
+                size: ByteSize(size),
+            });
+        }
+    }
     Ok(Trimmed {
         sizes,
         emptied,
+        closed,
         free,
     })
 }
