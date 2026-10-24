@@ -95,7 +95,7 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
                 measured_slots(config, &sizing.profiles, advised, &fresh, &context, &budget)
             }
         };
-        let cpus = cpus(
+        let (slots, cpus) = cpus_and_slots(
             config,
             profile,
             advised,
@@ -106,14 +106,6 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
             slots,
             lowering,
         );
-        let cpus_to = cpus.as_ref().map_or(profile.cpus, |cpus| cpus.to);
-        // Slots the CPU budget cannot hold would wait for CPU anyway, and their waits would ask for more.
-        let slots = if slots > profile.slots {
-            cpu_slots(config, profile, &context, &budget, cpus_to)
-                .map_or(slots, |fit| slots.min(fit.max(profile.slots)))
-        } else {
-            slots
-        };
         // Under caps a lowered memory's slots are the advice's, which its line says.
         let advised_slots = config.host.admission == Admission::Caps && memory < profile.memory.0;
         if slots > profile.slots && !advised_slots {
@@ -399,6 +391,47 @@ fn measured_slots(
     } else {
         current
     }
+}
+
+/// The profile's next `cpus` (`None` to keep them) and `slots`, from the `slots` memory and waits chose: under `caps`
+/// with a CPU budget, slots past what the budget holds at the new `cpus` are dropped, and the `cpus` sized again at
+/// the slots that stay, so an extra slot the budget refuses does not also refuse a CPU raise that fits without it.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is one thing a CPU change reads; a struct for them would be read here only"
+)]
+fn cpus_and_slots(
+    config: &Config,
+    profile: &Profile,
+    advised: &ProfileSizing,
+    history: &History,
+    since: u64,
+    context: &Context<'_>,
+    budget: &Budget,
+    slots: u32,
+    lowering: Lowering,
+) -> (u32, Option<Cpus>) {
+    let size = |slots: u32| {
+        cpus(
+            config, profile, advised, history, since, context, budget, slots, lowering,
+        )
+    };
+    // Slots the CPU budget cannot hold would wait for CPU anyway, and their waits would ask for more.
+    let fit = |slots: u32, cpus: &Option<Cpus>| {
+        let cpus = cpus.as_ref().map_or(profile.cpus, |cpus| cpus.to);
+        if slots > profile.slots {
+            cpu_slots(config, profile, context, budget, cpus)
+                .map_or(slots, |fit| slots.min(fit.max(profile.slots)))
+        } else {
+            slots
+        }
+    };
+    let mut cpus = size(slots);
+    let fitted = fit(slots, &cpus);
+    if fitted < slots {
+        cpus = size(fitted);
+    }
+    (fit(fitted, &cpus), cpus)
 }
 
 /// Under `caps` admission with a CPU budget, the most slots of the profile at `cpus` each that fit the budget beside

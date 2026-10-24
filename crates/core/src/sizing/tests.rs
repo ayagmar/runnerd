@@ -1133,6 +1133,28 @@ labels = ["node"]
         );
     }
 
+    #[test]
+    fn a_slot_the_cpu_budget_refuses_does_not_also_refuse_a_cpu_raise_that_fits_without_it() {
+        // jvm's three runs sat at its 8 CPUs and waited 5 minutes. A 36-CPU budget beside node's 16 holds 2 jvm slots
+        // at 10 CPUs, not 3 at 8.
+        let waited_pinned: Vec<Ran> = ledger_cpu(3, 7900, 8000)
+            .into_iter()
+            .map(|run| Ran {
+                started_at: Some(run.queued_at + 300_000),
+                ..run
+            })
+            .collect();
+        let raised = due_in(&cpu_budget(""), &history(waited_pinned), 64 * G, 36_000);
+        assert_eq!(
+            raised
+                .iter()
+                .map(|change| (change.profile.as_str(), change.to.slots, change.to.cpus))
+                .collect::<Vec<_>>(),
+            [("jvm", 2, Some(10))],
+            "{raised:?}"
+        );
+    }
+
     /// Three ledger tests pinned at jvm's 8 CPUs, queued `hours_ago`.
     fn pinned_hours_ago(hours_ago: u64) -> Vec<Ran> {
         ledger_cpu(3, 7900, 8000)
