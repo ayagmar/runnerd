@@ -33,7 +33,9 @@ its own code into that job's build. A fork's pull request must not be able to wr
   `workflow_dispatch` of the repository itself on its default branch (`GET /repos/{repo}`, asked once per
   repository) or on one of `[caches.build] branches`, which add to the default branch. A tag's run gives the tag's
   name as its branch, so a tag called `main` would pass for the branch: the run's commit must also be on the branch,
-  its head or an ancestor (`GET /compare/{branch}...{sha}` says `identical` or `behind`). A lookup that fails
+  its head or an ancestor. The branch's head comes from `GET /branches/{branch}`, which knows only branches; then
+  `GET /compare/{head}...{sha}` must say `identical` or `behind`. Comparing with the bare name would not do: it
+  resolves as git does, a tag before a branch, so the tag would be compared with itself. A lookup that fails
   decides nothing, so it never lets a job write. The job's own runner log, which its capture reads, names the
   job, but a job can write that log, so it decides nothing. Every other job reads. Uploads that come before GitHub
   has answered, typically the first poll interval of a job, are held and become entries or are dropped once it has.

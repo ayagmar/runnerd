@@ -269,7 +269,8 @@ pub trait GithubApi: Send + Sync {
         &self,
         repository: &str,
     ) -> impl Future<Output = Result<String, Error>> + Send;
-    /// Whether `branch` of the repository has the commit `sha`: its head or an ancestor of it.
+    /// Whether `branch` of the repository has the commit `sha`: its head or an ancestor of it. A tag of the same
+    /// name, which git would take for it, does not count.
     fn on_branch(
         &self,
         repository: &str,
@@ -353,6 +354,16 @@ struct RepositoryName {
 #[derive(Deserialize)]
 struct CompareBody {
     status: String,
+}
+
+#[derive(Deserialize)]
+struct BranchBody {
+    commit: CommitBody,
+}
+
+#[derive(Deserialize)]
+struct CommitBody {
+    sha: String,
 }
 
 #[derive(Deserialize)]
@@ -636,7 +647,9 @@ impl GithubApi for Github {
     }
 
     async fn on_branch(&self, repository: &str, branch: &str, sha: &str) -> Result<bool, Error> {
-        if sha.is_empty() || !sha.bytes().all(|byte| byte.is_ascii_hexdigit()) {
+        let commit =
+            |sha: &str| !sha.is_empty() && sha.bytes().all(|byte| byte.is_ascii_hexdigit());
+        if !commit(sha) {
             return Ok(false);
         }
         // A branch name may hold `#`, `%` or `?`, which would end or change the path.
@@ -650,8 +663,17 @@ impl GithubApi for Github {
                 }
             })
             .collect();
+        // Compare would read a bare name as git does, a tag before a branch: a tag `main` would pass for the
+        // branch. This endpoint knows only branches.
+        let path = format!("/repos/{repository}/branches/{base}");
+        let head: Result<BranchBody, Error> = self.get(&path).await;
+        lock(&self.etags).remove(&path);
+        let head = head?.commit.sha;
+        if !commit(&head) {
+            return Ok(false);
+        }
         // The commits it lists are not needed: one is the fewest it sends.
-        let path = format!("/repos/{repository}/compare/{base}...{sha}?per_page=1");
+        let path = format!("/repos/{repository}/compare/{head}...{sha}?per_page=1");
         let body: Result<CompareBody, Error> = self.get(&path).await;
         lock(&self.etags).remove(&path);
         // `behind`: the branch has moved on past it.
