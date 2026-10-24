@@ -52,6 +52,13 @@ fn slots(handle: &Handle) -> Vec<Option<(String, bool)>> {
         .collect()
 }
 
+/// Waits for the check of the shared caches to end.
+async fn check_ends(engine: &mut Engine<FakeGithub, FakeDocker>) {
+    while engine.trim.as_ref().is_some_and(|trim| !trim.is_finished()) {
+        tokio::time::sleep(Duration::from_millis(1)).await;
+    }
+}
+
 fn warm_in(repository: &str) -> (String, bool) {
     (repository.to_owned(), true)
 }
@@ -222,6 +229,8 @@ async fn a_runs_expected_jobs_get_runners_before_github_queues_them() {
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new(), "quiet");
+    // The start's check of the shared caches, which warm runners wait for.
+    check_ends(&mut engine).await;
 
     // The first job of a new run: a runner for it, two for the run's other jobs and one warm.
     github.0.lock().unwrap().queued = vec![ci_job(100, 50, time::now_ms())];
@@ -327,12 +336,29 @@ async fn the_shared_caches_are_checked_hourly_though_a_warm_runner_always_waits(
     assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
     assert!(engine.trim.is_none(), "no check while a runner runs");
 
-    // An hour after the last check, with a job ended since: the warm runner stops for the check, then comes back.
+    // An hour after the last check, with a job ended since: the warm runner stops for the check.
     engine.checked_at -= Duration::from_secs(3600);
     engine.tick(Shutdown::No).await;
     engine.publish();
     assert_eq!(slots(&handle), [None, None]);
     assert!(engine.trim.is_some(), "the shared caches are checked");
+
+    // Docker takes long to measure large volumes: until the check ends, no runner mounts what it may remove.
+    let check = engine.trim.replace(tokio::spawn(std::future::pending()));
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    engine.publish();
+    assert_eq!(slots(&handle), [None, None], "none while the check runs");
+    assert_eq!(registered(&github.calls()).len(), 1);
+
+    // It ended: the warm runner comes back.
+    if let Some(pending) = engine.trim.take() {
+        pending.abort();
+    }
+    engine.trim = check;
+    check_ends(&mut engine).await;
+    engine.tick(Shutdown::No).await;
     engine.tick(Shutdown::No).await;
     engine.publish();
     assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);

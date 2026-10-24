@@ -206,8 +206,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Whether upkeep of `profile` waits only for its runners, all idle: its reseed, or the shared caches' check
-    /// (`CHECK_EVERY` after the last), which waits for every profile's runners. Its warm runners then stop and none
-    /// starts.
+    /// (`CHECK_EVERY` after the last, or running), which waits for every profile's runners. Its warm runners then
+    /// stop and none starts.
     pub(super) fn upkeep_waits_for_warm(&self, profile: &str) -> bool {
         let idle = |slots: &Vec<Option<Occupant>>| {
             slots
@@ -217,13 +217,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let reseed = (self.reseed_due.contains(profile) || self.reseed_requested.contains(profile))
             && self.slots.get(profile).is_some_and(idle);
-        let check = self.trim_due
-            && self.trim.is_none()
+        // Until the check ends: a runner started meanwhile mounts the volumes it may remove.
+        let check = (self.trim.is_some()
+            || self.trim_due
+                && self
+                    .checked_at
+                    .elapsed()
+                    .is_ok_and(|age| age >= CHECK_EVERY))
             && self.records.shells.is_empty()
-            && self
-                .checked_at
-                .elapsed()
-                .is_ok_and(|age| age >= CHECK_EVERY)
             && self.slots.values().all(idle);
         reseed || check
     }
