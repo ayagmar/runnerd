@@ -689,3 +689,62 @@ async fn a_warm_runner_waits_while_a_shell_holds_back_its_profiles_reseed() {
         "no reseed runs while the shell is open"
     );
 }
+
+#[tokio::test]
+async fn a_warm_runner_on_the_old_image_waits_until_the_new_one_is_pulled() {
+    const NEXT: &str = "ghcr.io/ayagmar/runnerd-runner:app-0.0.6";
+    let on = |image: &str| {
+        warm_config().replace("image_stage = \"app\"", &format!("image = \"{image}\""))
+    };
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &on(PUBLISHED)).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let before = runner_ids(&handle, &mut engine);
+    assert_eq!(before.len(), 1, "a warm runner waits");
+
+    // A reload names the next release's image, which takes a while to pull: the old runner still serves meanwhile.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.missing_images.insert(NEXT.to_owned());
+        state.block_pulls = true;
+    }
+    engine.reload(Config::parse(&on(NEXT)).unwrap(), None, None);
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(
+        runner_ids(&handle, &mut engine),
+        before,
+        "it waits on the old image"
+    );
+
+    // Once pulled, it makes way for one on the new image.
+    docker.0.lock().unwrap().block_pulls = false;
+    for _ in 0..100 {
+        if docker
+            .0
+            .lock()
+            .unwrap()
+            .started_images
+            .last()
+            .map(String::as_str)
+            == Some(NEXT)
+        {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(
+        docker.0.lock().unwrap().started_images,
+        [PUBLISHED, NEXT],
+        "the old runner made way for one on the new image"
+    );
+    assert_eq!(
+        runner_ids(&handle, &mut engine).len(),
+        1,
+        "one runner waits"
+    );
+}

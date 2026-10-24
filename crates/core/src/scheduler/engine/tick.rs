@@ -272,7 +272,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                                     .config
                                     .profiles
                                     .get(&slot.profile)
-                                    .is_some_and(|profile| !occupant.outdated(repository, profile))
+                                    .is_some_and(|profile| {
+                                        // The old image still runs jobs: kept until the new one is present.
+                                        !occupant.outdated(repository, profile)
+                                            && (!occupant.other_image(profile)
+                                                || self.awaits_image(&profile.image))
+                                    })
                         })
                 })
                 .map(|(slot, _)| Decision::Stop { slot }),
