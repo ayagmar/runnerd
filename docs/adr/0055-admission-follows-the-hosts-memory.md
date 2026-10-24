@@ -26,8 +26,8 @@ bootloader change and leaves the reclaim that slows the jobs. runnerd should pre
 ## Decision
 
 - **The host's memory is read with the slice's.** Every 2 s the sampler reads `MemTotal` and `MemAvailable` from
-  `/proc/meminfo`, `/proc/pressure/memory`'s `some` and `full` lines, and the slice's memory without page cache
-  (`api::HostMemory`). The reading is kept in memory and shown in the status and by `runnerd doctor`, not stored.
+  `/proc/meminfo`, `/proc/pressure/memory`'s `some` and `full` lines, and the slice's memory without page cache or
+  reclaimable slab, which `MemAvailable` counts already (`api::HostMemory`). The reading is kept in memory and shown in the status and by `runnerd doctor`, not stored.
 - **New runners fit what the host leaves the slice.** Beside `MemoryMax`, admission bounds what the slice may
   reserve by what its runners hold without page cache plus `MemAvailable`, less a margin: the larger of 2 G and a
   sixteenth of the host's memory, 4 G on 64 G (`admission::host`). Admission fits new runners' reservations into
@@ -35,17 +35,20 @@ bootloader change and leaves the reclaim that slows the jobs. runnerd should pre
   what they use, a start the host cannot yet see in `MemAvailable` still counts. This is the same rule under both
   policies: under caps a runner reserves its cap, which is also the most it can hold. A job that waits for it says
   so: `Waiting::HostMemory`, "The host is short of memory: needs 6G; the host has 2G to spare".
-- **Nothing starts while the host's tasks stall.** When `full` pressure over the last 10 s reaches 5%, every task
-  that could run is waiting for memory that share of the time, and no runner starts. Starts resume only under 1%.
-- **Both bounds have hysteresis.** While a job waits for the host or the host stalls, the margin doubles, so starts
-  resume only once the host has twice the room, not at the edge. Otherwise each start would push the host back to
-  the edge.
+- **Nothing starts while the host stalls short of memory.** When `full` pressure over the last 10 s reaches 5%
+  while `MemAvailable` is under twice the margin, no runner starts. Starts resume only under 1%. The shares are the
+  whole host's, and a runner reclaiming page cache at its own cap raises them too: one scratch container at its cap
+  took them from 0 to 1.1% with 37 G available. With that much available, a stall is the runners' own limit reclaim,
+  which the page cache room below addresses and starts elsewhere do not make worse.
+- **Both bounds have hysteresis.** While a job waits for the host or the host stalls, and a runner runs, the margin
+  grows by half, so starts resume a little past the edge, not at it. Otherwise each start would push the host back
+  to the edge. With no runner in the slice there is no start to follow, so the first one needs only the margin.
 - **Nothing running is stopped for it.** A host short of memory only holds starts back. Warm runners neither start
   nor stop to make room while the host stalls, as at the slice's high-water mark.
-- **Those waits are not demand for slots.** Each span in which a job waited for the host goes into the history
-  (`host_holds`, schema 13). Sizing and auto sizing take the part of a job's wait inside those spans out of its
-  wait, so a host short of memory does not make auto sizing add slots. A span still open when the daemon stopped
-  ends at its last host sample.
+- **Those waits are not demand for slots.** Each plan adds the time since the last to every job that waited for the
+  host then, on the job's row (`jobs.host_waited`, schema 13). Sizing and auto sizing take it out of the job's wait,
+  so a host short of memory does not make auto sizing add slots, while a job that waited for a slot beside it still
+  counts.
 - **Caps keep room for page cache.** Sizing advises, and auto sizing writes, at least the largest peak plus 1 G
   (`api::PAGE_CACHE_ROOM`), or plus `[sizing] margin` when that is more. 1 G is twice the edge measured above.
   Measured admission's reservations stay at the peak plus the margin: page cache under a cap is the kernel's to
@@ -68,3 +71,6 @@ bootloader change and leaves the reclaim that slows the jobs. runnerd should pre
   job page show when they are not enough.
 - A kernel without pressure stall information still has `MemAvailable`. Without `/proc/meminfo` the host bound is
   absent, as without a recent reading, and only `MemoryMax` bounds starts.
+- `runnerd doctor` reads the host as admission does, with what the slice's runners hold now, and warns while the
+  host stalls short of memory or has less to spare than the smallest profile's `memory`. Under measured admission a
+  runner may reserve less than that, so the doctor can warn where admission still starts one.

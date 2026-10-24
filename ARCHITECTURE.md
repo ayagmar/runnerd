@@ -166,7 +166,7 @@ nothing until Docker has listed them.
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to, the spans admission held starts back for the host's memory; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory; times in ms |
 
 ## Invariants
 
@@ -242,10 +242,11 @@ nothing until Docker has listed them.
   predictions learn peaks only from runners sampled that way ([ADR 0037](docs/adr/0037-memory-without-page-cache.md)). Each runner's record keeps what it reserves and why.
 - Under either policy, what the running containers reserve, a new runner's reservation with them, also fits what
   the host's memory leaves the slice, from a reading of the last three intervals: the slice's memory without page
-  cache plus `MemAvailable`, less a margin of the larger of 2G and a sixteenth of the host's memory, twice that
-  while a job waits for it; and nothing starts while `full` memory pressure over 10 s is at 5%, until it is under
-  1%. No runner is stopped for the host. The spans in which a job waited for it are recorded, and sizing takes them
-  out of the jobs' waits. Sizing never advises a cap under the largest peak plus 1G
+  cache or reclaimable slab plus `MemAvailable`, less a margin of the larger of 2G and a sixteenth of the host's
+  memory, half again as much while a job waits for it and a runner runs; and nothing starts while the host has under
+  twice the margin available and `full` memory pressure over 10 s is at 5%, until it is under 1%. No runner is
+  stopped for the host. Each job's record adds up how long it waited for it, and sizing takes that out of its wait.
+  Sizing never advises a cap under the largest peak plus 1G
   ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)).
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
