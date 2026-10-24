@@ -11,7 +11,7 @@ use tracing::{info, warn};
 
 use super::{Engine, Occupant, Shutdown};
 use crate::api;
-use crate::cache::{self, Emptied, Trimmed};
+use crate::cache::{self, Emptied, Refused, Trimmed};
 use crate::config::ByteSize;
 use crate::docker::{DockerApi, is_not_found};
 use crate::github::GithubApi;
@@ -185,6 +185,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 sizes,
                 emptied,
                 closed,
+                refused,
                 free,
             })) => {
                 self.mark_oversized(&sizes);
@@ -205,6 +206,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 for Emptied { name, size } in closed {
                     info!("removed {name} ({size}): its profile has fewer slots now");
+                }
+                for Refused { name, error } in refused {
+                    warn!("cannot remove {name}, tried again at the next check: {error}");
                 }
             }
             Ok(Err(error)) => warn!("cannot check the shared caches: {error}"),

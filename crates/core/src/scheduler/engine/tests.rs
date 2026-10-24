@@ -323,6 +323,8 @@ struct DockerState {
     fail_pulls: bool,
     /// How many volumes fail to be made next, as when the disk is full.
     fail_volumes: u32,
+    /// Volumes a container still uses, which Docker refuses to remove.
+    volumes_in_use: BTreeSet<String>,
     /// Pulls do not finish while this is set, as when a large image downloads.
     block_pulls: bool,
     /// The image of each runner container started, in order.
@@ -595,11 +597,14 @@ impl DockerApi for FakeDocker {
     }
 
     async fn remove_volume(&self, name: &str) -> Result<(), docker::Error> {
-        self.0
-            .lock()
-            .unwrap()
-            .calls
-            .push(format!("remove volume {name}"));
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("remove volume {name}"));
+        if state.volumes_in_use.contains(name) {
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 409,
+                message: format!("remove {name}: volume is in use"),
+            });
+        }
         Ok(())
     }
 
@@ -3738,4 +3743,22 @@ async fn a_start_schedules_while_docker_still_measures_the_volumes() {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     assert!(engine.docker_disk.is_some(), "the measure is taken in");
+}
+
+#[tokio::test]
+async fn a_closed_slots_volume_a_kept_record_still_uses_does_not_keep_the_others() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        // app has 2 slots; slots 3 and 4 were open before, and slot 3's failed job is kept as its record.
+        let mut state = docker.0.lock().unwrap();
+        for slot in 1..=4 {
+            state
+                .volume_sizes
+                .insert(format!("runnerd-app-slot-{slot}"), 5 << 30);
+        }
+        state.volumes_in_use.insert("runnerd-app-slot-3".to_owned());
+    }
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    until_called(&mut engine, &docker, "remove volume runnerd-app-slot-4").await;
 }

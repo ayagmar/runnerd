@@ -218,8 +218,20 @@ pub struct Trimmed {
     pub emptied: Vec<Emptied>,
     /// The slot volumes past their profile's slot count it removed.
     pub closed: Vec<Emptied>,
+    /// The volumes it was to empty or remove that Docker refused to, as one a stopped container still uses: tried
+    /// again at the next check.
+    pub refused: Vec<Refused>,
     /// Docker's free disk in bytes, as measured before emptying any; `None` when it could not be measured.
     pub free: Option<u64>,
+}
+
+/// A volume `trim_shared` was to remove that Docker refused to.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Refused {
+    /// The volume.
+    pub name: String,
+    /// What Docker said.
+    pub error: String,
 }
 
 /// A shared cache `trim_shared` emptied.
@@ -245,6 +257,7 @@ pub async fn trim_shared(
     let sizes = docker.volume_sizes().await?;
     let free = docker.free_space().await.ok();
     let mut emptied = Vec::new();
+    let mut refused = Vec::new();
     let mut limits = vec![
         (names.pnpm(), caches.pnpm.max_size),
         (names.maven(), caches.maven.max_size),
@@ -256,7 +269,14 @@ pub async fn trim_shared(
         if let Some(&size) = sizes.get(&name)
             && size > limit.0
         {
-            docker.remove_volume(&name).await?;
+            // One Docker refuses stays to the next check; the others are still trimmed, and the sizes kept.
+            if let Err(error) = docker.remove_volume(&name).await {
+                refused.push(Refused {
+                    name,
+                    error: error.to_string(),
+                });
+                continue;
+            }
             emptied.push(Emptied {
                 name,
                 size: ByteSize(size),
@@ -271,7 +291,14 @@ pub async fn trim_shared(
                 .is_some_and(|slot| slot > count)
         });
         if past {
-            docker.remove_volume(name).await?;
+            // As a stopped container kept as a failed job's record still uses it.
+            if let Err(error) = docker.remove_volume(name).await {
+                refused.push(Refused {
+                    name: name.clone(),
+                    error: error.to_string(),
+                });
+                continue;
+            }
             closed.push(Emptied {
                 name: name.clone(),
                 size: ByteSize(size),
@@ -282,6 +309,7 @@ pub async fn trim_shared(
         sizes,
         emptied,
         closed,
+        refused,
         free,
     })
 }
