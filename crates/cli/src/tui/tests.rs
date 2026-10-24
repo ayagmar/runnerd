@@ -2257,3 +2257,38 @@ fn the_open_job_s_peak_among_its_runs_rises_with_its_samples_until_its_record_is
         peaks(&app)
     );
 }
+
+#[test]
+fn a_warm_runner_reads_as_warm_not_as_a_runner_stuck_waiting_for_its_job() {
+    let mut app = app();
+    app.update(event(
+        Some(1),
+        Event::SlotChanged {
+            profile: "jvm".to_owned(),
+            slot: SlotStatus {
+                slot: 1,
+                runner: Some(RunnerStatus {
+                    warm: true,
+                    ..runner(false)
+                }),
+            },
+        },
+    ));
+    let shown = screen(&app, 160, 40, false);
+    let health = shown.lines().nth(1).unwrap();
+    assert!(
+        health.contains("0/3 running") && health.contains("1 warm"),
+        "the warm runner runs nothing and is not starting: {health}"
+    );
+    assert!(!health.contains("starting"), "{health}");
+    assert!(
+        shown.contains("Warm runner for halyard/ledger, waiting for a job"),
+        "its slot card says so: {shown}"
+    );
+    assert!(!shown.contains("waiting for its job"), "{shown}");
+    let narrow = screen(&app, 80, 20, false);
+    assert!(
+        narrow.contains("warm runner for halyard/ledger, waiting for a job"),
+        "its slot row says so: {narrow}"
+    );
+}
