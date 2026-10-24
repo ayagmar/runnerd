@@ -283,6 +283,12 @@ pub(super) fn jobs(db: &Connection, query: &api::JobQuery) -> rusqlite::Result<a
     if let Some(conclusion) = &query.conclusion {
         condition("j.conclusion =", Value::Text(conclusion.clone()));
     }
+    if let Some(workflow) = &query.workflow {
+        condition("j.workflow =", Value::Text(workflow.clone()));
+    }
+    if let Some(name) = &query.name {
+        condition("j.name =", Value::Text(name.clone()));
+    }
     let ms =
         |secs: u64| Value::Integer(i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX));
     if let Some(since) = query.since {

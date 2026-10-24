@@ -138,7 +138,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `PUT /v1/config?revision=` with TOML | checks it, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
 | `GET /v1/doctor` | `runnerd doctor`'s checks, for the config runnerd runs with |
 | `POST /v1/shutdown` with `{"force": false}` | `202` |
-| `GET /v1/jobs?repository=&state=&conclusion=&since=&until=&before=&limit=` | a page of jobs, newest first; `next` is the `before` of the next page |
+| `GET /v1/jobs?repository=&state=&conclusion=&workflow=&name=&since=&until=&before=&limit=` | a page of jobs, newest first; `next` is the `before` of the next page |
 | `GET /v1/jobs/{id}` | a job with its timeline, steps, metrics and log size |
 | `GET /v1/jobs/{id}/samples` | its CPU, memory and network over time |
 | `GET /v1/jobs/{id}/logs?from=&follow=` | its log as text; with `follow=true`, open until the job's record is final |

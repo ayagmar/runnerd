@@ -129,6 +129,38 @@ async fn jobs_list_newest_first_by_repository_in_pages() {
 }
 
 #[tokio::test]
+async fn jobs_list_by_workflow_and_name_to_compare_runs_of_one_job() {
+    let dir = TestDir::new("store");
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    for (id, workflow, name) in [
+        (1, "CI", "build"),
+        (2, "CI", "lint"),
+        (3, "E2E", "build"),
+        (4, "CI", "build"),
+    ] {
+        store.queued(
+            "o/r",
+            &QueuedJob {
+                workflow: Some(workflow.to_owned()),
+                name: name.to_owned(),
+                ..queued(id)
+            },
+        );
+    }
+    store.flush().await;
+    let page = store
+        .jobs(JobQuery {
+            workflow: Some("CI".to_owned()),
+            name: Some("build".to_owned()),
+            ..JobQuery::default()
+        })
+        .await
+        .unwrap();
+    let ids: Vec<u64> = page.jobs.iter().map(|job| job.id).collect();
+    assert_eq!(ids, [4, 1]);
+}
+
+#[tokio::test]
 async fn cache_sizes_now_are_the_last_measurement_of_each_volume() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();

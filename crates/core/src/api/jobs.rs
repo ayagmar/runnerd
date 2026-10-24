@@ -171,6 +171,10 @@ pub struct JobQuery {
     pub state: Option<JobState>,
     /// Only jobs with this conclusion, such as `failure`.
     pub conclusion: Option<String>,
+    /// Only jobs of the workflow with this name, such as `CI`.
+    pub workflow: Option<String>,
+    /// Only jobs with this name in their workflow, such as `build`.
+    pub name: Option<String>,
     /// Only jobs queued at or after this time.
     pub since: Option<u64>,
     /// Only jobs queued before this time.

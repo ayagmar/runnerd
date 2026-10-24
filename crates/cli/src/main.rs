@@ -378,6 +378,8 @@ async fn run(client: &Client, json: bool, command: Command) -> Result<ExitCode, 
                 } else {
                     conclusion
                 },
+                workflow: None,
+                name: None,
                 since,
                 until: None,
                 before,
