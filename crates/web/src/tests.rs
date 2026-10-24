@@ -2712,3 +2712,32 @@ async fn the_latest_jobs_still_show_while_a_burst_of_jobs_waits() {
         "the jobs that ran still show: {recent}"
     );
 }
+
+#[tokio::test]
+async fn a_job_a_warm_runner_took_waited_seconds_not_the_runners_uptime() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        let timeline = &mut job.summary.timeline;
+        // Its runner waited 40 minutes for it; it started 2 s after it was queued.
+        timeline.container_started_at = Some(timeline.queued_at - 2400);
+        timeline.started_at = Some(timeline.queued_at + 2);
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    let legend = &body[body.find(r#"id="phase-legend""#).unwrap()..];
+    let legend = &legend[..legend.find("</ol>").unwrap()];
+    let starting = &legend[legend.find("Runner starting").unwrap()..];
+    assert!(
+        starting.contains(r#"id="phase-start-time" class="figure">2s<"#),
+        "the 2 s from queued to started are the runner's start: {legend}"
+    );
+}
