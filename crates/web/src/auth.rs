@@ -543,6 +543,10 @@ pub(crate) async fn login(
         .sessions
         .redeem(&login.code, origin.as_ref(), Instant::now())
     else {
+        // A browser that opens a link twice, as a phone's QR scanner can, is signed in by the first open.
+        if auth.authenticate(&headers).is_some() {
+            return no_store(Redirect::to("/").into_response());
+        }
         return (
             StatusCode::UNAUTHORIZED,
             views::signed_out(SignedOut::CodeUsed),
