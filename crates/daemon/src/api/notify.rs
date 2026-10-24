@@ -552,7 +552,7 @@ async fn step(
         {
             target.digest = Some(insights::digest(runs, config, now_ms));
         }
-        send_due(store, http, &setup.timing, target, now_ms).await;
+        send_due(store, http, &setup.timing, target).await;
     }
 }
 
@@ -580,13 +580,7 @@ async fn read_events(store: &Store, target: &mut Target) -> bool {
 }
 
 /// Sends the target's message and its digest if they are due, and records what was.
-async fn send_due(
-    store: &Store,
-    http: &reqwest::Client,
-    timing: &Timing,
-    target: &mut Target,
-    now_ms: u64,
-) {
+async fn send_due(store: &Store, http: &reqwest::Client, timing: &Timing, target: &mut Target) {
     let ready = target.due(timing).is_some_and(|due| due <= Instant::now());
     if !target.waiting() {
         // Nothing to send: the cursor moves past the events not wanted, and the insights still held are seen now.
@@ -629,12 +623,14 @@ async fn send_due(
         return;
     }
     if let Some(digest) = target.digest.clone() {
+        // The day it is for is the day it was made: one delivered after midnight still counts for the day before.
+        let made = digest.until * 1000;
         match deliver(http, &target.config, &digest_message(digest)).await {
             Ok(()) => {
                 if !store
                     .notify_record(
                         &target.config.name,
-                        vec![("digest".to_owned(), now_ms)],
+                        vec![("digest".to_owned(), made)],
                         Vec::new(),
                     )
                     .await
@@ -644,7 +640,7 @@ async fn send_due(
                         target.config.name
                     );
                 }
-                target.last_digest = now_ms;
+                target.last_digest = made;
                 target.digest = None;
                 target.delivered();
             }

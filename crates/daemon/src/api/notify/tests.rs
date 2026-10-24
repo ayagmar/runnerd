@@ -290,7 +290,7 @@ async fn an_insight_is_told_once_and_again_only_after_it_went_away_for_a_day() {
     let t0 = 1_800_000_000_000;
     let looks = async |target: &mut super::Target, held: Vec<Insight>, at: u64| {
         target.look(&held, at);
-        send_due(&store, &http, &timing, target, at).await;
+        send_due(&store, &http, &timing, target).await;
     };
 
     looks(&mut target, vec![flaky()], t0).await;
@@ -322,6 +322,38 @@ async fn an_insight_is_told_once_and_again_only_after_it_went_away_for_a_day() {
     assert_eq!(sent.len(), 2, "{sent:#?}");
     assert_eq!(sent[1].event, NotifyEvent::Insights);
     assert_eq!(sent[1].title, "halyard/api: CI / test is flaky");
+}
+
+#[tokio::test]
+async fn a_digest_delivered_after_midnight_counts_for_the_day_it_was_made() {
+    const HOUR: u64 = 3600;
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let text = webhook(&format!("http://{}/hook", endpoint.address));
+    let config = Config::parse(&text).unwrap();
+    let http = client(SETUP.timing.timeout).unwrap();
+    let mut target = start(&store, None, &config.notify.targets[0], &config)
+        .await
+        .unwrap();
+    let today = super::now();
+    let midnight = today - today % (24 * HOUR);
+    let late = DayTime {
+        minutes: 23 * 60 + 50,
+    };
+    // Made at 23:50 UTC yesterday; the endpoint answers only today.
+    target.digest = Some(runnerd_core::insights::digest(
+        &[],
+        &config,
+        (midnight - 10 * 60) * 1000,
+    ));
+    send_due(&store, &http, &SETUP.timing, &mut target).await;
+
+    assert_eq!(endpoint.count(), 1);
+    let last = store.notify_state().await.unwrap()["phone"]["digest"] / 1000;
+    assert!(
+        digest_due(midnight + 23 * HOUR + 50 * 60, 0, late, last),
+        "today's digest still goes at 23:50"
+    );
 }
 
 #[tokio::test]
