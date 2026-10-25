@@ -66,10 +66,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.collect_trim().await;
         self.collect_disk().await;
         self.collect_recordings().await;
+        // Before the finished runners go: one Docker never inspected while it ran is still recorded with its job.
+        self.observe_again().await;
         self.collect_finished().await;
         self.collect_shells().await;
         self.kill_cancelled().await;
-        self.observe_again().await;
         // Runners first: a runner that takes its job after this poll still counts as idle against a job the later
         // queued-jobs poll no longer lists, which leaves it surplus at worst (it stops after IDLE_TIMEOUT). The other
         // order sees the job queued and its runner busy, and starts a second runner for it.

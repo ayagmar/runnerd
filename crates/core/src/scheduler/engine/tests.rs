@@ -2926,6 +2926,43 @@ async fn a_jobs_record_takes_its_containers_cap_when_recovery_could_not_inspect_
 }
 
 #[tokio::test]
+async fn a_runner_docker_never_inspected_before_it_exited_is_recorded_with_its_job() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.slot_captures = HashMap::from([(1, "@@job 3 3\n".to_owned())]);
+        // Docker fails the inspect of slot 1's next container, whichever second it starts in.
+        let now = crate::time::now_ms() / 1000;
+        for secs in now..now + 3 {
+            let name = identity("ci", ID_A).runner_name("app", 1, secs);
+            state.fail_inspects.insert(name, 1);
+        }
+    }
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+
+    // Its job ends before the next tick's inspect could succeed while it ran.
+    {
+        let mut state = docker.0.lock().unwrap();
+        for container in &mut state.containers {
+            container.running = false;
+        }
+    }
+    github.0.lock().unwrap().queued = Vec::new();
+    engine.tick(Shutdown::No).await;
+    // Its job runs on in the history until GitHub says how it ended.
+    let job = until_state(&handle, 3, JobState::Running).await;
+    assert_eq!(
+        job.summary.runner.map(|runner| runner.profile).as_deref(),
+        Some("app")
+    );
+}
+
+#[tokio::test]
 async fn a_container_docker_reports_without_a_memory_cap_is_recorded_without_one() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
