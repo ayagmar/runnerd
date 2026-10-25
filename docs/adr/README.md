@@ -67,3 +67,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0059](0059-clients-show-what-core-computes.md) | Clients show what core computes about a job |
 | [0060](0060-clients-show-what-core-computes-about-the-host.md) | Clients show what core computes about the host |
 | [0061](0061-the-previous-release-reads-the-wire.md) | The previous release reads the wire, checked both ways in CI |
+| [0062](0062-client-parity-is-checked.md) | Client parity is checked, not remembered |
