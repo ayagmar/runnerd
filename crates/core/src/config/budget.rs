@@ -2,7 +2,7 @@
 //! holds to `MemoryMax` and what that leaves, the blocks a preview draws, and doctor's check. Derived from
 //! [`api::ConfigCheck`] and the [`Config`] it checked; clients only lay them out.
 
-use super::{ByteSize, Config};
+use super::{ByteSize, Config, ConfigError};
 use crate::api::{AdmissionPolicy, Check, CheckStatus, ConfigCheck, Tone};
 
 /// A config check's verdict, from `ConfigCheck::verdict`.
@@ -10,7 +10,7 @@ use crate::api::{AdmissionPolicy, Check, CheckStatus, ConfigCheck, Tone};
 pub enum Verdict {
     /// Valid, and what its admission rule holds fits `MemoryMax`.
     Fits,
-    /// Valid, but the slice has no `MemoryMax`, or it could not be read: nothing holds runners to a budget.
+    /// Valid, but the slice has no `MemoryMax`: nothing holds runners to a budget.
     NoBudget,
     /// Not valid: what its admission rule holds is more than `MemoryMax`.
     DoesNotFit,
@@ -112,14 +112,28 @@ pub struct Remainder {
 }
 
 impl ConfigCheck {
-    /// Its verdict: whether it is valid, and whether its budget fits.
-    pub fn verdict(&self) -> Verdict {
-        let over = self.budget(None).is_some_and(|budget| budget.over());
-        match (self.valid, over) {
-            (false, true) => Verdict::DoesNotFit,
-            (false, false) => Verdict::Invalid,
-            (true, _) if self.memory_max.is_none() => Verdict::NoBudget,
-            (true, _) => Verdict::Fits,
+    /// Its verdict: whether it is valid, and whether its budget fits. With `parsed`, the config it checked, only a
+    /// budget past `MemoryMax` that is the reason it is not valid does not fit; without it, as when the text does not
+    /// parse, a budget the check reports past `MemoryMax`.
+    pub fn verdict(&self, parsed: Option<&Config>) -> Verdict {
+        if self.valid {
+            return if self.memory_max.is_none() {
+                Verdict::NoBudget
+            } else {
+                Verdict::Fits
+            };
+        }
+        let over = match parsed {
+            Some(config) => matches!(
+                config.validate(self.memory_max.map(ByteSize)),
+                Err(ConfigError::OverBudget { .. } | ConfigError::ProfileOverBudget { .. })
+            ),
+            None => self.budget(None).is_some_and(|budget| budget.over()),
+        };
+        if over {
+            Verdict::DoesNotFit
+        } else {
+            Verdict::Invalid
         }
     }
 

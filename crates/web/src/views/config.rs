@@ -206,7 +206,7 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
     let needed = budget.map_or(0, |budget| budget.needed);
     let over = budget.is_some_and(|budget| budget.over());
     let whole = check.memory_max.unwrap_or(needed).max(needed);
-    let verdict = check.verdict();
+    let verdict = check.verdict(parsed.as_ref());
     let class = match verdict.tone() {
         Tone::Good => "check-result valid",
         Tone::Warn => "check-result valid unbounded",

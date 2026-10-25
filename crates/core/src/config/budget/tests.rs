@@ -29,10 +29,20 @@ fn check(text: &str, max: Option<u64>) -> crate::api::ConfigCheck {
     Config::check(text, |_| Ok(max.map(ByteSize))).1
 }
 
+/// The verdict on `text` as the dashboard shows it, with the config it parsed.
+fn verdict(text: &str, max: Option<u64>) -> Verdict {
+    check(text, max).verdict(Config::parse(text).ok().as_ref())
+}
+
 #[test]
 fn only_a_budget_past_memory_max_does_not_fit() {
-    assert_eq!(check(CONFIG, Some(8 << 30)).verdict(), Verdict::Fits);
-    assert_eq!(check(CONFIG, Some(6 << 30)).verdict(), Verdict::DoesNotFit);
+    assert_eq!(verdict(CONFIG, Some(8 << 30)), Verdict::Fits);
+    assert_eq!(verdict(CONFIG, Some(6 << 30)), Verdict::DoesNotFit);
+    assert_eq!(
+        check(CONFIG, Some(6 << 30)).verdict(None),
+        Verdict::DoesNotFit,
+        "from an old daemon's check"
+    );
     let budget = check(CONFIG, Some(6 << 30)).budget(None).unwrap();
     let over = budget.remainder().unwrap();
     assert_eq!((over.label, over.memory), ("Over by", 2 << 30));
@@ -42,15 +52,16 @@ fn only_a_budget_past_memory_max_does_not_fit() {
 fn an_invalid_config_is_not_valid_however_much_memory_is_left() {
     // Plenty of room, but the repository names no profile it has.
     let text = CONFIG.replace("profile = \"app\"", "profile = \"missing\"");
-    let checked = check(&text, Some(64 << 30));
-    assert_eq!(checked.verdict(), Verdict::Invalid);
-    assert_eq!(checked.verdict().label(), "Not valid");
-    assert_eq!(check("not toml", None).verdict(), Verdict::Invalid);
+    assert_eq!(verdict(&text, Some(64 << 30)), Verdict::Invalid);
+    assert_eq!(verdict(&text, Some(64 << 30)).label(), "Not valid");
+    // Its caps are past MemoryMax too, but the missing profile is why it is not valid.
+    assert_eq!(verdict(&text, Some(6 << 30)), Verdict::Invalid);
+    assert_eq!(verdict("not toml", None), Verdict::Invalid);
 }
 
 #[test]
 fn a_slice_without_memory_max_holds_no_budget_to_fit() {
-    let verdict = check(CONFIG, None).verdict();
+    let verdict = verdict(CONFIG, None);
     assert_eq!(verdict, Verdict::NoBudget);
     assert_eq!(verdict.tone(), Tone::Warn, "not proof of a budget");
 }
