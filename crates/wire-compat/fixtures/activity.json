@@ -2,6 +2,7 @@
   "full": {
     "failed": 1,
     "finished": 12,
+    "runner_failed": 1,
     "since": 1761300000,
     "started": [
       {
