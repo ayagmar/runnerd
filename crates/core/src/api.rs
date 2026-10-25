@@ -51,6 +51,7 @@ mod insights;
 mod jobs;
 mod records;
 mod sizing;
+mod units;
 
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
 pub use control::{
@@ -67,8 +68,9 @@ pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
     ChartLines, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics,
-    JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery, LogSummary, Pressure, Sample,
-    SampleSeries, Started, Stats, StatsQuery, StatsRow, Step, Timeline,
+    JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, LogQuery, LogSummary, Milestone,
+    Outcome, OutcomeKind, Phase, PhaseKind, Pressure, RunComparison, Sample, SampleSeries,
+    SampleUsage, Started, Stats, StatsQuery, StatsRow, Step, Timeline, job_title,
 };
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
@@ -78,6 +80,7 @@ pub use sizing::{
     Advice, AutoPlan, JobSizing, PAGE_CACHE_ROOM, Peaks, ProfileSizing, Resize, Sizing,
     SizingChange, SizingHold, SizingQuery, Spread, Starts, period,
 };
+pub use units::{ago, cores_used, cpu_time, duration, in_cores};
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
 /// has to produce one.
@@ -600,7 +603,7 @@ impl Waiting {
                     HoldCause::Register => "Runners cannot register with GitHub",
                     HoldCause::Start => "Runners cannot start",
                 },
-                admission::wait(until.saturating_sub(now))
+                duration(until.saturating_sub(now))
             ),
             Waiting::RunnerStarting => match starting_for(job, status) {
                 Some(slot) => format!("A runner is starting for it in {slot}"),

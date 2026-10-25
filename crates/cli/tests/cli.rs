@@ -1076,9 +1076,9 @@ fn a_job_a_warm_runner_took_shows_its_container_started_before_it_was_queued() {
     assert_eq!(
         rows,
         [
-            ["container started", "-40m 0s"],
-            ["queued", "+0s"],
-            ["job started", "+4s"]
+            ["Container started", "-40m 00s"],
+            ["Queued", "+0s"],
+            ["Job started", "+4s"]
         ],
         "{output}"
     );

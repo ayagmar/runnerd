@@ -7,7 +7,7 @@ use runnerd_core::api::{Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, 
 use runnerd_core::client::{Client, ClientError};
 use serde::{Deserialize, Serialize};
 
-use super::{Durations, Page, Parts, badge, durations, js, page, profile_class, time_ago};
+use super::{Page, Parts, badge, js, page, profile_class, time_ago};
 use crate::chart::{Band, Bar, Base, Series, TimeChart, nice_top, stacked_bars};
 use crate::format;
 
@@ -512,23 +512,22 @@ fn jobs(history: &History) -> Markup {
                         }
                         tbody {
                             @for job in &history.page.jobs {
-                                @let Durations { waited, ran } = durations(job, now);
                                 @let class = job.runner.as_ref().map_or("p-none".to_owned(), |runner| profile_class(&history.status, &runner.profile));
                                 tr class=(class) {
                                     th scope="row" {
                                         a href=(format!("/jobs/{}", job.id)) {
                                             span.swatch aria-hidden="true" {}
-                                            span.job-name { (job.name) }
+                                            span.job-name { (job.title().name) }
                                             span.repo { (job.repository) @if let Some(branch) = &job.branch { " · " (branch) } }
                                         }
                                     }
                                     td { (badge(job)) }
                                     // On a phone a row is a card: each figure says what it is.
                                     td { (time_ago(job.timeline.queued_at, now)) }
-                                    td.number data-label="waited" { (waited.map_or("–".to_owned(), format::duration)) }
-                                    td.number data-label="ran" { (ran.map_or("–".to_owned(), format::duration)) }
+                                    td.number data-label="waited" { (job.waited(now).map_or("–".to_owned(), format::duration)) }
+                                    td.number data-label="ran" { (job.ran(now).map_or("–".to_owned(), format::duration)) }
                                     td.number data-label="peak" { (job.metrics.memory_peak.map_or("–".to_owned(), format::bytes)) }
-                                    td.number data-label="CPU" { (job.metrics.cpu_average.map_or("–".to_owned(), format::cores)) }
+                                    td.number data-label="CPU" { (job.metrics.cpu_average.map_or("–".to_owned(), format::cores_used)) }
                                 }
                             }
                         }

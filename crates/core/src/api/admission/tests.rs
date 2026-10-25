@@ -137,7 +137,7 @@ fn a_record_says_what_cpu_its_runner_reserved_and_how_long_it_waited_for_it() {
     assert!(
         line.ends_with(
             ". Reserved 1.5 CPUs, the p95 average of 12 runs of its job; 20 CPUs of the budget were free; it waited \
-             1m30s for CPU"
+             1m 30s for CPU"
         ),
         "{line}"
     );

@@ -176,6 +176,11 @@ adopted too and drains as it would after a reload.
 ## Invariants
 
 - API types live only in `runnerd-core::api`. Clients deserialize the same types the daemon serializes.
+- What clients show of the same thing is computed once in `runnerd-core::api`: a job's outcome and whether it
+  failed, its steps' outcomes, how long it waited and ran, its phases, its name, its peaks as samples come in, its
+  latest runs compared, and how durations, ages, CPU time and cores in use are written (`api::jobs::facts`,
+  `api::units`). Core returns the label, the figure and its kind; the dashboard, the TUI and `runnerctl` only draw
+  them ([ADR 0059](docs/adr/0059-clients-show-what-core-computes.md)).
 - Clients never talk to Docker or GitHub; they talk to the daemon.
 - The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A `[notify]`
   target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them,

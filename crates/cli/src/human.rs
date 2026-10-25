@@ -1,16 +1,17 @@
 //! What people read: API types turned into aligned text, with durations like `1m 12s`, binary sizes like `213M`
 //! and colour when the output is a terminal. Pure functions of the API types and the current time; printing is
-//! `output`'s, and nothing here decides anything the daemon has not. Sizes and CPU read as on the dashboard; durations
-//! (`2h 5m`) and ages (`1h 52m ago`) stay exact and compact on purpose, where the dashboard writes a stopwatch
-//! (`2h 05m`) and rounds ages (`1 h ago`).
+//! `output`'s, and nothing here decides anything the daemon has not. Figures, durations, outcomes and names are
+//! `runnerd_core::api`'s, as the dashboard writes them; this module only lays them out and colours them.
 
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    Advice, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind,
-    Insights, Job, JobPage, JobRunner, JobSizing, JobState, JobSummary, NotifyTest, QueuedJob,
-    Record, RecordNote, Records, RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
+    self, Advice, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind,
+    Insights, Job, JobPage, JobRunner, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote,
+    Records, RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
 };
+pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
+use runnerd_core::api::{cpus, in_cores, job_title};
 use runnerd_core::config::ByteSize;
 
 /// How a piece of text should stand out.
@@ -48,56 +49,9 @@ impl Paint {
     }
 }
 
-/// `45s`, `1m 12s`, `2h 5m`, `3d 4h`.
-pub(crate) fn duration(seconds: u64) -> String {
-    let (d, h, m, s) = (
-        seconds / 86_400,
-        seconds / 3600 % 24,
-        seconds / 60 % 60,
-        seconds % 60,
-    );
-    if d > 0 {
-        format!("{d}d {h}h")
-    } else if h > 0 {
-        format!("{h}h {m}m")
-    } else if m > 0 {
-        format!("{m}m {s}s")
-    } else {
-        format!("{s}s")
-    }
-}
-
-/// `2m ago`, or `now`.
-pub(crate) fn ago(at: u64, now: u64) -> String {
-    match now.saturating_sub(at) {
-        0 => "now".to_owned(),
-        seconds => format!("{} ago", duration(seconds)),
-    }
-}
-
 /// Binary sizes as `runnerd.toml` writes them, and as the dashboard shows them: `512B`, `20K`, `213M`, `4.37G`, `9G`.
 pub(crate) fn bytes(n: u64) -> String {
     ByteSize(n).to_string()
-}
-
-/// Millicores as cores, as the dashboard shows them: `0.25`, `1.5`, `12`. Usage is in cores, a cap in CPUs.
-#[allow(
-    clippy::cast_precision_loss,
-    reason = "millicores of one host are far below 2^52"
-)]
-pub(crate) fn cores(millicores: u64) -> String {
-    let text = format!("{:.2}", millicores as f64 / 1000.0);
-    text.trim_end_matches('0').trim_end_matches('.').to_owned()
-}
-
-/// CPU time given in milliseconds: `4.6s` under a minute, then as [`duration`].
-#[allow(clippy::cast_precision_loss, reason = "under a minute of milliseconds")]
-pub(crate) fn cpu_time(ms: u64) -> String {
-    if ms < 60_000 {
-        format!("{:.1}s", ms as f64 / 1000.0)
-    } else {
-        duration(ms / 1000)
-    }
 }
 
 /// Columns padded to their widest cell, two spaces apart. Colour codes do not count towards widths.
@@ -181,51 +135,20 @@ fn dash() -> (String, Tone) {
     cell("-", Tone::Dim)
 }
 
-/// A job's outcome as one word: its conclusion once it has one, otherwise its state; and how to colour it.
-pub(crate) fn outcome(job: &JobSummary) -> (String, Tone) {
-    let word = match (&job.conclusion, job.state) {
-        (Some(conclusion), _) => conclusion.clone(),
-        (None, JobState::Queued) => "queued".to_owned(),
-        (None, JobState::Running) => "running".to_owned(),
-        (None, JobState::Completed) => "completed".to_owned(),
-        (None, JobState::Lost) => "lost".to_owned(),
-        (None, JobState::Elsewhere) => "elsewhere".to_owned(),
-    };
-    let tone = match word.as_str() {
-        "success" => Tone::Good,
-        "failure" | "timed_out" | "lost" | "startup_failure" => Tone::Bad,
-        "queued" | "running" => Tone::Busy,
-        _ => Tone::Dim,
-    };
-    (word, tone)
-}
-
-/// `workflow / job`, or the job's name alone; `job <id>` until the daemon knows its name, as for a job its runner
-/// took before the daemon saw it queued.
-pub(crate) fn title(job: &JobSummary) -> String {
-    named(job.workflow.as_deref(), &job.name, job.id)
-}
-
-/// A record's job as [`title`] names a job.
-pub(crate) fn record_title(record: &Record) -> String {
-    named(
-        record.workflow.as_deref(),
-        record.name.as_deref().unwrap_or(""),
-        record.job,
-    )
-}
-
-/// A queued job as [`title`] names a job.
-pub(crate) fn queued_title(job: &QueuedJob) -> String {
-    named(job.workflow.as_deref(), &job.name, job.id)
-}
-
-fn named(workflow: Option<&str>, name: &str, id: u64) -> String {
-    match workflow {
-        Some(workflow) => format!("{workflow} / {name}"),
-        None if name.is_empty() => format!("job {id}"),
-        None => name.to_owned(),
+/// How the terminal colours an outcome's kind.
+pub(crate) fn outcome_tone(kind: api::OutcomeKind) -> Tone {
+    match kind {
+        api::OutcomeKind::Succeeded => Tone::Good,
+        api::OutcomeKind::Failed => Tone::Bad,
+        api::OutcomeKind::Running | api::OutcomeKind::Waiting => Tone::Busy,
+        api::OutcomeKind::Ended => Tone::Dim,
     }
+}
+
+/// A job's outcome as one word, as every client words it, and how to colour it.
+pub(crate) fn outcome(job: &JobSummary) -> (String, Tone) {
+    let outcome = job.outcome();
+    (outcome.label.into_owned(), outcome_tone(outcome.kind))
 }
 
 /// Why a queued job waits, as the dashboard and the TUI say it; nothing when the daemon did not say.
@@ -243,27 +166,6 @@ pub(crate) fn queued_ago(job: &QueuedJob, now: u64) -> String {
     } else {
         ago(job.queued_at, now)
     }
-}
-
-/// Seconds the job waited for a runner, until now while it waits.
-pub(crate) fn waited(job: &JobSummary, now: u64) -> Option<u64> {
-    let end = match job.timeline.started_at {
-        Some(started) => started,
-        None if job.state == JobState::Queued => now,
-        None => return None,
-    };
-    Some(end.saturating_sub(job.timeline.queued_at))
-}
-
-/// Seconds the job ran, until now while it runs.
-pub(crate) fn ran(job: &JobSummary, now: u64) -> Option<u64> {
-    let started = job.timeline.started_at?;
-    let end = match job.timeline.finished_at {
-        Some(finished) => finished,
-        None if job.state == JobState::Running => now,
-        None => return None,
-    };
-    Some(end.saturating_sub(started))
 }
 
 const SAMPLED_NOTE: &str =
@@ -383,7 +285,7 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
             queued.row(vec![
                 plain(job.id.to_string()),
                 plain(job.place(status)),
-                plain(queued_title(job)),
+                plain(job.title().to_string()),
                 cell(queued_ago(job, now), Tone::Dim),
                 plain(waiting(job, status, now)),
             ]);
@@ -414,11 +316,11 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
         table.row(vec![
             cell(job.id.to_string(), Tone::Dim),
             plain(&job.repository),
-            plain(title(job)),
+            plain(job.title().to_string()),
             job.branch.as_deref().map_or_else(dash, plain),
             outcome(job),
-            waited(job, now).map_or_else(dash, |s| plain(duration(s))),
-            ran(job, now).map_or_else(dash, |s| plain(duration(s))),
+            job.waited(now).map_or_else(dash, |s| plain(duration(s))),
+            job.ran(now).map_or_else(dash, |s| plain(duration(s))),
             job.metrics
                 .memory_peak
                 .map_or_else(dash, |m| plain(bytes(m))),
@@ -443,37 +345,23 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
     out
 }
 
-/// A step's mark: `✓` succeeded, `✗` failed, `●` running, `○` waiting, `-` skipped or cancelled.
+/// A step's mark for its outcome: `✓` succeeded, `✗` failed, `●` running, `○` waiting, `-` neither.
 fn step_mark(step: &Step) -> (String, Tone) {
-    match (step.status.as_str(), step.conclusion.as_deref()) {
-        (_, Some("success")) => cell("✓", Tone::Good),
-        (_, Some("failure" | "timed_out")) => cell("✗", Tone::Bad),
-        (_, Some(_)) => cell("-", Tone::Dim),
-        ("in_progress", None) => cell("●", Tone::Busy),
-        _ => cell("○", Tone::Dim),
+    match step.outcome().kind {
+        api::OutcomeKind::Succeeded => cell("✓", Tone::Good),
+        api::OutcomeKind::Failed => cell("✗", Tone::Bad),
+        api::OutcomeKind::Running => cell("●", Tone::Busy),
+        api::OutcomeKind::Waiting => cell("○", Tone::Dim),
+        api::OutcomeKind::Ended => cell("-", Tone::Dim),
     }
-}
-
-/// How long a step took, until now while it runs.
-fn step_took(step: &Step, now: u64) -> Option<u64> {
-    let started = step.started_at?;
-    let end = match step.completed_at {
-        Some(completed) => completed,
-        None if step.status == "in_progress" => now,
-        None => return None,
-    };
-    Some(end.saturating_sub(started))
 }
 
 /// `, capped at 6G and 4 CPUs`: what the job's container was held to, when the record has it.
 fn caps(runner: &JobRunner) -> String {
-    let caps: Vec<String> = [
-        runner.memory_cap.map(bytes),
-        runner.cpu_cap.map(|cpu| format!("{} CPUs", cores(cpu))),
-    ]
-    .into_iter()
-    .flatten()
-    .collect();
+    let caps: Vec<String> = [runner.memory_cap.map(bytes), runner.cpu_cap.map(cpus)]
+        .into_iter()
+        .flatten()
+        .collect();
     if caps.is_empty() {
         String::new()
     } else {
@@ -489,7 +377,7 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
     let _ = writeln!(
         out,
         "{}  {}  {}",
-        paint.paint(Tone::Bold, &title(summary)),
+        paint.paint(Tone::Bold, &summary.title().to_string()),
         paint.paint(tone, &result),
         paint.paint(Tone::Dim, &format!("job {}", summary.id))
     );
@@ -600,7 +488,7 @@ pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
         table.row(vec![
             plain(record.job.to_string()),
             plain(&record.repository),
-            cell(record_title(record), Tone::Dim),
+            cell(record.title().to_string(), Tone::Dim),
             plain(bytes(record.bytes)),
             cell(made, Tone::Dim),
         ]);
@@ -622,25 +510,15 @@ fn timeline(summary: &JobSummary, now: u64, paint: Paint) -> String {
         )
     );
     let mut table = Table::default().right(&[1]);
-    let mut phases: Vec<(&str, u64)> = [
-        ("queued", Some(timeline.queued_at)),
-        ("container started", timeline.container_started_at),
-        ("job started", timeline.started_at),
-        ("finished", timeline.finished_at),
-        ("cleaned up", timeline.cleaned_at),
-    ]
-    .into_iter()
-    .filter_map(|(name, at)| at.map(|at| (name, at)))
-    .collect();
     // A warm runner's container started before the job was queued: it comes first, before `+0s`.
-    phases.sort_by_key(|(_, at)| *at);
-    for (name, at) in phases {
+    for milestone in timeline.milestones() {
+        let at = milestone.at;
         let offset = if at < timeline.queued_at {
             format!("-{}", duration(timeline.queued_at - at))
         } else {
             format!("+{}", duration(at - timeline.queued_at))
         };
-        table.row(vec![plain(name), plain(offset)]);
+        table.row(vec![plain(milestone.label), plain(offset)]);
     }
     out.push_str(&table.render(paint, "  "));
     out
@@ -652,10 +530,14 @@ fn steps(steps: &[Step], now: u64, paint: Paint) -> String {
         let _ = writeln!(out, "\n{}", paint.paint(Tone::Bold, "Steps"));
         let mut table = Table::default().right(&[1, 3]);
         for step in steps {
-            let took = step_took(step, now).map_or_else(String::new, duration);
-            let note = match step.conclusion.as_deref() {
-                Some("success") | None => String::new(),
-                Some(other) => other.to_owned(),
+            let took = step.took(now).map_or_else(String::new, duration);
+            let outcome = step.outcome();
+            // The mark says success, running and waiting; the word says how any other step ended.
+            let note = match outcome.kind {
+                api::OutcomeKind::Failed | api::OutcomeKind::Ended => outcome.label.into_owned(),
+                api::OutcomeKind::Succeeded
+                | api::OutcomeKind::Running
+                | api::OutcomeKind::Waiting => String::new(),
             };
             table.row(vec![
                 step_mark(step),
@@ -678,10 +560,10 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
     if let Some(time) = metrics.cpu_time {
         let mut parts = vec![format!("{} CPU time", cpu_time(time))];
         if let Some(average) = metrics.cpu_average {
-            parts.push(format!("{} cores average", cores(average)));
+            parts.push(format!("{} average", in_cores(average)));
         }
         if let Some(peak) = metrics.cpu_peak {
-            parts.push(format!("{} cores sampled peak", cores(peak)));
+            parts.push(format!("{} sampled peak", in_cores(peak)));
         }
         usage.row(vec![plain("cpu"), plain(parts.join(", "))]);
     }
@@ -789,10 +671,10 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             let _ = writeln!(
                 out,
                 "  cpu    p50 {} p95 {} p99 {} max {}",
-                cores(peaks.cpu.p50),
-                cores(peaks.cpu.p95),
-                cores(peaks.cpu.p99),
-                cores(peaks.cpu.max),
+                cores_used(peaks.cpu.p50),
+                cores_used(peaks.cpu.p95),
+                cores_used(peaks.cpu.p99),
+                cores_used(peaks.cpu.max),
             );
         }
         let tone = match profile.advice {
@@ -874,13 +756,16 @@ fn sizing_jobs(jobs: &[JobSizing], paint: Paint) -> String {
         };
         table.row(vec![
             plain(&job.repository),
-            cell(named(job.workflow.as_deref(), &job.name, 0), Tone::Dim),
+            cell(
+                job_title(job.workflow.as_deref(), &job.name, None).to_string(),
+                Tone::Dim,
+            ),
             plain(job.peaks.jobs.to_string()),
             plain(bytes(job.peaks.memory.p50)),
             plain(bytes(job.peaks.memory.p95)),
             plain(bytes(job.peaks.memory.p99)),
             plain(bytes(job.peaks.memory.max)),
-            plain(cores(job.peaks.cpu.p99)),
+            plain(cores_used(job.peaks.cpu.p99)),
             plain(duration(job.wait.p95)),
             needs,
         ]);
@@ -1044,10 +929,7 @@ pub(crate) fn digest(digest: &Digest) -> String {
         let _ = writeln!(out, "longest waits:");
     }
     for wait in &digest.waits {
-        let job = match &wait.workflow {
-            Some(workflow) => format!("{workflow} / {}", wait.name),
-            None => wait.name.clone(),
-        };
+        let job = job_title(wait.workflow.as_deref(), &wait.name, Some(wait.job));
         let _ = writeln!(out, "  {} {job} {}", wait.repository, duration(wait.waited));
     }
     out
@@ -1087,18 +969,19 @@ fn plural(count: u64, one: &str, many: &str) -> String {
 pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<String> {
     let kind = envelope.event.kind();
     let text = match &envelope.event {
-        Event::JobQueued { job } => format!("{} {} {}", job.id, job.repository, title(job)),
+        Event::JobQueued { job } => format!("{} {} {}", job.id, job.repository, job.title()),
         Event::JobStarted { job } => {
             let on = job
                 .runner
                 .as_ref()
                 .map(|runner| format!(" on {} slot {}", runner.profile, runner.slot))
                 .unwrap_or_default();
-            format!("{} {} {}{on}", job.id, job.repository, title(job))
+            format!("{} {} {}{on}", job.id, job.repository, job.title())
         }
         Event::JobStep { job, step } => {
             let (mark, tone) = step_mark(step);
-            let took = step_took(step, envelope.at)
+            let took = step
+                .took(envelope.at)
                 .filter(|_| step.completed_at.is_some())
                 .map(|s| format!(" {}", duration(s)))
                 .unwrap_or_default();
@@ -1106,14 +989,15 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
         }
         Event::JobFinished { job } => {
             let (result, tone) = outcome(job);
-            let ran = ran(job, envelope.at)
+            let ran = job
+                .ran(envelope.at)
                 .map(|s| format!(" after {}", duration(s)))
                 .unwrap_or_default();
             format!(
                 "{} {} {} {}{ran}",
                 job.id,
                 job.repository,
-                title(job),
+                job.title(),
                 paint.paint(tone, &result)
             )
         }
@@ -1189,7 +1073,7 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
 mod tests {
     use runnerd_core::api::{Event, EventEnvelope, RepositoryStatus};
 
-    use super::{Paint, Table, Tone, bytes, duration, event_line};
+    use super::{Paint, Table, Tone, bytes, event_line};
 
     #[test]
     fn watch_prints_a_repository_paused_or_removed_elsewhere() {
@@ -1228,15 +1112,6 @@ mod tests {
             line(removed).as_deref(),
             Some("repository.removed halyard/ledger removed")
         );
-    }
-
-    #[test]
-    fn durations_read_like_people_write_them() {
-        assert_eq!(duration(0), "0s");
-        assert_eq!(duration(45), "45s");
-        assert_eq!(duration(72), "1m 12s");
-        assert_eq!(duration(3600 + 5 * 60 + 9), "1h 5m");
-        assert_eq!(duration(3 * 86_400 + 4 * 3600), "3d 4h");
     }
 
     #[test]

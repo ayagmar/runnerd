@@ -64,3 +64,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0056](0056-adopted-runners-keep-their-reservations.md) | A runner a restart adopts keeps what it reserved |
 | [0057](0057-name-what-holds-the-hosts-memory.md) | Name the programs that hold the host's memory, by name only |
 | [0058](0058-a-repository-served-by-several-profiles.md) | A repository served by several profiles, each with its own labels |
+| [0059](0059-clients-show-what-core-computes.md) | Clients show what core computes about a job |

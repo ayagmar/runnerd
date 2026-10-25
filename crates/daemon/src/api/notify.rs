@@ -15,7 +15,7 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use runnerd_core::api::{
     Delivery, Digest, Event, EventEnvelope, Insight, JobState, JobSummary, Notification,
-    NotifyEvent, NotifyTest, NotifyTestQuery, Priority, RunnerFailure, Severity,
+    NotifyEvent, NotifyTest, NotifyTestQuery, Priority, RunnerFailure, Severity, job_title,
 };
 use runnerd_core::config::{Config, DayTime, Notify, NotifyKind, NotifyTarget};
 use runnerd_core::insights;
@@ -207,7 +207,7 @@ impl Target {
             }
             Event::JobFinished { job }
                 if job.state == JobState::Completed
-                    && matches!(job.conclusion.as_deref(), Some("failure" | "timed_out"))
+                    && job.is_failure()
                     && self.wants(NotifyEvent::Failed) =>
             {
                 self.failed.push(job);
@@ -665,10 +665,7 @@ async fn send_due(store: &Store, http: &reqwest::Client, timing: &Timing, target
 
 /// `repository: workflow / job`.
 fn job_line(job: &JobSummary) -> String {
-    match &job.workflow {
-        Some(workflow) => format!("{}: {workflow} / {}", job.repository, job.name),
-        None => format!("{}: {}", job.repository, job.name),
-    }
+    format!("{}: {}", job.repository, job.title())
 }
 
 fn on_branch(job: &JobSummary) -> String {
@@ -811,10 +808,13 @@ fn message(target: &Target) -> Notification {
 }
 
 fn insight_title(insight: &Insight) -> String {
-    let subject = match (&insight.workflow, &insight.job) {
-        (Some(workflow), Some(job)) => format!("{}: {workflow} / {job}", insight.repository),
-        (None, Some(job)) => format!("{}: {job}", insight.repository),
-        _ => insight.repository.clone(),
+    let subject = match &insight.job {
+        Some(job) => format!(
+            "{}: {}",
+            insight.repository,
+            job_title(insight.workflow.as_deref(), job, None)
+        ),
+        None => insight.repository.clone(),
     };
     let what = match insight.kind {
         runnerd_core::api::InsightKind::Slower { .. } => "got slower",
@@ -843,12 +843,14 @@ fn digest_message(digest: Digest) -> Notification {
     ));
     if !digest.waits.is_empty() {
         body.push("Longest waits:".to_owned());
-        body.extend(
-            digest
-                .waits
-                .iter()
-                .map(|wait| format!("{}: {} waited {}s", wait.repository, wait.name, wait.waited)),
-        );
+        body.extend(digest.waits.iter().map(|wait| {
+            format!(
+                "{}: {} waited {}s",
+                wait.repository,
+                job_title(wait.workflow.as_deref(), &wait.name, Some(wait.job)),
+                wait.waited
+            )
+        }));
     }
     Notification {
         event: NotifyEvent::Digest,

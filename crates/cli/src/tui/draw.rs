@@ -14,15 +14,16 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    Activity, AdmissionPolicy, Advice, AutoPlan, ChartLine, ChartLineKind, ChartLines, Job,
-    JobSummary, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus, Sample, Severity,
-    Sizing, SlotStatus, Status, Step, WaitKind, period,
+    self, Activity, AdmissionPolicy, Advice, AutoPlan, ChartLine, ChartLineKind, ChartLines, Job,
+    JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
+    RunComparison, Sample, Severity, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores,
+    job_title, period,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
 use super::app::{App, Connection, History, JobView, Outcome, Pane, Removal, View};
-use crate::human::{self, Tone, bytes, cores, duration};
+use crate::human::{self, Tone, bytes, cores_used, duration};
 use crate::watch;
 
 /// The web dashboard's profile colours as xterm-256 colours: mint, pink, lavender, yellow, blue, peach.
@@ -686,7 +687,7 @@ fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
         })
         .collect();
     let wait_width = waits.iter().map(|wait| wait.width()).max().unwrap_or(0);
-    let names: Vec<String> = queued.iter().map(human::queued_title).collect();
+    let names: Vec<String> = queued.iter().map(|job| job.title().to_string()).collect();
     let name_width = names
         .iter()
         .map(|name| name.width())
@@ -1074,14 +1075,14 @@ fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: The
                         .started_at
                         .map_or_else(String::new, |at| duration(now.saturating_sub(at)));
                     let memory = usage.last().map_or_else(String::new, |s| bytes(s.memory));
-                    let cpu = usage.last().map_or_else(String::new, |s| cores(s.cpu));
+                    let cpu = usage.last().map_or_else(String::new, |s| cores_used(s.cpu));
                     // Fixed columns at the right, their sparklines only from 100 columns; the job's name takes what
                     // is left, then its repository if that fits too.
                     let sparks = width >= 100;
                     let job_width = width
                         .saturating_sub(11 + 7 + 16 + 9 + 7 + 6 + if sparks { 13 } else { 0 })
                         .max(10);
-                    let title = human::title(&job.summary);
+                    let title = job.summary.title().to_string();
                     let repository = &job.summary.repository;
                     let (title, repository) = if title.width() + 1 + repository.width() <= job_width
                     {
@@ -1245,11 +1246,11 @@ fn card(
                 .map_or_else(|| "–".to_owned(), |s| bytes(s.memory));
             let cpu = usage
                 .last()
-                .map_or_else(|| "–".to_owned(), |s| cores(s.cpu));
+                .map_or_else(|| "–".to_owned(), |s| cores_used(s.cpu));
             let half = width.saturating_sub(1) / 2;
             vec![
                 Line::styled(fit(&job.summary.repository, width), theme.dim()),
-                Line::styled(fit(&human::title(&job.summary), width), bold()),
+                Line::styled(fit(&job.summary.title().to_string(), width), bold()),
                 Line::from(vec![
                     Span::styled(
                         format!("{count} "),
@@ -1314,7 +1315,7 @@ fn slice(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         limit_label: status
             .budget
             .slice_cpus
-            .map_or_else(String::new, |cpus| format!("slice {} CPUs", cores(cpus))),
+            .map_or_else(String::new, |slice| format!("slice {}", cpus(slice))),
         reserved_label: String::new(),
         values: app.host.iter().map(|sample| sample.cpu).collect(),
         limit: status.budget.slice_cpus.unwrap_or(0),
@@ -1393,10 +1394,6 @@ impl Chart {
             inner,
         );
     }
-}
-
-fn in_cores(millicores: u64) -> String {
-    format!("{} cores", cores(millicores))
 }
 
 fn list_block(title: &str, focused: bool, theme: Theme) -> Block<'_> {
@@ -1507,7 +1504,7 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     let jobs = &app.live.recent;
     let run_times: Vec<String> = jobs
         .iter()
-        .map(|job| human::ran(job, now).map_or_else(String::new, duration))
+        .map(|job| job.ran(now).map_or_else(String::new, duration))
         .collect();
     let finished: Vec<String> = jobs.iter().map(|job| finished_ago(job, now)).collect();
     // The times are as wide as the widest of them; the job and its repository take what is left, the job first.
@@ -1515,7 +1512,7 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     let ago_width = finished.iter().map(|ago| ago.width()).max().unwrap_or(0);
     let waits: Vec<String> = jobs
         .iter()
-        .map(|job| human::waited(job, now).map_or_else(String::new, duration))
+        .map(|job| job.waited(now).map_or_else(String::new, duration))
         .collect();
     let wait_width = if inner.width >= 110 {
         waits.iter().map(|wait| wait.width()).max().unwrap_or(0)
@@ -1538,7 +1535,7 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
         .sum::<usize>();
     let rest =
         usize::from(inner.width).saturating_sub(9 + 1 + ran_width + 1 + ago_width + 1 + optional);
-    let titles: Vec<String> = jobs.iter().map(human::title).collect();
+    let titles: Vec<String> = jobs.iter().map(|job| job.title().to_string()).collect();
     let title_width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
     let repository_width = jobs
         .iter()
@@ -1650,7 +1647,7 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         let mut cells = vec![
             Cell::from(badge(job, theme)),
             Cell::from(fit(&job.repository, repository_width)),
-            Cell::from(fit(&human::title(job), job_width)),
+            Cell::from(fit(&job.title().to_string(), job_width)),
         ];
         if wide {
             cells.push(Cell::from(fit(
@@ -1659,13 +1656,13 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
             )));
         }
         cells.extend([
-            Cell::from(human::waited(job, now).map_or_else(String::new, duration)),
-            Cell::from(human::ran(job, now).map_or_else(String::new, duration)),
+            Cell::from(job.waited(now).map_or_else(String::new, duration)),
+            Cell::from(job.ran(now).map_or_else(String::new, duration)),
             Cell::from(job.metrics.memory_peak.map_or_else(String::new, bytes)),
         ]);
         if wide {
             cells.push(Cell::from(
-                job.metrics.cpu_average.map_or_else(String::new, cores),
+                job.metrics.cpu_average.map_or_else(String::new, cores_used),
             ));
         }
         cells.push(Cell::from(Span::styled(
@@ -1765,7 +1762,7 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         Row::new(vec![
             Cell::from(record.job.to_string()),
             Cell::from(fit(&record.repository, repository_width)),
-            Cell::from(fit(&human::record_title(record), name_width)),
+            Cell::from(fit(&record.title().to_string(), name_width)),
             Cell::from(bytes(record.bytes)),
             Cell::from(Span::styled(made, theme.dim())),
         ])
@@ -2059,7 +2056,7 @@ fn sizing_profiles(
             }));
         }
         cells.extend([
-            Cell::from(cores(peaks.cpu.p99)),
+            Cell::from(cores_used(peaks.cpu.p99)),
             Cell::from(format!("{}%", profile.busy)),
             Cell::from(duration(profile.wait.p95)),
         ]);
@@ -2116,10 +2113,7 @@ fn sizing_jobs(
             }
             Advice::Keep { memory } | Advice::Lower { memory, .. } => Span::raw(bytes(memory)),
         };
-        let name = match &job.workflow {
-            Some(workflow) => format!("{workflow} / {}", job.name),
-            None => job.name.clone(),
-        };
+        let name = job_title(job.workflow.as_deref(), &job.name, None).to_string();
         let mut cells = vec![
             Cell::from(fit(&job.repository, repository_width)),
             Cell::from(fit(&name, shared - repository_width)),
@@ -2131,7 +2125,7 @@ fn sizing_jobs(
         }
         cells.extend([
             Cell::from(bytes(job.peaks.memory.max)),
-            Cell::from(cores(job.peaks.cpu.p99)),
+            Cell::from(cores_used(job.peaks.cpu.p99)),
             Cell::from(duration(job.wait.p95)),
             Cell::from(needs),
         ]);
@@ -2220,7 +2214,7 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
     let width = usize::from(head.width);
     let details = fit_details(job_details(app, job, now), width);
     let badge = badge(summary, theme);
-    let title = human::title(summary);
+    let title = summary.title().to_string();
     let title_width = title.width().min(width.saturating_sub(badge.width() + 2));
     let style = summary.runner.as_ref().map_or_else(
         || theme.dim(),
@@ -2251,21 +2245,15 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
         .iter()
         .find(|queued| queued.id == summary.id)
         .filter(|_| summary.timeline.started_at.is_none());
-    timeline(
-        frame,
-        timeline_area,
-        summary,
-        waiting.map(|queued| reason(app, queued, now, usize::from(area.width), theme)),
-        now,
-        theme,
-    );
+    let reason = waiting.map(|queued| reason(app, queued, now, usize::from(area.width), theme));
+    timeline(frame, timeline_area, summary, reason.as_ref(), now, theme);
     if runs_height > 0 {
         job_runs(
             frame,
             runs_area,
             app,
             summary,
-            &current_runs(open),
+            &job.compare(open.runs.as_deref().unwrap_or_default(), now),
             now,
             theme,
         );
@@ -2299,10 +2287,7 @@ fn job_details(app: &App, job: &Job, now: u64) -> Vec<(u8, String)> {
         details.push((1, format!("slot {} · {}", runner.profile, runner.slot)));
         match (runner.memory_cap, runner.cpu_cap, profile) {
             (Some(memory), Some(cpu), _) => {
-                details.push((
-                    4,
-                    format!("capped at {} and {} CPUs", bytes(memory), cores(cpu)),
-                ));
+                details.push((4, format!("capped at {} and {}", bytes(memory), cpus(cpu))));
             }
             (_, _, Some(profile)) => details.push((
                 4,
@@ -2315,10 +2300,10 @@ fn job_details(app: &App, job: &Job, now: u64) -> Vec<(u8, String)> {
             _ => {}
         }
     }
-    if let Some(waited) = human::waited(summary, now) {
+    if let Some(waited) = summary.waited(now) {
         details.push((2, format!("waited {}", duration(waited))));
     }
-    if let Some(ran) = human::ran(summary, now) {
+    if let Some(ran) = summary.ran(now) {
         details.push((0, format!("ran {}", duration(ran))));
     }
     if job
@@ -2361,86 +2346,67 @@ fn drop_least<T>(items: &mut Vec<(u8, T)>, kept: u8, fit: impl Fn(&[(u8, T)]) ->
     }
 }
 
-/// Waiting for a runner, the runner starting, and running, as one bar; while it waits, why.
+/// Waiting for a runner, the runner starting, and running, as one bar; while it waits, why. Cleaning up is left
+/// out: the bar is the job's way to its finish.
 fn timeline(
     frame: &mut Frame<'_>,
     area: Rect,
     job: &JobSummary,
-    reason: Option<Span<'static>>,
+    reason: Option<&Span<'_>>,
     now: u64,
     theme: Theme,
 ) {
-    let timeline = &job.timeline;
-    let end = timeline.finished_at.unwrap_or(now);
-    let started = timeline.started_at;
-    let container = timeline.runner_from().or(started);
-    let waiting = container.unwrap_or(end).saturating_sub(timeline.queued_at);
-    let starting = match (container, started) {
-        (Some(container), Some(started)) => started.saturating_sub(container),
-        _ => 0,
+    let phases: Vec<Phase> = job
+        .phases()
+        .into_iter()
+        .filter(|phase| phase.kind != PhaseKind::CleaningUp)
+        .collect();
+    let whole: u64 = phases.iter().map(|phase| phase.seconds(now)).sum();
+    let look = |kind: PhaseKind| match kind {
+        PhaseKind::Waiting => ("░", theme.wait()),
+        PhaseKind::Starting => ("▒", theme.cpu()),
+        PhaseKind::Running | PhaseKind::CleaningUp => ("█", theme.memory()),
     };
-    let running = started.map_or(0, |started| end.saturating_sub(started));
-    let whole = waiting + starting + running;
     let width = area.width;
-    let starting_cells = scale(starting, whole, width).max(u16::from(starting > 0));
-    let waiting_cells = scale(waiting, whole, width).max(u16::from(waiting > 0));
-    let running_cells = width.saturating_sub(waiting_cells + starting_cells);
-    let still = if timeline.finished_at.is_none() {
-        "…"
-    } else {
-        ""
-    };
-    let [bar, legend] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
-    frame.render_widget(
-        Line::from(vec![
-            Span::styled("░".repeat(usize::from(waiting_cells)), theme.wait()),
-            Span::styled("▒".repeat(usize::from(starting_cells)), theme.cpu()),
-            Span::styled(
-                "█".repeat(usize::from(if started.is_some() {
-                    running_cells
-                } else {
-                    0
-                })),
-                theme.memory(),
-            ),
-        ]),
-        bar,
-    );
-    let mut spans = vec![
-        Span::styled("░ ", theme.wait()),
-        Span::raw(format!("waiting for a runner {}  ", duration(waiting))),
-    ];
-    if let Some(reason) = reason {
-        let room = usize::from(area.width).saturating_sub(Line::from(spans.clone()).width());
-        let text = fit(&reason.content, room).trim_end().to_owned();
-        spans.push(Span::styled(text, reason.style));
+    let mut used = 0;
+    let mut bar = Vec::new();
+    for (index, phase) in phases.iter().enumerate() {
+        let seconds = phase.seconds(now);
+        // The last phase takes what is left, so the bar fills the line.
+        let cells = if index + 1 == phases.len() {
+            width.saturating_sub(used)
+        } else {
+            scale(seconds, whole, width)
+                .max(u16::from(seconds > 0))
+                .min(width.saturating_sub(used))
+        };
+        used += cells;
+        let (glyph, style) = look(phase.kind);
+        bar.push(Span::styled(glyph.repeat(usize::from(cells)), style));
     }
-    if started.is_some() {
+    let [bar_area, legend] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+    frame.render_widget(Line::from(bar), bar_area);
+    let mut spans = vec![];
+    for phase in &phases {
+        let (glyph, style) = look(phase.kind);
+        let still = if phase.to.is_none() { "…" } else { "" };
         spans.extend([
-            Span::styled("▒ ", theme.cpu()),
-            Span::raw(format!("runner starting {}  ", duration(starting))),
-            Span::styled("█ ", theme.memory()),
-            Span::raw(format!("running {}{still}", duration(running))),
+            Span::styled(format!("{glyph} "), style),
+            Span::raw(format!(
+                "{} {}{still}  ",
+                phase.kind.label(),
+                duration(phase.seconds(now))
+            )),
         ]);
+        if phase.kind == PhaseKind::Waiting
+            && let Some(reason) = reason
+        {
+            let room = usize::from(area.width).saturating_sub(Line::from(spans.clone()).width());
+            let text = fit(&reason.content, room).trim_end().to_owned();
+            spans.push(Span::styled(text, reason.style));
+        }
     }
     frame.render_widget(Line::from(spans), legend);
-}
-
-/// The open job's latest runs with this run as the page has it now, not as the runs were read: it may have started
-/// or finished since, and while it runs its peak rises with its samples.
-fn current_runs(open: &JobView) -> Vec<JobSummary> {
-    let summary = &open.job.summary;
-    open.runs
-        .iter()
-        .flatten()
-        .map(|run| {
-            if run.id == summary.id {
-                summary.clone()
-            } else {
-                run.clone()
-            }
-        })
-        .collect()
 }
 
 /// The same job's latest runs, oldest first, as the dashboard's job page compares them: a heading with the median
@@ -2451,44 +2417,24 @@ fn job_runs(
     area: Rect,
     app: &App,
     summary: &JobSummary,
-    runs: &[JobSummary],
+    compared: &RunComparison,
     now: u64,
     theme: Theme,
 ) {
     let [title, bars] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
-    let finished: Vec<&JobSummary> = runs
-        .iter()
-        .filter(|run| run.state.is_final() && run.timeline.started_at.is_some())
-        .collect();
-    let median = |mut values: Vec<u64>| {
-        values.sort_unstable();
-        values.get(values.len().saturating_sub(1) / 2).copied()
-    };
-    let ran = median(
-        finished
-            .iter()
-            .filter_map(|run| human::ran(run, now))
-            .collect(),
-    );
-    let waited = median(
-        finished
-            .iter()
-            .filter_map(|run| human::waited(run, now))
-            .collect(),
-    );
-    let failed = finished
-        .iter()
-        .filter(|run| human::outcome(run).1 == Tone::Bad)
-        .count();
-    let peak = runs.iter().filter_map(|run| run.metrics.memory_peak).max();
+    let runs = &compared.runs;
+    let peak = compared.largest_peak;
     let mut note = vec![];
-    if let Some(ran) = ran {
+    if let Some(ran) = compared.median_ran {
         note.push((0, format!("median run {}", duration(ran))));
     }
-    if let Some(waited) = waited {
+    if let Some(waited) = compared.median_waited {
         note.push((1, format!("wait {}", duration(waited))));
     }
-    note.push((0, format!("{failed} of {} failed", finished.len())));
+    note.push((
+        0,
+        format!("{} of {} failed", compared.failed, compared.finished),
+    ));
     if let Some(peak) = peak {
         note.push((2, format!("largest peak {}", bytes(peak))));
     }
@@ -2502,12 +2448,12 @@ fn job_runs(
     let shown = &runs[runs.len() - width..];
     let longest = shown
         .iter()
-        .filter_map(|run| human::ran(run, now))
+        .filter_map(|run| run.ran(now))
         .max()
         .unwrap_or(0);
     let longest_wait = shown
         .iter()
-        .filter_map(|run| human::waited(run, now))
+        .filter_map(|run| run.waited(now))
         .max()
         .unwrap_or(0);
     let profile = theme.profile(
@@ -2532,14 +2478,14 @@ fn job_runs(
     let mut spans = vec![Span::styled(labels[0], theme.dim())];
     spans.extend(shown.iter().map(|run| {
         Span::styled(
-            bar(human::ran(run, now), longest).to_string(),
+            bar(run.ran(now), longest).to_string(),
             this(run, theme.tone(human::outcome(run).1)),
         )
     }));
     spans.push(Span::styled(labels[1], theme.dim()));
     spans.extend(shown.iter().map(|run| {
         Span::styled(
-            bar(human::waited(run, now), longest_wait).to_string(),
+            bar(run.waited(now), longest_wait).to_string(),
             this(run, theme.wait()),
         )
     }));
@@ -2628,7 +2574,7 @@ fn step_line(
     bar_width: u16,
     theme: Theme,
 ) -> Line<'static> {
-    let running = step.status == "in_progress";
+    let running = step.is_running();
     let name_style = match (step.started_at, running) {
         (_, true) => bold(),
         (None, _) => theme.dim(),
@@ -2643,21 +2589,17 @@ fn step_line(
         spans.push(Span::styled(format!(" {:>9}", "–"), theme.dim()));
         return Line::from(spans);
     };
-    let finished = step
-        .completed_at
-        .unwrap_or(if running { now } else { started });
+    // A step that ended without a completion time has no duration to show; its bar is a mark at its start.
+    let took = step.took(now);
     let offset = scale(started.saturating_sub(start), span, bar_width);
-    let length = scale(finished.saturating_sub(started), span, bar_width)
+    let length = scale(took.unwrap_or(0), span, bar_width)
         .max(1)
         .min(bar_width.saturating_sub(offset));
-    let style = if running {
-        theme.cpu()
-    } else if matches!(step.conclusion.as_deref(), Some("failure" | "cancelled")) {
-        theme.tone(Tone::Bad)
-    } else if step.conclusion.as_deref() == Some("skipped") {
-        theme.dim()
-    } else {
-        theme.memory()
+    let style = match step.outcome().kind {
+        api::OutcomeKind::Succeeded => theme.memory(),
+        api::OutcomeKind::Failed => theme.tone(Tone::Bad),
+        api::OutcomeKind::Running => theme.cpu(),
+        api::OutcomeKind::Waiting | api::OutcomeKind::Ended => theme.dim(),
     };
     let glyph = if running { "▓" } else { "█" };
     spans.extend([
@@ -2667,10 +2609,9 @@ fn step_line(
         Span::styled(
             format!(
                 " {:>9}",
-                format!(
-                    "{}{}",
-                    duration(finished.saturating_sub(started)),
-                    if running { "…" } else { "" }
+                took.map_or_else(
+                    || "–".to_owned(),
+                    |took| format!("{}{}", duration(took), if running { "…" } else { "" })
                 )
             ),
             bold(),
@@ -2735,9 +2676,9 @@ fn metrics_line(open: &JobView, width: usize, theme: Theme) -> Line<'static> {
     let mut parts = vec![
         ("mem peak", peak_memory.map(bytes)),
         ("avg", metrics.memory_average.map(bytes)),
-        ("cpu peak", peak_cpu.map(cores)),
-        ("avg", metrics.cpu_average.map(cores)),
-        ("cpu time", metrics.cpu_time.map(human::cpu_time)),
+        ("cpu peak", peak_cpu.map(cores_used)),
+        ("avg", metrics.cpu_average.map(cores_used)),
+        ("cpu time", metrics.cpu_time.map(api::cpu_time)),
         ("in", metrics.network_received.map(bytes)),
         ("out", metrics.network_sent.map(bytes)),
     ];
@@ -2812,7 +2753,7 @@ fn job_spark(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, theme
             Span::styled("cpu ", theme.dim()),
             Span::raw(format!(
                 "{:>5} ",
-                last.map_or_else(String::new, |s| cores(s.cpu))
+                last.map_or_else(String::new, |s| cores_used(s.cpu))
             )),
             Span::styled(
                 spark(open.samples.iter().map(|s| s.cpu), cpu_cap, width),

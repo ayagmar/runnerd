@@ -183,7 +183,7 @@ impl Admission {
 
 impl CpuAdmission {
     /// One sentence on what the runner reserved of the CPU budget, as `Admission::line` ends, such as `Reserved 2.5
-    /// CPUs, the p95 average of 10 runs of its job; 20 CPUs of the budget were free; it waited 1m30s for CPU`.
+    /// CPUs, the p95 average of 10 runs of its job; 20 CPUs of the budget were free; it waited 1m 30s for CPU`.
     pub fn line(&self) -> String {
         let reserved = cpus(self.reserved);
         let why = match self.basis {
@@ -211,7 +211,7 @@ impl CpuAdmission {
             cpus(self.free)
         );
         if let Some(waited) = self.waited {
-            let _ = write!(line, "; it waited {} for CPU", wait(waited));
+            let _ = write!(line, "; it waited {} for CPU", super::duration(waited));
         }
         line
     }
@@ -240,15 +240,6 @@ pub fn cpus(millicores: u64) -> String {
     match cores(millicores).as_str() {
         "1" => "1 CPU".to_owned(),
         number => format!("{number} CPUs"),
-    }
-}
-
-/// Seconds as `45s`, `1m30s` or `2h05m`.
-pub(super) fn wait(secs: u64) -> String {
-    match secs {
-        0..60 => format!("{secs}s"),
-        60..3600 => format!("{}m{:02}s", secs / 60, secs % 60),
-        _ => format!("{}h{:02}m", secs / 3600, secs % 3600 / 60),
     }
 }
 

@@ -216,7 +216,7 @@ pub(crate) fn records(status: &Status, records: &Records, now: u64) -> Markup {
                                     th scope="row" {
                                         a href=(format!("/jobs/{}", record.job)) {
                                             span.swatch aria-hidden="true" {}
-                                            span.job-name { (record.name.clone().unwrap_or_else(|| format!("job {}", record.job))) }
+                                            span.job-name { (record.title().name) }
                                             span.repo {
                                                 // A narrow screen breaks it after the owner, not inside a name.
                                                 @if let Some((owner, name)) = record.repository.split_once('/') { (owner) "/" wbr; (name) } @else { (record.repository) }

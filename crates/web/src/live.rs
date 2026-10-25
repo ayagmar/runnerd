@@ -548,7 +548,8 @@ async fn run_job(
             return Ok(End::Done);
         }
         if changed {
-            data.job = app.daemon.get::<Job>(&format!("/v1/jobs/{id}")).await?;
+            let read = app.daemon.get::<Job>(&format!("/v1/jobs/{id}")).await?;
+            data.job.reread(read);
         }
         if !open {
             return Ok(End::Lost);

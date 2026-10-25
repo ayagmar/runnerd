@@ -5,7 +5,7 @@
 //! above them, whether it is on and, per profile, what its next look changes or until when a recent change holds it.
 
 use maud::{Markup, html};
-use runnerd_core::api::{Advice, AutoPlan, JobSizing, ProfileSizing, Sizing, period};
+use runnerd_core::api::{Advice, AutoPlan, JobSizing, ProfileSizing, Sizing, job_title, period};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, page};
@@ -183,7 +183,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                             }
                         }
                     }
-                    div { dt { "CPU p99" } dd { (format::cores(peaks.cpu.p99)) " of " (profile.cpus) } }
+                    div { dt { "CPU p99" } dd { (format::cores_used(peaks.cpu.p99)) " of " (profile.cpus) } }
                 }
             }
             @if peaks.jobs > 0 { (scale(sizing, profile)) }
@@ -216,7 +216,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                             @for job in &profile.jobs {
                                 tr {
                                     th scope="row" {
-                                        span.job-name { (job.name) }
+                                        span.job-name { (job_title(None, &job.name, None).name) }
                                         " "
                                         span.repo.muted { (job.repository) @if let Some(workflow) = &job.workflow { " · " (workflow) } }
                                     }
@@ -225,7 +225,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                                     td.number { (format::bytes(job.peaks.memory.p95)) }
                                     td.number { (format::bytes(job.peaks.memory.p99)) }
                                     td.number { (format::bytes(job.peaks.memory.max)) }
-                                    td.number { (format::cores(job.peaks.cpu.p99)) }
+                                    td.number { (format::cores_used(job.peaks.cpu.p99)) }
                                     td.number { (format::duration(job.wait.p95)) }
                                     td.number { (needs(job)) }
                                 }
