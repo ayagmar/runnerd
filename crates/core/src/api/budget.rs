@@ -202,14 +202,27 @@ impl Budget {
             return (None, None);
         };
         let room = max.saturating_sub(drawn);
-        if self.closed() {
+        // While no runner starts, all the room is closed.
+        let shut = if self.closed() {
+            Some((
+                ClosedKind::Held,
+                "closed: the slice is past 90% of its MemoryMax, so no runner starts",
+            ))
+        } else if self.host.as_ref().is_some_and(|host| host.stalled) {
+            Some((
+                ClosedKind::Stalled,
+                "closed: the host's programs stall waiting for memory, so no runner starts",
+            ))
+        } else {
+            None
+        };
+        if let Some((kind, text)) = shut {
             let closed = (room > 0).then(|| ClosedPart {
                 memory: room,
-                kind: ClosedKind::Held,
+                kind,
                 reading: Reading {
                     figure: ByteSize(room).to_string(),
-                    text: "closed: the slice is past 90% of its MemoryMax, so no runner starts"
-                        .to_owned(),
+                    text: text.to_owned(),
                 },
             });
             return (None, closed);
@@ -275,10 +288,11 @@ pub struct BudgetParts {
     /// The mirror, each seed container, then each shell open in a record.
     pub held: Vec<HeldPart>,
     /// What `MemoryMax` leaves past every block, less what is closed; `None` without `MemoryMax`, without room past
-    /// the blocks and the closed part, and while the slice is held (`Budget::held`).
+    /// the blocks and the closed part, and while no runner starts: the slice is held (`Budget::held`) or the host
+    /// stalls.
     pub free: Option<FreePart>,
     /// What of the room past every block no runner may start in, drawn after what is free: all of it while the slice
-    /// is held, else what the host's memory holds back (`Budget::host_withheld`); `None` while neither closes any.
+    /// is held or the host stalls, else what the host's memory holds back (`Budget::host_withheld`); `None` while neither closes any.
     pub closed: Option<ClosedPart>,
     /// What the blocks are scaled against: `MemoryMax`, or the blocks' sum when larger or without it.
     pub whole: u64,
@@ -373,14 +387,18 @@ pub enum ClosedKind {
     Host,
     /// The slice is past 90% of its `MemoryMax` under measured admission (`Budget::held`).
     Held,
+    /// The host's programs stall waiting for memory (`HostBudget::stalled`).
+    Stalled,
 }
 
 impl ClosedKind {
-    /// Its name under its block or in a key: `held by the host` or `closed past 90%`.
+    /// Its name under its block or in a key: `held by the host`, `closed past 90%` or `closed while the host
+    /// stalls`.
     pub fn name(self) -> &'static str {
         match self {
             Self::Host => "held by the host",
             Self::Held => "closed past 90%",
+            Self::Stalled => "closed while the host stalls",
         }
     }
 }

@@ -199,20 +199,34 @@ fn the_host_holds_back_the_end_of_the_bar_past_idle_slots_under_caps() {
 }
 
 #[test]
-fn a_host_that_leaves_as_much_or_stalls_changes_nothing() {
+fn a_host_that_leaves_as_much_changes_nothing() {
     let plain = status(AdmissionPolicy::Measured, Some(24 * G));
-    for host in [host(30 * G, false), host(G, true)] {
-        let mut status = plain.clone();
-        status.budget.host = Some(host);
-        let parts = status.budget_parts();
-        assert_eq!(parts.free, plain.budget_parts().free);
-        assert_eq!(parts.closed, None);
-        assert_eq!(status.budget.host_withheld(), None);
-    }
-    let mut stalled = plain.budget;
-    stalled.host = Some(host(G, true));
+    let mut status = plain.clone();
+    status.budget.host = Some(host(30 * G, false));
+    let parts = status.budget_parts();
+    assert_eq!(parts.free, plain.budget_parts().free);
+    assert_eq!(parts.closed, None);
+    assert_eq!(status.budget.host_withheld(), None);
+}
+
+#[test]
+fn nothing_is_free_while_the_host_stalls() {
+    let mut status = status(AdmissionPolicy::Caps, Some(24 * G));
+    status.budget.host = Some(host(30 * G, true));
+    let parts = status.budget_parts();
+    assert_eq!(parts.free, None, "no runner starts, so nothing is free");
+    let closed = parts.closed.expect("the room past both slots is closed");
     assert_eq!(
-        stalled.host_line().as_deref(),
+        (closed.memory, closed.kind, closed.reading.line()),
+        (
+            8 * G,
+            ClosedKind::Stalled,
+            "8G closed: the host's programs stall waiting for memory, so no runner starts"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        status.budget.host_line().as_deref(),
         Some("host: 20G of 64G available; stalling, so no runner starts")
     );
 }
