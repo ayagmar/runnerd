@@ -256,6 +256,10 @@ h1#_top {
   --c: var(--pink);
 }
 
+.tui .t-p2 {
+  --c: #d6cdf6;
+}
+
 .tui .t-mem {
   --c: #8fe0a6;
 }
