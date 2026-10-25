@@ -1709,17 +1709,25 @@ impl fmt::Display for ByteSize {
 }
 
 impl ByteSize {
-    /// The size in at most two significant digits, rounded to the nearest, for a label too narrow for its
-    /// `Display`: `3.3G` for 3.25G, `12G`, `512M`. Every client's budget bar labels a block with it.
+    /// The size rounded to the nearest, for a label too narrow for its `Display`: two significant digits below 10
+    /// of its unit, whole units above, and the next unit up once it rounds to 1024: `3.3G` for 3.25G, `12G`,
+    /// `512M`, and `1G` for 1023.5M. Every client's budget bar labels a block with it.
     #[allow(
         clippy::cast_precision_loss,
         reason = "shown with one decimal at most, far coarser than f64's precision"
     )]
     pub fn short(self) -> String {
-        let Some((unit, factor)) = UNITS.iter().find(|(_, factor)| self.0 >= *factor) else {
+        let Some(index) = UNITS.iter().position(|(_, factor)| self.0 >= *factor) else {
             return format!("{}B", self.0);
         };
-        let value = self.0 as f64 / *factor as f64;
+        let (mut unit, factor) = UNITS[index];
+        let mut value = self.0 as f64 / factor as f64;
+        if value.round() >= 1024.0
+            && let Some(larger) = index.checked_sub(1)
+        {
+            unit = UNITS[larger].0;
+            value /= 1024.0;
+        }
         // Halves round up, as `f64::round` does and formatting, which rounds them to even, does not.
         let tenths = (value * 10.0).round() / 10.0;
         if tenths < 10.0 {

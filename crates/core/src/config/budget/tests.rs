@@ -96,4 +96,6 @@ fn a_short_size_rounds_to_two_digits_and_keeps_its_unit() {
     assert_eq!(short(12 << 30), "12G");
     assert_eq!(short(512 << 20), "512M");
     assert_eq!(short(1 << 30), "1G");
+    assert_eq!(short((1 << 30) - 1), "1G", "just under 1G");
+    assert_eq!(short(2047 << 19), "1G", "1023.5M");
 }
