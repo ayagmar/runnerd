@@ -139,8 +139,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Whether `profile`'s seed container, at its profile's cap, fits beside what else runs: in the slice's
-    /// `MemoryMax` and in what the host leaves the slice (ADR 0055). The profile's own runners, which stop before it
-    /// starts, and the room its waiting seed holds count as free.
+    /// `MemoryMax` and in what the host leaves the slice (ADR 0055), and not while measured admission holds the
+    /// slice at its high-water mark. The profile's own runners, which stop before it starts, and the room its
+    /// waiting seed holds count as free.
     fn fits_seed(&self, profile: &str) -> bool {
         let memory = self.config.profiles.get(profile).map_or(0, |p| p.memory.0);
         let runners: u64 = self
@@ -159,6 +160,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 host::left(host.limit, in_use, host.stalled)
                     >= i64::try_from(memory).unwrap_or(i64::MAX)
             })
+            && !self.admitting(&mut [], None).held
     }
 
     /// The room a requested reseed holds while it waits for it once its profile drained: its profile's cap, so

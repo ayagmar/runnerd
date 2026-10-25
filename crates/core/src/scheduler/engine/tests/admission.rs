@@ -183,6 +183,26 @@ async fn nothing_starts_while_the_slice_is_at_the_high_water_mark() {
 }
 
 #[tokio::test]
+async fn a_reseed_waits_while_the_slice_is_at_the_high_water_mark() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &measured());
+    engine.memory_max = Some(10 * G);
+    engine.recover().await.unwrap();
+    engine.request_reseed("app").unwrap();
+    // 9.2G of 10G, though nothing runnerd counts holds any of it: the 4G seed container would push it to the cap.
+    slice_at(&handle.store, 92 * G / 10);
+    engine.tick(Shutdown::No).await;
+    assert!(engine.reseeds.is_empty(), "the seed waits");
+    slice_at(&handle.store, 3 * G);
+    engine.tick(Shutdown::No).await;
+    assert!(engine.reseeds.contains_key("app"), "the seed starts");
+}
+
+#[tokio::test]
 async fn without_a_recent_sample_of_the_slice_runners_are_admitted_at_their_caps() {
     let (github, docker, dir) = (
         FakeGithub::default(),
