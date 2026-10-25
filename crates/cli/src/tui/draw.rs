@@ -1394,13 +1394,22 @@ fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     );
 }
 
-/// An outcome as a short upper-case badge.
+/// An outcome as an upper-case badge.
 fn badge(job: &JobSummary, theme: Theme) -> Span<'static> {
     let (word, tone) = human::outcome(job);
     Span::styled(
-        format!("{:<9}", word.to_uppercase()),
+        word.to_uppercase(),
         theme.tone(tone).add_modifier(Modifier::BOLD),
     )
+}
+
+/// The cells the widest of `jobs`' badges takes, so a column of them never cuts an outcome such as `startup
+/// failure`.
+fn badge_width<'job>(jobs: impl IntoIterator<Item = &'job JobSummary>) -> usize {
+    jobs.into_iter()
+        .map(|job| job.outcome().label.width())
+        .max()
+        .unwrap_or(0)
 }
 
 /// How long ago a job finished, or nothing while it has not.
@@ -1449,8 +1458,9 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
         .filter(|width| **width > 0)
         .map(|width| width + 1)
         .sum::<usize>();
-    let rest =
-        usize::from(inner.width).saturating_sub(9 + 1 + ran_width + 1 + ago_width + 1 + optional);
+    let outcome_width = badge_width(jobs);
+    let rest = usize::from(inner.width)
+        .saturating_sub(outcome_width + 1 + ran_width + 1 + ago_width + 1 + optional);
     let titles: Vec<String> = jobs.iter().map(|job| job.title().to_string()).collect();
     let title_width = titles.iter().map(|title| title.width()).max().unwrap_or(0);
     let repository_width = jobs
@@ -1498,7 +1508,7 @@ fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
             Row::new(cells)
         });
     let mut widths = vec![
-        Constraint::Length(9),
+        Constraint::Length(length(outcome_width)),
         Constraint::Length(length(title_width)),
     ];
     for width in [repository_width, branch_width, wait_width] {
@@ -1545,7 +1555,8 @@ fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         .chain(["FINISHED".len()])
         .max()
         .unwrap_or(0);
-    let mut columns = vec![("OUTCOME", 9), ("REPOSITORY", 0), ("JOB", 0)];
+    let outcome_width = badge_width(&jobs.jobs).max("OUTCOME".len());
+    let mut columns = vec![("OUTCOME", outcome_width), ("REPOSITORY", 0), ("JOB", 0)];
     if wide {
         columns.push(("BRANCH", 14));
     }
