@@ -1,6 +1,7 @@
 //! The engine's invariants over generated sequences of events, on the fakes: jobs queued with every kind of labels,
 //! taken, finished, cancelled and lost; runners that fail to start, wait or exit idle; Docker calls that fail once;
-//! samples of the slice and the host, short of memory or stalling; reloads and restarts; time passing. After each
+//! samples of the slice and the host, short of memory or stalling; reseeds asked for; reloads and restarts; time
+//! passing. After each
 //! tick the named checks below must hold, and once the sequence drains no runner may be left.
 //!
 //! The sequences come from a seeded generator, so a failure replays: it prints its seed and the shortest sequence
@@ -274,6 +275,10 @@ enum Step {
         available: u64,
         stalled: bool,
     },
+    /// Someone asks to reseed the heavy (`light` false) or the light profile.
+    Reseed {
+        light: bool,
+    },
     Reload(Change),
     /// The daemon restarts: a new engine on the same history and Docker.
     Restart,
@@ -325,6 +330,9 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             63..=65 => Step::Restart,
             66..=67 => Step::RestartInspectFails(rng.index()),
             68..=71 => Step::Elapse,
+            72..=73 => Step::Reseed {
+                light: rng.below(2) == 0,
+            },
             _ => Step::Tick,
         })
         .collect()
@@ -559,6 +567,12 @@ impl Case {
                 available,
                 stalled,
             } => self.sample(percent, available, stalled),
+            // Refused for a profile reseeding already, one a reload removed and one a shell holds.
+            Step::Reseed { light } => {
+                let _ = self
+                    .engine
+                    .request_reseed(if light { "light" } else { "heavy" });
+            }
             Step::Reload(change) => {
                 self.reload(change).await;
                 self.tick().await?;
@@ -900,6 +914,7 @@ impl Case {
         self.unregistered_runners_exit();
         self.no_name_twice().await;
         let before = self.status();
+        let seeds_before: BTreeSet<String> = self.engine.reseed_memory.keys().cloned().collect();
         self.engine.tick(Shutdown::No).await;
         let after = self.status();
         let listed = std::mem::take(&mut self.still_listed);
@@ -914,9 +929,16 @@ impl Case {
                 .map(|(_, runner)| runner.name.clone())
                 .collect()
         };
-        let started: BTreeSet<String> =
+        let mut started: BTreeSet<String> =
             names(&after).difference(&names(&before)).cloned().collect();
         self.no_pool_gets_more_runners_than_its_queued_jobs(&after, &started)?;
+        started.extend(
+            self.engine
+                .reseed_memory
+                .keys()
+                .filter(|profile| !seeds_before.contains(*profile))
+                .map(|profile| format!("{profile}'s seed container")),
+        );
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
@@ -967,9 +989,10 @@ impl Case {
         Ok(())
     }
 
-    /// Invariant 2: a tick that starts a runner leaves the running ones within the slice's `MemoryMax`, the CPU
-    /// budget under `cpu_overcommit` and what the host leaves the slice, and starts nothing while the host stalls
-    /// short of memory (ADR 0055). Running runners may be past it otherwise: nothing is stopped for it.
+    /// Invariant 2: a tick that starts a runner or a seed container leaves what runs within the slice's
+    /// `MemoryMax`, the CPU budget under `cpu_overcommit` and what the host leaves the slice, and starts nothing
+    /// while the host stalls short of memory (ADR 0055). What runs may be past it otherwise: nothing is stopped for
+    /// it.
     fn starts_fit_the_budget(
         &self,
         status: &api::Status,
@@ -1026,7 +1049,12 @@ impl Case {
         if let Some(host) = &budget.host {
             let reading = &host.memory;
             let limit = (reading.slice + reading.available).saturating_sub(HOST_MARGIN);
-            let reserved: u64 = runners_of(status).map(|(_, runner)| runner.reserved).sum();
+            // The seed containers that run, at their caps; not the room a waiting one holds.
+            let seeds: u64 = self.engine.reseed_memory.values().sum();
+            let reserved = runners_of(status)
+                .map(|(_, runner)| runner.reserved)
+                .sum::<u64>()
+                + seeds;
             if reserved > limit {
                 return violation(
                     self,
