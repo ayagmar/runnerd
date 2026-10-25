@@ -460,6 +460,21 @@ html {
   container-type: inline-size;
 }
 
+/* A block too narrow for its size's full figure shows the shorter one. */
+.size .short {
+  display: none;
+}
+
+@container (max-width: 6rem) {
+  .size:has(.short) .full {
+    display: none;
+  }
+
+  .size .short {
+    display: inline;
+  }
+}
+
 @container (max-width: 2.25rem) {
   .block > span:not(.fill),
   .free > span {

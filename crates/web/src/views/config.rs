@@ -249,13 +249,13 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
                 div.bar.bar-small role="img" aria-label=(format!("{needed_name} {} of {}: {}", format::bytes(needed), check.memory_max.map_or("no limit".to_owned(), format::bytes), blocks.iter().map(|block| format!("{} {}", block.label, format::bytes(block.memory))).collect::<Vec<_>>().join(", "))) {
                     @for block in &blocks {
                         div class=(format!("block {}", block.profile.map_or("mirror".to_owned(), |index| format!("p{}", index % 6)))) style=(format!("--size: {:.4}", ratio(block.memory, whole))) title=(format!("{}: {}", block.label, format::bytes(block.memory))) {
-                            span.size { (ByteSize(block.memory).short()) }
+                            (super::block_size(block.memory))
                             span.name { (block.label) }
                         }
                     }
                     @if let Some(max) = check.memory_max.filter(|max| *max > needed) {
                         div.free style=(format!("--size: {:.4}", ratio(max - needed, whole))) {
-                            span.size { (ByteSize(max - needed).short()) }
+                            (super::block_size(max - needed))
                             span.name { "free" }
                         }
                     }
