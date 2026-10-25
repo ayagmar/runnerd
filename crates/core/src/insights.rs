@@ -387,19 +387,22 @@ fn flaky(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
     ))
 }
 
-/// A job whose last runs' memory peaks near its profile's `memory`.
+/// A job whose last runs' memory peaks near its profile's `memory`: the profile of its last measured run, whose
+/// runs alone count, as a job a repository serves in several profiles peaks apart in each.
 fn near_cap(key: JobKey<'_>, runs: &[&Run], config: &Config) -> Option<Insight> {
-    let measured: Vec<&Run> = runs
+    let measured = runs
         .iter()
         .rev()
-        .filter(|run| run.memory_peak.is_some() && run.profile.is_some())
+        .filter(|run| run.memory_peak.is_some() && run.profile.is_some());
+    let name = measured.clone().next()?.profile.as_deref()?;
+    let measured: Vec<&Run> = measured
+        .filter(|run| run.profile.as_deref() == Some(name))
         .take(CAP_RUNS)
         .copied()
         .collect();
     if measured.len() < CAP_MIN_RUNS {
         return None;
     }
-    let name = measured.first()?.profile.as_deref()?;
     let profile = config.profiles.get(name)?;
     let cap = profile.memory.0;
     let peaks: Vec<u64> = measured.iter().filter_map(|run| run.memory_peak).collect();
