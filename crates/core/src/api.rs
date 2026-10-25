@@ -68,8 +68,9 @@ pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
     ChartLines, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics,
-    JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery, LogSummary, Pressure, Sample,
-    SampleSeries, Started, Stats, StatsQuery, StatsRow, Step, Timeline,
+    JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, LogQuery, LogSummary, Milestone,
+    Outcome, OutcomeKind, Phase, PhaseKind, Pressure, RunComparison, Sample, SampleSeries,
+    SampleUsage, Started, Stats, StatsQuery, StatsRow, Step, Timeline, job_title,
 };
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,

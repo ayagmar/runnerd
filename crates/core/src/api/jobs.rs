@@ -4,6 +4,13 @@
 
 use serde::{Deserialize, Serialize};
 
+mod facts;
+
+pub use facts::{
+    JobTitle, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, RunComparison, SampleUsage,
+    job_title,
+};
+
 /// Where a job is in its life, as this daemon saw it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
