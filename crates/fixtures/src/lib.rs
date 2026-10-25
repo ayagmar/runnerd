@@ -1,10 +1,10 @@
 //! Daemon data every client's parity test draws, and the facts `runnerd-core` computes from it, which the dashboard,
 //! the TUI and `runnerctl` must each state as core words them (ADR 0062). The data is chosen where clients drifted
 //! before: a lost, an elsewhere, a `startup_failure`, a timed-out and a cancelled job; an adopted job without a name;
-//! a step without an end time and a cancelled one with times; a job no pool serves; a held measured budget of which
-//! the host's memory leaves less free than `MemoryMax` does; warm and
-//! starting runners and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records
-//! near `max_total`; a build cache that refused uploads and had no lookups.
+//! a step without an end time and a cancelled one with times; a job no pool serves; a measured budget of which the
+//! host's memory leaves less free than `MemoryMax` does, and a job waiting for the host; warm and starting runners
+//! and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records near
+//! `max_total`; a build cache that refused uploads and had no lookups.
 //!
 //! Test support only: client tests depend on it, a client never does, so no client depends on another to share it.
 //! It computes nothing itself; every fact is core's.
@@ -42,8 +42,8 @@ pub const CANCELLED: u64 = 9205;
 pub const UNNAMED: u64 = 9206;
 /// A queued job asking for a label no pool of its repository has.
 pub const NO_POOL: u64 = 9301;
-/// A queued job waiting while the measured budget is held.
-pub const HELD: u64 = 9302;
+/// A queued job waiting for the host's memory, which leaves less than `MemoryMax` does.
+pub const HOST_SHORT: u64 = 9302;
 
 const LEDGER: &str = "halyard/ledger";
 const STOREFRONT: &str = "halyard/storefront";
@@ -165,7 +165,7 @@ fn host() -> HostBudget {
     }
 }
 
-/// A measured budget past 90% of its `MemoryMax`, so it is held, of whose 2G left the host leaves 512M; jvm's three
+/// A measured budget of whose 2G left the host leaves 512M; jvm's three
 /// slots run, are warm and start a runner, node's first holds a runner whose job is known before GitHub lists it
 /// busy.
 fn status() -> Status {
@@ -178,7 +178,7 @@ fn status() -> Status {
             memory_max: Some(24 * GIB),
             memory_in_use: 22 * GIB,
             admission: AdmissionPolicy::Measured,
-            held: true,
+            held: false,
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
@@ -252,13 +252,13 @@ fn status() -> Status {
                 },
             ),
             queued(
-                HELD,
+                HOST_SHORT,
                 STOREFRONT,
                 "lint",
                 47,
-                Waiting::Memory {
-                    needs: 4 * GIB,
-                    free: 0,
+                Waiting::HostMemory {
+                    needs: GIB,
+                    free: 512 * MIB,
                 },
             ),
         ],
@@ -571,8 +571,7 @@ pub struct JobFacts {
 pub struct Facts {
     /// Each finished job, newest first.
     pub rows: Vec<JobRow>,
-    /// What is reserved of the memory budget, and why nothing starts: `22G of 24G reserved in runnerd.slice by
-    /// predicted peaks; …`.
+    /// What is reserved of the memory budget: `22G of 24G reserved in runnerd.slice by predicted peaks`.
     pub budget: String,
     /// The CPU budget's clause.
     pub cpu: String,
@@ -641,7 +640,11 @@ pub fn facts(daemon: &Daemon) -> Facts {
         cpu: status.budget.cpu.expect("a CPU budget").line(),
         host: status.budget.host_line().expect("a host reading"),
         free: parts.free.expect("room past the runners").reading.line(),
-        host_part: parts.host.expect("the host holds room back").reading.line(),
+        host_part: parts
+            .closed
+            .expect("the host holds room back")
+            .reading
+            .line(),
         health: status.health(NOW),
         waits: status
             .queued
@@ -752,7 +755,10 @@ mod tests {
             "a cancelled step took time"
         );
         assert_eq!(facts.job.limits, "capped at 40G and 1.3 CPUs");
-        assert!(daemon.status.budget.held, "the measured budget is held");
+        assert!(
+            !daemon.status.budget.held,
+            "the measured budget is not held"
+        );
         assert_eq!(
             daemon.status.budget.host_withheld(),
             Some(3 * GIB / 2),

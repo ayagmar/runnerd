@@ -60,7 +60,9 @@ mod tone;
 mod units;
 
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
-pub use budget::{BudgetParts, FreePart, HeldKind, HeldPart, HostPart, Reading, SlotPart};
+pub use budget::{
+    BudgetParts, ClosedKind, ClosedPart, FreePart, HeldKind, HeldPart, Reading, SlotPart,
+};
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, ReplaceQuery,
     RunningJob,

@@ -1,5 +1,5 @@
-//! What the memory budget means as every client shows it: its line, what is reserved and free of it, what the host's
-//! memory holds back of it, and the parts a bar draws. Plain derivations of [`Status`]; clients only lay them out.
+//! What the memory budget means as every client shows it: its line, what is reserved and free of it, what of it no
+//! runner may start in, and the parts a bar draws. Plain derivations of [`Status`]; clients only lay them out.
 
 use super::{AdmissionPolicy, Budget, HostMemory, Status, percent};
 use crate::config::ByteSize;
@@ -53,34 +53,45 @@ impl Budget {
 
     /// The host's line as clients show it, such as `host: 31G of 64G available, 1.5% stalled for memory; leaves the
     /// slice 40G`; when that is less room than `MemoryMax` leaves (`Budget::host_withheld`), `…; leaves the slice 25G
-    /// of its 46G, so 6.5G is free`; while it stalls, `…; stalling, so no runner starts`. With programs outside the
-    /// slice large enough to name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`).
-    /// `None` without a recent reading of the host.
+    /// of its 46G, so 6.5G is free`;
+    /// while it stalls, `…; stalling, so no runner starts`. While the slice is held
+    /// (`Budget::held`), nothing is free, so it says no figure of it. With programs outside the slice large enough to
+    /// name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`). `None` without a recent
+    /// reading of the host.
     pub fn host_line(&self) -> Option<String> {
         let host = self.host.as_ref()?;
         let mut line = format!("host: {}", host.memory.available_line());
         if let Some(full) = host.memory.full.filter(|full| full.avg10 > 0) {
             line = format!("{line}, {} stalled for memory", percent(full.avg10));
         }
-        line = match (host.stalled, self.memory_max.zip(self.host_withheld())) {
-            (true, _) => format!("{line}; stalling, so no runner starts"),
-            (false, Some((max, _))) => {
-                let free = match host.spare {
-                    0 => "nothing".to_owned(),
-                    spare => ByteSize(spare).to_string(),
-                };
-                format!(
-                    "{line}; leaves the slice {} of its {}, so {free} is free",
-                    ByteSize(host.limit),
-                    ByteSize(max),
-                )
+        let free = match host.spare {
+            0 => "nothing".to_owned(),
+            spare => ByteSize(spare).to_string(),
+        };
+        let limit = ByteSize(host.limit);
+        line = if host.stalled {
+            format!("{line}; stalling, so no runner starts")
+        } else if self.closed() {
+            format!("{line}; leaves the slice {limit}")
+        } else {
+            match self.memory_max {
+                Some(max) if self.host_withheld().is_some() => format!(
+                    "{line}; leaves the slice {limit} of its {}, so {free} is free",
+                    ByteSize(max)
+                ),
+                _ => format!("{line}; leaves the slice {limit}"),
             }
-            (false, None) => format!("{line}; leaves the slice {}", ByteSize(host.limit)),
         };
         if !host.memory.holders.is_empty() {
             line = format!("{line}; {}", host.memory.outside_line());
         }
         Some(line)
+    }
+
+    /// Whether measured admission holds the slice at its high-water mark (`Budget::held`), so no runner starts and
+    /// nothing is free.
+    fn closed(&self) -> bool {
+        self.held && self.admission == AdmissionPolicy::Measured
     }
 
     /// What the host's memory holds back of the room `MemoryMax` leaves beside what runs, in bytes: that room less
@@ -120,7 +131,7 @@ impl HostMemory {
 impl Status {
     /// The budget as a bar draws it: a block per slot as large as its cap (under measured admission, a block per
     /// runner as large as what it reserves), the mirror, seed containers and shells, then what is free and what of
-    /// it the host's memory holds back; and the whole the blocks are scaled against.
+    /// the room no runner may start in; and the whole the blocks are scaled against.
     pub fn budget_parts(&self) -> BudgetParts {
         let budget = &self.budget;
         let slots: Vec<SlotPart> = self
@@ -171,23 +182,38 @@ impl Status {
             .filter(|part| !part.reserved)
             .map(|part| part.memory)
             .sum();
-        let (free, host) = budget.room_parts(drawn, unclaimed);
+        let (free, closed) = budget.room_parts(drawn, unclaimed);
         BudgetParts {
             slots,
             held,
             free,
-            host,
+            closed,
             whole,
         }
     }
 }
 
 impl Budget {
-    /// The bar's room past `drawn` bytes of blocks, of which `unclaimed` are idle slots' caps: what is free, and
-    /// what of it the host's memory holds back.
-    fn room_parts(&self, drawn: u64, unclaimed: u64) -> (Option<FreePart>, Option<HostPart>) {
+    /// The bar's room past `drawn` bytes of blocks, of which `unclaimed` are idle slots' caps: what is free, and what
+    /// of it no runner may start in.
+    fn room_parts(&self, drawn: u64, unclaimed: u64) -> (Option<FreePart>, Option<ClosedPart>) {
+        let Some(max) = self.memory_max else {
+            return (None, None);
+        };
+        let room = max.saturating_sub(drawn);
+        if self.closed() {
+            let closed = (room > 0).then(|| ClosedPart {
+                memory: room,
+                kind: ClosedKind::Held,
+                reading: Reading {
+                    figure: ByteSize(room).to_string(),
+                    text: "closed: the slice is past 90% of its MemoryMax, so no runner starts"
+                        .to_owned(),
+                },
+            });
+            return (None, closed);
+        }
         let withheld = self.host_withheld();
-        let room = self.memory_max.map_or(0, |max| max.saturating_sub(drawn));
         // The host's part ends the bar, within the free room: under caps, idle slots' blocks stay drawn though the
         // host may hold their room too.
         let host = withheld
@@ -197,43 +223,41 @@ impl Budget {
             .host
             .as_ref()
             .map_or((0, 0), |host| (host.limit, host.spare));
-        let free = self.memory_max.and_then(|max| {
-            let memory = room - host.unwrap_or(0);
-            let text = match (unclaimed, withheld) {
-                (0, None) => format!("of {} free", ByteSize(max)),
-                (_, None) => format!(
-                    "of {} free past every slot's cap; {} is free beside what runs",
-                    ByteSize(max),
-                    ByteSize(self.remaining().unwrap_or(0))
-                ),
-                (0, Some(_)) => format!(
-                    "free; the host leaves the slice {} of its {}",
-                    ByteSize(host_limit),
-                    ByteSize(max)
-                ),
-                (_, Some(_)) => format!(
-                    "free past every slot's cap; {} is free beside what runs, as the host leaves the slice {} of \
-                     its {}",
-                    ByteSize(spare),
-                    ByteSize(host_limit),
-                    ByteSize(max)
-                ),
-            };
-            (memory > 0).then(|| FreePart {
-                memory,
-                reading: Reading {
-                    figure: ByteSize(memory).to_string(),
-                    text,
-                },
-            })
-        });
-        let host = host.map(|memory| HostPart {
+        let memory = room - host.unwrap_or(0);
+        let text = match (unclaimed, withheld) {
+            (0, None) => format!("of {} free", ByteSize(max)),
+            (_, None) => format!(
+                "of {} free past every slot's cap; {} is free beside what runs",
+                ByteSize(max),
+                ByteSize(self.remaining().unwrap_or(0))
+            ),
+            (0, Some(_)) => format!(
+                "free; the host leaves the slice {} of its {}",
+                ByteSize(host_limit),
+                ByteSize(max)
+            ),
+            (_, Some(_)) => format!(
+                "free past every slot's cap; {} is free beside what runs, as the host leaves the slice {} of its {}",
+                ByteSize(spare),
+                ByteSize(host_limit),
+                ByteSize(max)
+            ),
+        };
+        let free = (memory > 0).then(|| FreePart {
             memory,
+            reading: Reading {
+                figure: ByteSize(memory).to_string(),
+                text,
+            },
+        });
+        let host = host.map(|memory| ClosedPart {
+            memory,
+            kind: ClosedKind::Host,
             reading: Reading {
                 figure: ByteSize(memory).to_string(),
                 text: format!(
                     "{} for its other programs and page cache, which leave the slice {}",
-                    HostPart::NAME,
+                    ClosedKind::Host.name(),
                     ByteSize(host_limit)
                 ),
             },
@@ -249,12 +273,12 @@ pub struct BudgetParts {
     pub slots: Vec<SlotPart>,
     /// The mirror, each seed container, then each shell open in a record.
     pub held: Vec<HeldPart>,
-    /// What `MemoryMax` leaves past every block, less what the host holds back; `None` without `MemoryMax` or room
-    /// past them and the host's part.
+    /// What `MemoryMax` leaves past every block, less what is closed; `None` without `MemoryMax`, without room past
+    /// the blocks and the closed part, and while the slice is held (`Budget::held`).
     pub free: Option<FreePart>,
-    /// What the host's memory holds back of the room past every block (`Budget::host_withheld`), drawn after what is
-    /// free; `None` while the host leaves the slice as much as `MemoryMax`.
-    pub host: Option<HostPart>,
+    /// What of the room past every block no runner may start in, drawn after what is free: all of it while the slice
+    /// is held, else what the host's memory holds back (`Budget::host_withheld`); `None` while neither closes any.
+    pub closed: Option<ClosedPart>,
     /// What the blocks are scaled against: `MemoryMax`, or the blocks' sum when larger or without it.
     pub whole: u64,
 }
@@ -329,20 +353,35 @@ pub struct FreePart {
     pub reading: Reading,
 }
 
-/// What the host's memory holds back of the bar's free room: no runner may start in it while the host's other
-/// programs and its page cache need it.
+/// Room past the bar's blocks that no runner may start in.
 #[derive(Debug, Clone, PartialEq, Eq)]
-pub struct HostPart {
+pub struct ClosedPart {
     /// In bytes.
     pub memory: u64,
+    /// What closes it.
+    pub kind: ClosedKind,
     /// Its figure and what it means, such as `20.73G` `held by the host for its other programs and page cache,
     /// which leave the slice 25.27G`.
     pub reading: Reading,
 }
 
-impl HostPart {
-    /// Its name under its block or in a key: `held by the host`.
-    pub const NAME: &'static str = "held by the host";
+/// What closes room past the bar's blocks.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ClosedKind {
+    /// The host's other programs and its page cache need it.
+    Host,
+    /// The slice is past 90% of its `MemoryMax` under measured admission (`Budget::held`).
+    Held,
+}
+
+impl ClosedKind {
+    /// Its name under its block or in a key: `held by the host` or `closed past 90%`.
+    pub fn name(self) -> &'static str {
+        match self {
+            Self::Host => "held by the host",
+            Self::Held => "closed past 90%",
+        }
+    }
 }
 
 #[cfg(test)]

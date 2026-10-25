@@ -14,7 +14,7 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    self, Activity, AutoPlan, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart, HostPart,
+    self, Activity, AutoPlan, ChartLine, ChartLineKind, ChartLines, ClosedPart, HeldKind, HeldPart,
     Insights, Job, JobSummary, LogSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus,
     QueuedJob, RecordNote, RecordState, Records, RepositoryStatus, RunComparison, Sample, Sizing,
     SlotStatus, Status, Step, WaitKind, cpus, in_cores, job_title,
@@ -739,7 +739,7 @@ fn budget_note(app: &App) -> Vec<(u8, String)> {
 
 /// The budget as one bar: a block per slot as wide as its memory (under measured admission, a block per runner as
 /// wide as what it reserves), filled as far as its job uses it; then the mirror and each seed container, then what
-/// is free and what the host holds back.
+/// is free and what is closed.
 fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let status = &app.live.status;
     let mut note = budget_note(app);
@@ -834,7 +834,7 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         names.push(Span::styled(format!("{name:room$} "), style));
         drawn += width;
     }
-    let rest = bar_rest(parts.host.as_ref(), whole, bar.width, drawn, theme);
+    let rest = bar_rest(parts.closed.as_ref(), whole, bar.width, drawn, theme);
     cells.extend(rest.cells);
     names.extend(rest.names);
     note.extend(rest.note.map(|label| (3, label)));
@@ -844,28 +844,31 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     frame.render_widget(Line::from(names), labels);
 }
 
-/// The bar past its blocks: what is free, then what the host holds back, hatched and named under it or, too narrow
-/// for that, in the heading as the mirror is.
+/// The bar past its blocks: what is free, then what is closed, hatched and named under it or, too narrow for that,
+/// in the heading as the mirror is.
 struct Rest {
     cells: Vec<Span<'static>>,
     names: Vec<Span<'static>>,
     note: Option<String>,
 }
 
-/// The bar of `width` cells past the `drawn` ones, for what the `host` holds back of the `whole`.
-fn bar_rest(host: Option<&HostPart>, whole: u64, width: u16, drawn: u16, theme: Theme) -> Rest {
+/// The bar of `width` cells past the `drawn` ones, for what is `closed` of the `whole`.
+fn bar_rest(closed: Option<&ClosedPart>, whole: u64, width: u16, drawn: u16, theme: Theme) -> Rest {
     let rest = width.saturating_sub(drawn);
-    let host = host.map(|host| {
-        let width = scale(host.memory, whole, width).max(1).min(rest);
-        (width, format!("{} {}", HostPart::NAME, host.reading.figure))
+    let closed = closed.map(|closed| {
+        let width = scale(closed.memory, whole, width).max(1).min(rest);
+        (
+            width,
+            format!("{} {}", closed.kind.name(), closed.reading.figure),
+        )
     });
-    let free = rest - host.as_ref().map_or(0, |(width, _)| *width);
+    let free = rest - closed.as_ref().map_or(0, |(width, _)| *width);
     let mut out = Rest {
         cells: vec![Span::styled("·".repeat(usize::from(free)), theme.dim())],
         names: Vec::new(),
         note: None,
     };
-    if let Some((width, label)) = host {
+    if let Some((width, label)) = closed {
         out.cells
             .push(Span::styled("╱".repeat(usize::from(width)), theme.dim()));
         out.names.push(Span::raw(" ".repeat(usize::from(free))));

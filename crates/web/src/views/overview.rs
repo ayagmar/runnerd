@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Activity, ActivityQuery, HeldKind, HeldPart, HostPart, HostSample, HostSamples, Job, JobPage,
+    Activity, ActivityQuery, ClosedPart, HeldKind, HeldPart, HostSample, HostSamples, Job, JobPage,
     JobQuery, JobState, JobSummary, JobTitle, ProfileStatus, QueuedJob, RepositoryStatus, Sample,
     SampleSeries, SlotState, SlotStatus, Status, Tone, WaitKind, cpus, in_cores,
 };
@@ -306,7 +306,7 @@ fn slot_view<'overview>(
 
 /// The budget: the slice as the ground, a block per slot sized by its memory cap (under measured admission, a block
 /// per runner sized by what it reserves), filled as high as the job's last sampled memory; the mirror and each seed
-/// container; and what is free. A block opens its job, or its slot's card;
+/// container; what is free, and what no runner may start in. A block opens its job, or its slot's card;
 /// hovering or focusing one says what it holds in the readout above the bar.
 pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     let status = &overview.status;
@@ -351,17 +351,17 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     if let Some(lens) = &free_lens {
         lenses.push(("free".to_owned(), lens.clone()));
     }
-    let host = bar.host.as_ref().map(|host| {
+    let closed = bar.closed.as_ref().map(|closed| {
         (
-            host.memory,
+            closed,
             Lens {
-                figure: host.reading.figure.clone(),
-                text: host.reading.text.clone(),
+                figure: closed.reading.figure.clone(),
+                text: closed.reading.text.clone(),
             },
         )
     });
-    if let Some((_, lens)) = &host {
-        lenses.push(("host".to_owned(), lens.clone()));
+    if let Some((_, lens)) = &closed {
+        lenses.push(("closed".to_owned(), lens.clone()));
     }
     html! {
         section #budget .budget aria-labelledby="budget-title"
@@ -392,18 +392,18 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                         (super::block_size(free))
                     }
                 }
-                @if let Some((memory, lens)) = &host {
-                    @let link = link("host", None);
-                    div.free.host tabindex="0" role="img" style=(format!("--size: {:.3}", gib(*memory)))
+                @if let Some((part, lens)) = &closed {
+                    @let link = link("closed", None);
+                    div.free.closed tabindex="0" role="img" style=(format!("--size: {:.3}", gib(part.memory)))
                         aria-label=(format!("{} {}", lens.figure, lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
                         data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
-                        (super::block_size(*memory))
-                        span.name { (HostPart::NAME) }
+                        (super::block_size(part.memory))
+                        span.name { (part.kind.name()) }
                     }
                 }
             }
-            (bar_keys(&held, free_lens.as_ref(), host.as_ref().map(|(_, lens)| lens)))
+            (bar_keys(&held, free_lens.as_ref(), closed.as_ref()))
         }
     }
 }
@@ -457,11 +457,15 @@ fn lens_id(key: &str) -> String {
     format!("lens-{key}")
 }
 
-/// On a touch screen the mirror, a seed container, the free remainder and what the host holds back may be too thin
-/// to tap: keys under the bar select them instead, and say their sizes.
-fn bar_keys(held: &[Held], free_lens: Option<&Lens>, host_lens: Option<&Lens>) -> Markup {
+/// On a touch screen the mirror, a seed container, the free remainder and what is closed may be too thin to tap: keys
+/// under the bar select them instead, and say their sizes.
+fn bar_keys(
+    held: &[Held],
+    free_lens: Option<&Lens>,
+    closed: Option<&(&ClosedPart, Lens)>,
+) -> Markup {
     html! {
-        @if !held.is_empty() || free_lens.is_some() || host_lens.is_some() {
+        @if !held.is_empty() || free_lens.is_some() || closed.is_some() {
             div.bar-keys {
                 @for part in held {
                     @let key = js(&part.key);
@@ -477,10 +481,10 @@ fn bar_keys(held: &[Held], free_lens: Option<&Lens>, host_lens: Option<&Lens>) -
                         span.swatch aria-hidden="true" {} (lens.figure) " free"
                     }
                 }
-                @if let Some(lens) = host_lens {
-                    button.bar-key.key-host type="button" data-on:click="$_slot = $_slot == 'host' ? '' : 'host'"
-                        data-class:linked="$_slot == 'host'" {
-                        span.swatch aria-hidden="true" {} (lens.figure) " " (HostPart::NAME)
+                @if let Some((part, lens)) = closed {
+                    button.bar-key.key-closed type="button" data-on:click="$_slot = $_slot == 'closed' ? '' : 'closed'"
+                        data-class:linked="$_slot == 'closed'" {
+                        span.swatch aria-hidden="true" {} (lens.figure) " " (part.kind.name())
                     }
                 }
             }
