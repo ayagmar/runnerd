@@ -29,8 +29,9 @@ own words, and each client labelled doctor's checks itself.
 
 ## Consequences
 
-- The overview, the TUI and `runnerctl status` draw the same blocks from `Status::budget_parts`, and scale a job by
-  the caps it ran with.
+- The dashboard's overview and the TUI draw the same blocks from `Status::budget_parts`, and scale a job by the caps
+  it ran with, as `runnerctl job` does (`Job::limits`). All of them, `runnerctl status` and watch included, word
+  the budget with `Budget::line`.
 - A hold is judged against the time the client shows it, not the time the plan was made.
 - A client that shows a fact about the host must find it in core first; one that is not there is added to core,
   with a test in domain terms.
