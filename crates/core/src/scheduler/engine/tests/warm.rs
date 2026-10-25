@@ -812,3 +812,70 @@ async fn a_warm_runner_on_the_old_image_waits_until_the_new_one_is_pulled() {
         "one runner waits"
     );
 }
+
+#[tokio::test]
+async fn a_requested_reseed_starts_beside_a_warm_runner_while_another_job_waits_for_the_host() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let config = format!(
+        "{}{}",
+        warm_config().replace("memory = \"4G\"", "memory = \"1G\""),
+        r#"
+[profiles.big]
+image_stage = "big"
+cpus = 2
+memory = "2G"
+slots = 1
+
+[profiles.heavy]
+image_stage = "heavy"
+cpus = 2
+memory = "8G"
+slots = 1
+
+[[repositories]]
+name = "o/t"
+profile = "big"
+labels = ["self-hosted", "big"]
+warm = 0
+
+[[repositories]]
+name = "o/h"
+profile = "heavy"
+labels = ["self-hosted", "heavy"]
+warm = 0
+"#
+    );
+    let (mut engine, handle, _dir) = active(&github, &docker, &config).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "o/r's warm runner starts"
+    );
+
+    // A 32G host, margin 2G (3G while short), whose slice holds o/r's 1G warm runner and which has 10.5G
+    // available: the slice may hold 9.5G, 8.5G while short. Heavy's 8G seed fits beside the warm runner, so its
+    // room is held; o/t's 2G job waits for the host, which keeps it short, as stopping the warm runner frees only
+    // 1G of it.
+    handle.store.host_memory(api::HostMemory {
+        at: time::now_ms() / 1000,
+        total: 32 << 30,
+        available: 21 << 29,
+        slice: 1 << 30,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+    });
+    engine.request_reseed("heavy").unwrap();
+    github.0.lock().unwrap().queued = vec![QueuedJob {
+        labels: vec!["self-hosted".to_owned(), "big".to_owned()],
+        ..job(5)
+    }];
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(engine.reseeds.contains_key("heavy"), "the seed starts");
+    assert_eq!(registered(&github.calls()).len(), 1, "o/t's job waits");
+}

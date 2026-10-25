@@ -21,7 +21,10 @@ whenever its profile's slots were free, whatever the slice or the host had left.
   stopped runner's room pays that back before a start takes it.
 - **A seed container fits the budget as a runner does.** It starts only where its cap fits in the slice's
   `MemoryMax` and in what the host leaves the slice, and not while measured admission holds the slice at its
-  high-water mark. Until then the reseed stays due.
+  high-water mark. Until then the reseed stays due. The host's limit is the one with the plain margin, as the
+  room a requested reseed holds is judged by: a held room makes other jobs wait for the host, which keeps the
+  larger margin in force, so a seed judged by that one could wait for as long as another pool's warm runner
+  stays.
 - **A requested reseed holds its room once its profile drained.** `runnerd reseed` stops the profile's jobs from
   starting. Once its slots are free, the seed's cap counts in the budget, so other profiles' starts leave that
   room and the seed starts as their runners finish. It holds the room only while the cap would fit with no runner

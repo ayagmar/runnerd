@@ -277,7 +277,7 @@ adopted too and drains as it would after a reload.
   Sizing never advises a cap under the largest peak plus 1G
   ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)). A job takes a stopped warm runner's room only
   once its reservation paid the host's deficit, and a seed container starts only where its cap fits the slice, the
-  host and, under measured admission, the high-water mark; a requested reseed's cap counts in the budget once its
+  host with the plain margin and, under measured admission, the high-water mark; a requested reseed's cap counts in the budget once its
   profile drained ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
