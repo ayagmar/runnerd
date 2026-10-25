@@ -14,10 +14,10 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    self, Activity, AutoPlan, ChartLine, ChartLineKind, ChartLines, ClosedPart, HeldKind, HeldPart,
-    Insights, Job, JobSummary, LogSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus,
-    QueuedJob, RecordNote, RecordState, Records, RepositoryStatus, RunComparison, Sample, Sizing,
-    SlotStatus, Status, Step, WaitKind, cpus, in_cores, job_title,
+    self, Activity, AutoPlan, BudgetParts, ChartLine, ChartLineKind, ChartLines, HeldKind,
+    HeldPart, Insights, Job, JobSummary, LogSummary, Phase, PhaseKind, ProfileSizing,
+    ProfileStatus, QueuedJob, RecordNote, RecordState, Records, RepositoryStatus, RunComparison,
+    Sample, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores, job_title,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -834,7 +834,7 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         names.push(Span::styled(format!("{name:room$} "), style));
         drawn += width;
     }
-    let rest = bar_rest(parts.closed.as_ref(), whole, bar.width, drawn, theme);
+    let rest = bar_rest(&parts, bar.width, drawn, theme);
     cells.extend(rest.cells);
     names.extend(rest.names);
     note.extend(rest.note.map(|label| (3, label)));
@@ -852,26 +852,40 @@ struct Rest {
     note: Option<String>,
 }
 
-/// The bar of `width` cells past the `drawn` ones, for what is `closed` of the `whole`.
-fn bar_rest(closed: Option<&ClosedPart>, whole: u64, width: u16, drawn: u16, theme: Theme) -> Rest {
+/// The bar of `width` cells past the `drawn` ones, for what of `parts` is free and closed. The closed part
+/// takes what rounding leaves, so the bar never shows more free than core says is.
+fn bar_rest(parts: &BudgetParts, width: u16, drawn: u16, theme: Theme) -> Rest {
+    let (free, closed, whole) = (parts.free.as_ref(), parts.closed.as_ref(), parts.whole);
     let rest = width.saturating_sub(drawn);
+    let free_cells = match (free, closed) {
+        (Some(free), Some(_)) => scale(free.memory, whole, width).min(rest.saturating_sub(1)),
+        (Some(_), None) => rest,
+        (None, _) => 0,
+    };
     let closed = closed.map(|closed| {
-        let width = scale(closed.memory, whole, width).max(1).min(rest);
         (
-            width,
+            rest - free_cells,
             format!("{} {}", closed.kind.name(), closed.reading.figure),
         )
     });
-    let free = rest - closed.as_ref().map_or(0, |(width, _)| *width);
+    let blank = if free.is_none() && closed.is_none() {
+        rest
+    } else {
+        0
+    };
     let mut out = Rest {
-        cells: vec![Span::styled("·".repeat(usize::from(free)), theme.dim())],
+        cells: vec![
+            Span::styled("·".repeat(usize::from(free_cells)), theme.dim()),
+            Span::raw(" ".repeat(usize::from(blank))),
+        ],
         names: Vec::new(),
         note: None,
     };
     if let Some((width, label)) = closed {
         out.cells
             .push(Span::styled("╱".repeat(usize::from(width)), theme.dim()));
-        out.names.push(Span::raw(" ".repeat(usize::from(free))));
+        out.names
+            .push(Span::raw(" ".repeat(usize::from(free_cells))));
         if label.width() <= usize::from(width) {
             out.names.push(Span::styled(label, theme.dim()));
         } else {
