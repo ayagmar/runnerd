@@ -725,6 +725,11 @@ impl Case {
     /// GitHub completes a running job, and its ephemeral runner leaves. Its container no longer reports the job:
     /// runner names have a resolution of a second, so a runner started in its slot right after it may get its name
     /// and its container's ID.
+    ///
+    /// It also leaves GitHub's queued listing, even if `AssignListed` left it there: the harness assumes a stale
+    /// listing never outlives its job. Where it does, as for a runner killed during its job's setup within GitHub's
+    /// few seconds of lag, the engine no longer counts the job as taken once its runner exits, and starts a second
+    /// runner for it, which waits out `IDLE_TIMEOUT`: one idle runner, rare enough to leave.
     fn end_job(&mut self, id: u64, container: &str, conclusion: &str) {
         let job = self.jobs.get_mut(&id).unwrap();
         job.phase = Phase::Done {
