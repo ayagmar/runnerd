@@ -6,9 +6,9 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    self, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind, Insights,
-    Job, JobPage, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, Records,
-    RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
+    self, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, Insights, Job,
+    JobPage, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, Records, RemovedRecords,
+    Sizing, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
 use runnerd_core::api::{in_cores, job_title};
@@ -817,27 +817,18 @@ fn build_cache(counts: &BuildCacheCounts) -> Option<String> {
 /// last.
 pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     let mut out = String::new();
-    let days = insights.until.saturating_sub(insights.since) / 86_400;
     if insights.insights.is_empty() {
-        let _ = writeln!(out, "nothing to report from the last {days} days");
+        let _ = writeln!(out, "{}", insights.empty_line());
     }
     for insight in &insights.insights {
-        let (severity, tone) = match insight.severity {
-            Severity::Warning => ("warning", Tone::Busy),
-            Severity::Notice => ("notice", Tone::Dim),
-        };
-        let kind = match insight.kind {
-            InsightKind::Slower { .. } => "slower",
-            InsightKind::Flaky { .. } => "flaky",
-            InsightKind::NearCap { .. } => "near-cap",
-            InsightKind::ColdCache { .. } => "cold-cache",
-            InsightKind::Throttled { .. } => "throttled",
-            InsightKind::Waits { .. } => "waits",
-        };
         let _ = writeln!(
             out,
-            "{} {kind:<9} {}",
-            paint.paint(tone, &format!("{severity:<7}")),
+            "{} {:<9} {}",
+            paint.paint(
+                insight.tone().into(),
+                &format!("{:<7}", insight.severity.label())
+            ),
+            insight.kind.word(),
             insight.sentence
         );
     }
@@ -856,11 +847,9 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     ])
     .right(&[1, 2, 3, 4, 5, 6]);
     let wait = |spread: &WaitSpread, value: Option<u64>| {
-        if spread.jobs == 0 {
-            dash()
-        } else {
-            value.map_or_else(dash, |seconds| plain(duration(seconds)))
-        }
+        spread
+            .reading(value)
+            .map_or_else(dash, |seconds| plain(duration(seconds)))
     };
     for repository in &insights.waits {
         let now = &repository.now;
@@ -880,11 +869,7 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
 
 /// `runnerctl insights --digest`: the last 24 hours.
 pub(crate) fn digest(digest: &Digest) -> String {
-    let mut out = format!(
-        "last 24 hours: {} finished, {} failed\n",
-        plural(digest.finished, "job", "jobs"),
-        digest.failed
-    );
+    let mut out = format!("last 24 hours: {}\n", digest.summary_line());
     for insight in &digest.new {
         let _ = writeln!(out, "new: {}", insight.sentence);
     }
@@ -892,8 +877,7 @@ pub(crate) fn digest(digest: &Digest) -> String {
         let _ = writeln!(out, "longest waits:");
     }
     for wait in &digest.waits {
-        let job = job_title(wait.workflow.as_deref(), &wait.name, Some(wait.job));
-        let _ = writeln!(out, "  {} {job} {}", wait.repository, duration(wait.waited));
+        let _ = writeln!(out, "  {}", wait.line());
     }
     out
 }
@@ -918,14 +902,6 @@ pub(crate) fn notify_test(tested: &NotifyTest, paint: Paint) -> String {
         };
     }
     out
-}
-
-fn plural(count: u64, one: &str, many: &str) -> String {
-    if count == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{count} {many}")
-    }
 }
 
 /// One line for an event, as `watch` prints when its output is not a terminal. `None` for live samples.

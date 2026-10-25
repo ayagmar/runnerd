@@ -828,29 +828,14 @@ fn insight_title(insight: &Insight) -> String {
 }
 
 fn digest_message(digest: Digest) -> Notification {
-    let mut body = vec![format!(
-        "{} finished, {} failed.",
-        plural(
-            usize::try_from(digest.finished).unwrap_or(usize::MAX),
-            "job",
-            "jobs"
-        ),
-        digest.failed
-    )];
+    let mut body = vec![format!("{}.", digest.summary_line())];
     body.extend(lines(
         digest.new.iter().map(|insight| insight.sentence.clone()),
         digest.new.len(),
     ));
     if !digest.waits.is_empty() {
         body.push("Longest waits:".to_owned());
-        body.extend(digest.waits.iter().map(|wait| {
-            format!(
-                "{}: {} waited {}s",
-                wait.repository,
-                job_title(wait.workflow.as_deref(), &wait.name, Some(wait.job)),
-                wait.waited
-            )
-        }));
+        body.extend(digest.waits.iter().map(runnerd_core::api::LongWait::line));
     }
     Notification {
         event: NotifyEvent::Digest,

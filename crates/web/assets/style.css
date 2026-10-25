@@ -1957,10 +1957,8 @@ dl.health-figures {
   overflow-wrap: anywhere;
 }
 
-.insight.warning.slower,
-.insight.warning.near-cap { border-left-color: var(--wait); }
-.insight.warning.flaky { border-left-color: var(--failure-ink); }
-.insight.notice { border-left-color: var(--memory); }
+.insight.warn { border-left-color: var(--wait); }
+.insight.bad { border-left-color: var(--failure-ink); }
 
 .empty {
   color: var(--muted);

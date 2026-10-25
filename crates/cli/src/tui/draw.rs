@@ -14,10 +14,9 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    self, Activity, AutoPlan, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart, Job,
-    JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
-    RunComparison, Sample, Severity, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores,
-    job_title,
+    self, Activity, AutoPlan, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart, Insights,
+    Job, JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
+    RunComparison, Sample, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores, job_title,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -556,13 +555,7 @@ fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'
 fn insight_items(app: &App, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
     let sep = || Span::styled(" · ", theme.dim());
     let mut items = Vec::new();
-    let warnings = app.insights.as_ref().map_or(0, |insights| {
-        insights
-            .insights
-            .iter()
-            .filter(|insight| insight.severity == Severity::Warning)
-            .count()
-    });
+    let warnings = app.insights.as_ref().map_or(0, Insights::warning_count);
     if warnings > 0 {
         let what = if warnings == 1 { "insight" } else { "insights" };
         items.push((
