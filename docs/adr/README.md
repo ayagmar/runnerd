@@ -46,7 +46,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |
 | [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default |
 | [0040](0040-unused-runner-images-removed.md) | Published runner images no profile runs are removed |
-| [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits (amended: a snapshot over its limit is due for a reseed) |
+| [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits (amended: a snapshot over its limit is due for a reseed; amended by 0065) |
 | [0042](0042-dashboard-behind-a-proxy-and-installable.md) | The dashboard behind a proxy the owner runs, and installable as an app (amended by 0043) |
 | [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md) | Phones signed in by QR code, and sessions that outlive a restart |
 | [0044](0044-queued-jobs-say-why-they-wait.md) | Queued jobs say why they wait |
@@ -70,3 +70,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0062](0062-client-parity-is-checked.md) | Client parity is checked, not remembered |
 | [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md) | A warm runner's room pays the host's deficit first, and a seed container fits the budget |
 | [0064](0064-each-notify-kind-is-a-sender.md) | Each notification target kind is a sender of its own, and Discord is one |
+| [0065](0065-a-snapshot-starts-over-from-the-image.md) | A snapshot over its limit starts over from the image |
