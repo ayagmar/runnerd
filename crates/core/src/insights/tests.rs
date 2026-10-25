@@ -419,6 +419,22 @@ fn memory_well_under_the_cap_says_nothing() {
     );
 }
 
+#[test]
+fn a_job_served_in_two_profiles_is_near_the_cap_by_its_last_profiles_runs_alone() {
+    let config = Config::parse(&format!(
+        "{CONFIG}\n[profiles.light]\nimage_stage = \"node\"\ncpus = 1\nmemory = \"1G\"\nslots = 1\n"
+    ))
+    .unwrap();
+    // Nine runs of 3G in app, 75% of its 4G, then one of 200M in light: light has one small run, not 300% of its cap.
+    let mut runs = peaking(&[30, 30, 30, 30, 30, 30, 30, 30, 30, 2]);
+    runs.last_mut().unwrap().profile = Some("light".to_owned());
+
+    assert!(
+        insights(&runs, &config, 14, NOW).insights.is_empty(),
+        "nothing is near a cap"
+    );
+}
+
 /// A job of `halyard/api` that started `hours_ago` hours before `NOW` after waiting `waited` seconds, on a runner
 /// started before it was queued when `warm`.
 fn waited(n: u64, hours_ago: u64, waited: u64, warm: bool) -> Run {

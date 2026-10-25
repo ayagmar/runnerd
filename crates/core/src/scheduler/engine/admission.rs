@@ -307,6 +307,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         admitting
     }
 
+    /// Makes the budgets `admitting` leaves those the runners leave now, so a start's record says what was free
+    /// when it started: a stop since the plan gave its runner's back, and a start that failed took nothing.
+    pub(super) fn refresh_free(&self, admitting: &mut Admitting) {
+        if !admitting.held {
+            admitting.free = self
+                .memory_max
+                .map(|max| max.saturating_sub(self.memory_in_use()));
+        }
+        if let (Some(cpu), Some(budget)) = (admitting.cpu.as_mut(), self.cpu_budget()) {
+            cpu.free = budget.saturating_sub(self.cpu_in_use());
+        }
+    }
+
     /// What the host's memory leaves runners beside what runs now, from a reading of the last few sample intervals.
     pub(super) fn host_budget(&self) -> Option<api::HostBudget> {
         let fresh = (3 * SAMPLE_INTERVAL).as_secs();
@@ -437,7 +450,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         Some(admitting)
     }
 
-    /// Tells apart the jobs of the runners whose job the history now has a record of.
+    /// Tells apart the jobs of the runners whose job the history now has a record of, unless that record is the
+    /// unnamed one a runner's claim makes of a job no listing saw: GitHub's details name it (`follow_jobs`).
     async fn find_keys(&mut self) {
         let unknown: Vec<(String, u64)> = self
             .occupied()
@@ -448,6 +462,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let Ok(Some(record)) = self.store.job(job).await else {
                 continue;
             };
+            if record.summary.name.is_empty() {
+                continue;
+            }
             if let Some(occupant) = self
                 .slots
                 .values_mut()

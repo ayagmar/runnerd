@@ -183,6 +183,42 @@ async fn a_warm_runner_gives_its_slot_to_a_queued_job_of_another_repository() {
 }
 
 #[tokio::test]
+async fn a_job_that_takes_a_warm_runners_memory_records_the_memory_its_stop_freed() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let config = shared_slot().replace("slots = 1", "slots = 2");
+    let (mut engine, handle, _dir) = active(&github, &docker, &config).await;
+    // One 4G cap, with the mirror off: a warm runner leaves 2G.
+    engine.memory_max = Some(6 << 30);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+
+    github.0.lock().unwrap().queued = vec![QueuedJob {
+        labels: vec!["self-hosted".to_owned(), "other".to_owned()],
+        ..job(7)
+    }];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let runner = handle.status.borrow().profiles[0]
+        .slots
+        .iter()
+        .find_map(|slot| {
+            slot.runner
+                .clone()
+                .filter(|runner| runner.repository == "o/s")
+        })
+        .unwrap();
+    handle.store.flush().await;
+    let admission = handle.store.runner_admitted(&runner.name).await.unwrap();
+    assert_eq!(
+        admission.map(|admission| admission.free),
+        Some(Some(6 << 30))
+    );
+}
+
+#[tokio::test]
 async fn a_warm_runner_that_took_a_job_before_its_stop_keeps_it_and_the_other_job_waits() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

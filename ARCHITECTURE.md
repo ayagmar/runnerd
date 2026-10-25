@@ -156,7 +156,8 @@ queued → slot → container → removed
    that limit ([ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md)).
 
 On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`) and schedules
-nothing until Docker has listed them.
+nothing until Docker has listed them. A running runner in a slot, profile or repository the config no longer has is
+adopted too and drains as it would after a reload.
 
 ## State
 
