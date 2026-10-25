@@ -434,6 +434,27 @@ async fn a_shell_whose_process_exited_is_removed_and_one_left_by_an_earlier_run_
 }
 
 #[tokio::test]
+async fn a_shell_left_by_an_earlier_run_that_docker_fails_to_remove_is_removed_on_a_later_tick() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let mut left = runner_container(1, 7, true);
+    left.id = "runnerd-shell-10-1".to_owned();
+    left.name = left.id.clone();
+    left.labels
+        .insert(record::SHELL_LABEL.to_owned(), "10".to_owned());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![left];
+        state.fail_removes = 1;
+    }
+    let dir = TestDir::new("shell-left");
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    assert_eq!(docker.0.lock().unwrap().containers.len(), 1);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(docker.0.lock().unwrap().containers.len(), 0);
+}
+
+#[tokio::test]
 async fn failures_committed_at_once_count_together_against_min_free() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     // Room for one record of 2G (twice the 1G its layer holds) above the 10G floor, not for two.

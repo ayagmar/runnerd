@@ -113,12 +113,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         Ok(caps)
     }
 
-    /// Removes the shell containers an earlier run left.
-    async fn remove_shells(&self, shells: Vec<docker::Container>) {
+    /// Removes the shell containers an earlier run left; each tick tries again those Docker failed to remove.
+    async fn remove_shells(&mut self, shells: Vec<docker::Container>) {
         for shell in shells {
             info!("removing {}, a shell an earlier run left", shell.name);
             if let Err(error) = self.docker.remove(&shell.id).await {
                 warn!("cannot remove {}: {error}", shell.name);
+                self.leftover.insert(shell.id, shell.name);
             }
         }
     }
