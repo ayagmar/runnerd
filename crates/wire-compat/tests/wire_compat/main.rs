@@ -6,15 +6,17 @@
 //! Both ways, with no running daemon:
 //!
 //! - The previous release reads what this one writes: every sample in `samples` parses as the previous release's
-//!   type, from `runnerd-core-previous`, the dev-dependency pinned to its commit. That catches a removed or renamed
-//!   field, an enum variant its readers have no fallback for, and a changed representation.
-//! - This one reads what the previous release wrote: `fixtures/`, which that release's samples wrote, parse as
-//!   this version's types. That catches a newly required field and a removed variant.
+//!   type, from `runnerd-core-previous`, the dev-dependency pinned to its commit, and written back it has every key
+//!   and value of the sample it read. That catches a removed or renamed field, defaulted and optional ones too, an
+//!   enum variant its readers have no fallback for or read as their fallback, and a changed representation.
+//! - This one reads what the previous release wrote: `fixtures/`, which that release's samples wrote, one file for
+//!   every document, parse as this version's types with the values they hold. That catches a newly required field
+//!   and a removed variant.
 //!
 //! A break made on purpose is one line in [`ACCEPTED`], naming the ADR that records it. An entry that no longer
 //! fails fails the check too, so the list stays true. CONTRIBUTING.md says how to move both to a new release.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::fs;
 use std::path::PathBuf;
 
@@ -60,14 +62,65 @@ type Items = BTreeMap<String, Value>;
 struct Document {
     name: &'static str,
     items: Items,
-    current: fn(&Value) -> Result<(), String>,
-    previous: fn(&Value) -> Result<(), String>,
+    current: fn(&Value) -> Result<Value, String>,
+    previous: fn(&Value) -> Result<Value, String>,
 }
 
-fn reads<T: DeserializeOwned>(value: &Value) -> Result<(), String> {
+/// What a reader makes of `value`, written back as JSON.
+fn reads<T: DeserializeOwned + Serialize>(value: &Value) -> Result<Value, String> {
     T::deserialize(value)
-        .map(drop)
-        .map_err(|error| error.to_string())
+        .map(json)
+        .map_err(|error| format!("does not parse: {error}"))
+}
+
+/// Which keys of what a reader writes back the JSON it read must have.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Keys {
+    /// Every one: a full sample sets every field, so a key it lacks is a field the reader filled in with its
+    /// default, one the writer renamed or removed.
+    Every,
+    /// Those both have: an empty sample leaves fields out, and a field newer than the JSON is the reader's own.
+    Shared,
+}
+
+/// Where what a reader `read` and wrote back differs from what was `written`, beyond keys only the writer has: a
+/// key [`Keys`] says it must have and lacks, or another value, such as a fallback variant's tag.
+fn misread(read: &Value, written: &Value, keys: Keys, path: &str) -> Option<String> {
+    match (read, written) {
+        (Value::Object(read), Value::Object(written)) => read.iter().find_map(|(key, value)| {
+            let path = if path.is_empty() {
+                key.clone()
+            } else {
+                format!("{path}.{key}")
+            };
+            match written.get(key) {
+                Some(written) => misread(value, written, keys, &path),
+                None if keys == Keys::Every => {
+                    Some(format!("reads `{path}`, which it was not sent"))
+                }
+                None => None,
+            }
+        }),
+        (Value::Array(read), Value::Array(written)) if read.len() == written.len() => read
+            .iter()
+            .zip(written)
+            .enumerate()
+            .find_map(|(index, (read, written))| {
+                misread(read, written, keys, &format!("{path}[{index}]"))
+            }),
+        _ if read == written => None,
+        _ => Some(format!("reads `{path}` as {read}, sent {written}")),
+    }
+}
+
+/// Whether `reader` reads `written` and sees what it says.
+fn check(
+    reader: fn(&Value) -> Result<Value, String>,
+    written: &Value,
+    keys: Keys,
+) -> Result<(), String> {
+    let read = reader(written)?;
+    misread(&read, written, keys, "").map_or(Ok(()), Err)
 }
 
 fn json(value: impl Serialize) -> Value {
@@ -178,15 +231,15 @@ documents! {
     "shell-query": ShellQuery => full(samples::shell_query(), None),
 }
 
-/// Whether a reader may fail on an item without a break: an event of a type it does not know, which both the
-/// client's event stream and the history skip.
-fn skipped(document: &str, error: &str) -> bool {
-    document == "events" && error.starts_with("unknown variant")
-}
-
 /// The previous release's samples, one file per document.
 fn fixtures() -> PathBuf {
     PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("fixtures")
+}
+
+/// The previous release's samples of a document, by label.
+fn fixture(name: &str) -> Items {
+    let text = fs::read_to_string(fixtures().join(format!("{name}.json"))).unwrap();
+    serde_json::from_str(&text).unwrap()
 }
 
 /// Fails, naming each, on the items that do not parse and no entry accepts, and on the entries for `reader` whose
@@ -198,7 +251,7 @@ fn assert_reads(reader: Reader, failures: &BTreeMap<String, String>) {
             .iter()
             .any(|accepted| accepted.reader == reader && accepted.item == item)
         {
-            problems.push(format!("{item} does not parse: {error}"));
+            problems.push(format!("{item} {error}"));
         }
     }
     for accepted in ACCEPTED.iter().filter(|accepted| accepted.reader == reader) {
@@ -218,12 +271,21 @@ fn assert_reads(reader: Reader, failures: &BTreeMap<String, String>) {
 
 #[test]
 fn the_previous_release_reads_what_this_one_writes() {
+    // An event of a type the previous release does not have is no break: the client's event stream and the history
+    // skip what they cannot read. One it has must still read, renamed or not.
+    let known_events = fixture("events");
     let mut failures = BTreeMap::new();
     for document in documents() {
         for (label, value) in &document.items {
-            if let Err(error) = (document.previous)(value)
-                && !skipped(document.name, &error)
-            {
+            if document.name == "events" && !known_events.contains_key(label) {
+                continue;
+            }
+            let keys = if label == "empty" {
+                Keys::Shared
+            } else {
+                Keys::Every
+            };
+            if let Err(error) = check(document.previous, value, keys) {
                 failures.insert(format!("{}/{label}", document.name), error);
             }
         }
@@ -238,25 +300,27 @@ fn this_version_reads_what_the_previous_release_wrote() {
         .map(|document| (document.name, document))
         .collect();
     let mut failures = BTreeMap::new();
-    let mut files = 0;
+    let mut names = BTreeSet::new();
     for entry in fs::read_dir(fixtures()).unwrap() {
         let path = entry.unwrap().path();
         let name = path.file_stem().unwrap().to_str().unwrap().to_owned();
-        let items: Items = serde_json::from_str(&fs::read_to_string(&path).unwrap()).unwrap();
-        files += 1;
+        names.insert(name.clone());
         let Some(document) = documents.get(name.as_str()) else {
-            failures.insert(name, "this version has no such document".to_owned());
+            failures.insert(name, "is a fixture of no document".to_owned());
             continue;
         };
-        for (label, value) in &items {
-            if let Err(error) = (document.current)(value)
-                && !skipped(document.name, &error)
-            {
+        for (label, value) in &fixture(&name) {
+            if let Err(error) = check(document.current, value, Keys::Shared) {
                 failures.insert(format!("{name}/{label}"), error);
             }
         }
     }
-    assert!(files > 0, "{PREVIOUS} has fixtures");
+    for name in documents.keys().filter(|name| !names.contains(**name)) {
+        failures.insert(
+            (*name).to_owned(),
+            format!("has no fixture: {PREVIOUS} wrote none"),
+        );
+    }
     assert_reads(Reader::Current, &failures);
 }
 

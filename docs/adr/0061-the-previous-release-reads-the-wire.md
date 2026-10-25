@@ -18,9 +18,13 @@ a newer one stored. `[notify]` webhooks parse what the daemon sends.
 - A check reads the JSON both ways between this version and the previous release, in `crates/wire-compat`:
   - The previous release reads this one's output: every sample parses as the previous release's own type, from
     `runnerd-core` pinned by commit as the dev-dependency `runnerd-core-previous`. Its real readers, not a copy or
-    a schema, so serde attributes, fallbacks and tagging count as they ship.
+    a schema, so serde attributes, fallbacks and tagging count as they ship. Parsing is not enough: a reader fills
+    a defaulted or optional field it was not sent, and reads an unknown variant as its fallback. So what it read is
+    written back and compared with the sample: every key it writes must be in a full sample, which sets every
+    field, with the same value. A key that is not is a field renamed or removed; a value that differs, a fallback.
   - This version reads the previous release's output: the samples that release wrote, committed under
-    `crates/wire-compat/fixtures/`, parse as this version's types.
+    `crates/wire-compat/fixtures/` with one file for every document, parse as this version's types, and the keys
+    both have keep their values.
 - The samples are one Rust value per document (the responses, the events, the requests, a notification), built
   from struct literals that name every field and lists of every enum variant guarded by an exhaustive `match`. A
   new field or variant does not compile until it has a sample, so the check sees every one. Where serializing skips
@@ -28,8 +32,9 @@ a newer one stored. `[notify]` webhooks parse what the daemon sends.
 - A break made on purpose is one line in `ACCEPTED` naming the failing item and the ADR that records it. An entry
   whose item parses fails the check, so the list stays true and empties as releases move on. The first entry is
   `waiting/no-pool`, under 0058.
-- A new event type is not a break: the client's event stream and the history skip an event they cannot read. A
-  known event that an older reader can no longer read is: it would be dropped silently.
+- A new event type is not a break: the client's event stream and the history skip an event they cannot read. An
+  event type the previous release's fixtures hold is: an older reader of a renamed or changed one, or this version
+  reading one removed, would drop it silently.
 - `crates/wire-compat` is a workspace of its own. In the main workspace, a second `runnerd-core` would make every
   `-p runnerd-core` ambiguous. `.github/scripts/check-wire-compat.sh` runs its fmt, clippy and tests, in the gate
   and in CI's `rust` job.

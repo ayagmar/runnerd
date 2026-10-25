@@ -87,6 +87,10 @@ break is the point, write the ADR that says what an older client or daemon does 
 `ACCEPTED` naming the item the failure names and the ADR. A new event type needs neither: clients and the history
 skip events they do not know.
 
+The check's own `crates/wire-compat/Cargo.lock` locks runnerd-core's dependencies too. After changing them, run
+`cargo check --manifest-path crates/wire-compat/Cargo.toml --tests` and commit that lock as well, or the check fails
+under `--locked`.
+
 ## Releases
 
 `.github/workflows/release.yml` runs when a tag like `v0.0.1` or `v0.0.1-rc.1` is pushed; a suffix makes a pre-release.
@@ -128,14 +132,17 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    `docker --config "$(mktemp -d)" pull ghcr.io/ayagmar/runnerd-runner:base-<version>`), `install.sh` installs the
    new version, and crates.io lists it.
 6. Make the new release the one the wire check reads against
-   ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)). On a branch from the tagged commit:
-   - write its fixtures: `cargo test --manifest-path crates/wire-compat/Cargo.toml --target-dir target/wire-compat
-     --test wire_compat -- --ignored write_fixtures` replaces `crates/wire-compat/fixtures/` with its samples;
+   ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)). On a branch from the tagged commit, in this
+   order:
    - in `crates/wire-compat/Cargo.toml`, set `runnerd-core-previous`'s `rev` to the tag's commit
      (`git rev-parse v0.0.6^{commit}`) and its comment to the tag, and `PREVIOUS` in
      `crates/wire-compat/tests/wire_compat/main.rs` to the tag; run `cargo check --manifest-path
      crates/wire-compat/Cargo.toml --tests` so its `Cargo.lock` follows;
-   - add to `documents!` the document types the release added, with their samples;
+   - add to `documents!` the document types the release added, with their samples, which now compile against the
+     previous release;
+   - write its fixtures: `cargo test --manifest-path crates/wire-compat/Cargo.toml --target-dir target/wire-compat
+     --test wire_compat -- --ignored write_fixtures` replaces `crates/wire-compat/fixtures/` with its samples, one
+     file per document (the check fails on a document without one);
    - run `.github/scripts/check-wire-compat.sh`. It names every `ACCEPTED` entry the new release no longer breaks;
      remove them.
 
