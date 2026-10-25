@@ -2346,7 +2346,8 @@ dl.health-figures {
     padding: 0.45rem 0.4rem;
   }
 
-  .block > .name {
+  .block > .name,
+  .free.closed > .name {
     font-size: 0.8125rem;
     line-height: 1.15;
     white-space: normal;
