@@ -1,5 +1,5 @@
 #!/bin/sh
-# This version and the previous release read each other's JSON (crates/wire-compat, ADR 0060). The crate is a
+# This version and the previous release read each other's JSON (crates/wire-compat, ADR 0061). The crate is a
 # workspace of its own, so the workspace's fmt, clippy and tests do not reach it.
 set -eu
 

@@ -1,4 +1,4 @@
-# The JSON this version and the previous release exchange read both ways (ADR 0060). A workspace of its own: it
+# The JSON this version and the previous release exchange read both ways (ADR 0061). A workspace of its own: it
 # depends on runnerd-core twice, this version's and the previous release's, and in the main workspace that would make
 # every `-p runnerd-core` ambiguous. .github/scripts/check-wire-compat.sh runs it.
 [workspace]

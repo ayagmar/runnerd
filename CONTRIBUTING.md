@@ -128,7 +128,7 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    `docker --config "$(mktemp -d)" pull ghcr.io/ayagmar/runnerd-runner:base-<version>`), `install.sh` installs the
    new version, and crates.io lists it.
 6. Make the new release the one the wire check reads against
-   ([ADR 0060](docs/adr/0060-the-previous-release-reads-the-wire.md)). On a branch from the tagged commit:
+   ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)). On a branch from the tagged commit:
    - write its fixtures: `cargo test --manifest-path crates/wire-compat/Cargo.toml --target-dir target/wire-compat
      --test wire_compat -- --ignored write_fixtures` replaces `crates/wire-compat/fixtures/` with its samples;
    - in `crates/wire-compat/Cargo.toml`, set `runnerd-core-previous`'s `rev` to the tag's commit

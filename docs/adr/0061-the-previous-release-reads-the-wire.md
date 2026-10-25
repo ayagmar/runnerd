@@ -1,4 +1,4 @@
-# 0060. The previous release reads the wire
+# 0061. The previous release reads the wire
 
 Status: **Accepted** (2026-10-25).
 
