@@ -345,6 +345,22 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
         .collect()
 }
 
+/// What GitHub's listing of queued jobs shows of a job a runner just took.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Listing {
+    /// It no longer lists it.
+    Current,
+    /// It still lists it until the next tick, as it does for a few seconds.
+    Stale,
+}
+
+/// When an idle runner exits without a job.
+#[derive(Debug, Clone, Copy, PartialEq)]
+enum Exit {
+    AtOnce,
+    AfterIdleTimeout,
+}
+
 /// Where a job is, as GitHub knows it.
 #[derive(Debug, Clone, PartialEq)]
 enum Phase {
@@ -549,8 +565,8 @@ impl Case {
                     },
                 );
             }
-            Step::Assign(pick) => self.assign(pick, false).await,
-            Step::AssignListed(pick) => self.assign(pick, true).await,
+            Step::Assign(pick) => self.assign(pick, Listing::Current).await,
+            Step::AssignListed(pick) => self.assign(pick, Listing::Stale).await,
             Step::Finish(pick) => {
                 let running = self.running();
                 if let Some((id, container)) = pick_from(&running, pick).cloned() {
@@ -575,8 +591,8 @@ impl Case {
             }
             Step::Lose(pick) => self.lose(pick),
             Step::StartFails => self.docker.0.lock().unwrap().fail_starts += 1,
-            Step::ExitsAtOnce(pick) => self.exit_idle(pick, false),
-            Step::ExitsIdle(pick) => self.exit_idle(pick, true),
+            Step::ExitsAtOnce(pick) => self.exit_idle(pick, Exit::AtOnce),
+            Step::ExitsIdle(pick) => self.exit_idle(pick, Exit::AfterIdleTimeout),
             Step::InspectFails(pick) => self.inspect_fails(pick),
             Step::StartedInspectFails => self.docker.0.lock().unwrap().fail_started_inspects += 1,
             Step::RemoveFails => self.docker.0.lock().unwrap().fail_removes += 1,
@@ -648,7 +664,7 @@ impl Case {
     }
 
     /// GitHub gives a queued job to an idle runner of its repository whose labels it matches.
-    async fn assign(&mut self, pick: usize, listed: bool) {
+    async fn assign(&mut self, pick: usize, listing: Listing) {
         let idle = self.idle_containers();
         let registered: BTreeSet<String> = self
             .github
@@ -690,7 +706,7 @@ impl Case {
         let repository = container.labels["runnerd.repository"].clone();
         {
             let mut github = self.github.0.lock().unwrap();
-            if listed {
+            if listing == Listing::Stale {
                 self.still_listed.insert(id);
             } else {
                 github.queued.retain(|job| job.id != id);
@@ -769,13 +785,13 @@ impl Case {
         self.took_job.remove(container);
     }
 
-    /// An idle runner's container exits without a job; `waited`: after `IDLE_TIMEOUT`.
-    fn exit_idle(&mut self, pick: usize, waited: bool) {
+    /// An idle runner's container exits without a job, at once or after `IDLE_TIMEOUT`.
+    fn exit_idle(&mut self, pick: usize, exit: Exit) {
         let idle = self.idle_containers();
         let Some(container) = pick_from(&idle, pick).cloned() else {
             return;
         };
-        if waited {
+        if exit == Exit::AfterIdleTimeout {
             for occupant in self.engine.slots.values_mut().flatten().flatten() {
                 if occupant.container == container.id {
                     occupant.started_at -= IDLE_TIMEOUT;
