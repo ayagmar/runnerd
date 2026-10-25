@@ -72,6 +72,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .cloned()
                 .collect();
             for name in due {
+                // The seed container runs at its profile's cap: a reseed waits for room in the slice and on the
+                // host, still due, as a runner does.
+                let memory = self.config.profiles.get(&name).map_or(0, |p| p.memory.0);
+                if !self.fits_seed(memory) {
+                    continue;
+                }
                 self.reseed_due.remove(&name);
                 let requested = self.reseed_requested.remove(&name);
                 let oversized = self.oversized.remove(&name);
@@ -130,6 +136,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Ok(trimmed)
             }));
         }
+    }
+
+    /// Whether a seed container of `memory` fits beside what runs now: in the slice's `MemoryMax` and in what the
+    /// host leaves the slice (ADR 0055).
+    fn fits_seed(&self, memory: u64) -> bool {
+        let in_use = self.memory_in_use();
+        self.memory_max
+            .is_none_or(|max| max.saturating_sub(in_use) >= memory)
+            && self.host_budget().is_none_or(|host| host.spare >= memory)
     }
 
     /// Rebuilds a profile's snapshot in the background; its slots start nothing until it is done. A `requested`

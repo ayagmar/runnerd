@@ -47,15 +47,9 @@ enum Bug {
     /// `a_runner_watched_through_a_failed_inspect_still_records_the_job_it_runs`: Docker fails at most one inspect
     /// of a container across a restart.
     WatchedThroughAFailedInspect,
-    /// `a_reseed_starts_only_where_its_seed_container_fits_the_budget`: seed containers are left out of the budget.
-    ReseedPastTheBudget,
 }
 
-const KNOWN_BUGS: &[Bug] = &[
-    Bug::RecoveryRemovesOnce,
-    Bug::WatchedThroughAFailedInspect,
-    Bug::ReseedPastTheBudget,
-];
+const KNOWN_BUGS: &[Bug] = &[Bug::RecoveryRemovesOnce, Bug::WatchedThroughAFailedInspect];
 
 /// A deterministic generator (SplitMix64): the same seed gives the same sequence on every machine.
 struct Rng(u64);
@@ -1022,11 +1016,6 @@ impl Case {
                 .sum();
             drop(docker);
             let seeds: u64 = budget.seed_memory.iter().map(|seed| seed.memory).sum();
-            let seeds = if self.known.contains(&Bug::ReseedPastTheBudget) {
-                0
-            } else {
-                seeds
-            };
             if caps + seeds > MEMORY_MAX {
                 return violation(
                     self,
@@ -1037,14 +1026,8 @@ impl Case {
                 );
             }
         }
-        let seeds: u64 = budget.seed_memory.iter().map(|seed| seed.memory).sum();
-        let in_use = if self.known.contains(&Bug::ReseedPastTheBudget) {
-            budget.memory_in_use - seeds
-        } else {
-            budget.memory_in_use
-        };
         if let Some(max) = budget.memory_max
-            && in_use > max
+            && budget.memory_in_use > max
         {
             return violation(
                 self,
@@ -1423,7 +1406,6 @@ async fn a_runner_watched_through_a_failed_inspect_still_records_the_job_it_runs
 }
 
 #[tokio::test]
-#[ignore = "bug: a reseed starts its seed container at its profile's cap past the slice's MemoryMax"]
 async fn a_reseed_starts_only_where_its_seed_container_fits_the_budget() {
     let steps = [
         // A light job runs in light's slot 1, so the light profile is due a reseed once its slots are free.
