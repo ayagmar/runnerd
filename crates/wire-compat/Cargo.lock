@@ -67,7 +67,7 @@ dependencies = [
 
 [[package]]
 name = "runnerd-core"
-version = "0.0.15"
+version = "0.0.16"
 dependencies = [
  "serde",
  "thiserror",
@@ -80,7 +80,7 @@ name = "runnerd-wire-compat"
 version = "0.0.0"
 dependencies = [
  "runnerd-core 0.0.14",
- "runnerd-core 0.0.15",
+ "runnerd-core 0.0.16",
  "serde",
  "serde_json",
 ]
