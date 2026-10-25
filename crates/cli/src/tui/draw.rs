@@ -473,45 +473,15 @@ fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
 }
 
 /// The health line's figures, each with its rank for [`drop_least`]; `None` marks where the hours' bars go.
-/// How many runners run a job, and the others as `, 1 starting, 2 warm`, or nothing.
-fn runners(status: &Status) -> (usize, String) {
-    let mut running = 0;
-    let (mut starting, mut warm) = (0, 0);
-    for runner in status
-        .profiles
-        .iter()
-        .flat_map(|profile| &profile.slots)
-        .filter_map(|slot| slot.runner.as_ref())
-    {
-        match (runner.busy, runner.warm) {
-            (true, _) => running += 1,
-            (false, false) => starting += 1,
-            (false, true) => warm += 1,
-        }
-    }
+fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
+    let health = app.live.status.health(now);
+    let (running, slots) = (health.running, health.slots);
     let mut idle = String::new();
-    for (count, what) in [(starting, "starting"), (warm, "warm")] {
+    for (count, what) in [(health.starting, "starting"), (health.warm, "warm")] {
         if count > 0 {
             let _ = write!(idle, ", {count} {what}");
         }
     }
-    (running, idle)
-}
-
-fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
-    let status = &app.live.status;
-    let (running, idle) = runners(status);
-    let slots: usize = status
-        .profiles
-        .iter()
-        .map(|profile| profile.slots.len())
-        .sum();
-    let queued = &status.queued;
-    let oldest = queued
-        .iter()
-        .filter(|job| job.queued_at > 0)
-        .map(|job| job.queued_at)
-        .min();
     let sep = || Span::styled(" · ", theme.dim());
     let mut items: Vec<(u8, Option<Vec<Span<'static>>>)> = vec![(
         0,
@@ -528,23 +498,19 @@ fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'
         Some(vec![
             sep(),
             Span::styled(
-                queued.len().to_string(),
-                if queued.is_empty() {
-                    bold()
-                } else {
-                    theme.wait().add_modifier(Modifier::BOLD)
+                health.waiting.to_string(),
+                match health.waiting_tone() {
+                    api::Tone::Warn => theme.wait().add_modifier(Modifier::BOLD),
+                    _ => bold(),
                 },
             ),
             Span::raw(" waiting"),
         ]),
     ));
-    if let Some(oldest) = oldest {
+    if let Some(oldest) = health.oldest_wait {
         items.push((
             1,
-            Some(vec![Span::raw(format!(
-                ", oldest {}",
-                duration(now.saturating_sub(oldest))
-            ))]),
+            Some(vec![Span::raw(format!(", oldest {}", duration(oldest)))]),
         ));
     }
     if let Some(day) = &app.activity {
@@ -569,10 +535,9 @@ fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'
                 sep(),
                 Span::styled(
                     day.failed.to_string(),
-                    if day.runner_failed > 0 {
-                        theme.tone(Tone::Bad)
-                    } else {
-                        bold()
+                    match day.failed_tone() {
+                        api::Tone::Neutral => bold(),
+                        tone => theme.tone(tone.into()),
                     },
                 ),
                 Span::raw(" failed"),
@@ -1012,6 +977,20 @@ impl Usage<'_> {
     }
 }
 
+/// The slots' heading: how many run a job, as the health line counts them, and how many jobs wait.
+fn slots_note(app: &App, now: u64) -> String {
+    let health = app.live.status.health(now);
+    format!("{} running · {} queued", health.running, health.waiting)
+}
+
+/// `line` as a sentence, its first letter a capital.
+fn sentence(line: &str) -> String {
+    let mut chars = line.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
 /// `3/9 Run tests`: the step a job is in.
 fn step_label(job: &Job) -> Option<(String, String)> {
     watch::current_step(job)
@@ -1019,16 +998,8 @@ fn step_label(job: &Job) -> Option<(String, String)> {
 }
 
 fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
-    let running = app.live.running.len();
-    let queued = app.live.status.queued.len();
     let [title, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    heading(
-        frame,
-        title,
-        "Slots",
-        format!("{running} running · {queued} queued"),
-        theme,
-    );
+    heading(frame, title, "Slots", slots_note(app, now), theme);
     let focused = app.pane == Pane::Slots;
     let width = usize::from(rest.width);
     let lines: Vec<Line<'_>> = app
@@ -1040,8 +1011,9 @@ fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: The
                 Span::styled("■ ", style),
                 Span::styled(fit(&format!("{} {}", profile.name, slot.slot), 9), bold()),
             ];
-            match (slot_job(app, profile, slot), &slot.runner) {
-                (Some(job), _) => {
+            let state = Status::slot_state(profile, slot);
+            match slot_job(app, profile, slot).filter(|_| state.is_running()) {
+                Some(job) => {
                     let usage = Usage::of(app, profile, job);
                     let (count, name) = step_label(job).unwrap_or_default();
                     let ran = job
@@ -1082,15 +1054,7 @@ fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: The
                         spans.push(Span::styled(usage.cpu(6), theme.cpu()));
                     }
                 }
-                (None, Some(runner)) if runner.warm => spans.push(Span::styled(
-                    format!("warm runner for {}, waiting for a job", runner.repository),
-                    theme.dim(),
-                )),
-                (None, Some(runner)) => spans.push(Span::styled(
-                    format!("runner for {} waiting for its job", runner.repository),
-                    theme.dim(),
-                )),
-                (None, None) => spans.push(Span::styled("idle", theme.dim())),
+                None => spans.push(Span::styled(state.line(), theme.dim())),
             }
             let line = Line::from(spans);
             if focused && position == app.slot {
@@ -1112,17 +1076,7 @@ fn slot_cards(
     theme: Theme,
 ) {
     let [title, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    heading(
-        frame,
-        title,
-        "Slots",
-        format!(
-            "{} running · {} queued",
-            app.live.running.len(),
-            app.live.status.queued.len()
-        ),
-        theme,
-    );
+    heading(frame, title, "Slots", slots_note(app, now), theme);
     let slots: Vec<_> = app.slots().collect();
     let rows =
         Layout::vertical(vec![Constraint::Length(7); slots.len().div_ceil(columns)]).split(rest);
@@ -1207,8 +1161,9 @@ fn card(
     now: u64,
     theme: Theme,
 ) -> Vec<Line<'static>> {
+    let state = Status::slot_state(profile, slot);
     match (slot_job(app, profile, slot), &slot.runner) {
-        (Some(job), _) => {
+        (Some(job), _) if state.is_running() => {
             let usage = Usage::of(app, profile, job);
             let (count, name) = step_label(job).unwrap_or_default();
             let ran = job
@@ -1247,24 +1202,14 @@ fn card(
                 ]),
             ]
         }
-        (None, Some(runner)) => vec![
-            Line::styled(
-                fit(
-                    &if runner.warm {
-                        format!("Warm runner for {}, waiting for a job", runner.repository)
-                    } else {
-                        format!("Runner for {} waiting for its job", runner.repository)
-                    },
-                    width,
-                ),
-                theme.dim(),
-            ),
+        (_, Some(runner)) => vec![
+            Line::styled(fit(&sentence(&state.line()), width), theme.dim()),
             Line::styled(
                 format!("started {}", human::ago(runner.started_at, now)),
                 theme.dim(),
             ),
         ],
-        (None, None) => vec![Line::styled("Idle", theme.dim())],
+        (_, None) => vec![Line::styled(sentence(&state.line()), theme.dim())],
     }
 }
 

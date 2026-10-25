@@ -52,6 +52,8 @@ mod insights;
 mod jobs;
 mod records;
 mod sizing;
+mod slots;
+mod tone;
 mod units;
 
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
@@ -83,6 +85,8 @@ pub use sizing::{
     Advice, AutoPlan, JobSizing, PAGE_CACHE_ROOM, Peaks, ProfileSizing, Resize, Sizing,
     SizingChange, SizingHold, SizingQuery, Spread, Starts, period,
 };
+pub use slots::{Health, SlotState};
+pub use tone::Tone;
 pub use units::{ago, cores_used, cpu_time, duration, in_cores};
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only

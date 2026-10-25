@@ -3053,7 +3053,7 @@ async fn a_warm_runner_reads_as_warm_not_as_a_runner_waiting_for_its_job() {
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
     assert!(
-        body.contains("Warm, waiting for a job"),
+        body.contains("A warm runner for halyard/ledger, waiting for a job, "),
         "its slot card: {body}"
     );
     assert!(

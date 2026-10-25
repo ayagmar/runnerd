@@ -2455,7 +2455,7 @@ fn a_warm_runner_reads_as_warm_not_as_a_runner_stuck_waiting_for_its_job() {
     );
     assert!(!health.contains("starting"), "{health}");
     assert!(
-        shown.contains("Warm runner for halyard/ledger, waiting for a job"),
+        shown.contains("A warm runner for halyard/ledger, waiting for a job"),
         "its slot card says so: {shown}"
     );
     assert!(!shown.contains("waiting for its job"), "{shown}");

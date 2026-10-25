@@ -25,6 +25,18 @@ pub(crate) enum Tone {
     Busy,
 }
 
+impl From<api::Tone> for Tone {
+    fn from(tone: api::Tone) -> Tone {
+        match tone {
+            api::Tone::Good => Tone::Good,
+            api::Tone::Warn => Tone::Busy,
+            api::Tone::Bad => Tone::Bad,
+            api::Tone::Neutral => Tone::Plain,
+            api::Tone::Quiet => Tone::Dim,
+        }
+    }
+}
+
 /// Colours text, or leaves it plain.
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct Paint {
@@ -194,20 +206,12 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
     for profile in &status.profiles {
         for slot in &profile.slots {
             let mut row = vec![plain(&profile.name), plain(slot.slot.to_string())];
-            match &slot.runner {
-                Some(runner) => {
-                    row.push(if runner.busy {
-                        cell("busy", Tone::Busy)
-                    } else {
-                        cell("idle", Tone::Plain)
-                    });
-                    row.push(plain(&runner.repository));
-                    row.push(cell(&runner.name, Tone::Dim));
-                    row.push(plain(duration(now.saturating_sub(runner.started_at))));
-                }
-                None => {
-                    row.push(cell("free", Tone::Dim));
-                }
+            let state = Status::slot_state(profile, slot);
+            row.push(cell(state.word(), state.tone().into()));
+            if let Some(runner) = &slot.runner {
+                row.push(plain(&runner.repository));
+                row.push(cell(&runner.name, Tone::Dim));
+                row.push(plain(duration(now.saturating_sub(runner.started_at))));
             }
             slots.row(row);
         }
