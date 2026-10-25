@@ -118,10 +118,14 @@ impl Host {
             kvm: Path::new("/dev/kvm").exists(),
             memory: {
                 let paths = Paths::default();
-                let slice = config.map_or(0, |config| {
-                    metrics::read_unavailable(&paths.slice(&config.host.slice))
-                });
-                metrics::read_host_memory(&paths, slice, 0)
+                let slice = config.map(|config| config.host.slice.as_str());
+                let unavailable =
+                    slice.map_or(0, |slice| metrics::read_unavailable(&paths.slice(slice)));
+                metrics::read_host_memory(&paths, unavailable, 0).map(|memory| api::HostMemory {
+                    holders: slice
+                        .map_or_else(Vec::new, |slice| metrics::read_holders(&paths, slice)),
+                    ..memory
+                })
             },
         }
     }
@@ -766,7 +770,7 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
             },
         )
     };
-    let budget = host::budget(*memory, memory.slice, host::Remembered::default());
+    let budget = host::budget(memory.clone(), memory.slice, host::Remembered::default());
     let detail = format!(
         "{} of {} available, {} to spare for runners past a {} margin; every task waited for memory {}",
         ByteSize(memory.available),
@@ -798,7 +802,7 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
     Check {
         name: "host memory".to_owned(),
         status: Status::Warn,
-        detail: format!("{detail}: {why}"),
+        detail: format!("{detail}; {}: {why}", memory.outside_line()),
         fix: Some(
             "close what uses the host's memory beside the runners; runnerd waits for it by itself"
                 .to_owned(),

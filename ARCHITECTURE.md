@@ -144,7 +144,9 @@ queued → slot → container → removed
 5. While a job runs the engine records it in the store: the job's ID from the runner's `_diag` Worker log
    (`observe::capture`, run in the container with `docker exec`), its steps from `GithubApi::job`, its log from the
    runner's `_diag/pages`, CPU, memory and `memory.events` from the container's cgroup every 2 s (`observe::metrics`,
-   which reads the host's `/proc/meminfo` and `/proc/pressure/memory` beside them), and the
+   which reads the host's `/proc/meminfo` and `/proc/pressure/memory` beside them, and every 30 s the name and
+   memory of each process outside the slice, never its command line
+   ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), and the
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`).
 6. When a profile is idle after its slot 1 ran a job, or after the caches' check measured its snapshot over

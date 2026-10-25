@@ -10,7 +10,9 @@
 //! is short of memory, not after. Whether a cgroup met its limit comes from `memory.events`, never from how close
 //! a sample came to it. A container whose files vanish ends its series; that is not an error. Beside the slice, it
 //! reads the host's memory: `MemTotal` and `MemAvailable` from `/proc/meminfo` and the stall shares of
-//! `/proc/pressure/memory`.
+//! `/proc/pressure/memory`; and, every `HOLDERS_INTERVAL`, which programs outside the slice hold the most of it, by
+//! the name and memory lines of each `/proc/<pid>/status` whose `/proc/<pid>/cgroup` is not in the slice. Only a
+//! program's name leaves this module, never its command line, arguments, environment or paths.
 
 use std::collections::HashMap;
 use std::io;
@@ -27,6 +29,16 @@ use crate::time;
 
 /// How often running containers are sampled.
 pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+
+/// How often the host's processes are read for what holds its memory outside the slice: they are many, and what
+/// they hold changes slowly.
+pub const HOLDERS_INTERVAL: Duration = Duration::from_secs(30);
+
+/// How many programs `read_holders` names at most.
+pub const HOLDERS: usize = 3;
+
+/// What a program must hold for `read_holders` to name it, in bytes.
+pub const HOLDER_FLOOR: u64 = 512 << 20;
 
 /// Where the cgroup and proc file systems are mounted: the host's, or a test's fixture tree.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -200,7 +212,73 @@ pub fn read_host_memory(paths: &Paths, slice: u64, at: u64) -> Option<api::HostM
         slice,
         some: line("some"),
         full: line("full"),
+        holders: Vec::new(),
     })
+}
+
+/// The `HOLDERS` programs outside `slice` holding the most memory, largest first, none under `HOLDER_FLOOR`: the
+/// processes in `/proc` whose cgroup is not the slice or under it, grouped by name (`Name` in `/proc/<pid>/status`,
+/// the kernel's escaped `comm`), each holding its `RssAnon` and `RssShmem`. A process that ends while it is read,
+/// or a kernel thread, which holds neither, counts for nothing.
+pub fn read_holders(paths: &Paths, slice: &str) -> Vec<api::Holder> {
+    let slice = paths.slice(slice);
+    let slice = slice.strip_prefix(&paths.cgroup).unwrap_or(&slice);
+    let Ok(entries) = std::fs::read_dir(&paths.proc) else {
+        return Vec::new();
+    };
+    let mut held: HashMap<String, u64> = HashMap::new();
+    for entry in entries.flatten() {
+        let name = entry.file_name();
+        if !name
+            .to_str()
+            .is_some_and(|name| name.bytes().all(|byte| byte.is_ascii_digit()))
+        {
+            continue;
+        }
+        let dir = entry.path();
+        let Ok(cgroup) = read(&dir.join("cgroup")) else {
+            continue;
+        };
+        let in_slice = cgroup.lines().any(|line| {
+            line.strip_prefix("0::")
+                .is_some_and(|path| Path::new(path.trim_start_matches('/')).starts_with(slice))
+        });
+        if in_slice {
+            continue;
+        }
+        let Ok(status) = read(&dir.join("status")) else {
+            continue;
+        };
+        let line = |key: &str| {
+            status
+                .lines()
+                .find_map(|line| line.strip_prefix(key)?.strip_prefix(':'))
+        };
+        let kib = |key: &str| {
+            line(key)
+                .and_then(|value| value.trim().strip_suffix("kB")?.trim().parse::<u64>().ok())
+                .unwrap_or(0)
+        };
+        let memory = kib("RssAnon")
+            .saturating_add(kib("RssShmem"))
+            .saturating_mul(1024);
+        let Some(name) = line("Name") else {
+            continue;
+        };
+        let name: String = name.trim().chars().filter(|c| !c.is_control()).collect();
+        if memory > 0 {
+            let total = held.entry(name).or_default();
+            *total = total.saturating_add(memory);
+        }
+    }
+    let mut holders: Vec<api::Holder> = held
+        .into_iter()
+        .filter(|(_, memory)| *memory >= HOLDER_FLOOR)
+        .map(|(name, memory)| api::Holder { name, memory })
+        .collect();
+    holders.sort_by(|a, b| b.memory.cmp(&a.memory).then_with(|| a.name.cmp(&b.name)));
+    holders.truncate(HOLDERS);
+    holders
 }
 
 /// Bytes received and sent by a process's network namespace on its `eth*` interfaces: the container's own
@@ -249,6 +327,8 @@ pub struct Sampler {
     slice: String,
     previous: HashMap<String, (u64, u64)>,
     previous_host: Option<(u64, u64)>,
+    /// The last `read_holders` and when (ms) it was read.
+    holders: Option<(u64, Vec<api::Holder>)>,
 }
 
 /// Millicores used between two readings of CPU time (µs) taken at two times (ms).
@@ -269,14 +349,23 @@ impl Sampler {
             slice: slice.to_owned(),
             previous: HashMap::new(),
             previous_host: None,
+            holders: None,
         }
     }
 
     /// The host's memory at `at` (ms), beside what the slice holds that `MemAvailable` leaves out
-    /// (`read_unavailable`).
-    pub fn host_memory(&self, at: u64) -> Option<api::HostMemory> {
+    /// (`read_unavailable`), with what holds it outside the slice as last read, at most `HOLDERS_INTERVAL` ago.
+    pub fn host_memory(&mut self, at: u64) -> Option<api::HostMemory> {
         let slice = read_unavailable(&self.paths.slice(&self.slice));
-        read_host_memory(&self.paths, slice, at / 1000)
+        let mut memory = read_host_memory(&self.paths, slice, at / 1000)?;
+        let every = u64::try_from(HOLDERS_INTERVAL.as_millis()).unwrap_or(u64::MAX);
+        let holders = match self.holders.take() {
+            Some((then, holders)) if at.saturating_sub(then) < every => (then, holders),
+            _ => (at, read_holders(&self.paths, &self.slice)),
+        };
+        memory.holders.clone_from(&holders.1);
+        self.holders = Some(holders);
+        Some(memory)
     }
 
     /// One sample of every tracked container that still exists, and of the slice, at `at` (ms). A container

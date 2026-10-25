@@ -320,7 +320,7 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
     if let Some(cpu) = budget.cpu {
         let _ = write!(out, "; {}", cpu.line());
     }
-    if let Some(host) = budget.host {
+    if let Some(host) = &budget.host {
         let _ = write!(out, "; {}", host.line());
     }
     if let Some(host) = &state.host {

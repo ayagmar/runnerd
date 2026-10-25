@@ -253,8 +253,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Budget {
                 memory: admitting.free,
                 cpu: admitting.cpu.as_ref().map(|cpu| cpu.free),
-                host: admitting.host.map(|host| host.spare),
-                held: admitting.held || admitting.host.is_some_and(|host| host.stalled),
+                host: admitting.host.as_ref().map(|host| host.spare),
+                held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
             },
             SystemTime::now(),
         );

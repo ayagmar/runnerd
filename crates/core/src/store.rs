@@ -555,7 +555,7 @@ impl Store {
 
     /// The latest reading of the host's memory; `None` before the first.
     pub fn latest_host_memory(&self) -> Option<api::HostMemory> {
-        *lock(&self.latest_host_memory)
+        lock(&self.latest_host_memory).clone()
     }
 
     /// Adds `ms` to how long each of `jobs` waited because the host's memory could not take its runner, which

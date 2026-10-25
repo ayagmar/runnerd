@@ -291,7 +291,7 @@ fn budget_line(status: &Status) -> String {
     if let Some(cpu) = budget.cpu {
         let _ = write!(line, "; {}", cpu.line());
     }
-    if let Some(host) = budget.host {
+    if let Some(host) = &budget.host {
         let _ = write!(line, "; {}", host.line());
     }
     line

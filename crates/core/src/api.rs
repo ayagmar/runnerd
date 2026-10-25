@@ -65,7 +65,7 @@ pub use insights::{
 };
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
-    CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, HostMemory, HostSample,
+    CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Holder, HostMemory, HostSample,
     HostSampleQuery, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState,
     JobSummary, LogQuery, LogSummary, Pressure, Sample, SampleSeries, Started, Stats, StatsQuery,
     StatsRow, Step, Timeline,
@@ -154,7 +154,7 @@ pub struct Budget {
 
 /// What the host's memory leaves the runners (ADR 0055). New runners fit in the lower of `MemoryMax` and
 /// `limit`; running ones are never stopped for it.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostBudget {
     /// The reading it comes from.
     pub memory: HostMemory,
@@ -169,7 +169,8 @@ pub struct HostBudget {
 
 impl HostBudget {
     /// The host's line as clients show it, such as `host: 31G of 64G available, 1.5% stalled for memory; leaves the
-    /// slice 40G` or, while it stalls, `…; stalling, so no runner starts`.
+    /// slice 40G` or, while it stalls, `…; stalling, so no runner starts`; with programs outside the slice large
+    /// enough to name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`).
     pub fn line(&self) -> String {
         let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
         let mut line = format!(
@@ -180,10 +181,15 @@ impl HostBudget {
         if let Some(full) = self.memory.full.filter(|full| full.avg10 > 0) {
             line = format!("{line}, {} stalled for memory", percent(full.avg10));
         }
-        if self.stalled {
+        line = if self.stalled {
             format!("{line}; stalling, so no runner starts")
         } else {
             format!("{line}; leaves the slice {}", size(self.limit))
+        };
+        if self.memory.holders.is_empty() {
+            line
+        } else {
+            format!("{line}; {}", self.memory.outside_line())
         }
     }
 }
@@ -540,10 +546,7 @@ impl Waiting {
                     )
                 };
                 match host {
-                    Some(host) => format!(
-                        "{reason}; programs outside CI hold {}",
-                        size(host.memory.outside())
-                    ),
+                    Some(host) => format!("{reason}; {}", host.memory.outside_line()),
                     None => reason,
                 }
             }

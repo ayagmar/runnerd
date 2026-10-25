@@ -431,7 +431,7 @@ fn readout(
                     @if let Some(cpu) = budget.cpu {
                         span.muted { " · " (cpu.line()) }
                     }
-                    @if let Some(host) = budget.host {
+                    @if let Some(host) = &budget.host {
                         span.muted { " · " (host.line()) }
                     }
                 }

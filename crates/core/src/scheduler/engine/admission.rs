@@ -336,7 +336,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         admitting: &Admitting,
         waiting: &BTreeMap<u64, api::Waiting>,
     ) {
-        let stalled = admitting.host.is_some_and(|host| host.stalled);
+        let stalled = admitting.host.as_ref().is_some_and(|host| host.stalled);
         let short = stalled
             || waiting
                 .values()
@@ -357,7 +357,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         match (short, was_short) {
             (true, false) => {
-                if let Some(host) = admitting.host {
+                if let Some(host) = &admitting.host {
                     info!(
                         "the host is short of memory ({} available{}): no runner starts that does not fit {} \
                          beside what runs",
