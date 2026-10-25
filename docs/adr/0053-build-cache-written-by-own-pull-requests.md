@@ -6,7 +6,7 @@ Status: **Accepted** (2026-10-24). Amends [0052](0052-shared-build-cache.md).
 
 Under 0052 only a push, schedule or manual run of the default branch (or a `[caches.build] branches` one) writes.
 So `main` reads only what the previous `main` run built, and every task the merged pull request changed misses. On
-the owner's trellis, which requires pull requests to be up to date before they merge, a merge's tree is exactly
+the owner's halyard/ledger, which requires pull requests to be up to date before they merge, a merge's tree is exactly
 what the pull request's last run built, yet 20 of 32 `main` Android gates missed (median 197 s against 33 s for a
 hit), about 70 runner-minutes a day. The owner is the only collaborator of the repositories runnerd serves and
 asked for pull requests to write, per repository.
