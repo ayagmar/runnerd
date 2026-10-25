@@ -3,8 +3,8 @@
 # Sourced by entrypoint.sh, job-started.sh, job-cleanup.sh and seed.sh, and by runnerd's cache tests.
 
 # The slot's copy-on-write layers, as name:path. Each path shows the profile's read-only snapshot
-# /base/<name> (seed.sh) over what the image has there, with this slot's own changes on top in
-# /state/<name>/upper.
+# /base/<name> (seed.sh) over the whiteouts of what the snapshot no longer holds of the image, in
+# /base/<name>.hidden, over what the image has there, with this slot's own changes on top in /state/<name>/upper.
 # An image without a layer's path (base has no Android SDK) skips that layer.
 LAYERS=(cache:/home/runner/.cache tools:/home/runner/_work/_tool android:/opt/android-sdk)
 
@@ -97,7 +97,10 @@ mount_layers() {
         [ -z "$interrupted" ] || rm -rf "/state/$name"
         [ "$(size_gb "/state/$name")" -le "$LAYER_BUDGET_GB" ] || rm -rf "/state/$name"
         lower=$path
-        [ -n "$interrupted" ] || [ ! -d "/base/$name" ] || lower=/base/$name:$lower
+        if [ -z "$interrupted" ]; then
+            [ ! -d "/base/$name.hidden" ] || lower=/base/$name.hidden:$lower
+            [ ! -d "/base/$name" ] || lower=/base/$name:$lower
+        fi
         mkdir -p "/state/$name/upper" "/state/$name/work"
         if [ "$name" = cache ]; then
             drop_cache_secrets "/state/$name/upper"

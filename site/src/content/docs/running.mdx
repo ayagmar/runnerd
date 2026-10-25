@@ -65,7 +65,7 @@ A job that finds no runner waits for the next poll, a registration and a contain
 
 ## Warm caches
 
-A slot is one concurrent job of a profile. Each job gets a new container, but the slot keeps a volume over the profile's read-only snapshot. The images point every common toolchain's cache into `~/.cache`: rustup and cargo, Go modules and builds, Gradle, Maven, npm, Yarn, Bun, pip, uv, Poetry, pub, Deno and coursier.
+A slot is one concurrent job of a profile. Each job gets a new container, but the slot keeps a volume over the profile's read-only snapshot. What a job deletes of the image, or replaces, stays deleted for every slot once it is in the snapshot. The images point every common toolchain's cache into `~/.cache`: rustup and cargo, Go modules and builds, Gradle, Maven, npm, Yarn, Bun, pip, uv, Poetry, pub, Deno and coursier.
 
 <Caches />
 
