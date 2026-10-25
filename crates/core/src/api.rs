@@ -82,11 +82,12 @@ pub use records::{
     SHELL_PROTOCOL, ShellQuery,
 };
 pub use sizing::{
-    Advice, AutoPlan, JobSizing, PAGE_CACHE_ROOM, Peaks, ProfileSizing, Resize, Sizing,
-    SizingChange, SizingHold, SizingQuery, Spread, Starts, period,
+    Advice, AutoPlan, GRANULE, JobSizing, Need, PAGE_CACHE_ROOM, Peaks, ProfilePlan, ProfileSizing,
+    Resize, SAMPLE_INTERVAL, Sizing, SizingChange, SizingHold, SizingQuery, Spread, Starts, need,
+    period, sampled_note,
 };
 pub use slots::{Health, SlotState};
-pub use tone::Tone;
+pub use tone::{Tone, Toned};
 pub use units::{ago, cores_used, cpu_time, duration, in_cores};
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only

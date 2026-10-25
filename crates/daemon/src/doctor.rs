@@ -6,7 +6,7 @@ use std::path::Path;
 use std::process::Command;
 
 use runnerd_core::admission::host;
-use runnerd_core::api::{self, Advice, Check, CheckStatus as Status, PAGE_CACHE_ROOM, Sizing};
+use runnerd_core::api::{self, Check, CheckStatus as Status, Sizing};
 use runnerd_core::config::{self, Admission, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::observe::metrics::{self, Paths};
@@ -816,63 +816,7 @@ fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
         Ok(sizing) => sizing,
         Err(error) => return skip("sizing", &format!("cannot read the job history: {error}")),
     };
-    let changes: Vec<_> = sizing
-        .profiles
-        .iter()
-        .filter(|profile| {
-            profile.advice.change().is_some()
-                || matches!(profile.advice, Advice::SliceTooSmall { .. })
-        })
-        .collect();
-    let raise = changes.iter().any(|profile| {
-        matches!(
-            profile.advice,
-            Advice::Raise { .. } | Advice::SliceTooSmall { .. }
-        )
-    });
-    let detail = if changes.is_empty() {
-        let too_few = sizing
-            .profiles
-            .iter()
-            .any(|profile| matches!(profile.advice, Advice::TooFew { .. }));
-        if too_few {
-            format!(
-                "some profiles ran fewer than {} jobs; runnerctl sizing shows their peaks",
-                sizing.min_jobs
-            )
-        } else {
-            format!(
-                "every profile's memory fits its jobs' largest peak + {}%, at least {} for page cache",
-                sizing.margin,
-                ByteSize(PAGE_CACHE_ROOM)
-            )
-        }
-    } else {
-        changes
-            .iter()
-            .map(|profile| format!("{}: {}", profile.name, sizing.advice_line(profile)))
-            .collect::<Vec<_>>()
-            .join("; ")
-    };
-    Check {
-        name: "sizing".to_owned(),
-        status: if raise { Status::Warn } else { Status::Info },
-        detail,
-        fix: (!changes.is_empty()).then(|| {
-            changes
-                .iter()
-                .map(|profile| match profile.advice {
-                    Advice::SliceTooSmall { .. } => format!(
-                        "raise MemoryMax in the slice's unit file, sudo systemctl daemon-reload, then: \
-                         runnerctl sizing apply {}",
-                        profile.name
-                    ),
-                    _ => format!("runnerctl sizing apply {}", profile.name),
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }),
-    }
+    sizing.doctor_check()
 }
 
 fn pass(name: &str, detail: String) -> Check {

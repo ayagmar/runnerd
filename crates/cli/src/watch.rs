@@ -347,7 +347,10 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
         "\n{}",
         paint.paint(
             Tone::Dim,
-            "CPU and MEM are the last sample, taken every 2 s. Ctrl-C quits."
+            &format!(
+                "CPU and MEM are the last sample, taken every {} s. Ctrl-C quits.",
+                runnerd_core::api::SAMPLE_INTERVAL
+            )
         )
     );
     out

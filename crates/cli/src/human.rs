@@ -6,8 +6,8 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    self, Advice, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind,
-    Insights, Job, JobPage, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, Records,
+    self, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind, Insights,
+    Job, JobPage, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, Records,
     RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
@@ -180,9 +180,6 @@ pub(crate) fn queued_ago(job: &QueuedJob, now: u64) -> String {
     }
 }
 
-const SAMPLED_NOTE: &str =
-    "memory peaks are sampled every 2 s; spikes shorter than that do not show";
-
 /// `runnerctl status`.
 pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
     let mut out = String::new();
@@ -309,7 +306,11 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
         .iter()
         .any(|job| job.metrics.memory_peak.is_some())
     {
-        let _ = writeln!(out, "{}", paint.paint(Tone::Dim, SAMPLED_NOTE));
+        let _ = writeln!(
+            out,
+            "{}",
+            paint.paint(Tone::Dim, &api::sampled_note(api::SAMPLE_INTERVAL))
+        );
     }
     if let Some(next) = page.next {
         let _ = writeln!(
@@ -572,7 +573,11 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
     ]);
     out.push_str(&usage.render(paint, "  "));
     if metrics.memory_peak.is_some() {
-        let _ = writeln!(out, "  {}", paint.paint(Tone::Dim, SAMPLED_NOTE));
+        let _ = writeln!(
+            out,
+            "  {}",
+            paint.paint(Tone::Dim, &api::sampled_note(api::SAMPLE_INTERVAL))
+        );
     }
     out
 }
@@ -585,12 +590,9 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
         paint.paint(
             Tone::Dim,
             &format!(
-                "from the last {} of history; peaks are sampled every {} s, so advice adds {}% to the largest \
-                 and waits for {} jobs{}",
-                duration(now.saturating_sub(sizing.since)),
-                sizing.sample_interval,
-                sizing.margin,
-                sizing.min_jobs,
+                "from {} of history; {}{}",
+                duration(sizing.covered()),
+                sizing.method_line(),
                 if sizing.auto {
                     "; auto sizing applies it"
                 } else {
@@ -619,7 +621,7 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
                 out,
                 "  warm runners took {} of {} jobs: waited p50 {}, the others {}",
                 starts.warm,
-                starts.warm + starts.cold,
+                starts.total(),
                 duration(starts.warm_p50),
                 duration(starts.cold_p50),
             );
@@ -647,13 +649,11 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
                 cores_used(peaks.cpu.max),
             );
         }
-        let tone = match profile.advice {
-            Advice::Raise { .. } | Advice::SliceTooSmall { .. } => Tone::Bad,
-            Advice::Lower { .. } => Tone::Busy,
-            Advice::Keep { .. } => Tone::Good,
-            Advice::TooFew { .. } => Tone::Dim,
-        };
-        let _ = writeln!(out, "  {}", paint.paint(tone, &sizing.advice_line(profile)));
+        let _ = writeln!(
+            out,
+            "  {}",
+            paint.paint(profile.advice.tone().into(), &sizing.advice_line(profile))
+        );
         out.push_str(&sizing_changes(sizing, &profile.name, now, paint));
         // Under auto sizing the daemon applies it.
         if !sizing.auto && profile.advice.change().is_some() {
@@ -715,15 +715,8 @@ fn sizing_jobs(jobs: &[JobSizing], paint: Paint) -> String {
     ])
     .right(&[2, 3, 4, 5, 6, 7, 8]);
     for job in jobs {
-        let needs = match job.advice {
-            Advice::TooFew { .. } => {
-                cell(format!("max {}", bytes(job.peaks.memory.max)), Tone::Dim)
-            }
-            Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
-                cell(format!("{} > cap", bytes(memory)), Tone::Bad)
-            }
-            Advice::Keep { memory } | Advice::Lower { memory, .. } => plain(bytes(memory)),
-        };
+        let needs = job.needs();
+        let needs = cell(needs.text, needs.tone.into());
         table.row(vec![
             plain(&job.repository),
             cell(

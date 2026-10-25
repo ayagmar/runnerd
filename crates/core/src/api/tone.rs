@@ -15,3 +15,12 @@ pub enum Tone {
     /// A fact in the background, such as an idle slot or a note.
     Quiet,
 }
+
+/// Text and what it means, for a client to colour.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Toned {
+    /// What it says.
+    pub text: String,
+    /// What it means.
+    pub tone: Tone,
+}

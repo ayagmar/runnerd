@@ -8,6 +8,10 @@ use serde::{Deserialize, Serialize};
 use crate::api::AdmissionPolicy;
 use crate::config::ByteSize;
 
+mod shown;
+
+pub use shown::{GRANULE, Need, ProfilePlan, SAMPLE_INTERVAL, need, sampled_note};
+
 /// `GET /v1/sizing` query parameters.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SizingQuery {
@@ -375,14 +379,7 @@ impl Sizing {
     pub(crate) fn memory_line(&self, profile: &ProfileSizing) -> String {
         let size = |bytes: u64| ByteSize(bytes).to_string();
         let peaks = &profile.peaks;
-        let need = if peaks.memory.max * u64::from(self.margin) / 100 >= PAGE_CACHE_ROOM {
-            format!("its largest peak + {}%", self.margin)
-        } else {
-            format!(
-                "its largest peak + {} for page cache",
-                size(PAGE_CACHE_ROOM)
-            )
-        };
+        let need = self.need_reason(peaks);
         let at_cap = format!(
             "{} of {} jobs ran out of memory at their cap",
             peaks.at_cap, peaks.jobs

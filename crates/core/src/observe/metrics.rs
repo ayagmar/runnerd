@@ -28,7 +28,7 @@ use crate::sync::lock;
 use crate::time;
 
 /// How often running containers are sampled.
-pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(2);
+pub const SAMPLE_INTERVAL: Duration = Duration::from_secs(api::SAMPLE_INTERVAL);
 
 /// How often the host's processes are read for what holds its memory outside the slice: they are many, and what
 /// they hold changes slowly.

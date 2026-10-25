@@ -14,10 +14,10 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    self, Activity, Advice, AutoPlan, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart,
-    Job, JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
+    self, Activity, AutoPlan, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart, Job,
+    JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
     RunComparison, Sample, Severity, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores,
-    job_title, period,
+    job_title,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -1745,21 +1745,8 @@ fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
         "Sizing",
         fit_details(
             vec![
-                (
-                    0,
-                    format!(
-                        "{} of history",
-                        duration(sizing.until.saturating_sub(sizing.since))
-                    ),
-                ),
-                (
-                    2,
-                    format!(
-                        "peaks every {} s +{}%",
-                        sizing.sample_interval, sizing.margin
-                    ),
-                ),
-                (1, format!("advice after {} jobs", sizing.min_jobs)),
+                (0, format!("{} of history", duration(sizing.covered()))),
+                (2, sizing.method_line()),
                 (
                     if sizing.auto_plan.is_some() { 3 } else { 0 },
                     format!("auto sizing {}", if sizing.auto { "on" } else { "off" }),
@@ -1777,7 +1764,7 @@ fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
     // The advice wraps onto a second line rather than lose its end; the hint below it is cut.
     let mut lines = vec![Line::styled(
         format!("{}: {}", profile.name, sizing.advice_line(profile)),
-        theme.tone(advice_tone(profile.advice)),
+        theme.tone(profile.advice.tone().into()),
     )];
     let last = sizing
         .changes
@@ -1883,44 +1870,17 @@ fn plan_line(
     profile: &ProfileSizing,
     now: u64,
 ) -> (String, String) {
-    if let Some(change) = plan
-        .next
-        .iter()
-        .find(|change| change.profile == profile.name)
-    {
-        let what = if plan.blocked.is_some() {
-            format!("Once that is fixed: {}", change.line())
-        } else {
-            format!(
-                "Next look, within {}: {}",
-                period(plan.every),
-                change.line()
-            )
-        };
-        return (what, change.reason.clone());
+    let next = plan.profile_plan(&profile.name, now);
+    let mut what = next.headline(plan);
+    if let Some(until) = next.until() {
+        let _ = write!(what, " for {}", duration(until.saturating_sub(now)));
     }
-    if let Some(hold) = plan.held.iter().find(|hold| hold.profile == profile.name) {
-        if now < hold.until {
-            return (
-                format!("No change for {}", duration(hold.until.saturating_sub(now))),
-                format!(
-                    "changed {}; the interval holds it until then",
-                    human::ago(hold.changed, now)
-                ),
-            );
-        }
-        return (
-            format!(
-                "No lowering for {}",
-                duration(hold.lowered_after().saturating_sub(now))
-            ),
-            format!(
-                "changed {}; a raise may come before then",
-                human::ago(hold.changed, now)
-            ),
-        );
-    }
-    ("Nothing to change".to_owned(), sizing.advice_line(profile))
+    let reason = next.reason(sizing, profile);
+    let why = match next.changed() {
+        Some(changed) => format!("changed {}; {reason}", human::ago(changed, now)),
+        None => reason,
+    };
+    (what, why)
 }
 
 /// A row per profile: its memory and slots, its jobs' peaks, how busy and how long waited, the advice.
@@ -1993,8 +1953,8 @@ fn sizing_profiles(
             }));
         }
         cells.push(Cell::from(Span::styled(
-            advice_word(profile.advice),
-            theme.tone(advice_tone(profile.advice)),
+            profile.advice.word(),
+            theme.tone(profile.advice.tone().into()),
         )));
         Row::new(cells)
     });
@@ -2024,15 +1984,8 @@ fn sizing_jobs(
     let shared = usize::from(jobs_area.width).saturating_sub(fixed);
     let repository_width = shared / 2;
     let rows = profile.jobs.iter().map(|job| {
-        let needs = match job.advice {
-            Advice::TooFew { .. } => {
-                Span::styled(format!("max {}", bytes(job.peaks.memory.max)), theme.dim())
-            }
-            Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
-                Span::styled(format!("{} > cap", bytes(memory)), theme.tone(Tone::Bad))
-            }
-            Advice::Keep { memory } | Advice::Lower { memory, .. } => Span::raw(bytes(memory)),
-        };
+        let needs = job.needs();
+        let needs = Span::styled(needs.text, theme.tone(needs.tone.into()));
         let name = job_title(job.workflow.as_deref(), &job.name, None).to_string();
         let mut cells = vec![
             Cell::from(fit(&job.repository, repository_width)),
@@ -2067,27 +2020,6 @@ fn widths(columns: &[(&str, usize)]) -> Vec<Constraint> {
             width => Constraint::Length(u16::try_from(*width).unwrap_or(u16::MAX)),
         })
         .collect()
-}
-
-fn advice_tone(advice: Advice) -> Tone {
-    match advice {
-        Advice::Raise { .. } | Advice::SliceTooSmall { .. } => Tone::Bad,
-        Advice::Lower { .. } => Tone::Busy,
-        Advice::Keep { .. } => Tone::Good,
-        Advice::TooFew { .. } => Tone::Plain,
-    }
-}
-
-/// The advice as a word or two, for a table cell.
-fn advice_word(advice: Advice) -> String {
-    match advice {
-        Advice::TooFew { .. } => "too few".to_owned(),
-        Advice::Keep { .. } => "keep".to_owned(),
-        Advice::SliceTooSmall { .. } => "grow slice".to_owned(),
-        Advice::Lower { memory, slots } | Advice::Raise { memory, slots } => {
-            format!("{} × {slots}", bytes(memory))
-        }
-    }
 }
 
 fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, theme: Theme) {

@@ -2450,7 +2450,7 @@ async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved
         "Review memory 3.25G, 4 slots in the config",
         "integration tests",
         "halyard/storefront · CI",
-        "waits for 10 jobs",
+        "once a profile ran 10 jobs",
     ] {
         assert!(
             sizing.body.contains(expected),
@@ -2982,11 +2982,12 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
                 reason: "lower memory".to_owned(),
                 uncertain: false,
             }],
+            // A hold is read against the reader's clock, not the fixtures'.
             held: vec![SizingHold {
                 profile: "jvm".to_owned(),
                 changed: now - 3600,
-                until: now + 23 * 3600,
-                lower_until: now + 23 * 3600,
+                until: crate::now() + 23 * 3600,
+                lower_until: crate::now() + 23 * 3600,
             }],
             blocked: None,
         });
