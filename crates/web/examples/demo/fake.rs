@@ -729,6 +729,11 @@ impl Fixtures {
                         || matches!(job.conclusion.as_deref(), Some("failure" | "timed_out"))
                 })
                 .count() as u64,
+            // The fixtures keep no kills for memory: only lost jobs are their runner's failures.
+            runner_failed: finished
+                .iter()
+                .filter(|job| job.state == JobState::Lost)
+                .count() as u64,
         }
     }
 

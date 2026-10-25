@@ -572,11 +572,13 @@ pub(super) fn activity(db: &Connection, since: u64, now: u64) -> rusqlite::Resul
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let (finished, failed) = db.query_row(
-        "SELECT count(*), count(*) FILTER (WHERE state = 'lost' OR conclusion IN ('failure', 'timed_out')) \
-         FROM jobs WHERE finished_at >= ?1 AND finished_at <= ?2 AND state IN ('completed', 'lost')",
+    let (finished, failed, runner_failed) = db.query_row(
+        "SELECT count(*), count(*) FILTER (WHERE j.state = 'lost' OR j.conclusion IN ('failure', 'timed_out')), \
+         count(*) FILTER (WHERE j.state = 'lost' OR (j.conclusion IN ('failure', 'timed_out') AND r.oom_kills > 0)) \
+         FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+         WHERE j.finished_at >= ?1 AND j.finished_at <= ?2 AND j.state IN ('completed', 'lost')",
         params![ms(since), ms(now)],
-        |row| Ok((row.get(0)?, row.get(1)?)),
+        |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?)),
     )?;
     Ok(api::Activity {
         since,
@@ -584,6 +586,7 @@ pub(super) fn activity(db: &Connection, since: u64, now: u64) -> rusqlite::Resul
         started,
         finished,
         failed,
+        runner_failed,
     })
 }
 

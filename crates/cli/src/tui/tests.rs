@@ -1653,6 +1653,7 @@ fn day() -> runnerd_core::api::Activity {
         started: vec![started(200, 10), started(600, 20), started(900, 300)],
         finished: 30,
         failed: 2,
+        runner_failed: 0,
     }
 }
 

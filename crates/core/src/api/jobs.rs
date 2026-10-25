@@ -388,6 +388,10 @@ pub struct Activity {
     pub finished: u64,
     /// Of those, the ones that failed, timed out or were lost, as `GET /v1/stats` counts failures.
     pub failed: u64,
+    /// Of the failed, the ones their runner failed rather than their own steps: lost with their runner, or failed
+    /// after the kernel killed a process of theirs for memory at their cap.
+    #[serde(default)]
+    pub runner_failed: u64,
 }
 
 impl Activity {

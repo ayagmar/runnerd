@@ -995,6 +995,11 @@ async fn the_health_figures_count_the_24_hours_up_to_now_by_when_jobs_started_an
         "one of the two jobs that ended in the day failed: {failed}"
     );
     assert!(
+        health.contains(r#"<div class="failing"><dt>Failed, 24 h"#)
+            && failed.contains("1 by their runner"),
+        "a job lost with its runner turns the figure red: {failed}"
+    );
+    assert!(
         health.contains("2 jobs started"),
         "the job queued days ago counts where it started: {health}"
     );
