@@ -50,12 +50,24 @@ profile = "node"
 labels = ["self-hosted", "linux", "x64", "node"]
 ```
 
-## Light jobs in a smaller profile
+## Split light and heavy jobs
 
-A runner may take any queued job of its repository whose labels it has, so under [measured admission](../admission/#measured-admission) it reserves for the heaviest of them. A linter waits behind an 8G build's reservation. Give the repository a second entry with the same `name`: a pool of smaller runners with a label of its own.
+A runner may take any queued job of its repository whose labels it has, so it is sized for the heaviest of them: under `caps` every job takes a slot at the profile's `memory`, and under [measured admission](../admission/#measured-admission) a runner reserves the largest prediction among its repository's queued jobs. A 300M linter queued beside a 6G build waits like the build.
+
+You see it in two places:
+
+- The linter waits for room it does not need: `Needs 6.5G of memory; 3G of the budget is free`, or `All 2 node slots are busy`.
+- In `runnerctl sizing`, its row has a `P95` peak far under the profile's `memory` and a `WAIT P95` as long as the build's.
+
+Serve the repository in a second, smaller profile: another `[[repositories]]` entry with the same `name`, its own `profile` and a label of its own. Added to [the example above](#an-example), under measured admission:
 
 ```toml
-[profiles.light]
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+admission = "measured"   # the check holds the largest runner and the mirror, 9.5G, to MemoryMax
+
+[profiles.small]
 image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.13"
 cpus = 2
 memory = "1G"
@@ -68,21 +80,23 @@ labels = ["self-hosted", "linux", "x64", "node"]
 
 [[repositories]]
 name = "halyard/storefront"
-profile = "light"
-labels = ["storefront-light"]
+profile = "small"
+labels = ["storefront-small"]
 ```
 
-Then move the light jobs over in the workflow:
+Then point the light jobs at it:
 
 ```yaml
 jobs:
   lint:
-    runs-on: storefront-light   # was [self-hosted]
+    runs-on: storefront-small   # was [self-hosted, linux, x64]
 ```
 
-A job runs in the pool whose labels include every label in its `runs-on`. The light pool leaves out `self-hosted` on purpose: every job nobody relabelled still asks for `self-hosted`, which only the `node` pool has, so it can never land on a 1G runner. Each pool reserves only for its own queued jobs, and has its own `warm` and `build_cache`.
+Under `caps` the check holds every slot at its cap to `MemoryMax`: the small profile's 4 × 1G takes the example to 36.5G, past its 33G, so lower another profile's `slots` or raise `MemoryMax` to make room.
 
-The config check refuses two pools of a repository that share a label (a job asking only for that label could run in either), two in the same profile, and pools that set `build_cache_writers` differently. A job whose labels no pool has, such as a typo in `runs-on`, waits with *No profile serves the label …* in `runnerctl status` and the dashboard, and so does a job that asks for no labels. Only jobs asking for a single GitHub-hosted runner label, such as `ubuntu-latest` or `macos-15`, are left to GitHub and not listed. Pause and resume apply to the whole repository; a pool whose runners keep failing holds back only itself.
+A job runs in the pool that has every label in its `runs-on`. The `small` pool leaves out `self-hosted` on purpose: every job you did not move still asks for `self-hosted`, which only the `node` pool has, so a heavy job can never land on a 1G runner. Each pool runs in its own profile's slots, reserves only for its own queued jobs, and has its own `warm` and `build_cache`. `runnerctl status` lists the repository once per pool, and the clients name a waiting job's pool (`halyard/storefront · small`).
+
+The config check refuses two pools of a repository that share a label (a job asking only for that label could run in either), two in the same profile, and pools whose `build_cache_writers` differ. A job no pool has every label for, such as one with a typo in `runs-on`, waits with `No profile serves the label storefornt-small`; one that asks for no labels waits with `It asks for no labels, so no profile serves it`. Only a job asking for exactly one GitHub-hosted label, such as `ubuntu-latest` or `macos-15`, is left to GitHub and not listed. Pause and resume apply to the whole repository; a pool whose runners keep failing holds back only itself.
 
 ## Runner images
 
@@ -160,7 +174,7 @@ A new record pushes out the oldest past `max_count` or `max_total`; without room
 $ runnerd check-config runnerd.toml
 runnerd.toml: valid, memory caps sum to 32.5G
 $ runnerd check-config runnerd.toml --memory-max 24G
-error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G
+error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G; lower `slots` or `memory`, or raise the slice's MemoryMax (`runnerd doctor` prints its unit)
 ```
 
 A slice without a unit file has no `MemoryMax`; the check then passes with a warning, since nothing would hold the runners to their caps. Under [measured admission](../admission/#measured-admission) it holds one runner of each profile, with the mirror, to `MemoryMax`, and refuses a slice without one. The caps may then add up past `MemoryMax`, and the check says both figures:
@@ -231,7 +245,7 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 
 | Key | Default | Means |
 |---|---|---|
-| `name` | | `owner/name` on GitHub; repeat an entry to serve the repository in [several profiles](#light-jobs-in-a-smaller-profile) |
+| `name` | | `owner/name` on GitHub; repeat an entry to serve the repository in [several profiles](#split-light-and-heavy-jobs) |
 | `profile` | | the profile its jobs run on; one entry per profile for a repository |
 | `labels` | | at least one; a job runs here when every label in its `runs-on` is one of these; no two entries of a repository share one |
 | `warm` | `1` | runners kept registered for jobs not queued yet while the repository is active ([warm runners](../running/#warm-runners)); `0` turns them off |
@@ -292,6 +306,6 @@ Each `[[notify.targets]]`:
 | `kind` | required | `"ntfy"` or `"webhook"` |
 | `url` | required | an ntfy topic's URL (`https://ntfy.sh/<topic>`) or the webhook's, where it answers without a redirect: a redirect counts as a failed send; a secret that no log line, error or client shows |
 | `headers` | `{}` | sent with each post, such as `{ Authorization = "Bearer tk_…" }`; their values are secrets too |
+| `events` | `["failed", "lost", "runner", "insights"]` | what it is sent; add `"digest"` for the daily digest |
 
 The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show `url` and header values as `"<secret>"`. Leave them so and saving keeps the values in the file; write a new value over one to change it. A target renamed in the editor has nothing to keep, so write its values again. Comments are shown as written.
-| `events` | `["failed", "lost", "runner", "insights"]` | what it is sent; add `"digest"` for the daily digest |

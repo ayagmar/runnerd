@@ -47,7 +47,7 @@ host: too large for a small disk, and a knob to hand-tune is what auto sizing ex
 ## Consequences
 
 - On the owner's host, about 361 GB free plus the current slot volumes gives 13 slots about 6 to 7 GiB each, enough for
-  glowly's images and Testcontainers' images per slot.
+  halyard/storefront's images and Testcontainers' images per slot.
 - A lowered share applies when the slot's next container starts. Its entrypoint runs the cleanup, which empties a
   store over its budget before any job.
 - The build cache gives way first. Emptying the whole store (`docker system prune -af`) happens only when images
