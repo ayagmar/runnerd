@@ -506,6 +506,20 @@ fn records(jobs: &[u64]) -> Records {
 }
 
 #[test]
+fn records_near_max_total_say_so_first_on_a_narrow_heading() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('3')));
+    let mut near = records(&[42, 43]);
+    near.limits.max_total = 700 << 20;
+    app.update(Msg::Records(near));
+    let shown = screen(&app, 80, 24, false);
+    assert!(
+        shown.contains("near max_total, so new ones remove the oldest"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn a_record_is_removed_only_after_y_and_the_list_follows_new_ones() {
     let mut app = app();
     assert_eq!(app.update(key(KeyCode::Char('3'))), vec![Effect::Records]);

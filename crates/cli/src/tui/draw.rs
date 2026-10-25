@@ -318,6 +318,11 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
 /// A section's title on the left and a note on the right, on one line.
 /// The note is cut to leave the title and two cells beside it.
 fn heading(frame: &mut Frame<'_>, area: Rect, title: &str, note: String, theme: Theme) {
+    styled_heading(frame, area, title, note, theme.dim());
+}
+
+/// `heading` with its note in `style`.
+fn styled_heading(frame: &mut Frame<'_>, area: Rect, title: &str, note: String, style: Style) {
     frame.render_widget(Line::styled(title.to_owned(), bold()), area);
     let room = usize::from(area.width).saturating_sub(title.width() + 2);
     let note = if note.width() <= room {
@@ -325,10 +330,7 @@ fn heading(frame: &mut Frame<'_>, area: Rect, title: &str, note: String, theme: 
     } else {
         fit(&note, room).trim_end().to_owned()
     };
-    frame.render_widget(
-        Line::styled(note, theme.dim()).alignment(Alignment::Right),
-        area,
-    );
+    frame.render_widget(Line::styled(note, style).alignment(Alignment::Right), area);
 }
 
 /// The fewest rows the repositories and latest jobs keep: a title and four jobs.
@@ -1628,7 +1630,15 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         frame.render_widget(Line::styled("reading…", theme.dim()), table_area);
         return;
     };
-    heading(frame, title, "Records", records.summary(), theme);
+    // Near max_total, that comes first and stands out: the usage is what a narrow heading drops.
+    match records.pressure() {
+        Some(pressure) => {
+            let room = usize::from(title.width).saturating_sub("Records".width() + 2);
+            let note = fit_details(vec![(0, pressure.to_owned()), (1, records.usage())], room);
+            styled_heading(frame, title, "Records", note, theme.wait());
+        }
+        None => heading(frame, title, "Records", records.usage(), theme),
+    }
     if records.records.is_empty() {
         frame.render_widget(
             Paragraph::new(Line::styled(Records::empty_reason(), theme.dim()))

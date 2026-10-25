@@ -168,9 +168,17 @@ impl RecordLimits {
 }
 
 impl Records {
-    /// How many there are and how much they take of their limits: `3 of 20 records, 1.2G of 10G, each kept 7
-    /// days`, and when near `max_total`, `; near max_total, so new ones remove the oldest`.
+    /// How many there are and how much they take of their limits, and when near `max_total`, `Records::pressure`:
+    /// `3 of 20 records, 1.2G of 10G, each kept 7 days; near max_total, so new ones remove the oldest`.
     pub fn summary(&self) -> String {
+        match self.pressure() {
+            Some(pressure) => format!("{}; {pressure}", self.usage()),
+            None => self.usage(),
+        }
+    }
+
+    /// How many there are and how much they take of their limits: `3 of 20 records, 1.2G of 10G, each kept 7 days`.
+    pub fn usage(&self) -> String {
         let limits = &self.limits;
         // `[records] max_age` is in days more often than not.
         let age = match limits.max_age / 86_400 {
@@ -178,18 +186,20 @@ impl Records {
             days if days > 1 && limits.max_age.is_multiple_of(86_400) => format!("{days} days"),
             _ => period(limits.max_age),
         };
-        let line = format!(
+        format!(
             "{} of {} records, {} of {}, each kept {age}",
             self.records.len(),
             limits.max_count,
             ByteSize(self.bytes()),
             ByteSize(limits.max_total),
-        );
-        if limits.near_full(self.bytes()) {
-            format!("{line}; near max_total, so new ones remove the oldest")
-        } else {
-            line
-        }
+        )
+    }
+
+    /// What being near `max_total` means, when they are: `near max_total, so new ones remove the oldest`.
+    pub fn pressure(&self) -> Option<&'static str> {
+        self.limits
+            .near_full(self.bytes())
+            .then_some("near max_total, so new ones remove the oldest")
     }
 
     /// What the summary means: near `max_total` is worth a look.
