@@ -1,7 +1,7 @@
 # 0051. Insights from the history, and notifications the daemon sends
 
 Status: **Accepted** (2026-10-24). Builds option 1 of [0034](0034-desktop-framework.md) and answers its open
-questions about notifications.
+questions about notifications. Amended by [0064](0064-each-notify-kind-is-a-sender.md).
 
 ## Context
 
