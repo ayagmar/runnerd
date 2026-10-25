@@ -90,6 +90,9 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
     let shown = text(&html);
     assert!(shown.contains(&facts.budget), "{shown}");
     assert!(shown.contains(&facts.cpu), "{shown}");
+    for fact in [&facts.host, &facts.free, &facts.host_part] {
+        assert!(shown.contains(fact.as_str()), "{fact}: {shown}");
+    }
     let health = &facts.health;
     for figure in [
         format!("Running {} of {} slots", health.running, health.slots),

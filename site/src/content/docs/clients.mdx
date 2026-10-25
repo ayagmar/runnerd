@@ -77,7 +77,7 @@ Views of the same thing are linked. On the overview, pointing at, focusing or ta
 
 The page opens with four figures: slots running, jobs waiting and how long the oldest has, the p95 wait of every job that started in the 24 hours up to now, with the longest wait of each of those hours, and the failures among the jobs that ended in them. That figure turns red only when a runner failed its job, lost with it or killed for memory at its cap, and says how many; a job's own failing tests leave it plain. Under them, **Waiting** lists each queued job, oldest first, with how long it has waited and why runnerd has not started it: no profile serves its labels, its repository is paused, its runners failed to register, start or take a job and runnerd retries later, a runner is starting for it, its profile is reseeding or pulling its image, every slot of its profile is busy, its runner needs more memory or CPU than the budget has left, an older job waiting for CPU goes first, or an older job's runner starts first. The reason is the scheduler's own, worked out again each time the status changes.
 
-Under [CPU admission](../admission/#cpu-admission) the line above the budget bar adds the CPU the runners reserve of the budget, and says when a job waits for CPU. Below the slots: the latest jobs, pause and resume per repository or all at once, and the slice over the last half hour. A pause lasts until a resume, across restarts. On a phone the pages are a bar along the bottom edge.
+When [the host's memory](../admission/#the-hosts-memory) leaves the slice less than `MemoryMax` does, the bar's free part is what the host leaves, and a hatched part after it is held by the host. Under [CPU admission](../admission/#cpu-admission) the line above the budget bar adds the CPU the runners reserve of the budget, and says when a job waits for CPU. Below the slots: the latest jobs, pause and resume per repository or all at once, and the slice over the last half hour. A pause lasts until a resume, across restarts. On a phone the pages are a bar along the bottom edge.
 
 ### A job
 
@@ -120,7 +120,7 @@ It talks to the socket (`--socket` picks another), prints aligned text, coloured
 
 ```console wrap=false
 $ runnerctl status
-runnerd 0.0.14  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
+runnerd 0.0.14  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
 
 PROFILE  SLOT  STATE     REPOSITORY          RUNNER                                      UP
 jvm         1  running   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792899841     7m 23s
@@ -213,7 +213,7 @@ older jobs: --before 120055991489
 One frame of `runnerctl watch`:
 
 ```console wrap=false
-runnerd 0.0.14  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G  runnerd.slice uses 5.34 cores, 9.57G
+runnerd 0.0.14  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G  runnerd.slice uses 5.34 cores, 9.57G
 
 SLOT     JOB                                                      STEP                                         RAN   CPU    MEM
 jvm 1    halyard/ledger CI / build                                Integration tests (Testcontainers) (7/9)  7m 41s  3.14  4.19G
@@ -267,7 +267,7 @@ every repository resumed
 The dashboard, for a host you reach over SSH. It shows what the web dashboard does, in the same words:
 
 - a health line: slots running, jobs waiting and the oldest's wait, and over the last 24 hours the p95 wait with a bar for the longest wait of each hour, and the failures, red only when a runner failed its job, then how many warning [insights](../insights/) hold;
-- the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container; its heading adds the CPU budget under [CPU admission](../admission/#cpu-admission);
+- the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container, then what is free and, hatched, what the host's memory holds back of it; its heading adds the CPU budget under [CPU admission](../admission/#cpu-admission);
 - a card per slot with the job, its step, run time, and memory and CPU sparklines;
 - **Waiting**: each queued job, oldest first, with how long it has waited and why runnerd has not started it;
 - the repositories, the latest jobs, and the slice's memory and CPU up to its MemoryMax and CPUs;

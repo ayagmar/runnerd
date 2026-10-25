@@ -6,8 +6,8 @@ use std::collections::BTreeMap;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Activity, ActivityQuery, HeldKind, HeldPart, HostSample, HostSamples, Job, JobPage, JobQuery,
-    JobState, JobSummary, JobTitle, ProfileStatus, QueuedJob, RepositoryStatus, Sample,
+    Activity, ActivityQuery, HeldKind, HeldPart, HostPart, HostSample, HostSamples, Job, JobPage,
+    JobQuery, JobState, JobSummary, JobTitle, ProfileStatus, QueuedJob, RepositoryStatus, Sample,
     SampleSeries, SlotState, SlotStatus, Status, Tone, WaitKind, cpus, in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
@@ -351,6 +351,18 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     if let Some(lens) = &free_lens {
         lenses.push(("free".to_owned(), lens.clone()));
     }
+    let host = bar.host.as_ref().map(|host| {
+        (
+            host.memory,
+            Lens {
+                figure: host.reading.figure.clone(),
+                text: host.reading.text.clone(),
+            },
+        )
+    });
+    if let Some((_, lens)) = &host {
+        lenses.push(("host".to_owned(), lens.clone()));
+    }
     html! {
         section #budget .budget aria-labelledby="budget-title"
             "data-signals:_slot__ifmissing"="''" "data-signals:_repo__ifmissing"="''" {
@@ -380,8 +392,18 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                         (super::block_size(free))
                     }
                 }
+                @if let Some((memory, lens)) = &host {
+                    @let link = link("host", None);
+                    div.free.host tabindex="0" role="img" style=(format!("--size: {:.3}", gib(*memory)))
+                        aria-label=(format!("{} {}", lens.figure, lens.text))
+                        data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
+                        data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
+                        (super::block_size(*memory))
+                        span.name { (HostPart::NAME) }
+                    }
+                }
             }
-            (bar_keys(&held, free_lens.as_ref()))
+            (bar_keys(&held, free_lens.as_ref(), host.as_ref().map(|(_, lens)| lens)))
         }
     }
 }
@@ -408,8 +430,8 @@ fn readout(
                     @if let Some(cpu) = budget.cpu {
                         span.muted { " · " (cpu.line()) }
                     }
-                    @if let Some(host) = &budget.host {
-                        span.muted { " · " (host.line()) }
+                    @if let Some(host) = budget.host_line() {
+                        span.muted { " · " (host) }
                     }
                 }
             }))
@@ -435,11 +457,11 @@ fn lens_id(key: &str) -> String {
     format!("lens-{key}")
 }
 
-/// On a touch screen the mirror, a seed container and the free remainder may be too thin to tap: keys under the bar
-/// select them instead, and say their sizes.
-fn bar_keys(held: &[Held], free_lens: Option<&Lens>) -> Markup {
+/// On a touch screen the mirror, a seed container, the free remainder and what the host holds back may be too thin
+/// to tap: keys under the bar select them instead, and say their sizes.
+fn bar_keys(held: &[Held], free_lens: Option<&Lens>, host_lens: Option<&Lens>) -> Markup {
     html! {
-        @if !held.is_empty() || free_lens.is_some() {
+        @if !held.is_empty() || free_lens.is_some() || host_lens.is_some() {
             div.bar-keys {
                 @for part in held {
                     @let key = js(&part.key);
@@ -453,6 +475,12 @@ fn bar_keys(held: &[Held], free_lens: Option<&Lens>) -> Markup {
                     button.bar-key.key-free type="button" data-on:click="$_slot = $_slot == 'free' ? '' : 'free'"
                         data-class:linked="$_slot == 'free'" {
                         span.swatch aria-hidden="true" {} (lens.figure) " free"
+                    }
+                }
+                @if let Some(lens) = host_lens {
+                    button.bar-key.key-host type="button" data-on:click="$_slot = $_slot == 'host' ? '' : 'host'"
+                        data-class:linked="$_slot == 'host'" {
+                        span.swatch aria-hidden="true" {} (lens.figure) " " (HostPart::NAME)
                     }
                 }
             }

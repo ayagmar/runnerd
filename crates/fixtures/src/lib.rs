@@ -1,7 +1,8 @@
 //! Daemon data every client's parity test draws, and the facts `runnerd-core` computes from it, which the dashboard,
 //! the TUI and `runnerctl` must each state as core words them (ADR 0062). The data is chosen where clients drifted
 //! before: a lost, an elsewhere, a `startup_failure`, a timed-out and a cancelled job; an adopted job without a name;
-//! a step without an end time and a cancelled one with times; a job no pool serves; a held measured budget; warm and
+//! a step without an end time and a cancelled one with times; a job no pool serves; a held measured budget of which
+//! the host's memory leaves less free than `MemoryMax` does; warm and
 //! starting runners and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records
 //! near `max_total`; a build cache that refused uploads and had no lookups.
 //!
@@ -10,9 +11,10 @@
 
 use runnerd_core::api::{
     self, AdmissionPolicy, Budget, BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume,
-    Caches, CpuBudget, Health, Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary,
-    OutcomeKind, PoolStatus, ProfileStatus, QueuedJob, Record, RecordLimits, Records,
-    RepositoryStatus, RunnerStatus, SlotStatus, Status, Step, Timeline, Tone, WaitKind, Waiting,
+    Caches, CpuBudget, Health, HostBudget, HostMemory, Job, JobMetrics, JobRunner, JobState,
+    JobSummary, LogSummary, OutcomeKind, PoolStatus, ProfileStatus, QueuedJob, Record,
+    RecordLimits, Records, RepositoryStatus, RunnerStatus, SlotStatus, Status, Step, Timeline,
+    Tone, WaitKind, Waiting,
 };
 
 /// When the clients draw the fixtures: 2026-10-22T14:03:07Z.
@@ -145,8 +147,27 @@ fn queued(id: u64, repository: &str, name: &str, ago: u64, waiting: Waiting) -> 
     }
 }
 
-/// A measured budget past 90% of its `MemoryMax`, so it is held; jvm's three slots run, are warm and start a
-/// runner, node's first holds a runner whose job is known before GitHub lists it busy.
+/// A 64G host whose memory leaves the slice 22.5G: 18G its runners hold and 8.5G available, less a 4G margin.
+fn host() -> HostBudget {
+    HostBudget {
+        memory: HostMemory {
+            at: NOW - 2,
+            total: 64 * GIB,
+            available: 8 * GIB + 512 * MIB,
+            slice: 18 * GIB,
+            some: None,
+            full: None,
+            holders: Vec::new(),
+        },
+        limit: 22 * GIB + 512 * MIB,
+        spare: 512 * MIB,
+        stalled: false,
+    }
+}
+
+/// A measured budget past 90% of its `MemoryMax`, so it is held, of whose 2G left the host leaves 512M; jvm's three
+/// slots run, are warm and start a runner, node's first holds a runner whose job is known before GitHub lists it
+/// busy.
 fn status() -> Status {
     let jvm = |slot: usize, runner: Option<RunnerStatus>| SlotStatus { slot, runner };
     Status {
@@ -161,7 +182,7 @@ fn status() -> Status {
             mirror_memory: 0,
             seed_memory: Vec::new(),
             shell_memory: Vec::new(),
-            host: None,
+            host: Some(host()),
             cpu: Some(CpuBudget {
                 cpus: 16_000,
                 budget: 16_000,
@@ -555,6 +576,13 @@ pub struct Facts {
     pub budget: String,
     /// The CPU budget's clause.
     pub cpu: String,
+    /// The host's clause, with what is free while it leaves less than `MemoryMax`: `host: …; leaves the slice
+    /// 22.5G of its 24G, so 512M is free`.
+    pub host: String,
+    /// The bar's free part: what the host leaves free.
+    pub free: String,
+    /// The bar's part the host holds back.
+    pub host_part: String,
     /// The slots' health: how many slots there are and run, start a runner or hold a warm one.
     pub health: Health,
     /// Why each queued job waits, oldest first.
@@ -606,10 +634,14 @@ pub fn facts(daemon: &Daemon) -> Facts {
         .activity()
         .expect("the build cache stored and refused");
     let build_cache_refused = build_cache.refused_line().expect("refused uploads");
+    let parts = status.budget_parts();
     Facts {
         rows: daemon.finished().iter().map(row).collect(),
         budget: status.budget.memory_reading().line(),
         cpu: status.budget.cpu.expect("a CPU budget").line(),
+        host: status.budget.host_line().expect("a host reading"),
+        free: parts.free.expect("room past the runners").reading.line(),
+        host_part: parts.host.expect("the host holds room back").reading.line(),
         health: status.health(NOW),
         waits: status
             .queued
@@ -721,6 +753,11 @@ mod tests {
         );
         assert_eq!(facts.job.limits, "capped at 40G and 1.3 CPUs");
         assert!(daemon.status.budget.held, "the measured budget is held");
+        assert_eq!(
+            daemon.status.budget.host_withheld(),
+            Some(3 * GIB / 2),
+            "the host holds back 1.5G of the 2G MemoryMax leaves"
+        );
         let words: Vec<&str> = facts.slots.iter().map(|slot| slot.word).collect();
         assert_eq!(words, ["running", "warm", "starting", "starting"]);
         assert_eq!(facts.records_tone, Tone::Warn);
