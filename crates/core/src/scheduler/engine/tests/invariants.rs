@@ -459,13 +459,17 @@ impl Case {
     }
 
     /// Recovers as `Engine::run` does: again until Docker answers.
-    async fn recover(&mut self) {
+    async fn recover(&mut self) -> Result<(), Violation> {
         for _ in 0..10 {
             if self.engine.recover().await.is_ok() {
-                return;
+                return Ok(());
             }
         }
-        panic!("recovery never succeeded");
+        violation(
+            self,
+            "recovery_succeeds",
+            "Docker never answered".to_owned(),
+        )
     }
 
     /// The runner containers Docker runs, by ID.
@@ -592,16 +596,16 @@ impl Case {
                     .request_reseed(if light { "light" } else { "heavy" });
             }
             Step::Reload(change) => {
-                self.reload(change).await;
+                self.reload(change).await?;
                 self.tick().await?;
             }
             Step::Restart => {
-                self.restart().await;
+                self.restart().await?;
                 self.tick().await?;
             }
             Step::RestartInspectFails(pick) => {
                 self.inspect_fails(pick);
-                self.restart().await;
+                self.restart().await?;
                 self.tick().await?;
             }
             Step::Elapse => self.elapse(),
@@ -823,7 +827,7 @@ impl Case {
         });
     }
 
-    async fn reload(&mut self, change: Change) {
+    async fn reload(&mut self, change: Change) -> Result<(), Violation> {
         let mut shape = self.shape;
         match change {
             Change::HeavySlots(slots) => shape.heavy_slots = slots,
@@ -859,11 +863,19 @@ impl Case {
                 reply,
             })
             .await;
-        assert_eq!(answer.await.unwrap(), Ok(None), "a person's reload applies");
+        let applied = answer.await;
+        if applied != Ok(Ok(None)) {
+            return violation(
+                self,
+                "a_reload_applies",
+                format!("{change:?} answered {applied:?}"),
+            );
+        }
         self.shape = shape;
+        Ok(())
     }
 
-    async fn restart(&mut self) {
+    async fn restart(&mut self) -> Result<(), Violation> {
         for (_, capture) in std::mem::take(&mut self.engine.captures) {
             capture.abort();
         }
@@ -873,7 +885,7 @@ impl Case {
         self.handle = handle;
         // The store keeps the host's reading in memory only.
         self.host = None;
-        self.recover().await;
+        self.recover().await
     }
 
     fn elapse(&mut self) {
@@ -1049,7 +1061,7 @@ impl Case {
                 );
             }
             let seeds: u64 = budget.seed_memory.iter().map(|seed| seed.memory).sum();
-            if caps + seeds > MEMORY_MAX {
+            if caps.saturating_add(seeds) > MEMORY_MAX {
                 return violation(
                     self,
                     "starts_fit_the_budget",
@@ -1085,13 +1097,15 @@ impl Case {
         }
         // From the harness's own reading, whatever the engine reports: the engine's margin is at least this one.
         if let Some(reading) = self.host.filter(HostReading::fresh) {
-            let limit = (reading.slice + reading.available).saturating_sub(HOST_MARGIN);
+            let limit = reading
+                .slice
+                .saturating_add(reading.available)
+                .saturating_sub(HOST_MARGIN);
             // The seed containers that run, at their caps; not the room a waiting one holds.
             let seeds: u64 = self.engine.reseed_memory.values().sum();
             let reserved = runners_of(status)
                 .map(|(_, runner)| runner.reserved)
-                .sum::<u64>()
-                + seeds;
+                .fold(seeds, u64::saturating_add);
             if reserved > limit {
                 return violation(
                     self,
@@ -1305,7 +1319,7 @@ fn runners_of(status: &api::Status) -> impl Iterator<Item = (&str, &api::RunnerS
 /// Runs a sequence from a fresh start, then drains it; the first broken invariant.
 async fn run(steps: &[Step]) -> Result<(), Violation> {
     let mut case = Case::new();
-    case.recover().await;
+    case.recover().await?;
     case.tick().await?;
     for (index, step) in steps.iter().enumerate() {
         case.step = index;
