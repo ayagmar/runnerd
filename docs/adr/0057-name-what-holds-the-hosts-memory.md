@@ -15,6 +15,9 @@ They can act on it ("stop the emulator") only once they know which programs thos
   are what the host can't drop as page cache, the same memory `HostMemory::outside` counts. `RssFile` is left out,
   and so is PSS: `smaps_rollup` walks every mapping under the process's memory lock, which is too costly to do
   for every process on the host.
+- Only cgroup v2 says a process's slice: without `cgroup.controllers` at the cgroup root (a v1 or hybrid host) no
+  program is named, and a process without a `0::` line counts for nothing, so a runner never passes for a program
+  outside CI. The name is read as bytes, since the kernel cuts `comm` at 15 bytes inside a character.
 - The three largest programs that hold 512M or more are `HostMemory::holders`. The wait reason, the host line every
   client shows and `runnerd doctor`'s host-memory warning name them: `programs outside CI hold 30G, most java 9.3G
   and qemu-system-x86 5.8G`.

@@ -219,8 +219,13 @@ pub fn read_host_memory(paths: &Paths, slice: u64, at: u64) -> Option<api::HostM
 /// The `HOLDERS` programs outside `slice` holding the most memory, largest first, none under `HOLDER_FLOOR`: the
 /// processes in `/proc` whose cgroup is not the slice or under it, grouped by name (`Name` in `/proc/<pid>/status`,
 /// the kernel's escaped `comm`), each holding its `RssAnon` and `RssShmem`. A process that ends while it is read,
-/// or a kernel thread, which holds neither, counts for nothing.
+/// or a kernel thread, which holds neither, counts for nothing. None without cgroup v2 mounted at `paths.cgroup`
+/// (no `cgroup.controllers`, as on a v1 or hybrid host), and a process without a v2 cgroup counts for nothing:
+/// where a process's slice can't be told, a runner's could pass for a program outside it.
 pub fn read_holders(paths: &Paths, slice: &str) -> Vec<api::Holder> {
+    if !paths.cgroup.join("cgroup.controllers").is_file() {
+        return Vec::new();
+    }
     let slice = paths.slice(slice);
     let slice = slice.strip_prefix(&paths.cgroup).unwrap_or(&slice);
     let Ok(entries) = std::fs::read_dir(&paths.proc) else {
@@ -239,16 +244,17 @@ pub fn read_holders(paths: &Paths, slice: &str) -> Vec<api::Holder> {
         let Ok(cgroup) = read(&dir.join("cgroup")) else {
             continue;
         };
-        let in_slice = cgroup.lines().any(|line| {
-            line.strip_prefix("0::")
-                .is_some_and(|path| Path::new(path.trim_start_matches('/')).starts_with(slice))
-        });
-        if in_slice {
-            continue;
-        }
-        let Ok(status) = read(&dir.join("status")) else {
+        let Some(cgroup) = cgroup.lines().find_map(|line| line.strip_prefix("0::")) else {
             continue;
         };
+        if Path::new(cgroup.trim_start_matches('/')).starts_with(slice) {
+            continue;
+        }
+        // `comm` is bytes, and the kernel cuts it at 15 without minding UTF-8.
+        let Ok(status) = std::fs::read(dir.join("status")) else {
+            continue;
+        };
+        let status = String::from_utf8_lossy(&status);
         let line = |key: &str| {
             status
                 .lines()

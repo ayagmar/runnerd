@@ -253,20 +253,36 @@ MemAvailable: 32 kB
 /// Writes a process under the `proc` fixture: its name, the cgroup it is in, and what it holds in `RssAnon` and
 /// `RssShmem`, in MiB.
 fn process(paths: &Paths, pid: u32, name: &str, cgroup: &str, anon: u64, shmem: u64) {
+    process_bytes(
+        paths,
+        pid,
+        name.as_bytes(),
+        &format!("0::{cgroup}\n"),
+        anon,
+        shmem,
+    );
+}
+
+/// `process` with a name of any bytes and the whole of `/proc/<pid>/cgroup`, beside cgroup v2's root.
+fn process_bytes(paths: &Paths, pid: u32, name: &[u8], cgroup: &str, anon: u64, shmem: u64) {
+    std::fs::create_dir_all(&paths.cgroup).unwrap();
+    std::fs::write(paths.cgroup.join("cgroup.controllers"), "cpu memory\n").unwrap();
     let dir = paths.proc.join(pid.to_string());
     std::fs::create_dir_all(&dir).unwrap();
-    std::fs::write(dir.join("cgroup"), format!("0::{cgroup}\n")).unwrap();
-    std::fs::write(
-        dir.join("status"),
+    std::fs::write(dir.join("cgroup"), cgroup).unwrap();
+    let mut status = b"Name:\t".to_vec();
+    status.extend_from_slice(name);
+    status.extend_from_slice(
         format!(
-            "Name:\t{name}\nUmask:\t0022\nState:\tS (sleeping)\nVmRSS:\t{} kB\nRssAnon:\t{} kB\n\
+            "\nUmask:\t0022\nState:\tS (sleeping)\nVmRSS:\t{} kB\nRssAnon:\t{} kB\n\
              RssFile:\t 9999 kB\nRssShmem:\t{} kB\n",
             (anon + shmem + 10) << 10,
             anon << 10,
             shmem << 10
-        ),
-    )
-    .unwrap();
+        )
+        .as_bytes(),
+    );
+    std::fs::write(dir.join("status"), status).unwrap();
 }
 
 fn holders(list: &[(&str, u64)]) -> Vec<api::Holder> {
@@ -323,6 +339,70 @@ fn the_programs_outside_the_slice_holding_the_most_memory_are_named_largest_firs
             ("firefox", 2048)
         ]),
         "the three largest, the slice's left out"
+    );
+}
+
+#[test]
+fn where_cgroup_v2_cannot_place_a_process_no_runner_passes_for_a_program_outside_ci() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    // A hybrid host: the runner's memory cgroup is v1's, and v2 says only the root.
+    process_bytes(
+        &paths,
+        500,
+        b"java",
+        "5:memory:/ci.slice/docker-a.scope\n0::/\n",
+        20 * 1024,
+        0,
+    );
+    // A process with only v1 memberships.
+    process_bytes(
+        &paths,
+        501,
+        b"dockerd",
+        "5:memory:/ci.slice/docker-b.scope\n",
+        10 * 1024,
+        0,
+    );
+    std::fs::remove_file(paths.cgroup.join("cgroup.controllers")).unwrap();
+    assert_eq!(
+        read_holders(&paths, "ci.slice"),
+        [],
+        "no v2 at the cgroup root"
+    );
+    // On cgroup v2, a process without a v2 membership still can't be told apart from a runner.
+    std::fs::write(paths.cgroup.join("cgroup.controllers"), "memory\n").unwrap();
+    std::fs::write(
+        paths.proc.join("500/cgroup"),
+        "0::/ci.slice/docker-a.scope\n",
+    )
+    .unwrap();
+    process(
+        &paths,
+        600,
+        "qemu-system-x86",
+        "/user.slice/a.scope",
+        6 * 1024,
+        0,
+    );
+    assert_eq!(
+        read_holders(&paths, "ci.slice"),
+        holders(&[("qemu-system-x86", 6 * 1024)]),
+        "only the program v2 puts outside the slice"
+    );
+}
+
+#[test]
+fn a_name_cut_inside_a_character_keeps_its_programs_memory() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    // A 16-byte name ending in "é" that the kernel cut at 15 bytes, inside the character.
+    let mut name = b"gradle-daemon-".to_vec();
+    name.push(0xc3);
+    process_bytes(&paths, 100, &name, "0::/user.slice/a.scope\n", 2048, 0);
+    assert_eq!(
+        read_holders(&paths, "ci.slice"),
+        holders(&[("gradle-daemon-\u{fffd}", 2048)])
     );
 }
 
