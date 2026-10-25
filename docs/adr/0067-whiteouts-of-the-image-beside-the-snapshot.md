@@ -25,14 +25,17 @@ copied either: under sysbox, `getxattr` of `trusted.overlay.opaque` fails in the
   The snapshot is copied from a view without that layer, so it never holds a whiteout.
 - The whiteouts are worked out again at every reseed, from a view that includes the last ones, so they carry
   forward.
-- The image's own `CACHE_SECRETS`, and their directories, get none: the image's copies stay, as `mount_layers`
-  keeps them.
+- The image's own `CACHE_SECRETS`, and their directories or symlinks, get none: the image's copies stay, as
+  `mount_layers` keeps them.
+- The image's entries are listed in full before any whiteout is made, so a listing that fails fails the reseed,
+  which leaves the last whiteouts. `snapshot_max` counts the whiteouts' layers.
 - Starting over drops the layer with the snapshot. A layer missing from the image gets none.
 
 ## Consequences
 
 The whiteouts are made against the image of the reseed that made them: after a change of image, an entry the
 new image adds under a directory a job replaced shows until a job deletes it. An image older than this ignores
-`/base/<layer>.hidden`, and its seed script leaves it as it was, so after going back to one, the image's deleted
-files show again, as before. A reseed walks the image's layer paths once more; the published images hold a few
+`/base/<layer>.hidden`, and its seed script neither updates nor removes it: a job on such an image may come to rely
+on an image file a whiteout there hides, and coming back would hide it again. Going back to an older image needs the
+profile's snapshot and slot volumes removed first. A reseed walks the image's layer paths once more; the published images hold a few
 hundred entries there.

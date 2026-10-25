@@ -108,12 +108,15 @@ make_hidden_dir() {
 
 # Puts a whiteout in /base/$1.hidden.new for each entry of the image's $2 that slot 1's view hides: one a job
 # deleted, or one under a directory it replaced. The image's CACHE_SECRETS get none, as its own copies stay
-# (layers.sh), and a directory of theirs none either, only what else it held. Nothing under a symlink or a file of the
+# (layers.sh), and a directory or symlink of theirs none either: only what else such a directory held. Nothing under a symlink or a file of the
 # view is looked at, and the layer holds only directories it makes.
 hide_image_entries() {
-    local hidden=/base/$1.hidden.new image=$2 entry done_with='' lower=/base/$1
+    local hidden=/base/$1.hidden.new image=$2 entry done_with='' lower=/base/$1 entries
     [ -d "$image" ] && [ ! -L "$image" ] || return 0
     [ ! -d "/base/$1.hidden" ] || lower=$lower:/base/$1.hidden
+    # Listed in full first, so a find that fails fails the reseed instead of leaving whiteouts out.
+    entries=$(mktemp)
+    find "$image" -mindepth 1 -printf '%P\0' > "$entries"
     mount -t overlay overlay -o "ro,lowerdir=/workers/1/$1/upper:$lower:$image" /mnt/view
     while IFS= read -r -d '' entry; do
         # find lists a directory before what it holds.
@@ -123,8 +126,12 @@ hide_image_entries() {
             { [ -d "/mnt/view/$entry" ] && [ ! -L "/mnt/view/$entry" ]; } || done_with=$entry
         elif [ "$1" = cache ] && is_secret "$entry"; then
             done_with=$entry
-        elif [ "$1" = cache ] && holds_secret "$entry" && [ -d "$image/$entry" ] && [ ! -L "$image/$entry" ]; then
-            make_hidden_dir "$hidden" "$image" "$entry"
+        elif [ "$1" = cache ] && holds_secret "$entry"; then
+            if [ -d "$image/$entry" ] && [ ! -L "$image/$entry" ]; then
+                make_hidden_dir "$hidden" "$image" "$entry"
+            else
+                done_with=$entry
+            fi
         else
             if [ "${entry%/*}" = "$entry" ]; then
                 make_hidden_dir "$hidden" "$image" ""
@@ -134,16 +141,19 @@ hide_image_entries() {
             mknod "$hidden/$entry" c 0 0
             done_with=$entry
         fi
-    done < <(find "$image" -mindepth 1 -printf '%P\0')
+    done < "$entries"
     umount /mnt/view
+    rm -f "$entries"
 }
 
 max=${2:-0}
 if [ "$max" -gt 0 ]; then
-    # What the new snapshot would hold: slot 1's view of each layer it changed, the snapshot of each other one.
+    # What the new snapshot would hold: slot 1's view of each layer it changed, the snapshot of each other one, and
+    # the whiteouts there are now.
     size=0
     for layer in "${LAYERS[@]}"; do
         name=${layer%%:*}
+        [ ! -d "/base/$name.hidden" ] || size=$((size + $(du -sxb "/base/$name.hidden" | cut -f1)))
         if [ -d "/workers/1/$name/upper" ]; then
             mount_view "$name"
             size=$((size + $(du -sxb /mnt/merged | cut -f1)))
