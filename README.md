@@ -84,7 +84,7 @@ The installer downloads `runnerd` and `runnerctl` for Linux x86_64 or aarch64, c
 `~/.local/bin` and runs `runnerd doctor`. It never uses sudo. To pick the directory or the release:
 
 ```sh
-curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.13
+curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.14
 ```
 
 For v0.0.3 and earlier, run that release's own `install.sh`. Every release archive, `install.sh` and `sha256.sum` has
