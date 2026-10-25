@@ -423,7 +423,7 @@ fn jobs(state: &State, now: u64, paint: Paint) -> String {
         let mut queued = Table::default().right(&[2]);
         for job in &state.status.queued {
             queued.row(vec![
-                (job.repository.clone(), Tone::Plain),
+                (job.place(&state.status), Tone::Plain),
                 (job.title().to_string(), Tone::Plain),
                 (human::queued_ago(job, now), Tone::Dim),
                 (human::waiting(job, &state.status, now), Tone::Dim),
@@ -462,7 +462,8 @@ fn jobs(state: &State, now: u64, paint: Paint) -> String {
 mod tests {
     use runnerd_core::api::{
         Budget, Event, EventEnvelope, JobMetrics, JobRunner, JobState, JobSummary, LogSummary,
-        ProfileStatus, RunnerStatus, SlotStatus, Status, Step, Timeline,
+        PoolStatus, ProfileStatus, RepositoryStatus, RunnerStatus, SlotStatus, Status, Step,
+        Timeline,
     };
 
     use std::collections::BTreeMap;
@@ -672,6 +673,39 @@ mod tests {
         state.apply(&event(Event::JobStarted { job: started }));
         let ids: Vec<u64> = state.status.queued.iter().map(|job| job.id).collect();
         assert_eq!(ids, [8], "the started job left the queue");
+    }
+
+    #[test]
+    fn a_queued_job_of_a_repository_with_several_pools_names_its_pool() {
+        let mut state = state();
+        let pool = |profile: &str| PoolStatus {
+            profile: profile.to_owned(),
+            labels: vec![profile.to_owned()],
+            queued_jobs: 0,
+        };
+        state.status.repositories.push(RepositoryStatus {
+            name: "halyard/ledger".to_owned(),
+            profile: "jvm".to_owned(),
+            labels: vec!["jvm".to_owned()],
+            pools: vec![pool("jvm"), pool("light")],
+            paused: false,
+            queued_jobs: 1,
+        });
+        let mut queued = summary(JobState::Queued);
+        queued.runner = None;
+        state.apply(&event(Event::JobQueued { job: queued }));
+        state.status.queued[0].profile = Some("light".to_owned());
+        let shown = screen(&state);
+        let row = shown
+            .lines()
+            .skip_while(|line| *line != "Queued")
+            .nth(1)
+            .unwrap_or_default();
+        assert!(
+            row.contains(&state.status.queued[0].place(&state.status)),
+            "as status, the TUI and the dashboard place it: {shown}"
+        );
+        assert!(row.contains("light"), "its pool is named: {shown}");
     }
 
     #[test]
