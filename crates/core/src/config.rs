@@ -1198,6 +1198,11 @@ impl Config {
                 });
             }
         }
+        self.check_budget(memory_max)
+    }
+
+    /// Holds what `[host] admission` needs to the slice's `MemoryMax`; warns when the slice has none to hold caps to.
+    fn check_budget(&self, memory_max: Option<ByteSize>) -> Result<Vec<Warning>, ConfigError> {
         let total = self.memory_caps()?;
         if self.host.admission == Admission::Measured {
             let Some(memory_max) = memory_max else {
@@ -1215,6 +1220,15 @@ impl Config {
                 return Err(ConfigError::ProfileOverBudget {
                     profile: profile.clone(),
                     needs: ByteSize(needs),
+                    slice: self.host.slice.clone(),
+                    memory_max,
+                });
+            }
+            // Without a profile, the mirror alone must fit: the caps sum, which is all `memory_needed` holds.
+            let needed = self.memory_needed()?;
+            if needed > memory_max {
+                return Err(ConfigError::OverBudget {
+                    total: needed,
                     slice: self.host.slice.clone(),
                     memory_max,
                 });

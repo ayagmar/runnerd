@@ -578,6 +578,34 @@ fn measured_admission_needs_one_runner_of_every_profile_to_fit() {
 }
 
 #[test]
+fn measured_admission_without_a_profile_still_needs_the_mirror_to_fit() {
+    let text = r#"
+repositories = []
+
+[host]
+slice = "ci.slice"
+isolation = "sysbox"
+admission = "measured"
+
+[caches]
+mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+[profiles]
+"#;
+    let (_, check) = Config::check(text, |_| Ok(Some(size("256M"))));
+    assert!(
+        !check.valid,
+        "a 512M mirror does not fit 256M: {}",
+        check.message
+    );
+    assert!(check.message.contains("512M"), "{}", check.message);
+    let (_, check) = Config::check(text, |_| Ok(Some(size("1G"))));
+    assert!(check.valid, "a 512M mirror fits 1G: {}", check.message);
+}
+
+#[test]
 fn measured_admission_needs_a_memory_max_to_admit_against() {
     let error = Config::parse(&measured(2))
         .unwrap()
