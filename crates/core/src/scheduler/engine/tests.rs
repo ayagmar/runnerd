@@ -1061,6 +1061,42 @@ async fn a_job_github_still_lists_queued_after_its_runner_took_it_gets_no_twin()
 }
 
 #[tokio::test]
+async fn a_runner_whose_log_shows_its_job_runs_it_while_github_lists_it_idle() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    for _ in 0..10 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    // The runner's log names its job, but GitHub's listing, which lags it, still has the runner idle.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .captures
+        .insert(("1".to_owned(), "0".to_owned()), "@@job 1 1\n".to_owned());
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1)];
+        state.jobs.insert(1, details(1, "in_progress", None));
+    }
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 1, JobState::Running).await;
+    github.0.lock().unwrap().queued.clear();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let status = handle.status.borrow();
+    let profile = &status.profiles[0];
+    assert_eq!(
+        api::Status::slot_state(profile, &profile.slots[0]),
+        api::SlotState::Running {
+            repository: "o/r".to_owned()
+        }
+    );
+}
+
+#[tokio::test]
 async fn a_job_whose_capture_never_reported_it_leaves_the_queue_once_github_completes_it() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

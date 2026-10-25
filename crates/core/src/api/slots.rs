@@ -70,7 +70,7 @@ impl SlotState {
 }
 
 impl Status {
-    /// What `slot` of `profile` is doing: its runner's state as GitHub reports it, or for a free slot, whether its
+    /// What `slot` of `profile` is doing: its runner's state as the daemon reports it, or for a free slot, whether its
     /// profile reseeds into it.
     pub fn slot_state(profile: &ProfileStatus, slot: &SlotStatus) -> SlotState {
         match &slot.runner {

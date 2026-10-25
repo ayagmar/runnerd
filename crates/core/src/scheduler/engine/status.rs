@@ -52,7 +52,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             name: occupant.runner_name.clone(),
                             runner_id: occupant.runner_id,
                             container: occupant.container.clone(),
-                            busy: occupant.busy,
+                            busy: occupant.busy || occupant.job.is_some(),
                             started_at: unix_secs(occupant.started_at),
                             reserved: self.takes(occupant),
                             warm: plan.warm.contains(&SlotRef {

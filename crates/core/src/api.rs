@@ -316,7 +316,7 @@ pub struct RunnerStatus {
     pub runner_id: u64,
     /// The Docker container ID.
     pub container: String,
-    /// Whether GitHub reports it running a job.
+    /// Whether it runs a job, as GitHub or its log reports it: its log names the job before GitHub lists it busy.
     pub busy: bool,
     /// Seconds since the Unix epoch.
     pub started_at: u64,
