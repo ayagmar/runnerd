@@ -2031,6 +2031,23 @@ dl.health-figures {
   background: var(--bg);
 }
 
+/* Exact widths: a block's share of the bar is its share of the budget, so the MemoryMax mark lands where it says.
+   No gap and no side padding on the blocks, which a narrow block could not shrink below; the labels carry it. */
+.bar-small {
+  gap: 0;
+}
+
+.bar-small > .block,
+.bar-small > .free {
+  flex: 0 0 calc(var(--size) * 100%);
+  padding-inline: 0;
+  box-shadow: inset -2px 0 var(--bg);
+}
+
+.bar-small > :is(.block, .free) > span {
+  padding-inline: 0.45rem;
+}
+
 .bar-small .block .size,
 .bar-small .free .size {
   font-size: 1.125rem;

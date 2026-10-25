@@ -93,6 +93,16 @@ pub enum Admission {
     Measured,
 }
 
+impl Admission {
+    /// The policy as the API names it.
+    pub fn policy(self) -> api::AdmissionPolicy {
+        match self {
+            Admission::Caps => api::AdmissionPolicy::Caps,
+            Admission::Measured => api::AdmissionPolicy::Measured,
+        }
+    }
+}
+
 fn default_poll_interval() -> Duration {
     Duration::from_secs(15)
 }
@@ -998,34 +1008,40 @@ impl Config {
         text: &str,
         memory_max: impl FnOnce(&str) -> std::io::Result<Option<ByteSize>>,
     ) -> (Option<Config>, api::ConfigCheck) {
-        let invalid = |message: String, memory_caps: Option<ByteSize>, max: Option<ByteSize>| {
-            api::ConfigCheck {
+        let invalid =
+            |message: String, config: Option<&Config>, max: Option<ByteSize>| api::ConfigCheck {
                 valid: false,
                 message,
                 warnings: Vec::new(),
-                memory_caps: memory_caps.map(|caps| caps.0),
+                admission: config
+                    .map(|config| config.host.admission.policy())
+                    .unwrap_or_default(),
+                memory_caps: config
+                    .and_then(|config| config.memory_caps().ok())
+                    .map(|caps| caps.0),
+                memory_needed: config
+                    .and_then(|config| config.memory_needed().ok())
+                    .map(|need| need.0),
                 memory_max: max.map(|max| max.0),
                 revision: None,
-            }
-        };
+            };
         let config = match Config::parse(text) {
             Ok(config) => config,
             Err(error) => return (None, invalid(error.to_string(), None, None)),
         };
-        let caps = config.memory_caps().ok();
         let max = match memory_max(&config.host.slice) {
             Ok(max) => max,
-            Err(error) => return (None, invalid(error.to_string(), caps, None)),
+            Err(error) => return (None, invalid(error.to_string(), Some(&config), None)),
         };
-        match config
+        let figures = config
             .validate(max)
-            .and_then(|warnings| Ok((warnings, config.memory_caps()?)))
-        {
-            Ok((warnings, total)) => {
+            .and_then(|warnings| Ok((warnings, config.memory_caps()?, config.memory_needed()?)));
+        match figures {
+            Ok((warnings, total, needed)) => {
                 let message = match (config.host.admission, max) {
-                    (Admission::Measured, Some(max)) if total > max => format!(
-                        "valid, memory caps sum to {total}, over the {max} MemoryMax: admission = \"measured\" \
-                         starts what the predicted peaks fit"
+                    (Admission::Measured, Some(max)) => format!(
+                        "valid under admission = \"measured\": the largest runner with the mirror needs {needed} \
+                         of the {max} MemoryMax; every slot at its cap at once would take {total}"
                     ),
                     _ => format!("valid, memory caps sum to {total}"),
                 };
@@ -1033,13 +1049,15 @@ impl Config {
                     valid: true,
                     message,
                     warnings: warnings.iter().map(ToString::to_string).collect(),
+                    admission: config.host.admission.policy(),
                     memory_caps: Some(total.0),
+                    memory_needed: Some(needed.0),
                     memory_max: max.map(|max| max.0),
                     revision: None,
                 };
                 (Some(config), check)
             }
-            Err(error) => (None, invalid(error.to_string(), caps, max)),
+            Err(error) => (None, invalid(error.to_string(), Some(&config), max)),
         }
     }
 
@@ -1065,6 +1083,26 @@ impl Config {
             })
             .map(ByteSize)
             .ok_or(ConfigError::BudgetOverflow)
+    }
+
+    /// The memory `[host] admission` must fit in `MemoryMax`: every cap at once under caps; under measured, the
+    /// largest single runner with the mirror, since `slots` there only bounds how many run at once.
+    pub fn memory_needed(&self) -> Result<ByteSize, ConfigError> {
+        match self.host.admission {
+            Admission::Caps => self.memory_caps(),
+            Admission::Measured => {
+                let largest = self
+                    .profiles
+                    .values()
+                    .map(|p| p.memory.0)
+                    .max()
+                    .unwrap_or(0);
+                largest
+                    .checked_add(self.mirror_memory())
+                    .map(ByteSize)
+                    .ok_or(ConfigError::BudgetOverflow)
+            }
+        }
     }
 
     /// Refuses a profile outside the bounds auto sizing keeps it in, or whose bounds cross.

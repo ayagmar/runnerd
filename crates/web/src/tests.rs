@@ -1925,6 +1925,88 @@ async fn a_config_over_the_budget_is_not_saved_and_the_page_shows_both_numbers()
     assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, before);
 }
 
+/// The result region `/config/check` answers for `toml`.
+async fn checked(dashboard: &Dashboard, toml: &str) -> String {
+    let cookie = dashboard.sign_in().await;
+    dashboard
+        .write(
+            &cookie,
+            "POST",
+            "/config/check",
+            &serde_json::json!({ "toml": toml }),
+        )
+        .await
+        .body
+}
+
+/// `toml` under `admission = "measured"`.
+fn measured(toml: &str) -> String {
+    let measured = toml.replacen(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nadmission = \"measured\"",
+        1,
+    );
+    assert_ne!(measured, toml);
+    measured
+}
+
+#[tokio::test]
+async fn under_caps_a_config_over_memory_max_shows_by_how_much_and_where_memory_max_falls() {
+    let dashboard = Dashboard::start().await;
+    // 2 × 12G + 2 × 7G + 512M = 38.5G, over runnerd.slice's 33G.
+    let result = checked(&dashboard, &with_jvm_memory(&dashboard, "12G")).await;
+    for expected in [
+        "Does not fit",
+        "Memory caps",
+        "38.5G",
+        "Over by",
+        "5.5G",
+        "max-mark",
+    ] {
+        assert!(result.contains(expected), "lacks {expected:?}: {result}");
+    }
+}
+
+#[tokio::test]
+async fn under_measured_caps_past_memory_max_are_no_overflow_when_one_runner_and_the_mirror_fit() {
+    let dashboard = Dashboard::start().await;
+    // 4 × 9G + 4 × 7G + 512M = 64.5G of caps on 33G; one jvm runner and the mirror take 9.5G.
+    let config = dashboard.fake.fixtures.lock().unwrap().config.clone();
+    let toml = measured(&config.replace("slots = 2", "slots = 4"));
+    let result = checked(&dashboard, &toml).await;
+    for expected in [
+        "Fits the budget",
+        "Largest runner + mirror",
+        "9.5G",
+        "23.5G",
+        "Every slot at its cap at once would take 64.5G",
+        "jvm ×1 9G, mirror 512M",
+    ] {
+        assert!(result.contains(expected), "lacks {expected:?}: {result}");
+    }
+    for unexpected in ["Over by", "max-mark", "Memory caps"] {
+        assert!(
+            !result.contains(unexpected),
+            "shows {unexpected:?}: {result}"
+        );
+    }
+}
+
+#[tokio::test]
+async fn under_measured_a_runner_too_big_for_memory_max_does_not_fit_and_says_which() {
+    let dashboard = Dashboard::start().await;
+    let result = checked(&dashboard, &measured(&with_jvm_memory(&dashboard, "40G"))).await;
+    for expected in [
+        "Does not fit",
+        "one runner of jvm and the mirror take 40.5G",
+        "Over by",
+        "7.5G",
+        "max-mark",
+    ] {
+        assert!(result.contains(expected), "lacks {expected:?}: {result}");
+    }
+}
+
 #[tokio::test]
 async fn a_config_that_fits_is_saved_and_checking_one_saves_nothing() {
     let dashboard = Dashboard::start().await;
@@ -1962,8 +2044,7 @@ async fn the_config_page_shows_the_file_its_budget_and_the_doctor() {
         "halyard/ledger",
         "/home/forge/.config/runnerd/runnerd.toml",
         "Fits the budget",
-        "jvm 2",
-        "node 2 7G",
+        "jvm ×2 18G, node ×2 14G, mirror 512M",
         "MemoryHigh=30G",
     ] {
         assert!(

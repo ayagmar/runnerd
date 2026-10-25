@@ -544,12 +544,13 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             "config",
             match (
                 config.host.admission,
+                config.memory_needed(),
                 config.memory_caps(),
                 slice.memory_max,
             ) {
-                (Admission::Measured, Ok(caps), Some(max)) if caps > max => format!(
-                    "memory caps sum to {caps}, over {name}'s {max} MemoryMax: admission = \"measured\" starts \
-                     what the predicted peaks fit"
+                (Admission::Measured, Ok(needed), Ok(caps), Some(max)) if caps > max => format!(
+                    "under admission = \"measured\", the largest runner with the mirror needs {needed} of \
+                     {name}'s {max} MemoryMax; every slot at its cap at once would take {caps}"
                 ),
                 _ => format!("fits in {name}"),
             },

@@ -5,6 +5,8 @@ use std::fmt;
 
 use serde::{Deserialize, Serialize};
 
+use crate::api::AdmissionPolicy;
+
 /// A runner of this daemon that holds a slot, and the job it runs, if it took one.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct RunningJob {
@@ -84,8 +86,16 @@ pub struct ConfigCheck {
     pub message: String,
     /// What a valid config should still fix.
     pub warnings: Vec<String>,
-    /// Bytes every runner and the mirror may use at once, when it parses.
+    /// `[host] admission`, which decides what must fit `MemoryMax`: `memory_caps` under caps, `memory_needed`
+    /// under measured. Caps from a daemon before it said.
+    #[serde(default)]
+    pub admission: AdmissionPolicy,
+    /// Bytes every slot and the mirror take at their caps, all at once, when it parses.
     pub memory_caps: Option<u64>,
+    /// Bytes the admission rule must fit in `MemoryMax`, when it parses: `memory_caps` under caps; under measured,
+    /// the largest single runner with the mirror. `None` from a daemon before it said.
+    #[serde(default)]
+    pub memory_needed: Option<u64>,
     /// The `MemoryMax` of the slice it names; `None` when unlimited or unknown.
     pub memory_max: Option<u64>,
     /// From `PUT /v1/config`, once written: the revision of the text written, to make the next change against.

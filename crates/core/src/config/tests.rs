@@ -549,9 +549,22 @@ fn measured_admission_lets_the_caps_add_up_past_memory_max() {
     assert!(check.valid, "{}", check.message);
     assert!(check.message.contains("measured"), "{}", check.message);
     assert_eq!(config.unwrap().host.admission, super::Admission::Measured);
-    // The same caps admitted by caps do not fit.
+    // The check names the rule, and the figure it holds to MemoryMax is one runner, not every cap.
+    assert_eq!(check.admission, crate::api::AdmissionPolicy::Measured);
+    let max = size("10G").0;
+    assert!(
+        check.memory_caps > Some(max),
+        "the caps add up past MemoryMax"
+    );
+    assert!(
+        check.memory_needed.is_some_and(|needed| needed <= max),
+        "one runner fits: {check:?}"
+    );
+    // The same caps admitted by caps do not fit, and there the caps are what must fit.
     let caps = MINIMAL.replace("slots = 1", "slots = 8");
-    assert!(!Config::check(&caps, |_| Ok(Some(size("10G")))).1.valid);
+    let refused = Config::check(&caps, |_| Ok(Some(size("10G")))).1;
+    assert!(!refused.valid, "8 × 4G of caps do not fit 10G");
+    assert_eq!(refused.memory_needed, refused.memory_caps);
 }
 
 #[test]

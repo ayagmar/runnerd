@@ -225,7 +225,7 @@ pub(super) async fn replace_config(
 /// Why `replace` left the config as it was.
 pub(super) enum Refusal {
     /// The new config does not validate.
-    Invalid(ConfigCheck),
+    Invalid(Box<ConfigCheck>),
     /// The engine did not run it, or its file was not written.
     Control(ControlError),
     Join(tokio::task::JoinError),
@@ -255,7 +255,7 @@ pub(super) async fn replace(
         .await
         .map_err(Refusal::Join)?;
     let Some(config) = config else {
-        return Err(Refusal::Invalid(checked));
+        return Err(Refusal::Invalid(Box::new(checked)));
     };
     // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs, and the
     // CPUs read only scale the dashboard's CPU chart.
@@ -270,7 +270,7 @@ pub(super) async fn replace(
                     "cpu_overcommit needs the slice {}'s CPUs, and they cannot be read: {io_error}",
                     config.host.slice
                 );
-                return Err(Refusal::Invalid(checked));
+                return Err(Refusal::Invalid(Box::new(checked)));
             }
             Err(join_error) => return Err(Refusal::Join(join_error)),
         }
