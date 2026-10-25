@@ -352,14 +352,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .is_some_and(Option::is_some)
     }
 
-    /// What the runners take (`takes`), and the memory
-    /// caps of the seed containers (which run with their profile's limits), the shells and the mirror.
+    /// What the runners take (`takes`), and the memory caps of the seed containers (which run with their profile's
+    /// limits) and the room waiting ones hold (`seed_memory`), the shells and the mirror.
     pub(super) fn memory_in_use(&self) -> u64 {
         let runners: u64 = self
             .occupied()
             .map(|(_, occupant)| self.takes(occupant))
             .sum();
-        let reseeds: u64 = self.reseed_memory.values().sum();
+        let reseeds: u64 = self.seed_memory().values().sum();
         runners + reseeds + self.shell_memory() + self.mirror_memory_in_use()
     }
 

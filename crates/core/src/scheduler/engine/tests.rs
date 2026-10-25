@@ -2653,6 +2653,37 @@ async fn a_running_reseed_keeps_its_memory_when_a_reload_lowers_its_profiles() {
 }
 
 #[tokio::test]
+async fn a_requested_reseed_that_waits_for_room_holds_it_against_other_profiles_jobs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &sized("0G", "4G", "4G"));
+    engine.memory_max = Some(6 << 30);
+    engine.recover().await.unwrap();
+    // `small` has drained, but its 4G seed container does not fit beside app's 4G runner in 6G.
+    engine.request_reseed("small").unwrap();
+    engine.tick(Shutdown::No).await;
+    assert!(!engine.reseeds.contains_key("small"), "the seed waits");
+    engine.publish();
+    let seeds = handle.status.borrow().budget.seed_memory.clone();
+    assert_eq!(
+        seeds,
+        [api::SeedMemory {
+            profile: "small".to_owned(),
+            memory: 4 << 30
+        }]
+    );
+
+    // App's job ends and another is queued: the room it frees goes to the seed, not to app's next runner.
+    docker.0.lock().unwrap().containers[0].running = false;
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    assert!(engine.reseeds.contains_key("small"), "the seed starts");
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
 async fn a_running_mirror_keeps_its_memory_when_a_reload_lowers_it() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

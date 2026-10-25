@@ -734,6 +734,27 @@ async fn a_warm_runner_waits_while_a_shell_holds_back_its_profiles_reseed() {
 }
 
 #[tokio::test]
+async fn a_warm_runner_keeps_waiting_for_a_due_reseed_whose_seed_would_not_fit() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+
+    // The slice shrinks under the 4G seed container: stopping the warm runner would not make room for the reseed.
+    engine.memory_max = Some(3 << 30);
+    engine.reseed_due.insert("app".to_owned());
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    engine.publish();
+    assert_eq!(slots(&handle), [Some(warm_in("o/r")), None]);
+    assert!(engine.reseeds.is_empty(), "the reseed waits for room");
+}
+
+#[tokio::test]
 async fn a_warm_runner_on_the_old_image_waits_until_the_new_one_is_pulled() {
     const NEXT: &str = "ghcr.io/ayagmar/runnerd-runner:app-0.0.6";
     let on = |image: &str| {
