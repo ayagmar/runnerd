@@ -28,10 +28,10 @@ use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
 use runnerd_core::api::{
-    Admission, AdmissionPolicy, Basis, Budget, CpuAdmission, Event, EventEnvelope, EventQuery, Job,
-    JobMetrics, JobRunner, JobState, JobSummary, LogSummary, ProfileStatus, QueuedJob, Record,
-    RecordLimits, Records, RepositoryStatus, RunnerStatus, Sample, SeedMemory, ShellMemory,
-    SlotStatus, Status, Step, Timeline, Waiting,
+    Admission, AdmissionPolicy, Basis, Budget, CpuAdmission, Event, EventEnvelope, EventQuery,
+    HostBudget, HostMemory, Job, JobMetrics, JobRunner, JobState, JobSummary, LogSummary,
+    ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus, RunnerStatus,
+    Sample, SeedMemory, ShellMemory, SlotStatus, Status, Step, Timeline, Waiting,
 };
 use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread, Starts};
 
@@ -868,6 +868,41 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     let shown = screen(&app, 120, 40, false);
     let names = shown.lines().nth(4).unwrap();
     assert!(names.contains("jvm seed 9G"), "{shown}");
+}
+
+#[test]
+fn the_bar_shows_no_free_cell_when_core_says_nothing_is_free() {
+    // Nothing runs, and the host leaves the slice 4G: it holds all 8G past the three slots' 25G.
+    let mut app = app();
+    app.live.status.budget.host = Some(HostBudget {
+        memory: HostMemory {
+            at: NOW,
+            total: 64 << 30,
+            available: 8 << 30,
+            slice: 0,
+            some: None,
+            full: None,
+            holders: Vec::new(),
+        },
+        limit: 4 << 30,
+        spare: 4 << 30,
+        stalled: false,
+    });
+    assert_eq!(app.live.status.budget_parts().free, None);
+    let shown = screen(&app, 80, 24, false);
+    let bar = shown.lines().nth(3).unwrap();
+    assert!(!bar.contains('·'), "no free cell: {shown}");
+    assert!(bar.ends_with('╱'), "the host's part ends the bar: {shown}");
+
+    // Held under measured admission, nothing runs and all 33G is closed.
+    let budget = &mut app.live.status.budget;
+    budget.admission = AdmissionPolicy::Measured;
+    budget.held = true;
+    let shown = screen(&app, 80, 24, false);
+    let mut lines = shown.lines().skip(3);
+    let (bar, names) = (lines.next().unwrap(), lines.next().unwrap());
+    assert!(!bar.contains('·'), "no free cell while held: {shown}");
+    assert!(names.contains("closed past 90% 33G"), "{shown}");
 }
 
 #[test]

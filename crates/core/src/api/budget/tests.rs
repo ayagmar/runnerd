@@ -1,8 +1,9 @@
 //! What the overview says of the budget and of a running job's limits, the same in every client.
 
 use crate::api::{
-    AdmissionPolicy, Budget, Job, JobMetrics, JobRunner, JobState, JobSummary, LimitSource,
-    LogSummary, ProfileStatus, RunnerStatus, SeedMemory, SlotStatus, Status, Timeline,
+    AdmissionPolicy, Budget, ClosedKind, HostBudget, HostMemory, Job, JobMetrics, JobRunner,
+    JobState, JobSummary, LimitSource, LogSummary, ProfileStatus, RunnerStatus, SeedMemory,
+    SlotStatus, Status, Timeline,
 };
 
 const G: u64 = 1 << 30;
@@ -120,6 +121,145 @@ fn every_client_says_the_held_measured_budget_admits_no_runner() {
     assert_eq!(
         budget.line(),
         "8G reserved in ci.slice by predicted peaks, which has no MemoryMax"
+    );
+}
+
+/// A reading of a 64G host that leaves the slice `limit`, so `spare` beside the 8G running.
+fn host(limit: u64, stalled: bool) -> HostBudget {
+    HostBudget {
+        memory: HostMemory {
+            at: 0,
+            total: 64 * G,
+            available: 20 * G,
+            slice: 8 * G,
+            some: None,
+            full: None,
+            holders: vec![],
+        },
+        limit,
+        spare: limit.saturating_sub(8 * G),
+        stalled,
+    }
+}
+
+#[test]
+fn free_is_what_the_host_leaves_when_it_leaves_less_than_memory_max() {
+    let mut status = status(AdmissionPolicy::Measured, Some(46 * G));
+    status.budget.host = Some(host(13 * G, false));
+    let parts = status.budget_parts();
+    assert_eq!(
+        parts.free.map(|free| (free.memory, free.reading.line())),
+        Some((
+            5 * G,
+            "5G free; the host leaves the slice 13G of its 46G".to_owned()
+        ))
+    );
+    assert_eq!(
+        parts
+            .closed
+            .map(|closed| (closed.memory, closed.reading.line())),
+        Some((
+            33 * G,
+            "33G held by the host for its other programs and page cache, which leave the slice 13G"
+                .to_owned()
+        ))
+    );
+    assert_eq!(
+        status.budget.host_line().as_deref(),
+        Some("host: 20G of 64G available; leaves the slice 13G of its 46G, so 5G is free")
+    );
+}
+
+#[test]
+fn the_host_holds_back_the_end_of_the_bar_past_idle_slots_under_caps() {
+    let mut status = status(AdmissionPolicy::Caps, Some(24 * G));
+    // 12G beside the running slot: the host holds back 4G of the 8G past both slots.
+    status.budget.host = Some(host(20 * G, false));
+    let parts = status.budget_parts();
+    assert_eq!(
+        parts.free.map(|free| free.reading.line()),
+        Some(
+            "4G free past every slot's cap; 12G is free beside what runs, as the host leaves the slice 20G of its \
+             24G"
+                .to_owned()
+        )
+    );
+    assert_eq!(parts.closed.map(|closed| closed.memory), Some(4 * G));
+    // 2G beside the running slot: less than the idle slot's 8G cap, so the host holds all 8G past both slots.
+    status.budget.host = Some(host(10 * G, false));
+    let parts = status.budget_parts();
+    assert_eq!(parts.free, None, "nothing past the idle slot is free");
+    assert_eq!(parts.closed.map(|closed| closed.memory), Some(8 * G));
+    // Only what runs: past it the host leaves nothing.
+    status.budget.host = Some(host(8 * G, false));
+    assert_eq!(
+        status.budget.host_line().as_deref(),
+        Some("host: 20G of 64G available; leaves the slice 8G of its 24G, so nothing is free")
+    );
+}
+
+#[test]
+fn a_host_that_leaves_as_much_changes_nothing() {
+    let plain = status(AdmissionPolicy::Measured, Some(24 * G));
+    let mut status = plain.clone();
+    status.budget.host = Some(host(30 * G, false));
+    let parts = status.budget_parts();
+    assert_eq!(parts.free, plain.budget_parts().free);
+    assert_eq!(parts.closed, None);
+    assert_eq!(status.budget.host_withheld(), None);
+}
+
+#[test]
+fn nothing_is_free_while_the_host_stalls() {
+    let mut status = status(AdmissionPolicy::Caps, Some(24 * G));
+    status.budget.host = Some(host(30 * G, true));
+    let parts = status.budget_parts();
+    assert_eq!(parts.free, None, "no runner starts, so nothing is free");
+    let closed = parts.closed.expect("the room past both slots is closed");
+    assert_eq!(
+        (closed.memory, closed.kind, closed.reading.line()),
+        (
+            8 * G,
+            ClosedKind::Stalled,
+            "8G closed: the host's programs stall waiting for memory, so no runner starts"
+                .to_owned()
+        )
+    );
+    assert_eq!(
+        status.budget.host_line().as_deref(),
+        Some("host: 20G of 64G available; stalling, so no runner starts")
+    );
+}
+
+#[test]
+fn nothing_is_free_while_the_slice_is_held_though_the_host_leaves_room() {
+    let mut status = status(AdmissionPolicy::Measured, Some(46 * G));
+    status.budget.held = true;
+    status.budget.host = Some(host(13 * G, false));
+    let parts = status.budget_parts();
+    assert_eq!(parts.free, None, "no runner starts, so nothing is free");
+    let closed = parts.closed.expect("the room past the runner is closed");
+    assert_eq!(
+        (closed.memory, closed.kind, closed.reading.line()),
+        (
+            38 * G,
+            ClosedKind::Held,
+            "38G closed: the slice is past 90% of its MemoryMax, so no runner starts".to_owned()
+        )
+    );
+    assert_eq!(
+        status.budget.host_line().as_deref(),
+        Some("host: 20G of 64G available; leaves the slice 13G")
+    );
+}
+
+#[test]
+fn without_memory_max_the_host_line_says_what_the_host_leaves_free() {
+    let mut budget = status(AdmissionPolicy::Measured, None).budget;
+    budget.host = Some(host(13 * G, false));
+    assert_eq!(
+        budget.host_line().as_deref(),
+        Some("host: 20G of 64G available; leaves the slice 13G, so 5G is free")
     );
 }
 

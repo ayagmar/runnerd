@@ -60,7 +60,9 @@ mod tone;
 mod units;
 
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
-pub use budget::{BudgetParts, FreePart, HeldKind, HeldPart, Reading, SlotPart};
+pub use budget::{
+    BudgetParts, ClosedKind, ClosedPart, FreePart, HeldKind, HeldPart, Reading, SlotPart,
+};
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, ReplaceQuery,
     RunningJob,
@@ -184,29 +186,6 @@ pub struct HostBudget {
     pub spare: u64,
     /// Whether the host's tasks stall for memory (`full` pressure), so no runner starts until they stop.
     pub stalled: bool,
-}
-
-impl HostBudget {
-    /// The host's line as clients show it, such as `host: 31G of 64G available, 1.5% stalled for memory; leaves the
-    /// slice 40G` or, while it stalls, `…; stalling, so no runner starts`; with programs outside the slice large
-    /// enough to name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`).
-    pub fn line(&self) -> String {
-        let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
-        let mut line = format!("host: {}", self.memory.available_line());
-        if let Some(full) = self.memory.full.filter(|full| full.avg10 > 0) {
-            line = format!("{line}, {} stalled for memory", percent(full.avg10));
-        }
-        line = if self.stalled {
-            format!("{line}; stalling, so no runner starts")
-        } else {
-            format!("{line}; leaves the slice {}", size(self.limit))
-        };
-        if self.memory.holders.is_empty() {
-            line
-        } else {
-            format!("{line}; {}", self.memory.outside_line())
-        }
-    }
 }
 
 /// Hundredths of a percent as a percentage: `1.5%`, `12%`.

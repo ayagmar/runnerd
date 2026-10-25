@@ -14,10 +14,10 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    self, Activity, AutoPlan, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart, Insights,
-    Job, JobSummary, LogSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob,
-    RecordNote, RecordState, Records, RepositoryStatus, RunComparison, Sample, Sizing, SlotStatus,
-    Status, Step, WaitKind, cpus, in_cores, job_title,
+    self, Activity, AutoPlan, BudgetParts, ChartLine, ChartLineKind, ChartLines, HeldKind,
+    HeldPart, Insights, Job, JobSummary, LogSummary, Phase, PhaseKind, ProfileSizing,
+    ProfileStatus, QueuedJob, RecordNote, RecordState, Records, RepositoryStatus, RunComparison,
+    Sample, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores, job_title,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -728,8 +728,8 @@ fn budget_note(app: &App) -> Vec<(u8, String)> {
     if let Some(cpu) = budget.cpu {
         parts.push((1, cpu.line()));
     }
-    if let Some(host) = &budget.host {
-        parts.push((1, host.line()));
+    if let Some(host) = budget.host_line() {
+        parts.push((1, host));
     }
     if let Some(host) = &app.live.host {
         parts.push((2, format!("{} in use, sampled", bytes(host.memory))));
@@ -739,7 +739,7 @@ fn budget_note(app: &App) -> Vec<(u8, String)> {
 
 /// The budget as one bar: a block per slot as wide as its memory (under measured admission, a block per runner as
 /// wide as what it reserves), filled as far as its job uses it; then the mirror and each seed container, then what
-/// is free.
+/// is free and what is closed.
 fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let status = &app.live.status;
     let mut note = budget_note(app);
@@ -834,12 +834,65 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         names.push(Span::styled(format!("{name:room$} "), style));
         drawn += width;
     }
+    let rest = bar_rest(&parts, bar.width, drawn, theme);
+    cells.extend(rest.cells);
+    names.extend(rest.names);
+    note.extend(rest.note.map(|label| (3, label)));
     let room = usize::from(title.width).saturating_sub("Budget".width() + 2);
     heading(frame, title, "Budget", fit_details(note, room), theme);
-    let free = bar.width.saturating_sub(drawn);
-    cells.push(Span::styled("·".repeat(usize::from(free)), theme.dim()));
     frame.render_widget(Line::from(cells), bar);
     frame.render_widget(Line::from(names), labels);
+}
+
+/// The bar past its blocks: what is free, then what is closed, hatched and named under it or, too narrow for that,
+/// in the heading as the mirror is.
+struct Rest {
+    cells: Vec<Span<'static>>,
+    names: Vec<Span<'static>>,
+    note: Option<String>,
+}
+
+/// The bar of `width` cells past the `drawn` ones, for what of `parts` is free and closed. The closed part
+/// takes what rounding leaves, so the bar never shows more free than core says is.
+fn bar_rest(parts: &BudgetParts, width: u16, drawn: u16, theme: Theme) -> Rest {
+    let (free, closed, whole) = (parts.free.as_ref(), parts.closed.as_ref(), parts.whole);
+    let rest = width.saturating_sub(drawn);
+    let free_cells = match (free, closed) {
+        (Some(free), Some(_)) => scale(free.memory, whole, width).min(rest.saturating_sub(1)),
+        (Some(_), None) => rest,
+        (None, _) => 0,
+    };
+    let closed = closed.map(|closed| {
+        (
+            rest - free_cells,
+            format!("{} {}", closed.kind.name(), closed.reading.figure),
+        )
+    });
+    let blank = if free.is_none() && closed.is_none() {
+        rest
+    } else {
+        0
+    };
+    let mut out = Rest {
+        cells: vec![
+            Span::styled("·".repeat(usize::from(free_cells)), theme.dim()),
+            Span::raw(" ".repeat(usize::from(blank))),
+        ],
+        names: Vec::new(),
+        note: None,
+    };
+    if let Some((width, label)) = closed {
+        out.cells
+            .push(Span::styled("╱".repeat(usize::from(width)), theme.dim()));
+        out.names
+            .push(Span::raw(" ".repeat(usize::from(free_cells))));
+        if label.width() <= usize::from(width) {
+            out.names.push(Span::styled(label, theme.dim()));
+        } else {
+            out.note = Some(label);
+        }
+    }
+    out
 }
 
 /// Memory the budget holds for something other than a slot.

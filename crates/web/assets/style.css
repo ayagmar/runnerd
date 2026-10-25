@@ -486,6 +486,11 @@ html {
   color: var(--muted);
 }
 
+/* Room no runner may take while the host holds it back or the slice is held: hatched. */
+.free.closed {
+  background: repeating-linear-gradient(-45deg, var(--line) 0 2px, transparent 2px 8px);
+}
+
 /* The readout above the bar: the slice's total, and the selected block's line beside it. */
 .budget .figures {
   display: flex;
@@ -567,6 +572,10 @@ html {
 .bar-key.shell .swatch { background: var(--ink); }
 .bar-key.seed .swatch { background: color-mix(in srgb, var(--profile) 30%, var(--ink)); }
 .key-free .swatch { background: var(--bg); box-shadow: inset 0 0 0 1px var(--line); }
+.key-closed .swatch {
+  background: repeating-linear-gradient(-45deg, var(--line) 0 2px, var(--bg) 2px 5px);
+  box-shadow: inset 0 0 0 1px var(--line);
+}
 
 /* Ink, not the accent: an idle block's outline is a profile colour that may be the accent's. */
 .block:focus-visible,
@@ -2337,7 +2346,8 @@ dl.health-figures {
     padding: 0.45rem 0.4rem;
   }
 
-  .block > .name {
+  .block > span.name,
+  .free.closed > .name {
     font-size: 0.8125rem;
     line-height: 1.15;
     white-space: normal;
