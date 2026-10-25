@@ -1160,8 +1160,8 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
         assert!(text.ends_with(line), "{key}'s line reads {line:?}");
     }
     assert!(
-        overview.contains(r#"of 33G free""#),
-        "the free remainder is named for screen readers"
+        overview.contains("of 33G free past every slot's cap; "),
+        "the free remainder is named for screen readers, apart from the room free slots leave"
     );
 }
 

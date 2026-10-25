@@ -93,20 +93,18 @@ impl Job {
     /// budget, when the record has it, and the cap its container ran with, or for a record without it, `profile`'s
     /// limit as configured now. A reservation of the whole cap is one line.
     pub fn chart_lines(&self, profile: Option<&super::ProfileStatus>) -> ChartLines {
-        let runner = self.summary.runner.as_ref();
+        let limits = self.limits(profile);
         let admission = self.admission.as_ref();
         let name = profile.map_or("profile", |profile| profile.name.as_str());
         ChartLines {
             memory: chart_lines(
-                runner.and_then(|runner| runner.memory_cap),
-                profile.map(|profile| profile.memory),
+                limits.memory,
                 admission.map(|admission| admission.reserved),
                 |value| crate::config::ByteSize(value).to_string(),
                 name,
             ),
             cpu: chart_lines(
-                runner.and_then(|runner| runner.cpu_cap),
-                profile.map(|profile| u64::from(profile.cpus) * 1000),
+                limits.cpu,
                 admission
                     .and_then(|admission| admission.cpu)
                     .map(|cpu| cpu.reserved),
@@ -115,12 +113,103 @@ impl Job {
             ),
         }
     }
+
+    /// What its container may use of each resource, as every client scales its use against: the cap it ran with,
+    /// or, for a record without it, `profile`'s limit as configured now. Each resource falls back on its own, so a
+    /// reload that changes the profile never replaces a cap the record has.
+    pub fn limits(&self, profile: Option<&super::ProfileStatus>) -> Limits {
+        let runner = self.summary.runner.as_ref();
+        let limit = |cap: Option<u64>, now: Option<u64>| match (cap, now) {
+            (Some(value), _) => Some(Limit {
+                value,
+                source: LimitSource::Cap,
+            }),
+            (None, Some(value)) => Some(Limit {
+                value,
+                source: LimitSource::ProfileNow,
+            }),
+            (None, None) => None,
+        };
+        Limits {
+            memory: limit(
+                runner.and_then(|runner| runner.memory_cap),
+                profile.map(|profile| profile.memory),
+            ),
+            cpu: limit(
+                runner.and_then(|runner| runner.cpu_cap),
+                profile.map(|profile| u64::from(profile.cpus) * 1000),
+            ),
+        }
+    }
+}
+
+/// What a job's container may use, from `Job::limits`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limits {
+    /// In bytes.
+    pub memory: Option<Limit>,
+    /// In millicores.
+    pub cpu: Option<Limit>,
+}
+
+impl Limits {
+    /// The limits as one clause, such as `capped at 6G and 4 CPUs`, `capped at 6G; profile now 4 CPUs` or `profile
+    /// now 6G and 4 CPUs`; `None` without either.
+    pub fn line(&self) -> Option<String> {
+        let memory = self.memory.map(|limit| {
+            (
+                limit.source,
+                crate::config::ByteSize(limit.value).to_string(),
+            )
+        });
+        let cpu = self
+            .cpu
+            .map(|limit| (limit.source, super::cpus(limit.value)));
+        let clause = |source: LimitSource, figures: &str| match source {
+            LimitSource::Cap => format!("capped at {figures}"),
+            LimitSource::ProfileNow => format!("profile now {figures}"),
+        };
+        match (memory, cpu) {
+            (Some((memory_source, memory)), Some((cpu_source, cpu)))
+                if memory_source == cpu_source =>
+            {
+                Some(clause(memory_source, &format!("{memory} and {cpu}")))
+            }
+            (Some((memory_source, memory)), Some((cpu_source, cpu))) => Some(format!(
+                "{}; {}",
+                clause(memory_source, &memory),
+                clause(cpu_source, &cpu)
+            )),
+            (Some((source, figure)), None) | (None, Some((source, figure))) => {
+                Some(clause(source, &figure))
+            }
+            (None, None) => None,
+        }
+    }
+}
+
+/// One resource's limit for a job's container.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Limit {
+    /// Bytes or millicores.
+    pub value: u64,
+    /// Where it comes from.
+    pub source: LimitSource,
+}
+
+/// Where a job's limit comes from.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum LimitSource {
+    /// The cap its container ran with.
+    Cap,
+    /// Its profile's limit in the config now, for a record without its container's cap; a reload since may have
+    /// changed it.
+    ProfileNow,
 }
 
 /// One resource's lines: `value` writes a figure, such as `8.5G` or `3.6 CPUs`.
 fn chart_lines(
-    cap: Option<u64>,
-    now: Option<u64>,
+    limit: Option<Limit>,
     reserved: Option<u64>,
     value: fn(u64) -> String,
     profile: &str,
@@ -131,17 +220,26 @@ fn chart_lines(
         label: format!("{label} {}", value(figure)),
     };
     let mut lines = vec![];
-    match (cap, now) {
-        (Some(cap), _) if reserved == Some(cap) => {
+    match limit {
+        Some(Limit {
+            value: cap,
+            source: LimitSource::Cap,
+        }) if reserved == Some(cap) => {
             return vec![line(cap, ChartLineKind::CapAndReserved, "cap and reserved")];
         }
-        (Some(cap), _) => lines.push(line(cap, ChartLineKind::Cap, "cap")),
-        (None, Some(now)) => lines.push(line(
+        Some(Limit {
+            value: cap,
+            source: LimitSource::Cap,
+        }) => lines.push(line(cap, ChartLineKind::Cap, "cap")),
+        Some(Limit {
+            value: now,
+            source: LimitSource::ProfileNow,
+        }) => lines.push(line(
             now,
             ChartLineKind::ProfileNow,
             &format!("{profile} now"),
         )),
-        (None, None) => {}
+        None => {}
     }
     if let Some(reserved) = reserved {
         lines.push(line(reserved, ChartLineKind::Reserved, "reserved"));

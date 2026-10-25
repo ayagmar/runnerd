@@ -7,11 +7,11 @@ use std::fmt::Write as _;
 
 use runnerd_core::api::{
     self, Advice, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind,
-    Insights, Job, JobPage, JobRunner, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote,
-    Records, RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
+    Insights, Job, JobPage, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, Records,
+    RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
-use runnerd_core::api::{cpus, in_cores, job_title};
+use runnerd_core::api::{in_cores, job_title};
 use runnerd_core::config::ByteSize;
 
 /// How a piece of text should stand out.
@@ -171,34 +171,6 @@ pub(crate) fn queued_ago(job: &QueuedJob, now: u64) -> String {
 const SAMPLED_NOTE: &str =
     "memory peaks are sampled every 2 s; spikes shorter than that do not show";
 
-/// The memory line of a status: what is in use of what.
-fn budget_line(status: &Status) -> String {
-    let budget = &status.budget;
-    let by = budget
-        .admission_note()
-        .map_or_else(String::new, |note| format!(" {note}"));
-    let mut line = match budget.memory_max {
-        Some(max) => format!(
-            "{} of {} reserved in {}{by}",
-            bytes(budget.memory_in_use),
-            bytes(max),
-            budget.slice
-        ),
-        None => format!(
-            "{} reserved in {}, which has no MemoryMax",
-            bytes(budget.memory_in_use),
-            budget.slice
-        ),
-    };
-    if let Some(cpu) = budget.cpu {
-        let _ = write!(line, "; {}", cpu.line());
-    }
-    if let Some(host) = &budget.host {
-        let _ = write!(line, "; {}", host.line());
-    }
-    line
-}
-
 /// `runnerctl status`.
 pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
     let mut out = String::new();
@@ -207,7 +179,7 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
         "{} {}  {}",
         paint.paint(Tone::Bold, "runnerd"),
         status.version,
-        budget_line(status)
+        status.budget.line()
     );
     if status.shutting_down {
         let _ = write!(
@@ -357,16 +329,10 @@ fn step_mark(step: &Step) -> (String, Tone) {
 }
 
 /// `, capped at 6G and 4 CPUs`: what the job's container was held to, when the record has it.
-fn caps(runner: &JobRunner) -> String {
-    let caps: Vec<String> = [runner.memory_cap.map(bytes), runner.cpu_cap.map(cpus)]
-        .into_iter()
-        .flatten()
-        .collect();
-    if caps.is_empty() {
-        String::new()
-    } else {
-        format!(", capped at {}", caps.join(" and "))
-    }
+fn caps(job: &Job) -> String {
+    job.limits(None)
+        .line()
+        .map_or_else(String::new, |limits| format!(", {limits}"))
 }
 
 /// `runnerctl job <id>`.
@@ -404,7 +370,7 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
                     "(profile {}, slot {}{})",
                     runner.profile,
                     runner.slot,
-                    caps(runner)
+                    caps(job)
                 )
             )
         );

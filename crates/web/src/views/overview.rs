@@ -6,7 +6,7 @@ use std::collections::BTreeMap;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Activity, ActivityQuery, AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery,
+    Activity, ActivityQuery, HeldKind, HeldPart, HostSample, HostSamples, Job, JobPage, JobQuery,
     JobState, JobSummary, JobTitle, ProfileStatus, QueuedJob, RepositoryStatus, Sample,
     SampleSeries, SlotStatus, Started, Status, WaitKind, cpus, in_cores,
 };
@@ -270,7 +270,10 @@ fn slot_view<'overview>(
         .and_then(|samples| samples.last())
         .map(|sample| sample.memory);
     let name = format!("{} {}", profile.name, slot.slot);
-    let cap = format::bytes(profile.memory);
+    let memory_limit = job
+        .and_then(|job| job.limits(Some(profile)).memory)
+        .map_or(profile.memory, |limit| limit.value);
+    let cap = format::bytes(memory_limit);
     let lens = match (&slot.runner, job, memory) {
         (Some(_), Some(job), Some(memory)) => Lens {
             figure: format::bytes(memory),
@@ -326,35 +329,28 @@ fn slot_view<'overview>(
 pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     let status = &overview.status;
     let budget = &status.budget;
-    let reserved: u64 = status
-        .profiles
+    let bar = status.budget_parts();
+    let slot_blocks: Vec<(&ProfileStatus, &SlotStatus, u64)> = bar
+        .slots
         .iter()
-        .flat_map(|profile| {
-            profile
-                .slots
-                .iter()
-                .filter_map(|slot| block_memory(status, profile, slot))
+        .filter_map(|part| {
+            let profile = status.profiles.get(part.profile)?;
+            let slot = profile.slots.iter().find(|slot| slot.slot == part.slot)?;
+            Some((profile, slot, part.memory))
         })
-        .sum();
-    let held = held(status);
-    let held_total: u64 = held.iter().map(|part| part.memory).sum();
-    let free = budget
-        .memory_max
-        .map(|max| max.saturating_sub(reserved + held_total));
+        .collect();
+    let held = held(status, &bar.held);
     let used_now = overview.host.samples.last().map(|sample| sample.memory);
-    let max = budget
-        .memory_max
-        .map_or("no limit".to_owned(), format::bytes);
     // What is in use now is the readout's, which changes with every sample.
     let label = format!(
-        "Memory budget of {}: {} of {max} reserved by running containers",
+        "Memory budget of {}: {}",
         budget.slice,
-        format::bytes(budget.memory_in_use),
+        budget.memory_reading().line(),
     );
-    let free = free.filter(|free| *free > 0);
-    let free_lens = free.map(|free| Lens {
-        figure: format::bytes(free),
-        text: format!("of {max} free"),
+    let free = bar.free.as_ref().map(|free| free.memory);
+    let free_lens = bar.free.as_ref().map(|free| Lens {
+        figure: free.reading.figure.clone(),
+        text: free.reading.text.clone(),
     });
     let mut lenses: Vec<(String, Lens)> = status
         .profiles
@@ -379,12 +375,8 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
             h2 #budget-title .visually-hidden { "Budget" }
             (readout(overview, used_now, &lenses, parts))
             div.bar role="group" aria-label=(label) {
-                @for profile in &status.profiles {
-                    @for slot in &profile.slots {
-                        @if let Some(memory) = block_memory(status, profile, slot) {
-                            (block(overview, profile, slot, memory, parts))
-                        }
-                    }
+                @for (profile, slot, memory) in &slot_blocks {
+                    (block(overview, profile, slot, *memory, parts))
                 }
                 @for part in &held {
                     @let link = link(&part.key, None);
@@ -421,15 +413,13 @@ fn readout(
     parts: &Parts,
 ) -> Markup {
     let budget = &overview.status.budget;
+    let reading = budget.memory_reading();
     html! {
         div.figures {
             (parts.html("budget-readout", html! {
                 p #budget-readout .readout {
-                    span.big { (format::bytes(budget.memory_in_use)) }
-                    span { " of " (budget.memory_max.map_or("unlimited".to_owned(), format::bytes)) " in " code { (budget.slice) } }
-                    @if let Some(note) = budget.admission_note() {
-                        span.muted { " " (note) }
-                    }
+                    span.big { (reading.figure) }
+                    span { " " (reading.text) }
                     @if let Some(used) = used_now {
                         span.muted { " · " (format::bytes(used)) " in use" }
                     }
@@ -500,48 +490,29 @@ struct Held {
 }
 
 /// The mirror, each seed container, in the colour of the profile it reseeds, then each shell open in a record.
-fn held(status: &Status) -> Vec<Held> {
-    let budget = &status.budget;
-    let mirror = (budget.mirror_memory > 0).then(|| Held {
-        key: "mirror".to_owned(),
-        class: "mirror".to_owned(),
-        name: "mirror".to_owned(),
-        memory: budget.mirror_memory,
-        lens: Lens {
-            figure: format::bytes(budget.mirror_memory),
-            text: "held by the mirror".to_owned(),
-        },
-    });
-    let seeds = budget.seed_memory.iter().map(|seed| Held {
-        key: format!("seed-{}", slot_id(&seed.profile, 0)),
-        class: format!("seed {}", profile_class(status, &seed.profile)),
-        name: format!("{} seed", seed.profile),
-        memory: seed.memory,
-        lens: Lens {
-            figure: format::bytes(seed.memory),
-            text: format!("held by {}'s seed container", seed.profile),
-        },
-    });
-    let shells = budget.shell_memory.iter().map(|shell| Held {
-        key: format!("shell-{}", shell.job),
-        class: "shell".to_owned(),
-        name: format!("job {} shell", shell.job),
-        memory: shell.memory,
-        lens: Lens {
-            figure: format::bytes(shell.memory),
-            text: format!("held by the shell in job {}'s record", shell.job),
-        },
-    });
-    mirror.into_iter().chain(seeds).chain(shells).collect()
-}
-
-/// What a slot's block holds of the budget: its cap; under measured admission what its runner reserves, and no
-/// block for a free slot.
-fn block_memory(status: &Status, profile: &ProfileStatus, slot: &SlotStatus) -> Option<u64> {
-    match status.budget.admission {
-        AdmissionPolicy::Caps => Some(profile.memory),
-        AdmissionPolicy::Measured => slot.runner.as_ref().map(|runner| runner.reserved),
-    }
+fn held(status: &Status, held: &[HeldPart]) -> Vec<Held> {
+    held.iter()
+        .map(|part| {
+            let (key, class) = match &part.kind {
+                HeldKind::Mirror => ("mirror".to_owned(), "mirror".to_owned()),
+                HeldKind::Seed { profile } => (
+                    format!("seed-{}", slot_id(profile, 0)),
+                    format!("seed {}", profile_class(status, profile)),
+                ),
+                HeldKind::Shell { job } => (format!("shell-{job}"), "shell".to_owned()),
+            };
+            Held {
+                key,
+                class,
+                name: part.name(),
+                memory: part.memory,
+                lens: Lens {
+                    figure: format::bytes(part.memory),
+                    text: part.holder(),
+                },
+            }
+        })
+        .collect()
 }
 
 fn block(
@@ -639,7 +610,7 @@ fn slot_card(
             data-on:pointerleave=(link.pointer_leave) data-on:focusout=(link.leave) data-class:linked=(link.linked) {
             div.slot-head {
                 h3.slot-name { (profile.name) " " (slot.slot) }
-                span.slot-caps { (format::bytes(profile.memory)) " · " (profile.cpus) " CPUs" }
+                span.slot-caps { (slot_caps(profile, view.job)) }
             }
             @match (&slot.runner, view.job) {
                 (None, _) => {
@@ -659,6 +630,19 @@ fn slot_card(
             }
         }
     }
+}
+
+/// A slot's caps: its running job's container's, which a reload since may have changed in the profile, else the
+/// profile's.
+fn slot_caps(profile: &ProfileStatus, job: Option<&Job>) -> String {
+    let limits = job.map(|job| job.limits(Some(profile)));
+    let memory = limits
+        .and_then(|limits| limits.memory)
+        .map_or(profile.memory, |limit| limit.value);
+    let cpu = limits
+        .and_then(|limits| limits.cpu)
+        .map_or(u64::from(profile.cpus) * 1000, |limit| limit.value);
+    format!("{} · {}", format::bytes(memory), cpus(cpu))
 }
 
 fn running_job(
@@ -709,6 +693,7 @@ fn running_job(
         }
         .render(parts)
     };
+    let limits = job.limits(Some(profile));
     let last = samples.last();
     let figure = |class: &str, text: String| {
         let id = format!("{key}-{class}-now");
@@ -737,12 +722,12 @@ fn running_job(
             div.memory {
                 dt.visually-hidden { "Memory" }
                 (figure("memory", last.map_or("–".to_owned(), |sample| format::bytes(sample.memory))))
-                (sparkline(&memory, profile.memory, "memory"))
+                (sparkline(&memory, limits.memory.map_or(profile.memory, |limit| limit.value), "memory"))
             }
             div.cpu {
                 dt.visually-hidden { "CPU" }
                 (figure("cpu", last.map_or("–".to_owned(), |sample| in_cores(sample.cpu))))
-                (sparkline(&cpu, u64::from(profile.cpus) * 1000, "cpu"))
+                (sparkline(&cpu, limits.cpu.map_or(u64::from(profile.cpus) * 1000, |limit| limit.value), "cpu"))
             }
         }
     }

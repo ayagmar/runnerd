@@ -773,9 +773,8 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
     };
     let budget = host::budget(memory.clone(), memory.slice, host::Remembered::default());
     let detail = format!(
-        "{} of {} available, {} to spare for runners past a {} margin; every task waited for memory {}",
-        ByteSize(memory.available),
-        ByteSize(memory.total),
+        "{}, {} to spare for runners past a {} margin; every task waited for memory {}",
+        memory.available_line(),
         ByteSize(budget.spare),
         ByteSize(host::margin(memory.total, false)),
         stalled(memory.full)

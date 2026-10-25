@@ -14,8 +14,8 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    self, Activity, AdmissionPolicy, Advice, AutoPlan, ChartLine, ChartLineKind, ChartLines, Job,
-    JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
+    self, Activity, Advice, AutoPlan, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart,
+    Job, JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
     RunComparison, Sample, Severity, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores,
     job_title, period,
 };
@@ -763,23 +763,7 @@ fn scale(part: u64, whole: u64, width: u16) -> u16 {
 /// rank for [`fit_details`].
 fn budget_note(app: &App) -> Vec<(u8, String)> {
     let budget = &app.live.status.budget;
-    let mut note = match budget.memory_max {
-        Some(max) => format!(
-            "{} of {} reserved in {}",
-            bytes(budget.memory_in_use),
-            bytes(max),
-            budget.slice
-        ),
-        None => format!(
-            "{} reserved in {}, no MemoryMax",
-            bytes(budget.memory_in_use),
-            budget.slice
-        ),
-    };
-    if let Some(by) = budget.admission_note() {
-        let _ = write!(note, " {by}");
-    }
-    let mut parts = vec![(0, note)];
+    let mut parts = vec![(0, budget.memory_reading().line())];
     if let Some(cpu) = budget.cpu {
         parts.push((1, cpu.line()));
     }
@@ -797,22 +781,20 @@ fn budget_note(app: &App) -> Vec<(u8, String)> {
 /// is free.
 fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let status = &app.live.status;
-    let budget = &status.budget;
     let mut note = budget_note(app);
     let [title, bar, labels] = Layout::vertical([Constraint::Length(1); 3]).areas(area);
 
-    let blocks: Vec<_> = app
-        .slots()
-        .filter_map(|(index, profile, slot)| {
-            let memory = match budget.admission {
-                AdmissionPolicy::Caps => Some(profile.memory),
-                AdmissionPolicy::Measured => slot.runner.as_ref().map(|runner| runner.reserved),
-            }?;
-            Some((index, profile, slot, memory))
+    let parts = status.budget_parts();
+    let blocks: Vec<_> = parts
+        .slots
+        .iter()
+        .filter_map(|part| {
+            let profile = status.profiles.get(part.profile)?;
+            let slot = profile.slots.iter().find(|slot| slot.slot == part.slot)?;
+            Some((part.profile, profile, slot, part.memory))
         })
         .collect();
-    let caps: u64 = blocks.iter().map(|(_, _, _, memory)| memory).sum();
-    let whole = budget.memory_max.unwrap_or(caps).max(caps);
+    let whole = parts.whole;
     let mut cells = Vec::new();
     let mut names = Vec::new();
     let mut drawn = 0;
@@ -868,7 +850,7 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         style,
         label,
         memory,
-    } in held(status, theme)
+    } in held(status, &parts.held, theme)
     {
         let width = scale(memory, whole, bar.width)
             .max(2)
@@ -907,30 +889,25 @@ struct Held {
 }
 
 /// The mirror, each seed container in its profile's colour, then each shell open in a record.
-fn held(status: &Status, theme: Theme) -> Vec<Held> {
-    let budget = &status.budget;
-    let mirror = (budget.mirror_memory > 0).then(|| Held {
-        style: Style::default(),
-        label: format!("mirror {}", bytes(budget.mirror_memory)),
-        memory: budget.mirror_memory,
-    });
-    let seeds = budget.seed_memory.iter().map(|seed| {
-        let index = status
-            .profiles
-            .iter()
-            .position(|profile| profile.name == seed.profile);
-        Held {
-            style: theme.profile(index),
-            label: format!("{} seed {}", seed.profile, bytes(seed.memory)),
-            memory: seed.memory,
-        }
-    });
-    let shells = budget.shell_memory.iter().map(|shell| Held {
-        style: Style::default(),
-        label: format!("job {} shell {}", shell.job, bytes(shell.memory)),
-        memory: shell.memory,
-    });
-    mirror.into_iter().chain(seeds).chain(shells).collect()
+fn held(status: &Status, held: &[HeldPart], theme: Theme) -> Vec<Held> {
+    held.iter()
+        .map(|part| {
+            let style = match &part.kind {
+                HeldKind::Seed { profile } => theme.profile(
+                    status
+                        .profiles
+                        .iter()
+                        .position(|status| &status.name == profile),
+                ),
+                HeldKind::Mirror | HeldKind::Shell { .. } => Style::default(),
+            };
+            Held {
+                style,
+                label: format!("{} {}", part.name(), bytes(part.memory)),
+                memory: part.memory,
+            }
+        })
+        .collect()
 }
 
 /// The running job in a slot.
@@ -1000,19 +977,17 @@ struct Usage<'app> {
 
 impl Usage<'_> {
     fn of<'app>(app: &'app App, profile: &ProfileStatus, job: &Job) -> Usage<'app> {
-        let runner = job.summary.runner.as_ref();
+        let limits = job.limits(Some(profile));
         Usage {
             samples: app
                 .series
                 .get(&job.summary.id)
                 .map(|series| series.iter().collect())
                 .unwrap_or_default(),
-            memory_cap: runner
-                .and_then(|runner| runner.memory_cap)
-                .unwrap_or(profile.memory),
-            cpu_cap: runner
-                .and_then(|runner| runner.cpu_cap)
-                .unwrap_or(u64::from(profile.cpus) * 1000),
+            memory_cap: limits.memory.map_or(profile.memory, |limit| limit.value),
+            cpu_cap: limits
+                .cpu
+                .map_or(u64::from(profile.cpus) * 1000, |limit| limit.value),
         }
     }
 
@@ -2285,19 +2260,8 @@ fn job_details(app: &App, job: &Job, now: u64) -> Vec<(u8, String)> {
     details.push((5, format!("run {}", summary.run_id)));
     if let Some(runner) = &summary.runner {
         details.push((1, format!("slot {} · {}", runner.profile, runner.slot)));
-        match (runner.memory_cap, runner.cpu_cap, profile) {
-            (Some(memory), Some(cpu), _) => {
-                details.push((4, format!("capped at {} and {}", bytes(memory), cpus(cpu))));
-            }
-            (_, _, Some(profile)) => details.push((
-                4,
-                format!(
-                    "profile now {} and {} CPUs",
-                    bytes(profile.memory),
-                    profile.cpus
-                ),
-            )),
-            _ => {}
+        if let Some(limits) = job.limits(profile).line() {
+            details.push((4, limits));
         }
     }
     if let Some(waited) = summary.waited(now) {

@@ -315,21 +315,11 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
     let budget = &status.budget;
     let _ = write!(
         out,
-        "{} {}  {}{} reserved",
+        "{} {}  {}",
         paint.paint(Tone::Bold, "runnerd"),
         status.version,
-        bytes(budget.memory_in_use),
-        budget
-            .memory_max
-            .map(|max| format!(" of {}", bytes(max)))
-            .unwrap_or_default(),
+        budget.line(),
     );
-    if let Some(cpu) = budget.cpu {
-        let _ = write!(out, "; {}", cpu.line());
-    }
-    if let Some(host) = &budget.host {
-        let _ = write!(out, "; {}", host.line());
-    }
     if let Some(host) = &state.host {
         let _ = write!(
             out,

@@ -45,6 +45,7 @@
 use serde::{Deserialize, Serialize};
 
 mod admission;
+mod budget;
 mod control;
 mod events;
 mod insights;
@@ -54,6 +55,7 @@ mod sizing;
 mod units;
 
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
+pub use budget::{BudgetParts, FreePart, HeldKind, HeldPart, Reading, SlotPart};
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, ReplaceQuery,
     RunningJob,
@@ -68,9 +70,10 @@ pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
     ChartLines, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics,
-    JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, LogQuery, LogSummary, Milestone,
-    Outcome, OutcomeKind, Phase, PhaseKind, Pressure, RunComparison, Sample, SampleSeries,
-    SampleUsage, Started, Stats, StatsQuery, StatsRow, Step, Timeline, job_title,
+    JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource, Limits,
+    LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
+    RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
+    Timeline, job_title,
 };
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
@@ -176,11 +179,7 @@ impl HostBudget {
     /// enough to name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`).
     pub fn line(&self) -> String {
         let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
-        let mut line = format!(
-            "host: {} of {} available",
-            size(self.memory.available),
-            size(self.memory.total)
-        );
+        let mut line = format!("host: {}", self.memory.available_line());
         if let Some(full) = self.memory.full.filter(|full| full.avg10 > 0) {
             line = format!("{line}, {} stalled for memory", percent(full.avg10));
         }
