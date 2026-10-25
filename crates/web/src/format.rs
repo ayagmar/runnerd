@@ -10,6 +10,14 @@ pub(crate) fn bytes(bytes: u64) -> String {
     ByteSize(bytes).to_string()
 }
 
+/// `line` as a sentence, its first letter a capital, for the core's lines that start lower case.
+pub(crate) fn sentence(line: &str) -> String {
+    let mut chars = line.chars();
+    chars.next().map_or_else(String::new, |first| {
+        first.to_uppercase().chain(chars).collect()
+    })
+}
+
 /// `2026-10-22`, in UTC.
 pub(crate) fn date(at: u64) -> String {
     let (year, month, day) = civil(at / 86_400);

@@ -599,28 +599,20 @@ fn slot_card(
             @match (&slot.runner, view.job) {
                 (None, _) => {
                     @if slot_state == SlotState::Reseeding {
-                        p.slot-idle { (sentence(&slot_state.line())) }
+                        p.slot-idle { (format::sentence(&slot_state.line())) }
                     } @else {
-                        p.visually-hidden { (sentence(&slot_state.line())) }
+                        p.visually-hidden { (format::sentence(&slot_state.line())) }
                     }
                 }
                 (Some(_), Some(job)) if slot_state.is_running() => { (running_job(overview, profile, job, &view.key, parts)) }
                 (Some(runner), _) => {
                     span.repo { (runner.repository) }
                     @let id = format!("{}-waiting", view.key);
-                    p.slot-idle { (sentence(&slot_state.line())) ", " (parts.html(&id, html! { span.muted #(id) { "started " (time_ago(runner.started_at, overview.now)) } })) }
+                    p.slot-idle { (format::sentence(&slot_state.line())) ", " (parts.html(&id, html! { span.muted #(id) { "started " (time_ago(runner.started_at, overview.now)) } })) }
                 }
             }
         }
     }
-}
-
-/// `line` as a sentence, its first letter a capital.
-fn sentence(line: &str) -> String {
-    let mut chars = line.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }
 
 /// A slot's caps: its running job's container's, which a reload since may have changed in the profile, else the

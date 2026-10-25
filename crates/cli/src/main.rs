@@ -499,7 +499,7 @@ async fn records(
     if json {
         return print_json(&removed);
     }
-    output::line(human::removed(&removed));
+    output::line(removed.line());
     Ok(ExitCode::SUCCESS)
 }
 
@@ -581,14 +581,10 @@ async fn pause(
             message,
             jobs,
         }) if status == StatusCode::CONFLICT => {
-            let (runs, runners) = if jobs.len() == 1 {
-                ("its run", "its runner")
-            } else {
-                ("their runs", "their runners")
-            };
             return Err(Error::Local(format!(
-                "{message}\n`runnerctl pause --force {}` cancels {runs} and removes {runners}",
-                target.arguments
+                "{message}\n`runnerctl pause --force {}` {}",
+                target.arguments,
+                runnerd_core::api::force_pause_consequence(jobs.len())
             )));
         }
         Err(error) => return Err(error.into()),
@@ -596,13 +592,7 @@ async fn pause(
     if json {
         return print_json(&paused);
     }
-    output::line(format_args!(
-        "{} paused: it gets no new runners",
-        target.name
-    ));
-    for stopped in &paused.stopped {
-        output::line(format_args!("stopped {stopped}"));
-    }
+    output::line(paused.line(&target.name));
     Ok(ExitCode::SUCCESS)
 }
 
@@ -624,9 +614,7 @@ async fn reseed(
         .await?;
     let Some(events) = &mut events else {
         if !json {
-            output::line(format_args!(
-                "{profile}: reseed requested; it runs once the profile's slots are free"
-            ));
+            output::line(runnerd_core::api::reseed_requested(profile));
         }
         return Ok(ExitCode::SUCCESS);
     };
@@ -655,10 +643,7 @@ async fn reseed(
             if !output.is_empty() {
                 output::line(output);
             }
-            match error {
-                Some(error) => output::line(format_args!("{profile}: reseed failed: {error}")),
-                None => output::line(format_args!("{profile}: reseeded")),
-            };
+            output::line(runnerd_core::api::reseeded(profile, error.as_deref()));
         }
         return Ok(exit(error.is_none()));
     }
@@ -803,15 +788,7 @@ async fn sizing(
     for warning in &checked.warnings {
         output::line(format_args!("warning: {warning}"));
     }
-    let cpus = resize
-        .cpus
-        .map(|cpus| format!(", {cpus} cpus"))
-        .unwrap_or_default();
-    output::line(format_args!(
-        "{profile}: memory {}, {} slots{cpus} written; the daemon runs with them",
-        ByteSize(resize.memory),
-        resize.slots
-    ));
+    output::line(resize.written_line(&profile));
     if undo && sizing.auto {
         output::line(
             "auto sizing is on: it may raise them again after [sizing] raise_interval and lower them after \

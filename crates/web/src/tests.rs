@@ -2573,7 +2573,11 @@ async fn reseed_and_empty_from_the_caches_page_reach_the_daemon() {
             &serde_json::json!({}),
         )
         .await;
-    assert!(reseed.body.contains("Reseeding jvm"), "{}", reseed.body);
+    assert!(
+        reseed.body.contains("jvm: reseed requested"),
+        "{}",
+        reseed.body
+    );
     let clean = dashboard
         .write(
             &cookie,

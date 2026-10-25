@@ -51,6 +51,7 @@ mod events;
 mod insights;
 mod jobs;
 mod records;
+mod results;
 mod sizing;
 mod slots;
 mod stats;
@@ -83,6 +84,7 @@ pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
 };
+pub use results::{force_pause_consequence, reseed_requested, reseeded};
 pub use sizing::{
     Advice, AutoPlan, GRANULE, JobSizing, Need, PAGE_CACHE_ROOM, Peaks, ProfilePlan, ProfileSizing,
     Resize, SAMPLE_INTERVAL, Sizing, SizingChange, SizingHold, SizingQuery, Spread, Starts, need,

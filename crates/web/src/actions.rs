@@ -10,7 +10,7 @@ use axum::response::{Html, IntoResponse, Response};
 use maud::Markup;
 use runnerd_core::api::{
     Busy, ConfigCheck, ConfigFile, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
-    RunningJob, Status,
+    Status, force_pause_consequence, reseed_requested,
 };
 use runnerd_core::client::{Body, Reply};
 use serde::Deserialize;
@@ -75,16 +75,13 @@ async fn rows(app: &App) -> Result<Markup, Markup> {
 /// cancel their runs with `force`.
 fn ask_to_force(reply: &Reply, force: &str, label: &str) -> Response {
     let (message, them) = match serde_json::from_slice::<Busy>(&reply.body) {
-        Ok(busy) if busy.jobs.len() == 1 => (
-            format!("{}. Pausing now cancels its run on GitHub.", busy.message),
-            "it",
-        ),
         Ok(busy) if !busy.jobs.is_empty() => (
             format!(
-                "{}. Pausing now cancels their runs on GitHub.",
-                busy.message
+                "{}. Pausing now {}.",
+                busy.message,
+                force_pause_consequence(busy.jobs.len())
             ),
-            "them",
+            if busy.jobs.len() == 1 { "it" } else { "them" },
         ),
         _ => (reply.message(), "them"),
     };
@@ -98,20 +95,12 @@ fn ask_to_force(reply: &Reply, force: &str, label: &str) -> Response {
 
 /// The page after a pause: `region` and, if it cancelled runs, which.
 fn paused(reply: &Reply, region: Markup, what: &str) -> Response {
-    let stopped: Vec<RunningJob> = serde_json::from_slice::<Paused>(&reply.body)
-        .map(|paused| paused.stopped)
-        .unwrap_or_default();
-    if stopped.is_empty() {
-        html(&[region])
-    } else {
-        let names: Vec<String> = stopped.iter().map(ToString::to_string).collect();
-        html(&[
+    match serde_json::from_slice::<Paused>(&reply.body) {
+        Ok(paused) if !paused.stopped.is_empty() => html(&[
             region,
-            views::notice(
-                &format!("Paused {what}; stopped {}", names.join(", ")),
-                Tone::Done,
-            ),
-        ])
+            views::notice(&crate::format::sentence(&paused.line(what)), Tone::Done),
+        ]),
+        _ => html(&[region]),
     }
 }
 
@@ -208,7 +197,8 @@ pub(crate) async fn reseed(State(app): State<App>, Path(profile): Path<String>) 
     match send(&app, &format!("/v1/profiles/{profile}/reseed")).await {
         Ok(reply) if reply.status.is_success() => html(&[views::notice(
             &format!(
-                "Reseeding {profile}'s snapshot from slot 1; the overview shows when it is done"
+                "{}; the overview shows when it is done",
+                reseed_requested(&profile)
             ),
             Tone::Done,
         )]),
@@ -253,19 +243,7 @@ async fn remove_records(app: &App, path: &str) -> Response {
         Err(error) => return refused(&error.to_string()),
     };
     let removed: RemovedRecords = serde_json::from_slice(&reply.body).unwrap_or_default();
-    let notice = views::notice(
-        &match removed.jobs.len() {
-            1 => format!(
-                "Removed 1 record, {} freed",
-                crate::format::bytes(removed.bytes)
-            ),
-            count => format!(
-                "Removed {count} records, {} freed",
-                crate::format::bytes(removed.bytes)
-            ),
-        },
-        Tone::Done,
-    );
+    let notice = views::notice(&crate::format::sentence(&removed.line()), Tone::Done);
     let records = app.daemon.get::<Records>("/v1/records").await;
     let status = app.daemon.get::<Status>("/v1/status").await;
     match (status, records) {

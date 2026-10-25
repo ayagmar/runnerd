@@ -41,7 +41,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
                 span.big { (jobs) " jobs" }
                 span.muted { " since " (format::date(sizing.since)) }
             }
-            p.muted { (sentence(&sizing.method_line())) "." }
+            p.muted { (format::sentence(&sizing.method_line())) "." }
         }
         (auto_plan(view))
         @for (index, profile) in sizing.profiles.iter().enumerate() {
@@ -143,14 +143,6 @@ fn needs(job: &JobSizing) -> Markup {
             _ => { (needs.text) }
         }
     }
-}
-
-/// `line` as a sentence, its first letter a capital.
-fn sentence(line: &str) -> String {
-    let mut chars = line.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }
 
 fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Markup {

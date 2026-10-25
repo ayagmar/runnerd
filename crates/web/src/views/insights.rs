@@ -46,7 +46,7 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
             }
         }
         @if insights.insights.is_empty() {
-            p.empty { (sentence(&insights.empty_line())) "." }
+            p.empty { (format::sentence(&insights.empty_line())) "." }
         } @else {
             ul.insight-list aria-label="Insights" {
                 @for insight in &insights.insights {
@@ -101,14 +101,6 @@ fn wait(spread: &WaitSpread, value: Option<u64>) -> String {
     spread
         .reading(value)
         .map_or_else(|| "–".to_owned(), format::duration)
-}
-
-/// `line` as a sentence, its first letter a capital.
-fn sentence(line: &str) -> String {
-    let mut chars = line.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }
 
 fn waits(waits: &[RepositoryWaits]) -> Markup {

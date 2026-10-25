@@ -125,21 +125,13 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
     }
 }
 
-/// `line` as a sentence, its first letter a capital.
-fn sentence(line: &str) -> String {
-    let mut chars = line.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
-}
-
 /// The records of failed jobs, each removable, and the limits they are kept within.
 pub(crate) fn records(status: &Status, records: &Records, now: u64) -> Markup {
     html! {
         section #records .records aria-labelledby="records-title" {
             div.section-head {
                 h2 #records-title { "Records of failed jobs" }
-                p class=(if records.summary_tone() == Tone::Warn { "muted over-limit" } else { "muted" }) { (sentence(&records.summary())) }
+                p class=(if records.summary_tone() == Tone::Warn { "muted over-limit" } else { "muted" }) { (format::sentence(&records.summary())) }
                 @if !records.records.is_empty() {
                     button.button-quiet type="button"
                         data-on:click="confirm('Remove every record? Their shells can no longer be opened.') && @delete('/v1/records?all=true')"
@@ -147,7 +139,7 @@ pub(crate) fn records(status: &Status, records: &Records, now: u64) -> Markup {
                 }
             }
             @if records.records.is_empty() {
-                p.muted { (sentence(Records::empty_reason())) "." }
+                p.muted { (format::sentence(Records::empty_reason())) "." }
             } @else {
                 div.table-wrap {
                     table.job-table.record-table {

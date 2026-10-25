@@ -7,8 +7,8 @@ use std::fmt::Write as _;
 
 use runnerd_core::api::{
     self, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
-    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, RemovedRecords,
-    Sizing, Status, Step, WaitSpread,
+    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, Sizing, Status,
+    Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
 use runnerd_core::api::{in_cores, job_title};
@@ -406,15 +406,6 @@ fn record_note(job: u64, note: &RecordNote, now: u64, paint: Paint) -> String {
             state.line(),
             RecordNote::shell_command(job)
         ),
-    }
-}
-
-/// What a removal of records freed.
-pub(crate) fn removed(removed: &RemovedRecords) -> String {
-    match removed.jobs.len() {
-        0 => "no record removed".to_owned(),
-        1 => format!("removed 1 record, {} freed", bytes(removed.bytes)),
-        count => format!("removed {count} records, {} freed", bytes(removed.bytes)),
     }
 }
 

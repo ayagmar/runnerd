@@ -643,7 +643,7 @@ fn record(view: &JobView) -> Markup {
             @match note.state() {
                 state @ RecordState::Skipped { .. } => {
                     h2 #record-title { "Record" }
-                    p.muted { (sentence(&state.line())) "." }
+                    p.muted { (format::sentence(&state.line())) "." }
                 }
                 state @ RecordState::Removed { at, .. } => {
                     h2 #record-title { "Record" }
@@ -652,7 +652,7 @@ fn record(view: &JobView) -> Markup {
                 state @ RecordState::Kept { .. } => {
                 div.section-head {
                     h2 #record-title { "Open a shell" }
-                    p.muted { (sentence(&state.line())) }
+                    p.muted { (format::sentence(&state.line())) }
                 }
                 p {
                     "runnerd kept this job's runner as it failed. In a terminal on the host, this opens a shell in its "
@@ -668,14 +668,6 @@ fn record(view: &JobView) -> Markup {
             }
         }
     }
-}
-
-/// `line` as a sentence, its first letter a capital.
-fn sentence(line: &str) -> String {
-    let mut chars = line.chars();
-    chars.next().map_or_else(String::new, |first| {
-        first.to_uppercase().chain(chars).collect()
-    })
 }
 
 /// The log's last lines, numbered; live lines are appended to `#log-lines`.
