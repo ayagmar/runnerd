@@ -953,7 +953,7 @@ impl Case {
     async fn tick(&mut self) -> Result<(), Violation> {
         self.unregistered_runners_exit();
         self.no_name_twice().await;
-        let before = self.status();
+        let calls_before = self.docker.0.lock().unwrap().calls.len();
         let seeds_before: BTreeSet<String> = self.engine.reseed_memory.keys().cloned().collect();
         self.engine.tick(Shutdown::No).await;
         let after = self.status();
@@ -964,13 +964,19 @@ impl Case {
             .unwrap()
             .queued
             .retain(|job| !listed.contains(&job.id));
-        let names = |status: &api::Status| -> BTreeSet<String> {
-            runners_of(status)
-                .map(|(_, runner)| runner.name.clone())
-                .collect()
-        };
-        let mut started: BTreeSet<String> =
-            names(&after).difference(&names(&before)).cloned().collect();
+        // From Docker's starts, not the runners' names: a slot's next runner may take the name of one that stopped
+        // this second.
+        let running: BTreeSet<String> = self
+            .running_containers()
+            .into_iter()
+            .map(|container| container.name)
+            .collect();
+        let mut started: BTreeSet<String> = self.docker.0.lock().unwrap().calls[calls_before..]
+            .iter()
+            .filter_map(|call| call.strip_prefix("start "))
+            .filter(|name| running.contains(*name))
+            .map(str::to_owned)
+            .collect();
         self.no_pool_gets_more_runners_than_its_queued_jobs(&after, &started)?;
         started.extend(
             self.engine
