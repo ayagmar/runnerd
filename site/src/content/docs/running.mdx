@@ -103,7 +103,7 @@ Each runner reaches the cache through a socket of its own, which no other runner
 
 The job page and `runnerctl job` show each job's hits and what it read and stored; the Caches page and `runnerctl caches`, the cache's size and its hit rate over 7 days. The [Cold cache](../insights/#insights) insight names a job whose writing runs find almost nothing in it.
 
-To keep a repository out, set `build_cache = false` under it. A workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` in its `env`, and any tool's by configuring a remote cache of its own. `runnerctl caches clean runnerd-build-cache` empties it while no runner runs a job.
+To keep a repository out, set `build_cache = false` under it. A workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` in its `env`, and any tool's by configuring a remote cache of its own. `runnerctl caches --clean runnerd-build-cache` empties it while no runner runs a job.
 
 ## Records of failed jobs
 
