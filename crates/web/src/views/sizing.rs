@@ -5,7 +5,9 @@
 //! above them, whether it is on and, per profile, what its next look changes or until when a recent change holds it.
 
 use maud::{Markup, html};
-use runnerd_core::api::{Advice, AutoPlan, JobSizing, ProfileSizing, Sizing, job_title, period};
+use runnerd_core::api::{
+    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Sizing, Tone, job_title,
+};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, page};
@@ -39,10 +41,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
                 span.big { (jobs) " jobs" }
                 span.muted { " since " (format::date(sizing.since)) }
             }
-            p.muted {
-                "Peaks are sampled every " (sizing.sample_interval) " s, so a shorter spike goes unseen: advice adds "
-                (sizing.margin) "% to the largest, and waits for " (sizing.min_jobs) " jobs."
-            }
+            p.muted { (format::sentence(&sizing.method_line())) "." }
         }
         (auto_plan(view))
         @for (index, profile) in sizing.profiles.iter().enumerate() {
@@ -98,66 +97,51 @@ fn auto_plan(view: &SizingView) -> Markup {
 
 /// What auto sizing does next with one profile.
 fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Markup {
-    let next = plan
-        .next
-        .iter()
-        .find(|change| change.profile == profile.name);
-    let held = plan.held.iter().find(|hold| hold.profile == profile.name);
+    let next = plan.profile_plan(&profile.name, view.now);
+    let class = match next {
+        ProfilePlan::Next { .. } => "plan-what changes",
+        ProfilePlan::Held { .. } | ProfilePlan::LowerHeld { .. } => "plan-what held",
+        ProfilePlan::Nothing => "plan-what",
+    };
+    let reason = next.reason(&view.sizing, profile);
     html! {
-        @if let Some(change) = next {
-            span.plan-what.changes {
-                @if plan.blocked.is_some() {
-                    strong { "Once that is fixed: " (change.line()) }
-                } @else {
-                    strong { "Next look, within " (period(plan.every)) ": " (change.line()) }
+        span class=(class) {
+            strong {
+                (next.headline(plan))
+                @if let Some(until) = next.until() {
+                    " before " (format::short_date(until)) " " (format::clock(until)) " UTC"
+                    span.muted { ", in " (format::duration(until.saturating_sub(view.now))) }
                 }
-                span.muted { (change.reason) }
             }
-        } @else if let Some(hold) = held.filter(|hold| view.sizing.until < hold.until) {
-            span.plan-what.held {
-                strong {
-                    "No change before " (format::short_date(hold.until)) " " (format::clock(hold.until)) " UTC"
-                    span.muted { ", in " (format::duration(hold.until.saturating_sub(view.now))) }
-                }
-                span.muted { "Changed " (format::ago(hold.changed, view.now)) "; the interval holds it until then." }
-            }
-        } @else if let Some(hold) = held {
-            span.plan-what.held {
-                strong {
-                    "No lowering before " (format::short_date(hold.lowered_after())) " "
-                    (format::clock(hold.lowered_after())) " UTC"
-                    span.muted { ", in " (format::duration(hold.lowered_after().saturating_sub(view.now))) }
-                }
-                span.muted { "Changed " (format::ago(hold.changed, view.now)) "; a raise may come before then." }
-            }
-        } @else {
-            span.plan-what {
-                strong { "Nothing to change" }
-                span.muted { (view.sizing.advice_line(profile)) }
+            @if let Some(changed) = next.changed() {
+                span.muted { "Changed " (format::ago(changed, view.now)) "; " (reason) "." }
+            } @else {
+                span.muted { (reason) }
             }
         }
     }
 }
 
 fn advice_class(advice: Advice) -> &'static str {
-    match advice {
-        Advice::Raise { .. } | Advice::SliceTooSmall { .. } => "advice raise",
-        Advice::Lower { .. } => "advice lower",
-        Advice::Keep { .. } => "advice keep",
-        Advice::TooFew { .. } => "advice too-few",
+    match advice.tone() {
+        Tone::Bad => "advice raise",
+        Tone::Warn => "advice lower",
+        Tone::Good => "advice keep",
+        Tone::Neutral | Tone::Quiet => "advice too-few",
     }
 }
 
 /// What the jobs need, for a table cell.
 fn needs(job: &JobSizing) -> Markup {
-    match job.advice {
-        Advice::TooFew { jobs } => {
-            html! { span.muted title=(format!("{jobs} runs, too few to advise on; the largest peak")) { "too few runs; max " (format::bytes(job.peaks.memory.max)) } }
+    let needs = job.needs();
+    html! {
+        @match (job.advice, needs.tone) {
+            (Advice::TooFew { jobs }, _) => {
+                span.muted title=(format!("{jobs} runs, too few to advise on; the largest peak")) { (needs.text) }
+            }
+            (_, Tone::Bad) => { strong.over { (needs.text) } }
+            _ => { (needs.text) }
         }
-        Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
-            html! { strong.over { (format::bytes(memory)) ", over the cap" } }
-        }
-        Advice::Keep { memory } | Advice::Lower { memory, .. } => html! { (format::bytes(memory)) },
     }
 }
 
@@ -177,7 +161,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                         div {
                             dt { "Warm starts" }
                             dd {
-                                (profile.starts.warm) " of " (profile.starts.warm + profile.starts.cold)
+                                (profile.starts.warm) " of " (profile.starts.total())
                                 ", p50 " (format::duration(profile.starts.warm_p50))
                                 " (others " (format::duration(profile.starts.cold_p50)) ")"
                             }
@@ -268,25 +252,20 @@ fn changes(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
 }
 
 /// The cap as a track, the jobs' peaks from p50 to p99 on it, and what the advice sizes for as a mark: the memory
-/// it advises, or with too few jobs, the largest peak with the margin.
+/// it advises, or with too few jobs, what it would size for (`Sizing::need`).
 fn scale(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
     let memory = &profile.peaks.memory;
-    let need = match profile.advice {
-        Advice::Keep { memory }
-        | Advice::Lower { memory, .. }
-        | Advice::Raise { memory, .. }
-        | Advice::SliceTooSmall { memory } => memory,
-        Advice::TooFew { .. } => memory.max + memory.max * u64::from(sizing.margin) / 100,
-    };
+    let need = sizing.need(&profile.peaks, profile.advice);
+    let reason = need.reason;
+    let need = need.memory;
     let whole = profile.memory.max(need).max(memory.max).max(1);
     let at = |bytes: u64| format!("{:.2}%", ratio(bytes, whole) * 100.0);
     let label = format!(
-        "Memory peaks: p50 {}, p95 {}, p99 {}, largest {}; the largest + {}% is {}; the cap is {}",
+        "Memory peaks: p50 {}, p95 {}, p99 {}, largest {}; {reason}, rounded up, is {}; the cap is {}",
         format::bytes(memory.p50),
         format::bytes(memory.p95),
         format::bytes(memory.p99),
         format::bytes(memory.max),
-        sizing.margin,
         format::bytes(need),
         format::bytes(profile.memory)
     );
@@ -297,7 +276,7 @@ fn scale(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
             span.mark.p95 style=(format!("--at: {}", at(memory.p95))) title=(format!("p95 {}", format::bytes(memory.p95))) {}
             // Near the end of the track, the label goes to the mark's left.
             span class=(if ratio(need, whole) > 0.7 { "mark need end" } else { "mark need" }) style=(format!("--at: {}", at(need))) {
-                span { "max + " (sizing.margin) "% " (format::bytes(need)) }
+                span { "needs " (format::bytes(need)) }
             }
         }
         p.scale-keys.muted {

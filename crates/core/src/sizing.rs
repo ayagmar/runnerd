@@ -5,12 +5,11 @@
 
 use std::collections::BTreeMap;
 
-use crate::api::{self, Advice, PAGE_CACHE_ROOM, Peaks, Spread};
+use crate::api::{self, Advice, Peaks, Spread};
 use crate::config::{Admission, Config};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 
-/// Advice rounds memory up to a multiple of this: 256M.
-pub(crate) const GRANULE: u64 = 256 << 20;
+pub(crate) use crate::api::GRANULE;
 
 /// Without its container's `memory.events`, a peak at or above this share of its cap, in percent, likely met it.
 const AT_CAP: u64 = 95;
@@ -283,10 +282,7 @@ impl Sized {
     /// rounded up to `GRANULE`. The largest, not a percentile: the cap kills a job that goes over it, so a cap below
     /// a peak a job reached kills it again.
     fn need(&self, peaks: &Peaks) -> u64 {
-        let largest = peaks.memory.max;
-        let margin = (largest.saturating_mul(u64::from(self.margin)) / 100).max(PAGE_CACHE_ROOM);
-        let need = largest.saturating_add(margin);
-        need.div_ceil(GRANULE).saturating_mul(GRANULE).max(GRANULE)
+        api::need(peaks.memory.max, self.margin)
     }
 
     fn advice(&self, peaks: &Peaks, wants_slots: bool) -> Advice {

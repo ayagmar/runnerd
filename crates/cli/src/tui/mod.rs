@@ -14,7 +14,6 @@ use runnerd_core::api::{
     Job, JobPage, PauseQuery, Paused, Records, SampleSeries, Sizing, Status,
 };
 use runnerd_core::client::{Client, ClientError, Events, StatusCode};
-use runnerd_core::config::ByteSize;
 use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
 use tokio::sync::mpsc::{self, UnboundedSender};
 use tokio::task::JoinHandle;
@@ -406,7 +405,7 @@ impl Requests {
                     };
                     let removed = crate::remove_records(&client, &path).await;
                     let _ = send.send(match removed {
-                        Ok(removed) => Msg::Done(crate::human::removed(&removed)),
+                        Ok(removed) => Msg::Done(removed.line()),
                         Err(error) => Msg::Failed(error.to_string()),
                     });
                     answer(
@@ -449,9 +448,7 @@ impl Requests {
                         .await;
                     status(&client, &send).await;
                     let _ = send.send(match requested {
-                        Ok(_) => Msg::Done(format!(
-                            "{profile}: reseed requested; it runs once the profile's slots are free"
-                        )),
+                        Ok(_) => Msg::Done(runnerd_core::api::reseed_requested(&profile)),
                         Err(error) => Msg::Failed(error.to_string()),
                     });
                 });
@@ -519,11 +516,7 @@ async fn status(client: &Client, send: &UnboundedSender<Msg>) {
 async fn write_resize(client: Client, send: UnboundedSender<Msg>, resizing: Resizing) {
     let Resizing { profile, resize } = resizing;
     let _ = send.send(match crate::write_resize(&client, &profile, resize).await {
-        Ok(_) => Msg::Done(format!(
-            "{profile}: memory {}, {} slots written; the daemon runs with them",
-            ByteSize(resize.memory),
-            resize.slots
-        )),
+        Ok(_) => Msg::Done(resize.written_line(&profile)),
         Err(error) => Msg::Failed(error.to_string()),
     });
     answer(&send, client.get::<Sizing>("/v1/sizing").await, Msg::Sizing);
@@ -556,18 +549,7 @@ async fn pause(client: &Client, repository: Option<String>, force: bool) -> Msg 
         .post_json::<Paused>(&format!("{}/pause", target.path), &PauseQuery { force })
         .await
     {
-        Ok(paused) if paused.stopped.is_empty() => {
-            Msg::Done(format!("{name} paused: it gets no new runners"))
-        }
-        Ok(paused) => Msg::Done(format!(
-            "{name} paused; stopped {}",
-            paused
-                .stopped
-                .iter()
-                .map(ToString::to_string)
-                .collect::<Vec<_>>()
-                .join(", ")
-        )),
+        Ok(paused) => Msg::Done(paused.line(name)),
         Err(ClientError::Api {
             status,
             message,

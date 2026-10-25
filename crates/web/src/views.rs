@@ -335,6 +335,26 @@ pub(crate) fn slot_id(profile: &str, slot: usize) -> String {
     format!("slot-{}-{slot}", hex(profile))
 }
 
+/// A budget block's size: its figure as `runnerd.toml` writes it, and when shorter, `ByteSize::short`'s, which only a
+/// narrow block shows. A figure longer than five characters, such as `767.5M`, would not fit a block's font at its
+/// largest, so the block shows the short one alone.
+pub(crate) fn block_size(memory: u64) -> Markup {
+    let full = format::bytes(memory);
+    let short = runnerd_core::config::ByteSize(memory).short();
+    html! {
+        span.size {
+            @if full.chars().count() > 5 {
+                (short)
+            } @else if short == full {
+                (full)
+            } @else {
+                span.full { (full) }
+                span.short { (short) }
+            }
+        }
+    }
+}
+
 /// The id of a repository's row, which a pause or resume replaces: `a/b` → `repo-612f62`. Also a signal name's
 /// suffix, so it has only letters and digits after its dash.
 pub(crate) fn repository_id(name: &str) -> String {
@@ -344,6 +364,25 @@ pub(crate) fn repository_id(name: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_block_reads_its_full_size_as_the_tui_does_and_the_short_one_only_when_narrow() {
+        let block = block_size(3328 << 20).into_string();
+        assert!(
+            block.contains(r#"<span class="full">3.25G</span>"#)
+                && block.contains(r#"<span class="short">3.3G</span>"#),
+            "{block}"
+        );
+        assert_eq!(
+            block_size(8 << 30).into_string(),
+            r#"<span class="size">8G</span>"#
+        );
+        assert_eq!(
+            block_size(1535 << 19).into_string(),
+            r#"<span class="size">768M</span>"#,
+            "767.5M is too long for a block, so it reads short whatever the width"
+        );
+    }
 
     #[test]
     fn names_whose_slugs_match_get_their_own_ids() {

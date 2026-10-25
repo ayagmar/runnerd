@@ -45,15 +45,22 @@
 use serde::{Deserialize, Serialize};
 
 mod admission;
+mod budget;
 mod control;
 mod events;
 mod insights;
 mod jobs;
 mod records;
+mod results;
 mod sizing;
+mod slots;
+mod stats;
+mod storage;
+mod tone;
 mod units;
 
 pub use admission::{Admission, AdmissionPolicy, Basis, CpuAdmission, JobPeak, cores, cpus};
+pub use budget::{BudgetParts, FreePart, HeldKind, HeldPart, Reading, SlotPart};
 pub use control::{
     Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, PauseQuery, Paused, ReplaceQuery,
     RunningJob,
@@ -68,18 +75,27 @@ pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
     CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
     ChartLines, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics,
-    JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, LogQuery, LogSummary, Milestone,
-    Outcome, OutcomeKind, Phase, PhaseKind, Pressure, RunComparison, Sample, SampleSeries,
-    SampleUsage, Started, Stats, StatsQuery, StatsRow, Step, Timeline, job_title,
+    JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource, Limits,
+    LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
+    RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
+    Timeline, job_title,
 };
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
 };
+pub use results::{force_pause_consequence, reseed_requested, reseeded};
 pub use sizing::{
-    Advice, AutoPlan, JobSizing, PAGE_CACHE_ROOM, Peaks, ProfileSizing, Resize, Sizing,
-    SizingChange, SizingHold, SizingQuery, Spread, Starts, period,
+    Advice, AutoPlan, GRANULE, JobSizing, Need, PAGE_CACHE_ROOM, Peaks, ProfilePlan, ProfileSizing,
+    Resize, SAMPLE_INTERVAL, Sizing, SizingChange, SizingHold, SizingQuery, Spread, Starts, need,
+    period, sampled_note,
 };
+pub use slots::{Health, SlotState};
+pub use stats::StatsSummary;
+pub use storage::{
+    BuildCacheActivity, CacheLimit, RECORDS_NEAR_FULL, RecordState, records_near_full,
+};
+pub use tone::{Tone, Toned};
 pub use units::{ago, cores_used, cpu_time, duration, in_cores};
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only
@@ -176,11 +192,7 @@ impl HostBudget {
     /// enough to name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`).
     pub fn line(&self) -> String {
         let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
-        let mut line = format!(
-            "host: {} of {} available",
-            size(self.memory.available),
-            size(self.memory.total)
-        );
+        let mut line = format!("host: {}", self.memory.available_line());
         if let Some(full) = self.memory.full.filter(|full| full.avg10 > 0) {
             line = format!("{line}, {} stalled for memory", percent(full.avg10));
         }
@@ -304,7 +316,7 @@ pub struct RunnerStatus {
     pub runner_id: u64,
     /// The Docker container ID.
     pub container: String,
-    /// Whether GitHub reports it running a job.
+    /// Whether it runs a job, as GitHub or its log reports it: its log names the job before GitHub lists it busy.
     pub busy: bool,
     /// Seconds since the Unix epoch.
     pub started_at: u64,

@@ -8,7 +8,8 @@ use std::fmt::Write as _;
 use maud::{Markup, html};
 use runnerd_core::api::{
     BuildCacheCounts, ChartLine, ChartLineKind, Job, JobPage, JobQuery, JobState, JobSummary,
-    OutcomeKind, PhaseKind, ProfileStatus, Sample, SampleSeries, Status, in_cores,
+    OutcomeKind, PhaseKind, ProfileStatus, RecordNote, RecordState, Sample, SampleSeries, Status,
+    in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -438,18 +439,19 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
     }
 }
 
-/// What the shared build cache served the job and took from it, for a job that asked it anything.
+/// What the shared build cache served the job and took from it, for a job that used it at all.
 fn build_cache(cache: &BuildCacheCounts) -> Markup {
     html! {
-        @if let Some(percent) = cache.hit_percent() {
-            div title=(format!("{} of {} lookups found an entry", cache.hits, cache.lookups())) {
+        @if let Some(activity) = cache.activity() {
+            div {
                 dt { "From the build cache" }
-                dd { (percent) "% hit, " (format::bytes(cache.read_bytes)) }
+                dd { (activity.lookups_line()) ", " (activity.served_line()) }
             }
             div {
                 dt { "To the build cache" }
                 dd {
-                    @if cache.writer { (format::bytes(cache.written_bytes)) } @else { "read only" }
+                    (activity.stored_line())
+                    @if let Some(refused) = activity.refused_line() { ", " (refused) }
                 }
             }
         }
@@ -635,22 +637,22 @@ fn record(view: &JobView) -> Markup {
         return html! {};
     };
     let id = view.job.summary.id;
-    let command = format!("runnerctl shell {id}");
+    let command = RecordNote::shell_command(id);
     html! {
         section #record .record aria-labelledby="record-title" {
-            @if let Some(why) = &note.skipped {
-                h2 #record-title { "Record" }
-                p.muted { "Not kept: " (why) "." }
-            } @else if let Some(at) = note.removed_at {
-                h2 #record-title { "Record" }
-                p.muted {
-                    "Kept, then " (note.removed_by.map_or_else(|| "removed".to_owned(), |by| by.to_string()))
-                    " " (time_ago(at, view.now)) "."
+            @match note.state() {
+                state @ RecordState::Skipped { .. } => {
+                    h2 #record-title { "Record" }
+                    p.muted { (format::sentence(&state.line())) "." }
                 }
-            } @else {
+                state @ RecordState::Removed { at, .. } => {
+                    h2 #record-title { "Record" }
+                    p.muted { "Kept, then " (state.line()) " " (time_ago(at, view.now)) "." }
+                }
+                state @ RecordState::Kept { .. } => {
                 div.section-head {
                     h2 #record-title { "Open a shell" }
-                    @if let Some(bytes) = note.bytes { p.muted { "Record kept, " (format::bytes(bytes)) } }
+                    p.muted { (format::sentence(&state.line())) }
                 }
                 p {
                     "runnerd kept this job's runner as it failed. In a terminal on the host, this opens a shell in its "
@@ -661,6 +663,7 @@ fn record(view: &JobView) -> Markup {
                     button.button-quiet type="button"
                         data-on:click=(format!("navigator.clipboard.writeText('{command}')"))
                         aria-label="Copy the command" { "Copy" }
+                }
                 }
             }
         }
@@ -676,8 +679,7 @@ pub(crate) fn log(view: &JobView) -> Markup {
                 h2 #log-title .visually-hidden { "Log" }
                 p.muted {
                     a href=(format!("/jobs/{}/log", summary.id)) { "Full log" }
-                    " · " (summary.log.lines) " lines, " (format::bytes(summary.log.bytes))
-                    @if summary.log.truncated { ", cut at history.log_max" }
+                    " · " (summary.log.description())
                 }
             }
             @if view.log_from > 0 {

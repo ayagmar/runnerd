@@ -14,6 +14,10 @@ use serde::{Deserialize, Deserializer, de};
 
 use crate::api;
 
+mod budget;
+
+pub use budget::{BudgetBlock, CheckBudget, Remainder, Verdict};
+
 /// A parsed `runnerd.toml`. `validate` checks it against the host's budget.
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -1058,56 +1062,24 @@ impl Config {
         text: &str,
         memory_max: impl FnOnce(&str) -> std::io::Result<Option<ByteSize>>,
     ) -> (Option<Config>, api::ConfigCheck) {
-        let invalid =
-            |message: String, config: Option<&Config>, max: Option<ByteSize>| api::ConfigCheck {
-                valid: false,
-                message,
-                warnings: Vec::new(),
-                admission: config
-                    .map(|config| config.host.admission.policy())
-                    .unwrap_or_default(),
-                memory_caps: config
-                    .and_then(|config| config.memory_caps().ok())
-                    .map(|caps| caps.0),
-                memory_needed: config
-                    .and_then(|config| config.memory_needed().ok())
-                    .map(|need| need.0),
-                memory_max: max.map(|max| max.0),
-                revision: None,
-            };
         let config = match Config::parse(text) {
             Ok(config) => config,
-            Err(error) => return (None, invalid(error.to_string(), None, None)),
+            Err(error) => return (None, budget::invalid(error.to_string(), None, None)),
         };
         let max = match memory_max(&config.host.slice) {
             Ok(max) => max,
-            Err(error) => return (None, invalid(error.to_string(), Some(&config), None)),
-        };
-        let figures = config
-            .validate(max)
-            .and_then(|warnings| Ok((warnings, config.memory_caps()?, config.memory_needed()?)));
-        match figures {
-            Ok((warnings, total, needed)) => {
-                let message = match (config.host.admission, max) {
-                    (Admission::Measured, Some(max)) => format!(
-                        "valid under admission = \"measured\": the largest runner with the mirror needs {needed} \
-                         of the {max} MemoryMax; every slot at its cap at once would take {total}"
-                    ),
-                    _ => format!("valid, memory caps sum to {total}"),
-                };
-                let check = api::ConfigCheck {
-                    valid: true,
-                    message,
-                    warnings: warnings.iter().map(ToString::to_string).collect(),
-                    admission: config.host.admission.policy(),
-                    memory_caps: Some(total.0),
-                    memory_needed: Some(needed.0),
-                    memory_max: max.map(|max| max.0),
-                    revision: None,
-                };
-                (Some(config), check)
+            Err(error) => {
+                return (
+                    None,
+                    budget::invalid(error.to_string(), Some(&config), None),
+                );
             }
-            Err(error) => (None, invalid(error.to_string(), Some(&config), max)),
+        };
+        let check = config.check_against(max);
+        if check.valid {
+            (Some(config), check)
+        } else {
+            (None, check)
         }
     }
 
@@ -1733,6 +1705,37 @@ impl fmt::Display for ByteSize {
         let number = format!("{:.2}", self.0 as f64 / *factor as f64);
         let number = number.trim_end_matches('0').trim_end_matches('.');
         write!(f, "{number}{unit}")
+    }
+}
+
+impl ByteSize {
+    /// The size rounded to the nearest, for a label too narrow for its `Display`: two significant digits below 10
+    /// of its unit, whole units above, and the next unit up once it rounds to 1024: `3.3G` for 3.25G, `12G`,
+    /// `512M`, and `1G` for 1023.5M. Every client's budget bar labels a block with it.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "shown with one decimal at most, far coarser than f64's precision"
+    )]
+    pub fn short(self) -> String {
+        let Some(index) = UNITS.iter().position(|(_, factor)| self.0 >= *factor) else {
+            return format!("{}B", self.0);
+        };
+        let (mut unit, factor) = UNITS[index];
+        let mut value = self.0 as f64 / factor as f64;
+        if value.round() >= 1024.0
+            && let Some(larger) = index.checked_sub(1)
+        {
+            unit = UNITS[larger].0;
+            value /= 1024.0;
+        }
+        // Halves round up, as `f64::round` does and formatting, which rounds them to even, does not.
+        let tenths = (value * 10.0).round() / 10.0;
+        if tenths < 10.0 {
+            let number = format!("{tenths:.1}");
+            format!("{}{unit}", number.trim_end_matches(".0"))
+        } else {
+            format!("{:.0}{unit}", value.round())
+        }
     }
 }
 

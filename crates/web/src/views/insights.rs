@@ -4,7 +4,7 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Digest, Insight, InsightKind, Insights, RepositoryWaits, RunLink, Severity, WaitSpread,
+    Digest, Insight, InsightKind, Insights, RepositoryWaits, RunLink, Tone, WaitSpread,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -32,7 +32,6 @@ impl InsightsView {
 /// The whole page.
 pub(crate) fn render(view: &InsightsView) -> Markup {
     let insights = &view.insights;
-    let days = insights.until.saturating_sub(insights.since) / 86_400;
     let count = insights.insights.len();
     let day = &view.digest;
     let main = html! {
@@ -40,16 +39,14 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
             h1.visually-hidden { "Insights" }
             p.figures {
                 span.big { (count) @if count == 1 { " insight" } @else { " insights" } }
-                span.muted { " from the last " (days) " days" }
+                span.muted { " " (insights.window_line()) }
             }
             p.muted {
-                "Last 24 hours: " (day.finished) " jobs finished, " (day.failed) " failed"
-                @if day.new.len() == 1 { ", 1 new insight" } @else if !day.new.is_empty() { ", " (day.new.len()) " new insights" }
-                "."
+                "Last 24 hours: " (day.summary_line()) "."
             }
         }
         @if insights.insights.is_empty() {
-            p.empty { "Nothing stands out: no job got slower, failed and passed on a re-run, or neared its memory cap." }
+            p.empty { (format::sentence(&insights.empty_line())) "." }
         } @else {
             ul.insight-list aria-label="Insights" {
                 @for insight in &insights.insights {
@@ -65,21 +62,14 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
 }
 
 fn card(insight: &Insight, now: u64) -> Markup {
-    let (class, label) = match insight.kind {
-        InsightKind::Slower { .. } => ("slower", "Slower"),
-        InsightKind::Flaky { .. } => ("flaky", "Flaky"),
-        InsightKind::NearCap { .. } => ("near-cap", "Near its cap"),
-        InsightKind::ColdCache { .. } => ("cold-cache", "Cold cache"),
-        InsightKind::Throttled { .. } => ("throttled", "Memory pressure"),
-        InsightKind::Waits { .. } => ("waits", "Waits"),
-    };
-    let severity = match insight.severity {
-        Severity::Warning => "warning",
-        Severity::Notice => "notice",
+    let tone = match insight.tone() {
+        Tone::Warn => " warn",
+        Tone::Bad => " bad",
+        Tone::Good | Tone::Neutral | Tone::Quiet => "",
     };
     html! {
-        li class=(format!("insight {severity} {class}")) {
-            span.badge { (label) }
+        li class=(format!("insight {} {}{tone}", insight.severity.label(), insight.kind.word())) {
+            span.badge { (insight.kind.label()) }
             p.sentence { (insight.sentence) }
             @if let InsightKind::Slower { since: Some(since), .. } = &insight.kind {
                 p.muted { "Since " (run_link(since, now)) }
@@ -108,10 +98,9 @@ fn run_link(run: &RunLink, now: u64) -> Markup {
 }
 
 fn wait(spread: &WaitSpread, value: Option<u64>) -> String {
-    match value {
-        Some(seconds) if spread.jobs > 0 => format::duration(seconds),
-        _ => "–".to_owned(),
-    }
+    spread
+        .reading(value)
+        .map_or_else(|| "–".to_owned(), format::duration)
 }
 
 fn waits(waits: &[RepositoryWaits]) -> Markup {

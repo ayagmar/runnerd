@@ -438,9 +438,10 @@ html {
   text-overflow: ellipsis;
 }
 
+/* A size never loses its end: in a narrow block it gets smaller, down to a third of the block's width. */
 .block .size,
 .free .size {
-  font-size: clamp(1.1rem, 0.6rem + 2.4vw, 2.75rem);
+  font-size: min(clamp(1.1rem, 0.6rem + 2.4vw, 2.75rem), 30cqi);
   font-weight: 700;
   letter-spacing: -0.05em;
   line-height: 0.95;
@@ -457,6 +458,21 @@ html {
 .block,
 .free {
   container-type: inline-size;
+}
+
+/* A block too narrow for its size's full figure shows the shorter one. */
+.size .short {
+  display: none;
+}
+
+@container (max-width: 6rem) {
+  .size:has(.short) .full {
+    display: none;
+  }
+
+  .size .short {
+    display: inline;
+  }
 }
 
 @container (max-width: 2.25rem) {
@@ -1069,6 +1085,7 @@ html {
 
 .badge.success { background: var(--success-bg); color: var(--success-ink); }
 .badge.failure { background: var(--failure-bg); color: var(--failure-ink); }
+.badge.warn { background: color-mix(in srgb, var(--wait) 16%, var(--surface)); color: var(--wait-ink); }
 .badge.running,
 .badge.queued { background: var(--running-bg); color: var(--running-ink); }
 
@@ -1914,6 +1931,11 @@ dl.health-figures {
   color: var(--failure-ink);
 }
 
+/* Past a limit runnerd acts on by itself: worth a look, not a failure. */
+.over-limit {
+  color: var(--wait-ink);
+}
+
 .advice {
   display: flex;
   flex-wrap: wrap;
@@ -1955,10 +1977,8 @@ dl.health-figures {
   overflow-wrap: anywhere;
 }
 
-.insight.warning.slower,
-.insight.warning.near-cap { border-left-color: var(--wait); }
-.insight.warning.flaky { border-left-color: var(--failure-ink); }
-.insight.notice { border-left-color: var(--memory); }
+.insight.warn { border-left-color: var(--wait); }
+.insight.bad { border-left-color: var(--failure-ink); }
 
 .empty {
   color: var(--muted);
@@ -2031,6 +2051,10 @@ dl.health-figures {
   border-top-color: var(--failure-ink);
 }
 
+.check-result.unbounded {
+  border-top-color: var(--wait);
+}
+
 .check-result.invalid h2,
 .check-result.invalid .check-message {
   color: var(--failure-ink);
@@ -2061,7 +2085,7 @@ dl.health-figures {
 
 .bar-small .block .size,
 .bar-small .free .size {
-  font-size: 1.125rem;
+  font-size: min(1.125rem, 30cqi);
 }
 
 /* A narrow block's name wraps rather than losing its end. */

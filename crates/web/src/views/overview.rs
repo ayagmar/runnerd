@@ -6,9 +6,9 @@ use std::collections::BTreeMap;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Activity, ActivityQuery, AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery,
+    Activity, ActivityQuery, HeldKind, HeldPart, HostSample, HostSamples, Job, JobPage, JobQuery,
     JobState, JobSummary, JobTitle, ProfileStatus, QueuedJob, RepositoryStatus, Sample,
-    SampleSeries, SlotStatus, Started, Status, WaitKind, cpus, in_cores,
+    SampleSeries, SlotState, SlotStatus, Status, Tone, WaitKind, cpus, in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -270,7 +270,10 @@ fn slot_view<'overview>(
         .and_then(|samples| samples.last())
         .map(|sample| sample.memory);
     let name = format!("{} {}", profile.name, slot.slot);
-    let cap = format::bytes(profile.memory);
+    let memory_limit = job
+        .and_then(|job| job.limits(Some(profile)).memory)
+        .map_or(profile.memory, |limit| limit.value);
+    let cap = format::bytes(memory_limit);
     let lens = match (&slot.runner, job, memory) {
         (Some(_), Some(job), Some(memory)) => Lens {
             figure: format::bytes(memory),
@@ -288,27 +291,9 @@ fn slot_view<'overview>(
                 job.summary.repository
             ),
         },
-        (Some(runner), None, _) if runner.warm => Lens {
+        _ => Lens {
             figure: cap,
-            text: format!(
-                "{name}, a warm runner for {}, waiting for a job",
-                runner.repository
-            ),
-        },
-        (Some(runner), None, _) => Lens {
-            figure: cap,
-            text: format!(
-                "{name}, a runner for {} waiting for its job",
-                runner.repository
-            ),
-        },
-        (None, _, _) if profile.reseeding && slot.slot == 1 => Lens {
-            figure: cap,
-            text: format!("{name}, reseeding the snapshot"),
-        },
-        (None, _, _) => Lens {
-            figure: cap,
-            text: format!("{name}, idle"),
+            text: format!("{name}, {}", Status::slot_state(profile, slot).line()),
         },
     };
     SlotView {
@@ -326,35 +311,28 @@ fn slot_view<'overview>(
 pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     let status = &overview.status;
     let budget = &status.budget;
-    let reserved: u64 = status
-        .profiles
+    let bar = status.budget_parts();
+    let slot_blocks: Vec<(&ProfileStatus, &SlotStatus, u64)> = bar
+        .slots
         .iter()
-        .flat_map(|profile| {
-            profile
-                .slots
-                .iter()
-                .filter_map(|slot| block_memory(status, profile, slot))
+        .filter_map(|part| {
+            let profile = status.profiles.get(part.profile)?;
+            let slot = profile.slots.iter().find(|slot| slot.slot == part.slot)?;
+            Some((profile, slot, part.memory))
         })
-        .sum();
-    let held = held(status);
-    let held_total: u64 = held.iter().map(|part| part.memory).sum();
-    let free = budget
-        .memory_max
-        .map(|max| max.saturating_sub(reserved + held_total));
+        .collect();
+    let held = held(status, &bar.held);
     let used_now = overview.host.samples.last().map(|sample| sample.memory);
-    let max = budget
-        .memory_max
-        .map_or("no limit".to_owned(), format::bytes);
     // What is in use now is the readout's, which changes with every sample.
     let label = format!(
-        "Memory budget of {}: {} of {max} reserved by running containers",
+        "Memory budget of {}: {}",
         budget.slice,
-        format::bytes(budget.memory_in_use),
+        budget.memory_reading().line(),
     );
-    let free = free.filter(|free| *free > 0);
-    let free_lens = free.map(|free| Lens {
-        figure: format::bytes(free),
-        text: format!("of {max} free"),
+    let free = bar.free.as_ref().map(|free| free.memory);
+    let free_lens = bar.free.as_ref().map(|free| Lens {
+        figure: free.reading.figure.clone(),
+        text: free.reading.text.clone(),
     });
     let mut lenses: Vec<(String, Lens)> = status
         .profiles
@@ -379,12 +357,8 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
             h2 #budget-title .visually-hidden { "Budget" }
             (readout(overview, used_now, &lenses, parts))
             div.bar role="group" aria-label=(label) {
-                @for profile in &status.profiles {
-                    @for slot in &profile.slots {
-                        @if let Some(memory) = block_memory(status, profile, slot) {
-                            (block(overview, profile, slot, memory, parts))
-                        }
-                    }
+                @for (profile, slot, memory) in &slot_blocks {
+                    (block(overview, profile, slot, *memory, parts))
                 }
                 @for part in &held {
                     @let link = link(&part.key, None);
@@ -393,7 +367,7 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                         aria-label=(format!("{} {}", part.lens.figure, part.lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
                         data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
-                        span.size { (part.lens.figure) }
+                        (super::block_size(part.memory))
                         span.name { (part.name) }
                     }
                 }
@@ -403,7 +377,7 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                         aria-label=(format!("{} {}", lens.figure, lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
                         data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
-                        span.size { (lens.figure) }
+                        (super::block_size(free))
                     }
                 }
             }
@@ -421,15 +395,13 @@ fn readout(
     parts: &Parts,
 ) -> Markup {
     let budget = &overview.status.budget;
+    let reading = budget.memory_reading();
     html! {
         div.figures {
             (parts.html("budget-readout", html! {
                 p #budget-readout .readout {
-                    span.big { (format::bytes(budget.memory_in_use)) }
-                    span { " of " (budget.memory_max.map_or("unlimited".to_owned(), format::bytes)) " in " code { (budget.slice) } }
-                    @if let Some(note) = budget.admission_note() {
-                        span.muted { " " (note) }
-                    }
+                    span.big { (reading.figure) }
+                    span { " " (reading.text) }
                     @if let Some(used) = used_now {
                         span.muted { " · " (format::bytes(used)) " in use" }
                     }
@@ -500,48 +472,29 @@ struct Held {
 }
 
 /// The mirror, each seed container, in the colour of the profile it reseeds, then each shell open in a record.
-fn held(status: &Status) -> Vec<Held> {
-    let budget = &status.budget;
-    let mirror = (budget.mirror_memory > 0).then(|| Held {
-        key: "mirror".to_owned(),
-        class: "mirror".to_owned(),
-        name: "mirror".to_owned(),
-        memory: budget.mirror_memory,
-        lens: Lens {
-            figure: format::bytes(budget.mirror_memory),
-            text: "held by the mirror".to_owned(),
-        },
-    });
-    let seeds = budget.seed_memory.iter().map(|seed| Held {
-        key: format!("seed-{}", slot_id(&seed.profile, 0)),
-        class: format!("seed {}", profile_class(status, &seed.profile)),
-        name: format!("{} seed", seed.profile),
-        memory: seed.memory,
-        lens: Lens {
-            figure: format::bytes(seed.memory),
-            text: format!("held by {}'s seed container", seed.profile),
-        },
-    });
-    let shells = budget.shell_memory.iter().map(|shell| Held {
-        key: format!("shell-{}", shell.job),
-        class: "shell".to_owned(),
-        name: format!("job {} shell", shell.job),
-        memory: shell.memory,
-        lens: Lens {
-            figure: format::bytes(shell.memory),
-            text: format!("held by the shell in job {}'s record", shell.job),
-        },
-    });
-    mirror.into_iter().chain(seeds).chain(shells).collect()
-}
-
-/// What a slot's block holds of the budget: its cap; under measured admission what its runner reserves, and no
-/// block for a free slot.
-fn block_memory(status: &Status, profile: &ProfileStatus, slot: &SlotStatus) -> Option<u64> {
-    match status.budget.admission {
-        AdmissionPolicy::Caps => Some(profile.memory),
-        AdmissionPolicy::Measured => slot.runner.as_ref().map(|runner| runner.reserved),
-    }
+fn held(status: &Status, held: &[HeldPart]) -> Vec<Held> {
+    held.iter()
+        .map(|part| {
+            let (key, class) = match &part.kind {
+                HeldKind::Mirror => ("mirror".to_owned(), "mirror".to_owned()),
+                HeldKind::Seed { profile } => (
+                    format!("seed-{}", slot_id(profile, 0)),
+                    format!("seed {}", profile_class(status, profile)),
+                ),
+                HeldKind::Shell { job } => (format!("shell-{job}"), "shell".to_owned()),
+            };
+            Held {
+                key,
+                class,
+                name: part.name(),
+                memory: part.memory,
+                lens: Lens {
+                    figure: format::bytes(part.memory),
+                    text: part.holder(),
+                },
+            }
+        })
+        .collect()
 }
 
 fn block(
@@ -560,11 +513,11 @@ fn block(
     let fill = view
         .memory
         .map(|used| (used as f64 / memory.max(1) as f64).min(1.0));
-    let state = match (&slot.runner, view.job) {
-        (None, _) => "idle",
-        (Some(_), Some(_)) => "busy",
-        (Some(runner), None) if runner.warm => "starting warm",
-        (Some(_), None) => "starting",
+    let state = match Status::slot_state(profile, slot) {
+        SlotState::Idle | SlotState::Reseeding => "idle",
+        SlotState::Running { .. } => "busy",
+        SlotState::Warm { .. } => "starting warm",
+        SlotState::Starting { .. } => "starting",
     };
     let href = view.job.map_or(format!("#{}", view.key), |job| {
         format!("/jobs/{}", job.summary.id)
@@ -587,7 +540,7 @@ fn block(
                 }))
             }
             // Its name is what it shows, for voice control: the space joins the two as words.
-            span.size { (format::bytes(memory)) }
+            (super::block_size(memory))
             " "
             span.name { (profile.name) " " (slot.slot) }
         }
@@ -622,11 +575,12 @@ fn slot_card(
 ) -> Markup {
     let class = profile_class(&overview.status, &profile.name);
     let view = slot_view(overview, profile, slot);
-    let state = match (&slot.runner, view.job) {
-        (None, _) => " idle",
-        (Some(runner), None) if runner.warm => " starting warm",
-        (Some(_), None) => " starting",
-        (Some(_), Some(_)) => "",
+    let slot_state = Status::slot_state(profile, slot);
+    let state = match slot_state {
+        SlotState::Idle | SlotState::Reseeding => " idle",
+        SlotState::Warm { .. } => " starting warm",
+        SlotState::Starting { .. } => " starting",
+        SlotState::Running { .. } => "",
     };
     let repository = slot
         .runner
@@ -639,26 +593,38 @@ fn slot_card(
             data-on:pointerleave=(link.pointer_leave) data-on:focusout=(link.leave) data-class:linked=(link.linked) {
             div.slot-head {
                 h3.slot-name { (profile.name) " " (slot.slot) }
-                span.slot-caps { (format::bytes(profile.memory)) " · " (profile.cpus) " CPUs" }
+                span.slot-caps { (slot_caps(profile, view.job)) }
             }
             @match (&slot.runner, view.job) {
                 (None, _) => {
-                    @if profile.reseeding && slot.slot == 1 {
-                        p.slot-idle { "Reseeding the profile's snapshot" }
+                    @if slot_state == SlotState::Reseeding {
+                        p.slot-idle { (format::sentence(&slot_state.line())) }
                     } @else {
-                        p.visually-hidden { "Idle" }
+                        p.visually-hidden { (format::sentence(&slot_state.line())) }
                     }
                 }
-                (Some(runner), None) => {
+                (Some(_), Some(job)) if slot_state.is_running() => { (running_job(overview, profile, job, &view.key, parts)) }
+                (Some(runner), _) => {
                     span.repo { (runner.repository) }
                     @let id = format!("{}-waiting", view.key);
-                    @let what = if runner.warm { "Warm, waiting for a job " } else { "Waiting for its job " };
-                    p.slot-idle { (what) (parts.html(&id, html! { span.muted #(id) { (time_ago(runner.started_at, overview.now)) } })) }
+                    p.slot-idle { (format::sentence(&slot_state.line())) ", " (parts.html(&id, html! { span.muted #(id) { "started " (time_ago(runner.started_at, overview.now)) } })) }
                 }
-                (Some(_), Some(job)) => { (running_job(overview, profile, job, &view.key, parts)) }
             }
         }
     }
+}
+
+/// A slot's caps: its running job's container's, which a reload since may have changed in the profile, else the
+/// profile's.
+fn slot_caps(profile: &ProfileStatus, job: Option<&Job>) -> String {
+    let limits = job.map(|job| job.limits(Some(profile)));
+    let memory = limits
+        .and_then(|limits| limits.memory)
+        .map_or(profile.memory, |limit| limit.value);
+    let cpu = limits
+        .and_then(|limits| limits.cpu)
+        .map_or(u64::from(profile.cpus) * 1000, |limit| limit.value);
+    format!("{} · {}", format::bytes(memory), cpus(cpu))
 }
 
 fn running_job(
@@ -709,6 +675,7 @@ fn running_job(
         }
         .render(parts)
     };
+    let limits = job.limits(Some(profile));
     let last = samples.last();
     let figure = |class: &str, text: String| {
         let id = format!("{key}-{class}-now");
@@ -737,12 +704,12 @@ fn running_job(
             div.memory {
                 dt.visually-hidden { "Memory" }
                 (figure("memory", last.map_or("–".to_owned(), |sample| format::bytes(sample.memory))))
-                (sparkline(&memory, profile.memory, "memory"))
+                (sparkline(&memory, limits.memory.map_or(profile.memory, |limit| limit.value), "memory"))
             }
             div.cpu {
                 dt.visually-hidden { "CPU" }
                 (figure("cpu", last.map_or("–".to_owned(), |sample| in_cores(sample.cpu))))
-                (sparkline(&cpu, u64::from(profile.cpus) * 1000, "cpu"))
+                (sparkline(&cpu, limits.cpu.map_or(u64::from(profile.cpus) * 1000, |limit| limit.value), "cpu"))
             }
         }
     }
@@ -1025,69 +992,13 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
     }
 }
 
-/// What the health figures count, over the jobs of the last day.
-struct Health<'overview> {
-    /// Slots holding a runner that runs a job, and all slots.
-    running: usize,
-    slots: usize,
-    /// Of the slots holding a runner, those whose runner waits for its job, and the warm ones, which wait for jobs
-    /// not queued yet.
-    starting: usize,
-    warm: usize,
-    /// When each job that started in the last day did, and how long it waited for its runner, oldest first.
-    waits: &'overview [Started],
-    /// Jobs that finished in the last day, of those the ones that failed or were lost, and of those the ones their
-    /// runner failed.
-    finished: u64,
-    failed: u64,
-    runner_failed: u64,
-}
-
-impl<'overview> Health<'overview> {
-    fn of(overview: &'overview Overview) -> Health<'overview> {
-        let runners = overview
-            .status
-            .profiles
-            .iter()
-            .flat_map(|profile| &profile.slots)
-            .filter_map(|slot| slot.runner.as_ref());
-        let starting = runners
-            .clone()
-            .filter(|runner| !runner.busy && !runner.warm)
-            .count();
-        let warm = runners
-            .clone()
-            .filter(|runner| !runner.busy && runner.warm)
-            .count();
-        Health {
-            running: runners.count() - starting - warm,
-            slots: overview
-                .status
-                .profiles
-                .iter()
-                .map(|profile| profile.slots.len())
-                .sum(),
-            starting,
-            warm,
-            waits: &overview.day.started,
-            finished: overview.day.finished,
-            failed: overview.day.failed,
-            runner_failed: overview.day.runner_failed,
-        }
-    }
-}
-
 /// The figures that say whether CI keeps up: slots running, jobs waiting and the oldest's wait, the waits of the
 /// last day with the longest of each hour, and the failures of the last day.
 pub(crate) fn health(overview: &Overview) -> Markup {
-    let health = Health::of(overview);
-    let queued = &overview.status.queued;
-    let oldest = queued
-        .iter()
-        .filter(|job| job.queued_at > 0)
-        .map(|job| job.queued_at)
-        .min();
-    let p95 = overview.day.wait_p95();
+    let health = overview.status.health(overview.now);
+    let day = &overview.day;
+    let waits = &day.started;
+    let p95 = day.wait_p95();
     html! {
         section #health .health aria-labelledby="health-title" {
             h2 #health-title .visually-hidden { "Health" }
@@ -1102,29 +1013,29 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                         dd.figure-note { (health.warm) " warm, waiting for jobs" }
                     }
                 }
-                div class=(if queued.is_empty() { "" } else { "waiting" }) {
+                div class=(tone_class(health.waiting_tone())) {
                     dt { "Waiting" }
-                    dd { a.figure-main href="#queue" { (queued.len()) } }
-                    @if let Some(oldest) = oldest {
-                        dd.figure-note { "oldest " (format::duration(overview.now.saturating_sub(oldest))) }
-                    } @else if queued.is_empty() {
+                    dd { a.figure-main href="#queue" { (health.waiting) } }
+                    @if let Some(oldest) = health.oldest_wait {
+                        dd.figure-note { "oldest " (format::duration(oldest)) }
+                    } @else if health.waiting == 0 {
                         dd.figure-note { "none queued" }
                     }
                 }
                 div {
                     dt { "Wait p95, 24 h" }
                     dd { span.figure-main { (p95.map_or("–".to_owned(), format::duration)) } }
-                    dd.figure-note { (health.waits.len()) " job" @if health.waits.len() != 1 { "s" } " started" }
+                    dd.figure-note { (waits.len()) " job" @if waits.len() != 1 { "s" } " started" }
                     (wait_hours(&overview.day))
                 }
                 // Red only for the failures runnerd may be to blame for; a job's own failing steps are its repository's.
-                div class=(if health.runner_failed > 0 { "failing" } else { "" }) {
+                div class=(tone_class(day.failed_tone())) {
                     dt { "Failed, 24 h" }
-                    dd { span.figure-main { (health.failed) } }
+                    dd { span.figure-main { (day.failed) } }
                     dd.figure-note {
-                        "of " (health.finished) " finished; "
-                        @if health.runner_failed > 0 {
-                            (health.runner_failed) " by their runner; "
+                        "of " (day.finished) " finished; "
+                        @if day.runner_failed > 0 {
+                            (day.runner_failed) " by their runner; "
                         }
                         a href="/history?outcome=failure" { "failures" }
                     }
@@ -1134,6 +1045,15 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                 p.warning { "runnerd is shutting down: it starts no new runners and stops once running jobs finish." }
             }
         }
+    }
+}
+
+/// A health figure's class for what it means: amber `waiting`, red `failing`.
+fn tone_class(tone: Tone) -> &'static str {
+    match tone {
+        Tone::Warn => "waiting",
+        Tone::Bad => "failing",
+        Tone::Good | Tone::Neutral | Tone::Quiet => "",
     }
 }
 

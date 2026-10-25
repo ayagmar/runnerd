@@ -694,10 +694,10 @@ impl App {
                 output,
                 error,
             } => {
-                let text = match error {
-                    Some(error) => format!("{profile}: reseed failed: {error}"),
-                    None if output.trim().is_empty() => format!("{profile}: reseeded"),
-                    None => format!("{profile}: {}", last_line(output)),
+                let done = runnerd_core::api::reseeded(profile, error.as_deref());
+                let text = match last_line(output) {
+                    last if error.is_none() && !last.is_empty() => format!("{done}: {last}"),
+                    _ => done,
                 };
                 let outcome = if error.is_some() {
                     Outcome::Failed

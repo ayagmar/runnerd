@@ -122,13 +122,13 @@ It talks to the socket (`--socket` picks another), prints aligned text, coloured
 $ runnerctl status
 runnerd 0.0.13  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
 
-PROFILE  SLOT  STATE  REPOSITORY          RUNNER                                      UP
-jvm         1  busy   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792896193     7m 40s
-jvm         2  idle   halyard/ledger      runnerd-3f9a-forge-jvm-2-1792896020    10m 33s
-node        1  busy   halyard/storefront  runnerd-3f9a-forge-node-1-1792896311    5m 42s
-node        2  idle   halyard/storefront  runnerd-3f9a-forge-node-2-1792896608       45s
-small       1  idle   halyard/storefront  runnerd-3f9a-forge-small-1-1792896360   4m 53s
-small       2  free
+PROFILE  SLOT  STATE     REPOSITORY          RUNNER                                      UP
+jvm         1  running   halyard/ledger      runnerd-3f9a-forge-jvm-1-1792899841     7m 23s
+jvm         2  warm      halyard/ledger      runnerd-3f9a-forge-jvm-2-1792899668    10m 16s
+node        1  running   halyard/storefront  runnerd-3f9a-forge-node-1-1792899959    5m 25s
+node        2  starting  halyard/storefront  runnerd-3f9a-forge-node-2-1792900256       28s
+small       1  warm      halyard/storefront  runnerd-3f9a-forge-small-1-1792900008   4m 36s
+small       2  idle
 
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
 halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
@@ -136,11 +136,11 @@ halyard/storefront  node     active       4  self-hosted,linux,x64,node
                     small                 0  storefront-small
 
 JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FOR
-120055991720  halyard/storefront         CI / lint          5m 23s ago  No profile serves the label storefornt-small
-120055991710  halyard/storefront · node  E2E / visual-diff  1m 14s ago  A runner is starting for it in node 2
-120055991711  halyard/storefront · node  E2E / a11y         1m 8s ago   All 2 node slots are busy
-120055991712  halyard/storefront · node  E2E / lighthouse   55s ago     All 2 node slots are busy
-120055991713  halyard/storefront · node  E2E / unit         42s ago     All 2 node slots are busy
+120055991720  halyard/storefront         CI / lint          5m 06s ago  No profile serves the label storefornt-small
+120055991710  halyard/storefront · node  E2E / visual-diff  57s ago     A runner is starting for it in node 2
+120055991711  halyard/storefront · node  E2E / a11y         51s ago     All 2 node slots are busy
+120055991712  halyard/storefront · node  E2E / lighthouse   38s ago     All 2 node slots are busy
+120055991713  halyard/storefront · node  E2E / unit         25s ago     All 2 node slots are busy
 ```
 
 | Command | What it shows or does |
@@ -170,7 +170,7 @@ JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FO
 
 ```console wrap=false
 $ runnerctl sizing
-from the last 30d 0h of history; peaks are sampled every 2 s, so advice adds 15% to the largest and waits for 10 jobs; auto sizing applies it
+from 30d 0h of history; peaks are sampled every 2 s, so a shorter spike goes unseen: advice sizes for the largest + 15%, at least 1G for page cache, rounded up to 256M, once a profile ran 10 jobs; auto sizing applies it
 
 jvm  9G × 2, 8 CPUs; 400 jobs, slots busy 41%, waited p50 8s p95 35s
   warm runners took 31 of 40 jobs: waited p50 2s, the others 21s
@@ -213,29 +213,29 @@ older jobs: --before 120055991489
 One frame of `runnerctl watch`:
 
 ```console wrap=false
-runnerd 0.0.13  26.25G of 33G reserved; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G  runnerd.slice uses 2.66 cores, 9.78G
+runnerd 0.0.13  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G  runnerd.slice uses 5.34 cores, 9.57G
 
-SLOT     JOB                                            STEP                                         RAN   CPU    MEM
-jvm 1    halyard/ledger CI / build                      Integration tests (Testcontainers) (7/9)  7m 37s  4.54  3.85G
-jvm 2    warm, waiting for a job of halyard/ledger
-node 1   halyard/storefront E2E / playwright            Playwright e2e (6/8)                      5m 40s  4.54  2.45G
-node 2   waiting for a job of halyard/storefront
-small 1  warm, waiting for a job of halyard/storefront
-small 2  free
+SLOT     JOB                                                      STEP                                         RAN   CPU    MEM
+jvm 1    halyard/ledger CI / build                                Integration tests (Testcontainers) (7/9)  7m 41s  3.14  4.19G
+jvm 2    a warm runner for halyard/ledger, waiting for a job
+node 1   halyard/storefront E2E / playwright                      Playwright e2e (6/8)                      5m 44s  3.14  2.67G
+node 2   a runner for halyard/storefront waiting for its job
+small 1  a warm runner for halyard/storefront, waiting for a job
+small 2  idle
 
 Queued
-  halyard/storefront  CI / lint          5m 25s ago  No profile serves the label storefornt-small
-  halyard/storefront  E2E / visual-diff  1m 16s ago  A runner is starting for it in node 2
-  halyard/storefront  E2E / a11y         1m 10s ago  All 2 node slots are busy
-  halyard/storefront  E2E / lighthouse      57s ago  All 2 node slots are busy
-  halyard/storefront  E2E / unit            44s ago  All 2 node slots are busy
+  halyard/storefront         CI / lint          5m 29s ago  No profile serves the label storefornt-small
+  halyard/storefront · node  E2E / visual-diff  1m 20s ago  A runner is starting for it in node 2
+  halyard/storefront · node  E2E / a11y         1m 14s ago  All 2 node slots are busy
+  halyard/storefront · node  E2E / lighthouse   1m 01s ago  All 2 node slots are busy
+  halyard/storefront · node  E2E / unit            48s ago  All 2 node slots are busy
 
 Finished
-  success  halyard/ledger      CI / build        11m 5s  19m 32s ago
-  success  halyard/storefront  E2E / playwright  8m 57s  1h 1m ago
-  success  halyard/ledger      CI / build        11m 5s  1h 41m ago
-  failure  halyard/ledger      CI / build        11m 5s  2h 21m ago
-  success  halyard/storefront  E2E / playwright  8m 57s  3h 6m ago
+  success  halyard/ledger      CI / build        11m 05s  19m 36s ago
+  success  halyard/storefront  E2E / playwright   8m 57s  1h 01m ago
+  success  halyard/ledger      CI / build        11m 05s  1h 41m ago
+  failure  halyard/ledger      CI / build        11m 05s  2h 21m ago
+  success  halyard/storefront  E2E / playwright   8m 57s  3h 06m ago
 
 CPU and MEM are the last sample, taken every 2 s. Ctrl-C quits.
 ```

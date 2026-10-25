@@ -2,9 +2,7 @@
 //! the records of failed jobs, the other disk runnerd keeps, with their limits.
 
 use maud::{Markup, html};
-use runnerd_core::api::{
-    BuildCacheStats, CacheHistory, CacheKind, CacheVolume, Caches, Records, Status,
-};
+use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Records, Status, Tone};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, Parts, page, profile_class, time_ago};
@@ -37,29 +35,6 @@ impl CachesView {
                 .await?,
             records: daemon.get("/v1/records").await?,
         })
-    }
-}
-
-/// What a volume is called, and the profile it belongs to; none for a shared one.
-struct Kind<'volume> {
-    label: String,
-    profile: Option<&'volume str>,
-}
-
-fn kind(volume: &CacheVolume) -> Kind<'_> {
-    let (label, profile) = match &volume.kind {
-        CacheKind::Snapshot { profile } => (format!("{profile} snapshot"), Some(profile)),
-        CacheKind::Slot { profile, slot } => {
-            (format!("{profile} slot {slot} layer"), Some(profile))
-        }
-        CacheKind::Pnpm => ("pnpm store, shared".to_owned(), None),
-        CacheKind::Maven => ("Maven repository, shared".to_owned(), None),
-        CacheKind::Mirror => ("Docker Hub mirror".to_owned(), None),
-        CacheKind::Build => ("Build cache, shared".to_owned(), None),
-    };
-    Kind {
-        label,
-        profile: profile.map(String::as_str),
     }
 }
 
@@ -110,8 +85,9 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
         }
         ul #volumes .volume-grid {
             @for volume in &view.caches.volumes {
-                @let Kind { label, profile } = kind(volume);
-                @let class = profile.map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
+                @let label = volume.kind.description();
+                @let limit = volume.limit_status();
+                @let class = volume.kind.profile().map_or("p-none".to_owned(), |profile| profile_class(&view.status, profile));
                 @let points: Vec<(u64, u64)> = view.history.sizes.iter().filter(|size| size.name == volume.name).map(|size| (size.at, size.bytes)).collect();
                 @let peak = points.iter().map(|point| point.1).max().unwrap_or(volume.bytes).max(volume.bytes);
                 li class=(format!("volume {class}")) {
@@ -121,11 +97,11 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                     }
                     p.volume-name { code { (volume.name) } }
                     p.volume-size {
-                        span.big { (format::bytes(volume.bytes)) }
-                        @if let Some(limit) = volume.limit { span.muted { " of " (format::bytes(limit)) } }
+                        span class=(if limit.as_ref().is_some_and(|limit| limit.over) { "big over-limit" } else { "big" }) { (format::bytes(volume.bytes)) }
+                        @if let Some(limit) = &limit { span.muted { " of " (format::bytes(limit.limit)) ", " (limit.label) } }
                     }
                     @if volume.kind == CacheKind::Build && let Some(build) = &view.caches.build {
-                        (build_cache(build))
+                        p.muted { (build.week_line()) }
                     }
                     @if points.len() > 1 {
                         (TimeChart {
@@ -135,7 +111,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                             window: None,
                             live: None,
                             series: vec![Series { label: "size".to_owned(), class: "memory", points, area: true }],
-                            limits: volume.limit.map(|limit| Limit { value: limit, label: limit_label(volume, limit), class: "" }).into_iter().collect(),
+                            limits: limit.map(|limit| Limit { value: limit.limit, label: limit.label, class: "" }).into_iter().collect(),
                             value: format::bytes,
                             time: format::short_date,
                             gap: u64::MAX,
@@ -149,45 +125,13 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
     }
 }
 
-/// What the chart calls a volume's limit: the build cache is trimmed to it, the rest emptied above it.
-fn limit_label(volume: &CacheVolume, limit: u64) -> String {
-    if volume.kind == CacheKind::Build {
-        format!("trimmed to {}", format::bytes(limit))
-    } else {
-        format!("emptied above {}", format::bytes(limit))
-    }
-}
-
-/// The build cache's entries and what it served the last 7 days' jobs.
-fn build_cache(build: &BuildCacheStats) -> Markup {
-    let week = &build.week;
-    html! {
-        p.muted {
-            (build.entries) " entries; "
-            @match week.hit_percent() {
-                Some(percent) => {
-                    (percent) "% of " (week.lookups()) " lookups hit in 7 days, "
-                    (format::bytes(week.read_bytes)) " served, " (format::bytes(week.written_bytes)) " stored"
-                    @if week.refused > 0 { ", " (week.refused) " uploads refused" }
-                }
-                None => "no lookups in 7 days",
-            }
-        }
-    }
-}
-
 /// The records of failed jobs, each removable, and the limits they are kept within.
 pub(crate) fn records(status: &Status, records: &Records, now: u64) -> Markup {
-    let limits = &records.limits;
     html! {
         section #records .records aria-labelledby="records-title" {
             div.section-head {
                 h2 #records-title { "Records of failed jobs" }
-                p.muted {
-                    (records.records.len()) " of " (limits.max_count) ", "
-                    (format::bytes(records.bytes())) " of " (format::bytes(limits.max_total))
-                    ", each kept " (format::duration(limits.max_age))
-                }
+                p class=(if records.summary_tone() == Tone::Warn { "muted over-limit" } else { "muted" }) { (format::sentence(&records.summary())) }
                 @if !records.records.is_empty() {
                     button.button-quiet type="button"
                         data-on:click="confirm('Remove every record? Their shells can no longer be opened.') && @delete('/v1/records?all=true')"
@@ -195,10 +139,7 @@ pub(crate) fn records(status: &Status, records: &Records, now: u64) -> Markup {
                 }
             }
             @if records.records.is_empty() {
-                p.muted {
-                    "None kept. A profile with " code { "record_failures = true" }
-                    " keeps each failed job's runner as a record, to open a shell where it failed."
-                }
+                p.muted { (format::sentence(Records::empty_reason())) "." }
             } @else {
                 div.table-wrap {
                     table.job-table.record-table {
@@ -225,7 +166,7 @@ pub(crate) fn records(status: &Status, records: &Records, now: u64) -> Markup {
                                     }
                                     td {
                                         (time_ago(record.created_at, now))
-                                        @if records.shells.contains(&record.job) { span.muted { ", shell open" } }
+                                        @if records.shell_open(record.job) { span.muted { ", shell open" } }
                                     }
                                     td.number { (format::bytes(record.bytes)) }
                                     td.number {

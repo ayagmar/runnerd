@@ -506,6 +506,20 @@ fn records(jobs: &[u64]) -> Records {
 }
 
 #[test]
+fn records_near_max_total_say_so_first_on_a_narrow_heading() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('3')));
+    let mut near = records(&[42, 43]);
+    near.limits.max_total = 700 << 20;
+    app.update(Msg::Records(near));
+    let shown = screen(&app, 80, 24, false);
+    assert!(
+        shown.contains("near max_total, so new ones remove the oldest"),
+        "{shown}"
+    );
+}
+
+#[test]
 fn a_record_is_removed_only_after_y_and_the_list_follows_new_ones() {
     let mut app = app();
     assert_eq!(app.update(key(KeyCode::Char('3'))), vec![Effect::Records]);
@@ -847,11 +861,38 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
     assert!(heading.ends_with("· mirror 512M"), "{shown}");
     assert!(bar.contains("▒ "), "the mirror's block shows: {shown}");
 
-    // Without a MemoryMax the slots fill the bar, leaving no room for a block: the heading still names each.
+    // Without a MemoryMax the bar's whole is every block together, so the seed container still has its block.
     app.live.status.budget.memory_max = None;
     let shown = screen(&app, 120, 40, false);
-    let heading = shown.lines().nth(2).unwrap();
-    assert!(heading.contains("· mirror 512M · jvm seed 9G"), "{shown}");
+    let names = shown.lines().nth(4).unwrap();
+    assert!(names.contains("jvm seed 9G"), "{shown}");
+}
+
+#[test]
+fn a_budget_label_never_cuts_a_figure_at_any_width() {
+    let mut app = app();
+    running_job(&mut app);
+    app.update(event(
+        None,
+        Event::JobSample {
+            job: 42,
+            sample: Sample {
+                at: 1096,
+                cpu: 3140,
+                memory: 3328 << 20,
+                network_received: 0,
+                network_sent: 0,
+            },
+        },
+    ));
+    for width in 60..=160 {
+        let shown = screen(&app, width, 40, false);
+        let names = shown.lines().nth(4).unwrap();
+        assert!(
+            !names.contains('…'),
+            "at {width} columns a label is cut: {names}"
+        );
+    }
 }
 
 #[test]
@@ -2061,6 +2102,12 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         );
     }
 
+    let heading = rows_with(&screen(&app, 120, 24, false), "of history")[0].to_owned();
+    assert!(
+        heading.contains("peaks sampled every 2 s"),
+        "the sampling caveat survives a 120-column heading: {heading}"
+    );
+
     sizing.auto_plan.as_mut().unwrap().blocked =
         Some("runnerd.toml changed on disk since runnerd read it".to_owned());
     app.update(Msg::Sizing(sizing));
@@ -2455,7 +2502,7 @@ fn a_warm_runner_reads_as_warm_not_as_a_runner_stuck_waiting_for_its_job() {
     );
     assert!(!health.contains("starting"), "{health}");
     assert!(
-        shown.contains("Warm runner for halyard/ledger, waiting for a job"),
+        shown.contains("A warm runner for halyard/ledger, waiting for a job"),
         "its slot card says so: {shown}"
     );
     assert!(!shown.contains("waiting for its job"), "{shown}");

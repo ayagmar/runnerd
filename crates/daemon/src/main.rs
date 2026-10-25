@@ -315,13 +315,10 @@ fn doctor(path: Option<&Path>) -> ExitCode {
     for check in &checks {
         output::line(check);
     }
-    if checks
-        .iter()
-        .any(|check| check.status == runnerd_core::api::CheckStatus::Fail)
-    {
-        ExitCode::FAILURE
-    } else {
+    if runnerd_core::api::Doctor::all_passed(&checks) {
         ExitCode::SUCCESS
+    } else {
+        ExitCode::FAILURE
     }
 }
 

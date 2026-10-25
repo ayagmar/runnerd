@@ -182,8 +182,12 @@ adopted too and drains as it would after a reload.
 - What clients show of the same thing is computed once in `runnerd-core::api`: a job's outcome and whether it
   failed, its steps' outcomes, how long it waited and ran, its phases, its name, its peaks as samples come in, its
   latest runs compared, and how durations, ages, CPU time and cores in use are written (`api::jobs::facts`,
-  `api::units`). Core returns the label, the figure and its kind; the dashboard, the TUI and `runnerctl` only draw
-  them ([ADR 0059](docs/adr/0059-clients-show-what-core-computes.md)).
+  `api::units`). So is what they show of the host: the budget's lines and the parts its bar draws, each slot's state
+  and the slots' health, the sizing advice and auto sizing's next step, a config check's verdict and budget, doctor's
+  badges, insights and the digest, caches, the build cache and records, the history's daily statistics, and what an
+  action did. Core returns the label, the figure and its kind or `api::Tone`; the dashboard, the TUI and `runnerctl`
+  only draw them ([ADR 0059](docs/adr/0059-clients-show-what-core-computes.md),
+  [ADR 0060](docs/adr/0060-clients-show-what-core-computes-about-the-host.md)).
 - Clients never talk to Docker or GitHub; they talk to the daemon.
 - The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A `[notify]`
   target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them,

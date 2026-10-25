@@ -6,8 +6,8 @@ use std::path::Path;
 use std::process::Command;
 
 use runnerd_core::admission::host;
-use runnerd_core::api::{self, Advice, Check, CheckStatus as Status, PAGE_CACHE_ROOM, Sizing};
-use runnerd_core::config::{self, Admission, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
+use runnerd_core::api::{self, Check, CheckStatus as Status, Sizing};
+use runnerd_core::config::{self, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::observe::metrics::{self, Paths};
 use runnerd_core::record;
@@ -539,41 +539,7 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             ),
         )
     };
-    let config_check = match config.validate(slice.memory_max) {
-        Ok(warnings) if warnings.is_empty() => pass(
-            "config",
-            match (
-                config.host.admission,
-                config.memory_needed(),
-                config.memory_caps(),
-                slice.memory_max,
-            ) {
-                (Admission::Measured, Ok(needed), Ok(caps), Some(max)) if caps > max => format!(
-                    "under admission = \"measured\", the largest runner with the mirror needs {needed} of \
-                     {name}'s {max} MemoryMax; every slot at its cap at once would take {caps}"
-                ),
-                _ => format!("fits in {name}"),
-            },
-        ),
-        Ok(warnings) => Check {
-            name: "config".to_owned(),
-            status: Status::Pass,
-            detail: format!(
-                "valid, with warnings: {}",
-                warnings
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-            fix: None,
-        },
-        Err(error) => fail(
-            "config",
-            error.to_string(),
-            "change runnerd.toml or the slice's limits",
-        ),
-    };
+    let config_check = config.check_against(slice.memory_max).doctor_check();
     vec![slice_check, config_check]
 }
 
@@ -721,12 +687,12 @@ fn sysbox_fix(os_release: &str, platform: &str) -> String {
     }
 }
 
-/// Warns when the records take 80% of `[records] max_total`, past which new ones evict the oldest.
+/// Warns when the records near `[records] max_total` (`api::records_near_full`), past which new ones evict the oldest.
 fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
     let max_total = config.records.max_total;
     match records {
         Err(error) => skip("records", &format!("cannot list them: {error}")),
-        Ok(bytes) if u128::from(*bytes) * 5 >= u128::from(max_total.0) * 4 => Check {
+        Ok(bytes) if api::records_near_full(*bytes, max_total.0) => Check {
             name: "records".to_owned(),
             status: Status::Warn,
             detail: format!(
@@ -773,9 +739,8 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
     };
     let budget = host::budget(memory.clone(), memory.slice, host::Remembered::default());
     let detail = format!(
-        "{} of {} available, {} to spare for runners past a {} margin; every task waited for memory {}",
-        ByteSize(memory.available),
-        ByteSize(memory.total),
+        "{}, {} to spare for runners past a {} margin; every task waited for memory {}",
+        memory.available_line(),
         ByteSize(budget.spare),
         ByteSize(host::margin(memory.total, false)),
         stalled(memory.full)
@@ -817,63 +782,7 @@ fn sizing_check(sizing: &Result<Sizing, String>) -> Check {
         Ok(sizing) => sizing,
         Err(error) => return skip("sizing", &format!("cannot read the job history: {error}")),
     };
-    let changes: Vec<_> = sizing
-        .profiles
-        .iter()
-        .filter(|profile| {
-            profile.advice.change().is_some()
-                || matches!(profile.advice, Advice::SliceTooSmall { .. })
-        })
-        .collect();
-    let raise = changes.iter().any(|profile| {
-        matches!(
-            profile.advice,
-            Advice::Raise { .. } | Advice::SliceTooSmall { .. }
-        )
-    });
-    let detail = if changes.is_empty() {
-        let too_few = sizing
-            .profiles
-            .iter()
-            .any(|profile| matches!(profile.advice, Advice::TooFew { .. }));
-        if too_few {
-            format!(
-                "some profiles ran fewer than {} jobs; runnerctl sizing shows their peaks",
-                sizing.min_jobs
-            )
-        } else {
-            format!(
-                "every profile's memory fits its jobs' largest peak + {}%, at least {} for page cache",
-                sizing.margin,
-                ByteSize(PAGE_CACHE_ROOM)
-            )
-        }
-    } else {
-        changes
-            .iter()
-            .map(|profile| format!("{}: {}", profile.name, sizing.advice_line(profile)))
-            .collect::<Vec<_>>()
-            .join("; ")
-    };
-    Check {
-        name: "sizing".to_owned(),
-        status: if raise { Status::Warn } else { Status::Info },
-        detail,
-        fix: (!changes.is_empty()).then(|| {
-            changes
-                .iter()
-                .map(|profile| match profile.advice {
-                    Advice::SliceTooSmall { .. } => format!(
-                        "raise MemoryMax in the slice's unit file, sudo systemctl daemon-reload, then: \
-                         runnerctl sizing apply {}",
-                        profile.name
-                    ),
-                    _ => format!("runnerctl sizing apply {}", profile.name),
-                })
-                .collect::<Vec<_>>()
-                .join("\n")
-        }),
-    }
+    sizing.doctor_check()
 }
 
 fn pass(name: &str, detail: String) -> Check {

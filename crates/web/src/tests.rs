@@ -1160,8 +1160,8 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
         assert!(text.ends_with(line), "{key}'s line reads {line:?}");
     }
     assert!(
-        overview.contains(r#"of 33G free""#),
-        "the free remainder is named for screen readers"
+        overview.contains("of 33G free past every slot's cap; "),
+        "the free remainder is named for screen readers, apart from the room free slots leave"
     );
 }
 
@@ -2259,8 +2259,9 @@ async fn caps_too_large_to_add_up_draw_no_budget() {
     let toml = config.replacen("slots = 2", "slots = 4294967295", 1);
     assert_ne!(toml, config);
     let result = checked(&dashboard, &toml).await;
-    assert!(result.contains("Does not fit"), "{result}");
-    for unexpected in ["Memory caps", "bar-small", "free", "0B"] {
+    // Caps that overflow have no total to fit or not: the check says why it is not valid.
+    assert!(result.contains("Not valid"), "{result}");
+    for unexpected in ["Does not fit", "Memory caps", "bar-small", "free", "0B"] {
         assert!(
             !result.contains(unexpected),
             "shows {unexpected:?}: {result}"
@@ -2450,7 +2451,7 @@ async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved
         "Review memory 3.25G, 4 slots in the config",
         "integration tests",
         "halyard/storefront · CI",
-        "waits for 10 jobs",
+        "once a profile ran 10 jobs",
     ] {
         assert!(
             sizing.body.contains(expected),
@@ -2572,7 +2573,11 @@ async fn reseed_and_empty_from_the_caches_page_reach_the_daemon() {
             &serde_json::json!({}),
         )
         .await;
-    assert!(reseed.body.contains("Reseeding jvm"), "{}", reseed.body);
+    assert!(
+        reseed.body.contains("jvm: reseed requested"),
+        "{}",
+        reseed.body
+    );
     let clean = dashboard
         .write(
             &cookie,
@@ -2982,11 +2987,12 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
                 reason: "lower memory".to_owned(),
                 uncertain: false,
             }],
+            // A hold is read against the reader's clock, not the fixtures'.
             held: vec![SizingHold {
                 profile: "jvm".to_owned(),
                 changed: now - 3600,
-                until: now + 23 * 3600,
-                lower_until: now + 23 * 3600,
+                until: crate::now() + 23 * 3600,
+                lower_until: crate::now() + 23 * 3600,
             }],
             blocked: None,
         });
@@ -3053,7 +3059,7 @@ async fn a_warm_runner_reads_as_warm_not_as_a_runner_waiting_for_its_job() {
     let cookie = dashboard.sign_in().await;
     let body = dashboard.page(&cookie, "/").await.body;
     assert!(
-        body.contains("Warm, waiting for a job"),
+        body.contains("A warm runner for halyard/ledger, waiting for a job, "),
         "its slot card: {body}"
     );
     assert!(

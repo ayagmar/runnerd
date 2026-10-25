@@ -3,7 +3,9 @@
 //! their memory peaks.
 
 use maud::{Markup, html};
-use runnerd_core::api::{Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsRow, Status};
+use runnerd_core::api::{
+    Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsSummary, Status,
+};
 use runnerd_core::client::{Client, ClientError};
 use serde::{Deserialize, Serialize};
 
@@ -147,50 +149,12 @@ fn day_start(at: u64) -> u64 {
     at - at % 86_400
 }
 
-/// One day of the trends, all repositories of the filter summed.
-#[derive(Debug, Default, Clone)]
-struct Day {
-    start: u64,
-    jobs: u64,
-    succeeded: u64,
-    failed: u64,
-    cancelled: u64,
-    queue_seconds: u64,
-    run_seconds: u64,
-    memory_peak: u64,
-}
-
-fn days(stats: &Stats, now: u64) -> Vec<Day> {
-    let first = day_start(now).saturating_sub((TREND_DAYS - 1) * 86_400);
-    let mut days: Vec<Day> = (0..TREND_DAYS)
-        .map(|i| Day {
-            start: first + i * 86_400,
-            ..Day::default()
-        })
-        .collect();
-    for row in &stats.rows {
-        let StatsRow {
-            start,
-            jobs,
-            succeeded,
-            failed,
-            cancelled,
-            queue_seconds,
-            run_seconds,
-            memory_peak,
-            ..
-        } = row;
-        if let Some(day) = days.iter_mut().find(|day| day.start == *start) {
-            day.jobs += jobs;
-            day.succeeded += succeeded;
-            day.failed += failed;
-            day.cancelled += cancelled;
-            day.queue_seconds += queue_seconds;
-            day.run_seconds += run_seconds;
-            day.memory_peak = day.memory_peak.max(*memory_peak);
-        }
-    }
-    days
+/// The trends' days, all repositories of the filter summed, oldest first.
+fn days(stats: &Stats, now: u64) -> Vec<StatsSummary> {
+    stats.daily(
+        day_start(now).saturating_sub((TREND_DAYS - 1) * 86_400),
+        TREND_DAYS,
+    )
 }
 
 /// The whole page.
@@ -293,23 +257,17 @@ const DAY_KEYS: &str = "if (evt.key == 'ArrowLeft') { $_day = Math.max(0, ($_day
 /// it on every chart and puts its numbers in the headline.
 fn trends(history: &History) -> Markup {
     let days = days(&history.stats, history.now);
-    let peak = days.iter().map(|day| day.memory_peak).max().unwrap_or(0);
+    let peak = StatsSummary::of(&days).memory_peak.unwrap_or(0);
     let bars: Vec<Bar> = days
         .iter()
         .map(|day| Bar {
             label: format::short_date(day.start),
-            parts: vec![
-                day.succeeded,
-                day.failed,
-                day.cancelled,
-                day.jobs
-                    .saturating_sub(day.succeeded + day.failed + day.cancelled),
-            ],
+            parts: vec![day.succeeded, day.failed, day.cancelled, day.other()],
         })
         .collect();
-    let durations = daily(&days, |day| day.run_seconds.checked_div(day.jobs));
-    let waits = daily(&days, |day| day.queue_seconds.checked_div(day.jobs));
-    let peaks = daily(&days, |day| (day.jobs > 0).then_some(day.memory_peak));
+    let durations = daily(&days, StatsSummary::average_run);
+    let waits = daily(&days, StatsSummary::average_wait);
+    let peaks = daily(&days, |day| day.memory_peak);
     let time_top = nice_top(
         durations
             .iter()
@@ -403,13 +361,18 @@ fn lens(whole: &str, per_day: &[String]) -> String {
 }
 
 /// A day's value at its middle, so a line's points sit over the bars of the same days.
-fn daily(days: &[Day], value: fn(&Day) -> Option<u64>) -> Vec<(u64, u64)> {
+fn daily(days: &[StatsSummary], value: fn(&StatsSummary) -> Option<u64>) -> Vec<(u64, u64)> {
     days.iter()
         .filter_map(|day| value(day).map(|value| (day.start + 43_200, value)))
         .collect()
 }
 
-fn per_day(title: &str, series: Vec<Series>, value: fn(u64) -> String, days: &[Day]) -> TimeChart {
+fn per_day(
+    title: &str,
+    series: Vec<Series>,
+    value: fn(u64) -> String,
+    days: &[StatsSummary],
+) -> TimeChart {
     TimeChart {
         title: title.to_owned(),
         start: days.first().map_or(0, |day| day.start),
@@ -425,48 +388,36 @@ fn per_day(title: &str, series: Vec<Series>, value: fn(u64) -> String, days: &[D
 }
 
 /// The 30 days' totals, or the picked day's.
-fn headline(days: &[Day]) -> Markup {
-    let total: u64 = days.iter().map(|day| day.jobs).sum();
-    let succeeded: u64 = days.iter().map(|day| day.succeeded).sum();
-    let run: u64 = days.iter().map(|day| day.run_seconds).sum();
-    let queue: u64 = days.iter().map(|day| day.queue_seconds).sum();
-    let peak = |peak: u64| {
-        if peak > 0 {
-            format::bytes(peak)
-        } else {
-            "–".to_owned()
-        }
-    };
-    let share = |succeeded: u64, jobs: u64| {
-        (succeeded * 100)
-            .checked_div(jobs)
+fn headline(days: &[StatsSummary]) -> Markup {
+    let total = StatsSummary::of(days);
+    let peak = |peak: Option<u64>| peak.map_or("–".to_owned(), format::bytes);
+    let share = |summary: &StatsSummary| {
+        summary
+            .success_percent()
             .map_or("–".to_owned(), |percent| format!("{percent}%"))
     };
-    let average = |sum: u64, jobs: u64| {
-        sum.checked_div(jobs)
-            .map_or("–".to_owned(), format::duration)
-    };
-    let each = |value: &dyn Fn(&Day) -> String| days.iter().map(value).collect::<Vec<_>>();
+    let average = |seconds: Option<u64>| seconds.map_or("–".to_owned(), format::duration);
+    let each = |value: &dyn Fn(&StatsSummary) -> String| days.iter().map(value).collect::<Vec<_>>();
     let figures = [
-        ("Jobs", total.to_string(), each(&|day| day.jobs.to_string())),
         (
-            "Succeeded",
-            share(succeeded, total),
-            each(&|day| share(day.succeeded, day.jobs)),
+            "Jobs",
+            total.jobs.to_string(),
+            each(&|day| day.jobs.to_string()),
         ),
+        ("Succeeded", share(&total), each(&|day| share(day))),
         (
             "Average run",
-            average(run, total),
-            each(&|day| average(day.run_seconds, day.jobs)),
+            average(total.average_run()),
+            each(&|day| average(day.average_run())),
         ),
         (
             "Average wait",
-            average(queue, total),
-            each(&|day| average(day.queue_seconds, day.jobs)),
+            average(total.average_wait()),
+            each(&|day| average(day.average_wait())),
         ),
         (
             "Sampled memory peak",
-            peak(days.iter().map(|day| day.memory_peak).max().unwrap_or(0)),
+            peak(total.memory_peak),
             each(&|day| peak(day.memory_peak)),
         ),
     ];

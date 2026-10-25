@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use super::RunnerFailure;
 use super::jobs::JobSummary;
 
+mod shown;
+
 /// The window `GET /v1/insights` reads by default, in days.
 pub const INSIGHT_DAYS: u32 = 14;
 

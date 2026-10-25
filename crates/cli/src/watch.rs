@@ -315,21 +315,11 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
     let budget = &status.budget;
     let _ = write!(
         out,
-        "{} {}  {}{} reserved",
+        "{} {}  {}",
         paint.paint(Tone::Bold, "runnerd"),
         status.version,
-        bytes(budget.memory_in_use),
-        budget
-            .memory_max
-            .map(|max| format!(" of {}", bytes(max)))
-            .unwrap_or_default(),
+        budget.line(),
     );
-    if let Some(cpu) = budget.cpu {
-        let _ = write!(out, "; {}", cpu.line());
-    }
-    if let Some(host) = &budget.host {
-        let _ = write!(out, "; {}", host.line());
-    }
     if let Some(host) = &state.host {
         let _ = write!(
             out,
@@ -357,7 +347,10 @@ pub(crate) fn frame(state: &State, now: u64, paint: Paint) -> String {
         "\n{}",
         paint.paint(
             Tone::Dim,
-            "CPU and MEM are the last sample, taken every 2 s. Ctrl-C quits."
+            &format!(
+                "CPU and MEM are the last sample, taken every {} s. Ctrl-C quits.",
+                runnerd_core::api::SAMPLE_INTERVAL
+            )
         )
     );
     out
@@ -369,18 +362,12 @@ fn slots(state: &State, now: u64, paint: Paint) -> String {
     for profile in &state.status.profiles {
         for slot in &profile.slots {
             let name = format!("{} {}", profile.name, slot.slot);
-            let Some(runner) = &slot.runner else {
-                slots.row(vec![(name, Tone::Plain), ("free".to_owned(), Tone::Dim)]);
-                continue;
-            };
-            let Some(job) = state.job_in(&profile.name, slot.slot) else {
-                let what = if runner.busy {
-                    format!("busy: {}", runner.repository)
-                } else if runner.warm {
-                    format!("warm, waiting for a job of {}", runner.repository)
-                } else {
-                    format!("waiting for a job of {}", runner.repository)
-                };
+            let job = slot
+                .runner
+                .as_ref()
+                .and_then(|_| state.job_in(&profile.name, slot.slot));
+            let Some(job) = job else {
+                let what = Status::slot_state(profile, slot).line();
                 slots.row(vec![(name, Tone::Plain), (what, Tone::Dim)]);
                 continue;
             };
@@ -624,7 +611,7 @@ mod tests {
             },
         }));
         let done = screen(&state);
-        assert!(done.contains("jvm 1  free"), "{done}");
+        assert!(done.contains("jvm 1  idle"), "{done}");
         assert!(
             done.contains("success  halyard/ledger  build / test  15s  just now"),
             "{done}"

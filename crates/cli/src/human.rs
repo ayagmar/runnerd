@@ -6,12 +6,12 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    self, Advice, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, InsightKind,
-    Insights, Job, JobPage, JobRunner, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote,
-    Records, RemovedRecords, Severity, Sizing, Status, Step, WaitSpread,
+    self, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
+    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, Sizing,
+    SlotState, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
-use runnerd_core::api::{cpus, in_cores, job_title};
+use runnerd_core::api::{in_cores, job_title};
 use runnerd_core::config::ByteSize;
 
 /// How a piece of text should stand out.
@@ -23,6 +23,18 @@ pub(crate) enum Tone {
     Good,
     Bad,
     Busy,
+}
+
+impl From<api::Tone> for Tone {
+    fn from(tone: api::Tone) -> Tone {
+        match tone {
+            api::Tone::Good => Tone::Good,
+            api::Tone::Warn => Tone::Busy,
+            api::Tone::Bad => Tone::Bad,
+            api::Tone::Neutral => Tone::Plain,
+            api::Tone::Quiet => Tone::Dim,
+        }
+    }
 }
 
 /// Colours text, or leaves it plain.
@@ -168,37 +180,6 @@ pub(crate) fn queued_ago(job: &QueuedJob, now: u64) -> String {
     }
 }
 
-const SAMPLED_NOTE: &str =
-    "memory peaks are sampled every 2 s; spikes shorter than that do not show";
-
-/// The memory line of a status: what is in use of what.
-fn budget_line(status: &Status) -> String {
-    let budget = &status.budget;
-    let by = budget
-        .admission_note()
-        .map_or_else(String::new, |note| format!(" {note}"));
-    let mut line = match budget.memory_max {
-        Some(max) => format!(
-            "{} of {} reserved in {}{by}",
-            bytes(budget.memory_in_use),
-            bytes(max),
-            budget.slice
-        ),
-        None => format!(
-            "{} reserved in {}, which has no MemoryMax",
-            bytes(budget.memory_in_use),
-            budget.slice
-        ),
-    };
-    if let Some(cpu) = budget.cpu {
-        let _ = write!(line, "; {}", cpu.line());
-    }
-    if let Some(host) = &budget.host {
-        let _ = write!(line, "; {}", host.line());
-    }
-    line
-}
-
 /// `runnerctl status`.
 pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
     let mut out = String::new();
@@ -207,7 +188,7 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
         "{} {}  {}",
         paint.paint(Tone::Bold, "runnerd"),
         status.version,
-        budget_line(status)
+        status.budget.line()
     );
     if status.shutting_down {
         let _ = write!(
@@ -222,20 +203,12 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
     for profile in &status.profiles {
         for slot in &profile.slots {
             let mut row = vec![plain(&profile.name), plain(slot.slot.to_string())];
-            match &slot.runner {
-                Some(runner) => {
-                    row.push(if runner.busy {
-                        cell("busy", Tone::Busy)
-                    } else {
-                        cell("idle", Tone::Plain)
-                    });
-                    row.push(plain(&runner.repository));
-                    row.push(cell(&runner.name, Tone::Dim));
-                    row.push(plain(duration(now.saturating_sub(runner.started_at))));
-                }
-                None => {
-                    row.push(cell("free", Tone::Dim));
-                }
+            let state = Status::slot_state(profile, slot);
+            row.push(cell(state.word(), state.tone().into()));
+            if let Some(runner) = &slot.runner {
+                row.push(plain(&runner.repository));
+                row.push(cell(&runner.name, Tone::Dim));
+                row.push(plain(duration(now.saturating_sub(runner.started_at))));
             }
             slots.row(row);
         }
@@ -333,7 +306,11 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
         .iter()
         .any(|job| job.metrics.memory_peak.is_some())
     {
-        let _ = writeln!(out, "{}", paint.paint(Tone::Dim, SAMPLED_NOTE));
+        let _ = writeln!(
+            out,
+            "{}",
+            paint.paint(Tone::Dim, &api::sampled_note(api::SAMPLE_INTERVAL))
+        );
     }
     if let Some(next) = page.next {
         let _ = writeln!(
@@ -357,16 +334,10 @@ fn step_mark(step: &Step) -> (String, Tone) {
 }
 
 /// `, capped at 6G and 4 CPUs`: what the job's container was held to, when the record has it.
-fn caps(runner: &JobRunner) -> String {
-    let caps: Vec<String> = [runner.memory_cap.map(bytes), runner.cpu_cap.map(cpus)]
-        .into_iter()
-        .flatten()
-        .collect();
-    if caps.is_empty() {
-        String::new()
-    } else {
-        format!(", capped at {}", caps.join(" and "))
-    }
+fn caps(job: &Job) -> String {
+    job.limits(None)
+        .line()
+        .map_or_else(String::new, |limits| format!(", {limits}"))
 }
 
 /// `runnerctl job <id>`.
@@ -404,7 +375,7 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
                     "(profile {}, slot {}{})",
                     runner.profile,
                     runner.slot,
-                    caps(runner)
+                    caps(job)
                 )
             )
         );
@@ -423,66 +394,36 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
 
 /// What became of a failed job's record.
 fn record_note(job: u64, note: &RecordNote, now: u64, paint: Paint) -> String {
-    match (note, note.removed_at) {
-        (
-            RecordNote {
-                skipped: Some(why), ..
-            },
-            _,
-        ) => {
-            format!(
-                "record {}",
-                paint.paint(Tone::Dim, &format!("not kept: {why}"))
-            )
-        }
-        (RecordNote { removed_by, .. }, Some(at)) => {
-            let why = removed_by.map_or_else(|| "removed".to_owned(), |by| by.to_string());
-            format!(
-                "record {}",
-                paint.paint(Tone::Dim, &format!("{why}, {}", ago(at, now)))
-            )
-        }
-        (RecordNote { bytes, .. }, None) => format!(
-            "record kept{}: `runnerctl shell {job}` opens a shell in it",
-            bytes
-                .map(|bytes| format!(", {}", self::bytes(bytes)))
-                .unwrap_or_default()
+    let state = note.state();
+    match state {
+        RecordState::Skipped { .. } => format!("record {}", paint.paint(Tone::Dim, &state.line())),
+        RecordState::Removed { at, .. } => format!(
+            "record {}",
+            paint.paint(Tone::Dim, &format!("{}, {}", state.line(), ago(at, now)))
         ),
-    }
-}
-
-/// What a removal of records freed.
-pub(crate) fn removed(removed: &RemovedRecords) -> String {
-    match removed.jobs.len() {
-        0 => "no record removed".to_owned(),
-        1 => format!("removed 1 record, {} freed", bytes(removed.bytes)),
-        count => format!("removed {count} records, {} freed", bytes(removed.bytes)),
+        RecordState::Kept { .. } => format!(
+            "{}: `{}` opens a shell in it",
+            state.line(),
+            RecordNote::shell_command(job)
+        ),
     }
 }
 
 /// `runnerctl records`.
 pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
-    let limits = &records.limits;
     let mut out = format!(
-        "{} records, {} of {}; at most {}, each for {}\n",
-        records.records.len(),
-        bytes(records.bytes()),
-        bytes(limits.max_total),
-        limits.max_count,
-        duration(limits.max_age)
+        "{}\n",
+        paint.paint(records.summary_tone().into(), &records.summary())
     );
     if records.records.is_empty() {
-        out.push_str(&paint.paint(
-            Tone::Dim,
-            "none kept: a profile with record_failures = true keeps each failed job's runner as a record, to open a \
-             shell where it failed\n",
-        ));
+        out.push_str(&paint.paint(Tone::Dim, Records::empty_reason()));
+        out.push('\n');
         return out;
     }
     let mut table = Table::new(&["JOB", "REPOSITORY", "NAME", "SIZE", "MADE"]).right(&[3]);
     for record in &records.records {
         let mut made = ago(record.created_at, now);
-        if records.shells.contains(&record.job) {
+        if records.shell_open(record.job) {
             made.push_str(", shell open");
         }
         table.row(vec![
@@ -593,16 +534,18 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
         plain("log"),
         // The last column: the hint's colour codes pad nothing after it.
         plain(format!(
-            "{} lines, {}{}  {}",
-            log.lines,
-            bytes(log.bytes),
-            if log.truncated { ", truncated" } else { "" },
+            "{}  {}",
+            log.description(),
             paint.paint(Tone::Dim, &format!("runnerctl logs {}", summary.id))
         )),
     ]);
     out.push_str(&usage.render(paint, "  "));
     if metrics.memory_peak.is_some() {
-        let _ = writeln!(out, "  {}", paint.paint(Tone::Dim, SAMPLED_NOTE));
+        let _ = writeln!(
+            out,
+            "  {}",
+            paint.paint(Tone::Dim, &api::sampled_note(api::SAMPLE_INTERVAL))
+        );
     }
     out
 }
@@ -615,12 +558,9 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
         paint.paint(
             Tone::Dim,
             &format!(
-                "from the last {} of history; peaks are sampled every {} s, so advice adds {}% to the largest \
-                 and waits for {} jobs{}",
-                duration(now.saturating_sub(sizing.since)),
-                sizing.sample_interval,
-                sizing.margin,
-                sizing.min_jobs,
+                "from {} of history; {}{}",
+                duration(sizing.covered()),
+                sizing.method_line(),
                 if sizing.auto {
                     "; auto sizing applies it"
                 } else {
@@ -649,7 +589,7 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
                 out,
                 "  warm runners took {} of {} jobs: waited p50 {}, the others {}",
                 starts.warm,
-                starts.warm + starts.cold,
+                starts.total(),
                 duration(starts.warm_p50),
                 duration(starts.cold_p50),
             );
@@ -677,13 +617,11 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
                 cores_used(peaks.cpu.max),
             );
         }
-        let tone = match profile.advice {
-            Advice::Raise { .. } | Advice::SliceTooSmall { .. } => Tone::Bad,
-            Advice::Lower { .. } => Tone::Busy,
-            Advice::Keep { .. } => Tone::Good,
-            Advice::TooFew { .. } => Tone::Dim,
-        };
-        let _ = writeln!(out, "  {}", paint.paint(tone, &sizing.advice_line(profile)));
+        let _ = writeln!(
+            out,
+            "  {}",
+            paint.paint(profile.advice.tone().into(), &sizing.advice_line(profile))
+        );
         out.push_str(&sizing_changes(sizing, &profile.name, now, paint));
         // Under auto sizing the daemon applies it.
         if !sizing.auto && profile.advice.change().is_some() {
@@ -745,15 +683,8 @@ fn sizing_jobs(jobs: &[JobSizing], paint: Paint) -> String {
     ])
     .right(&[2, 3, 4, 5, 6, 7, 8]);
     for job in jobs {
-        let needs = match job.advice {
-            Advice::TooFew { .. } => {
-                cell(format!("max {}", bytes(job.peaks.memory.max)), Tone::Dim)
-            }
-            Advice::Raise { memory, .. } | Advice::SliceTooSmall { memory } => {
-                cell(format!("{} > cap", bytes(memory)), Tone::Bad)
-            }
-            Advice::Keep { memory } | Advice::Lower { memory, .. } => plain(bytes(memory)),
-        };
+        let needs = job.needs();
+        let needs = cell(needs.text, needs.tone.into());
         table.row(vec![
             plain(&job.repository),
             cell(
@@ -791,90 +722,47 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
     }
     let mut table = Table::new(&["VOLUME", "HOLDS", "SIZE", "LIMIT"]).right(&[2, 3]);
     for volume in &caches.volumes {
-        let holds = match &volume.kind {
-            CacheKind::Snapshot { profile } => format!("snapshot of {profile}"),
-            CacheKind::Slot { profile, slot } => format!("{profile} slot {slot}"),
-            CacheKind::Pnpm => "pnpm store".to_owned(),
-            CacheKind::Maven => "Maven repository".to_owned(),
-            CacheKind::Mirror => "Docker Hub mirror".to_owned(),
-            CacheKind::Build => "build cache".to_owned(),
-        };
-        let over = volume.limit.is_some_and(|limit| volume.bytes > limit);
+        let limit = volume.limit_status();
         table.row(vec![
             plain(&volume.name),
-            cell(holds, Tone::Dim),
+            cell(volume.kind.description(), Tone::Dim),
             cell(
                 bytes(volume.bytes),
-                if over { Tone::Busy } else { Tone::Plain },
+                limit
+                    .as_ref()
+                    .map_or(Tone::Plain, |limit| limit.tone().into()),
             ),
-            volume.limit.map_or_else(dash, |limit| plain(bytes(limit))),
+            limit.map_or_else(dash, |limit| plain(limit.label)),
         ]);
     }
     out.push_str(&table.render(paint, ""));
     if let Some(build) = &caches.build {
-        let week = &build.week;
-        let served = match week.hit_percent() {
-            Some(percent) => format!(
-                "{percent}% of {} lookups hit in 7 days, {} served, {} stored",
-                week.lookups(),
-                bytes(week.read_bytes),
-                bytes(week.written_bytes)
-            ),
-            None => "no lookups in 7 days".to_owned(),
-        };
-        let _ = writeln!(out, "build cache: {} entries; {served}", build.entries);
+        let _ = writeln!(out, "build cache: {}", build.week_line());
     }
     out
 }
 
-/// What the build cache did for a job, if it had it: `None` for a job without it, or one that never asked.
+/// What the build cache did for a job, if it had it: `None` for a job without it, or one that never used it.
 fn build_cache(counts: &BuildCacheCounts) -> Option<String> {
-    if counts.lookups() == 0 && counts.written_bytes == 0 && counts.refused == 0 {
-        return None;
-    }
-    let mut parts = vec![format!(
-        "{} of {} lookups hit ({}%)",
-        counts.hits,
-        counts.lookups(),
-        counts.hit_percent().unwrap_or(0)
-    )];
-    parts.push(format!("{} served", bytes(counts.read_bytes)));
-    if counts.writer {
-        parts.push(format!("{} stored", bytes(counts.written_bytes)));
-    } else {
-        parts.push("read only".to_owned());
-    }
-    if counts.refused > 0 {
-        parts.push(format!("{} uploads refused", counts.refused));
-    }
-    Some(parts.join(", "))
+    counts.activity().map(|activity| activity.line())
 }
 
 /// `runnerctl insights`: one line per insight, warnings first, then each repository's waits this week against the
 /// last.
 pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     let mut out = String::new();
-    let days = insights.until.saturating_sub(insights.since) / 86_400;
     if insights.insights.is_empty() {
-        let _ = writeln!(out, "nothing to report from the last {days} days");
+        let _ = writeln!(out, "{}", insights.empty_line());
     }
     for insight in &insights.insights {
-        let (severity, tone) = match insight.severity {
-            Severity::Warning => ("warning", Tone::Busy),
-            Severity::Notice => ("notice", Tone::Dim),
-        };
-        let kind = match insight.kind {
-            InsightKind::Slower { .. } => "slower",
-            InsightKind::Flaky { .. } => "flaky",
-            InsightKind::NearCap { .. } => "near-cap",
-            InsightKind::ColdCache { .. } => "cold-cache",
-            InsightKind::Throttled { .. } => "throttled",
-            InsightKind::Waits { .. } => "waits",
-        };
         let _ = writeln!(
             out,
-            "{} {kind:<9} {}",
-            paint.paint(tone, &format!("{severity:<7}")),
+            "{} {:<9} {}",
+            paint.paint(
+                insight.tone().into(),
+                &format!("{:<7}", insight.severity.label())
+            ),
+            insight.kind.word(),
             insight.sentence
         );
     }
@@ -893,11 +781,9 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     ])
     .right(&[1, 2, 3, 4, 5, 6]);
     let wait = |spread: &WaitSpread, value: Option<u64>| {
-        if spread.jobs == 0 {
-            dash()
-        } else {
-            value.map_or_else(dash, |seconds| plain(duration(seconds)))
-        }
+        spread
+            .reading(value)
+            .map_or_else(dash, |seconds| plain(duration(seconds)))
     };
     for repository in &insights.waits {
         let now = &repository.now;
@@ -917,11 +803,7 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
 
 /// `runnerctl insights --digest`: the last 24 hours.
 pub(crate) fn digest(digest: &Digest) -> String {
-    let mut out = format!(
-        "last 24 hours: {} finished, {} failed\n",
-        plural(digest.finished, "job", "jobs"),
-        digest.failed
-    );
+    let mut out = format!("last 24 hours: {}\n", digest.summary_line());
     for insight in &digest.new {
         let _ = writeln!(out, "new: {}", insight.sentence);
     }
@@ -929,8 +811,7 @@ pub(crate) fn digest(digest: &Digest) -> String {
         let _ = writeln!(out, "longest waits:");
     }
     for wait in &digest.waits {
-        let job = job_title(wait.workflow.as_deref(), &wait.name, Some(wait.job));
-        let _ = writeln!(out, "  {} {job} {}", wait.repository, duration(wait.waited));
+        let _ = writeln!(out, "  {}", wait.line());
     }
     out
 }
@@ -955,14 +836,6 @@ pub(crate) fn notify_test(tested: &NotifyTest, paint: Paint) -> String {
         };
     }
     out
-}
-
-fn plural(count: u64, one: &str, many: &str) -> String {
-    if count == 1 {
-        format!("1 {one}")
-    } else {
-        format!("{count} {many}")
-    }
 }
 
 /// One line for an event, as `watch` prints when its output is not a terminal. `None` for live samples.
@@ -1005,10 +878,10 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             Some(runner) => format!(
                 "{profile} slot {} {} {}",
                 slot.slot,
-                if runner.busy { "busy" } else { "idle" },
+                SlotState::of_runner(runner).word(),
                 runner.repository
             ),
-            None => format!("{profile} slot {} free", slot.slot),
+            None => format!("{profile} slot {} {}", slot.slot, SlotState::Idle.word()),
         },
         Event::ProfileChanged { profile } => format!(
             "{} {} {} slots{}",
@@ -1018,18 +891,7 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             if profile.reseeding { " reseeding" } else { "" }
         ),
         Event::ProfileRemoved { profile } => format!("{profile} removed"),
-        Event::BudgetChanged { budget } => format!(
-            "{} reserved{}{}",
-            bytes(budget.memory_in_use),
-            budget
-                .memory_max
-                .map(|max| format!(" of {}", bytes(max)))
-                .unwrap_or_default(),
-            budget
-                .cpu
-                .map(|cpu| format!("; {}", cpu.line()))
-                .unwrap_or_default()
-        ),
+        Event::BudgetChanged { budget } => budget.line(),
         Event::RepositoryChanged { repository } => format!(
             "{} {} {} queued",
             repository.name,
@@ -1071,7 +933,9 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
 
 #[cfg(test)]
 mod tests {
-    use runnerd_core::api::{Event, EventEnvelope, RepositoryStatus};
+    use runnerd_core::api::{
+        AdmissionPolicy, Budget, Event, EventEnvelope, RepositoryStatus, RunnerStatus, SlotStatus,
+    };
 
     use super::{Paint, Table, Tone, bytes, event_line};
 
@@ -1111,6 +975,64 @@ mod tests {
         assert_eq!(
             line(removed).as_deref(),
             Some("repository.removed halyard/ledger removed")
+        );
+    }
+
+    #[test]
+    fn watch_on_a_pipe_names_slots_and_the_budget_as_status_does() {
+        let line = |event| {
+            event_line(
+                &EventEnvelope {
+                    id: Some(9),
+                    at: 1000,
+                    event,
+                },
+                Paint { colour: false },
+            )
+            .unwrap_or_default()
+        };
+        let warm = Event::SlotChanged {
+            profile: "jvm".to_owned(),
+            slot: SlotStatus {
+                slot: 2,
+                runner: Some(RunnerStatus {
+                    repository: "halyard/ledger".to_owned(),
+                    name: "ci-jvm-2".to_owned(),
+                    runner_id: 7,
+                    container: "c".to_owned(),
+                    busy: false,
+                    started_at: 900,
+                    reserved: 8 << 30,
+                    warm: true,
+                }),
+            },
+        };
+        assert_eq!(
+            line(warm),
+            "slot.changed       jvm slot 2 warm halyard/ledger"
+        );
+        let empty = Event::SlotChanged {
+            profile: "jvm".to_owned(),
+            slot: SlotStatus {
+                slot: 2,
+                runner: None,
+            },
+        };
+        assert_eq!(line(empty), "slot.changed       jvm slot 2 idle");
+        let held = Event::BudgetChanged {
+            budget: Budget {
+                slice: "runnerd.slice".to_owned(),
+                memory_max: Some(33 << 30),
+                memory_in_use: 30 << 30,
+                admission: AdmissionPolicy::Measured,
+                held: true,
+                ..Budget::default()
+            },
+        };
+        let held = line(held);
+        assert!(
+            held.contains("so no runner starts"),
+            "a held budget says no runner starts: {held}"
         );
     }
 
