@@ -1180,6 +1180,34 @@ async fn profiles_whose_names_differ_only_in_punctuation_keep_their_own_slots() 
 }
 
 #[tokio::test]
+async fn a_job_whose_own_steps_failed_does_not_turn_the_failed_figure_red() {
+    use runnerd_core::api::JobState;
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let now = crate::now();
+        let mut failed = fixtures.jobs[0].clone();
+        failed.summary.state = JobState::Completed;
+        failed.summary.conclusion = Some("failure".to_owned());
+        failed.summary.timeline.queued_at = now - 600;
+        failed.summary.timeline.started_at = Some(now - 590);
+        failed.summary.timeline.finished_at = Some(now - 60);
+        fixtures.jobs = vec![failed];
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
+    assert!(
+        health.contains(r#"Failed, 24 h</dt><dd><span class="figure-main">1</span>"#),
+        "the failure counts: {health}"
+    );
+    assert!(
+        !health.contains(r#"class="failing""#) && !health.contains("by their runner"),
+        "a failing test is the repository's, not runnerd's: {health}"
+    );
+}
+
+#[tokio::test]
 async fn a_live_overview_lets_a_job_age_out_of_its_24_hours_with_no_job_event() {
     use runnerd_core::api::{HostSample, JobState};
     let dashboard = Dashboard::start().await;
