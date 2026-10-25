@@ -1,7 +1,9 @@
 # 0055. Admission follows the host's memory, and caps keep room for page cache
 
 Status: **Accepted** (2026-10-24). Amends [0033](0033-measured-admission.md),
-[0032](0032-sizing-advice-from-sampled-peaks.md) and [0039](0039-auto-sizing.md).
+[0032](0032-sizing-advice-from-sampled-peaks.md) and [0039](0039-auto-sizing.md). Amended by
+[0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md): a stopped warm runner's room pays the host's
+deficit first, and a seed container fits the budget as a runner does.
 
 ## Context
 
@@ -45,10 +47,6 @@ bootloader change and leaves the reclaim that slows the jobs. runnerd should pre
   to the edge. With no runner in the slice there is no start to follow, so the first one needs only the margin.
 - **Nothing running is stopped for it.** A host short of memory only holds starts back. Warm runners neither start
   nor stop to make room while the host stalls, as at the slice's high-water mark.
-- **A warm runner's room pays the host's deficit first.** A job may stop warm runners of other pools for room, and
-  each stop gives back what its runner reserves while the limit stays put: its memory moves from the slice to
-  `MemAvailable`. So the host's spare is kept negative by what the running ones reserve past the limit, and a job
-  takes their room only if it fits once that is paid back. The status still shows the spare as at least 0.
 - **Those waits are not demand for slots.** Each plan adds the time since the last to every job that waited for the
   host then, on the job's row (`jobs.host_waited`, schema 13). Sizing and auto sizing take it out of the job's wait,
   so a host short of memory does not make auto sizing add slots, while a job that waited for a slot beside it still
