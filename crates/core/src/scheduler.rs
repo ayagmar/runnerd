@@ -211,8 +211,9 @@ pub struct Budget {
     pub memory: Option<u64>,
     /// The CPU left, in millicores; `None` for no budget.
     pub cpu: Option<u64>,
-    /// The memory the host has to spare for new runners beside other programs (ADR 0055); `None` when not known.
-    pub host: Option<u64>,
+    /// The memory the host has to spare for new runners beside other programs (ADR 0055), negative by what the
+    /// running ones reserve past the host's limit; `None` when not known.
+    pub host: Option<i64>,
     /// Nothing starts, so no warm runner stops to make room: measured admission holds the slice at its high-water
     /// mark, or the host's tasks stall for memory.
     pub held: bool,
@@ -339,7 +340,7 @@ pub fn plan(
         let room = if fits || profile.preparing.is_some() {
             None
         } else {
-            warm.make_room(repository, free_index.is_none(), left.short(memory, cpu))
+            warm.make_room(repository, free_index.is_none(), left, memory, cpu)
         };
         let index = match (room.as_ref(), free_index) {
             (Some(room), free) => free.or(room.slot).unwrap_or_default(),
@@ -484,12 +485,12 @@ fn why_waits(
             ),
             Short::Memory,
         ),
-        (_, Some(free), _) if free < memory => (
+        (_, Some(free), _) if free < signed(memory) => (
             started.for_host(
                 memory,
                 Waiting::HostMemory {
                     needs: memory,
-                    free,
+                    free: u64::try_from(free).unwrap_or(0),
                 },
             ),
             Short::Memory,
@@ -599,14 +600,15 @@ fn start_warm(
 struct Left {
     memory: Option<u64>,
     cpu: Option<u64>,
-    /// The host's memory to spare, which a runner's memory takes from as it does from `memory`.
-    host: Option<u64>,
+    /// The host's memory to spare, which a runner's memory takes from as it does from `memory`. Negative while the
+    /// runners reserve past the host's limit: a stopped runner's reservation pays that back first.
+    host: Option<i64>,
 }
 
 impl Left {
     fn fits(self, memory: u64, cpu: u64) -> bool {
         self.memory.is_none_or(|free| free >= memory)
-            && self.host.is_none_or(|free| free >= memory)
+            && self.host.is_none_or(|free| free >= signed(memory))
             && self.cpu.is_none_or(|free| free >= cpu)
     }
 
@@ -614,8 +616,11 @@ impl Left {
     /// no budget.
     fn short(self, memory: u64, cpu: u64) -> Left {
         let lacks = |free: Option<u64>| free.map(|free| memory.saturating_sub(free));
+        let host = self
+            .host
+            .map(|free| u64::try_from(signed(memory).saturating_sub(free)).unwrap_or(0));
         Left {
-            memory: lacks(self.memory).max(lacks(self.host)),
+            memory: lacks(self.memory).max(host),
             cpu: self.cpu.map(|free| cpu.saturating_sub(free)),
             host: None,
         }
@@ -623,15 +628,20 @@ impl Left {
 
     fn take(&mut self, memory: u64, cpu: u64) {
         self.memory = self.memory.map(|free| free.saturating_sub(memory));
-        self.host = self.host.map(|free| free.saturating_sub(memory));
+        self.host = self.host.map(|free| free.saturating_sub(signed(memory)));
         self.cpu = self.cpu.map(|free| free.saturating_sub(cpu));
     }
 
     fn give(&mut self, memory: u64, cpu: u64) {
         self.memory = self.memory.map(|free| free + memory);
-        self.host = self.host.map(|free| free + memory);
+        self.host = self.host.map(|free| free.saturating_add(signed(memory)));
         self.cpu = self.cpu.map(|free| free + cpu);
     }
+}
+
+/// `bytes` as the host's signed budget counts them.
+fn signed(bytes: u64) -> i64 {
+    i64::try_from(bytes).unwrap_or(i64::MAX)
 }
 
 /// What `sort_out` leaves a repository to start: runners for the IDs of its jobs, and warm runners.
@@ -781,10 +791,19 @@ impl<'plan> Warm<'plan> {
         Warm { runners }
     }
 
-    /// Picks warm runners of pools other than `repository` whose room lets its next runner start: a slot of its
-    /// profile when it has none (`slot`), and the memory and CPU it is `short` of. Those in its profile go first.
-    /// `None`, and nothing picked, when all of them would not do.
-    fn make_room(&mut self, repository: &Repository, slot: bool, short: Left) -> Option<Room> {
+    /// Picks warm runners of pools other than `repository` whose room lets its next runner, of `needs_memory` and
+    /// `needs_cpu`, start in the budgets `left`: a slot of its profile when it has none (`slot`), and the memory
+    /// and CPU it is short of. Those in its profile go first. `None`, and nothing picked, when all of them would
+    /// not do.
+    fn make_room(
+        &mut self,
+        repository: &Repository,
+        slot: bool,
+        left: Left,
+        needs_memory: u64,
+        needs_cpu: u64,
+    ) -> Option<Room> {
+        let short = left.short(needs_memory, needs_cpu);
         let (memory, cpu) = (short.memory.unwrap_or(0), short.cpu.unwrap_or(0));
         let mut candidates: Vec<usize> = self
             .runners
@@ -836,7 +855,10 @@ impl<'plan> Warm<'plan> {
             room.stopped.push(ref_.clone());
             picked.push(at);
         }
-        if (slot && room.slot.is_none()) || room.memory < memory || room.cpu < cpu {
+        // What they give back must let it start: a start never takes what the stops do not free.
+        let mut after = left;
+        after.give(room.memory, room.cpu);
+        if (slot && room.slot.is_none()) || !after.fits(needs_memory, needs_cpu) {
             return None;
         }
         for at in picked {
@@ -895,7 +917,11 @@ impl<'plan> Started<'plan> {
 
     /// `reason` for a job whose `needs` of memory the host cannot spare, unless it could before this plan's starts.
     fn for_host(&self, needs: u64, reason: Waiting) -> Waiting {
-        Self::behind(self.first, self.before.host, needs).unwrap_or(reason)
+        let free = self
+            .before
+            .host
+            .map(|free| u64::try_from(free).unwrap_or(0));
+        Self::behind(self.first, free, needs).unwrap_or(reason)
     }
 
     /// `reason` for a job whose `needs` of CPU do not fit, unless they did before this plan's starts.

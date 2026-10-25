@@ -42,9 +42,6 @@ const EVENTS: usize = 40;
 /// steers around them so it guards everything else; a fix removes its bug from `KNOWN_BUGS` and the `#[ignore]`.
 #[derive(Debug, Clone, Copy, PartialEq)]
 enum Bug {
-    /// `a_job_taking_a_waiting_runners_room_still_fits_what_the_host_leaves`: the host's check is
-    /// skipped in a tick that stopped a waiting runner.
-    HostRoomOfAStoppedRunner,
     /// `a_stopped_runner_that_recovery_cannot_remove_is_removed_later`: Docker removes everything at a restart.
     RecoveryRemovesOnce,
     /// `a_runner_watched_through_a_failed_inspect_still_records_the_job_it_runs`: Docker fails at most one inspect
@@ -55,7 +52,6 @@ enum Bug {
 }
 
 const KNOWN_BUGS: &[Bug] = &[
-    Bug::HostRoomOfAStoppedRunner,
     Bug::RecoveryRemovesOnce,
     Bug::WatchedThroughAFailedInspect,
     Bug::ReseedPastTheBudget,
@@ -954,8 +950,7 @@ impl Case {
         let started: BTreeSet<String> =
             names(&after).difference(&names(&before)).cloned().collect();
         self.no_pool_gets_more_runners_than_its_queued_jobs(&after, &started)?;
-        let stopped = names(&before).difference(&names(&after)).next().is_some();
-        self.starts_fit_the_budget(&after, &started, stopped)?;
+        self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.no_removal_of_a_running_job()
@@ -1012,7 +1007,6 @@ impl Case {
         &self,
         status: &api::Status,
         started: &BTreeSet<String>,
-        stopped: bool,
     ) -> Result<(), Violation> {
         if started.is_empty() {
             return Ok(());
@@ -1073,9 +1067,7 @@ impl Case {
                 ),
             );
         }
-        if let Some(host) = &budget.host
-            && !(stopped && self.known.contains(&Bug::HostRoomOfAStoppedRunner))
-        {
+        if let Some(host) = &budget.host {
             let reading = &host.memory;
             let limit = (reading.slice + reading.available).saturating_sub(HOST_MARGIN);
             let reserved: u64 = runners_of(status).map(|(_, runner)| runner.reserved).sum();
@@ -1371,7 +1363,6 @@ async fn broken(steps: &[Step]) -> Option<(&'static str, String)> {
 }
 
 #[tokio::test]
-#[ignore = "bug: a start that stops another repository's waiting runner takes the host's memory the margin keeps"]
 async fn a_job_taking_a_waiting_runners_room_still_fits_what_the_host_leaves() {
     let steps = [
         // o/s gets a runner, then its job is cancelled: the runner waits for nothing.

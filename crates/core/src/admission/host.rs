@@ -60,11 +60,18 @@ pub fn budget(memory: HostMemory, reserved: u64, remembered: Remembered) -> Host
     HostBudget {
         memory,
         limit,
-        spare: if stalled {
-            0
-        } else {
-            limit.saturating_sub(reserved)
-        },
+        spare: u64::try_from(left(limit, reserved, stalled)).unwrap_or(0),
         stalled,
     }
+}
+
+/// What a host `limit` leaves new runners beside the `reserved` memory of what runs in the slice: negative by what
+/// they reserve past it, none while the host is `stalled`. A runner that stops gives its reservation back to this,
+/// so a deficit stays owed rather than hidden by `HostBudget::spare`, which stops at 0.
+pub fn left(limit: u64, reserved: u64, stalled: bool) -> i64 {
+    if stalled {
+        return 0;
+    }
+    let bytes = |bytes: u64| i64::try_from(bytes).unwrap_or(i64::MAX);
+    bytes(limit).saturating_sub(bytes(reserved))
 }

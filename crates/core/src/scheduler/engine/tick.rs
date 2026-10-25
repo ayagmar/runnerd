@@ -12,6 +12,7 @@ use tracing::{info, warn};
 
 use super::admission::Admitting;
 use super::{Engine, Occupant, Purpose, RunningJobs, Shutdown};
+use crate::admission::host;
 use crate::api::Basis;
 use crate::config::Admission;
 use crate::docker::DockerApi;
@@ -266,7 +267,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Budget {
                 memory: admitting.free,
                 cpu: admitting.cpu.as_ref().map(|cpu| cpu.free),
-                host: admitting.host.as_ref().map(|host| host.spare),
+                host: admitting
+                    .host
+                    .as_ref()
+                    .map(|host| host::left(host.limit, self.memory_in_use(), host.stalled)),
                 held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
             },
             SystemTime::now(),
