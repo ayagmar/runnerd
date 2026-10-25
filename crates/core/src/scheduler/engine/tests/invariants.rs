@@ -361,6 +361,23 @@ struct JobModel {
     taken_by: Option<(String, String)>,
 }
 
+/// A reading of the host the harness gave the sampler.
+#[derive(Debug, Clone, Copy)]
+struct HostReading {
+    /// Unix seconds.
+    at: u64,
+    slice: u64,
+    available: u64,
+    stalled: bool,
+}
+
+impl HostReading {
+    /// Whether admission still goes by it: it is from the last three sample intervals.
+    fn fresh(&self) -> bool {
+        self.at + 3 * api::SAMPLE_INTERVAL >= time::now_ms() / 1000
+    }
+}
+
 /// A broken invariant: which, at which step, and what was seen.
 #[derive(Debug, Clone)]
 struct Violation {
@@ -385,8 +402,8 @@ struct Case {
     still_listed: BTreeSet<u64>,
     /// Docker calls checked so far.
     calls_seen: usize,
-    /// The last host reading, as `(available, stalled)`.
-    host: Option<(u64, bool)>,
+    /// The last reading of the host this daemon's store has, which a restart loses.
+    host: Option<HostReading>,
     step: usize,
 }
 
@@ -797,7 +814,12 @@ impl Case {
             }),
             holders: Vec::new(),
         });
-        self.host = Some((available * G, stalled));
+        self.host = Some(HostReading {
+            at: now / 1000,
+            slice,
+            available: available * G,
+            stalled,
+        });
     }
 
     async fn reload(&mut self, change: Change) {
@@ -848,6 +870,8 @@ impl Case {
         let (engine, handle) = Case::engine(&self.github, &self.docker, &self.dir, self.shape);
         self.engine = engine;
         self.handle = handle;
+        // The store keeps the host's reading in memory only.
+        self.host = None;
         self.recover().await;
     }
 
@@ -1046,8 +1070,8 @@ impl Case {
                 ),
             );
         }
-        if let Some(host) = &budget.host {
-            let reading = &host.memory;
+        // From the harness's own reading, whatever the engine reports: the engine's margin is at least this one.
+        if let Some(reading) = self.host.filter(HostReading::fresh) {
             let limit = (reading.slice + reading.available).saturating_sub(HOST_MARGIN);
             // The seed containers that run, at their caps; not the room a waiting one holds.
             let seeds: u64 = self.engine.reseed_memory.values().sum();
@@ -1062,8 +1086,7 @@ impl Case {
                     format!("started {started:?} with {reserved} reserved past the host's {limit}"),
                 );
             }
-            let stalled = reading.full.is_some_and(|full| full.avg10 >= 500);
-            if stalled && reading.available < 2 * HOST_MARGIN {
+            if reading.stalled && reading.available < 2 * HOST_MARGIN {
                 return violation(
                     self,
                     "starts_fit_the_budget",
