@@ -25,7 +25,7 @@ use tokio::sync::{Mutex, broadcast, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
-use self::send::{Sender, client, deliver, sender};
+use self::send::{client, deliver};
 use super::history::{insight_runs_of, now};
 use super::{AppState, Authenticated, ConfigText, error};
 
@@ -152,8 +152,6 @@ impl<T> Kept<T> {
 /// One target's state: what it was sent, what waits to be, and when it may be sent.
 struct Target {
     config: NotifyTarget,
-    /// Sends to it, as its kind takes messages.
-    sender: Box<dyn Sender>,
     /// The last event read; delivered, or not wanted.
     cursor: u64,
     /// The cursor as stored.
@@ -417,7 +415,6 @@ async fn reconcile(
     }
     for wanted in &config.notify.targets {
         if let Some(target) = targets.get_mut(&wanted.name) {
-            target.sender = sender(wanted);
             target.config = wanted.clone();
             continue;
         }
@@ -450,7 +447,6 @@ async fn start(
         .filter_map(|(key, seen)| Some((key.strip_prefix("insight:")?.to_owned(), seen)))
         .collect();
     Some(Target {
-        sender: sender(config),
         config: config.clone(),
         cursor,
         stored: cursor,
@@ -618,7 +614,7 @@ async fn send_due(store: &Store, http: &reqwest::Client, timing: &Timing, target
         }
     } else if ready {
         let notification = message(target);
-        match deliver(http, &*target.sender, &target.config, &notification).await {
+        match deliver(http, &target.config, &notification).await {
             Ok(()) => {
                 let (mut set, remove) = target.told_now();
                 set.push(("event".to_owned(), target.cursor));
@@ -648,14 +644,7 @@ async fn send_due(store: &Store, http: &reqwest::Client, timing: &Timing, target
     if let Some(digest) = target.digest.clone() {
         // The day it is for is the day it was made: one delivered after midnight still counts for the day before.
         let made = digest.until * 1000;
-        match deliver(
-            http,
-            &*target.sender,
-            &target.config,
-            &digest_message(digest),
-        )
-        .await
-        {
+        match deliver(http, &target.config, &digest_message(digest)).await {
             Ok(()) => {
                 if !store
                     .notify_record(
@@ -904,7 +893,7 @@ pub(super) async fn test(
     info!("notify: test message requested by {principal:?}");
     // All at once, so slow targets together still answer within the client's wait.
     let deliveries = futures_util::future::join_all(targets.iter().map(|target| async {
-        let error = deliver(&http, &*sender(target), target, &test_message(&target.name))
+        let error = deliver(&http, target, &test_message(&target.name))
             .await
             .err();
         if let Some(why) = &error {

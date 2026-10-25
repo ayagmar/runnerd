@@ -11,11 +11,10 @@ retries. Every new kind would grow that match and put a third service's JSON bes
 ## Decision
 
 - **A kind is a `Sender`.** `api/notify/send.rs` defines the trait: a sender turns an `api::Notification` into the
-  post its kind takes, a URL and a JSON body, and reads whether the status answered means delivered (by default,
-  any 2xx). Each kind implements it in its own module beside it (`webhook.rs`, `ntfy.rs`, `discord.rs`) and knows nothing of the
+  post its kind takes, a URL and a JSON body; any 2xx answer means delivered, for every kind. Each kind implements it in its own module beside it (`webhook.rs`, `ntfy.rs`, `discord.rs`) and knows nothing of the
   others or of the notifier.
-- **The notifier holds senders, not kinds.** Each target keeps the sender built from its config, rebuilt when a
-  reload changes the target; `runnerctl notify test` builds one per target. The only `match` on the kind is the one
+- **A sender is built from the target's config at each send.** The config stays the only copy of the URL, kind and
+  headers, so a reload that changes them takes effect at the next send; `runnerctl notify test` sends the same way. The only `match` on the kind is the one
   that builds the sender.
 - **What every kind shares stays in one place.** The HTTP client (no redirects, the daemon's TLS provider, the
   timeout), the target's headers, the content type and the wording of a failed send are `send.rs`'s, so no sender

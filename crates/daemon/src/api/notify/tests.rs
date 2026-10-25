@@ -21,7 +21,7 @@ use tokio::sync::{Mutex, Notify, watch};
 
 use super::{
     ConfigText, Notifier, Setup, Timing, client, deliver, digest_due, digest_message, parse_offset,
-    run, send_due, sender, start, test_message,
+    run, send_due, start, test_message,
 };
 use crate::testdir::Dir;
 
@@ -581,13 +581,10 @@ async fn a_long_message_is_cut_to_discords_limits_and_a_429_is_not_delivered() {
         ..test_message("chat")
     };
 
-    assert_eq!(
-        deliver(&http, &*sender(target), target, &long).await,
-        Ok(())
-    );
+    assert_eq!(deliver(&http, target, &long).await, Ok(()));
     endpoint.status.store(429, Ordering::SeqCst);
     assert_eq!(
-        deliver(&http, &*sender(target), target, &long).await,
+        deliver(&http, target, &long).await,
         Err("the target answered HTTP 429 Too Many Requests".to_owned()),
         "rate limited is a failed send, retried like any other"
     );
@@ -620,9 +617,7 @@ async fn a_discord_test_message_is_a_green_embed() {
         client(SETUP.timing.timeout).unwrap(),
     );
 
-    deliver(&http, &*sender(target), target, &test_message("chat"))
-        .await
-        .unwrap();
+    deliver(&http, target, &test_message("chat")).await.unwrap();
 
     let body: serde_json::Value =
         serde_json::from_slice(&endpoint.received.lock().unwrap()[0].2).unwrap();

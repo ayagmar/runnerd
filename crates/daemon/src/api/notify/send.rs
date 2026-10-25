@@ -1,6 +1,5 @@
 //! How a message reaches a `[notify]` target: the `Sender` each kind implements, one module per kind, and the
-//! post they share. A sender turns an `api::Notification` into the URL and JSON body its kind takes, and reads
-//! whether the answer means delivered; the post adds the target's headers and the daemon's HTTP client. Neither
+//! post they share. A sender turns an `api::Notification` into the URL and JSON body its kind takes; the post adds the target's headers and the daemon's HTTP client. Neither
 //! logs, nor returns an error holding, a target's URL or a header's value.
 
 use std::time::Duration;
@@ -18,19 +17,10 @@ pub(super) struct Post {
     pub body: Vec<u8>,
 }
 
-/// One kind of target: what it is sent for a notification, and what answer means it took it.
+/// One kind of target: what it is sent for a notification.
 pub(super) trait Sender: Send + Sync {
     /// The post that sends `notification`; an error never holds the URL.
     fn post(&self, notification: &Notification) -> Result<Post, String>;
-
-    /// Whether the target took the message, from the status it answered.
-    fn took(&self, status: reqwest::StatusCode) -> Result<(), String> {
-        if status.is_success() {
-            Ok(())
-        } else {
-            Err(format!("the target answered HTTP {status}"))
-        }
-    }
 }
 
 /// The sender for `target`'s kind.
@@ -56,15 +46,15 @@ pub(super) fn client(timeout: Duration) -> Result<reqwest::Client, String> {
         .map_err(|build_error| build_error.to_string())
 }
 
-/// Posts `notification` to `target` through `sender`; the error says what failed in words that never hold the URL
+/// Posts `notification` to `target` through its kind's sender; the error says what failed in words that never hold the URL
 /// or a header.
 pub(super) async fn deliver(
     http: &reqwest::Client,
-    sender: &dyn Sender,
     target: &NotifyTarget,
     notification: &Notification,
 ) -> Result<(), String> {
-    let Post { url, body } = sender.post(notification)?;
+    // Built from the target's config at each send, so a reload that changes its URL or kind takes effect at once.
+    let Post { url, body } = sender(target).post(notification)?;
     let mut request = http
         .post(url)
         .header(reqwest::header::CONTENT_TYPE, "application/json")
@@ -73,7 +63,12 @@ pub(super) async fn deliver(
         request = request.header(name.as_str(), value.expose());
     }
     let response = request.send().await.map_err(|send| describe(&send))?;
-    sender.took(response.status())
+    let status = response.status();
+    if status.is_success() {
+        Ok(())
+    } else {
+        Err(format!("the target answered HTTP {status}"))
+    }
 }
 
 /// What failed, in words that hold neither the URL nor anything a TLS or DNS error might quote from it.

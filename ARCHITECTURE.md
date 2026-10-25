@@ -202,8 +202,8 @@ adopted too and drains as it would after a reload.
   (`api/notify`) reads the store's durable events and the history off the engine's loop; the engine never waits
   for it, and a target's cursor moves only once a delivery succeeded
   ([ADR 0051](docs/adr/0051-insights-and-notifications.md)). Each kind of target is a `Sender`
-  (`api/notify/send.rs`) that turns a notification into its kind's URL and body; the notifier holds one per target,
-  built from its config, and the shared post adds the headers, so no sender can log them
+  (`api/notify/send.rs`) that turns a notification into its kind's URL and body; built from the target's config at each
+  send, and the shared post adds the headers, so no sender can log them
   ([ADR 0064](docs/adr/0064-each-notify-kind-is-a-sender.md)).
 - A runner's build cache uploads become entries only once GitHub says its job runs on that runner and is a push,
   schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`, of a
