@@ -761,7 +761,11 @@ impl App {
         };
         let id = open.job.summary.id;
         match &envelope.event {
-            Event::JobStarted { job } if job.id == id => open.job.summary = job.clone(),
+            Event::JobStarted { job } if job.id == id => {
+                open.job.summary = job.clone();
+                // The started job's record says how its runner was admitted.
+                effects.push(Effect::RefreshJob(id));
+            }
             Event::JobFinished { job } if job.id == id => {
                 open.job.summary = job.clone();
                 // The final record carries the steps' last state and the job's totals.

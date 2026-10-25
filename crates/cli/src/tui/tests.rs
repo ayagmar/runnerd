@@ -27,12 +27,13 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::crossterm::event::{KeyCode, KeyEvent};
 use ratatui::style::Color;
-use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread, Starts};
 use runnerd_core::api::{
-    Budget, Event, EventEnvelope, EventQuery, Job, JobMetrics, JobRunner, JobState, JobSummary,
-    LogSummary, ProfileStatus, QueuedJob, Record, RecordLimits, Records, RepositoryStatus,
-    RunnerStatus, Sample, SeedMemory, ShellMemory, SlotStatus, Status, Step, Timeline, Waiting,
+    Admission, AdmissionPolicy, Basis, Budget, CpuAdmission, Event, EventEnvelope, EventQuery, Job,
+    JobMetrics, JobRunner, JobState, JobSummary, LogSummary, ProfileStatus, QueuedJob, Record,
+    RecordLimits, Records, RepositoryStatus, RunnerStatus, Sample, SeedMemory, ShellMemory,
+    SlotStatus, Status, Step, Timeline, Waiting,
 };
+use runnerd_core::api::{Advice, JobSizing, Peaks, ProfileSizing, Resize, Sizing, Spread, Starts};
 
 use unicode_width::UnicodeWidthStr;
 
@@ -74,7 +75,7 @@ fn app() -> App {
             version: "0.0.1".to_owned(),
             shutting_down: false,
             budget: Budget {
-                admission: runnerd_core::api::AdmissionPolicy::Caps,
+                admission: AdmissionPolicy::Caps,
                 held: false,
                 slice: "ci.slice".to_owned(),
                 memory_max: Some(33 << 30),
@@ -586,7 +587,7 @@ fn sizing() -> Sizing {
         sample_interval: 2,
         min_jobs: 10,
         memory_max: Some(33 << 30),
-        admission: runnerd_core::api::AdmissionPolicy::Caps,
+        admission: AdmissionPolicy::Caps,
         profiles: vec![
             advised("jvm", 9 << 30, 7800 << 20, Advice::Keep { memory: 9 << 30 }),
             advised(
@@ -737,6 +738,35 @@ fn the_queue_lists_each_waiting_job_oldest_first_with_why_and_opens_and_pauses_l
         !job.contains("Memory") && !job.contains("Steps"),
         "nothing to chart or list before a runner has it: {job}"
     );
+}
+
+#[test]
+fn a_queued_job_left_open_shows_what_its_runner_reserved_once_it_starts() {
+    let mut app = app();
+    app.live.status.queued = vec![queued(51, "halyard/ledger", "build", 1000)];
+    app.update(key(KeyCode::Tab));
+    assert_eq!(opened(&app.update(key(KeyCode::Enter))), [51]);
+    let effects = app.update(event(
+        Some(9),
+        Event::JobStarted {
+            job: summary(51, JobState::Running),
+        },
+    ));
+    assert!(
+        effects.contains(&Effect::RefreshJob(51)),
+        "the started job is read again for its admission: {effects:?}"
+    );
+    let summary = app.job.as_ref().unwrap().job.summary.clone();
+    app.update(Msg::Job(Job {
+        admission: Some(measured()),
+        summary,
+        steps: vec![],
+        record: None,
+    }));
+    let job = screen(&app, 120, 40, false);
+    for expected in ["reserved 6.5G", "reserved 3.6 CPUs"] {
+        assert!(job.contains(expected), "{expected}: {job}");
+    }
 }
 
 #[test]
@@ -963,7 +993,7 @@ async fn dropping_then_back(
             at: NOW,
             event: Event::BudgetChanged {
                 budget: Budget {
-                    admission: runnerd_core::api::AdmissionPolicy::Caps,
+                    admission: AdmissionPolicy::Caps,
                     held: false,
                     slice: "ci.slice".to_owned(),
                     memory_max: None,
@@ -1101,13 +1131,9 @@ fn opening_a_job_from_the_latest_jobs_follows_only_its_log() {
     assert!(!job.contains("another job's line"), "{job}");
 }
 
-#[test]
-fn an_open_jobs_charts_say_what_it_reserved_beside_its_caps() {
-    use runnerd_core::api::{Admission, AdmissionPolicy, Basis, CpuAdmission};
-    let mut app = app();
-    running_job(&mut app);
-    app.update(key(KeyCode::Enter));
-    let measured = Admission {
+/// A runner admitted by measured peaks: 6.5G and 3.6 CPUs reserved.
+fn measured() -> Admission {
+    Admission {
         policy: AdmissionPolicy::Measured,
         reserved: 6656 << 20,
         basis: Basis::Cap,
@@ -1119,7 +1145,15 @@ fn an_open_jobs_charts_say_what_it_reserved_beside_its_caps() {
             free: 38_700,
             waited: None,
         }),
-    };
+    }
+}
+
+#[test]
+fn an_open_jobs_charts_say_what_it_reserved_beside_its_caps() {
+    let mut app = app();
+    running_job(&mut app);
+    app.update(key(KeyCode::Enter));
+    let measured = measured();
     let caps = Admission {
         policy: AdmissionPolicy::Caps,
         reserved: 9 << 30,
