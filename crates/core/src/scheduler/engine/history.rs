@@ -79,7 +79,7 @@ async fn read_jobs<G: GithubApi>(
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Starts watching a runner's container: records it, samples it, leases its address for the mirror's log, and
-    /// captures its job and log.
+    /// captures its job and log. If Docker fails to inspect it, `observe_again` tries on the next tick.
     pub(super) async fn observe(&mut self, slot: &SlotRef, occupant: &Occupant) {
         let state = match self.docker.inspect(&occupant.container).await {
             Ok(state) => state,
@@ -88,6 +88,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
         };
+        if let Some(entry) = self
+            .slots
+            .values_mut()
+            .flatten()
+            .flatten()
+            .find(|entry| entry.runner_name == occupant.runner_name)
+        {
+            entry.observed = true;
+        }
         let started_at = state
             .started_at
             .unwrap_or_else(|| time::ms(occupant.started_at));
@@ -135,6 +144,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         ));
         if let Some(old) = self.captures.insert(occupant.runner_name.clone(), task) {
             old.abort();
+        }
+    }
+
+    /// Watches the runners `observe` could not, as Docker failed to inspect their containers.
+    pub(super) async fn observe_again(&mut self) {
+        let unobserved: Vec<(SlotRef, Occupant)> = self
+            .occupied()
+            .filter(|(_, occupant)| !occupant.observed)
+            .map(|(slot, occupant)| (slot, occupant.clone()))
+            .collect();
+        for (slot, occupant) in unobserved {
+            self.observe(&slot, &occupant).await;
         }
     }
 

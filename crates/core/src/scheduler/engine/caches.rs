@@ -10,6 +10,7 @@ use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
 use super::{Engine, Occupant, Shutdown};
+use crate::admission::host;
 use crate::api;
 use crate::cache::{self, Emptied, Refused, Trimmed};
 use crate::config::ByteSize;
@@ -72,6 +73,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .cloned()
                 .collect();
             for name in due {
+                // The seed container runs at its profile's cap: a reseed waits for room in the slice and on the
+                // host, still due, as a runner does.
+                if !self.fits_seed(&name) {
+                    continue;
+                }
                 self.reseed_due.remove(&name);
                 let requested = self.reseed_requested.remove(&name);
                 let oversized = self.oversized.remove(&name);
@@ -130,6 +136,73 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Ok(trimmed)
             }));
         }
+    }
+
+    /// Whether `profile`'s seed container, at its profile's cap, fits beside what else runs: in the slice's
+    /// `MemoryMax` and in what the host leaves the slice (ADR 0055), and not while measured admission holds the
+    /// slice at its high-water mark. The profile's own runners, which stop before it starts, and the room its
+    /// waiting seed holds count as free. The host's limit is `waiting_seed`'s, without the larger margin of a short
+    /// host: the room it holds keeps other jobs waiting for the host and so the host short.
+    fn fits_seed(&self, profile: &str) -> bool {
+        let memory = self.config.profiles.get(profile).map_or(0, |p| p.memory.0);
+        let runners: u64 = self
+            .slots
+            .get(profile)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .map(|occupant| self.takes(occupant))
+            .sum();
+        let own = runners.saturating_add(self.waiting_seed(profile).unwrap_or(0));
+        let in_use = self.memory_in_use().saturating_sub(own);
+        self.memory_max
+            .is_none_or(|max| max.saturating_sub(in_use) >= memory)
+            && self.host_budget().is_none_or(|host| {
+                host::left(host::limit(&host.memory, false), in_use, host.stalled)
+                    >= i64::try_from(memory).unwrap_or(i64::MAX)
+            })
+            && !self.admitting(&mut [], None).held
+    }
+
+    /// The room a requested reseed holds while it waits for it once its profile drained: its profile's cap, so
+    /// later starts leave that room and the seed starts as runners finish, rather than hold the profile's jobs for
+    /// as long as other profiles' take what frees. `None` until then, while a shell holds it back, once it runs, and
+    /// while the cap would not fit even with no runner running: the room would then hold every start for a seed that
+    /// cannot start, which instead waits as a due one does.
+    fn waiting_seed(&self, profile: &str) -> Option<u64> {
+        let drained = self
+            .slots
+            .get(profile)
+            .is_some_and(|slots| slots.iter().all(Option::is_none));
+        let waits = self.reseed_requested.contains(profile)
+            && !self.reseeds.contains_key(profile)
+            && drained
+            && !self.shell_profiles().contains(profile);
+        let memory = self.config.profiles.get(profile)?.memory.0;
+        // Not `memory_in_use`, which counts this room. The host's limit as the first runner into an empty slice
+        // sees it, without the larger margin of a short or stalling host, which passes.
+        let others = self.reseed_memory.values().sum::<u64>()
+            + self.shell_memory()
+            + self.mirror_memory_in_use();
+        let fits = self
+            .memory_max
+            .is_none_or(|max| max.saturating_sub(others) >= memory)
+            && self
+                .host_memory()
+                .is_none_or(|host| host::limit(&host, false).saturating_sub(others) >= memory);
+        (waits && fits).then_some(memory)
+    }
+
+    /// The memory each seed container holds of the budget, by profile: a running one's cap as it started, and the
+    /// room a requested reseed holds while it waits (`waiting_seed`).
+    pub(super) fn seed_memory(&self) -> BTreeMap<String, u64> {
+        let mut seeds = self.reseed_memory.clone();
+        for profile in &self.reseed_requested {
+            if let Some(memory) = self.waiting_seed(profile) {
+                seeds.entry(profile.clone()).or_insert(memory);
+            }
+        }
+        seeds
     }
 
     /// Rebuilds a profile's snapshot in the background; its slots start nothing until it is done. A `requested`
@@ -324,8 +397,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .flatten()
                 .all(|occupant| !occupant.busy && occupant.job.is_none())
         };
-        // A shell holds back the reseed until it closes, so runners keep serving meanwhile.
-        let reseed = (self.reseed_due.contains(profile) || self.reseed_requested.contains(profile))
+        // A shell holds back the reseed until it closes, so runners keep serving meanwhile. So does a due reseed
+        // with no room for its seed even once they stop: it is not asked for, and may wait long.
+        let reseed = (self.reseed_requested.contains(profile)
+            || self.reseed_due.contains(profile) && self.fits_seed(profile))
             && !self.shell_profiles().contains(profile)
             && self.slots.get(profile).is_some_and(idle);
         // Until the check ends: a runner started meanwhile mounts the volumes it may remove.

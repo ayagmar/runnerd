@@ -320,13 +320,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// The host's latest memory reading, if it is from the last few sample intervals.
+    pub(super) fn host_memory(&self) -> Option<api::HostMemory> {
+        let fresh = (3 * SAMPLE_INTERVAL).as_secs();
+        self.store
+            .latest_host_memory()
+            .filter(|memory| memory.at + fresh >= time::now_ms() / 1000)
+    }
+
     /// What the host's memory leaves runners beside what runs now, from a reading of the last few sample intervals.
     pub(super) fn host_budget(&self) -> Option<api::HostBudget> {
-        let fresh = (3 * SAMPLE_INTERVAL).as_secs();
-        let memory = self
-            .store
-            .latest_host_memory()
-            .filter(|memory| memory.at + fresh >= time::now_ms() / 1000)?;
+        let memory = self.host_memory()?;
         // The larger margin keeps a start from pushing a busy host back to the edge; with no runner in the slice
         // there is no such start to follow, so the first runner needs only the margin.
         let remembered = host::Remembered {

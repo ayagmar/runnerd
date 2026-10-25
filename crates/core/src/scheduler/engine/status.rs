@@ -137,12 +137,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             host: self.host_budget(),
             mirror_memory: self.mirror_memory_in_use(),
             seed_memory: self
-                .reseed_memory
-                .iter()
-                .map(|(profile, memory)| api::SeedMemory {
-                    profile: profile.clone(),
-                    memory: *memory,
-                })
+                .seed_memory()
+                .into_iter()
+                .map(|(profile, memory)| api::SeedMemory { profile, memory })
                 .collect(),
             shell_memory: self.shell_budget(),
             slice_cpus: self.cpus,

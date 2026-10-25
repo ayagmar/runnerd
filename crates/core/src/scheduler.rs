@@ -207,12 +207,15 @@ pub struct Plan {
 /// The budgets a plan starts runners within.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Budget {
-    /// The memory left; `None` for no budget.
-    pub memory: Option<u64>,
-    /// The CPU left, in millicores; `None` for no budget.
-    pub cpu: Option<u64>,
-    /// The memory the host has to spare for new runners beside other programs (ADR 0055); `None` when not known.
-    pub host: Option<u64>,
+    /// The memory left, negative by what the running containers take past `MemoryMax` (`left`); `None` for no
+    /// budget.
+    pub memory: Option<i64>,
+    /// The CPU left, in millicores, negative by what the runners reserve past the budget (`left`); `None` for no
+    /// budget.
+    pub cpu: Option<i64>,
+    /// The memory the host has to spare for new runners beside other programs (ADR 0055), negative by what the
+    /// running ones reserve past the host's limit; `None` when not known.
+    pub host: Option<i64>,
     /// Nothing starts, so no warm runner stops to make room: measured admission holds the slice at its high-water
     /// mark, or the host's tasks stall for memory.
     pub held: bool,
@@ -339,7 +342,7 @@ pub fn plan(
         let room = if fits || profile.preparing.is_some() {
             None
         } else {
-            warm.make_room(repository, free_index.is_none(), left.short(memory, cpu))
+            warm.make_room(repository, free_index.is_none(), left, memory, cpu)
         };
         let index = match (room.as_ref(), free_index) {
             (Some(room), free) => free.or(room.slot).unwrap_or_default(),
@@ -474,28 +477,34 @@ fn why_waits(
         return (reason, Short::Slot);
     }
     match (left.memory, left.host, left.cpu) {
-        (Some(free), _, _) if free < memory => (
+        (Some(free), _, _) if free < signed(memory) => (
             started.for_memory(
                 memory,
                 Waiting::Memory {
                     needs: memory,
-                    free,
+                    free: unsigned(free),
                 },
             ),
             Short::Memory,
         ),
-        (_, Some(free), _) if free < memory => (
+        (_, Some(free), _) if free < signed(memory) => (
             started.for_host(
                 memory,
                 Waiting::HostMemory {
                     needs: memory,
-                    free,
+                    free: unsigned(free),
                 },
             ),
             Short::Memory,
         ),
         (_, _, Some(free)) => (
-            started.for_cpu(cpu, Waiting::Cpu { needs: cpu, free }),
+            started.for_cpu(
+                cpu,
+                Waiting::Cpu {
+                    needs: cpu,
+                    free: unsigned(free),
+                },
+            ),
             Short::Cpu,
         ),
         // `fits` said otherwise.
@@ -594,44 +603,68 @@ fn start_warm(
     }
 }
 
-/// The memory, CPU and host budgets a plan has left; `None`, no budget.
+/// The memory, CPU and host budgets a plan has left; `None`, no budget. Each is negative while what runs takes past
+/// it: a stopped runner's reservation pays that back first, so a start never takes room that is owed.
 #[derive(Debug, Clone, Copy)]
 struct Left {
-    memory: Option<u64>,
-    cpu: Option<u64>,
+    memory: Option<i64>,
+    cpu: Option<i64>,
     /// The host's memory to spare, which a runner's memory takes from as it does from `memory`.
-    host: Option<u64>,
+    host: Option<i64>,
 }
 
 impl Left {
     fn fits(self, memory: u64, cpu: u64) -> bool {
-        self.memory.is_none_or(|free| free >= memory)
-            && self.host.is_none_or(|free| free >= memory)
-            && self.cpu.is_none_or(|free| free >= cpu)
+        let fits = |free: Option<i64>, needs: u64| free.is_none_or(|free| free >= signed(needs));
+        fits(self.memory, memory) && fits(self.host, memory) && fits(self.cpu, cpu)
     }
 
     /// What a runner of `memory` and `cpu` lacks, the host's memory counted with the slice's: none where there is
     /// no budget.
     fn short(self, memory: u64, cpu: u64) -> Left {
-        let lacks = |free: Option<u64>| free.map(|free| memory.saturating_sub(free));
+        let lacks = |free: Option<i64>, needs: u64| {
+            free.map(|free| signed(needs).saturating_sub(free).max(0))
+        };
         Left {
-            memory: lacks(self.memory).max(lacks(self.host)),
-            cpu: self.cpu.map(|free| cpu.saturating_sub(free)),
+            memory: lacks(self.memory, memory).max(lacks(self.host, memory)),
+            cpu: lacks(self.cpu, cpu),
             host: None,
         }
     }
 
     fn take(&mut self, memory: u64, cpu: u64) {
-        self.memory = self.memory.map(|free| free.saturating_sub(memory));
-        self.host = self.host.map(|free| free.saturating_sub(memory));
-        self.cpu = self.cpu.map(|free| free.saturating_sub(cpu));
+        let take = |free: &mut Option<i64>, used: u64| {
+            *free = free.map(|free| free.saturating_sub(signed(used)));
+        };
+        take(&mut self.memory, memory);
+        take(&mut self.host, memory);
+        take(&mut self.cpu, cpu);
     }
 
     fn give(&mut self, memory: u64, cpu: u64) {
-        self.memory = self.memory.map(|free| free + memory);
-        self.host = self.host.map(|free| free + memory);
-        self.cpu = self.cpu.map(|free| free + cpu);
+        let give = |free: &mut Option<i64>, freed: u64| {
+            *free = free.map(|free| free.saturating_add(signed(freed)));
+        };
+        give(&mut self.memory, memory);
+        give(&mut self.host, memory);
+        give(&mut self.cpu, cpu);
     }
+}
+
+/// What `budget` leaves beside what runs `in_use`: negative by what runs past it, so a deficit stays owed rather
+/// than hidden at 0.
+fn left(budget: u64, in_use: u64) -> i64 {
+    signed(budget).saturating_sub(signed(in_use))
+}
+
+/// A budget's bytes or millicores, signed as `Left` counts them.
+fn signed(amount: u64) -> i64 {
+    i64::try_from(amount).unwrap_or(i64::MAX)
+}
+
+/// A signed budget as a job's wait shows it: none once it is spent.
+fn unsigned(free: i64) -> u64 {
+    u64::try_from(free).unwrap_or(0)
 }
 
 /// What `sort_out` leaves a repository to start: runners for the IDs of its jobs, and warm runners.
@@ -781,11 +814,23 @@ impl<'plan> Warm<'plan> {
         Warm { runners }
     }
 
-    /// Picks warm runners of pools other than `repository` whose room lets its next runner start: a slot of its
-    /// profile when it has none (`slot`), and the memory and CPU it is `short` of. Those in its profile go first.
-    /// `None`, and nothing picked, when all of them would not do.
-    fn make_room(&mut self, repository: &Repository, slot: bool, short: Left) -> Option<Room> {
-        let (memory, cpu) = (short.memory.unwrap_or(0), short.cpu.unwrap_or(0));
+    /// Picks warm runners of pools other than `repository` whose room lets its next runner, of `needs_memory` and
+    /// `needs_cpu`, start in the budgets `left`: a slot of its profile when it has none (`slot`), and the memory
+    /// and CPU it is short of. Those in its profile go first. `None`, and nothing picked, when all of them would
+    /// not do.
+    fn make_room(
+        &mut self,
+        repository: &Repository,
+        slot: bool,
+        left: Left,
+        needs_memory: u64,
+        needs_cpu: u64,
+    ) -> Option<Room> {
+        let short = left.short(needs_memory, needs_cpu);
+        let (memory, cpu) = (
+            unsigned(short.memory.unwrap_or(0)),
+            unsigned(short.cpu.unwrap_or(0)),
+        );
         let mut candidates: Vec<usize> = self
             .runners
             .iter()
@@ -836,7 +881,10 @@ impl<'plan> Warm<'plan> {
             room.stopped.push(ref_.clone());
             picked.push(at);
         }
-        if (slot && room.slot.is_none()) || room.memory < memory || room.cpu < cpu {
+        // What they give back must let it start: a start never takes what the stops do not free.
+        let mut after = left;
+        after.give(room.memory, room.cpu);
+        if (slot && room.slot.is_none()) || !after.fits(needs_memory, needs_cpu) {
             return None;
         }
         for at in picked {
@@ -903,9 +951,9 @@ impl<'plan> Started<'plan> {
         Self::behind(self.first, self.before.cpu, needs).unwrap_or(reason)
     }
 
-    fn behind(first: Option<u64>, free: Option<u64>, needs: u64) -> Option<Waiting> {
+    fn behind(first: Option<u64>, free: Option<i64>, needs: u64) -> Option<Waiting> {
         first
-            .filter(|_| free.is_some_and(|free| free >= needs))
+            .filter(|_| free.is_some_and(|free| free >= signed(needs)))
             .map(|job| Waiting::BehindStart { job })
     }
 }

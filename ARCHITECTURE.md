@@ -223,7 +223,8 @@ adopted too and drains as it would after a reload.
 - A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
   memory and CPU.
 - A warm runner never holds back upkeep: a reseed, or the shared caches' check an hour after the last, stops idle
-  warm runners and starts none until it runs.
+  warm runners and starts none until it runs. A due reseed whose seed would not fit even once they stop leaves
+  them waiting ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
@@ -274,7 +275,10 @@ adopted too and drains as it would after a reload.
   twice the margin available and `full` memory pressure over 10 s is at 5%, until it is under 1%. No runner is
   stopped for the host. Each job's record adds up how long it waited for it, and sizing takes that out of its wait.
   Sizing never advises a cap under the largest peak plus 1G
-  ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)).
+  ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)). A job takes a stopped warm runner's room only
+  once its reservation paid the host's deficit, and a seed container starts only where its cap fits the slice, the
+  host with the plain margin and, under measured admission, the high-water mark; a requested reseed's cap counts in the budget once its
+  profile drained ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
 - Under `[host] cpu_overcommit`, what the runners reserve of CPU, a new runner's with them, fits the slice's CPUs
   times the factor: each its profile's `cpus`, or under measured admission its job's predicted average CPU, at most
   the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no

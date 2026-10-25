@@ -56,8 +56,18 @@ pub(super) fn backoff(failures: u32) -> Duration {
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
-    /// Frees the slots whose container stopped: the runner took its job and exited, or it never started.
+    /// Frees the slots whose container stopped: the runner took its job and exited, or it never started. First
+    /// removes again the containers recovery failed to remove.
     pub(super) async fn collect_finished(&mut self) {
+        for (id, name) in std::mem::take(&mut self.leftover) {
+            match self.docker.remove(&id).await {
+                Err(error) if !is_not_found(&error) => {
+                    warn!("cannot remove {name}: {error}");
+                    self.leftover.insert(id, name);
+                }
+                _ => info!("removed {name}, left by an earlier run"),
+            }
+        }
         let occupied: Vec<(SlotRef, Occupant)> = self
             .occupied()
             .map(|(slot, occupant)| (slot, occupant.clone()))
@@ -424,6 +434,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     key: None,
                     labels: Some(labels),
                     image: Some(image),
+                    observed: false,
                 };
                 if let Some(entry) = self
                     .slots

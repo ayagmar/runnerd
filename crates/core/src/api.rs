@@ -270,7 +270,8 @@ pub struct ShellMemory {
     pub memory: u64,
 }
 
-/// A running seed container's memory cap: its profile's limit when the reseed started.
+/// A seed container's memory cap: its profile's limit when the reseed started, or, for a requested reseed whose
+/// profile drained, the room it holds until it starts.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SeedMemory {
     /// The profile it reseeds.

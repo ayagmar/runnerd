@@ -12,6 +12,7 @@ use tracing::{info, warn};
 
 use super::admission::Admitting;
 use super::{Engine, Occupant, Purpose, RunningJobs, Shutdown};
+use crate::admission::host;
 use crate::api::Basis;
 use crate::config::Admission;
 use crate::docker::DockerApi;
@@ -65,6 +66,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.collect_trim().await;
         self.collect_disk().await;
         self.collect_recordings().await;
+        // Before the finished runners go: one Docker never inspected while it ran is still recorded with its job.
+        self.observe_again().await;
         self.collect_finished().await;
         self.collect_shells().await;
         self.kill_cancelled().await;
@@ -264,9 +267,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             &repositories,
             &profiles,
             Budget {
-                memory: admitting.free,
-                cpu: admitting.cpu.as_ref().map(|cpu| cpu.free),
-                host: admitting.host.as_ref().map(|host| host.spare),
+                // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
+                memory: if admitting.held {
+                    Some(0)
+                } else {
+                    self.memory_max
+                        .map(|max| crate::scheduler::left(max, self.memory_in_use()))
+                },
+                cpu: admitting
+                    .cpu
+                    .as_ref()
+                    .and(self.cpu_budget())
+                    .map(|budget| crate::scheduler::left(budget, self.cpu_in_use())),
+                host: admitting
+                    .host
+                    .as_ref()
+                    .map(|host| host::left(host.limit, self.memory_in_use(), host.stalled)),
                 held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
             },
             SystemTime::now(),
@@ -347,14 +363,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .is_some_and(Option::is_some)
     }
 
-    /// What the runners take (`takes`), and the memory
-    /// caps of the seed containers (which run with their profile's limits), the shells and the mirror.
+    /// What the runners take (`takes`), and the memory caps of the seed containers (which run with their profile's
+    /// limits) and the room waiting ones hold (`seed_memory`), the shells and the mirror.
     pub(super) fn memory_in_use(&self) -> u64 {
         let runners: u64 = self
             .occupied()
             .map(|(_, occupant)| self.takes(occupant))
             .sum();
-        let reseeds: u64 = self.reseed_memory.values().sum();
+        let reseeds: u64 = self.seed_memory().values().sum();
         runners + reseeds + self.shell_memory() + self.mirror_memory_in_use()
     }
 
