@@ -28,7 +28,8 @@ copied either: under sysbox, `getxattr` of `trusted.overlay.opaque` fails in the
 - The image's own `CACHE_SECRETS`, and their directories or symlinks, get none: the image's copies stay, as
   `mount_layers` keeps them.
 - The image's entries are listed in full before any whiteout is made, so a listing that fails fails the reseed,
-  which leaves the last whiteouts. `snapshot_max` counts the whiteouts' layers.
+  which leaves the last whiteouts. `snapshot_max` counts the whiteouts a reseed starts with, not the ones it
+  makes: they take only directory entries, and the next reseed counts them.
 - Starting over drops the layer with the snapshot. A layer missing from the image gets none.
 
 ## Consequences
