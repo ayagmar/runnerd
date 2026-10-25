@@ -448,7 +448,7 @@ async fn runners_failing_together_hold_their_repository_back_once() {
     }
     engine.tick(Shutdown::No).await;
     assert_eq!(
-        engine.repositories["o/r"].failures, 1,
+        engine.repositories["o/r"].holds["app"].failures, 1,
         "two runners of one start fail once"
     );
 }
@@ -553,7 +553,7 @@ async fn warm_runners_that_keep_dying_while_they_wait_hold_their_repository_back
         }
         engine.tick(Shutdown::No).await;
         assert_eq!(
-            engine.repositories["o/r"].held.is_some(),
+            engine.repositories["o/r"].holds["app"].held.is_some(),
             exits == 2,
             "held after the second in a row, not the first"
         );
@@ -569,7 +569,14 @@ async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_i
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     // A failure days ago, and no job since to end its streak.
-    engine.repositories.get_mut("o/r").unwrap().failures = 1;
+    engine
+        .repositories
+        .get_mut("o/r")
+        .unwrap()
+        .holds
+        .entry("app".to_owned())
+        .or_default()
+        .failures = 1;
 
     for occupant in engine.slots.values_mut().flatten().flatten() {
         occupant.started_at -= IDLE_TIMEOUT;
@@ -584,7 +591,7 @@ async fn a_warm_runner_that_waited_out_its_time_ends_the_failure_streak_before_i
     engine.tick(Shutdown::No).await;
 
     assert_eq!(
-        engine.repositories["o/r"].failures, 0,
+        engine.repositories["o/r"].holds["app"].failures, 0,
         "the next failure is announced as a new streak's first"
     );
 }

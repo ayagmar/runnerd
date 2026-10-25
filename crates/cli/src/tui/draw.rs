@@ -640,7 +640,7 @@ fn resample(values: &[u64], width: usize) -> Vec<u64> {
 fn reason_style(kind: WaitKind, theme: Theme) -> Style {
     match kind {
         WaitKind::Act => theme.wait().add_modifier(Modifier::BOLD),
-        WaitKind::Soon => theme.dim(),
+        WaitKind::Soon | WaitKind::Other => theme.dim(),
         WaitKind::Full => theme.wait(),
     }
 }
@@ -658,8 +658,8 @@ fn reason(app: &App, job: &QueuedJob, now: u64, width: usize, theme: Theme) -> S
     })
 }
 
-/// Every queued job, oldest first: how long it has waited, its name, its repository where there is room, and why it
-/// waits, which takes the rest of the line.
+/// Every queued job, oldest first: how long it has waited, its name, its repository (and pool) where there is room,
+/// and why it waits, which takes the rest of the line.
 fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let focused = app.pane == Pane::Queue;
     let queued = &app.live.status.queued;
@@ -693,13 +693,17 @@ fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
         .max()
         .unwrap_or(0)
         .min((width * 3 / 10).max(12));
+    let places: Vec<String> = queued
+        .iter()
+        .map(|job| job.place(&app.live.status))
+        .collect();
     let repository_width = if width >= 120 {
-        queued
+        places
             .iter()
-            .map(|job| job.repository.width())
+            .map(|place| place.width())
             .max()
             .unwrap_or(0)
-            .min(24)
+            .min(32)
     } else {
         0
     };
@@ -715,24 +719,26 @@ fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
                 0
             },
     );
-    let rows = queued
-        .iter()
-        .zip(waits)
-        .zip(names)
-        .map(|((job, wait), name)| {
-            let mut cells = vec![
-                Cell::from(Line::from(Span::styled(wait, theme.wait())).right_aligned()),
-                Cell::from(fit(&name, name_width)),
-            ];
-            if repository_width > 0 {
-                cells.push(Cell::from(Span::styled(
-                    fit(&job.repository, repository_width),
-                    theme.dim(),
-                )));
-            }
-            cells.push(Cell::from(reason(app, job, now, reason_width, theme)));
-            Row::new(cells)
-        });
+    let rows =
+        queued
+            .iter()
+            .zip(waits)
+            .zip(names)
+            .zip(places)
+            .map(|(((job, wait), name), place)| {
+                let mut cells = vec![
+                    Cell::from(Line::from(Span::styled(wait, theme.wait())).right_aligned()),
+                    Cell::from(fit(&name, name_width)),
+                ];
+                if repository_width > 0 {
+                    cells.push(Cell::from(Span::styled(
+                        fit(&place, repository_width),
+                        theme.dim(),
+                    )));
+                }
+                cells.push(Cell::from(reason(app, job, now, reason_width, theme)));
+                Row::new(cells)
+            });
     let mut widths = vec![
         Constraint::Length(length(wait_width)),
         Constraint::Length(length(name_width)),
@@ -1414,7 +1420,7 @@ fn repositories_width(app: &App) -> u16 {
             // `■ `, the name, `  profile`, `  N queued`, `  paused`.
             2 + repository.name.width()
                 + 2
-                + repository.profile.width()
+                + repository.profiles().width()
                 + format!("  {} queued", repository.queued_jobs).width()
                 + if repository.paused { 8 } else { 0 }
         })
@@ -1426,8 +1432,8 @@ fn repositories_width(app: &App) -> u16 {
 fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let focused = app.pane == Pane::Repositories;
     let repositories = &app.live.status.repositories;
-    // A cell stays free before the latest jobs: the profile, which the square's colour also shows, goes from every
-    // line first, then a name is cut.
+    // A cell stays free before the latest jobs: the profiles, which the square's colour also shows for the first
+    // pool, go from every line first, then a name is cut.
     let width = usize::from(area.width).saturating_sub(1);
     let spans = |repository: &RepositoryStatus, profile: Option<&str>, name_width: usize| {
         let mut spans = vec![
@@ -1451,13 +1457,14 @@ fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     };
     let with_profile = repositories.iter().all(|repository| {
         let name_width = repository.name.width();
-        Line::from(spans(repository, Some(&repository.profile), name_width)).width() <= width
+        Line::from(spans(repository, Some(&repository.profiles()), name_width)).width() <= width
     });
     let lines: Vec<Line<'_>> = repositories
         .iter()
         .enumerate()
         .map(|(position, repository)| {
-            let profile = with_profile.then_some(repository.profile.as_str());
+            let profiles = repository.profiles();
+            let profile = with_profile.then_some(profiles.as_str());
             let others = Line::from(spans(repository, profile, 0)).width();
             let spans = spans(repository, profile, width.saturating_sub(others));
             let line = Line::from(spans);

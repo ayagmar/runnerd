@@ -16,8 +16,8 @@ use crate::docker::DockerApi;
 use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
-use crate::scheduler::SlotRef;
 use crate::scheduler::warm::Attempt;
+use crate::scheduler::{Pool, SlotRef};
 use crate::store::{LogPosition, RunnerRecord, Store};
 use crate::time;
 
@@ -141,21 +141,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn take_found(&mut self) {
         while let Ok(found) = self.found.1.try_recv() {
             self.queued_jobs.remove(&found.job);
-            let Some(occupant) = self
-                .slots
-                .values_mut()
-                .flatten()
-                .flatten()
-                .find(|occupant| occupant.runner_name == found.runner)
-            else {
+            let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
+                slots
+                    .iter_mut()
+                    .flatten()
+                    .find(|occupant| occupant.runner_name == found.runner)
+                    .map(|occupant| (profile, occupant))
+            }) else {
                 continue;
             };
             occupant.job = Some(found.job);
             // A warm runner takes its job before a listing shows it queued: its run is seen here first. After a
-            // restart, `recover` noted it with its jobs' queued times.
-            let repository = occupant.repository.clone();
+            // restart, `recover` noted it with its jobs' queued times. Its job is its pool's.
+            let pool = Pool {
+                repository: occupant.repository.clone(),
+                profile: profile.clone(),
+            };
             let attempt = self.latest_attempt(found.run_id);
-            self.note_job(&repository, attempt, found.job, None, time::now_ms());
+            self.note_job(&pool, attempt, found.job, None, time::now_ms());
         }
     }
 
@@ -233,15 +236,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match answer {
                 Ok(details) => {
                     // The attempt and workflow of a run first seen through a job a runner took.
-                    self.place_job(
-                        &repository,
-                        Attempt {
-                            run_id: details.run_id,
-                            run_attempt: details.run_attempt,
-                        },
-                        id,
-                        details.workflow_name.as_deref(),
-                    );
+                    if let Some(pool) = self
+                        .config
+                        .pool(&repository, &details.labels)
+                        .map(Pool::from)
+                    {
+                        self.place_job(
+                            &pool,
+                            Attempt {
+                                run_id: details.run_id,
+                                run_attempt: details.run_attempt,
+                            },
+                            id,
+                            details.workflow_name.as_deref(),
+                        );
+                    }
                     self.note_workflow(details.run_id, details.workflow_name.as_deref());
                     described.push((repository, id, details.clone()));
                     self.store.details(details);

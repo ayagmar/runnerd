@@ -775,11 +775,14 @@ pub(super) fn warm(
     since: u64,
 ) -> rusqlite::Result<Vec<crate::scheduler::warm::Seen>> {
     db.prepare_cached(
-        "SELECT repository, workflow, run_id, run_attempt, queued_at FROM jobs WHERE queued_at >= ?1 ORDER BY id",
+        "SELECT repository, workflow, run_id, run_attempt, queued_at, labels FROM jobs WHERE queued_at >= ?1 \
+         ORDER BY id",
     )?
     .query_map([since], |row| {
+        let labels: String = row.get(5)?;
         Ok(crate::scheduler::warm::Seen {
             repository: row.get(0)?,
+            labels: serde_json::from_str(&labels).unwrap_or_default(),
             workflow: row.get(1)?,
             run_id: row.get(2)?,
             run_attempt: row.get(3)?,
@@ -841,7 +844,8 @@ pub(super) fn cache_history(db: &Connection, since: u64) -> rusqlite::Result<Vec
 
 pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
     db.prepare_cached(
-        "SELECT j.id, j.repository, j.state, j.runner, r.removed_at, j.run_id, j.workflow, j.queued_at, j.run_attempt FROM jobs j \
+        "SELECT j.id, j.repository, j.state, j.runner, r.removed_at, j.run_id, j.workflow, j.queued_at, j.run_attempt, \
+         j.labels FROM jobs j \
          LEFT JOIN runners r ON r.name = j.runner WHERE j.state IN ('queued', 'running') ORDER BY j.id",
     )?
     .query_map([], |row| {
@@ -855,6 +859,7 @@ pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
             workflow: row.get(6)?,
             queued_at: row.get(7)?,
             run_attempt: row.get(8)?,
+            labels: serde_json::from_str(&row.get::<_, String>(9)?).unwrap_or_default(),
         })
     })?
     .collect()

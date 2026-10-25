@@ -252,21 +252,31 @@ impl Occupant {
     }
 }
 
+/// A repository's state, shared by its pools but for their holds and what they wait for CPU.
 #[derive(Debug, Default)]
 struct RepositoryState {
     queued: Vec<QueuedJob>,
     /// Whether the last poll of its queued jobs succeeded.
     listed: bool,
+    /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
+    /// not hold back the others (ADR 0058).
+    holds: BTreeMap<String, PoolHold>,
+    /// By the profile of each of its pools, that pool's oldest job held for CPU that memory and a slot had room
+    /// for, and since when, kept while that job stays queued: a tick held by memory or slots in between does not
+    /// make it younger.
+    cpu_wait: BTreeMap<String, CpuWait>,
+    /// The profiles of its pools whose next job the last plan held for CPU.
+    cpu_held: BTreeSet<String>,
+}
+
+/// A pool's runners held back after they failed, as `RepositoryState::holds` keeps them.
+#[derive(Debug, Default)]
+struct PoolHold {
     held: Option<Hold>,
     /// Runners in a row that ended without taking a job.
     failures: u32,
     /// Runners in a row that ended without a job after waiting `IDLE_TIMEOUT` for one.
     idle_exits: u32,
-    /// Its oldest job held for CPU that memory and a slot had room for, and since when, kept while that job stays
-    /// queued: a tick held by memory or slots in between does not make it younger.
-    cpu_wait: Option<CpuWait>,
-    /// Whether the last plan held its next job for CPU.
-    cpu_held: bool,
 }
 
 /// A job waiting for CPU, as `RepositoryState::cpu_wait` keeps it.

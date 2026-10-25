@@ -24,7 +24,7 @@ use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
-use crate::scheduler::{Decision, Repository, matches};
+use crate::scheduler::{Decision, Pool, Repository, matches};
 use crate::sizing::{Measure, Ran};
 use crate::time;
 
@@ -53,8 +53,8 @@ pub(super) struct Measured {
 #[derive(Debug, Clone)]
 pub(super) struct Admitting {
     pub policy: AdmissionPolicy,
-    /// What each repository's next runner reserves goes by; absent, its profile's memory and `default`.
-    pub basis: BTreeMap<String, Basis>,
+    /// What each pool's next runner reserves goes by; absent, its profile's memory and `default`.
+    pub basis: BTreeMap<Pool, Basis>,
     /// What a runner reserving its profile's memory goes by.
     pub default: Basis,
     /// The budget left; `None` for an unlimited slice.
@@ -72,30 +72,26 @@ pub(super) struct Admitting {
 /// What one plan admits by CPU.
 #[derive(Debug, Clone)]
 pub(super) struct CpuAdmitting {
-    /// What each repository's next runner reserves goes by; absent, its profile's `cpus`.
-    pub basis: BTreeMap<String, Basis>,
+    /// What each pool's next runner reserves goes by; absent, its profile's `cpus`.
+    pub basis: BTreeMap<Pool, Basis>,
     /// The CPU budget left, in millicores.
     pub free: u64,
 }
 
 impl Admitting {
-    /// The record of a runner of `repository` started reserving `reserved` and `cpu` millicores, which takes them
-    /// from the budgets left.
-    pub(super) fn admit(&mut self, repository: &str, reserved: u64, cpu: u64) -> api::Admission {
+    /// The record of a runner of `pool` started reserving `reserved` and `cpu` millicores, which takes them from
+    /// the budgets left.
+    pub(super) fn admit(&mut self, pool: &Pool, reserved: u64, cpu: u64) -> api::Admission {
         let admission = api::Admission {
             policy: self.policy,
             reserved,
-            basis: self.basis.get(repository).copied().unwrap_or(self.default),
+            basis: self.basis.get(pool).copied().unwrap_or(self.default),
             free: self.free,
             slice: self.slice,
             cpu: self.cpu.as_mut().map(|admitting| {
                 let admission = api::CpuAdmission {
                     reserved: cpu,
-                    basis: admitting
-                        .basis
-                        .get(repository)
-                        .copied()
-                        .unwrap_or(Basis::Cap),
+                    basis: admitting.basis.get(pool).copied().unwrap_or(Basis::Cap),
                     free: admitting.free,
                     waited: None,
                 };
@@ -225,6 +221,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             reserved: None,
                             ..run.clone()
                         },
+                        &run.profile,
                         cap,
                         at,
                     );
@@ -233,7 +230,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 predictor.learn(run, &run.profile, cap, at);
             } else {
                 // A cancelled run's peak may be cut short, so only how it ended counts.
-                predictor.mark(run, cap, at);
+                predictor.mark(run, &run.profile, cap, at);
             }
         }
         self.measured.predictor = Some((predictor, SystemTime::now()));
@@ -304,9 +301,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 now,
             ) {
                 repository.runner_memory = Some(prediction.memory);
-                admitting
-                    .basis
-                    .insert(repository.name.clone(), prediction.basis);
+                admitting.basis.insert(repository.pool(), prediction.basis);
             }
         }
         admitting
@@ -437,7 +432,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 (prediction.cpu, prediction.basis)
             });
             repository.runner_cpu = Some(cpu.min(budget));
-            admitting.basis.insert(repository.name.clone(), basis);
+            admitting.basis.insert(repository.pool(), basis);
         }
         Some(admitting)
     }
@@ -519,9 +514,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 } else {
                     let labels = self
                         .config
-                        .repositories
-                        .iter()
-                        .find(|repository| repository.name == occupant.repository)
+                        .pool_in(&occupant.repository, profile)
                         .map(|repository| repository.labels.as_slice())
                         .unwrap_or_default();
                     let queued = self
@@ -618,24 +611,29 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         stops
     }
 
-    /// Notes which repositories this plan held for CPU (`held`). A held repository without a wait starts one for
-    /// its oldest queued job, logging it; a wait ends when its runner starts or, once a listing succeeded, its job
-    /// is no longer queued, not when a later plan holds the job for memory or a slot instead.
-    pub(super) fn note_held_for_cpu(&mut self, held: &BTreeSet<String>) {
+    /// Notes which pools this plan held for CPU (`held`). A held pool without a wait starts one for its oldest
+    /// queued job, logging it; a wait ends when its runner starts or, once a listing succeeded, its job is no
+    /// longer queued, not when a later plan holds the job for memory or a slot instead.
+    pub(super) fn note_held_for_cpu(&mut self, held: &BTreeSet<Pool>) {
         let budget = self.cpu_budget();
         let in_use = self.cpu_in_use();
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
-        let mut idle: BTreeMap<String, usize> = BTreeMap::new();
-        for (_, occupant) in self.occupied() {
+        let mut idle: BTreeMap<Pool, usize> = BTreeMap::new();
+        for (slot, occupant) in self.occupied() {
             if !occupant.busy && occupant.job.is_none() {
-                *idle.entry(occupant.repository.clone()).or_default() += 1;
+                let pool = Pool {
+                    repository: occupant.repository.clone(),
+                    profile: slot.profile,
+                };
+                *idle.entry(pool).or_default() += 1;
             }
         }
         for repository in &self.config.repositories {
             let name = &repository.name;
+            let pool = Pool::from(repository);
             let Some(state) = self.repositories.get_mut(name) else {
                 continue;
             };
@@ -644,26 +642,35 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .iter()
                 .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels));
             if state.listed
-                && let Some(wait) = state.cpu_wait
+                && let Some(wait) = state.cpu_wait.get(&repository.profile)
                 && !queued.clone().any(|job| job.id == wait.job)
             {
-                state.cpu_wait = None;
+                state.cpu_wait.remove(&repository.profile);
             }
-            state.cpu_held = held.contains(name);
+            let cpu_held = held.contains(&pool);
+            if cpu_held {
+                state.cpu_held.insert(repository.profile.clone());
+            } else {
+                state.cpu_held.remove(&repository.profile);
+            }
             // As `plan` serves them: its waiting runners take the oldest jobs, the next one is held.
             let mut ids: Vec<u64> = queued.map(|job| job.id).collect();
             ids.sort_unstable();
-            if state.cpu_held
-                && state.cpu_wait.is_none()
-                && let Some(oldest) = ids.get(idle.get(name).copied().unwrap_or(0)).copied()
+            if cpu_held
+                && !state.cpu_wait.contains_key(&repository.profile)
+                && let Some(oldest) = ids.get(idle.get(&pool).copied().unwrap_or(0)).copied()
             {
-                state.cpu_wait = Some(super::CpuWait {
-                    job: oldest,
-                    since: SystemTime::now(),
-                });
+                state.cpu_wait.insert(
+                    repository.profile.clone(),
+                    super::CpuWait {
+                        job: oldest,
+                        since: SystemTime::now(),
+                    },
+                );
                 if let Some(budget) = budget {
                     info!(
-                        "{name}: its next job waits for CPU: runners reserve {} of the budget's {}",
+                        "{name}: its next job in {} waits for CPU: runners reserve {} of the budget's {}",
+                        repository.profile,
                         api::cpus(in_use),
                         api::cpus(budget)
                     );

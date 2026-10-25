@@ -57,7 +57,7 @@ struct Answer {
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// What a runner container in `slot` (1-based) of `profile` mounts: the caches, and its build cache socket's
-    /// directory when the build cache is on for its repository.
+    /// directory when the build cache is on for its repository's pool in `profile`.
     pub(super) fn runner_mounts(
         &self,
         profile: &str,
@@ -66,7 +66,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         repository: &str,
     ) -> Vec<Mount> {
         let mut mounts = cache::runner_mounts(&self.names, profile, slot);
-        mounts.extend(self.attach_build_cache(runner, repository));
+        mounts.extend(self.attach_build_cache(runner, repository, profile));
         mounts
     }
 
@@ -77,16 +77,20 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Opens the build cache for a runner about to start, when on for its repository, and returns what its
-    /// container mounts. Without it, the runner builds without the shared cache.
-    pub(super) fn attach_build_cache(&self, runner: &str, repository: &str) -> Option<Mount> {
+    /// Opens the build cache for a runner about to start, when on for its repository's pool in `profile`, and
+    /// returns what its container mounts. Without it, the runner builds without the shared cache.
+    pub(super) fn attach_build_cache(
+        &self,
+        runner: &str,
+        repository: &str,
+        profile: &str,
+    ) -> Option<Mount> {
         let cache = self.build_cache.as_ref()?;
         let wanted = self.config.caches.build.enabled
             && self
                 .config
-                .repositories
-                .iter()
-                .any(|candidate| candidate.name == repository && candidate.build_cache);
+                .pool_in(repository, profile)
+                .is_some_and(|pool| pool.build_cache);
         if !wanted {
             return None;
         }
@@ -159,6 +163,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .filter_map(|(runner, job)| {
                 let (repository, _, details) =
                     described.iter().find(|(_, id, _)| job == Some(*id))?;
+                // The same in each of its pools.
                 let writers = self
                     .config
                     .repositories

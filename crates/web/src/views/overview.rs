@@ -908,6 +908,7 @@ pub(crate) fn repositories(status: &Status) -> Markup {
 /// One repository's row; a pause or resume replaces it. Hovering it lights up the slots its runners hold and its
 /// latest jobs.
 pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> Markup {
+    // Coloured as its first pool's profile.
     let class = profile_class(status, &repository.profile);
     let (action, label) = if repository.paused {
         ("resume", "Resume")
@@ -941,7 +942,7 @@ pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> 
                 a href=(format!("/history?repository={}", repository.name)) { (repository.name) }
             }
             div.repo-meta {
-                span { (repository.profile) }
+                span { (repository.profiles()) }
                 @if repository.queued_jobs > 0 { span { (repository.queued_jobs) " queued" } }
                 @if repository.paused { span.badge.neutral { "paused" } }
             }
@@ -1198,7 +1199,7 @@ fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
                 }
                 (job_name(job.workflow.as_deref(), &job.name))
                 span.repo {
-                    (job.repository)
+                    (job.place(&overview.status))
                     @if let Some(branch) = &job.branch { " · " (branch) }
                 }
                 @if let Some(waiting) = &job.waiting {
@@ -1209,12 +1210,14 @@ fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
     }
 }
 
-/// How a reason is drawn: one the owner can act on, one that clears by itself, or what is full.
+/// How a reason is drawn: one the owner can act on, one that clears by itself, what is full, or one this client
+/// does not know, drawn plain.
 fn reason_class(kind: WaitKind) -> &'static str {
     match kind {
         WaitKind::Act => "act",
         WaitKind::Soon => "soon",
         WaitKind::Full => "full",
+        WaitKind::Other => "other",
     }
 }
 

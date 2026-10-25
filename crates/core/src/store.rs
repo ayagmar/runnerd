@@ -172,6 +172,8 @@ pub struct OpenJob {
     pub workflow: Option<String>,
     /// When GitHub queued it, in milliseconds since the epoch.
     pub queued_at: u64,
+    /// The labels it asked for, which tell its repository's pool.
+    pub labels: Vec<String>,
 }
 
 /// Where a job's log capture continues: the runner's page file and the byte offset in it.

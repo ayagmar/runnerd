@@ -990,7 +990,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
     engine
         .repositories
         .get_mut("o/r")
-        .and_then(|state| state.cpu_wait.as_mut())
+        .and_then(|state| state.cpu_wait.get_mut("app"))
         .expect("the build's wait is kept")
         .since -= CPU_PRIORITY_AFTER;
 
@@ -1033,7 +1033,7 @@ async fn a_heavy_job_keeps_its_place_for_cpu_through_high_water_ticks_and_starts
     );
     assert_eq!(runners_of(&mut engine, &handle, "o/b"), 0);
     assert!(
-        engine.repositories["o/r"].cpu_wait.is_none(),
+        engine.repositories["o/r"].cpu_wait.is_empty(),
         "served, the build no longer waits"
     );
 }
@@ -1056,14 +1056,17 @@ async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
     github.0.lock().unwrap().queued = (1..=2).map(job).collect();
     engine.tick(Shutdown::No).await;
     assert_eq!(
-        engine.repositories["o/r"].cpu_wait.map(|wait| wait.job),
+        engine.repositories["o/r"]
+            .cpu_wait
+            .get("app")
+            .map(|wait| wait.job),
         Some(2)
     );
     // Its run is cancelled: GitHub lists it no more.
     github.0.lock().unwrap().queued = vec![job(1)];
     engine.tick(Shutdown::No).await;
     assert!(
-        engine.repositories["o/r"].cpu_wait.is_none(),
+        engine.repositories["o/r"].cpu_wait.is_empty(),
         "a job gone from the queue no longer waits"
     );
 }

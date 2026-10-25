@@ -14,8 +14,8 @@ use crate::cache;
 use crate::docker::{self, DockerApi, is_not_found};
 use crate::github::GithubApi;
 use crate::record;
-use crate::scheduler::SlotRef;
 use crate::scheduler::warm::Attempt;
+use crate::scheduler::{Pool, SlotRef};
 use crate::time;
 
 /// The limits an adopted container runs with, and when it started.
@@ -165,7 +165,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     running.insert(occupant.runner_name.clone());
                     // Its socket back in the directory its container mounts, if it does; its job's writes are
                     // decided again.
-                    drop(self.attach_build_cache(&occupant.runner_name, &occupant.repository));
+                    drop(self.attach_build_cache(
+                        &occupant.runner_name,
+                        &occupant.repository,
+                        &profile,
+                    ));
                     let slot = SlotRef {
                         profile,
                         index: index.unwrap_or(0),
@@ -217,9 +221,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             .runner
                             .as_ref()
                             .is_some_and(|runner| running.contains(runner));
-                    if runs {
+                    let pool = self
+                        .config
+                        .pool(&job.repository, &job.labels)
+                        .map(Pool::from);
+                    if runs && let Some(pool) = pool {
                         self.note_job(
-                            &job.repository,
+                            &pool,
                             Attempt {
                                 run_id: job.run_id,
                                 run_attempt: job.run_attempt,

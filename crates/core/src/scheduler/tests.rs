@@ -317,7 +317,8 @@ fn a_job_with_a_slot_and_memory_but_no_cpu_waits_and_its_repository_is_held_for_
     assert_eq!(starts(&decisions), [(0, "o/a"), (1, "o/a"), (2, "o/b")]);
     assert!(
         decisions.contains(&Decision::HeldForCpu {
-            repository: "o/a".to_owned()
+            repository: "o/a".to_owned(),
+            profile: "app".to_owned(),
         }),
         "o/a is held for CPU"
     );
@@ -341,7 +342,8 @@ fn a_runner_at_its_profiles_cpus_that_do_not_fit_holds_its_repository_once() {
     assert_eq!(
         decisions,
         [Decision::HeldForCpu {
-            repository: "o/a".to_owned()
+            repository: "o/a".to_owned(),
+            profile: "app".to_owned(),
         }]
     );
 }
@@ -414,6 +416,7 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
         }
         let held = decisions.contains(&Decision::HeldForCpu {
             repository: "o/heavy".to_owned(),
+            profile: "app".to_owned(),
         });
         // As the engine marks it: since the first plan that held it.
         waiting_since = if held {
@@ -573,7 +576,8 @@ fn a_job_held_only_by_an_older_jobs_start_waits_behind_it_not_for_what_runs() {
     );
     assert!(
         behind.decisions.contains(&Decision::HeldForCpu {
-            repository: "o/2".to_owned()
+            repository: "o/2".to_owned(),
+            profile: "app".to_owned(),
         }),
         "o/2 is held for CPU as before"
     );
@@ -991,4 +995,67 @@ fn a_warm_runner_in_a_slot_a_lowered_count_closed_stops_and_its_slot_serves_no_j
         "no runner starts in a closed slot: {:?}",
         other.decisions
     );
+}
+
+/// o/a in `app` for `[self-hosted, linux, app]` jobs and in `light` for `a-light` jobs, both with free slots.
+fn two_pools(queued: Vec<QueuedJob>) -> (Vec<Repository>, BTreeMap<String, Profile>) {
+    let heavy = repository("o/a", "app", queued.clone());
+    let light = Repository {
+        labels: vec!["a-light".to_owned()],
+        ..repository("o/a", "light", queued)
+    };
+    let mut profiles = profiles(vec![Slot::Free; 2]);
+    let app = profiles["app"].clone();
+    profiles.insert("light".to_owned(), app);
+    (vec![heavy, light], profiles)
+}
+
+#[test]
+fn a_job_asking_for_no_labels_starts_no_runner_in_any_pool() {
+    let (repositories, profiles) = two_pools(vec![job(1, &[])]);
+    let plan = plan(&repositories, &profiles, budget(None, None), now());
+    assert_eq!(starts(&plan.decisions), []);
+    assert_eq!(
+        plan.waiting,
+        BTreeMap::from([(1, Waiting::NoPool { labels: Vec::new() })])
+    );
+}
+
+#[test]
+fn only_jobs_for_githubs_own_images_go_unlisted() {
+    let labels = [
+        "ubuntu-latest",
+        "ubuntu-slim",
+        "ubuntu-24.04-arm",
+        "windows-2025-vs2026",
+        "windows-11-vs2026-arm",
+        "macos-15-intel",
+        "macos-26-intel",
+        "xcode-27",
+        "macos-latest-large",
+        "macos-14-large",
+        "macos-15-large",
+        "macos-26-large",
+        "macos-latest-xlarge",
+        "macos-14-xlarge",
+        "macos-15-xlarge",
+        "macos-26-xlarge",
+        "xcode-27-xlarge",
+        // Not GitHub's: fake versions, a typo and custom names.
+        "ubuntu-99.04",
+        "ubuntu-2404",
+        "macos-99",
+        "macos-builder",
+        "windows-big",
+    ];
+    let mut queued: Vec<QueuedJob> = (1..)
+        .zip(labels)
+        .map(|(id, label)| job(id, &[label]))
+        .collect();
+    queued.push(job(23, &["self-hosted", "ubuntu-latest"]));
+    let (repositories, profiles) = two_pools(queued);
+    let waiting = plan(&repositories, &profiles, budget(None, None), now()).waiting;
+    let unserved: Vec<u64> = waiting.keys().copied().collect();
+    // GitHub's own labels are left to it; the rest, `self-hosted` beside an image name too, are the owner's to fix.
+    assert_eq!(unserved, [18, 19, 20, 21, 22, 23]);
 }

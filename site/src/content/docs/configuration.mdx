@@ -50,6 +50,40 @@ profile = "node"
 labels = ["self-hosted", "linux", "x64", "node"]
 ```
 
+## Light jobs in a smaller profile
+
+A runner may take any queued job of its repository whose labels it has, so under [measured admission](../admission/#measured-admission) it reserves for the heaviest of them. A linter waits behind an 8G build's reservation. Give the repository a second entry with the same `name`: a pool of smaller runners with a label of its own.
+
+```toml
+[profiles.light]
+image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.13"
+cpus = 2
+memory = "1G"
+slots = 4
+
+[[repositories]]
+name = "halyard/storefront"
+profile = "node"
+labels = ["self-hosted", "linux", "x64", "node"]
+
+[[repositories]]
+name = "halyard/storefront"
+profile = "light"
+labels = ["storefront-light"]
+```
+
+Then move the light jobs over in the workflow:
+
+```yaml
+jobs:
+  lint:
+    runs-on: storefront-light   # was [self-hosted]
+```
+
+A job runs in the pool whose labels include every label in its `runs-on`. The light pool leaves out `self-hosted` on purpose: every job nobody relabelled still asks for `self-hosted`, which only the `node` pool has, so it can never land on a 1G runner. Each pool reserves only for its own queued jobs, and has its own `warm` and `build_cache`.
+
+The config check refuses two pools of a repository that share a label (a job asking only for that label could run in either), two in the same profile, and pools that set `build_cache_writers` differently. A job whose labels no pool has, such as a typo in `runs-on`, waits with *No profile serves the label …* in `runnerctl status` and the dashboard, and so does a job that asks for no labels. Only jobs asking for a single GitHub-hosted runner label, such as `ubuntu-latest` or `macos-15`, are left to GitHub and not listed. Pause and resume apply to the whole repository; a pool whose runners keep failing holds back only itself.
+
 ## Runner images
 
 [`image/Dockerfile`](https://github.com/ayagmar/runnerd/tree/main/image) has four stages. Each release publishes every one, for linux/amd64.
@@ -197,9 +231,9 @@ The config check refuses a `memory` or `slots` outside the profile's own bounds.
 
 | Key | Default | Means |
 |---|---|---|
-| `name` | | `owner/name` on GitHub |
-| `profile` | | the profile its jobs run on |
-| `labels` | | at least one; a job runs here when every label in its `runs-on` is one of these |
+| `name` | | `owner/name` on GitHub; repeat an entry to serve the repository in [several profiles](#light-jobs-in-a-smaller-profile) |
+| `profile` | | the profile its jobs run on; one entry per profile for a repository |
+| `labels` | | at least one; a job runs here when every label in its `runs-on` is one of these; no two entries of a repository share one |
 | `warm` | `1` | runners kept registered for jobs not queued yet while the repository is active ([warm runners](../running/#warm-runners)); `0` turns them off |
 | `build_cache` | `true` | whether its runners get the shared [build cache](../running/#build-cache) |
 | `build_cache_writers` | `"default-branch"` | whose jobs write to the build cache: `"default-branch"`, the default branch's and `build.branches`' pushes, schedules and manual runs; `"pull-requests"`, those and [pull requests people opened from the repository's own branches](../running/#build-cache) |

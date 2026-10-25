@@ -291,7 +291,7 @@ fn a_cancelled_run_killed_for_memory_makes_its_job_unpredictable_without_countin
         oom_killed: true,
         ..build(0)
     };
-    predictor.mark(&killed, 7 * G, NOW);
+    predictor.mark(&killed, "node", 7 * G, NOW);
     let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
     assert_eq!(
         prediction.basis,
@@ -589,7 +589,7 @@ fn a_cancelled_run_past_what_it_reserved_makes_its_job_reserve_at_least_that_run
         reserved: Some(2560 * M),
         ..build(5 * G)
     };
-    predictor.mark(&cancelled, 7 * G, NOW);
+    predictor.mark(&cancelled, "node", 7 * G, NOW);
     let prediction = predictor.predict(&key("build"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
     assert_eq!(
         prediction.basis,
@@ -609,6 +609,7 @@ fn a_job_seen_only_cancelled_reserves_its_cap() {
     }
     predictor.mark(
         &run("halyard/storefront", "e2e", "node", NOW, 3, G),
+        "node",
         7 * G,
         NOW,
     );
@@ -791,4 +792,39 @@ fn a_cpu_budget_holds_back_jobs_that_memory_has_room_for() {
     assert!(bounded.cpu_held > 0, "the CPU budget held a job back");
     assert_eq!(bounded.worst_cpu, 6000);
     assert_eq!(bounded.never_started, 0);
+}
+
+#[test]
+fn a_job_of_one_name_in_two_pools_is_predicted_from_its_runs_in_each() {
+    let mut predictor = predictor();
+    // 100 light runs and 2 heavy ones of the same workflow and job name, in two pools' profiles.
+    for _ in 0..100 {
+        let light = Ran {
+            cpu_average: Some(100),
+            ..run("halyard/storefront", "test", "light", NOW, 1, 200 * M)
+        };
+        predictor.learn(&light, "light", 7 * G, NOW);
+    }
+    for _ in 0..2 {
+        let heavy = Ran {
+            cpu_average: Some(1800),
+            ..run("halyard/storefront", "test", "node", NOW, 5, 3 * G)
+        };
+        predictor.learn(&heavy, "node", 7 * G, NOW);
+    }
+    let heavy = predictor.predict(&key("test"), "node", 7 * G, NOW + MINUTE, Copies::Alone);
+    assert!(
+        heavy.memory >= 3 * G,
+        "the heavy pool's job keeps its 3G, not the light runs' 200M: {heavy:?}"
+    );
+    let cpu = predictor.predict_cpu(&key("test"), "node", 8000);
+    assert!(
+        cpu.cpu >= 1800,
+        "the heavy pool's job keeps its CPU: {cpu:?}"
+    );
+    let light = predictor.predict(&key("test"), "light", 7 * G, NOW + MINUTE, Copies::Alone);
+    assert!(
+        light.memory < G,
+        "the light pool's job goes by its own runs: {light:?}"
+    );
 }

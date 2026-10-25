@@ -10,8 +10,8 @@ use tracing::warn;
 use super::Engine;
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
-use crate::scheduler::matches;
 use crate::scheduler::warm::{self, Attempt, Learned, Runs};
+use crate::scheduler::{Pool, matches};
 use crate::time;
 
 /// How often the history is read again.
@@ -40,7 +40,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let now = time::now_ms();
         match self.store.warm(now.saturating_sub(warm::LOOKBACK)).await {
             Ok(seen) => {
-                let mut learned = Learned::new(&seen, now);
+                let config = &self.config;
+                let mut learned = Learned::new(&seen, now, |seen| {
+                    config
+                        .pool(&seen.repository, &seen.labels)
+                        .map(|pool| pool.profile.clone())
+                });
                 if let Some((older, _)) = &self.warm.learned {
                     learned.absorb(older);
                 }
@@ -51,19 +56,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.warm.runs.expire(now);
     }
 
-    /// Notes a job of `repository` queued or taken at `at` (ms), of `attempt`, with its workflow when known.
+    /// Notes a job for `pool` queued or taken at `at` (ms), of `attempt`, with its workflow when known.
     pub(super) fn note_job(
         &mut self,
-        repository: &str,
+        pool: &Pool,
         attempt: Attempt,
         job: u64,
         workflow: Option<&str>,
         at: u64,
     ) {
         if let Some((learned, _)) = &mut self.warm.learned {
-            learned.note(repository, at);
+            learned.note(&pool.repository, at);
         }
-        self.warm.runs.note(repository, attempt, job, workflow, at);
+        self.warm.runs.note(pool, attempt, job, workflow, at);
     }
 
     /// The latest attempt of run `run_id` seen, or its first: a runner's capture tells only the run.
@@ -74,14 +79,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Moves a job a runner took to the attempt its details say, if it was noted under another of its run's.
     pub(super) fn place_job(
         &mut self,
-        repository: &str,
+        pool: &Pool,
         attempt: Attempt,
         job: u64,
         workflow: Option<&str>,
     ) {
         self.warm
             .runs
-            .place(repository, attempt, job, workflow, time::now_ms());
+            .place(pool, attempt, job, workflow, time::now_ms());
     }
 
     /// Notes the workflow of run `run_id`, if it is followed, as a running job's details say.
@@ -103,13 +108,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .queued
                     .iter()
                     .filter(|job| matches(job, &repository.labels))
-                    .map(|job| (repository.name.clone(), job.clone())),
+                    .map(|job| (Pool::from(repository), job.clone())),
             );
         }
         let now = time::now_ms();
-        for (repository, job) in seen {
+        for (pool, job) in seen {
             self.note_job(
-                &repository,
+                &pool,
                 Attempt {
                     run_id: job.run_id,
                     run_attempt: job.run_attempt,
@@ -121,8 +126,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// How many warm runners each repository wants now, by name.
-    pub(super) fn warm_targets(&self) -> BTreeMap<String, usize> {
+    /// How many warm runners each pool wants now.
+    pub(super) fn warm_targets(&self) -> BTreeMap<Pool, usize> {
         let Some((learned, _)) = &self.warm.learned else {
             return BTreeMap::new();
         };
@@ -131,12 +136,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .repositories
             .iter()
             .map(|repository| {
+                let pool = Pool::from(repository);
                 let wanted = warm::target(
                     repository.warm,
                     learned.active(&repository.name, now),
-                    self.warm.runs.remaining(&repository.name, learned, now),
+                    self.warm.runs.remaining(&pool, learned, now),
                 );
-                (repository.name.clone(), wanted)
+                (pool, wanted)
             })
             .collect()
     }

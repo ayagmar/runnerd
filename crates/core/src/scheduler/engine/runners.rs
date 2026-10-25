@@ -132,7 +132,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Release::Ended => took_job != Some(false),
                 Release::Idle => false,
             };
-        if let Some(state) = self.repositories.get_mut(&occupant.repository) {
+        if let Some(state) = self
+            .repositories
+            .get_mut(&occupant.repository)
+            .map(|state| state.holds.entry(slot.profile.clone()).or_default())
+        {
             match took_job {
                 Some(true) => {
                     state.failures = 0;
@@ -287,11 +291,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Holds back a repository's next runners after one failed, longer each time in a row, and announces the first
-    /// hold of a streak as `runner.failed`: a repository that stays broken says so once, not every 10 minutes, until
-    /// a runner takes a job. Runners that fail while it is held started before the hold, so they do not lengthen it.
+    /// Holds back the next runners of a repository's pool in `profile` after one failed, longer each time in a row,
+    /// and announces the first hold of a streak as `runner.failed`: a pool that stays broken says so once, not every
+    /// 10 minutes, until a runner takes a job. Its repository's other pools go on. Runners that fail while it is held started before the hold, so they do not lengthen it.
     fn hold(&mut self, repository: &str, profile: &str, cause: HoldCause, error: String) {
-        if let Some(state) = self.repositories.get_mut(repository)
+        if let Some(state) = self
+            .repositories
+            .get_mut(repository)
+            .map(|state| state.holds.entry(profile.to_owned()).or_default())
             && state
                 .held
                 .is_none_or(|held| held.until <= SystemTime::now())
@@ -302,7 +309,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 until: SystemTime::now() + wait,
                 cause,
             });
-            warn!("{repository}: no runner starts for {}s", wait.as_secs());
+            warn!(
+                "{repository}: no runner starts in {profile} for {}s",
+                wait.as_secs()
+            );
             if state.failures > 1 {
                 return;
             }
@@ -341,12 +351,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         admission: Admission,
         purpose: Purpose,
     ) {
+        // Its pool's labels: those of the repository's entry in the slot's profile.
         let Some(labels) = self
             .config
-            .repositories
-            .iter()
-            .find(|candidate| candidate.name == repository)
-            .map(|candidate| candidate.labels.clone())
+            .pool_in(repository, &slot.profile)
+            .map(|pool| pool.labels.clone())
         else {
             return;
         };

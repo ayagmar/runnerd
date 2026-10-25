@@ -66,21 +66,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         // The queue as clients list it: a job a runner took, which GitHub still lists for a few seconds, is not counted.
         let queued = self.queued(&plan.waiting);
-        let repositories = self
-            .config
-            .repositories
-            .iter()
-            .map(|repository| api::RepositoryStatus {
-                name: repository.name.clone(),
-                profile: repository.profile.clone(),
-                labels: repository.labels.clone(),
-                paused: self.control.is_paused(&repository.name),
-                queued_jobs: queued
-                    .iter()
-                    .filter(|job| job.repository == repository.name)
-                    .count(),
-            })
-            .collect();
+        let repositories = self.repository_statuses(&queued);
         let previous = self.status.borrow().clone();
         let announced = self.announced_profiles.take();
         let status = api::Status {
@@ -94,6 +80,47 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.announce_changes(&previous, announced.as_deref(), &status);
         self.status.send_replace(status);
         self.publish_records();
+    }
+
+    /// Each configured repository once, with its pools and its jobs in `queued`.
+    fn repository_statuses(&self, queued: &[api::QueuedJob]) -> Vec<api::RepositoryStatus> {
+        self.config
+            .repository_names()
+            .into_iter()
+            .map(|name| {
+                let pools: Vec<api::PoolStatus> = self
+                    .config
+                    .repositories
+                    .iter()
+                    .filter(|pool| pool.name == name)
+                    .map(|pool| api::PoolStatus {
+                        profile: pool.profile.clone(),
+                        labels: pool.labels.clone(),
+                        queued_jobs: queued
+                            .iter()
+                            .filter(|job| {
+                                job.repository == name
+                                    && job.profile.as_ref() == Some(&pool.profile)
+                            })
+                            .count(),
+                    })
+                    .collect();
+                api::RepositoryStatus {
+                    profile: pools
+                        .first()
+                        .map(|pool| pool.profile.clone())
+                        .unwrap_or_default(),
+                    labels: pools
+                        .first()
+                        .map(|pool| pool.labels.clone())
+                        .unwrap_or_default(),
+                    pools,
+                    paused: self.control.is_paused(&name),
+                    queued_jobs: queued.iter().filter(|job| job.repository == name).count(),
+                    name,
+                }
+            })
+            .collect()
     }
 
     /// The memory caps in use, with the mirror's and each seed container's part.
@@ -126,35 +153,40 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     cpus,
                     budget,
                     in_use: self.cpu_in_use(),
-                    held: self.repositories.values().any(|state| state.cpu_held),
+                    held: self
+                        .repositories
+                        .values()
+                        .any(|state| !state.cpu_held.is_empty()),
                 }),
         }
     }
 
-    /// The queued jobs the repositories' runners can take and none holds, oldest first, with why each `waiting`;
-    /// none of a repository whose last listing failed or was skipped.
+    /// The queued jobs the repositories' pools can take and none holds, and those the plan says no pool serves,
+    /// oldest first, with why each `waiting`; none of a repository whose last listing failed or was skipped.
     fn queued(&self, waiting: &BTreeMap<u64, api::Waiting>) -> Vec<api::QueuedJob> {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
         let mut queued: Vec<api::QueuedJob> = self
-            .config
             .repositories
             .iter()
-            .flat_map(|repository| {
-                let state = &self.repositories[&repository.name];
+            .flat_map(|(repository, state)| {
                 // Unlisted at the last tick: a failed listing or a shutdown, which the history does not follow.
                 let queued = if state.listed { &state.queued[..] } else { &[] };
                 queued
                     .iter()
-                    .filter(|job| {
-                        crate::scheduler::matches(job, &repository.labels)
-                            && !taken.contains(&job.id)
+                    .filter(|job| !taken.contains(&job.id))
+                    .filter_map(move |job| {
+                        let pool = self.config.pool(repository, &job.labels);
+                        let unserved =
+                            matches!(waiting.get(&job.id), Some(api::Waiting::NoPool { .. }));
+                        (pool.is_some() || unserved).then_some((job, pool))
                     })
-                    .map(|job| api::QueuedJob {
+                    .map(|(job, pool)| api::QueuedJob {
                         id: job.id,
-                        repository: repository.name.clone(),
+                        repository: repository.clone(),
+                        profile: pool.map(|pool| pool.profile.clone()),
                         run_id: job.run_id,
                         run_attempt: job.run_attempt,
                         workflow: job.workflow.clone(),
