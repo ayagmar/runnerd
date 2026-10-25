@@ -1424,7 +1424,7 @@ fn chart_lines(page: &str) -> Vec<Vec<String>> {
 }
 
 /// A runner admitted by measured peaks: 6.5G and 3.6 CPUs reserved.
-fn measured() -> Admission {
+fn measured_admission() -> Admission {
     Admission {
         policy: AdmissionPolicy::Measured,
         reserved: 6656 << 20,
@@ -1451,7 +1451,7 @@ async fn a_measured_jobs_charts_show_what_it_reserved_under_its_caps() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     dashboard.runner_caps(Some(8704 << 20), Some(22_000));
-    dashboard.admission(Some(measured()));
+    dashboard.admission(Some(measured_admission()));
     let job = dashboard
         .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
         .await;
@@ -1480,7 +1480,7 @@ async fn a_job_admitted_by_caps_shows_one_line_per_chart() {
             free: 20_000,
             waited: None,
         }),
-        ..measured()
+        ..measured_admission()
     }));
     let job = dashboard
         .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
@@ -1502,7 +1502,7 @@ async fn without_cpu_overcommit_only_memory_shows_a_reservation() {
     dashboard.runner_caps(Some(8704 << 20), Some(22_000));
     dashboard.admission(Some(Admission {
         cpu: None,
-        ..measured()
+        ..measured_admission()
     }));
     let job = dashboard
         .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
@@ -1530,6 +1530,40 @@ async fn a_job_recorded_without_its_caps_is_charted_against_the_profiles_limits_
     assert!(
         job.body.contains("limits in the config now"),
         "the job page says its lines are today's config"
+    );
+}
+
+#[tokio::test]
+async fn a_reservation_equal_to_the_profiles_limit_now_is_labelled_apart_from_it() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    // Docker reported no CPU limit, and the runner reserved jvm's 8 CPUs.
+    dashboard.runner_caps(Some(8704 << 20), None);
+    let mut admission = measured_admission();
+    admission.cpu.as_mut().unwrap().reserved = 8000;
+    dashboard.admission(Some(admission));
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await;
+    assert_eq!(
+        chart_lines(&job.body)[1],
+        ["jvm now 8 CPUs", "reserved 8 CPUs"],
+        "today's limit and the reservation keep their meanings"
+    );
+    let cpu = job
+        .body
+        .split(r#"<div class="chart-card">"#)
+        .nth(2)
+        .unwrap();
+    let placements: Vec<bool> = cpu
+        .split(r#"<span class="limit-label"#)
+        .skip(1)
+        .map(|label| label[..label.find('"').unwrap()].contains("below"))
+        .collect();
+    assert_eq!(
+        placements,
+        [false, true],
+        "one label sits above the shared line and the other below it"
     );
 }
 

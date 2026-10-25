@@ -415,6 +415,24 @@ impl TimeChart {
         self.render_with(top, &[], parts)
     }
 
+    /// Each line with its height and whether its label sits above it: one highest line's label does, the others'
+    /// sit below theirs, so the labels of close or equal lines do not overlap.
+    fn placed_limits(&self, top: u64) -> Vec<(&Limit, f64, bool)> {
+        let highest = self
+            .limits
+            .iter()
+            .enumerate()
+            // On a tie, the first: `max_by_key` keeps the last of equals.
+            .rev()
+            .max_by_key(|(_, limit)| limit.value)
+            .map(|(index, _)| index);
+        self.limits
+            .iter()
+            .enumerate()
+            .map(|(index, limit)| (limit, y_of(limit.value, top), Some(index) == highest))
+            .collect()
+    }
+
     /// The chart with bands over it, each drawn while its expression holds. A band needs a chart without a window,
     /// whose start stays put.
     pub(crate) fn render_with(&self, top: u64, bands: &[Band], parts: &Parts) -> Markup {
@@ -460,14 +478,7 @@ impl TimeChart {
                 (series, stretches)
             })
             .collect();
-        // The highest line's label sits above it, the others' below theirs, so the labels of close lines do not
-        // overlap.
-        let highest = self.limits.iter().map(|limit| limit.value).max();
-        let limits: Vec<(&Limit, f64, bool)> = self
-            .limits
-            .iter()
-            .map(|limit| (limit, y_of(limit.value, top), Some(limit.value) == highest))
-            .collect();
+        let limits = self.placed_limits(top);
         let span_style = format!("--span: {}", frame.span());
         let span_style = if live.is_some() {
             parts.clocked(span_style)
