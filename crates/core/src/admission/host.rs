@@ -49,14 +49,20 @@ pub fn stalls(memory: &HostMemory, before: bool) -> bool {
     stalling && memory.available < margin(memory.total, false).saturating_mul(2)
 }
 
+/// What `memory` lets the slice's runners hold in all: what the slice holds now without page cache plus
+/// `MemAvailable`, less the margin, larger while the host is `short`.
+pub fn limit(memory: &HostMemory, short: bool) -> u64 {
+    memory
+        .slice
+        .saturating_add(memory.available)
+        .saturating_sub(margin(memory.total, short))
+}
+
 /// What `memory` leaves runners beside the `reserved` memory of what runs in the slice, given what the last plan
 /// `remembered`.
 pub fn budget(memory: HostMemory, reserved: u64, remembered: Remembered) -> HostBudget {
     let stalled = stalls(&memory, remembered.stalled);
-    let limit = memory
-        .slice
-        .saturating_add(memory.available)
-        .saturating_sub(margin(memory.total, remembered.short || stalled));
+    let limit = limit(&memory, remembered.short || stalled);
     HostBudget {
         memory,
         limit,

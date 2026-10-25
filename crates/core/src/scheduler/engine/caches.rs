@@ -165,7 +165,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// The room a requested reseed holds while it waits for it once its profile drained: its profile's cap, so
     /// later starts leave that room and the seed starts as runners finish, rather than hold the profile's jobs for
-    /// as long as other profiles' take what frees. `None` until then, while a shell holds it back, and once it runs.
+    /// as long as other profiles' take what frees. `None` until then, while a shell holds it back, once it runs, and
+    /// while the cap would not fit even with no runner running: the room would then hold every start for a seed that
+    /// cannot start, which instead waits as a due one does.
     fn waiting_seed(&self, profile: &str) -> Option<u64> {
         let drained = self
             .slots
@@ -175,9 +177,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             && !self.reseeds.contains_key(profile)
             && drained
             && !self.shell_profiles().contains(profile);
-        waits
-            .then(|| self.config.profiles.get(profile).map(|p| p.memory.0))
-            .flatten()
+        let memory = self.config.profiles.get(profile)?.memory.0;
+        // Not `memory_in_use`, which counts this room. The host's limit as the first runner into an empty slice
+        // sees it, without the larger margin of a short or stalling host, which passes.
+        let others = self.reseed_memory.values().sum::<u64>()
+            + self.shell_memory()
+            + self.mirror_memory_in_use();
+        let fits = self
+            .memory_max
+            .is_none_or(|max| max.saturating_sub(others) >= memory)
+            && self
+                .host_memory()
+                .is_none_or(|host| host::limit(&host, false).saturating_sub(others) >= memory);
+        (waits && fits).then_some(memory)
     }
 
     /// The memory each seed container holds of the budget, by profile: a running one's cap as it started, and the

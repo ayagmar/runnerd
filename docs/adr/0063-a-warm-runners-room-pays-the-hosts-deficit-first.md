@@ -24,7 +24,9 @@ whenever its profile's slots were free, whatever the slice or the host had left.
   high-water mark. Until then the reseed stays due.
 - **A requested reseed holds its room once its profile drained.** `runnerd reseed` stops the profile's jobs from
   starting. Once its slots are free, the seed's cap counts in the budget, so other profiles' starts leave that
-  room and the seed starts as their runners finish.
+  room and the seed starts as their runners finish. It holds the room only while the cap would fit with no runner
+  running: in `MemoryMax` and in the host's latest limit, beside the mirror, shells and running seeds. Otherwise
+  the room would hold every start on the host for a seed that cannot start, so the seed waits as a due one does.
 - **A due reseed that is not asked for does not hold warm runners back for nothing.** The profile's warm runners
   stop for it only if its seed would fit once they stop.
 
@@ -33,5 +35,7 @@ whenever its profile's slots were free, whatever the slice or the host had left.
 - On a host past its limit, a job stops another pool's warm runner only if that runner's reservation covers the
   deficit and the new runner; otherwise it waits with `HostMemory`.
 - A due reseed may wait a long time under steady load from other profiles. A requested one waits at most until
-  enough of their runners finish, and meanwhile the budget shows its room as the seed's part.
+  enough of their runners finish, and meanwhile the budget shows its room as the seed's part, while the host's
+  limit could fit its cap. While the host's other programs leave too little for that, it holds no room and waits
+  as a due one does, until they release memory; the profile's jobs wait with it.
 - A requested reseed is not kept across a restart, as before: it is asked for again.

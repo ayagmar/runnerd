@@ -2691,6 +2691,38 @@ async fn a_requested_reseed_that_waits_for_room_holds_it_against_other_profiles_
 }
 
 #[tokio::test]
+async fn a_requested_reseed_the_host_could_never_fit_holds_no_room_against_other_jobs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &sized("0G", "4G", "8G"));
+    engine.memory_max = Some(16 << 30);
+    // A 16G desktop whose other programs leave 7G: less its 2G margin, the slice's runners may hold 5G, under
+    // small's 8G cap even with nothing running.
+    handle.store.host_memory(api::HostMemory {
+        at: crate::time::now_ms() / 1000,
+        total: 16 << 30,
+        available: 7 << 30,
+        slice: 0,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+    });
+    engine.recover().await.unwrap();
+    engine.request_reseed("small").unwrap();
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    assert!(!engine.reseeds.contains_key("small"), "the seed waits");
+    assert!(
+        engine.reseed_requested.contains("small"),
+        "the reseed stays requested"
+    );
+    assert_eq!(registered(&github.calls()).len(), 1, "app's job starts");
+    engine.publish();
+    assert_eq!(handle.status.borrow().budget.seed_memory, []);
+}
+
+#[tokio::test]
 async fn a_running_mirror_keeps_its_memory_when_a_reload_lowers_it() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
