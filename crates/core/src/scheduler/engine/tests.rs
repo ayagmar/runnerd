@@ -2522,6 +2522,33 @@ fn idle_runner(github: &FakeGithub, docker: &FakeDocker) {
 }
 
 #[tokio::test]
+async fn a_queued_job_of_a_repository_a_reload_removed_closes_once_github_says_it_ran_elsewhere() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    // Too little memory for any runner: the job stays queued.
+    engine.memory_max = Some(1 << 30);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(5)];
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 5, JobState::Queued).await;
+
+    // A reload removes o/r, which recorded it; another machine's runner takes it.
+    let only_s = CONFIG.replace("name = \"o/r\"", "name = \"o/s\"");
+    engine.reload(Config::parse(&only_s).unwrap(), Some(1 << 30), None);
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = Vec::new();
+        let mut elsewhere = details(5, "completed", Some("success"));
+        elsewhere.runner_name = Some("another-machine".to_owned());
+        state.jobs.insert(5, elsewhere);
+    }
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 5, JobState::Elsewhere).await;
+}
+
+#[tokio::test]
 async fn a_reload_removes_the_idle_runners_of_a_repository_it_removed_or_moved() {
     let other_repository = CONFIG.replace("name = \"o/r\"", "name = \"o/x\"");
     let other_profile = CONFIG

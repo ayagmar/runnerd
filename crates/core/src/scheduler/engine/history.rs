@@ -211,8 +211,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .queued_jobs
             .iter()
             .filter(|(id, repository)| {
+                // A repository a reload removed lists nothing: GitHub says what became of its jobs.
                 !taken.contains(*id)
-                    && self.repositories.get(*repository).is_some_and(|state| {
+                    && self.repositories.get(*repository).is_none_or(|state| {
                         state.listed && !state.queued.iter().any(|job| job.id == **id)
                     })
             })
