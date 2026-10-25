@@ -201,12 +201,9 @@ struct Block {
     class: String,
 }
 
-/// What `admission` holds to `MemoryMax`, a block per profile, from the text itself: under caps, every slot of each
-/// profile at its cap; under measured, one runner of the largest profile. The mirror with either.
-fn blocks(text: &str, admission: AdmissionPolicy) -> Vec<Block> {
-    let Ok(config) = Config::parse(text) else {
-        return Vec::new();
-    };
+/// What `admission` holds to `MemoryMax`, a block per profile, from the editor's config: under caps, every slot of
+/// each profile at its cap; under measured, one runner of the largest profile. The mirror with either.
+fn blocks(config: &Config, admission: AdmissionPolicy) -> Vec<Block> {
     let profiles = config
         .profiles
         .iter()
@@ -242,9 +239,22 @@ fn blocks(text: &str, admission: AdmissionPolicy) -> Vec<Block> {
 
 /// The check's verdict, what its admission rule holds to `MemoryMax` and the budget that is, and its warnings.
 pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Markup {
-    let blocks = blocks(text, check.admission);
-    let caps = check.memory_caps.unwrap_or(0);
-    let needed = check.memory_needed.or(check.memory_caps).unwrap_or(0);
+    let parsed = Config::parse(text).ok();
+    // A daemon from before `memory_needed` sends neither it nor `admission`; the text says both.
+    let (admission, known) = match (check.memory_needed, &parsed) {
+        (Some(needed), _) => (check.admission, Some(needed)),
+        (None, Some(config)) => (
+            config.host.admission.policy(),
+            config.memory_needed().ok().map(|needed| needed.0),
+        ),
+        (None, None) => (check.admission, None),
+    };
+    // Without a total to hold to MemoryMax, as when the caps overflow, there is no budget to show.
+    let blocks = match (&parsed, known) {
+        (Some(config), Some(_)) => blocks(config, admission),
+        _ => Vec::new(),
+    };
+    let needed = known.unwrap_or(0);
     let over = check.memory_max.is_some_and(|max| needed > max);
     let whole = check.memory_max.unwrap_or(needed).max(needed);
     let class = if check.valid {
@@ -252,7 +262,7 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
     } else {
         "check-result invalid"
     };
-    let needed_name = match check.admission {
+    let needed_name = match admission {
         AdmissionPolicy::Caps => "Memory caps",
         AdmissionPolicy::Measured => "Largest runner + mirror",
     };
@@ -274,7 +284,7 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
             }
             // A valid config's message repeats the figures below it.
             @if !check.valid { p.check-message { (check.message) } }
-            @if check.memory_caps.is_some() {
+            @if known.is_some() {
                 dl.facts {
                     div { dt { (needed_name) } dd { (format::bytes(needed)) } }
                     div { dt { "MemoryMax" } dd { (check.memory_max.map_or("unlimited".to_owned(), format::bytes)) } }
@@ -285,10 +295,12 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
                         }
                     }
                 }
-                @if check.admission == AdmissionPolicy::Measured {
+                @if admission == AdmissionPolicy::Measured {
                     p.muted {
-                        "Admission is measured: runners reserve their predicted peaks, and slots only bound how many run at once. Every slot at its cap at once would take "
-                        (format::bytes(caps)) "."
+                        "Admission is measured: runners reserve their predicted peaks, and slots only bound how many run at once."
+                        @if let Some(caps) = check.memory_caps {
+                            " Every slot at its cap at once would take " (format::bytes(caps)) "."
+                        }
                     }
                 }
             }
