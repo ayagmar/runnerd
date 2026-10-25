@@ -7,8 +7,8 @@ use std::collections::BTreeMap;
 use maud::{Markup, html};
 use runnerd_core::api::{
     Activity, ActivityQuery, AdmissionPolicy, HostSample, HostSamples, Job, JobPage, JobQuery,
-    JobState, JobSummary, ProfileStatus, QueuedJob, RepositoryStatus, Sample, SampleSeries,
-    SlotStatus, Started, Status, WaitKind,
+    JobState, JobSummary, JobTitle, ProfileStatus, QueuedJob, RepositoryStatus, Sample,
+    SampleSeries, SlotStatus, Started, Status, WaitKind, cpus, in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -736,7 +736,7 @@ fn running_job(
             }
             div.cpu {
                 dt.visually-hidden { "CPU" }
-                (figure("cpu", last.map_or("–".to_owned(), |sample| format!("{} cores", format::cores(sample.cpu)))))
+                (figure("cpu", last.map_or("–".to_owned(), |sample| in_cores(sample.cpu))))
                 (sparkline(&cpu, u64::from(profile.cpus) * 1000, "cpu"))
             }
         }
@@ -799,12 +799,7 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
     let cpu_chart = TimeChart {
         title: format!(
             "CPU of {slice} over the last 30 minutes, sampled every {interval} s{}",
-            up_to(
-                status
-                    .budget
-                    .slice_cpus
-                    .map(|cpus| format!("{} CPUs", format::cores(cpus)))
-            )
+            up_to(status.budget.slice_cpus.map(cpus))
         ),
         start: 0,
         end: now,
@@ -817,7 +812,7 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
             area: true,
         }],
         limits: vec![],
-        value: |millicores| format!("{} cores", format::cores(millicores)),
+        value: in_cores,
         time: relative_clock,
         gap,
     };
@@ -839,7 +834,7 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
                 div.chart-card {
                     h3 {
                         "CPU"
-                        (reading(parts, "host-cpu-now", &overview.host.samples.last().map_or("–".to_owned(), |s| format!("{} cores", format::cores(s.cpu))), &format::cores(cpu_peak)))
+                        (reading(parts, "host-cpu-now", &overview.host.samples.last().map_or("–".to_owned(), |s| in_cores(s.cpu)), &format::cores_used(cpu_peak)))
                     }
                     (cpu_chart.render(cpu_top, parts))
                 }
@@ -1013,7 +1008,7 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
                             data-on:focusout=[enter.as_ref().map(|_| "$_slot = ''")] {
                             a href=(format!("/jobs/{}", job.id)) {
                                 (badge(job))
-                                (job_name(job.workflow.as_deref(), &job.name))
+                                (job_name(&job.title()))
                                 span.repo { (job.repository) }
                                 span.when { (time_ago(job.timeline.queued_at, overview.now)) }
                             }
@@ -1197,7 +1192,7 @@ fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
                         "–"
                     }
                 }
-                (job_name(job.workflow.as_deref(), &job.name))
+                (job_name(&job.title()))
                 span.repo {
                     (job.place(&overview.status))
                     @if let Some(branch) = &job.branch { " · " (branch) }
@@ -1222,11 +1217,11 @@ fn reason_class(kind: WaitKind) -> &'static str {
 }
 
 /// A job's name after its workflow's, which reads quieter: `CI / build`, as every client names a job.
-fn job_name(workflow: Option<&str>, name: &str) -> Markup {
+fn job_name(title: &JobTitle<'_>) -> Markup {
     html! {
         span.job-name {
-            @if let Some(workflow) = workflow { span.workflow { (workflow) " / " } }
-            (name)
+            @if let Some(workflow) = title.workflow { span.workflow { (workflow) " / " } }
+            (title.name)
         }
     }
 }

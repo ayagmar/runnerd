@@ -1739,6 +1739,54 @@ async fn a_running_jobs_stream_appends_new_log_lines_and_updates_its_charts() {
         "{update}"
     );
     assert!(update.contains("sampled peak 8G"), "{update}");
+    assert!(
+        update.contains("<dt>Memory peak over the job</dt><dd>8G</dd>"),
+        "the job's peak rises with the sample, as in the TUI: {update}"
+    );
+}
+
+#[tokio::test]
+async fn a_live_jobs_latest_runs_count_it_once_it_fails() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut stream = dashboard
+        .stream(&cookie, &format!("/live/jobs/{LEDGER_RUNNING}"))
+        .await;
+    let failed = |text: &str| -> (u32, u32) {
+        let at = text.rfind("<dt>Failed</dt><dd>").unwrap() + "<dt>Failed</dt><dd>".len();
+        let (failed, rest) = text[at..].split_once(" of ").unwrap();
+        let finished = &rest[..rest.find('<').unwrap()];
+        (failed.parse().unwrap(), finished.parse().unwrap())
+    };
+    let first = read_until(&mut stream, |text| text.contains("<dt>Failed</dt>")).await;
+    let (before, finished_before) = failed(&first);
+    let summary = {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        job.summary.state = JobState::Completed;
+        job.summary.conclusion = Some("failure".to_owned());
+        job.summary.timeline.finished_at = Some(NOW + 2);
+        job.summary.clone()
+    };
+    dashboard
+        .fake
+        .events
+        .send(EventEnvelope {
+            id: None,
+            at: NOW + 2,
+            event: Event::JobFinished { job: summary },
+        })
+        .unwrap();
+    let update = read_until(&mut stream, |text| text.contains("<dt>Failed</dt>")).await;
+    assert_eq!(
+        failed(&update),
+        (before + 1, finished_before + 1),
+        "the runs read when the page opened count the job as it ended: {update}"
+    );
 }
 
 #[tokio::test]

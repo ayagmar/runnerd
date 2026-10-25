@@ -8,11 +8,13 @@ use std::fmt::Write as _;
 use maud::{Markup, html};
 use runnerd_core::api::{
     BuildCacheCounts, ChartLine, ChartLineKind, Job, JobPage, JobQuery, JobState, JobSummary,
-    ProfileStatus, Sample, SampleSeries, Status, Step,
+    OutcomeKind, PhaseKind, ProfileStatus, Sample, SampleSeries, Status, in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
 
-use super::{Live, Parts, badge, digest, durations, outcome_class, page, profile_class, time_ago};
+use super::{
+    Live, Parts, badge, digest, outcome_class, outcome_kind_class, page, profile_class, time_ago,
+};
 use crate::chart::{Band, Base, Limit, Series, TimeChart, nice_top};
 use crate::format;
 
@@ -87,7 +89,9 @@ impl JobView {
         })
     }
 
+    /// A sample as it arrives: the charts take it, and the job's peaks rise to it while it runs.
     pub(crate) fn add_sample(&mut self, sample: Sample) {
+        self.job.observe(&sample);
         self.samples.samples.push(sample);
     }
 }
@@ -110,7 +114,7 @@ impl JobView {
 }
 
 /// The live regions, by id, in the order the page has them, with their parts.
-pub(crate) fn regions(view: &JobView) -> [(&'static str, Markup, Parts); 4] {
+pub(crate) fn regions(view: &JobView) -> [(&'static str, Markup, Parts); 5] {
     let region = |id, render: &dyn Fn(&Parts) -> Markup| {
         let parts = Parts::default();
         let markup = render(&parts);
@@ -121,6 +125,7 @@ pub(crate) fn regions(view: &JobView) -> [(&'static str, Markup, Parts); 4] {
         region("timeline", &|parts| timeline(view, parts)),
         region("steps", &|parts| steps(view, parts)),
         region("metrics", &|parts| metrics(view, parts)),
+        region("runs", &|_| runs(view)),
     ]
 }
 
@@ -128,12 +133,12 @@ pub(crate) fn regions(view: &JobView) -> [(&'static str, Markup, Parts); 4] {
 pub(crate) fn render(view: &JobView) -> Markup {
     let summary = &view.job.summary;
     let url = format!("/live/jobs/{}", summary.id);
-    let [head, timeline, steps, metrics] = regions(view);
+    let [head, timeline, steps, metrics, runs] = regions(view);
     let live = view.live().then(|| Live {
         url: &url,
         at: view.now,
         log: Some(view.log_from + view.log.len() as u64),
-        regions: [&head, &timeline, &steps, &metrics]
+        regions: [&head, &timeline, &steps, &metrics, &runs]
             .iter()
             .map(|(id, markup, _)| (*id, digest(&markup.0)))
             .collect(),
@@ -146,21 +151,11 @@ pub(crate) fn render(view: &JobView) -> Markup {
         @if let Some(admission) = &view.job.admission {
             p.muted.admission { (admission.line()) }
         }
-        (runs(view))
+        (runs.1)
         (record(view))
         (log(view))
     };
-    page(&title(summary), None, live.as_ref(), &main)
-}
-
-/// The page's title: `workflow / job`, as the terminal clients write a job, or the job's name alone; `job <id>`
-/// until the daemon knows its name.
-fn title(summary: &JobSummary) -> String {
-    match &summary.workflow {
-        Some(workflow) => format!("{workflow} / {}", summary.name),
-        None if summary.name.is_empty() => format!("job {}", summary.id),
-        None => summary.name.clone(),
-    }
+    page(&summary.title().to_string(), None, live.as_ref(), &main)
 }
 
 /// The title, outcome and where the job came from.
@@ -172,7 +167,7 @@ pub(crate) fn head(view: &JobView) -> Markup {
                 a href=(format!("/history?repository={}", summary.repository)) { (summary.repository) }
                 @if let Some(workflow) = &summary.workflow { " · " (workflow) }
             }
-            h1 { (summary.name) " " (badge(summary)) }
+            h1 { (summary.title().name) " " (badge(summary)) }
             // Waited, ran and the queued time are the timeline's.
             p.job-facts {
                 @if let Some(branch) = &summary.branch { code { (branch) } }
@@ -190,48 +185,19 @@ pub(crate) fn head(view: &JobView) -> Markup {
 
 /// The phases from queued to cleaned up, as one bar.
 pub(crate) fn timeline(view: &JobView, parts: &Parts) -> Markup {
-    let timeline = &view.job.summary.timeline;
+    let summary = &view.job.summary;
     let now = view.now;
-    let marks = [
-        ("Queued", Some(timeline.queued_at)),
-        ("Container started", timeline.container_started_at),
-        ("Job started", timeline.started_at),
-        ("Finished", timeline.finished_at),
-        ("Cleaned up", timeline.cleaned_at),
-    ];
-    let phases: Vec<(&str, &str, u64, Option<u64>)> = [
-        (
-            "Waiting for a runner",
-            "wait",
-            Some(timeline.queued_at),
-            timeline.runner_from(),
-        ),
-        (
-            "Runner starting",
-            "start",
-            timeline.runner_from(),
-            timeline.started_at,
-        ),
-        ("Running", "run", timeline.started_at, timeline.finished_at),
-        (
-            "Cleaning up",
-            "clean",
-            timeline.finished_at,
-            timeline.cleaned_at,
-        ),
-    ]
-    .into_iter()
-    .filter_map(|(label, class, from, to)| Some((label, class, from?, to)))
-    .collect();
+    let phases = summary.phases();
     let live = view.live();
     html! {
         section #timeline .timeline aria-labelledby="timeline-title" {
             h2 #timeline-title .visually-hidden { "Timeline" }
             // Named by the legend, whose figures are parts that change on their own.
             div.phases role="img" aria-labelledby="phase-legend" {
-                @for (_, class, from, to) in &phases {
+                @for phase in &phases {
                     // Each phase grows by its seconds; an ongoing one follows the page's clock.
-                    @let seconds = to.unwrap_or(now).saturating_sub(*from);
+                    @let (class, from, to) = (phase_class(phase.kind), phase.from, phase.to);
+                    @let seconds = phase.seconds(now);
                     @let follows = live && to.is_none();
                     @let share = format!("--share: {seconds}");
                     div class=(format!("phase {class}{}", if to.is_none() { " ongoing" } else { "" }))
@@ -240,14 +206,16 @@ pub(crate) fn timeline(view: &JobView, parts: &Parts) -> Markup {
                 }
             }
             ol #phase-legend .phase-legend {
-                @for (label, class, from, to) in &phases {
-                    li class=(*class) {
+                @for phase in &phases {
+                    @let class = phase_class(phase.kind);
+                    li class=(class) {
                         span.swatch aria-hidden="true" {}
-                        span { (label) }
+                        span { (phase.kind.label()) }
                         @let id = format!("phase-{class}-time");
+                        @let ongoing = phase.to.is_none();
                         (parts.html(&id, html! {
-                            span #(id) class=(if to.is_none() { "figure ongoing" } else { "figure" }) {
-                                (format::duration(to.unwrap_or(now).saturating_sub(*from))) @if to.is_none() { "…" }
+                            span #(id) class=(if ongoing { "figure ongoing" } else { "figure" }) {
+                                (format::duration(phase.seconds(now))) @if ongoing { "…" }
                             }
                         }))
                     }
@@ -256,8 +224,8 @@ pub(crate) fn timeline(view: &JobView, parts: &Parts) -> Markup {
             details.marks {
                 summary { "Exact times" }
                 dl {
-                    @for (label, at) in marks {
-                        @if let Some(at) = at { div { dt { (label) } dd { (format::timestamp(at)) } } }
+                    @for milestone in summary.timeline.milestones() {
+                        div { dt { (milestone.label) } dd { (format::timestamp(milestone.at)) } }
                     }
                 }
             }
@@ -265,14 +233,13 @@ pub(crate) fn timeline(view: &JobView, parts: &Parts) -> Markup {
     }
 }
 
-fn step_class(step: &Step) -> &'static str {
-    match (step.status.as_str(), step.conclusion.as_deref()) {
-        ("in_progress", _) => "running",
-        ("completed", Some("success")) => "success",
-        ("completed", Some("failure" | "timed_out")) => "failure",
-        ("completed", Some("skipped")) => "skipped",
-        ("completed", _) => "neutral",
-        _ => "pending",
+/// The CSS class of a phase of the timeline.
+fn phase_class(kind: PhaseKind) -> &'static str {
+    match kind {
+        PhaseKind::Waiting => "wait",
+        PhaseKind::Starting => "start",
+        PhaseKind::Running => "run",
+        PhaseKind::CleaningUp => "clean",
     }
 }
 
@@ -302,9 +269,10 @@ pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
                     style=[span.map(|span| format!("--span: {span}")).map(|style| if live { parts.clocked(style) } else { style })]
                     data-style:--span=[start.filter(|_| live).map(follow)] {
                     @for (index, step) in job.steps.iter().enumerate() {
-                        @let class = step_class(step);
-                        @let seconds = step.started_at.map(|from| step.completed_at.unwrap_or(now).saturating_sub(from));
-                        @let usage = step.started_at.and_then(|from| usage(&view.samples.samples, from, step.completed_at.unwrap_or(now)));
+                        @let outcome = step.outcome();
+                        @let class = outcome_kind_class(outcome.kind);
+                        @let seconds = step.took(now);
+                        @let usage = step.started_at.and_then(|from| view.samples.usage_between(from, from + seconds.unwrap_or(0)));
                         @let number = index + 1;
                         @let enter = format!("$_step = {number}");
                         li class=(class) tabindex=[usage.is_some().then_some("0")]
@@ -317,15 +285,15 @@ pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
                                 (step.name)
                                 @if let Some(usage) = &usage {
                                     @let id = format!("step-{number}-usage");
-                                    (parts.html(&id, html! { span.visually-hidden #(id) { ", " (usage.describe()) } }))
+                                    (parts.html(&id, html! { span.visually-hidden #(id) { ", " (usage.description()) } }))
                                 }
                             }
                             @let id = format!("step-{number}-time");
                             (parts.html(&id, html! {
                                 span.step-time #(id) {
-                                    @match (seconds, class) {
-                                        (_, "skipped") => "skipped",
-                                        (Some(seconds), "running") => { (format::duration(seconds)) "…" },
+                                    @match (seconds, outcome.kind) {
+                                        (_, OutcomeKind::Ended) => (outcome.label),
+                                        (Some(seconds), OutcomeKind::Running) => { (format::duration(seconds)) "…" },
                                         (Some(seconds), _) => { (format::duration(seconds)) },
                                         (None, _) => "–",
                                     }
@@ -333,7 +301,7 @@ pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
                             }))
                             span.step-track aria-hidden="true" {
                                 @if let (Some(start), Some(span), Some(from)) = (start, span, step.started_at) {
-                                    @let to = step.completed_at.unwrap_or(now).max(from);
+                                    @let to = from + seconds.unwrap_or(0);
                                     @let left = from.saturating_sub(start);
                                     @let right = to.saturating_sub(start);
                                     @let follows = live && step.completed_at.is_none();
@@ -345,7 +313,7 @@ pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
                                     @if let Some(usage) = &usage {
                                         @let id = format!("step-{number}-note");
                                         (parts.html(&id, html! {
-                                            span #(id) class=(if left + right > span { "step-usage start" } else { "step-usage end" }) { (usage.describe()) }
+                                            span #(id) class=(if left + right > span { "step-usage start" } else { "step-usage end" }) { (usage.description()) }
                                         }))
                                     }
                                 }
@@ -419,7 +387,7 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
             area: true,
         }],
         limits: cpu_line,
-        value: |millicores| format!("{} cores", format::cores(millicores)),
+        value: in_cores,
         time,
         gap,
     };
@@ -441,7 +409,7 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
                         (memory.render_with(nice_top(memory_peak.max(memory_limit), Base::Binary), &bands.memory, parts))
                     }
                     div.chart-card {
-                        h3 { "CPU" (parts.html("metrics-cpu-peak", html! { span.reading #metrics-cpu-peak { "sampled peak " (format::cores(cpu_peak)) " cores" } })) }
+                        h3 { "CPU" (parts.html("metrics-cpu-peak", html! { span.reading #metrics-cpu-peak { "sampled peak " (in_cores(cpu_peak)) } })) }
                         (cpu.render_with(nice_top(cpu_peak.max(cpu_limit), Base::Decimal), &bands.cpu, parts))
                     }
                 }
@@ -451,8 +419,8 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
                 // samples left.
                 div { dt { "Memory peak over the job" } dd { (optional(metrics.memory_peak, format::bytes)) } }
                 div { dt { "Average memory" } dd { (optional(metrics.memory_average, format::bytes)) } }
-                div { dt { "CPU time" } dd { (optional(metrics.cpu_time.map(|ms| ms / 1000), format::duration)) } }
-                div { dt { "Average CPU" } dd { (optional(metrics.cpu_average, |m| format!("{} cores", format::cores(m)))) } }
+                div { dt { "CPU time" } dd { (optional(metrics.cpu_time, format::cpu_time)) } }
+                div { dt { "Average CPU" } dd { (optional(metrics.cpu_average, in_cores)) } }
                 div { dt { "Received" } dd { (optional(metrics.network_received, format::bytes)) } }
                 div { dt { "Sent" } dd { (optional(metrics.network_sent, format::bytes)) } }
                 div { dt { "From the mirror" } dd { (format::bytes(metrics.mirror_bytes)) } }
@@ -484,47 +452,17 @@ fn build_cache(cache: &BuildCacheCounts) -> Markup {
 }
 
 /// The same job's latest runs, oldest first: a column each, its wait under its run time on one scale, and its
-/// memory peak under it against the largest; this run is outlined. Each column opens its run.
+/// memory peak under it against the largest; this run is outlined, as it is now. Each column opens its run. A live
+/// region: as this run ends its column, the medians and the failures follow.
 fn runs(view: &JobView) -> Markup {
-    let runs = &view.runs;
+    let compared = view.job.compare(&view.runs, view.now);
+    let runs = &compared.runs;
     let longest = runs
         .iter()
-        .map(|run| {
-            let times = durations(run, view.now);
-            times.waited.unwrap_or(0) + times.ran.unwrap_or(0)
-        })
+        .map(|run| run.waited(view.now).unwrap_or(0) + run.ran(view.now).unwrap_or(0))
         .max()
         .unwrap_or(0);
-    let peak = runs
-        .iter()
-        .filter_map(|run| run.metrics.memory_peak)
-        .max()
-        .unwrap_or(0);
-    let finished: Vec<&JobSummary> = runs
-        .iter()
-        .filter(|run| run.state.is_final() && run.timeline.started_at.is_some())
-        .collect();
-    let median = |values: Vec<u64>| {
-        let mut values = values;
-        values.sort_unstable();
-        values.get(values.len().saturating_sub(1) / 2).copied()
-    };
-    let ran = median(
-        finished
-            .iter()
-            .filter_map(|run| durations(run, view.now).ran)
-            .collect(),
-    );
-    let waited = median(
-        finished
-            .iter()
-            .filter_map(|run| durations(run, view.now).waited)
-            .collect(),
-    );
-    let failed = finished
-        .iter()
-        .filter(|run| outcome_class(run) == "failure")
-        .count();
+    let peak = compared.largest_peak.unwrap_or(0);
     let ratio = |part: u64, whole: u64| format!("{:.3}", crate::chart::ratio(part, whole));
     html! {
         @if runs.len() > 1 {
@@ -534,9 +472,9 @@ fn runs(view: &JobView) -> Markup {
                     a href=(format!("/history?repository={}", view.job.summary.repository)) { "History of " (view.job.summary.repository) }
                 }
                 dl.headline {
-                    div { dt { "Median run" } dd { (ran.map_or("–".to_owned(), format::duration)) } }
-                    div { dt { "Median wait" } dd { (waited.map_or("–".to_owned(), format::duration)) } }
-                    div { dt { "Failed" } dd { (failed) " of " (finished.len()) } }
+                    div { dt { "Median run" } dd { (compared.median_ran.map_or("–".to_owned(), format::duration)) } }
+                    div { dt { "Median wait" } dd { (compared.median_waited.map_or("–".to_owned(), format::duration)) } }
+                    div { dt { "Failed" } dd { (compared.failed) " of " (compared.finished) } }
                     div { dt { "Largest memory peak" } dd { (if peak > 0 { format::bytes(peak) } else { "–".to_owned() }) } }
                 }
                 p.run-scale aria-hidden="true" { "Wait and run, up to " (format::duration(longest)) }
@@ -544,9 +482,8 @@ fn runs(view: &JobView) -> Markup {
                 div.run-scroll {
                     ol.run-bars style=(format!("--runs: {}", runs.len())) {
                         @for run in runs {
-                            @let times = durations(run, view.now);
-                            @let waited = times.waited.unwrap_or(0);
-                            @let ran = times.ran.unwrap_or(0);
+                            @let waited = run.waited(view.now).unwrap_or(0);
+                            @let ran = run.ran(view.now).unwrap_or(0);
                             @let this = run.id == view.job.summary.id;
                             @let label = run_label(run, view.now);
                             li class=(if this { "this" } else { "" }) {
@@ -571,20 +508,22 @@ fn runs(view: &JobView) -> Markup {
                     li.peak { span.swatch {} "memory peak" }
                 }
             }
+        } @else {
+            // The region's place, for when a second run comes.
+            section #runs hidden {}
         }
     }
 }
 
 /// A run's column, in words: `Oct 22 14:02 UTC, success: waited 12s, ran 7m 34s, memory peak 4.1G`.
 fn run_label(run: &JobSummary, now: u64) -> String {
-    let times = durations(run, now);
     let mut label = format!(
         "{} {} UTC, {}",
         format::short_date(run.timeline.queued_at),
         format::clock(run.timeline.queued_at),
-        super::outcome_label(run)
+        run.outcome().label
     );
-    match (times.waited, times.ran) {
+    match (run.waited(now), run.ran(now)) {
         (Some(waited), Some(ran)) => {
             let verb = if run.state == JobState::Running {
                 "running for"
@@ -598,44 +537,18 @@ fn run_label(run: &JobSummary, now: u64) -> String {
                 format::duration(ran)
             );
         }
-        _ => label.push_str(": did not start"),
+        (Some(waited), None) if run.timeline.started_at.is_some() => {
+            let _ = write!(label, ": waited {}", format::duration(waited));
+        }
+        (Some(waited), None) => {
+            let _ = write!(label, ": waiting for {}", format::duration(waited));
+        }
+        (None, _) => label.push_str(": did not start"),
     }
     if let Some(peak) = run.metrics.memory_peak {
         let _ = write!(label, ", memory peak {}", format::bytes(peak));
     }
     label
-}
-
-/// The dashed memory and CPU lines of the job's charts, with their labels.
-/// What a job used over a stretch of its run, from the samples in it.
-struct Usage {
-    memory_peak: u64,
-    cpu_average: u64,
-}
-
-impl Usage {
-    fn describe(&self) -> String {
-        format!(
-            "peak {}, average {} cores",
-            format::bytes(self.memory_peak),
-            format::cores(self.cpu_average)
-        )
-    }
-}
-
-/// The samples taken from `from` to `to`; none when the stretch fell between two samples.
-fn usage(samples: &[Sample], from: u64, to: u64) -> Option<Usage> {
-    let inside: Vec<&Sample> = samples
-        .iter()
-        .filter(|sample| (from..=to).contains(&sample.at))
-        .collect();
-    let count = u64::try_from(inside.len())
-        .ok()
-        .filter(|count| *count > 0)?;
-    Some(Usage {
-        memory_peak: inside.iter().map(|sample| sample.memory).max()?,
-        cpu_average: inside.iter().map(|sample| sample.cpu).sum::<u64>() / count,
-    })
 }
 
 /// Each step's stretch over the memory and CPU charts, labelled with what it used.
@@ -653,11 +566,8 @@ fn step_bands(view: &JobView) -> StepBands {
         let Some(from) = step.started_at else {
             continue;
         };
-        let Some(usage) = usage(
-            &view.samples.samples,
-            from,
-            step.completed_at.unwrap_or(view.now),
-        ) else {
+        let end = from + step.took(view.now).unwrap_or(0);
+        let Some(usage) = view.samples.usage_between(from, end) else {
             continue;
         };
         let to = step.completed_at;
@@ -666,13 +576,13 @@ fn step_bands(view: &JobView) -> StepBands {
             from,
             to,
             shown: shown.clone(),
-            label: format!("peak {}", format::bytes(usage.memory_peak)),
+            label: usage.memory(),
         });
         bands.cpu.push(Band {
             from,
             to,
             shown,
-            label: format!("average {} cores", format::cores(usage.cpu_average)),
+            label: usage.cpu(),
         });
     }
     bands

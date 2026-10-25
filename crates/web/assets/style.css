@@ -1581,8 +1581,8 @@ dl.health-figures {
 .step-list .failure .step-name { color: var(--failure-ink); font-weight: 600; }
 .step-list .running { --profile: var(--cpu); }
 .step-list .running .step-name { font-weight: 600; }
-.step-list .skipped,
-.step-list .pending { color: var(--muted); }
+.step-list .neutral,
+.step-list .queued { color: var(--muted); }
 
 .step-list .running .step-bar {
   animation: beat 1.6s var(--ease) infinite;

@@ -312,8 +312,8 @@ fn a_job_moves_through_its_slot_its_steps_and_into_the_latest_jobs() {
         "1m 28s…",
         "Complete job",
         "–",
-        "waiting for a runner 4s",
-        "runner starting 5s",
+        "Waiting for a runner 4s",
+        "Runner starting 5s",
         "capped at 9G and 8 CPUs",
         "##[group]Unit tests",
     ] {
@@ -737,7 +737,7 @@ fn the_queue_lists_each_waiting_job_oldest_first_with_why_and_opens_and_pauses_l
         "{job}"
     );
     assert!(
-        job.contains("waiting for a runner 59s  The node slot is busy"),
+        job.contains("Waiting for a runner 59s…  The node slot is busy"),
         "its page says why it waits: {job}"
     );
     assert!(
@@ -1433,7 +1433,7 @@ fn how_long_ago_a_job_finished_reads_in_full_at_every_width() {
             "the age reads in full at {width}: {overview}"
         );
         assert!(
-            overview.contains("5s ago"),
+            overview.contains("just now"),
             "the age reads in full at {width}: {overview}"
         );
     }
@@ -1795,7 +1795,7 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
     for expected in [
         "0/3 running",
         "1 waiting, oldest 59s",
-        "24 h: wait p95 5m 0s",
+        "24 h: wait p95 5m 00s",
         "2 failed of 30 finished",
     ] {
         assert!(health.contains(expected), "{expected}: {health}");
@@ -1805,7 +1805,7 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
     let small = screen(&app, 80, 24, false);
     let health = small.lines().nth(1).unwrap();
     assert!(
-        health.contains("24 h: wait p95 5m 0s") && health.contains("2 failed"),
+        health.contains("24 h: wait p95 5m 00s") && health.contains("2 failed"),
         "at 80 columns the figures stay and the details go whole: {health}"
     );
     assert!(!health.contains('…'), "nothing cut mid-figure: {health}");
@@ -2053,7 +2053,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
             "the rules, wrapped rather than cut: {shown}"
         );
         let jvm = rows_with(&shown, "■ jvm")[0];
-        assert!(jvm.contains("No change for 2h 0m"), "{shown}");
+        assert!(jvm.contains("No change for 2h 00m"), "{shown}");
         let node = rows_with(&shown, "■ node")[0];
         assert!(
             node.contains("Next look, within 5 minutes: memory 7G → 5.25G, slots 2"),

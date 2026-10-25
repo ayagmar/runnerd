@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
-use runnerd_core::api::{JobState, JobSummary, Status};
+use runnerd_core::api::{self, JobSummary, Status};
 
 use crate::assets;
 use crate::format;
@@ -276,65 +276,31 @@ pub(crate) fn profile_class(status: &Status, profile: &str) -> String {
     }
 }
 
-/// What a job's outcome is called, and its CSS class.
-struct Outcome {
-    label: &'static str,
-    class: &'static str,
+/// The CSS class of an outcome's kind: `success`, `failure`, `running`, `queued` or `neutral`.
+pub(crate) fn outcome_kind_class(kind: api::OutcomeKind) -> &'static str {
+    match kind {
+        api::OutcomeKind::Succeeded => "success",
+        api::OutcomeKind::Failed => "failure",
+        api::OutcomeKind::Running => "running",
+        api::OutcomeKind::Waiting => "queued",
+        api::OutcomeKind::Ended => "neutral",
+    }
 }
 
-fn outcome(job: &JobSummary) -> Outcome {
-    let (label, class) = match (job.state, job.conclusion.as_deref()) {
-        (JobState::Queued, _) => ("queued", "queued"),
-        (JobState::Running, _) => ("running", "running"),
-        (JobState::Lost, _) => ("lost", "failure"),
-        (JobState::Elsewhere, _) => ("elsewhere", "neutral"),
-        (JobState::Completed, Some("success")) => ("success", "success"),
-        (JobState::Completed, Some("failure")) => ("failure", "failure"),
-        (JobState::Completed, Some("timed_out")) => ("timed out", "failure"),
-        (JobState::Completed, Some("cancelled")) => ("cancelled", "neutral"),
-        (JobState::Completed, Some("skipped")) => ("skipped", "neutral"),
-        (JobState::Completed, _) => ("completed", "neutral"),
-    };
-    Outcome { label, class }
-}
-
-/// A job's outcome in a word, as its badge says it.
-pub(crate) fn outcome_label(job: &JobSummary) -> &'static str {
-    outcome(job).label
-}
-
-/// The CSS class of a job's outcome: `success`, `failure`, `running`, `queued` or `neutral`.
+/// The CSS class of a job's outcome.
 pub(crate) fn outcome_class(job: &JobSummary) -> &'static str {
-    outcome(job).class
+    outcome_kind_class(job.outcome().kind)
 }
 
 /// A job's outcome as a badge.
 pub(crate) fn badge(job: &JobSummary) -> Markup {
-    let Outcome { label, class } = outcome(job);
-    html! { span class=(format!("badge {class}")) { (label) } }
+    let outcome = job.outcome();
+    html! { span class=(format!("badge {}", outcome_kind_class(outcome.kind))) { (outcome.label) } }
 }
 
 /// A time as text with its exact value in a tooltip.
 pub(crate) fn time_ago(at: u64, now: u64) -> Markup {
     html! { time datetime=(format::rfc3339(at)) title=(format::timestamp(at)) { (format::ago(at, now)) } }
-}
-
-/// Seconds a job waited for a runner, and ran; none for a job that has not started.
-pub(crate) struct Durations {
-    pub(crate) waited: Option<u64>,
-    pub(crate) ran: Option<u64>,
-}
-
-/// How long a job waited and ran.
-pub(crate) fn durations(job: &JobSummary, now: u64) -> Durations {
-    let timeline = &job.timeline;
-    let waited = timeline
-        .started_at
-        .map(|started| started.saturating_sub(timeline.queued_at));
-    let ran = timeline
-        .started_at
-        .map(|started| timeline.finished_at.unwrap_or(now).saturating_sub(started));
-    Durations { waited, ran }
 }
 
 /// Text as a JavaScript string literal, for a Datastar expression: `it's` → `'it\'s'`.
