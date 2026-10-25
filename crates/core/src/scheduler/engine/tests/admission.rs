@@ -1141,6 +1141,12 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
         reason.starts_with("The host is short of memory"),
         "{reason}"
     );
+    // The runners hold nothing yet, so all that is not available is held by the host's other programs.
+    let outside = crate::config::ByteSize(64 * G - (4 * G + 2 * 1280 * M + 100 * M));
+    assert!(
+        reason.ends_with(&format!("programs outside CI hold {outside}")),
+        "{reason}"
+    );
 
     // Room for both again by the 4G margin alone: at the edge, so they wait until the host has the larger margin.
     tokio::time::sleep(Duration::from_millis(20)).await;
@@ -1237,8 +1243,8 @@ async fn nothing_starts_while_the_host_stalls_short_of_memory() {
     let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
     slice_at(&handle.store, 0);
     // 7.5G available is under twice the 4G margin, and every runnable task waited for memory 6% of the last 10 s:
-    // nothing starts, though even the larger margin leaves room for one.
-    host_at(&handle.store, 0, 7 * G + 512 * M, 600);
+    // nothing starts, though even the larger margin leaves room for one. The runners hold 10G of the rest.
+    host_at(&handle.store, 10 * G, 7 * G + 512 * M, 600);
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 0, "nothing starts");
     engine.publish();
@@ -1251,6 +1257,12 @@ async fn nothing_starts_while_the_host_stalls_short_of_memory() {
         let job = status.queued.last().unwrap();
         let reason = job.waiting.as_ref().unwrap().reason(job, &status, 0);
         assert!(reason.contains("stall"), "{reason}");
+        // 64G less the 7.5G available and the runners' 10G: the runners' memory is not the other programs'.
+        let outside = crate::config::ByteSize(64 * G - 7 * G - 512 * M - 10 * G);
+        assert!(
+            reason.ends_with(&format!("programs outside CI hold {outside}")),
+            "{reason}"
+        );
     }
     // 3%: under where starts stop, over where they resume.
     host_at(&handle.store, 0, 7 * G + 512 * M, 300);

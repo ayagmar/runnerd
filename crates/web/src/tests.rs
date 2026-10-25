@@ -995,6 +995,11 @@ async fn the_health_figures_count_the_24_hours_up_to_now_by_when_jobs_started_an
         "one of the two jobs that ended in the day failed: {failed}"
     );
     assert!(
+        health.contains(r#"<div class="failing"><dt>Failed, 24 h"#)
+            && failed.contains("1 by their runner"),
+        "a job lost with its runner turns the figure red: {failed}"
+    );
+    assert!(
         health.contains("2 jobs started"),
         "the job queued days ago counts where it started: {health}"
     );
@@ -1172,6 +1177,34 @@ async fn profiles_whose_names_differ_only_in_punctuation_keep_their_own_slots() 
             "the block for {id} points at its own card"
         );
     }
+}
+
+#[tokio::test]
+async fn a_job_whose_own_steps_failed_does_not_turn_the_failed_figure_red() {
+    use runnerd_core::api::JobState;
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let now = crate::now();
+        let mut failed = fixtures.jobs[0].clone();
+        failed.summary.state = JobState::Completed;
+        failed.summary.conclusion = Some("failure".to_owned());
+        failed.summary.timeline.queued_at = now - 600;
+        failed.summary.timeline.started_at = Some(now - 590);
+        failed.summary.timeline.finished_at = Some(now - 60);
+        fixtures.jobs = vec![failed];
+    }
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let health = &body[body.find(r#"id="health""#).unwrap()..body.find(r#"id="queue""#).unwrap()];
+    assert!(
+        health.contains(r#"Failed, 24 h</dt><dd><span class="figure-main">1</span>"#),
+        "the failure counts: {health}"
+    );
+    assert!(
+        !health.contains(r#"class="failing""#) && !health.contains("by their runner"),
+        "a failing test is the repository's, not runnerd's: {health}"
+    );
 }
 
 #[tokio::test]

@@ -568,7 +568,7 @@ fn health_items(app: &App, now: u64, theme: Theme) -> Vec<(u8, Option<Vec<Span<'
                 sep(),
                 Span::styled(
                     day.failed.to_string(),
-                    if day.failed > 0 {
+                    if day.runner_failed > 0 {
                         theme.tone(Tone::Bad)
                     } else {
                         bold()

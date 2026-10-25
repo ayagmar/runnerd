@@ -321,6 +321,16 @@ pub struct HostMemory {
     pub full: Option<Pressure>,
 }
 
+impl HostMemory {
+    /// What the host holds outside the slice's runners, in bytes: its other programs, tmpfs and the kernel, without
+    /// page cache it can drop.
+    pub fn outside(&self) -> u64 {
+        self.total
+            .saturating_sub(self.available)
+            .saturating_sub(self.slice)
+    }
+}
+
 /// One line of a pressure stall file, in hundredths of a percent: 250 is 2.5% of the time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pressure {
@@ -378,6 +388,10 @@ pub struct Activity {
     pub finished: u64,
     /// Of those, the ones that failed, timed out or were lost, as `GET /v1/stats` counts failures.
     pub failed: u64,
+    /// Of the failed, the ones their runner failed rather than their own steps: lost with their runner, or failed
+    /// after the kernel killed a process of theirs for memory at their cap.
+    #[serde(default)]
+    pub runner_failed: u64,
 }
 
 impl Activity {

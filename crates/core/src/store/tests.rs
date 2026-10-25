@@ -226,6 +226,57 @@ async fn stats_count_a_lost_job_without_a_conclusion_as_failed() {
     assert_eq!(counts, [(1, 0, 1, 0)]);
 }
 
+/// Whether the kernel killed a process in a runner's container for memory.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Oom {
+    Killed,
+    No,
+}
+
+/// Job `id`, queued 10 s before its runner `runner` took it 200 s into the window from `since`, completed with
+/// `conclusion` 300 s into it.
+fn completed_in_window(
+    store: &Store,
+    since: u64,
+    id: u64,
+    runner: &str,
+    conclusion: &str,
+    oom: Oom,
+) {
+    let ms = |secs: u64| secs * 1000;
+    store.queued(
+        "o/r",
+        &QueuedJob {
+            created_at: ms(since + 190),
+            ..queued(id)
+        },
+    );
+    store.runner_started(self::runner(runner, ms(since)));
+    store.claimed(id, 10, runner, ms(since + 200));
+    if oom == Oom::Killed {
+        store.runner_oom_killed(runner);
+    }
+    store.details(crate::github::JobDetails {
+        id,
+        run_id: 10,
+        run_attempt: 1,
+        name: format!("job {id}"),
+        workflow_name: None,
+        head_branch: None,
+        html_url: None,
+        labels: Vec::new(),
+        created_at: None,
+        status: "completed".to_owned(),
+        conclusion: Some(conclusion.to_owned()),
+        started_at: None,
+        // `since` + 300 s, for the `since` of the test below.
+        completed_at: Some("1970-01-11T00:05:00Z".to_owned()),
+        runner_name: Some(runner.to_owned()),
+        steps: Vec::new(),
+    });
+    store.runner_removed(runner, ms(since + 310));
+}
+
 #[tokio::test]
 async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_it_was_queued() {
     let dir = TestDir::new("store");
@@ -265,28 +316,10 @@ async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_
     store.claimed(3, 10, "r", ms(since - 3600));
     store.lost(3, ms(since - 1));
     // Succeeded in the window: finished, not failed.
-    store.queued("o/r", &queued(4));
-    store.runner_started(runner("r4", ms(since)));
-    store.claimed(4, 10, "r4", ms(since + 200));
-    store.details(crate::github::JobDetails {
-        id: 4,
-        run_id: 10,
-        run_attempt: 1,
-        name: "job 4".to_owned(),
-        workflow_name: None,
-        head_branch: None,
-        html_url: None,
-        labels: Vec::new(),
-        created_at: None,
-        status: "completed".to_owned(),
-        conclusion: Some("success".to_owned()),
-        started_at: None,
-        // `since` + 300 s.
-        completed_at: Some("1970-01-11T00:05:00Z".to_owned()),
-        runner_name: Some("r4".to_owned()),
-        steps: Vec::new(),
-    });
-    store.runner_removed("r4", ms(since + 310));
+    completed_in_window(&store, since, 4, "r4", "success", Oom::No);
+    // Failed in the window, one after the kernel killed a process of its for memory: only that one is its runner's.
+    completed_in_window(&store, since, 5, "r5", "failure", Oom::Killed);
+    completed_in_window(&store, since, 6, "r6", "failure", Oom::No);
     // A busy day: more jobs than a page of `GET /v1/jobs` holds, each queued 10 s before it started.
     for id in 100..700 {
         store.queued(
@@ -300,7 +333,7 @@ async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_
     }
     store.flush().await;
     let activity = store.activity(since, since + day).await.unwrap();
-    assert_eq!(activity.started.len(), 602);
+    assert_eq!(activity.started.len(), 604);
     assert_eq!(
         activity.started[0],
         Started {
@@ -312,7 +345,11 @@ async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_
         activity.started[2..].iter().all(|job| job.waited == 10),
         "each of the busy day's jobs waited 10 s"
     );
-    assert_eq!((activity.finished, activity.failed), (3, 2));
+    assert_eq!(
+        (activity.finished, activity.failed, activity.runner_failed),
+        (5, 4, 3),
+        "the two lost jobs and the one killed for memory are their runners' failures"
+    );
 }
 
 #[tokio::test]

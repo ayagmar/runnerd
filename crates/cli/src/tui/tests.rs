@@ -390,6 +390,39 @@ fn every_pane_fits_a_terminal_of_80_by_24() {
 }
 
 #[test]
+fn the_failed_figure_is_red_only_for_failures_of_the_runner() {
+    // The colour of the count's cell in "2 failed" on the health line.
+    let colour_of_failed = |runner_failed| {
+        let mut app = app();
+        app.activity = Some(runnerd_core::api::Activity {
+            runner_failed,
+            ..day()
+        });
+        let mut terminal = Terminal::new(TestBackend::new(160, 40)).unwrap();
+        terminal
+            .draw(|frame| draw(frame, &app, NOW, Theme { colour: true }))
+            .unwrap();
+        let buffer = terminal.backend().buffer();
+        let row: Vec<&str> = (0..160).map(|x| buffer[(x, 1)].symbol()).collect();
+        let x = row
+            .windows(8)
+            .position(|cells| cells.concat() == "2 failed")
+            .unwrap();
+        buffer[(u16::try_from(x).unwrap(), 1)].fg
+    };
+    assert_ne!(
+        colour_of_failed(0),
+        Color::LightRed,
+        "failing tests are the repository's"
+    );
+    assert_eq!(
+        colour_of_failed(1),
+        Color::LightRed,
+        "a job lost with its runner"
+    );
+}
+
+#[test]
 fn without_colour_nothing_is_coloured() {
     let mut app = app();
     running_job(&mut app);
@@ -1653,6 +1686,7 @@ fn day() -> runnerd_core::api::Activity {
         started: vec![started(200, 10), started(600, 20), started(900, 300)],
         finished: 30,
         failed: 2,
+        runner_failed: 0,
     }
 }
 

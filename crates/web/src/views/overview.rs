@@ -71,6 +71,7 @@ impl Overview {
                 started: Vec::new(),
                 finished: 0,
                 failed: 0,
+                runner_failed: 0,
             },
         };
         overview.reload_running(daemon).await?;
@@ -1034,9 +1035,11 @@ struct Health<'overview> {
     warm: usize,
     /// When each job that started in the last day did, and how long it waited for its runner, oldest first.
     waits: &'overview [Started],
-    /// Jobs that finished in the last day, and of those the ones that failed or were lost.
+    /// Jobs that finished in the last day, of those the ones that failed or were lost, and of those the ones their
+    /// runner failed.
     finished: u64,
     failed: u64,
+    runner_failed: u64,
 }
 
 impl<'overview> Health<'overview> {
@@ -1068,6 +1071,7 @@ impl<'overview> Health<'overview> {
             waits: &overview.day.started,
             finished: overview.day.finished,
             failed: overview.day.failed,
+            runner_failed: overview.day.runner_failed,
         }
     }
 }
@@ -1112,10 +1116,17 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                     dd.figure-note { (health.waits.len()) " job" @if health.waits.len() != 1 { "s" } " started" }
                     (wait_hours(&overview.day))
                 }
-                div class=(if health.failed > 0 { "failing" } else { "" }) {
+                // Red only for the failures runnerd may be to blame for; a job's own failing steps are its repository's.
+                div class=(if health.runner_failed > 0 { "failing" } else { "" }) {
                     dt { "Failed, 24 h" }
                     dd { span.figure-main { (health.failed) } }
-                    dd.figure-note { "of " (health.finished) " finished; " a href="/history?outcome=failure" { "failures" } }
+                    dd.figure-note {
+                        "of " (health.finished) " finished; "
+                        @if health.runner_failed > 0 {
+                            (health.runner_failed) " by their runner; "
+                        }
+                        a href="/history?outcome=failure" { "failures" }
+                    }
                 }
             }
             @if overview.status.shutting_down {
