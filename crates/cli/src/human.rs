@@ -352,18 +352,22 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
     out.push('\n');
     let mut repositories =
         Table::new(&["REPOSITORY", "PROFILE", "STATE", "QUEUED", "LABELS"]).right(&[3]);
+    // A row per pool; the repository's name and state on its first.
     for repository in &status.repositories {
-        repositories.row(vec![
-            plain(&repository.name),
-            plain(&repository.profile),
-            if repository.paused {
-                cell("paused", Tone::Busy)
-            } else {
-                cell("active", Tone::Good)
-            },
-            plain(repository.queued_jobs.to_string()),
-            cell(repository.labels.join(","), Tone::Dim),
-        ]);
+        for (at, pool) in repository.listed_pools().iter().enumerate() {
+            let first = at == 0;
+            repositories.row(vec![
+                plain(if first { repository.name.as_str() } else { "" }),
+                plain(&pool.profile),
+                match (first, repository.paused) {
+                    (false, _) => plain(""),
+                    (true, true) => cell("paused", Tone::Busy),
+                    (true, false) => cell("active", Tone::Good),
+                },
+                plain(pool.queued_jobs.to_string()),
+                cell(pool.labels.join(","), Tone::Dim),
+            ]);
+        }
     }
     out.push_str(&repositories.render(paint, ""));
     if !status.queued.is_empty() {
@@ -378,7 +382,7 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
         for job in &status.queued {
             queued.row(vec![
                 plain(job.id.to_string()),
-                plain(&job.repository),
+                plain(job.place(status)),
                 plain(queued_title(job)),
                 cell(queued_ago(job, now), Tone::Dim),
                 plain(waiting(job, status, now)),
@@ -1204,6 +1208,11 @@ mod tests {
                 name: "halyard/ledger".to_owned(),
                 profile: "jvm".to_owned(),
                 labels: vec!["self-hosted".to_owned()],
+                pools: vec![runnerd_core::api::PoolStatus {
+                    profile: "jvm".to_owned(),
+                    labels: vec!["self-hosted".to_owned()],
+                    queued_jobs: 2,
+                }],
                 paused: true,
                 queued_jobs: 2,
             },

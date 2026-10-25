@@ -317,7 +317,8 @@ fn a_job_with_a_slot_and_memory_but_no_cpu_waits_and_its_repository_is_held_for_
     assert_eq!(starts(&decisions), [(0, "o/a"), (1, "o/a"), (2, "o/b")]);
     assert!(
         decisions.contains(&Decision::HeldForCpu {
-            repository: "o/a".to_owned()
+            repository: "o/a".to_owned(),
+            profile: "app".to_owned(),
         }),
         "o/a is held for CPU"
     );
@@ -341,7 +342,8 @@ fn a_runner_at_its_profiles_cpus_that_do_not_fit_holds_its_repository_once() {
     assert_eq!(
         decisions,
         [Decision::HeldForCpu {
-            repository: "o/a".to_owned()
+            repository: "o/a".to_owned(),
+            profile: "app".to_owned(),
         }]
     );
 }
@@ -414,6 +416,7 @@ fn heavy_job_beside_a_stream_of_light_ones(ticks: u64) -> (Option<u64>, usize) {
         }
         let held = decisions.contains(&Decision::HeldForCpu {
             repository: "o/heavy".to_owned(),
+            profile: "app".to_owned(),
         });
         // As the engine marks it: since the first plan that held it.
         waiting_since = if held {
@@ -573,7 +576,8 @@ fn a_job_held_only_by_an_older_jobs_start_waits_behind_it_not_for_what_runs() {
     );
     assert!(
         behind.decisions.contains(&Decision::HeldForCpu {
-            repository: "o/2".to_owned()
+            repository: "o/2".to_owned(),
+            profile: "app".to_owned(),
         }),
         "o/2 is held for CPU as before"
     );

@@ -320,13 +320,30 @@ pub struct RunnerStatus {
 pub struct RepositoryStatus {
     /// `owner/name` on GitHub.
     pub name: String,
+    /// Its first pool's profile, which clients before pools show.
+    #[serde(default)]
+    pub profile: String,
+    /// Its first pool's labels, which clients before pools show.
+    #[serde(default)]
+    pub labels: Vec<String>,
+    /// Its pools in config order, one per `[[repositories]]` entry: a job runs in the one whose labels match it
+    /// (ADR 0058). Empty from a daemon before pools; `listed_pools` reads either.
+    #[serde(default)]
+    pub pools: Vec<PoolStatus>,
+    /// Paused repositories get no new runners; their running jobs finish.
+    pub paused: bool,
+    /// Its jobs in `Status::queued`: queued ones none of its runners took yet, those no pool serves too.
+    pub queued_jobs: usize,
+}
+
+/// One of a repository's pools: its runners in one profile.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct PoolStatus {
     /// The profile its jobs run in.
     pub profile: String,
     /// The labels its runners register with.
     pub labels: Vec<String>,
-    /// Paused repositories get no new runners; their running jobs finish.
-    pub paused: bool,
-    /// Its jobs in `Status::queued`: queued ones its runners match and none of them took yet.
+    /// Its jobs in `Status::queued`: those its labels match.
     pub queued_jobs: usize,
 }
 
@@ -337,6 +354,10 @@ pub struct QueuedJob {
     pub id: u64,
     /// The repository whose runners can take it, `owner/name`.
     pub repository: String,
+    /// The profile of its repository's pool whose labels match it; `None` when no pool's do, and from a daemon
+    /// before pools.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub profile: Option<String>,
     /// The workflow run it belongs to.
     pub run_id: u64,
     /// 1 for the first attempt of the run, higher for re-runs.
@@ -355,6 +376,72 @@ pub struct QueuedJob {
     /// shuts down, and from a daemon before it said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<Waiting>,
+}
+
+/// The slot of an idle runner of `job`'s repository, in its pool's profile when known, such as `jvm 2`.
+fn starting_for(job: &QueuedJob, status: &Status) -> Option<String> {
+    status
+        .profiles
+        .iter()
+        .filter(|profile| job.profile.as_ref().is_none_or(|own| *own == profile.name))
+        .find_map(|profile| {
+            profile
+                .slots
+                .iter()
+                .find(|slot| {
+                    slot.runner
+                        .as_ref()
+                        .is_some_and(|runner| runner.repository == job.repository && !runner.busy)
+                })
+                .map(|slot| format!("{}\u{a0}{}", profile.name, slot.slot))
+        })
+}
+
+impl QueuedJob {
+    /// Where it runs, as every client names it: its repository, and its pool's profile when the repository has
+    /// several pools in `status`, such as `halyard/ledger · light`.
+    pub fn place(&self, status: &Status) -> String {
+        let pools = status
+            .repositories
+            .iter()
+            .find(|repository| repository.name == self.repository)
+            .map_or(0, |repository| repository.pools.len());
+        match self.profile.as_deref().filter(|_| pools > 1) {
+            Some(profile) => format!("{}\u{a0}· {profile}", self.repository),
+            None => self.repository.clone(),
+        }
+    }
+}
+
+impl RepositoryStatus {
+    /// Its pools, or from a daemon before pools its one profile and labels.
+    pub fn listed_pools(&self) -> Vec<PoolStatus> {
+        if !self.pools.is_empty() {
+            return self.pools.clone();
+        }
+        vec![PoolStatus {
+            profile: self.profile.clone(),
+            labels: self.labels.clone(),
+            queued_jobs: self.queued_jobs,
+        }]
+    }
+
+    /// Its pools' profiles, as every client lists them on one line: `jvm` or `jvm + light`.
+    pub fn profiles(&self) -> String {
+        self.listed_pools()
+            .iter()
+            .map(|pool| pool.profile.as_str())
+            .collect::<Vec<_>>()
+            .join(" + ")
+    }
+
+    /// The profile of its pool whose labels match a job asking for `labels`, as the daemon picks it.
+    pub fn pool_for(&self, labels: &[String]) -> Option<String> {
+        self.listed_pools()
+            .into_iter()
+            .find(|pool| crate::config::labels_match(labels, &pool.labels))
+            .map(|pool| pool.profile)
+    }
 }
 
 /// What failed, that holds a repository's runners back for a while.
@@ -440,12 +527,17 @@ pub enum Waiting {
         /// The older job's ID.
         job: u64,
     },
+    /// No pool of its repository has every label it asks for, so no runner of this daemon can take it (ADR 0058).
+    NoPool {
+        /// The labels it asks for.
+        labels: Vec<String>,
+    },
 }
 
 /// What a [`Waiting`] reason waits on, which clients draw it by.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum WaitKind {
-    /// Something the owner can act on: a pause, or runners that failed to take a job.
+    /// Something the owner can act on: a pause, runners that failed to take a job, or labels no pool serves.
     Act,
     /// Something that clears by itself shortly: a runner starting, a reseed, an image pull, an older job's start.
     Soon,
@@ -457,7 +549,7 @@ impl Waiting {
     /// What it waits on.
     pub fn kind(&self) -> WaitKind {
         match self {
-            Waiting::Paused | Waiting::Backoff { .. } => WaitKind::Act,
+            Waiting::Paused | Waiting::Backoff { .. } | Waiting::NoPool { .. } => WaitKind::Act,
             Waiting::RunnerStarting
             | Waiting::Reseeding { .. }
             | Waiting::PullingImage { .. }
@@ -484,6 +576,11 @@ impl Waiting {
         };
         match self {
             Waiting::Paused => format!("{} is paused", job.repository),
+            Waiting::NoPool { labels } => format!(
+                "No profile serves the {} {}",
+                if labels.len() == 1 { "label" } else { "labels" },
+                labels.join(", ")
+            ),
             Waiting::Backoff { until, cause } => format!(
                 "{}; retrying in {}",
                 match cause {
@@ -494,23 +591,10 @@ impl Waiting {
                 },
                 admission::wait(until.saturating_sub(now))
             ),
-            Waiting::RunnerStarting => {
-                let slot = status.profiles.iter().find_map(|profile| {
-                    profile
-                        .slots
-                        .iter()
-                        .find(|slot| {
-                            slot.runner.as_ref().is_some_and(|runner| {
-                                runner.repository == job.repository && !runner.busy
-                            })
-                        })
-                        .map(|slot| format!("{}\u{a0}{}", profile.name, slot.slot))
-                });
-                match slot {
-                    Some(slot) => format!("A runner is starting for it in {slot}"),
-                    None => "A runner is starting for it".to_owned(),
-                }
-            }
+            Waiting::RunnerStarting => match starting_for(job, status) {
+                Some(slot) => format!("A runner is starting for it in {slot}"),
+                None => "A runner is starting for it".to_owned(),
+            },
             Waiting::Reseeding { profile } => format!("{profile} is rebuilding its snapshot"),
             Waiting::PullingImage { profile } => format!("Pulling {profile}'s image"),
             Waiting::NoSlot { profile } => {

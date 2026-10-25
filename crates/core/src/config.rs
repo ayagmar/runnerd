@@ -24,7 +24,8 @@ pub struct Config {
     pub caches: Caches,
     /// Runner profiles by name.
     pub profiles: BTreeMap<String, Profile>,
-    /// The repositories to serve.
+    /// The repositories to serve, one pool per entry: a repository named by several entries is served by each of
+    /// their profiles, a job by the one whose labels match it (ADR 0058).
     pub repositories: Vec<Repository>,
     /// What is kept of past jobs.
     #[serde(default)]
@@ -313,13 +314,24 @@ impl TryFrom<ProfileToml> for Profile {
     }
 }
 
-/// A repository to serve: `[[repositories]]`.
+/// Whether a job asking for `wanted` may run on runners registered with `labels`: every label it asks for is one of
+/// theirs. GitHub compares labels without regard to case.
+pub fn labels_match(wanted: &[String], labels: &[String]) -> bool {
+    wanted.iter().all(|wanted| {
+        labels
+            .iter()
+            .any(|label| label.eq_ignore_ascii_case(wanted))
+    })
+}
+
+/// A repository to serve: `[[repositories]]`. Each entry is one of the repository's pools; entries with the same
+/// `name` serve it in several profiles, each with its own labels, which no two of them share (ADR 0058).
 #[derive(Debug, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Repository {
     /// `owner/name` on GitHub.
     pub name: String,
-    /// The profile its jobs run in.
+    /// The profile the jobs this pool's labels match run in.
     pub profile: String,
     /// The labels its runners register with; a job runs on them when every label it asks for is one of these.
     pub labels: Vec<String>,
@@ -330,8 +342,8 @@ pub struct Repository {
     /// Whether its runners get the shared build cache, when `[caches.build]` is enabled. Default true.
     #[serde(default = "default_true")]
     pub build_cache: bool,
-    /// Whose runs may write to the shared build cache besides the branches' (ADR 0053). Default
-    /// `"default-branch"`.
+    /// Whose runs may write to the shared build cache besides the branches' (ADR 0053), the same in every pool of
+    /// the repository. Default `"default-branch"`.
     #[serde(default)]
     pub build_cache_writers: BuildCacheWriters,
 }
@@ -867,6 +879,42 @@ pub enum ConfigError {
         /// The repository's `owner/name`.
         repository: String,
     },
+    /// Two `[[repositories]]` entries of one repository use the same profile.
+    #[error(
+        "repository {repository} has two entries with profile {profile:?}; give each of its pools its own profile"
+    )]
+    PoolProfileTwice {
+        /// The repository's `owner/name`.
+        repository: String,
+        /// The profile both entries name.
+        profile: String,
+    },
+    /// Two `[[repositories]]` entries of one repository share a label, so a job asking only for labels they share
+    /// could run in either.
+    #[error(
+        "repository {repository}'s pools in {first} and {second} both have the label {label:?}, so a job asking for \
+         it could land in either; give each pool labels of its own, such as only {second:?}'s own label for the \
+         lighter one"
+    )]
+    PoolLabelsOverlap {
+        /// The repository's `owner/name`.
+        repository: String,
+        /// The profile of the first entry.
+        first: String,
+        /// The profile of the later entry.
+        second: String,
+        /// A label both have.
+        label: String,
+    },
+    /// Two `[[repositories]]` entries of one repository say differently whose runs write to the build cache.
+    #[error(
+        "repository {repository}'s entries set build_cache_writers differently; whose runs may write to the build \
+         cache is the repository's, so set the same in each"
+    )]
+    PoolWritersDiffer {
+        /// The repository's `owner/name`.
+        repository: String,
+    },
     /// `unsafe-dind` without `allow_unsafe = true`.
     #[error(
         "isolation \"unsafe-dind\" runs runner containers privileged, so a job can take over the host; \
@@ -1132,6 +1180,69 @@ impl Config {
         Ok(())
     }
 
+    /// Checks that each repository's pools tell its jobs apart: each in its own profile, with labels no other of its
+    /// pools has, so at most one pool matches a job; and that they agree on whose runs write to the build cache.
+    fn check_pools(&self) -> Result<(), ConfigError> {
+        for (at, first) in self.repositories.iter().enumerate() {
+            for second in self.repositories[at + 1..]
+                .iter()
+                .filter(|second| second.name == first.name)
+            {
+                if second.profile == first.profile {
+                    return Err(ConfigError::PoolProfileTwice {
+                        repository: first.name.clone(),
+                        profile: first.profile.clone(),
+                    });
+                }
+                if let Some(label) = first.labels.iter().find(|label| {
+                    second
+                        .labels
+                        .iter()
+                        .any(|other| other.eq_ignore_ascii_case(label))
+                }) {
+                    return Err(ConfigError::PoolLabelsOverlap {
+                        repository: first.name.clone(),
+                        first: first.profile.clone(),
+                        second: second.profile.clone(),
+                        label: label.clone(),
+                    });
+                }
+                if second.build_cache_writers != first.build_cache_writers {
+                    return Err(ConfigError::PoolWritersDiffer {
+                        repository: first.name.clone(),
+                    });
+                }
+            }
+        }
+        Ok(())
+    }
+
+    /// The pool of `repository` whose labels match a job asking for `labels`: every label it asks for is one of
+    /// the pool's. `None` when no pool of it does.
+    pub fn pool(&self, repository: &str, labels: &[String]) -> Option<&Repository> {
+        self.repositories
+            .iter()
+            .find(|pool| pool.name == repository && labels_match(labels, &pool.labels))
+    }
+
+    /// The pool of `repository` in `profile`, whose runners start in that profile's slots.
+    pub fn pool_in(&self, repository: &str, profile: &str) -> Option<&Repository> {
+        self.repositories
+            .iter()
+            .find(|pool| pool.name == repository && pool.profile == profile)
+    }
+
+    /// The repositories served, each once, in the order the config first names them.
+    pub fn repository_names(&self) -> Vec<String> {
+        let mut names: Vec<String> = Vec::new();
+        for repository in &self.repositories {
+            if !names.contains(&repository.name) {
+                names.push(repository.name.clone());
+            }
+        }
+        names
+    }
+
     /// Checks the config against the slice's `MemoryMax` (`None` when the slice is unlimited).
     pub fn validate(&self, memory_max: Option<ByteSize>) -> Result<Vec<Warning>, ConfigError> {
         if self.host.isolation == Isolation::UnsafeDind && !self.host.allow_unsafe {
@@ -1198,6 +1309,7 @@ impl Config {
                 });
             }
         }
+        self.check_pools()?;
         self.check_budget(memory_max)
     }
 

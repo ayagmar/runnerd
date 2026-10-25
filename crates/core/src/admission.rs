@@ -567,8 +567,8 @@ impl<'run> Replayer<'run> {
     }
 
     /// Starts `run` at `now` if the policy admits it, `waiting` being every job not started yet; whether it did.
-    /// As in the daemon, the runner starts reserving the largest prediction among its repository's waiting jobs,
-    /// then its job's own.
+    /// As in the daemon, the runner starts reserving the largest prediction among the waiting jobs of its
+    /// repository's pool (those that ran in its profile), then its job's own.
     fn admit(&mut self, run: &'run Ran, waiting: &[&Ran], now: u64) -> bool {
         let Some((profile, limits)) = self.config.profiles.get_key_value(&run.profile) else {
             return false;
@@ -618,7 +618,7 @@ impl<'run> Replayer<'run> {
             Policy::Measured => (
                 waiting
                     .iter()
-                    .filter(|job| job.repository == run.repository)
+                    .filter(|job| job.repository == run.repository && job.profile == run.profile)
                     .map(|job| queued(job))
                     .max()
                     .unwrap_or(0)
@@ -640,10 +640,10 @@ impl<'run> Replayer<'run> {
         }
         let cpu = self.cpu(&Key::of(run), profile);
         if let Some(cpu_budget) = self.cpu_budget {
-            // As the daemon starts a runner: at the most CPU any of its repository's waiting jobs reserves.
+            // As the daemon starts a runner: at the most CPU any waiting job of its repository's pool reserves.
             let starting = waiting
                 .iter()
-                .filter(|job| job.repository == run.repository)
+                .filter(|job| job.repository == run.repository && job.profile == run.profile)
                 .map(|job| self.cpu(&Key::of(job), profile))
                 .max()
                 .unwrap_or(0)

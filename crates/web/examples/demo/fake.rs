@@ -601,6 +601,16 @@ impl Fixtures {
                         "x64".to_owned(),
                         "jvm".to_owned(),
                     ],
+                    pools: vec![runnerd_core::api::PoolStatus {
+                        profile: "jvm".to_owned(),
+                        labels: vec![
+                        "self-hosted".to_owned(),
+                        "linux".to_owned(),
+                        "x64".to_owned(),
+                        "jvm".to_owned(),
+                    ],
+                        queued_jobs: 0,
+                    }],
                     paused: false,
                     queued_jobs: 0,
                 },
@@ -613,6 +623,16 @@ impl Fixtures {
                         "x64".to_owned(),
                         "node".to_owned(),
                     ],
+                    pools: vec![runnerd_core::api::PoolStatus {
+                        profile: "node".to_owned(),
+                        labels: vec![
+                        "self-hosted".to_owned(),
+                        "linux".to_owned(),
+                        "x64".to_owned(),
+                        "node".to_owned(),
+                    ],
+                        queued_jobs: 1,
+                    }],
                     paused: false,
                     queued_jobs: 1,
                 },
@@ -620,6 +640,7 @@ impl Fixtures {
             queued: vec![QueuedJob {
                 id: 120_055_991_710,
                 repository: "halyard/storefront".to_owned(),
+                profile: None,
                 run_id: 120_055_991_710 / 3,
                 run_attempt: 1,
                 workflow: Some("E2E".to_owned()),

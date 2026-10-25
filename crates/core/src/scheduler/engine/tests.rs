@@ -2739,6 +2739,11 @@ fn repository_status(paused: bool, queued_jobs: usize) -> api::RepositoryStatus 
         name: "o/r".to_owned(),
         profile: "app".to_owned(),
         labels: vec!["self-hosted".to_owned(), "app".to_owned()],
+        pools: vec![api::PoolStatus {
+            profile: "app".to_owned(),
+            labels: vec!["self-hosted".to_owned(), "app".to_owned()],
+            queued_jobs,
+        }],
         paused,
         queued_jobs,
     }
@@ -2802,6 +2807,11 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
                 name: "o/s".to_owned(),
                 profile: "app".to_owned(),
                 labels: vec!["self-hosted".to_owned()],
+                pools: vec![api::PoolStatus {
+                    profile: "app".to_owned(),
+                    labels: vec!["self-hosted".to_owned()],
+                    queued_jobs: 0,
+                }],
                 paused: false,
                 queued_jobs: 0,
             }
@@ -3035,7 +3045,7 @@ async fn a_daemon_shutting_down_lists_no_queued_jobs_since_it_no_longer_polls_th
 }
 
 #[tokio::test]
-async fn the_status_lists_the_queued_jobs_runners_can_take_and_none_holds_oldest_first() {
+async fn the_status_lists_the_queued_jobs_none_holds_oldest_first_with_their_pool() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
     // Job 1 is queued at GitHub still, but the runner in slot 1 holds it.
@@ -3072,6 +3082,7 @@ async fn the_status_lists_the_queued_jobs_runners_can_take_and_none_holds_oldest
         api::QueuedJob {
             id,
             repository: "o/r".to_owned(),
+            profile: Some("app".to_owned()),
             run_id: 1,
             run_attempt,
             workflow: workflow.map(str::to_owned),
@@ -3086,6 +3097,14 @@ async fn the_status_lists_the_queued_jobs_runners_can_take_and_none_holds_oldest
         status.queued,
         [
             queued(3, 0, None, None, None, 0),
+            // No pool has `gpu`: it is listed, with no profile, for the owner to see why.
+            api::QueuedJob {
+                profile: None,
+                waiting: Some(api::Waiting::NoPool {
+                    labels: vec!["self-hosted".to_owned(), "gpu".to_owned()],
+                }),
+                ..queued(4, 0, None, None, None, 0)
+            },
             queued(
                 5,
                 2,
@@ -3181,7 +3200,14 @@ async fn a_runner_that_cannot_start_is_announced_once_until_one_takes_a_job() {
     engine.tick(Shutdown::No).await;
     // Still broken once the hold ends: held longer, without another announcement.
     for _ in 0..3 {
-        engine.repositories.get_mut("o/r").unwrap().held = None;
+        engine
+            .repositories
+            .get_mut("o/r")
+            .unwrap()
+            .holds
+            .get_mut("app")
+            .unwrap()
+            .held = None;
         engine.tick(Shutdown::No).await;
     }
     handle.store.flush().await;
@@ -3710,6 +3736,7 @@ async fn a_pull_that_lands_while_old_images_are_removed_keeps_its_image() {
 
 mod admission;
 mod build_cache;
+mod pools;
 mod records;
 mod warm;
 

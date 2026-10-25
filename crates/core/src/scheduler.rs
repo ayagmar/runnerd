@@ -28,12 +28,32 @@ pub struct Hold {
     pub cause: crate::api::HoldCause,
 }
 
-/// A repository as the planner sees it.
+/// Names one of a repository's pools: its runners in one profile (ADR 0058). No two pools of a repository share a
+/// profile.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+pub struct Pool {
+    /// `owner/name` on GitHub.
+    pub repository: String,
+    /// The profile its runners start in.
+    pub profile: String,
+}
+
+impl From<&crate::config::Repository> for Pool {
+    fn from(repository: &crate::config::Repository) -> Pool {
+        Pool {
+            repository: repository.name.clone(),
+            profile: repository.profile.clone(),
+        }
+    }
+}
+
+/// One of a repository's pools as the planner sees it: its runners in one profile, registered with one set of labels
+/// (ADR 0058). A repository with one `[[repositories]]` entry has one.
 #[derive(Debug, Clone)]
 pub struct Repository {
     /// `owner/name` on GitHub.
     pub name: String,
-    /// The profile its jobs run in.
+    /// The profile the jobs its labels match run in.
     pub profile: String,
     /// The labels its runners register with.
     pub labels: Vec<String>,
@@ -41,10 +61,10 @@ pub struct Repository {
     pub paused: bool,
     /// No runner starts for this repository before then, after its runners failed.
     pub held: Option<Hold>,
-    /// Its queued jobs at the last poll.
+    /// The repository's queued jobs at the last poll, those of its other pools too.
     pub queued: Vec<QueuedJob>,
     /// What a new runner of it takes of the budget: `None`, its profile's `memory`. Under measured admission, the
-    /// largest predicted peak of its queued jobs, since GitHub may give the runner any of them.
+    /// largest predicted peak of the queued jobs its labels match, since GitHub may give the runner any of them.
     pub runner_memory: Option<u64>,
     /// What a new runner of it takes of the CPU budget, in millicores: `None`, its profile's `cpus`. Under measured
     /// admission, the largest predicted average CPU of its queued jobs.
@@ -56,6 +76,14 @@ pub struct Repository {
 }
 
 impl Repository {
+    /// Its name as a pool.
+    pub fn pool(&self) -> Pool {
+        Pool {
+            repository: self.name.clone(),
+            profile: self.profile.clone(),
+        }
+    }
+
     /// Whether its next job has waited `CPU_PRIORITY_AFTER` or more for CPU at `now`.
     fn starved_of_cpu(&self, now: SystemTime) -> bool {
         self.cpu_waiting_since
@@ -147,10 +175,13 @@ pub enum Decision {
         /// meanwhile and the start waits for the next plan.
         replacing: Vec<SlotRef>,
     },
-    /// Hold the repository's next job: a slot and memory had room for its runner, the CPU budget did not.
+    /// Hold the next job of the repository's pool in `profile`: a slot and memory had room for its runner, the CPU
+    /// budget did not.
     HeldForCpu {
         /// `owner/name`.
         repository: String,
+        /// The pool's profile.
+        profile: String,
     },
     /// Remove the slot's runner: it waited `IDLE_TIMEOUT` for a job no longer queued and is not kept warm, or it is a
     /// warm runner whose room a queued job takes.
@@ -187,19 +218,29 @@ pub struct Budget {
     pub held: bool,
 }
 
+/// Whether GitHub runs a job on its own runners: every label it asks for names one of GitHub's images, such as
+/// `ubuntu-latest` or `macos-15`. No pool of this daemon is meant for it.
+fn hosted_by_github(job: &QueuedJob) -> bool {
+    !job.labels.is_empty()
+        && job.labels.iter().all(|label| {
+            let label = label.to_ascii_lowercase();
+            ["ubuntu-", "windows-", "macos-"]
+                .iter()
+                .any(|image| label.starts_with(image))
+        })
+}
+
 /// Whether a job may run on a repository's runners: every label it asks for is one of theirs. GitHub compares
 /// labels without regard to case.
 pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
-    job.labels.iter().all(|wanted| {
-        labels
-            .iter()
-            .any(|label| label.eq_ignore_ascii_case(wanted))
-    })
+    crate::config::labels_match(&job.labels, labels)
 }
 
 /// Decides which slots start a runner and which idle runners stop, and why each job left queued waits.
 ///
-/// Each repository gets a runner per matching queued job, less its runners still waiting for a job. Jobs are
+/// `repositories` holds each repository's pools; a job is served by the pool whose labels match it, and one no pool
+/// of its repository matches waits for a pool (`Waiting::NoPool`) unless it is for GitHub's own runners. Each pool
+/// gets a runner per matching queued job, less its runners still waiting for a job. Jobs are
 /// served oldest first across repositories, each in the lowest free slot of its repository's profile, while what
 /// the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `budget.memory` and
 /// `budget.host`, and its CPU
@@ -216,12 +257,13 @@ pub fn plan(
     now: SystemTime,
 ) -> Plan {
     let mut decided = Plan::default();
+    unserved(repositories, &mut decided);
     let mut wanted = BTreeMap::new();
     let mut warm_wanted = Vec::new();
     let mut jobs = Vec::new();
     for repository in repositories {
         if let Some(sorted) = sort_out(repository, profiles, now, &mut decided) {
-            wanted.insert(repository.name.as_str(), sorted.serve.len());
+            wanted.insert(pool_key(repository), sorted.serve.len());
             jobs.extend(sorted.serve.into_iter().map(|job| (job, repository)));
             warm_wanted.push((repository, sorted.warm));
         }
@@ -239,7 +281,7 @@ pub fn plan(
     // The job that waited long enough for CPU that no younger one takes CPU before it.
     let mut first_for_cpu = None;
     for (job, repository) in jobs {
-        let Some(missing) = wanted.get_mut(repository.name.as_str()) else {
+        let Some(missing) = wanted.get_mut(&pool_key(repository)) else {
             continue;
         };
         if *missing == 0 {
@@ -281,9 +323,7 @@ pub fn plan(
                 );
                 decided.waiting.insert(job, reason);
                 if short == Short::Cpu {
-                    let held = Decision::HeldForCpu {
-                        repository: repository.name.clone(),
-                    };
+                    let held = held_for_cpu(repository);
                     if !decided.decisions.contains(&held) {
                         decided.decisions.push(held);
                     }
@@ -318,6 +358,49 @@ pub fn plan(
         start_warm(&warm_wanted, profiles, &mut taken, left, &mut decided);
     }
     decided
+}
+
+/// The hold of `repository`'s next job for CPU.
+fn held_for_cpu(repository: &Repository) -> Decision {
+    Decision::HeldForCpu {
+        repository: repository.name.clone(),
+        profile: repository.profile.clone(),
+    }
+}
+
+/// A pool's repository and profile, which tell it apart in a plan.
+fn pool_key(repository: &Repository) -> (&str, &str) {
+    (&repository.name, &repository.profile)
+}
+
+/// Says why each queued job no pool of its repository matches waits, unless GitHub runs it on its own runners.
+fn unserved(repositories: &[Repository], decided: &mut Plan) {
+    let mut seen = BTreeSet::new();
+    for repository in repositories {
+        if !seen.insert(repository.name.as_str()) {
+            continue;
+        }
+        let pools: Vec<&Repository> = repositories
+            .iter()
+            .filter(|pool| pool.name == repository.name)
+            .collect();
+        decided.waiting.extend(
+            repository
+                .queued
+                .iter()
+                .filter(|job| {
+                    !hosted_by_github(job) && !pools.iter().any(|pool| matches(job, &pool.labels))
+                })
+                .map(|job| {
+                    (
+                        job.id,
+                        Waiting::NoPool {
+                            labels: job.labels.clone(),
+                        },
+                    )
+                }),
+        );
+    }
 }
 
 /// What a job's runner lacks.
@@ -665,8 +748,8 @@ impl<'plan> Warm<'plan> {
         Warm { runners }
     }
 
-    /// Picks warm runners of repositories other than `repository` whose room lets its next runner start: a slot of
-    /// its profile when it has none (`slot`), and the memory and CPU it is `short` of. Those in its profile go first.
+    /// Picks warm runners of pools other than `repository` whose room lets its next runner start: a slot of its
+    /// profile when it has none (`slot`), and the memory and CPU it is `short` of. Those in its profile go first.
     /// `None`, and nothing picked, when all of them would not do.
     fn make_room(&mut self, repository: &Repository, slot: bool, short: Left) -> Option<Room> {
         let (memory, cpu) = (short.memory.unwrap_or(0), short.cpu.unwrap_or(0));
@@ -677,7 +760,9 @@ impl<'plan> Warm<'plan> {
             .filter_map(|(at, runner)| {
                 runner
                     .as_ref()
-                    .filter(|(_, runner)| runner.repository != repository.name)
+                    .filter(|(slot, runner)| {
+                        runner.repository != repository.name || slot.profile != repository.profile
+                    })
                     .map(|_| at)
             })
             .collect();

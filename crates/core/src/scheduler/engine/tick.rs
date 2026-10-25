@@ -18,7 +18,7 @@ use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Budget, Decision, Plan, Preparing, Profile, Repository, RunnerSlot, Slot, SlotRef, plan,
+    Budget, Decision, Plan, Pool, Preparing, Profile, Repository, RunnerSlot, Slot, SlotRef, plan,
 };
 use crate::time;
 
@@ -78,12 +78,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .cloned()
             .collect();
         let queued = match mode {
-            Shutdown::No => self
-                .config
-                .repositories
-                .iter()
-                .map(|repository| repository.name.clone())
-                .collect(),
+            Shutdown::No => self.config.repository_names(),
             Shutdown::Graceful | Shutdown::Force => Vec::new(),
         };
         let listings = self
@@ -139,8 +134,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 start @ Decision::Start { .. } => {
                     deferred = !self.apply_start(start, &mut admitting).await;
                 }
-                Decision::HeldForCpu { repository } => {
-                    held_for_cpu.insert(repository);
+                Decision::HeldForCpu {
+                    repository,
+                    profile,
+                } => {
+                    held_for_cpu.insert(Pool {
+                        repository,
+                        profile,
+                    });
                 }
             }
         }
@@ -180,7 +181,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             info!("{repository}: a warm runner it would replace took a job; starting next tick");
             return false;
         }
-        let mut admission = admitting.admit(&repository, memory, cpu);
+        let pool = Pool {
+            repository,
+            profile: slot.profile.clone(),
+        };
+        let mut admission = admitting.admit(&pool, memory, cpu);
+        let repository = pool.repository;
         if warm {
             // Its profile's caps, whatever its repository's queued jobs predict.
             admission.basis = Basis::Cap;
@@ -194,7 +200,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let held_since = self
             .repositories
             .get_mut(&repository)
-            .and_then(|state| state.cpu_wait.take())
+            .and_then(|state| state.cpu_wait.remove(&slot.profile))
             .map(|wait| wait.since);
         if let Some((cpu, since)) = admission.cpu.as_mut().zip(held_since) {
             cpu.waited = Some(since.elapsed().unwrap_or_default().as_secs());
@@ -221,7 +227,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     profile: repository.profile.clone(),
                     labels: repository.labels.clone(),
                     paused: self.control.is_paused(&repository.name),
-                    held: state.held,
+                    held: state
+                        .holds
+                        .get(&repository.profile)
+                        .and_then(|hold| hold.held),
                     // GitHub lists a job queued for a few seconds after a runner took it: without this, a tick in
                     // between starts a second runner for it.
                     queued: state
@@ -232,8 +241,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .collect(),
                     runner_memory: None,
                     runner_cpu: None,
-                    cpu_waiting_since: state.cpu_wait.map(|wait| wait.since),
-                    warm: warm.get(&repository.name).copied().unwrap_or(0),
+                    cpu_waiting_since: state
+                        .cpu_wait
+                        .get(&repository.profile)
+                        .map(|wait| wait.since),
+                    warm: warm.get(&Pool::from(repository)).copied().unwrap_or(0),
                 }
             })
             .collect();

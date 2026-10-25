@@ -119,7 +119,9 @@ queued → slot → container → removed
 1. Every `poll_interval` the engine asks GitHub for runners first, then queued jobs (`Engine::tick`; the order
    avoids starting a second runner for a job its runner just took), every repository at once, a few requests at a
    time.
-2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget: what each
+2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget, in the profile of
+   the repository's pool whose labels match the job (each `[[repositories]]` entry is a pool;
+   [ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)): what each
    runner reserves is its cap, or under `admission = "measured"` its predicted peak (`engine/admission`,
    [ADR 0033](docs/adr/0033-measured-admission.md)), within what the host's memory leaves the slice
    ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)), and under `cpu_overcommit` within the CPU
@@ -196,6 +198,10 @@ nothing until Docker has listed them.
   (`HostIdentity::prefix`); other machines serve the same repositories. Runner containers on the local Docker are
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
 - `scheduler::plan` and `scheduler::warm` do no I/O and read no clock.
+- No two pools of a repository share a label or a profile (`Config::check_pools`), so at most one pool matches a
+  job. Admission, CPU holds, holds after failed runners, warm runners and runner registration go by the pool
+  (repository and slot's profile), pause by the repository; a job no pool matches waits with `Waiting::NoPool`
+  ([ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)).
 - A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
   memory and CPU.
 - A warm runner never holds back upkeep: a reseed, or the shared caches' check an hour after the last, stops idle
@@ -236,7 +242,7 @@ nothing until Docker has listed them.
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under
   `admission = "measured"` a runner reserves its predicted peak, at most its cap, and counts at the larger of that
   and its last sampled memory, or at its cap when its own or the slice's sample is older than three intervals; the
-  reservation follows its repository's queue until its job is known, then that job's prediction, and a waiting
+  reservation follows its pool's queue until its job is known, then that job's prediction, and a waiting
   runner raised past what is free is stopped. The config check holds only one runner of each profile with the mirror to `MemoryMax`; nothing
   starts while the slice's sampled memory is at 90% of it; and a runner reserves its cap without a recent sample,
   after a run of its job out of memory at its cap or killed for memory, or when a restart adopted it without a

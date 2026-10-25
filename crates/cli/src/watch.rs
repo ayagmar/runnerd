@@ -91,9 +91,10 @@ impl State {
     pub(crate) fn apply(&mut self, envelope: &EventEnvelope) -> Option<u64> {
         match &envelope.event {
             Event::JobQueued { job } => {
-                let queued = &mut self.status.queued;
-                if !queued.iter().any(|known| known.id == job.id) {
-                    queued.push(queued_job(job));
+                if !self.status.queued.iter().any(|known| known.id == job.id) {
+                    let job = queued_job(job, &self.status);
+                    let queued = &mut self.status.queued;
+                    queued.push(job);
                     // As the status orders them: IDs grow with time.
                     queued.sort_by_key(|known| known.id);
                 }
@@ -205,11 +206,17 @@ impl State {
     }
 }
 
-/// A queued job as the status lists it, from the job `job.queued` announces.
-fn queued_job(job: &JobSummary) -> QueuedJob {
+/// A queued job as the status lists it, from the job `job.queued` announces, in its repository's pool in `status`
+/// whose labels match it.
+fn queued_job(job: &JobSummary, status: &Status) -> QueuedJob {
     QueuedJob {
         id: job.id,
         repository: job.repository.clone(),
+        profile: status
+            .repositories
+            .iter()
+            .find(|repository| repository.name == job.repository)
+            .and_then(|repository| repository.pool_for(&job.labels)),
         run_id: job.run_id,
         run_attempt: job.run_attempt,
         workflow: job.workflow.clone(),

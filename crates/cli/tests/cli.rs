@@ -102,12 +102,18 @@ fn status() -> Status {
             name: "halyard/ledger".to_owned(),
             profile: "jvm".to_owned(),
             labels: vec!["self-hosted".to_owned(), "jvm".to_owned()],
+            pools: vec![runnerd_core::api::PoolStatus {
+                profile: "jvm".to_owned(),
+                labels: vec!["self-hosted".to_owned(), "jvm".to_owned()],
+                queued_jobs: 1,
+            }],
             paused: false,
             queued_jobs: 1,
         }],
         queued: vec![QueuedJob {
             id: 9002,
             repository: "halyard/ledger".to_owned(),
+            profile: None,
             run_id: 78,
             run_attempt: 1,
             workflow: Some("build".to_owned()),

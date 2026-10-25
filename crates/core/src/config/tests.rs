@@ -824,3 +824,92 @@ fn a_config_shown_with_its_notify_secrets_masked_saves_with_them_kept() {
         "a value written over the mask is the new one"
     );
 }
+
+/// MINIMAL with a `light` profile serving owner/app's jobs that ask for `labels` (a TOML array), with `extra` lines.
+fn with_light_pool(labels: &str, extra: &str) -> Config {
+    Config::parse(&format!(
+        "{MINIMAL}
+[profiles.light]
+image_stage = \"app\"
+cpus = 1
+memory = \"1G\"
+slots = 1
+
+[[repositories]]
+name = \"owner/app\"
+profile = \"light\"
+labels = {labels}
+{extra}"
+    ))
+    .unwrap()
+}
+
+#[test]
+fn a_repository_may_be_served_by_pools_with_labels_of_their_own() {
+    let config = with_light_pool("[\"app-light\"]", "");
+    assert_eq!(config.validate(Some(size("33G"))).unwrap(), Vec::new());
+    let profile = |labels: &[&str]| {
+        let labels: Vec<String> = labels.iter().map(|label| (*label).to_owned()).collect();
+        config
+            .pool("owner/app", &labels)
+            .map(|pool| pool.profile.as_str())
+    };
+    assert_eq!(profile(&["self-hosted"]), Some("app"));
+    assert_eq!(profile(&["APP-LIGHT"]), Some("light"));
+    assert_eq!(profile(&["self-hosted", "app-light"]), None);
+    assert_eq!(config.repository_names(), ["owner/app"]);
+}
+
+#[test]
+fn pools_of_a_repository_sharing_a_label_are_rejected() {
+    // A job asking for `self-hosted` alone could land in either.
+    let error = with_light_pool("[\"Self-Hosted\", \"app-light\"]", "")
+        .validate(Some(size("33G")))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("owner/app"), "{error}");
+    assert!(error.contains("self-hosted"), "{error}");
+    assert!(error.contains("app") && error.contains("light"), "{error}");
+}
+
+#[test]
+fn a_pool_without_labels_is_rejected() {
+    let error = with_light_pool("[]", "")
+        .validate(Some(size("33G")))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("needs at least one non-empty label"),
+        "{error}"
+    );
+}
+
+#[test]
+fn two_pools_of_a_repository_in_one_profile_are_rejected() {
+    let text = format!(
+        "{MINIMAL}
+[[repositories]]
+name = \"owner/app\"
+profile = \"app\"
+labels = [\"app-light\"]
+"
+    );
+    let error = Config::parse(&text)
+        .unwrap()
+        .validate(Some(size("33G")))
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("two entries with profile \"app\""),
+        "{error}"
+    );
+}
+
+#[test]
+fn pools_of_a_repository_must_agree_on_who_writes_to_the_build_cache() {
+    let error = with_light_pool("[\"app-light\"]", "build_cache_writers = \"pull-requests\"")
+        .validate(Some(size("33G")))
+        .unwrap_err()
+        .to_string();
+    assert!(error.contains("build_cache_writers"), "{error}");
+}

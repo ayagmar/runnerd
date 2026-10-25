@@ -62,6 +62,11 @@ fn repository(name: &str, profile: &str) -> RepositoryStatus {
         name: name.to_owned(),
         profile: profile.to_owned(),
         labels: vec!["self-hosted".to_owned()],
+        pools: vec![runnerd_core::api::PoolStatus {
+            profile: profile.to_owned(),
+            labels: vec!["self-hosted".to_owned()],
+            queued_jobs: 0,
+        }],
         paused: false,
         queued_jobs: 0,
     }
@@ -667,6 +672,7 @@ fn queued(id: u64, repository: &str, name: &str, at: u64) -> QueuedJob {
     QueuedJob {
         id,
         repository: repository.to_owned(),
+        profile: None,
         run_id: 4002,
         run_attempt: 1,
         workflow: Some("E2E".to_owned()),

@@ -598,6 +598,11 @@ fn repository(name: &str) -> crate::api::RepositoryStatus {
         name: name.to_owned(),
         profile: "app".to_owned(),
         labels: vec!["self-hosted".to_owned()],
+        pools: vec![crate::api::PoolStatus {
+            profile: "app".to_owned(),
+            labels: vec!["self-hosted".to_owned()],
+            queued_jobs: 0,
+        }],
         paused: false,
         queued_jobs: 0,
     }
