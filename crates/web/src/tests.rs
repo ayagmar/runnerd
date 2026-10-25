@@ -40,7 +40,7 @@ use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{
     Admission, AdmissionPolicy, Basis, ConfigCheck, CpuAdmission, Event, EventEnvelope, HostSample,
-    JobPeak, JobState, Sample, SeedMemory, ShellMemory, Waiting,
+    JobPeak, JobState, Sample, SeedMemory, ShellMemory, Step, Waiting,
 };
 
 use crate::views::{repository_id, slot_id};
@@ -1145,7 +1145,7 @@ async fn a_budget_block_opens_its_job_or_its_slots_card_and_lights_up_the_card()
     );
     // A block is named by what it shows and described by its line of the readout.
     for (key, line) in [
-        (&jvm_1, "of 9G in jvm 1, build on halyard/ledger"),
+        (&jvm_1, "of 9G in jvm 1, CI / build on halyard/ledger"),
         (&jvm_2, "9G jvm 2, idle"),
     ] {
         assert!(
@@ -3144,5 +3144,144 @@ async fn a_job_a_warm_runner_took_waited_seconds_not_the_runners_uptime() {
     assert!(
         starting.contains(r#"id="phase-start-time" class="figure">2s<"#),
         "the 2 s from queued to started are the runner's start: {legend}"
+    );
+}
+
+#[tokio::test]
+async fn a_step_shows_the_duration_it_has_and_none_it_lacks() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        let from = job.summary.timeline.started_at.unwrap();
+        let step = |number, name: &str, conclusion: &str, completed| Step {
+            number,
+            name: name.to_owned(),
+            status: "completed".to_owned(),
+            conclusion: Some(conclusion.to_owned()),
+            started_at: Some(from),
+            completed_at: completed,
+        };
+        job.steps = vec![
+            step(1, "Lint", "success", None),
+            step(2, "Deploy", "cancelled", Some(from + 60)),
+            step(3, "Docs", "skipped", Some(from)),
+        ];
+    }
+    let cookie = dashboard.sign_in().await;
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    let time = |number: u32| {
+        let id = format!(r#"id="step-{number}-time">"#);
+        let at = job.find(&id).unwrap() + id.len();
+        job[at..job[at..].find('<').unwrap() + at].to_owned()
+    };
+    assert_eq!(
+        time(1),
+        "–",
+        "a step without a completion time has no duration"
+    );
+    assert_eq!(time(2), "1m 00s", "a cancelled step keeps its duration");
+    assert_eq!(
+        time(3),
+        "skipped",
+        "a step that did not run says how it ended"
+    );
+    let lint = &job[job.find(">Lint<").unwrap()..job.find(">Deploy<").unwrap()];
+    assert!(
+        !lint.contains("data-style:--to"),
+        "only a running step's bar follows the clock: {lint}"
+    );
+}
+
+#[tokio::test]
+async fn a_running_jobs_peak_is_its_samples_highest_once_its_page_opens_and_a_final_jobs_its_total()
+{
+    let dashboard = Dashboard::start().await;
+    let highest = {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let highest = fixtures.samples[&LEDGER_RUNNING]
+            .iter()
+            .map(|sample| sample.memory)
+            .max()
+            .unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        // The job was read before its latest samples were stored.
+        job.summary.metrics.memory_peak = Some(highest / 2);
+        highest
+    };
+    let peak = |page: &str| {
+        let dt = "<dt>Memory peak over the job</dt><dd>";
+        let at = page.find(dt).unwrap() + dt.len();
+        page[at..at + page[at..].find('<').unwrap()].to_owned()
+    };
+    let cookie = dashboard.sign_in().await;
+    let running = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    assert_eq!(
+        peak(&running),
+        crate::format::bytes(highest),
+        "as the TUI shows it"
+    );
+
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        job.summary.state = JobState::Completed;
+        job.summary.conclusion = Some("success".to_owned());
+    }
+    let finished = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await
+        .body;
+    assert_eq!(
+        peak(&finished),
+        crate::format::bytes(highest / 2),
+        "a final job's peak is the daemon's total"
+    );
+}
+
+#[tokio::test]
+async fn a_running_job_without_a_name_is_named_by_its_id_on_the_overview() {
+    let dashboard = Dashboard::start().await;
+    {
+        let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        job.summary.name.clear();
+    }
+    let cookie = dashboard.sign_in().await;
+    let overview = dashboard.page(&cookie, "/").await.body;
+    let card = &overview[overview
+        .find(&format!(r#"href="/jobs/{LEDGER_RUNNING}""#))
+        .unwrap()..];
+    assert!(
+        card.contains(&format!(
+            r#"<span class="job-name">job {LEDGER_RUNNING}</span>"#
+        )),
+        "its slot card names it as its page does: {card}"
+    );
+    assert!(
+        overview.contains(&format!("job {LEDGER_RUNNING} on halyard/ledger")),
+        "its budget readout names it too"
     );
 }

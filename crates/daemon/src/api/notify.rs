@@ -843,12 +843,14 @@ fn digest_message(digest: Digest) -> Notification {
     ));
     if !digest.waits.is_empty() {
         body.push("Longest waits:".to_owned());
-        body.extend(
-            digest
-                .waits
-                .iter()
-                .map(|wait| format!("{}: {} waited {}s", wait.repository, wait.name, wait.waited)),
-        );
+        body.extend(digest.waits.iter().map(|wait| {
+            format!(
+                "{}: {} waited {}s",
+                wait.repository,
+                job_title(wait.workflow.as_deref(), &wait.name, Some(wait.job)),
+                wait.waited
+            )
+        }));
     }
     Notification {
         event: NotifyEvent::Digest,

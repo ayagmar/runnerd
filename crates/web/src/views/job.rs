@@ -44,8 +44,12 @@ pub(crate) struct JobView {
 
 impl JobView {
     pub(crate) async fn load(daemon: &Client, id: u64, now: u64) -> Result<JobView, ClientError> {
-        let job: Job = daemon.get(&format!("/v1/jobs/{id}")).await?;
-        let samples = daemon.get(&format!("/v1/jobs/{id}/samples")).await?;
+        let mut job: Job = daemon.get(&format!("/v1/jobs/{id}")).await?;
+        let samples: SampleSeries = daemon.get(&format!("/v1/jobs/{id}/samples")).await?;
+        // Samples stored since the job was read raise a running job's peaks, as those that arrive later do.
+        for sample in &samples.samples {
+            job.observe(sample);
+        }
         let status: Status = daemon.get("/v1/status").await?;
         let log_from = job.summary.log.lines.saturating_sub(LOG_TAIL);
         let log = daemon
@@ -292,7 +296,8 @@ pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
                             (parts.html(&id, html! {
                                 span.step-time #(id) {
                                     @match (seconds, outcome.kind) {
-                                        (_, OutcomeKind::Ended) => (outcome.label),
+                                        // A step that ended without running says how it ended: `skipped`.
+                                        (Some(0) | None, OutcomeKind::Ended) => (outcome.label),
                                         (Some(seconds), OutcomeKind::Running) => { (format::duration(seconds)) "…" },
                                         (Some(seconds), _) => { (format::duration(seconds)) },
                                         (None, _) => "–",
@@ -304,7 +309,7 @@ pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
                                     @let to = from + seconds.unwrap_or(0);
                                     @let left = from.saturating_sub(start);
                                     @let right = to.saturating_sub(start);
-                                    @let follows = live && step.completed_at.is_none();
+                                    @let follows = live && step.is_running();
                                     @let style = format!("--from: {left}; --to: {right}");
                                     span.step-bar style=(if follows { parts.clocked(style) } else { style })
                                         data-style:--to=[follows.then(|| format!("$shown.at - {start}"))] {}

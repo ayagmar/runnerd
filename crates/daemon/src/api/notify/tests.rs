@@ -12,15 +12,16 @@ use axum::body::Bytes;
 use axum::http::{HeaderMap, StatusCode, Uri};
 use axum::routing::post;
 use runnerd_core::api::{
-    Event, Insight, InsightKind, JobMetrics, JobState, JobSummary, LogSummary, Notification,
-    NotifyEvent, Priority, Severity, Timeline,
+    Digest, Event, Insight, InsightKind, JobMetrics, JobState, JobSummary, LogSummary, LongWait,
+    Notification, NotifyEvent, Priority, Severity, Timeline,
 };
 use runnerd_core::config::{Config, DayTime};
 use runnerd_core::store::Store;
 use tokio::sync::{Mutex, Notify, watch};
 
 use super::{
-    ConfigText, Notifier, Setup, Timing, client, digest_due, parse_offset, run, send_due, start,
+    ConfigText, Notifier, Setup, Timing, client, digest_due, digest_message, parse_offset, run,
+    send_due, start,
 };
 use crate::testdir::Dir;
 
@@ -736,4 +737,28 @@ async fn a_target_added_by_a_reload_gets_the_first_failure_after_it() {
         .map(|sent| sent.jobs.iter().map(|job| job.id).collect())
         .collect();
     assert_eq!(jobs, [vec![1]], "the failure after the reload is sent");
+}
+
+#[test]
+fn a_digests_longest_wait_of_a_job_without_a_name_names_it_by_its_id() {
+    let message = digest_message(Digest {
+        since: 0,
+        until: 86_400,
+        finished: 1,
+        failed: 0,
+        new: Vec::new(),
+        waits: vec![LongWait {
+            job: 7,
+            repository: "halyard/ledger".to_owned(),
+            workflow: None,
+            name: String::new(),
+            waited: 60,
+            url: None,
+        }],
+    })
+    .message;
+    assert!(
+        message.contains("halyard/ledger: job 7 waited"),
+        "as runnerctl's digest names it: {message}"
+    );
 }

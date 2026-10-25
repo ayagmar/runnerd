@@ -17,7 +17,7 @@ use runnerd_core::api::{
     self, Activity, AdmissionPolicy, Advice, AutoPlan, ChartLine, ChartLineKind, ChartLines, Job,
     JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
     RunComparison, Sample, Severity, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores,
-    period,
+    job_title, period,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -2113,10 +2113,7 @@ fn sizing_jobs(
             }
             Advice::Keep { memory } | Advice::Lower { memory, .. } => Span::raw(bytes(memory)),
         };
-        let name = match &job.workflow {
-            Some(workflow) => format!("{workflow} / {}", job.name),
-            None => job.name.clone(),
-        };
+        let name = job_title(job.workflow.as_deref(), &job.name, None).to_string();
         let mut cells = vec![
             Cell::from(fit(&job.repository, repository_width)),
             Cell::from(fit(&name, shared - repository_width)),
@@ -2592,9 +2589,10 @@ fn step_line(
         spans.push(Span::styled(format!(" {:>9}", "–"), theme.dim()));
         return Line::from(spans);
     };
-    let took = step.took(now).unwrap_or(0);
+    // A step that ended without a completion time has no duration to show; its bar is a mark at its start.
+    let took = step.took(now);
     let offset = scale(started.saturating_sub(start), span, bar_width);
-    let length = scale(took, span, bar_width)
+    let length = scale(took.unwrap_or(0), span, bar_width)
         .max(1)
         .min(bar_width.saturating_sub(offset));
     let style = match step.outcome().kind {
@@ -2611,7 +2609,10 @@ fn step_line(
         Span::styled(
             format!(
                 " {:>9}",
-                format!("{}{}", duration(took), if running { "…" } else { "" })
+                took.map_or_else(
+                    || "–".to_owned(),
+                    |took| format!("{}{}", duration(took), if running { "…" } else { "" })
+                )
             ),
             bold(),
         ),

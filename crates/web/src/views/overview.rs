@@ -276,12 +276,17 @@ fn slot_view<'overview>(
             figure: format::bytes(memory),
             text: format!(
                 "of {cap} in {name}, {} on {}",
-                job.summary.name, job.summary.repository
+                job.summary.title(),
+                job.summary.repository
             ),
         },
         (Some(_), Some(job), None) => Lens {
             figure: cap,
-            text: format!("{name}, {} on {}", job.summary.name, job.summary.repository),
+            text: format!(
+                "{name}, {} on {}",
+                job.summary.title(),
+                job.summary.repository
+            ),
         },
         (Some(runner), None, _) if runner.warm => Lens {
             figure: cap,
@@ -714,7 +719,7 @@ fn running_job(
         div.slot-title {
             a.slot-job href=(format!("/jobs/{}", summary.id)) {
                 span.repo { (summary.repository) }
-                span.job-name { (summary.name) }
+                span.job-name { (summary.title().name) }
             }
             (parts.html(&elapsed, html! {
                 p.elapsed #(elapsed) { span.visually-hidden { "Running for " } (format::duration(now.saturating_sub(started))) }

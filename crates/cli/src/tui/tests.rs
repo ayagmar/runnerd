@@ -2465,3 +2465,56 @@ fn a_warm_runner_reads_as_warm_not_as_a_runner_stuck_waiting_for_its_job() {
         "its slot row says so: {narrow}"
     );
 }
+
+#[test]
+fn a_step_shows_the_duration_it_has_and_none_it_lacks() {
+    let mut app = app();
+    running_job(&mut app);
+    app.update(key(KeyCode::Enter));
+    let summary = app.job.as_ref().unwrap().job.summary.clone();
+    let mut cancelled = step(2, "Deploy", 1010, Some(1070));
+    cancelled.conclusion = Some("cancelled".to_owned());
+    app.update(Msg::Job(Job {
+        admission: None,
+        summary,
+        steps: vec![
+            Step {
+                completed_at: None,
+                status: "completed".to_owned(),
+                ..step(1, "Lint", 1009, Some(1012))
+            },
+            cancelled,
+        ],
+        record: None,
+    }));
+    let job = screen(&app, 120, 40, false);
+    let lint = rows_with(&job, "Lint")[0];
+    assert!(
+        lint.trim_end().ends_with('–') && !lint.contains("0s"),
+        "a step that ended without a completion time has no duration: {job}"
+    );
+    let deploy = rows_with(&job, "Deploy")[0];
+    assert!(
+        deploy.trim_end().ends_with("1m 00s"),
+        "a cancelled step keeps its duration: {job}"
+    );
+}
+
+#[test]
+fn a_sizing_row_of_a_job_without_a_name_says_a_job() {
+    let mut app = app();
+    app.update(key(KeyCode::Char('4')));
+    let mut unnamed = sizing();
+    for profile in &mut unnamed.profiles {
+        profile.jobs[0].workflow = None;
+        profile.jobs[0].name.clear();
+    }
+    app.update(Msg::Sizing(unnamed));
+    let shown = screen(&app, 120, 24, false);
+    assert!(
+        rows_with(&shown, "halyard/storefront")
+            .iter()
+            .all(|row| row.contains("a job")),
+        "as runnerctl sizing names it: {shown}"
+    );
+}
