@@ -315,13 +315,15 @@ impl TryFrom<ProfileToml> for Profile {
 }
 
 /// Whether a job asking for `wanted` may run on runners registered with `labels`: every label it asks for is one of
-/// theirs. GitHub compares labels without regard to case.
+/// theirs. GitHub compares labels without regard to case. A job asking for no label, as one that names only a runner
+/// group, matches no runners: nothing says which pool it is for (ADR 0058).
 pub fn labels_match(wanted: &[String], labels: &[String]) -> bool {
-    wanted.iter().all(|wanted| {
-        labels
-            .iter()
-            .any(|label| label.eq_ignore_ascii_case(wanted))
-    })
+    !wanted.is_empty()
+        && wanted.iter().all(|wanted| {
+            labels
+                .iter()
+                .any(|label| label.eq_ignore_ascii_case(wanted))
+        })
 }
 
 /// A repository to serve: `[[repositories]]`. Each entry is one of the repository's pools; entries with the same

@@ -221,6 +221,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                             reserved: None,
                             ..run.clone()
                         },
+                        &run.profile,
                         cap,
                         at,
                     );
@@ -229,7 +230,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 predictor.learn(run, &run.profile, cap, at);
             } else {
                 // A cancelled run's peak may be cut short, so only how it ended counts.
-                predictor.mark(run, cap, at);
+                predictor.mark(run, &run.profile, cap, at);
             }
         }
         self.measured.predictor = Some((predictor, SystemTime::now()));

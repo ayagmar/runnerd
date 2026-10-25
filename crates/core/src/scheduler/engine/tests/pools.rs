@@ -177,14 +177,19 @@ async fn the_light_pool_reserves_only_what_its_own_queued_jobs_predict() {
         3 * G,
     )
     .await;
-    ran_in(&handle.store, "light", &["r-light"], "lint", 2000, 200 * M).await;
+    // The same job name in both pools: each pool's runs predict only its own.
+    ran_in(&handle.store, "light", &["r-light"], "build", 2000, 200 * M).await;
     engine.recover().await.unwrap();
     handle.store.host_sample(api::HostSample {
         at: time::now_ms() / 1000,
         cpu: 0,
         memory: 2 * G,
     });
-    github.0.lock().unwrap().queued = vec![job(1), light(2)];
+    let light_build = QueuedJob {
+        name: "build".to_owned(),
+        ..light(2)
+    };
+    github.0.lock().unwrap().queued = vec![job(1), light_build];
     engine.tick(Shutdown::No).await;
     let started = runners(&mut engine, &handle, &docker);
     let reserved = |profile: &str| {
@@ -201,7 +206,7 @@ async fn the_light_pool_reserves_only_what_its_own_queued_jobs_predict() {
     );
     assert!(
         light < 512 * M,
-        "the lint's runner reserves for 200M, not the build's 3G: {light}"
+        "the light build's runner reserves for 200M, not the heavy build's 3G: {light}"
     );
 }
 
@@ -335,6 +340,24 @@ async fn clients_and_daemons_before_pools_still_read_the_profile_of_a_repository
     }))
     .unwrap();
     assert_eq!(older.profiles(), "app");
+    // A reason added after this client still lets it read the job, said plainly.
+    let later: api::QueuedJob = serde_json::from_value(serde_json::json!({
+        "id": 1,
+        "repository": "o/r",
+        "run_id": 1,
+        "run_attempt": 1,
+        "name": "build",
+        "queued_at": 0,
+        "waiting": { "kind": "some-later-reason", "detail": 3 },
+    }))
+    .unwrap();
+    let reason = later.waiting.clone().unwrap();
+    assert_eq!(reason, api::Waiting::Unknown);
+    assert_eq!(reason.kind(), api::WaitKind::Other);
+    assert_eq!(
+        reason.reason(&later, &handle.status.borrow(), 0),
+        "Waits for a reason this client does not know yet"
+    );
     assert_eq!(
         older.pool_for(&["self-hosted".to_owned()]).as_deref(),
         Some("app")

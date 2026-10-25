@@ -84,6 +84,9 @@ impl Learned {
         let profiles: Vec<Option<String>> = seen.iter().map(profile).collect();
         // Each run's jobs per pool, and when its first and last were queued.
         let mut runs: BTreeMap<RunKey<'_>, (usize, u64, u64)> = BTreeMap::new();
+        // When each run attempt's first job was queued, in any pool: a pool's span runs from there, as a run seen
+        // live counts from its first job (`Run::first`), so a pool whose jobs wait for another's still counts.
+        let mut attempts: BTreeMap<(&str, u64, u32), u64> = BTreeMap::new();
         for (job, profile) in seen
             .iter()
             .zip(&profiles)
@@ -106,6 +109,10 @@ impl Learned {
                 run.0 += 1;
                 run.1 = run.1.min(job.queued_at);
                 run.2 = run.2.max(job.queued_at);
+                let first = attempts
+                    .entry((&job.repository, job.run_id, job.run_attempt))
+                    .or_insert(job.queued_at);
+                *first = (*first).min(job.queued_at);
             }
         }
         for ((repository, hour), days) in days {
@@ -119,7 +126,11 @@ impl Learned {
         }
         // By repository, pool's profile and workflow: each run's jobs and span.
         let mut workflows: BTreeMap<WorkflowKey<'_>, Vec<(usize, u64)>> = BTreeMap::new();
-        for ((repository, profile, workflow, ..), (jobs, first, last)) in runs {
+        for ((repository, profile, workflow, run_id, run_attempt), (jobs, first, last)) in runs {
+            let first = attempts
+                .get(&(repository, run_id, run_attempt))
+                .copied()
+                .unwrap_or(first);
             workflows
                 .entry((repository, profile, workflow))
                 .or_default()

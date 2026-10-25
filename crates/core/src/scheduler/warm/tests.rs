@@ -326,3 +326,37 @@ fn a_runs_jobs_are_expected_of_the_pool_whose_labels_they_ask_for() {
         "the heavy pool still expects its own job, whatever the light pool saw"
     );
 }
+
+#[test]
+fn a_pool_whose_jobs_wait_for_another_pools_still_expects_them_until_they_come() {
+    let now = MIDNIGHT + 12 * HOUR;
+    // Three runs: a heavy job, then 20 minutes later two light jobs that need it.
+    let history: Vec<Seen> = (1..=3)
+        .flat_map(|run| {
+            let first = now - run * HOUR;
+            let light = |at| Seen {
+                labels: vec!["light".to_owned()],
+                ..seen("o/app", "CI", run, at)
+            };
+            [
+                seen("o/app", "CI", run, first),
+                light(first + 20 * MINUTE),
+                light(first + 21 * MINUTE),
+            ]
+        })
+        .collect();
+    let learned = learn(&history, now);
+    let light = Pool {
+        profile: "light".to_owned(),
+        ..pool("o/app")
+    };
+    let mut runs = Runs::default();
+    runs.note(&pool("o/app"), first(10), 100, Some("CI"), now);
+    assert_eq!(
+        runs.remaining(&light, &learned, now + 10 * MINUTE),
+        2,
+        "ten minutes in, the light jobs are still to come"
+    );
+    // The light span (21 minutes) and IDLE_TIMEOUT (5 minutes) later, it no longer counts.
+    assert_eq!(runs.remaining(&light, &learned, now + 27 * MINUTE), 0);
+}

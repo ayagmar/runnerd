@@ -532,6 +532,10 @@ pub enum Waiting {
         /// The labels it asks for.
         labels: Vec<String>,
     },
+    /// A reason from a newer daemon than this client knows, so a reason added later does not keep the client from
+    /// reading the status.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What a [`Waiting`] reason waits on, which clients draw it by.
@@ -543,6 +547,8 @@ pub enum WaitKind {
     Soon,
     /// Room: a slot, memory or CPU that a running job holds.
     Full,
+    /// A reason this client does not know (`Waiting::Unknown`), drawn neutral.
+    Other,
 }
 
 impl Waiting {
@@ -550,6 +556,7 @@ impl Waiting {
     pub fn kind(&self) -> WaitKind {
         match self {
             Waiting::Paused | Waiting::Backoff { .. } | Waiting::NoPool { .. } => WaitKind::Act,
+            Waiting::Unknown => WaitKind::Other,
             Waiting::RunnerStarting
             | Waiting::Reseeding { .. }
             | Waiting::PullingImage { .. }
@@ -576,6 +583,10 @@ impl Waiting {
         };
         match self {
             Waiting::Paused => format!("{} is paused", job.repository),
+            Waiting::Unknown => "Waits for a reason this client does not know yet".to_owned(),
+            Waiting::NoPool { labels } if labels.is_empty() => {
+                "It asks for no labels, so no profile serves it".to_owned()
+            }
             Waiting::NoPool { labels } => format!(
                 "No profile serves the {} {}",
                 if labels.len() == 1 { "label" } else { "labels" },

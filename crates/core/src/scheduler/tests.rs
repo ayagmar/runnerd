@@ -996,3 +996,48 @@ fn a_warm_runner_in_a_slot_a_lowered_count_closed_stops_and_its_slot_serves_no_j
         other.decisions
     );
 }
+
+/// o/a in `app` for `[self-hosted, linux, app]` jobs and in `light` for `a-light` jobs, both with free slots.
+fn two_pools(queued: Vec<QueuedJob>) -> (Vec<Repository>, BTreeMap<String, Profile>) {
+    let heavy = repository("o/a", "app", queued.clone());
+    let light = Repository {
+        labels: vec!["a-light".to_owned()],
+        ..repository("o/a", "light", queued)
+    };
+    let mut profiles = profiles(vec![Slot::Free; 2]);
+    let app = profiles["app"].clone();
+    profiles.insert("light".to_owned(), app);
+    (vec![heavy, light], profiles)
+}
+
+#[test]
+fn a_job_asking_for_no_labels_starts_no_runner_in_any_pool() {
+    let (repositories, profiles) = two_pools(vec![job(1, &[])]);
+    let plan = plan(&repositories, &profiles, budget(None, None), now());
+    assert_eq!(starts(&plan.decisions), []);
+    assert_eq!(
+        plan.waiting,
+        BTreeMap::from([(1, Waiting::NoPool { labels: Vec::new() })])
+    );
+}
+
+#[test]
+fn only_jobs_for_githubs_own_images_go_unlisted() {
+    let ids = [
+        (1, "ubuntu-latest"),
+        (2, "ubuntu-24.04-arm"),
+        (3, "windows-2025"),
+        (4, "macos-15-xlarge"),
+        (5, "ubuntu-2404"),
+        (6, "macos-builder"),
+        (7, "windows-big"),
+    ];
+    let queued: Vec<QueuedJob> = ids.iter().map(|(id, label)| job(*id, &[label])).collect();
+    let mut with_self_hosted = queued;
+    with_self_hosted.push(job(8, &["self-hosted", "ubuntu-latest"]));
+    let (repositories, profiles) = two_pools(with_self_hosted);
+    let waiting = plan(&repositories, &profiles, budget(None, None), now()).waiting;
+    let unserved: Vec<u64> = waiting.keys().copied().collect();
+    // A typo or a custom label is the owner's to fix; so is `self-hosted` with an image name no pool has.
+    assert_eq!(unserved, [5, 6, 7, 8]);
+}

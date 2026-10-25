@@ -218,16 +218,41 @@ pub struct Budget {
     pub held: bool,
 }
 
-/// Whether GitHub runs a job on its own runners: every label it asks for names one of GitHub's images, such as
-/// `ubuntu-latest` or `macos-15`. No pool of this daemon is meant for it.
+/// Whether GitHub runs a job on its own runners: it asks for exactly one label, one of GitHub's image names. No pool
+/// of this daemon is meant for it. A typo, a custom label and an image name beside `self-hosted` are the owner's
+/// to fix, so they wait for a pool instead.
 fn hosted_by_github(job: &QueuedJob) -> bool {
-    !job.labels.is_empty()
-        && job.labels.iter().all(|label| {
-            let label = label.to_ascii_lowercase();
-            ["ubuntu-", "windows-", "macos-"]
-                .iter()
-                .any(|image| label.starts_with(image))
-        })
+    matches!(&job.labels[..], [label] if github_image(&label.to_ascii_lowercase()))
+}
+
+/// Whether `label`, in lower case, names a GitHub-hosted image: `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-24.04-arm`,
+/// `windows-latest`, `windows-2025`, `windows-11-arm`, `macos-latest`, `macos-15`, or a macOS one with `-large` or
+/// `-xlarge`.
+fn github_image(label: &str) -> bool {
+    let digits = |text: &str, count: usize| {
+        text.len() == count && text.bytes().all(|byte| byte.is_ascii_digit())
+    };
+    let ubuntu = |version: &str| {
+        version == "latest"
+            || version
+                .split_once('.')
+                .is_some_and(|(year, month)| digits(year, 2) && month == "04")
+    };
+    let macos = |version: &str| version == "latest" || digits(version, 2);
+    if let Some(version) = label.strip_prefix("ubuntu-") {
+        return ubuntu(version.strip_suffix("-arm").unwrap_or(version));
+    }
+    if let Some(version) = label.strip_prefix("windows-") {
+        return version == "latest" || version == "11-arm" || digits(version, 4);
+    }
+    if let Some(version) = label.strip_prefix("macos-") {
+        let version = version
+            .strip_suffix("-xlarge")
+            .or_else(|| version.strip_suffix("-large"))
+            .unwrap_or(version);
+        return macos(version);
+    }
+    false
 }
 
 /// Whether a job may run on a repository's runners: every label it asks for is one of theirs. GitHub compares

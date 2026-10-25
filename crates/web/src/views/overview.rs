@@ -1210,12 +1210,14 @@ fn queued_row(overview: &Overview, job: &QueuedJob) -> Markup {
     }
 }
 
-/// How a reason is drawn: one the owner can act on, one that clears by itself, or what is full.
+/// How a reason is drawn: one the owner can act on, one that clears by itself, what is full, or one this client
+/// does not know, drawn plain.
 fn reason_class(kind: WaitKind) -> &'static str {
     match kind {
         WaitKind::Act => "act",
         WaitKind::Soon => "soon",
         WaitKind::Full => "full",
+        WaitKind::Other => "other",
     }
 }
 

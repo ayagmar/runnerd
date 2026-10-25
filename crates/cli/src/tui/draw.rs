@@ -640,7 +640,7 @@ fn resample(values: &[u64], width: usize) -> Vec<u64> {
 fn reason_style(kind: WaitKind, theme: Theme) -> Style {
     match kind {
         WaitKind::Act => theme.wait().add_modifier(Modifier::BOLD),
-        WaitKind::Soon => theme.dim(),
+        WaitKind::Soon | WaitKind::Other => theme.dim(),
         WaitKind::Full => theme.wait(),
     }
 }

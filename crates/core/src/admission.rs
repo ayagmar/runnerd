@@ -135,16 +135,34 @@ impl Peaks {
     }
 }
 
+/// A job in one profile, as the predictor keeps its runs.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
+struct InProfile {
+    key: Key,
+    profile: String,
+}
+
+impl InProfile {
+    fn new(key: &Key, profile: &str) -> InProfile {
+        InProfile {
+            key: key.clone(),
+            profile: profile.to_owned(),
+        }
+    }
+}
+
 /// Predicts a job's peak from the runs it learned.
 #[derive(Debug, Clone)]
 pub struct Predictor {
     margin: u32,
     min_jobs: u32,
-    jobs: BTreeMap<Key, Peaks>,
+    /// By job and the profile it ran in: a job of one name may run in several pools of its repository, whose runs
+    /// say nothing of each other's (ADR 0058).
+    jobs: BTreeMap<InProfile, Peaks>,
     profiles: BTreeMap<String, Peaks>,
     /// The CPU averages of the runs that have one, apart from the peaks: a run whose peak says nothing of its
     /// memory still says what CPU it used, and must not make its job known to memory predictions.
-    cpu_jobs: BTreeMap<Key, Averages>,
+    cpu_jobs: BTreeMap<InProfile, Averages>,
     cpu_profiles: BTreeMap<String, Averages>,
 }
 
@@ -163,9 +181,9 @@ impl Predictor {
 
     /// Learns a run of `profile` that finished at `at` (ms), having run under `cap`: its peak, and how it ended.
     pub fn learn(&mut self, run: &Ran, profile: &str, cap: u64, at: u64) {
-        self.mark(run, cap, at);
+        self.mark(run, profile, cap, at);
         let peak = run.memory_peak;
-        if let Some(job) = self.jobs.get_mut(&Key::of(run)) {
+        if let Some(job) = self.jobs.get_mut(&InProfile::new(&Key::of(run), profile)) {
             job.add(peak);
             job.succeeded += u64::from(run.succeeded);
         }
@@ -187,7 +205,7 @@ impl Predictor {
             .or_default()
             .add(average, run.succeeded);
         self.cpu_jobs
-            .entry(Key::of(run))
+            .entry(InProfile::new(&Key::of(run), profile))
             .or_default()
             .add(average, run.succeeded);
     }
@@ -196,7 +214,7 @@ impl Predictor {
     /// CPU (its CPU time over its run time), by the same fallbacks as memory without the margin. CPU is shared, not
     /// a kill limit, so neither a run at its cap nor copies of the job beside it change it.
     pub fn predict_cpu(&self, key: &Key, profile: &str, cap: u64) -> CpuPrediction {
-        let job = self.cpu_jobs.get(key);
+        let job = self.cpu_jobs.get(&InProfile::new(key, profile));
         let min_jobs = u64::from(self.min_jobs);
         let peers = self
             .cpu_profiles
@@ -233,12 +251,15 @@ impl Predictor {
         }
     }
 
-    /// Learns only how a run ended, not its peak, as for a cancelled one: a run that met its cap (`Ran::met_cap`)
-    /// makes its job unpredictable for `UNPREDICTABLE_FOR`, a peak past what it reserved makes its job reserve its
-    /// largest peak for as long.
-    pub fn mark(&mut self, run: &Ran, cap: u64, at: u64) {
+    /// Learns only how a run of `profile` ended, not its peak, as for a cancelled one: a run that met its cap
+    /// (`Ran::met_cap`) makes its job in that profile unpredictable for `UNPREDICTABLE_FOR`, a peak past what it
+    /// reserved makes it reserve its largest peak for as long.
+    pub fn mark(&mut self, run: &Ran, profile: &str, cap: u64, at: u64) {
         let peak = run.memory_peak;
-        let job = self.jobs.entry(Key::of(run)).or_default();
+        let job = self
+            .jobs
+            .entry(InProfile::new(&Key::of(run), profile))
+            .or_default();
         if run.met_cap(cap) {
             job.unpredictable_until = job.unpredictable_until.max(at + UNPREDICTABLE_FOR);
         }
@@ -258,7 +279,7 @@ impl Predictor {
         now: u64,
         copies: Copies,
     ) -> Prediction {
-        let job = self.jobs.get(key);
+        let job = self.jobs.get(&InProfile::new(key, profile));
         if let Some(until) = job
             .map(|job| job.unpredictable_until)
             .filter(|until| *until > now)

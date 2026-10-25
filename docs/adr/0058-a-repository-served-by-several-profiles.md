@@ -26,12 +26,24 @@ queued; another's 600M design jobs waited 6-12 minutes behind its Android gate.
 - The scheduler plans per pool: a runner's reservation, under measured admission, is the largest prediction among
   the queued jobs its own labels match; a CPU hold, the CPU wait it starts, the warm runners it wants and the warm
   runners a job may stop are its own. A job may stop a warm runner of another pool of its repository.
+- Predictions keep each job's runs per profile as well as by repository, workflow and name: in learning, in
+  prediction, in the marks a run at its cap or past its reservation leaves, and in `runnerd simulate`'s replay. A
+  matrix job of one name that runs in two pools is predicted in each from its runs there.
+- A job that asks for no label (one naming only a runner group) matches no pool, so it never starts runners in
+  several pools at once; it waits with `Waiting::NoPool` and says it asks for no labels.
 - Warm runners learn per pool: the jobs a workflow's runs queue are counted per pool, by the labels each job asked
-  for, so a light pool does not keep runners for heavy jobs to come. Whether a repository is active stays per
-  repository.
+  for, so a light pool does not keep runners for heavy jobs to come. A pool's span runs from the first job of the
+  run attempt in any pool, as a run seen live counts from its first job, so a pool whose jobs wait on another
+  pool's still expects them. Whether a repository is active stays per repository.
 - A queued job of a served repository that no pool's labels match waits with `Waiting::NoPool`, an act-on-it reason
-  (`No profile serves the label halyard-lite`). Jobs whose every label names one of GitHub's images (`ubuntu-*`,
-  `windows-*`, `macos-*`) are GitHub's, not runnerd's, and are not listed.
+  (`No profile serves the label halyard-lite`). Only a job asking for exactly one GitHub-hosted image label is
+  GitHub's and not listed: `ubuntu-latest`, `ubuntu-NN.04`, `ubuntu-NN.04-arm`, `windows-latest`, `windows-NNNN`,
+  `windows-11-arm`, `macos-latest`, `macos-NN`, and macOS ones ending `-large` or `-xlarge`. A typo such as
+  `ubuntu-2404`, a custom label such as `macos-builder`, or an image name beside `self-hosted` waits with
+  `NoPool`.
+- `Waiting` gains `Unknown` (`#[serde(other)]`), shown as a neutral reason (`WaitKind::Other`), so a reason a later
+  daemon adds no longer keeps a client from reading the status. There is no API negotiation: runnerctl, the TUI and
+  the dashboard ship and install with the daemon.
 - Holds after failed runners are per pool: a light pool whose image is broken does not stop the heavy one. Pause
   and resume stay per repository.
 - The status lists each repository once with its `pools` (profile, labels, queued jobs), and each queued job with
@@ -45,4 +57,6 @@ queued; another's 600M design jobs waited 6-12 minutes behind its Android gate.
 - A repository can opt in without risk to its unlabelled jobs: the light pool registers only with its own label
   (leaving out `self-hosted`), so a job still asking for `[self-hosted]` matches only the heavy pool.
 - A job whose `runs-on` no pool serves, such as a typo in the new label, says so instead of waiting silently.
-- A client older than this daemon shows only a repository's first pool.
+- A client older than this daemon shows only a repository's first pool, and cannot read a status that lists an
+  unserved job: its `Waiting` has neither `NoPool` nor the `Unknown` fallback. Clients from this version on read
+  later reasons as `Unknown`.
