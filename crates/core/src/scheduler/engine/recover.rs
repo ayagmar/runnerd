@@ -106,8 +106,36 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Adopts the runner and seed containers a previous daemon left running, and removes the runners that
-    /// stopped, or that run under this machine's names for no free slot. Their registrations, and any of this host's runners without a container, go at the first poll.
+    /// Makes room for a running runner the config no longer has room for, as a reload leaves it: its slot past the
+    /// profile's count, its profile retired with the limits it runs with, its repository draining.
+    fn keep_draining(&mut self, profile: &str, index: usize, occupant: &Occupant) {
+        let slots = self.slots.entry(profile.to_owned()).or_default();
+        if slots.len() <= index {
+            slots.resize(index + 1, None);
+        }
+        if !self.config.profiles.contains_key(profile) {
+            self.retired
+                .entry(profile.to_owned())
+                .or_insert_with(|| crate::config::Profile {
+                    image: crate::config::Image::Pulled(occupant.image.clone().unwrap_or_default()),
+                    cpus: u32::try_from(occupant.cpus / 1000).unwrap_or(u32::MAX),
+                    memory: crate::config::ByteSize(occupant.memory),
+                    slots: 0,
+                    record_failures: false,
+                    min_memory: None,
+                    max_memory: None,
+                    max_slots: None,
+                });
+        }
+        if !self.repositories.contains_key(&occupant.repository) {
+            self.draining.insert(occupant.repository.clone());
+        }
+    }
+
+    /// Adopts the runner and seed containers a previous daemon left running, also those the config no longer has
+    /// room for, which drain as after a reload, and removes the runners that stopped, or that run under this
+    /// machine's names without a slot to adopt them in. Their registrations, and any of this host's runners without a
+    /// container, go at the first poll.
     /// Changes nothing unless Docker lists both kinds, so it can be tried again.
     pub(super) async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
@@ -147,7 +175,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .ok()
                 .and_then(|slot| slot.checked_sub(1));
             let occupant = self.adopted(&container, &profile).await;
-            let known_repository = self.repositories.contains_key(&occupant.repository);
+            // A runner the config no longer has room for drains as it would have without the restart: in a slot
+            // past a lowered count, of a removed profile or for a removed repository.
+            if ours
+                && container.running
+                && !profile.is_empty()
+                && !occupant.repository.is_empty()
+                && let Some(index) = index
+            {
+                self.keep_draining(&profile, index, &occupant);
+            }
+            let known_repository = self.repositories.contains_key(&occupant.repository)
+                || self.draining.contains(&occupant.repository);
             let free = index.and_then(|index| {
                 self.slots
                     .get_mut(&profile)?
@@ -199,6 +238,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             let keep: Vec<&str> = running.iter().map(String::as_str).collect();
             cache.forget_others(&keep);
         }
+        self.drop_closed_slots();
         self.recover_history(&running).await;
         self.measure_docker_disk();
         Ok(())

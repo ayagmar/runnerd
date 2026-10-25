@@ -179,6 +179,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .values()
             .chain(self.retired.values())
             .map(|profile| profile.image.reference())
+            // A profile retired at a restart from a container that did not say its image: its container keeps it.
+            .filter(|reference| !reference.is_empty())
             .chain(
                 self.images
                     .states

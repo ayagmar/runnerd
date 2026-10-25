@@ -2024,6 +2024,99 @@ async fn fewer_slots_stop_new_starts_but_not_the_running_job() {
 }
 
 #[tokio::test]
+async fn a_restart_keeps_a_job_running_in_a_slot_the_config_no_longer_has() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 2, 1);
+    github.0.lock().unwrap().queued = vec![job(3)];
+    let dir = TestDir::new("engine");
+    // A reload lowered `app` to one slot while slot 2 ran a job, then runnerd restarted.
+    let (mut engine, handle) = engine_with(
+        &github,
+        &docker,
+        &dir,
+        &CONFIG.replace("slots = 2", "slots = 1"),
+    );
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    assert_eq!(runner_in(&handle, 2).as_deref(), Some("o/r"));
+    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+
+    // Once it finishes, the one slot left takes the queued job.
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(registered(&github.calls()).len(), 1);
+    let slots: Vec<usize> = handle.status.borrow().profiles[0]
+        .slots
+        .iter()
+        .map(|slot| slot.slot)
+        .collect();
+    assert_eq!(slots, [1]);
+}
+
+#[tokio::test]
+async fn a_restart_keeps_a_job_running_in_a_profile_the_config_no_longer_has() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .memory
+        .insert("container-1".to_owned(), 4 << 30);
+    let dir = TestDir::new("engine");
+    // A reload moved the repository to `big` while `app` ran its job, then runnerd restarted.
+    let config = CONFIG
+        .replace("[profiles.app]", "[profiles.big]")
+        .replace("profile = \"app\"", "profile = \"big\"");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    assert_eq!(runner_in(&handle, 1).as_deref(), Some("o/r"));
+    // Its memory still counts against the budget.
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 4 << 30);
+
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let names: Vec<String> = handle
+        .status
+        .borrow()
+        .profiles
+        .iter()
+        .map(|profile| profile.name.clone())
+        .collect();
+    assert_eq!(names, ["big"]);
+}
+
+#[tokio::test]
+async fn a_restart_keeps_a_job_running_for_a_repository_the_config_no_longer_has() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    // A reload removed o/gone while its job ran, then runnerd restarted.
+    running_job(&github, &docker, "o/gone", 1, 1);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    assert_eq!(runner_in(&handle, 1).as_deref(), Some("o/gone"));
+
+    // Once it finishes, its container goes and so does its registration.
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+    assert_eq!(github.0.lock().unwrap().runners.len(), 0);
+}
+
+#[tokio::test]
 async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runner_is_in_one_it_drops()
  {
     let github = FakeGithub::default();
