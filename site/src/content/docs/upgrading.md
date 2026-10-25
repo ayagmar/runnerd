@@ -5,6 +5,22 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.15 to 0.0.16
+
+The job history stays at version 13, so either version reads it. Install 0.0.16, move each profile's published `image` to its `-0.0.16` tag, and restart runnerd:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.16/install.sh | sh -s -- --version v0.0.16
+runnerd check-config
+systemctl --user restart runnerd
+runnerctl doctor
+```
+
+### What changes on its own
+
+- **A snapshot over its `snapshot_max` starts over from the image**, and every slot's changes go with it. Before, it started over from slot 1's changes alone, which miss the files slot 1's jobs only read: a cache's index could name content that was gone, and every Gradle or npm job of the profile failed. Every slot of a profile whose snapshot starts over now runs its next job cold. The limit is checked against the snapshot the reseed would make, so this happens less often.
+- A profile whose jobs fail on missing cache files since such a reseed keeps failing after the upgrade. Stop runnerd, remove the profile's snapshot and slot volumes (`docker volume rm runnerd-<profile>-base runnerd-<profile>-slot-1 …`) and start it again.
+
 ## 0.0.14 to 0.0.15
 
 The job history stays at version 13, so either version reads it. Install 0.0.15, move each profile's published `image` to its `-0.0.15` tag, and restart runnerd:
