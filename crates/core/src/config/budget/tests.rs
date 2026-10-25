@@ -86,3 +86,14 @@ fn a_warning_is_its_own_tone_and_lets_doctor_pass() {
     };
     assert!(!Doctor::all_passed(&[fail]), "a failure does not");
 }
+
+#[test]
+fn a_short_size_rounds_to_two_digits_and_keeps_its_unit() {
+    let short = |bytes: u64| ByteSize(bytes).short();
+    assert_eq!(short(3328 << 20), "3.3G", "3.25G");
+    assert_eq!(short(2560 << 20), "2.5G");
+    assert_eq!(short(10 << 30), "10G");
+    assert_eq!(short(12 << 30), "12G");
+    assert_eq!(short(512 << 20), "512M");
+    assert_eq!(short(1 << 30), "1G");
+}

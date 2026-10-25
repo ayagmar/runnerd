@@ -855,6 +855,33 @@ fn the_budget_names_the_mirror_and_each_seed_container() {
 }
 
 #[test]
+fn a_budget_label_never_cuts_a_figure_at_any_width() {
+    let mut app = app();
+    running_job(&mut app);
+    app.update(event(
+        None,
+        Event::JobSample {
+            job: 42,
+            sample: Sample {
+                at: 1096,
+                cpu: 3140,
+                memory: 3328 << 20,
+                network_received: 0,
+                network_sent: 0,
+            },
+        },
+    ));
+    for width in 60..=160 {
+        let shown = screen(&app, width, 40, false);
+        let names = shown.lines().nth(4).unwrap();
+        assert!(
+            !names.contains('…'),
+            "at {width} columns a label is cut: {names}"
+        );
+    }
+}
+
+#[test]
 fn the_budget_names_a_shell_open_in_a_record() {
     let mut app = app();
     let budget = &mut app.live.status.budget;

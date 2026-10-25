@@ -768,30 +768,30 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         let style = theme.profile(Some(index));
         let sample =
             slot_job(app, profile, slot).and_then(|job| app.live.samples.get(&job.summary.id));
-        let used = sample.map_or(0, |sample| scale(sample.memory, memory, width));
-        let (text, label) = if slot.runner.is_some() {
+        let used_cells = sample.map_or(0, |sample| scale(sample.memory, memory, width));
+        let name = format!("{} {}", profile.name, slot.slot);
+        let (text, labels) = if slot.runner.is_some() {
+            let figure = sample.map_or(memory, |sample| sample.memory);
+            let full = bytes(figure);
+            let short = ByteSize(figure).short();
+            let used = if sample.is_some() { " used" } else { "" };
             (
                 format!(
                     "{}{}",
-                    "█".repeat(usize::from(used)),
-                    "▓".repeat(usize::from(width - used))
+                    "█".repeat(usize::from(used_cells)),
+                    "▓".repeat(usize::from(width - used_cells))
                 ),
-                sample.map_or_else(
-                    || format!("{} {} {}", profile.name, slot.slot, bytes(memory)),
-                    |sample| {
-                        format!(
-                            "{} {} {} used",
-                            profile.name,
-                            slot.slot,
-                            bytes(sample.memory)
-                        )
-                    },
-                ),
+                vec![
+                    format!("{name} {full}{used}"),
+                    format!("{name} {full}"),
+                    format!("{name} {short}"),
+                    name.clone(),
+                ],
             )
         } else {
             (
                 "░".repeat(usize::from(width)),
-                format!("{} {} idle", profile.name, slot.slot),
+                vec![format!("{name} idle"), name.clone()],
             )
         };
         // A gap between blocks, taken from the block itself.
@@ -802,11 +802,11 @@ fn budget(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         text.push(' ');
         cells.push(Span::styled(text, style));
         let room = usize::from(width.saturating_sub(1));
-        // Short of room, `used` goes before the figure is cut.
-        let label = match label.strip_suffix(" used") {
-            Some(short) if label.width() > room => short.to_owned(),
-            _ => label,
-        };
+        // Short of room, `used` goes, then the figure shortens, then it goes whole: a figure is never cut.
+        let label = labels
+            .into_iter()
+            .find(|label| label.width() <= room)
+            .unwrap_or_default();
         names.push(Span::styled(format!("{} ", fit(&label, room)), style));
         drawn += width;
     }

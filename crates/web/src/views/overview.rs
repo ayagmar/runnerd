@@ -11,6 +11,7 @@ use runnerd_core::api::{
     SampleSeries, SlotState, SlotStatus, Status, Tone, WaitKind, cpus, in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
+use runnerd_core::config::ByteSize;
 
 use super::{
     Live, Page, Parts, badge, digest, js, page, profile_class, repository_id, slot_id, time_ago,
@@ -367,7 +368,7 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                         aria-label=(format!("{} {}", part.lens.figure, part.lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
                         data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
-                        span.size { (part.lens.figure) }
+                        span.size { (ByteSize(part.memory).short()) }
                         span.name { (part.name) }
                     }
                 }
@@ -377,7 +378,7 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
                         aria-label=(format!("{} {}", lens.figure, lens.text))
                         data-on:pointerenter=(link.enter) data-on:focus=(link.enter)
                         data-on:pointerleave=(link.pointer_leave) data-on:blur=(link.leave) data-class:linked=(link.linked) {
-                        span.size { (lens.figure) }
+                        span.size { (ByteSize(free).short()) }
                     }
                 }
             }
@@ -540,7 +541,7 @@ fn block(
                 }))
             }
             // Its name is what it shows, for voice control: the space joins the two as words.
-            span.size { (format::bytes(memory)) }
+            span.size { (ByteSize(memory).short()) }
             " "
             span.name { (profile.name) " " (slot.slot) }
         }

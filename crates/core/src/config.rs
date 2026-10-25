@@ -1708,6 +1708,29 @@ impl fmt::Display for ByteSize {
     }
 }
 
+impl ByteSize {
+    /// The size in at most two significant digits, rounded to the nearest, for a label too narrow for its
+    /// `Display`: `3.3G` for 3.25G, `12G`, `512M`. Every client's budget bar labels a block with it.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "shown with one decimal at most, far coarser than f64's precision"
+    )]
+    pub fn short(self) -> String {
+        let Some((unit, factor)) = UNITS.iter().find(|(_, factor)| self.0 >= *factor) else {
+            return format!("{}B", self.0);
+        };
+        let value = self.0 as f64 / *factor as f64;
+        // Halves round up, as `f64::round` does and formatting, which rounds them to even, does not.
+        let tenths = (value * 10.0).round() / 10.0;
+        if tenths < 10.0 {
+            let number = format!("{tenths:.1}");
+            format!("{}{unit}", number.trim_end_matches(".0"))
+        } else {
+            format!("{:.0}{unit}", value.round())
+        }
+    }
+}
+
 impl<'de> Deserialize<'de> for ByteSize {
     fn deserialize<D: Deserializer<'de>>(deserializer: D) -> Result<Self, D::Error> {
         String::deserialize(deserializer)?

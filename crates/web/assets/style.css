@@ -438,9 +438,10 @@ html {
   text-overflow: ellipsis;
 }
 
+/* A size never loses its end: in a narrow block it gets smaller, down to a third of the block's width. */
 .block .size,
 .free .size {
-  font-size: clamp(1.1rem, 0.6rem + 2.4vw, 2.75rem);
+  font-size: min(clamp(1.1rem, 0.6rem + 2.4vw, 2.75rem), 30cqi);
   font-weight: 700;
   letter-spacing: -0.05em;
   line-height: 0.95;
@@ -2066,7 +2067,7 @@ dl.health-figures {
 
 .bar-small .block .size,
 .bar-small .free .size {
-  font-size: 1.125rem;
+  font-size: min(1.125rem, 30cqi);
 }
 
 /* A narrow block's name wraps rather than losing its end. */
