@@ -5,6 +5,34 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.13 to 0.0.14
+
+The job history stays at version 13, so either version reads it. Install 0.0.14, move each profile's published `image` to its `-0.0.14` tag, and restart runnerd:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.14/install.sh | sh -s -- --version v0.0.14
+runnerd check-config
+systemctl --user restart runnerd
+runnerctl doctor
+```
+
+Upgrade `runnerctl` with the daemon: a 0.0.13 client cannot read a status that lists a job no profile serves.
+
+### What changes on its own
+
+- **A queued job that no repository entry's labels match is listed**, waiting with *No profile serves the label …*, and so is a job that asks for no labels. Before, it was left out. Jobs asking for one GitHub-hosted label, such as `ubuntu-latest`, are still left out.
+- **A job waiting for the host's memory names what holds it**: `programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G`. The host line in status, the TUI and the dashboard names them too, and so does `runnerd doctor`'s warning.
+- **The failed figure turns red only when a runner failed its job**: lost with it, or killed for memory at its cap. `GET /v1/activity` gains `runner_failed`.
+- **Under `admission = "measured"`, `check-config`, the doctor and the config editor hold the largest runner and the mirror to `MemoryMax`**, as admission does, instead of every slot at its cap.
+- **A job's memory and CPU charts draw what admission reserved** beside the cap.
+- **A restart keeps a running job whose slot, profile or repository the config no longer has**, and lets it drain, as a reload does.
+- **Admission stays inside its budgets when a job takes a warm runner's room.** A job stops another pool's warm runner only where that runner's reservation covers what the job needs, on the slice, its CPUs and the host; otherwise it waits.
+- **A reseed's seed container waits for room** instead of starting past `MemoryMax` or the host's limit. After `runnerctl reseed`, the drained profile holds its seed's room so other pools' jobs don't take it, as long as the host could ever fit it.
+
+### New, off until you set them
+
+- [Several profiles for one repository](../configuration/#split-light-and-heavy-jobs): repeat its `[[repositories]]` entry with another `profile` and a label of its own, and point light jobs' `runs-on` at that label. To go back to 0.0.13, remove the extra entries first.
+
 ## 0.0.12 to 0.0.13
 
 ### Before
