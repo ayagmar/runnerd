@@ -1069,6 +1069,7 @@ html {
 
 .badge.success { background: var(--success-bg); color: var(--success-ink); }
 .badge.failure { background: var(--failure-bg); color: var(--failure-ink); }
+.badge.warn { background: color-mix(in srgb, var(--wait) 16%, var(--surface)); color: var(--wait-ink); }
 .badge.running,
 .badge.queued { background: var(--running-bg); color: var(--running-ink); }
 
@@ -2029,6 +2030,10 @@ dl.health-figures {
 
 .check-result.invalid {
   border-top-color: var(--failure-ink);
+}
+
+.check-result.unbounded {
+  border-top-color: var(--wait);
 }
 
 .check-result.invalid h2,

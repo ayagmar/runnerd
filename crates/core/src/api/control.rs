@@ -140,15 +140,46 @@ pub enum CheckStatus {
     Info,
 }
 
-impl fmt::Display for Check {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        let status = match self.status {
+impl CheckStatus {
+    /// Its label, as every client shows it: `ok`, `FAIL`, `WARN`, `skip` or `info`; a failure and a warning in
+    /// capitals so they stand out uncoloured.
+    pub fn label(self) -> &'static str {
+        match self {
             CheckStatus::Pass => "ok",
             CheckStatus::Fail => "FAIL",
             CheckStatus::Warn => "WARN",
             CheckStatus::Skip => "skip",
             CheckStatus::Info => "info",
-        };
+        }
+    }
+
+    /// What it means for the reader: a warning is not a failure.
+    pub fn tone(self) -> super::Tone {
+        match self {
+            CheckStatus::Pass => super::Tone::Good,
+            CheckStatus::Fail => super::Tone::Bad,
+            CheckStatus::Warn => super::Tone::Warn,
+            CheckStatus::Skip => super::Tone::Quiet,
+            CheckStatus::Info => super::Tone::Neutral,
+        }
+    }
+}
+
+impl Doctor {
+    /// Whether runners can run: no check failed. Warnings, skips and notes pass.
+    pub fn passed(&self) -> bool {
+        Doctor::all_passed(&self.checks)
+    }
+
+    /// `Doctor::passed` of checks not yet in a `Doctor`, as `runnerd doctor` runs them.
+    pub fn all_passed(checks: &[Check]) -> bool {
+        !checks.iter().any(|check| check.status == CheckStatus::Fail)
+    }
+}
+
+impl fmt::Display for Check {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        let status = self.status.label();
         write!(f, "{status:<5} {}: {}", self.name, self.detail)?;
         if let Some(fix) = &self.fix {
             for (i, line) in fix.lines().enumerate() {

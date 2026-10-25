@@ -2259,8 +2259,9 @@ async fn caps_too_large_to_add_up_draw_no_budget() {
     let toml = config.replacen("slots = 2", "slots = 4294967295", 1);
     assert_ne!(toml, config);
     let result = checked(&dashboard, &toml).await;
-    assert!(result.contains("Does not fit"), "{result}");
-    for unexpected in ["Memory caps", "bar-small", "free", "0B"] {
+    // Caps that overflow have no total to fit or not: the check says why it is not valid.
+    assert!(result.contains("Not valid"), "{result}");
+    for unexpected in ["Does not fit", "Memory caps", "bar-small", "free", "0B"] {
         assert!(
             !result.contains(unexpected),
             "shows {unexpected:?}: {result}"

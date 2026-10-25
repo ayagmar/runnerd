@@ -7,7 +7,7 @@ use std::process::Command;
 
 use runnerd_core::admission::host;
 use runnerd_core::api::{self, Check, CheckStatus as Status, Sizing};
-use runnerd_core::config::{self, Admission, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
+use runnerd_core::config::{self, ByteSize, Config, Image, Isolation, PUBLISHED_RUNNER};
 use runnerd_core::docker::{Docker, DockerApi as _};
 use runnerd_core::observe::metrics::{self, Paths};
 use runnerd_core::record;
@@ -539,41 +539,7 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             ),
         )
     };
-    let config_check = match config.validate(slice.memory_max) {
-        Ok(warnings) if warnings.is_empty() => pass(
-            "config",
-            match (
-                config.host.admission,
-                config.memory_needed(),
-                config.memory_caps(),
-                slice.memory_max,
-            ) {
-                (Admission::Measured, Ok(needed), Ok(caps), Some(max)) if caps > max => format!(
-                    "under admission = \"measured\", the largest runner with the mirror needs {needed} of \
-                     {name}'s {max} MemoryMax; every slot at its cap at once would take {caps}"
-                ),
-                _ => format!("fits in {name}"),
-            },
-        ),
-        Ok(warnings) => Check {
-            name: "config".to_owned(),
-            status: Status::Pass,
-            detail: format!(
-                "valid, with warnings: {}",
-                warnings
-                    .iter()
-                    .map(ToString::to_string)
-                    .collect::<Vec<_>>()
-                    .join("; ")
-            ),
-            fix: None,
-        },
-        Err(error) => fail(
-            "config",
-            error.to_string(),
-            "change runnerd.toml or the slice's limits",
-        ),
-    };
+    let config_check = config.check_against(slice.memory_max).doctor_check();
     vec![slice_check, config_check]
 }
 

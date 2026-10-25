@@ -10,10 +10,10 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use clap::{Parser, Subcommand};
 use runnerd_core::api::{
-    Caches, CheckStatus, ConfigCheck, ConfigFile, Dashboard, Digest, Doctor, Event, EventQuery,
-    Insights, InsightsQuery, Job, JobPage, JobQuery, JobState, LogQuery, NotifyTest,
-    NotifyTestQuery, PairingQuery, Pairings, PauseQuery, Paused, Records, RemoveRecordsQuery,
-    RemovedRecords, Resize, ShellQuery, Sizing, SizingQuery, Status,
+    Caches, ConfigCheck, ConfigFile, Dashboard, Digest, Doctor, Event, EventQuery, Insights,
+    InsightsQuery, Job, JobPage, JobQuery, JobState, LogQuery, NotifyTest, NotifyTestQuery,
+    PairingQuery, Pairings, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
+    Resize, ShellQuery, Sizing, SizingQuery, Status,
 };
 use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
@@ -927,10 +927,7 @@ async fn doctor(client: &Client, json: bool) -> Result<ExitCode, Error> {
         }
         Err(error) => return Err(error.into()),
     };
-    let passed = !doctor
-        .checks
-        .iter()
-        .any(|check| check.status == CheckStatus::Fail);
+    let passed = doctor.passed();
     if json {
         print_json(&doctor)?;
     } else {
