@@ -14,8 +14,9 @@ use std::path::PathBuf;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use runnerd_core::api::{
-    AutoPlan, Event, EventEnvelope, HostSample, JobState, Resize, RunnerStatus, Sample,
-    SizingChange, SizingHold, Waiting,
+    Admission, AdmissionPolicy, AutoPlan, Basis, CpuAdmission, CpuBudget, Event, EventEnvelope,
+    Holder, HostBudget, HostMemory, HostSample, JobPeak, JobState, PoolStatus, ProfileStatus,
+    Resize, RunnerStatus, Sample, SizingChange, SizingHold, SlotStatus, Waiting,
 };
 
 mod fake;
@@ -40,6 +41,9 @@ async fn main() {
     burst(&fake);
     warm(&fake);
     auto_sizing(&fake);
+    small_pool(&fake);
+    measured(&fake);
+    busy_desktop(&fake);
     fake::serve(&socket, fake.clone());
     let listener = runnerd_web::listen(&addr).await.unwrap().unwrap();
     let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
@@ -207,5 +211,169 @@ fn auto_sizing(fake: &fake::Fake) {
             lower_until: fixtures.now + 86_400,
         }],
         blocked: None,
+    });
+}
+
+/// storefront split in two pools: its node jobs wait for a node slot while a `small` runner, 1G for its light jobs,
+/// waits warm, and a job asking for a mistyped label waits for a pool, the oldest since nothing starts it.
+fn small_pool(fake: &fake::Fake) {
+    const GIB: u64 = 1 << 30;
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let at = now();
+    let status = &mut fixtures.status;
+    let warm = at - 260;
+    status.profiles.push(ProfileStatus {
+        name: "small".to_owned(),
+        image: "runnerd-runner:node".to_owned(),
+        cpus: 2,
+        memory: GIB,
+        reseeding: false,
+        slots: vec![
+            SlotStatus {
+                slot: 1,
+                runner: Some(RunnerStatus {
+                    repository: "halyard/storefront".to_owned(),
+                    name: format!("runnerd-3f9a-forge-small-1-{warm}"),
+                    runner_id: 4100 + warm % 1000,
+                    container: format!("{warm:x}c0ffee"),
+                    busy: false,
+                    started_at: warm,
+                    reserved: GIB,
+                    warm: true,
+                }),
+            },
+            SlotStatus {
+                slot: 2,
+                runner: None,
+            },
+        ],
+    });
+    let node = ["self-hosted", "linux", "x64", "node"]
+        .map(str::to_owned)
+        .to_vec();
+    for repository in &mut status.repositories {
+        if repository.name == "halyard/storefront" {
+            repository.pools = vec![
+                PoolStatus {
+                    profile: "node".to_owned(),
+                    labels: node.clone(),
+                    queued_jobs: repository.queued_jobs,
+                },
+                PoolStatus {
+                    profile: "small".to_owned(),
+                    labels: vec!["storefront-small".to_owned()],
+                    queued_jobs: 0,
+                },
+            ];
+            repository.queued_jobs += 1;
+        }
+    }
+    for job in &mut status.queued {
+        job.profile = Some("node".to_owned());
+    }
+    let mut lint = status.queued[0].clone();
+    lint.id += 10;
+    "lint".clone_into(&mut lint.name);
+    lint.workflow = Some("CI".to_owned());
+    lint.url = None;
+    lint.queued_at = at - 290;
+    lint.profile = None;
+    lint.waiting = Some(Waiting::NoPool {
+        labels: vec!["storefornt-small".to_owned()],
+    });
+    status.queued.insert(0, lint);
+}
+
+/// Measured admission with a CPU budget: ledger's build reserved its predicted 7.75G and 3.6 CPUs under its 9G and
+/// 8 CPU caps, and storefront's runners 4G under their 7G.
+fn measured(fake: &fake::Fake) {
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let ledger = 7 * GIB + 768 * MIB;
+    let status = &mut fixtures.status;
+    for profile in &mut status.profiles {
+        for runner in profile
+            .slots
+            .iter_mut()
+            .filter_map(|slot| slot.runner.as_mut())
+        {
+            match (profile.name.as_str(), runner.warm) {
+                ("jvm", false) => runner.reserved = ledger,
+                ("node", _) => runner.reserved = 4 * GIB,
+                _ => {}
+            }
+        }
+    }
+    let reserved: u64 = status
+        .profiles
+        .iter()
+        .flat_map(|profile| &profile.slots)
+        .filter_map(|slot| slot.runner.as_ref())
+        .map(|runner| runner.reserved)
+        .sum();
+    status.budget.admission = AdmissionPolicy::Measured;
+    status.budget.memory_in_use = reserved + status.budget.mirror_memory;
+    status.budget.cpu = Some(CpuBudget {
+        cpus: 32_000,
+        budget: 32_000,
+        in_use: 3_600 + 8_000 + 2 * 2_400 + 2_000,
+        held: false,
+    });
+    let predicted = Basis::Job {
+        runs: 212,
+        peak: JobPeak::P95,
+    };
+    let job = fixtures
+        .jobs
+        .iter_mut()
+        .find(|job| job.summary.id == 120_055_991_700)
+        .unwrap();
+    job.admission = Some(Admission {
+        policy: AdmissionPolicy::Measured,
+        reserved: ledger,
+        basis: predicted,
+        free: Some(17 * GIB),
+        slice: Some(6 * GIB + 256 * MIB),
+        cpu: Some(CpuAdmission {
+            reserved: 3_600,
+            basis: predicted,
+            free: 22_000,
+            waited: None,
+        }),
+    });
+}
+
+/// A desktop's java and emulator hold the host's memory beside the slice.
+fn busy_desktop(fake: &fake::Fake) {
+    const GIB: u64 = 1 << 30;
+    const MIB: u64 = 1 << 20;
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    let budget = &mut fixtures.status.budget;
+    let slice = 11 * GIB;
+    let available = 23 * GIB;
+    let limit = slice + available - 4 * GIB;
+    budget.host = Some(HostBudget {
+        memory: HostMemory {
+            at: now(),
+            total: 64 * GIB,
+            available,
+            slice,
+            some: None,
+            full: None,
+            holders: vec![
+                Holder {
+                    name: "java".to_owned(),
+                    memory: 9523 * MIB,
+                },
+                Holder {
+                    name: "qemu-system-x86".to_owned(),
+                    memory: 5939 * MIB,
+                },
+            ],
+        },
+        limit,
+        spare: limit.saturating_sub(budget.memory_in_use),
+        stalled: false,
     });
 }
