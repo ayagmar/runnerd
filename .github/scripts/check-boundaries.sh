@@ -22,13 +22,12 @@ done
 # Durations, ages, sizes and CPU figures are written by runnerd_core::api::units, ByteSize and api::cpus; a job's
 # outcome, name, wait and run time, a slot's state and why a job waits are decided by core (ADR 0059, 0060, 0062).
 # A function of the cli, the web dashboard or the daemon named for one of those formatters and returning text, or
-# named for one of those classifiers and taking the API type core decides it from, fails here: draw what core returns
-# instead, or add the fact to core. So does a client reading a runner's `busy` or `warm`, which `Status::slot_state`
-# reads. Mapping core's kind or tone to a
-# colour is a client's own. Test code is not checked: tests.rs, testing.rs, testdir.rs, parity.rs, tests/ and an
-# inline `mod tests` at the end of a file.
+# named for one of those classifiers and taking the API type or the string core decides it from, fails here: draw
+# what core returns instead, or add the fact to core. So does a client reading a runner's `busy` or `warm`, which
+# `Status::slot_state` reads. Mapping core's kind or tone to a colour is a client's own. Test code is not checked:
+# tests.rs, testing.rs, testdir.rs, parity.rs, tests/ and an inline `mod tests` at the end of a file.
 formatters='duration|durations|ago|age|elapsed|period|bytes|size|cores|cpus|cores_used|in_cores|cpu_time|millicores|percent|budget_line'
-classifiers='outcome|outcome_label|is_failure|is_failed|title|job_title|record_title|queued_title|waited|ran|took|step_took|slot_state|wait_reason'
+classifiers='durations|outcome|outcome_label|is_failure|is_failed|title|job_title|record_title|queued_title|waited|ran|took|step_took|slot_state|wait_reason'
 # Each exception: file, function, and why it may stay.
 allowed='
 crates/cli/src/human.rs bytes: ByteSize itself, under the short name the tables use
@@ -43,13 +42,14 @@ program='
 FNR == 1 { sig = ""; done = 0 }
 done { next }
 /^mod tests \{/ { done = 1; next }
-sig == "" && /(^|[^a-z_])fn [a-z_]+ *[<(]/ { sig = $0; at = FNR }
+# Each `fn` starts a signature of its own, whatever came before it.
+/(^|[^a-z_])fn [a-z_]+ *[<(]/ { sig = $0; at = FNR }
 sig != "" && FNR != at { sig = sig " " $0 }
 sig != "" && /[{;] *$/ {
   match(sig, /fn [a-z_]+/)
   name = substr(sig, RSTART + 3, RLENGTH - 3)
-  if ((name ~ "^(" classifiers ")$" && sig ~ /[^A-Za-z](JobSummary|Job|QueuedJob|Record|Step|Timeline|SlotStatus|RunnerStatus|Waiting)[^A-Za-z]/) \
-    || (name ~ "^(" formatters ")$" && sig ~ /\) *-> *(String|Cow<|Markup|&.static str|\(String)/))
+  if ((name ~ "^(" classifiers ")$" && sig ~ /[^A-Za-z](JobSummary|Job|QueuedJob|Record|Step|Timeline|SlotStatus|RunnerStatus|Waiting|str)[^A-Za-z]/) \
+    || (name ~ "^(" formatters ")$" && sig ~ /\) *-> *(String|Option<String>|Cow<|Markup|PreEscaped|Span<|Line<|impl [A-Za-z:]*Display|&.static str|\(String)/))
     print FILENAME, name, at
   sig = ""
 }

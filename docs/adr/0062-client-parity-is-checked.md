@@ -25,7 +25,7 @@ and both pass.
 - `.github/scripts/check-boundaries.sh` fails when the cli, the dashboard or the daemon defines a function named for
   a formatter core owns (`duration`, `ago`, `bytes`, `cpus`, `cpu_time` and the like) that returns text, or for a
   classifier core owns (`outcome`, `is_failure`, `title`, `waited`, `ran`, `slot_state` and the like) that takes the
-  API type it decides from, or when a client reads a runner's `busy` or `warm`. Each exception is listed in the
+  API type or the string it decides from, or when a client reads a runner's `busy` or `warm`. Each exception is listed in the
   script with why. Mapping core's kind or tone to a colour stays a client's.
 
 ## Consequences
