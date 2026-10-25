@@ -151,6 +151,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .get(super::runners::LABELS)
                 .map(|labels| labels.split(',').map(str::to_owned).collect()),
             image: container.labels.get(super::runners::IMAGE).cloned(),
+            observed: false,
         }
     }
 

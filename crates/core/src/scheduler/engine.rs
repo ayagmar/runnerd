@@ -201,6 +201,9 @@ struct Occupant {
     labels: Option<Vec<String>>,
     /// The image it runs; `None` for one adopted from a container that does not say.
     image: Option<String>,
+    /// Whether `observe` watches it: recorded, sampled and its job captured. Not while Docker fails to inspect its
+    /// container, which each tick tries again.
+    observed: bool,
 }
 
 impl Occupant {

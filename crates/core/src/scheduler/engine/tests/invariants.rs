@@ -44,12 +44,9 @@ const EVENTS: usize = 40;
 enum Bug {
     /// `a_stopped_runner_that_recovery_cannot_remove_is_removed_later`: Docker removes everything at a restart.
     RecoveryRemovesOnce,
-    /// `a_runner_watched_through_a_failed_inspect_still_records_the_job_it_runs`: Docker fails at most one inspect
-    /// of a container across a restart.
-    WatchedThroughAFailedInspect,
 }
 
-const KNOWN_BUGS: &[Bug] = &[Bug::RecoveryRemovesOnce, Bug::WatchedThroughAFailedInspect];
+const KNOWN_BUGS: &[Bug] = &[Bug::RecoveryRemovesOnce];
 
 /// A deterministic generator (SplitMix64): the same seed gives the same sequence on every machine.
 struct Rng(u64);
@@ -852,11 +849,6 @@ impl Case {
             if self.known.contains(&Bug::RecoveryRemovesOnce) {
                 docker.fail_removes = 0;
             }
-            if self.known.contains(&Bug::WatchedThroughAFailedInspect) {
-                for failures in docker.fail_inspects.values_mut() {
-                    *failures = (*failures).min(1);
-                }
-            }
         }
         let (engine, handle) = Case::engine(&self.github, &self.docker, &self.dir, self.shape);
         self.engine = engine;
@@ -1389,7 +1381,6 @@ async fn a_stopped_runner_that_recovery_cannot_remove_is_removed_later() {
 }
 
 #[tokio::test]
-#[ignore = "bug: a runner whose container Docker fails to inspect once as it is watched never has its job recorded"]
 async fn a_runner_watched_through_a_failed_inspect_still_records_the_job_it_runs() {
     let steps = [
         Step::Queue {

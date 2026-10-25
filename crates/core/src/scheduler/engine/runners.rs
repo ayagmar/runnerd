@@ -424,6 +424,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     key: None,
                     labels: Some(labels),
                     image: Some(image),
+                    observed: false,
                 };
                 if let Some(entry) = self
                     .slots
