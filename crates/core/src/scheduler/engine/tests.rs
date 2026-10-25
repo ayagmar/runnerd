@@ -359,6 +359,8 @@ struct DockerState {
     cpus: HashMap<String, u64>,
     /// How many `inspect`s of a container fail next, by ID, as when the Engine is busy.
     fail_inspects: HashMap<String, u32>,
+    /// How many of the next runner containers started fail their first `inspect`.
+    fail_started_inspects: u32,
     /// How many `remove`s fail next, as when the Engine is busy.
     fail_removes: u32,
     /// How many runner `start`s fail next, as when the Engine is busy.
@@ -467,6 +469,11 @@ impl DockerApi for FakeDocker {
                 status_code: 404,
                 message: format!("No such image: {}", spec.image),
             });
+        }
+        let runner = spec.labels.contains_key("runnerd.job");
+        if runner && state.fail_started_inspects > 0 {
+            state.fail_started_inspects -= 1;
+            *state.fail_inspects.entry(spec.name.clone()).or_default() += 1;
         }
         state.started_images.push(spec.image.clone());
         state.mounts.insert(spec.name.clone(), spec.mounts.clone());
@@ -2934,12 +2941,7 @@ async fn a_runner_docker_never_inspected_before_it_exited_is_recorded_with_its_j
     {
         let mut state = docker.0.lock().unwrap();
         state.slot_captures = HashMap::from([(1, "@@job 3 3\n".to_owned())]);
-        // Docker fails the inspect of slot 1's next container, whichever second it starts in.
-        let now = crate::time::now_ms() / 1000;
-        for secs in now..now + 3 {
-            let name = identity("ci", ID_A).runner_name("app", 1, secs);
-            state.fail_inspects.insert(name, 1);
-        }
+        state.fail_started_inspects = 1;
     }
     github.0.lock().unwrap().queued = vec![job(3)];
     engine.tick(Shutdown::No).await;

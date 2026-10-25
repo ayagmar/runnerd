@@ -270,6 +270,8 @@ enum Step {
     ExitsIdle(usize),
     /// Docker fails the next inspect of a runner's container.
     InspectFails(usize),
+    /// Docker fails the first inspect of the next runner container started.
+    StartedInspectFails,
     /// Docker fails the next remove.
     RemoveFails,
     /// The sampler reads the slice and the host: busy runners use `percent` of their caps, the host has
@@ -337,6 +339,7 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             72..=73 => Step::Reseed {
                 light: rng.below(2) == 0,
             },
+            74 => Step::StartedInspectFails,
             _ => Step::Tick,
         })
         .collect()
@@ -570,22 +573,12 @@ impl Case {
                     self.jobs.get_mut(&id).unwrap().phase = Phase::Done { ran: None };
                 }
             }
-            Step::Lose(pick) => {
-                let running = self.running();
-                if let Some((id, container)) = pick_from(&running, pick).cloned() {
-                    self.end_job(id, &container, "failure");
-                    self.docker
-                        .0
-                        .lock()
-                        .unwrap()
-                        .containers
-                        .retain(|candidate| candidate.id != container);
-                }
-            }
+            Step::Lose(pick) => self.lose(pick),
             Step::StartFails => self.docker.0.lock().unwrap().fail_starts += 1,
             Step::ExitsAtOnce(pick) => self.exit_idle(pick, false),
             Step::ExitsIdle(pick) => self.exit_idle(pick, true),
             Step::InspectFails(pick) => self.inspect_fails(pick),
+            Step::StartedInspectFails => self.docker.0.lock().unwrap().fail_started_inspects += 1,
             Step::RemoveFails => self.docker.0.lock().unwrap().fail_removes += 1,
             Step::Sample {
                 percent,
@@ -615,6 +608,29 @@ impl Case {
             Step::Tick => self.tick().await?,
         }
         self.no_removal_of_a_running_job()
+    }
+
+    /// A running job's container vanishes, as when someone removes it.
+    fn lose(&mut self, pick: usize) {
+        let running = self.running();
+        if let Some((id, container)) = pick_from(&running, pick).cloned() {
+            self.end_job(id, &container, "failure");
+            // Gone before Docker answered any inspect of it: nothing read its log, so nothing can name
+            // the runner that ran the job.
+            let unobserved = self
+                .engine
+                .occupied()
+                .any(|(_, occupant)| occupant.container == container && !occupant.observed);
+            if unobserved && let Some(job) = self.jobs.get_mut(&id) {
+                job.phase = Phase::Done { ran: None };
+            }
+            self.docker
+                .0
+                .lock()
+                .unwrap()
+                .containers
+                .retain(|candidate| candidate.id != container);
+        }
     }
 
     fn inspect_fails(&mut self, pick: usize) {
@@ -722,9 +738,9 @@ impl Case {
         }
     }
 
-    /// GitHub completes a running job, and its ephemeral runner leaves. Its container no longer reports the job:
-    /// runner names have a resolution of a second, so a runner started in its slot right after it may get its name
-    /// and its container's ID.
+    /// GitHub completes a running job, and its ephemeral runner leaves. Its stopped container's log still names the
+    /// job, as Docker keeps it until the container is removed; `no_name_twice` keeps a later runner from taking its
+    /// name and so its log.
     ///
     /// It also leaves GitHub's queued listing, even if `AssignListed` left it there: the harness assumes a stale
     /// listing never outlives its job. Where it does, as for a runner killed during its job's setup within GitHub's
@@ -750,12 +766,6 @@ impl Case {
         github
             .runners
             .retain(|runner| Some(&runner.name) != name.as_ref());
-        self.docker
-            .0
-            .lock()
-            .unwrap()
-            .container_captures
-            .remove(container);
         self.took_job.remove(container);
     }
 
