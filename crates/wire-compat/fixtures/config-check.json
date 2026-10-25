@@ -1,7 +1,9 @@
 {
   "full": {
+    "admission": "measured",
     "memory_caps": 17179869184,
     "memory_max": 34359738368,
+    "memory_needed": 12884901888,
     "message": "the config is valid",
     "revision": "3f2a",
     "valid": true,

@@ -27,6 +27,12 @@
     "kind": "memory",
     "needs": 6
   },
+  "no-pool": {
+    "kind": "no-pool",
+    "labels": [
+      "halyard-lite"
+    ]
+  },
   "no-slot": {
     "kind": "no-slot",
     "profile": "halyard"

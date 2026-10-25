@@ -3,6 +3,25 @@
     "budget": {
       "admission": "measured",
       "held": false,
+      "host": {
+        "limit": 42949672960,
+        "memory": {
+          "at": 1761400000,
+          "available": 33285996544,
+          "full": {
+            "avg10": 150,
+            "avg60": 60
+          },
+          "slice": 9663676416,
+          "some": {
+            "avg10": 250,
+            "avg60": 120
+          },
+          "total": 68719476736
+        },
+        "spare": 12884901888,
+        "stalled": false
+      },
       "memory_in_use": 9663676416,
       "memory_max": 34359738368,
       "mirror_memory": 1073741824,
@@ -64,6 +83,15 @@
         ],
         "name": "tidewater/halyard",
         "paused": false,
+        "pools": [
+          {
+            "labels": [
+              "self-hosted"
+            ],
+            "profile": "halyard",
+            "queued_jobs": 1
+          }
+        ],
         "profile": "halyard",
         "queued_jobs": 1
       }
@@ -90,6 +118,12 @@
             "avg10": 150,
             "avg60": 60
           },
+          "holders": [
+            {
+              "memory": 9663676416,
+              "name": "java"
+            }
+          ],
           "slice": 9663676416,
           "some": {
             "avg10": 250,
@@ -147,6 +181,7 @@
         "branch": "main",
         "id": 42,
         "name": "build",
+        "profile": "halyard",
         "queued_at": 1761400000,
         "repository": "tidewater/halyard",
         "run_attempt": 1,
@@ -167,6 +202,15 @@
         ],
         "name": "tidewater/halyard",
         "paused": false,
+        "pools": [
+          {
+            "labels": [
+              "self-hosted"
+            ],
+            "profile": "halyard",
+            "queued_jobs": 1
+          }
+        ],
         "profile": "halyard",
         "queued_jobs": 1
       }
