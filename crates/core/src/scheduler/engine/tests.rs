@@ -73,6 +73,8 @@ struct GithubState {
     assign: Option<(u64, u64)>,
     /// The repository a runner is registered on, where a test says; others show under every repository.
     registered_on: HashMap<u64, String>,
+    /// The repository a queued job is of, where a test says; others show under every repository.
+    queued_on: HashMap<u64, String>,
     /// How many deletes GitHub refuses next because the runner is busy.
     busy_deletes: u32,
     /// What `GET /actions/jobs/{id}` answers.
@@ -87,6 +89,11 @@ struct GithubState {
     compare_fails: bool,
     /// While true, registering a runner fails.
     register_fails: bool,
+    /// While true, deleting a busy runner answers `Busy`, as GitHub does, and each runner gets an ID never given
+    /// before: for tests that delete and register runners at random.
+    strict: bool,
+    /// Runners registered so far, for `strict` IDs.
+    registrations: u64,
     calls: Vec<String>,
     /// How many calls there were, for tests that wait for one.
     called: tokio::sync::watch::Sender<usize>,
@@ -190,7 +197,17 @@ impl GithubApi for FakeGithub {
         self.answer().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
-        let queued = state.queued.clone();
+        let queued = state
+            .queued
+            .iter()
+            .filter(|job| {
+                state
+                    .queued_on
+                    .get(&job.id)
+                    .is_none_or(|on| on == repository)
+            })
+            .cloned()
+            .collect();
         FakeGithub::polled(&mut state);
         Ok(queued)
     }
@@ -225,8 +242,14 @@ impl GithubApi for FakeGithub {
         if state.register_fails {
             return Err(github::Error::Token("register fails".to_owned()));
         }
+        state.registrations += 1;
+        let id = if state.strict {
+            1000 + state.registrations
+        } else {
+            100 + state.runners.len() as u64
+        };
         let runner = Runner {
-            id: 100 + state.runners.len() as u64,
+            id,
             name: name.to_owned(),
             status: "offline".to_owned(),
             busy: false,
@@ -240,6 +263,14 @@ impl GithubApi for FakeGithub {
         state.call(format!("delete {id}"));
         if state.busy_deletes > 0 {
             state.busy_deletes -= 1;
+            return Ok(Deleted::Busy);
+        }
+        if state.strict
+            && state
+                .runners
+                .iter()
+                .any(|runner| runner.id == id && runner.busy)
+        {
             return Ok(Deleted::Busy);
         }
         state.runners.retain(|runner| runner.id != id);
@@ -330,6 +361,12 @@ struct DockerState {
     fail_inspects: HashMap<String, u32>,
     /// How many `remove`s fail next, as when the Engine is busy.
     fail_removes: u32,
+    /// How many runner `start`s fail next, as when the Engine is busy.
+    fail_starts: u32,
+    /// Where set, a log capture with nothing to print yet waits for its container's `container_captures` entry,
+    /// as a runner's capture waits for the job GitHub gives it. It ends with its container, or once this GitHub no
+    /// longer has its runner, which then exits.
+    captures_wait: Option<FakeGithub>,
     /// What the Docker Hub mirror's log says.
     mirror_log: String,
     /// What the mirror logs while a runner container is removed, as when the runner's last pulls land just then.
@@ -361,6 +398,8 @@ struct DockerState {
     started_images: Vec<String>,
     /// What a runner container printed, when not just that it took its job.
     runner_log: Option<String>,
+    /// What one runner container printed, by ID, before `runner_log`.
+    container_logs: HashMap<String, String>,
     /// The paths a container's layer added or changed.
     changed: Vec<String>,
     /// The bytes a container's layer holds.
@@ -416,6 +455,13 @@ impl DockerApi for FakeDocker {
     ) -> Result<String, docker::Error> {
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("start {}", spec.name));
+        if state.fail_starts > 0 {
+            state.fail_starts -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
         if state.missing_images.contains(&spec.image) {
             return Err(docker::Error::DockerResponseServerError {
                 status_code: 404,
@@ -538,13 +584,13 @@ impl DockerApi for FakeDocker {
         std::future::pending().await
     }
 
-    async fn logs(&self, _container: &str) -> Result<String, docker::Error> {
-        Ok(self
-            .0
-            .lock()
-            .unwrap()
-            .runner_log
-            .clone()
+    async fn logs(&self, container: &str) -> Result<String, docker::Error> {
+        let state = self.0.lock().unwrap();
+        Ok(state
+            .container_logs
+            .get(container)
+            .or(state.runner_log.as_ref())
+            .cloned()
             .unwrap_or_else(|| "Running job: build".to_owned()))
     }
 
@@ -578,9 +624,42 @@ impl DockerApi for FakeDocker {
             .get(container)
             .or_else(|| slot.and_then(|slot| state.slot_captures.get(&slot)))
             .or_else(|| state.captures.get(&(page, offset)))
-            .cloned()
-            .unwrap_or_default();
-        Ok(futures_util::stream::iter([Ok(output.into_bytes())]).boxed())
+            .cloned();
+        if let (None, Some(github)) = (&output, state.captures_wait.clone()) {
+            let docker = self.0.clone();
+            let container = container.to_owned();
+            return Ok(futures_util::stream::once(async move {
+                loop {
+                    let name = {
+                        let state = docker.lock().unwrap();
+                        if let Some(output) = state.container_captures.get(&container) {
+                            return Ok(output.clone().into_bytes());
+                        }
+                        match state
+                            .containers
+                            .iter()
+                            .find(|candidate| candidate.id == container && candidate.running)
+                        {
+                            Some(running) => running.name.clone(),
+                            None => return Err(not_found()),
+                        }
+                    };
+                    let registered = github
+                        .0
+                        .lock()
+                        .unwrap()
+                        .runners
+                        .iter()
+                        .any(|runner| runner.name == name);
+                    if !registered {
+                        return Err(not_found());
+                    }
+                    tokio::time::sleep(Duration::from_millis(2)).await;
+                }
+            })
+            .boxed());
+        }
+        Ok(futures_util::stream::iter([Ok(output.unwrap_or_default().into_bytes())]).boxed())
     }
 
     async fn image_present(&self, image: &str) -> Result<bool, docker::Error> {
@@ -3991,6 +4070,7 @@ async fn a_pull_that_lands_while_old_images_are_removed_keeps_its_image() {
 
 mod admission;
 mod build_cache;
+mod invariants;
 mod pools;
 mod records;
 mod warm;
