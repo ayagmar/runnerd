@@ -12,6 +12,7 @@ use tracing::warn;
 
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Occupant};
+use crate::admission::Key;
 use crate::docker::DockerApi;
 use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
@@ -182,6 +183,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// Tells admission which job a runner runs as GitHub names it, which a runner may have taken before any
+    /// listing did.
+    fn name_job(&mut self, repository: &str, details: &JobDetails) {
+        let key = Key {
+            repository: repository.to_owned(),
+            workflow: details.workflow_name.clone(),
+            name: details.name.clone(),
+        };
+        for occupant in self.slots.values_mut().flatten().flatten() {
+            if occupant.job == Some(details.id) {
+                occupant.key = Some(key.clone());
+            }
+        }
+    }
+
     /// Records the queued jobs the repositories' runners may run, and closes those that left the queue for another
     /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
     /// runners completed.
@@ -252,6 +268,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         );
                     }
                     self.note_workflow(details.run_id, details.workflow_name.as_deref());
+                    self.name_job(&repository, &details);
                     described.push((repository, id, details.clone()));
                     self.store.details(details);
                 }
@@ -261,6 +278,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let undecided = self.undecided(&described);
         self.decide_writes(undecided).await;
         self.detach_ended();
+        self.follow_closing().await;
+    }
+
+    /// Asks GitHub whether the jobs of removed runners completed, and records them lost once it says nothing of them
+    /// for `LOST_AFTER`.
+    async fn follow_closing(&mut self) {
         let closing: Vec<(String, u64)> = self
             .closing
             .iter()

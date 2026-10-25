@@ -464,6 +464,43 @@ async fn once_its_job_is_known_a_runner_reserves_that_jobs_prediction() {
 }
 
 #[tokio::test]
+async fn a_runner_that_takes_a_job_no_listing_saw_reserves_that_jobs_prediction_once_github_names_it()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, 3 * G, 0).await;
+    history_of(&handle.store, "lint", 2000, G, 0).await;
+    // Started for a build, the runner gets job 9, a lint no listing of queued jobs showed.
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .captures
+        .insert(("1".to_owned(), "0".to_owned()), "@@job 9 1\n".to_owned());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 1);
+    until_state(&handle, 9, JobState::Running).await;
+    github.0.lock().unwrap().queued = Vec::new();
+    // GitHub does not answer for the job at first.
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    let mut lint = details(9, "in_progress", None);
+    lint.name = "lint".to_owned();
+    lint.workflow_name = None;
+    github.0.lock().unwrap().jobs.insert(9, lint);
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    // 1G + 15%, rounded up, not the 3.5G of a build.
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 1280 * M);
+}
+
+#[tokio::test]
 async fn an_idle_runner_reserves_the_largest_prediction_of_the_jobs_queued_since() {
     let (github, docker, dir) = (
         FakeGithub::default(),
