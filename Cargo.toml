@@ -5,7 +5,7 @@ members = ["crates/core", "crates/daemon", "crates/cli", "crates/web", "crates/f
 exclude = ["crates/wire-compat"]
 
 [workspace.package]
-version = "0.0.14"
+version = "0.0.15"
 edition = "2024"
 rust-version = "1.99"
 license = "MIT"
@@ -13,8 +13,8 @@ repository = "https://github.com/ayagmar/runnerd"
 readme = "README.md"
 
 [workspace.dependencies]
-runnerd-core = { path = "crates/core", version = "0.0.14", default-features = false }
-runnerd-web = { path = "crates/web", version = "0.0.14" }
+runnerd-core = { path = "crates/core", version = "0.0.15", default-features = false }
+runnerd-web = { path = "crates/web", version = "0.0.15" }
 # The clients' parity fixtures: a dev-dependency only, and never published.
 runnerd-fixtures = { path = "crates/fixtures" }
 axum = { version = "0.8.9", default-features = false, features = ["http1", "json", "query", "tokio"] }

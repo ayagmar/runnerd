@@ -5,6 +5,25 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.14 to 0.0.15
+
+The job history stays at version 13, so either version reads it. Install 0.0.15, move each profile's published `image` to its `-0.0.15` tag, and restart runnerd:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.15/install.sh | sh -s -- --version v0.0.15
+runnerd check-config
+systemctl --user restart runnerd
+runnerctl doctor
+```
+
+### What changes on its own
+
+- **The budget's free figure is what admission would start.** When the host leaves the slice less than `MemoryMax`, the free figure and the bar's free block show what the host leaves, and the rest of the bar is marked *held by the host*. While the slice is past 90% under measured admission, or the host stalls, nothing shows as free and the bar says why. The host line in status, the TUI and the dashboard ends with what is free.
+
+### New, off until you set them
+
+- [Discord notifications](../insights/#in-a-discord-channel): a `[[notify.targets]]` entry with `kind = "discord"` and the channel webhook's URL. To go back to 0.0.14, remove those targets first: 0.0.14 refuses a config with them.
+
 ## 0.0.13 to 0.0.14
 
 The job history stays at version 13, so either version reads it. Install 0.0.14, move each profile's published `image` to its `-0.0.14` tag, and restart runnerd:
