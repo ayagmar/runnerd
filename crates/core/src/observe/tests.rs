@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use super::capture::{Captured, MAX_LINE, Parser};
-use super::metrics::{Events, Paths, Sampler, Tracked, read_host_memory};
+use super::metrics::{Events, Paths, Sampler, Tracked, read_holders, read_host_memory};
 use super::mirror::{self, Leases};
 use crate::api;
 use crate::store::{LOG_BACKLOG, LogPosition, MirrorPosition};
@@ -250,6 +250,196 @@ MemAvailable: 32 kB
     assert_eq!(memory.map(|memory| memory.slice), Some(3200));
 }
 
+/// Writes a process under the `proc` fixture: its name, the cgroup it is in, and what it holds in `RssAnon` and
+/// `RssShmem`, in MiB.
+fn process(paths: &Paths, pid: u32, name: &str, cgroup: &str, anon: u64, shmem: u64) {
+    process_bytes(
+        paths,
+        pid,
+        name.as_bytes(),
+        &format!("0::{cgroup}\n"),
+        anon,
+        shmem,
+    );
+}
+
+/// `process` with a name of any bytes and the whole of `/proc/<pid>/cgroup`, beside cgroup v2's root.
+fn process_bytes(paths: &Paths, pid: u32, name: &[u8], cgroup: &str, anon: u64, shmem: u64) {
+    std::fs::create_dir_all(&paths.cgroup).unwrap();
+    std::fs::write(paths.cgroup.join("cgroup.controllers"), "cpu memory\n").unwrap();
+    let dir = paths.proc.join(pid.to_string());
+    std::fs::create_dir_all(&dir).unwrap();
+    std::fs::write(dir.join("cgroup"), cgroup).unwrap();
+    let mut status = b"Name:\t".to_vec();
+    status.extend_from_slice(name);
+    status.extend_from_slice(
+        format!(
+            "\nUmask:\t0022\nState:\tS (sleeping)\nVmRSS:\t{} kB\nRssAnon:\t{} kB\n\
+             RssFile:\t 9999 kB\nRssShmem:\t{} kB\n",
+            (anon + shmem + 10) << 10,
+            anon << 10,
+            shmem << 10
+        )
+        .as_bytes(),
+    );
+    std::fs::write(dir.join("status"), status).unwrap();
+}
+
+fn holders(list: &[(&str, u64)]) -> Vec<api::Holder> {
+    list.iter()
+        .map(|(name, mib)| api::Holder {
+            name: (*name).to_owned(),
+            memory: mib << 20,
+        })
+        .collect()
+}
+
+#[test]
+fn the_programs_outside_the_slice_holding_the_most_memory_are_named_largest_first() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    let terminal = "/user.slice/user-1000.slice/user@1000.service/app.slice/terminal.scope";
+    // Two Gradle daemons and an emulator in the owner's terminal: one name per program, its processes summed.
+    process(&paths, 100, "java", terminal, 5 * 1024, 0);
+    process(&paths, 101, "java", terminal, 4 * 1024, 300);
+    process(&paths, 200, "qemu-system-x86", terminal, 1024, 5 * 1024);
+    process(&paths, 300, "firefox", "/user.slice/firefox.scope", 2048, 0);
+    process(
+        &paths,
+        400,
+        "postgres",
+        "/system.slice/postgresql.service",
+        1024,
+        0,
+    );
+    // Runners and their jobs in the slice, however deep, are not outside it.
+    process(
+        &paths,
+        500,
+        "java",
+        "/ci.slice/docker-abc.scope/init.scope",
+        20 * 1024,
+        0,
+    );
+    process(&paths, 501, "dockerd", "/ci.slice", 30 * 1024, 0);
+    // A slice whose name only starts like it is another.
+    process(&paths, 600, "node", "/ci.slice-other/x.scope", 700, 0);
+    // Too small to name, alone or together.
+    process(&paths, 700, "bash", terminal, 300, 0);
+    process(&paths, 701, "bash", terminal, 200, 0);
+    // A kernel thread holds nothing of its own.
+    std::fs::create_dir_all(paths.proc.join("2")).unwrap();
+    std::fs::write(paths.proc.join("2/cgroup"), "0::/\n").unwrap();
+    std::fs::write(paths.proc.join("2/status"), "Name:\tkthreadd\n").unwrap();
+    assert_eq!(
+        read_holders(&paths, "ci.slice"),
+        holders(&[
+            ("java", 9 * 1024 + 300),
+            ("qemu-system-x86", 6 * 1024),
+            ("firefox", 2048)
+        ]),
+        "the three largest, the slice's left out"
+    );
+}
+
+#[test]
+fn where_cgroup_v2_cannot_place_a_process_no_runner_passes_for_a_program_outside_ci() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    // A hybrid host: the runner's memory cgroup is v1's, and v2 says only the root.
+    process_bytes(
+        &paths,
+        500,
+        b"java",
+        "5:memory:/ci.slice/docker-a.scope\n0::/\n",
+        20 * 1024,
+        0,
+    );
+    // A process with only v1 memberships.
+    process_bytes(
+        &paths,
+        501,
+        b"dockerd",
+        "5:memory:/ci.slice/docker-b.scope\n",
+        10 * 1024,
+        0,
+    );
+    std::fs::remove_file(paths.cgroup.join("cgroup.controllers")).unwrap();
+    assert_eq!(
+        read_holders(&paths, "ci.slice"),
+        [],
+        "no v2 at the cgroup root"
+    );
+    // On cgroup v2, a process without a v2 membership still can't be told apart from a runner.
+    std::fs::write(paths.cgroup.join("cgroup.controllers"), "memory\n").unwrap();
+    std::fs::write(
+        paths.proc.join("500/cgroup"),
+        "0::/ci.slice/docker-a.scope\n",
+    )
+    .unwrap();
+    process(
+        &paths,
+        600,
+        "qemu-system-x86",
+        "/user.slice/a.scope",
+        6 * 1024,
+        0,
+    );
+    assert_eq!(
+        read_holders(&paths, "ci.slice"),
+        holders(&[("qemu-system-x86", 6 * 1024)]),
+        "only the program v2 puts outside the slice"
+    );
+}
+
+#[test]
+fn a_name_cut_inside_a_character_keeps_its_programs_memory() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    // A 16-byte name ending in "é" that the kernel cut at 15 bytes, inside the character.
+    let mut name = b"gradle-daemon-".to_vec();
+    name.push(0xc3);
+    process_bytes(&paths, 100, &name, "0::/user.slice/a.scope\n", 2048, 0);
+    assert_eq!(
+        read_holders(&paths, "ci.slice"),
+        holders(&[("gradle-daemon-\u{fffd}", 2048)])
+    );
+}
+
+#[test]
+fn the_hosts_processes_are_read_for_what_holds_its_memory_only_every_holders_interval() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    std::fs::create_dir_all(&paths.proc).unwrap();
+    std::fs::write(
+        paths.proc.join("meminfo"),
+        "MemTotal: 67108864 kB\nMemAvailable: 2097152 kB\n",
+    )
+    .unwrap();
+    process(&paths, 100, "java", "/user.slice/a.scope", 9 * 1024, 0);
+    let mut sampler = Sampler::new(paths.clone(), "ci.slice");
+    let read = |sampler: &mut Sampler, at| sampler.host_memory(at).unwrap().holders;
+    assert_eq!(read(&mut sampler, 1_000), holders(&[("java", 9 * 1024)]));
+    process(
+        &paths,
+        200,
+        "qemu-system-x86",
+        "/user.slice/b.scope",
+        6 * 1024,
+        0,
+    );
+    assert_eq!(
+        read(&mut sampler, 29_000),
+        holders(&[("java", 9 * 1024)]),
+        "the last reading, under 30 s old"
+    );
+    assert_eq!(
+        read(&mut sampler, 31_000),
+        holders(&[("java", 9 * 1024), ("qemu-system-x86", 6 * 1024)]),
+        "read again after 30 s"
+    );
+}
+
 fn feed_all(chunks: &[&[u8]]) -> Vec<Captured> {
     let mut parser = Parser::default();
     chunks.iter().flat_map(|chunk| parser.feed(chunk)).collect()
@@ -452,6 +642,7 @@ fn the_hosts_memory_and_how_long_its_tasks_stalled_for_it_are_read_from_proc() {
                 avg10: 670,
                 avg60: 105
             }),
+            holders: Vec::new(),
         })
     );
     std::fs::write(paths.proc.join("meminfo"), "MemTotal: 1 kB\n").unwrap();

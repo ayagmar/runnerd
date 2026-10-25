@@ -303,7 +303,7 @@ pub struct HostSample {
 
 /// The host's memory at one moment, beside the slice's: what admission fits new runners in besides `MemoryMax`
 /// (ADR 0055). Read every few seconds; not kept in the history.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct HostMemory {
     /// When it was read.
     pub at: u64,
@@ -319,6 +319,10 @@ pub struct HostMemory {
     pub some: Option<Pressure>,
     /// Its `full` line: the share of time every task that could run waited for memory.
     pub full: Option<Pressure>,
+    /// The programs outside the slice that hold the most memory, largest first: at most a few, none under a floor.
+    /// Read less often than the rest. Empty when none is that large, and from a daemon before it said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub holders: Vec<Holder>,
 }
 
 impl HostMemory {
@@ -329,6 +333,32 @@ impl HostMemory {
             .saturating_sub(self.available)
             .saturating_sub(self.slice)
     }
+
+    /// What holds the host's memory outside the slice, as the clients say it: `programs outside CI hold 30G` and,
+    /// with `holders`, `, most java 9.3G and qemu-system-x86 5.8G`.
+    pub fn outside_line(&self) -> String {
+        let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
+        let line = format!("programs outside CI hold {}", size(self.outside()));
+        let named: Vec<String> = self
+            .holders
+            .iter()
+            .map(|holder| format!("{} {}", holder.name, size(holder.memory)))
+            .collect();
+        match named.as_slice() {
+            [] => line,
+            [one] => format!("{line}, most {one}"),
+            [rest @ .., last] => format!("{line}, most {} and {last}", rest.join(", ")),
+        }
+    }
+}
+
+/// A program outside the slice and the memory its processes hold.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct Holder {
+    /// Its processes' name, as `/proc/<pid>/comm` says it: never a command line, argument or path.
+    pub name: String,
+    /// What its processes hold that the host can't drop as page cache (`RssAnon` and `RssShmem`), in bytes.
+    pub memory: u64,
 }
 
 /// One line of a pressure stall file, in hundredths of a percent: 250 is 2.5% of the time.

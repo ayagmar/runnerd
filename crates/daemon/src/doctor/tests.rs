@@ -89,6 +89,7 @@ fn ready_host(os_release: &str) -> Host {
             slice: 0,
             some: Some(api::Pressure::default()),
             full: Some(api::Pressure::default()),
+            holders: Vec::new(),
         }),
     }
 }
@@ -144,6 +145,10 @@ fn host_memory_check(available: u64, stalled: u32) -> Check {
             avg10: stalled,
             avg60: 300,
         }),
+        holders: vec![api::Holder {
+            name: "qemu-system-x86".to_owned(),
+            memory: 6 << 30,
+        }],
         ..memory
     });
     checks(&host, Some(&config))
@@ -177,6 +182,10 @@ fn a_host_with_less_to_spare_than_the_smallest_runner_warns_that_runners_wait() 
     assert!(
         memory.detail.contains("6G to spare") && memory.detail.contains("a node runner"),
         "{memory}"
+    );
+    assert!(
+        memory.detail.contains("most qemu-system-x86 6G"),
+        "the warning names what holds the host's memory: {memory}"
     );
     let memory = host_memory_check(12 << 30, 0);
     assert_eq!(memory.status, Status::Pass, "8G to spare fits node's 7G");

@@ -1,5 +1,5 @@
 //! The wire format of an admission and the budget against readers already released: 0.0.7's `Admission`,
-//! `Basis` and `Budget` read what this one writes.
+//! `Basis` and `Budget` read what this one writes, and 0.0.13's `HostMemory` too.
 
 use serde::Deserialize;
 
@@ -140,5 +140,43 @@ fn a_record_says_what_cpu_its_runner_reserved_and_how_long_it_waited_for_it() {
              1m30s for CPU"
         ),
         "{line}"
+    );
+}
+
+/// `HostMemory` as 0.0.13 shipped it, before it named what holds the host's memory.
+#[derive(Debug, PartialEq, Eq, Deserialize)]
+struct ReleasedHostMemory {
+    at: u64,
+    total: u64,
+    available: u64,
+    slice: u64,
+}
+
+#[test]
+fn a_host_reading_names_its_holders_to_new_readers_and_reads_as_before_without_them() {
+    let old = r#"{"at":7,"total":64,"available":2,"slice":10,"some":null,"full":null}"#;
+    let read: crate::api::HostMemory = serde_json::from_str(old).unwrap();
+    assert!(read.holders.is_empty(), "a 0.0.13 daemon names none");
+    let named = crate::api::HostMemory {
+        holders: vec![crate::api::Holder {
+            name: "java".to_owned(),
+            memory: 9,
+        }],
+        ..read
+    };
+    let payload = serde_json::to_string(&named).unwrap();
+    assert_eq!(
+        serde_json::from_str::<crate::api::HostMemory>(&payload).unwrap(),
+        named
+    );
+    let released: ReleasedHostMemory = serde_json::from_str(&payload).unwrap();
+    assert_eq!(
+        released,
+        ReleasedHostMemory {
+            at: 7,
+            total: 64,
+            available: 2,
+            slice: 10
+        }
     );
 }

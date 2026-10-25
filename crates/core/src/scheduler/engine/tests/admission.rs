@@ -1069,7 +1069,8 @@ async fn a_job_held_for_cpu_that_leaves_the_queue_no_longer_waits() {
 }
 
 /// The host's memory read now: 64G with `available` of it, the slice's runners holding `slice` of it without page
-/// cache, and its tasks stalled `stalled` hundredths of a percent of the last 10 s.
+/// cache, and its tasks stalled `stalled` hundredths of a percent of the last 10 s; a Gradle daemon and an emulator
+/// hold the most of it outside the slice.
 fn host_at(store: &Store, slice: u64, available: u64, stalled: u32) {
     store.host_memory(api::HostMemory {
         at: time::now_ms() / 1000,
@@ -1081,6 +1082,16 @@ fn host_at(store: &Store, slice: u64, available: u64, stalled: u32) {
             avg10: stalled,
             avg60: 0,
         }),
+        holders: vec![
+            api::Holder {
+                name: "java".to_owned(),
+                memory: 9 * G,
+            },
+            api::Holder {
+                name: "qemu-system-x86".to_owned(),
+                memory: 6 * G,
+            },
+        ],
     });
 }
 
@@ -1141,10 +1152,13 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
         reason.starts_with("The host is short of memory"),
         "{reason}"
     );
-    // The runners hold nothing yet, so all that is not available is held by the host's other programs.
+    // The runners hold nothing yet, so all that is not available is held by the host's other programs, the
+    // largest of which it names.
     let outside = crate::config::ByteSize(64 * G - (4 * G + 2 * 1280 * M + 100 * M));
     assert!(
-        reason.ends_with(&format!("programs outside CI hold {outside}")),
+        reason.ends_with(&format!(
+            "programs outside CI hold {outside}, most java 9G and qemu-system-x86 6G"
+        )),
         "{reason}"
     );
 
@@ -1251,7 +1265,7 @@ async fn nothing_starts_while_the_host_stalls_short_of_memory() {
     {
         let status = handle.status.borrow();
         assert!(
-            status.budget.host.is_some_and(|host| host.stalled),
+            status.budget.host.as_ref().is_some_and(|host| host.stalled),
             "the budget says the host stalls"
         );
         let job = status.queued.last().unwrap();
@@ -1260,7 +1274,9 @@ async fn nothing_starts_while_the_host_stalls_short_of_memory() {
         // 64G less the 7.5G available and the runners' 10G: the runners' memory is not the other programs'.
         let outside = crate::config::ByteSize(64 * G - 7 * G - 512 * M - 10 * G);
         assert!(
-            reason.ends_with(&format!("programs outside CI hold {outside}")),
+            reason.ends_with(&format!(
+                "programs outside CI hold {outside}, most java 9G and qemu-system-x86 6G"
+            )),
             "{reason}"
         );
     }
@@ -1303,6 +1319,7 @@ async fn a_stall_with_memory_to_spare_holds_no_start_and_stops_no_runner() {
             .borrow()
             .budget
             .host
+            .as_ref()
             .is_some_and(|host| !host.stalled),
         "the budget says the host does not stall"
     );
@@ -1325,6 +1342,7 @@ async fn without_a_recent_reading_of_the_host_only_the_slice_bounds_starts() {
         slice: 0,
         some: None,
         full: None,
+        holders: Vec::new(),
     });
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4);
