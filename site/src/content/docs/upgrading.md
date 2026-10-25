@@ -27,7 +27,7 @@ Upgrade `runnerctl` with the daemon: a 0.0.13 client cannot read a status that l
 - **A job's memory and CPU charts draw what admission reserved** beside the cap.
 - **A restart keeps a running job whose slot, profile or repository the config no longer has**, and lets it drain, as a reload does.
 - **Admission stays inside its budgets when a job takes a warm runner's room.** A job stops another pool's warm runner only where that runner's reservation covers what the job needs, on the slice, its CPUs and the host; otherwise it waits.
-- **A reseed's seed container waits for room** instead of starting past `MemoryMax` or the host's limit. After `runnerd reseed`, the drained profile holds its seed's room so other pools' jobs don't take it, as long as the host could ever fit it.
+- **A reseed's seed container waits for room** instead of starting past `MemoryMax` or the host's limit. After `runnerctl reseed`, the drained profile holds its seed's room so other pools' jobs don't take it, as long as the host could ever fit it.
 
 ### New, off until you set them
 
