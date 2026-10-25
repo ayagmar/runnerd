@@ -54,6 +54,7 @@ jobs:
               - '.clippy.toml'
               - 'deny.toml'
               - '.github/scripts/check-boundaries.sh'
+              - '.github/scripts/check-wire-compat.sh'
               - '.github/workflows/ci.yml'
             # The commands the docs show, and the code that defines them.
             docs:
@@ -141,6 +142,8 @@ jobs:
           RUSTDOCFLAGS: -D warnings
       # Clients must not build the Docker or GitHub clients.
       - run: .github/scripts/check-boundaries.sh
+      # This version and the previous release read each other's JSON.
+      - run: .github/scripts/check-wire-compat.sh
       - name: cargo-machete
         run: |
           curl -sSfL -o "$RUNNER_TEMP/machete.tar.gz" \

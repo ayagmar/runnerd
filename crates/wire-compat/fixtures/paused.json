@@ -1,0 +1,11 @@
+{
+  "full": {
+    "stopped": [
+      {
+        "job": 42,
+        "repository": "tidewater/halyard",
+        "runner": "runnerd-halyard-0"
+      }
+    ]
+  }
+}

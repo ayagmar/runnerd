@@ -1,0 +1,155 @@
+{
+  "empty": {
+    "admission": null,
+    "branch": "main",
+    "conclusion": "success",
+    "id": 42,
+    "labels": [
+      "self-hosted"
+    ],
+    "log": {
+      "bytes": 90000,
+      "lines": 1200,
+      "truncated": false
+    },
+    "metrics": {
+      "build_cache": {
+        "hits": 80,
+        "misses": 20,
+        "read_bytes": 314572800,
+        "refused": 1,
+        "writer": true,
+        "written_bytes": 41943040
+      },
+      "cpu_average": 2000,
+      "cpu_peak": 3900,
+      "cpu_time": 1200000,
+      "memory_average": 3221225472,
+      "memory_peak": 5368709120,
+      "mirror_bytes": 157286400,
+      "network_received": 209715200,
+      "network_sent": 10485760
+    },
+    "name": "build",
+    "record": null,
+    "repository": "tidewater/halyard",
+    "run_attempt": 1,
+    "run_id": 900,
+    "runner": {
+      "cpu_cap": 4000,
+      "memory_cap": 8589934592,
+      "name": "runnerd-halyard-0",
+      "profile": "halyard",
+      "slot": 0
+    },
+    "state": "completed",
+    "steps": [
+      {
+        "completed_at": 1761400025,
+        "conclusion": "success",
+        "name": "Set up job",
+        "number": 1,
+        "started_at": 1761400020,
+        "status": "completed"
+      }
+    ],
+    "timeline": {
+      "cleaned_at": 1761400610,
+      "container_started_at": 1761400010,
+      "finished_at": 1761400600,
+      "queued_at": 1761400000,
+      "started_at": 1761400020
+    },
+    "url": "https://github.com/tidewater/halyard/actions/runs/900",
+    "workflow": "ci"
+  },
+  "full": {
+    "admission": {
+      "basis": {
+        "kind": "job",
+        "runs": 12
+      },
+      "cpu": {
+        "basis": {
+          "kind": "profile",
+          "runs": 30
+        },
+        "free": 8000,
+        "reserved": 2000,
+        "waited": 30
+      },
+      "free": 12884901888,
+      "policy": "measured",
+      "reserved": 6442450944,
+      "slice": 34359738368
+    },
+    "branch": "main",
+    "conclusion": "success",
+    "id": 42,
+    "labels": [
+      "self-hosted"
+    ],
+    "log": {
+      "bytes": 90000,
+      "lines": 1200,
+      "truncated": false
+    },
+    "metrics": {
+      "build_cache": {
+        "hits": 80,
+        "misses": 20,
+        "read_bytes": 314572800,
+        "refused": 1,
+        "writer": true,
+        "written_bytes": 41943040
+      },
+      "cpu_average": 2000,
+      "cpu_peak": 3900,
+      "cpu_time": 1200000,
+      "memory_average": 3221225472,
+      "memory_peak": 5368709120,
+      "mirror_bytes": 157286400,
+      "network_received": 209715200,
+      "network_sent": 10485760,
+      "sock_throttled": 2
+    },
+    "name": "build",
+    "record": {
+      "bytes": 2147483648,
+      "created_at": 1761400610,
+      "removed_at": 1761500000,
+      "removed_by": "user",
+      "skipped": "the job succeeded"
+    },
+    "repository": "tidewater/halyard",
+    "run_attempt": 1,
+    "run_id": 900,
+    "runner": {
+      "cpu_cap": 4000,
+      "memory_cap": 8589934592,
+      "name": "runnerd-halyard-0",
+      "profile": "halyard",
+      "slot": 0
+    },
+    "state": "completed",
+    "steps": [
+      {
+        "completed_at": 1761400025,
+        "conclusion": "success",
+        "name": "Set up job",
+        "number": 1,
+        "started_at": 1761400020,
+        "status": "completed"
+      }
+    ],
+    "timeline": {
+      "cleaned_at": 1761400610,
+      "container_started_at": 1761400010,
+      "finished_at": 1761400600,
+      "queued_at": 1761400000,
+      "started_at": 1761400020
+    },
+    "url": "https://github.com/tidewater/halyard/actions/runs/900",
+    "workflow": "ci"
+  }
+}

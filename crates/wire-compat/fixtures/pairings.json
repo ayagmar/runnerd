@@ -1,0 +1,11 @@
+{
+  "full": {
+    "links": [
+      {
+        "lifetime": 300,
+        "origin": "https://ci.tidewater.example",
+        "url": "https://ci.tidewater.example/pair#code"
+      }
+    ]
+  }
+}

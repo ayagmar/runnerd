@@ -1,0 +1,29 @@
+# The JSON this version and the previous release exchange read both ways (ADR 0061). A workspace of its own: it
+# depends on runnerd-core twice, this version's and the previous release's, and in the main workspace that would make
+# every `-p runnerd-core` ambiguous. .github/scripts/check-wire-compat.sh runs it.
+[workspace]
+
+[package]
+name = "runnerd-wire-compat"
+description = "Checks that runnerd's JSON stays readable between this version and the previous release"
+version = "0.0.0"
+edition = "2024"
+rust-version = "1.99"
+license = "MIT"
+publish = false
+
+[dependencies]
+
+[dev-dependencies]
+runnerd-core = { path = "../core", default-features = false }
+# The previous release, v0.0.13, by its commit. Moves to each new release when it is cut (CONTRIBUTING.md).
+runnerd-core-previous = { package = "runnerd-core", git = "https://github.com/ayagmar/runnerd", rev = "396115779c42c770fa5f6a63f058089f92c3bd07", default-features = false }
+serde = "1.0.229"
+serde_json = "1.0.154"
+
+[lints.rust]
+unsafe_code = "forbid"
+rust_2018_idioms = { level = "warn", priority = -1 }
+
+[lints.clippy]
+pedantic = { level = "warn", priority = -1 }

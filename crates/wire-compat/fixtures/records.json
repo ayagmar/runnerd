@@ -1,0 +1,25 @@
+{
+  "full": {
+    "limits": {
+      "max_age": 604800,
+      "max_count": 10,
+      "max_total": 21474836480,
+      "min_free": 53687091200
+    },
+    "records": [
+      {
+        "bytes": 2147483648,
+        "created_at": 1761400610,
+        "image": "runnerd-record-42",
+        "job": 42,
+        "name": "build",
+        "profile": "halyard",
+        "repository": "tidewater/halyard",
+        "workflow": "ci"
+      }
+    ],
+    "shells": [
+      42
+    ]
+  }
+}

@@ -1,6 +1,8 @@
 [workspace]
 resolver = "3"
 members = ["crates/core", "crates/daemon", "crates/cli", "crates/web"]
+# Its own workspace: it depends on the previous release of runnerd-core beside this one.
+exclude = ["crates/wire-compat"]
 
 [workspace.package]
 version = "0.0.13"

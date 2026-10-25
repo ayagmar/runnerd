@@ -1,0 +1,6 @@
+{
+  "full": {
+    "all": true,
+    "older_than": "7d"
+  }
+}

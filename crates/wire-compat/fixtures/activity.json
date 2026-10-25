@@ -1,0 +1,14 @@
+{
+  "full": {
+    "failed": 1,
+    "finished": 12,
+    "since": 1761300000,
+    "started": [
+      {
+        "at": 1761350000,
+        "waited": 30
+      }
+    ],
+    "until": 1761400000
+  }
+}

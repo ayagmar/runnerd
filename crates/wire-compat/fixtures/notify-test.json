@@ -1,0 +1,10 @@
+{
+  "full": {
+    "targets": [
+      {
+        "error": "connection refused",
+        "target": "phone"
+      }
+    ]
+  }
+}

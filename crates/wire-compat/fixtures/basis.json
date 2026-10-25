@@ -1,0 +1,29 @@
+{
+  "cap": {
+    "kind": "cap"
+  },
+  "job": {
+    "kind": "job",
+    "peak": "largest",
+    "runs": 12
+  },
+  "overran": {
+    "kind": "overran",
+    "until": 1761400300
+  },
+  "profile": {
+    "kind": "profile",
+    "runs": 30
+  },
+  "profile-max": {
+    "kind": "profile-max",
+    "runs": 30
+  },
+  "unmeasured": {
+    "kind": "unmeasured"
+  },
+  "unpredictable": {
+    "kind": "unpredictable",
+    "until": 1761400300
+  }
+}

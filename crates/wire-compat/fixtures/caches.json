@@ -1,0 +1,59 @@
+{
+  "full": {
+    "build": {
+      "bytes": 4294967296,
+      "entries": 9000,
+      "limit": 21474836480,
+      "week": {
+        "hits": 80,
+        "misses": 20,
+        "read_bytes": 314572800,
+        "refused": 1,
+        "writer": true,
+        "written_bytes": 41943040
+      }
+    },
+    "measured_at": 1761400000,
+    "volumes": [
+      {
+        "bytes": 3221225472,
+        "kind": "snapshot",
+        "limit": 10737418240,
+        "name": "runnerd-cache",
+        "profile": "halyard"
+      },
+      {
+        "bytes": 3221225472,
+        "kind": "slot",
+        "limit": 10737418240,
+        "name": "runnerd-cache",
+        "profile": "halyard",
+        "slot": 0
+      },
+      {
+        "bytes": 3221225472,
+        "kind": "pnpm",
+        "limit": 10737418240,
+        "name": "runnerd-cache"
+      },
+      {
+        "bytes": 3221225472,
+        "kind": "maven",
+        "limit": 10737418240,
+        "name": "runnerd-cache"
+      },
+      {
+        "bytes": 3221225472,
+        "kind": "mirror",
+        "limit": 10737418240,
+        "name": "runnerd-cache"
+      },
+      {
+        "bytes": 3221225472,
+        "kind": "build",
+        "limit": 10737418240,
+        "name": "runnerd-cache"
+      }
+    ]
+  }
+}

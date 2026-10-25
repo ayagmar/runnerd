@@ -1,0 +1,158 @@
+{
+  "full": {
+    "failed": 4,
+    "finished": 120,
+    "new": [
+      {
+        "before": 300,
+        "branch": "main",
+        "job": "build",
+        "key": "tidewater/halyard:ci:build",
+        "kind": "slower",
+        "now": 600,
+        "repository": "tidewater/halyard",
+        "runs": [
+          {
+            "at": 1761400000,
+            "branch": "main",
+            "job": 42,
+            "run_attempt": 1,
+            "run_id": 900,
+            "url": "https://github.com/tidewater/halyard/actions/runs/900"
+          }
+        ],
+        "sentence": "build got slower",
+        "severity": "warning",
+        "since": {
+          "at": 1761400000,
+          "branch": "main",
+          "job": 42,
+          "run_attempt": 1,
+          "run_id": 900,
+          "url": "https://github.com/tidewater/halyard/actions/runs/900"
+        },
+        "workflow": "ci"
+      },
+      {
+        "flaky": 2,
+        "job": "build",
+        "key": "tidewater/halyard:ci:build",
+        "kind": "flaky",
+        "repository": "tidewater/halyard",
+        "runs": [
+          {
+            "at": 1761400000,
+            "branch": "main",
+            "job": 42,
+            "run_attempt": 1,
+            "run_id": 900,
+            "url": "https://github.com/tidewater/halyard/actions/runs/900"
+          }
+        ],
+        "sentence": "build got slower",
+        "severity": "warning",
+        "total": 20,
+        "workflow": "ci"
+      },
+      {
+        "auto": "raises",
+        "cap": 8589934592,
+        "job": "build",
+        "key": "tidewater/halyard:ci:build",
+        "kind": "near-cap",
+        "peak": 7516192768,
+        "profile": "halyard",
+        "repository": "tidewater/halyard",
+        "runs": [
+          {
+            "at": 1761400000,
+            "branch": "main",
+            "job": 42,
+            "run_attempt": 1,
+            "run_id": 900,
+            "url": "https://github.com/tidewater/halyard/actions/runs/900"
+          }
+        ],
+        "sentence": "build got slower",
+        "severity": "warning",
+        "workflow": "ci"
+      },
+      {
+        "branch": "main",
+        "hits": 2,
+        "job": "build",
+        "key": "tidewater/halyard:ci:build",
+        "kind": "cold-cache",
+        "lookups": 100,
+        "repository": "tidewater/halyard",
+        "runs": [
+          {
+            "at": 1761400000,
+            "branch": "main",
+            "job": 42,
+            "run_attempt": 1,
+            "run_id": 900,
+            "url": "https://github.com/tidewater/halyard/actions/runs/900"
+          }
+        ],
+        "sentence": "build got slower",
+        "severity": "warning",
+        "workflow": "ci"
+      },
+      {
+        "job": "build",
+        "key": "tidewater/halyard:ci:build",
+        "kind": "throttled",
+        "repository": "tidewater/halyard",
+        "runs": [
+          {
+            "at": 1761400000,
+            "branch": "main",
+            "job": 42,
+            "run_attempt": 1,
+            "run_id": 900,
+            "url": "https://github.com/tidewater/halyard/actions/runs/900"
+          }
+        ],
+        "sentence": "build got slower",
+        "severity": "warning",
+        "throttled": 3,
+        "total": 20,
+        "workflow": "ci"
+      },
+      {
+        "before": 30,
+        "job": "build",
+        "key": "tidewater/halyard:ci:build",
+        "kind": "waits",
+        "now": 300,
+        "repository": "tidewater/halyard",
+        "runs": [
+          {
+            "at": 1761400000,
+            "branch": "main",
+            "job": 42,
+            "run_attempt": 1,
+            "run_id": 900,
+            "url": "https://github.com/tidewater/halyard/actions/runs/900"
+          }
+        ],
+        "sentence": "build got slower",
+        "severity": "warning",
+        "workflow": "ci"
+      }
+    ],
+    "since": 1760800000,
+    "until": 1761400000,
+    "waits": [
+      {
+        "job": 42,
+        "name": "build",
+        "repository": "tidewater/halyard",
+        "url": "https://github.com/tidewater/halyard/actions/runs/900",
+        "waited": 900,
+        "workflow": "ci"
+      }
+    ]
+  }
+}

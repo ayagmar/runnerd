@@ -1,0 +1,15 @@
+{
+  "full": {
+    "interval": 5,
+    "job": 42,
+    "samples": [
+      {
+        "at": 1761400100,
+        "cpu": 3000,
+        "memory": 4294967296,
+        "network_received": 1048576,
+        "network_sent": 1024
+      }
+    ]
+  }
+}

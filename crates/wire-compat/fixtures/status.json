@@ -1,0 +1,177 @@
+{
+  "empty": {
+    "budget": {
+      "admission": "measured",
+      "held": false,
+      "memory_in_use": 9663676416,
+      "memory_max": 34359738368,
+      "mirror_memory": 1073741824,
+      "seed_memory": [
+        {
+          "memory": 2147483648,
+          "profile": "halyard"
+        }
+      ],
+      "shell_memory": [
+        {
+          "job": 41,
+          "memory": 1073741824
+        }
+      ],
+      "slice": "runnerd.slice"
+    },
+    "profiles": [
+      {
+        "cpus": 4,
+        "image": "runnerd-runner:base",
+        "memory": 8589934592,
+        "name": "halyard",
+        "reseeding": false,
+        "slots": [
+          {
+            "runner": {
+              "busy": true,
+              "container": "runnerd-halyard-0",
+              "name": "runnerd-halyard-0",
+              "repository": "tidewater/halyard",
+              "reserved": 6442450944,
+              "runner_id": 7,
+              "started_at": 1761400000,
+              "warm": true
+            },
+            "slot": 0
+          }
+        ]
+      }
+    ],
+    "queued": [
+      {
+        "branch": "main",
+        "id": 42,
+        "name": "build",
+        "queued_at": 1761400000,
+        "repository": "tidewater/halyard",
+        "run_attempt": 1,
+        "run_id": 900,
+        "url": "https://github.com/tidewater/halyard/actions/runs/900",
+        "workflow": "ci"
+      }
+    ],
+    "repositories": [
+      {
+        "labels": [
+          "self-hosted"
+        ],
+        "name": "tidewater/halyard",
+        "paused": false,
+        "profile": "halyard",
+        "queued_jobs": 1
+      }
+    ],
+    "shutting_down": false,
+    "version": "0.0.0"
+  },
+  "full": {
+    "budget": {
+      "admission": "measured",
+      "cpu": {
+        "budget": 24000,
+        "cpus": 16000,
+        "held": false,
+        "in_use": 8000
+      },
+      "held": false,
+      "host": {
+        "limit": 42949672960,
+        "memory": {
+          "at": 1761400000,
+          "available": 33285996544,
+          "full": {
+            "avg10": 150,
+            "avg60": 60
+          },
+          "slice": 9663676416,
+          "some": {
+            "avg10": 250,
+            "avg60": 120
+          },
+          "total": 68719476736
+        },
+        "spare": 12884901888,
+        "stalled": false
+      },
+      "memory_in_use": 9663676416,
+      "memory_max": 34359738368,
+      "mirror_memory": 1073741824,
+      "seed_memory": [
+        {
+          "memory": 2147483648,
+          "profile": "halyard"
+        }
+      ],
+      "shell_memory": [
+        {
+          "job": 41,
+          "memory": 1073741824
+        }
+      ],
+      "slice": "runnerd.slice",
+      "slice_cpus": 16000
+    },
+    "profiles": [
+      {
+        "cpus": 4,
+        "image": "runnerd-runner:base",
+        "memory": 8589934592,
+        "name": "halyard",
+        "reseeding": false,
+        "slots": [
+          {
+            "runner": {
+              "busy": true,
+              "container": "runnerd-halyard-0",
+              "name": "runnerd-halyard-0",
+              "repository": "tidewater/halyard",
+              "reserved": 6442450944,
+              "runner_id": 7,
+              "started_at": 1761400000,
+              "warm": true
+            },
+            "slot": 0
+          }
+        ]
+      }
+    ],
+    "queued": [
+      {
+        "branch": "main",
+        "id": 42,
+        "name": "build",
+        "queued_at": 1761400000,
+        "repository": "tidewater/halyard",
+        "run_attempt": 1,
+        "run_id": 900,
+        "url": "https://github.com/tidewater/halyard/actions/runs/900",
+        "waiting": {
+          "free": 2147483648,
+          "kind": "memory",
+          "needs": 6442450944
+        },
+        "workflow": "ci"
+      }
+    ],
+    "repositories": [
+      {
+        "labels": [
+          "self-hosted"
+        ],
+        "name": "tidewater/halyard",
+        "paused": false,
+        "profile": "halyard",
+        "queued_jobs": 1
+      }
+    ],
+    "shutting_down": false,
+    "version": "0.0.0"
+  }
+}
