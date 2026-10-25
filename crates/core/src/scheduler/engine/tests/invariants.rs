@@ -24,8 +24,9 @@ const M: u64 = 1 << 20;
 /// at less than it holds lets one start too many.
 const MEMORY_MAX: u64 = 8 * G + 512 * M;
 
-/// The slice's CPUs, in millicores: one heavy runner and two light ones under `cpu_overcommit = 1.0`.
-const SLICE_CPUS: u64 = 4000;
+/// The slice's CPUs, in millicores: one heavy runner and one light one under `cpu_overcommit = 1.0`, where memory
+/// has room for two heavy ones, so CPU binds before memory.
+const SLICE_CPUS: u64 = 3000;
 
 /// What the host has, in all.
 const HOST_TOTAL: u64 = 64 * G;
@@ -1034,7 +1035,19 @@ impl Case {
                 .iter()
                 .map(|container| docker.memory.get(&container.id).copied().unwrap_or(0))
                 .sum();
+            let cpus: u64 = running
+                .iter()
+                .map(|container| docker.cpus.get(&container.id).copied().unwrap_or(0))
+                .sum();
             drop(docker);
+            // The CPU budget is the slice's CPUs times 1.0; seeds and the mirror reserve none.
+            if self.shape.cpu_overcommit && cpus > SLICE_CPUS {
+                return violation(
+                    self,
+                    "starts_fit_the_budget",
+                    format!("started {started:?} with CPU limits of {cpus} in {SLICE_CPUS}"),
+                );
+            }
             let seeds: u64 = budget.seed_memory.iter().map(|seed| seed.memory).sum();
             if caps + seeds > MEMORY_MAX {
                 return violation(
@@ -1417,6 +1430,68 @@ async fn a_runner_watched_through_a_failed_inspect_still_records_the_job_it_runs
         Step::InspectFails(0),
         Step::RestartInspectFails(0),
         Step::Assign(0),
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
+
+#[tokio::test]
+async fn a_job_taking_a_waiting_runners_room_still_fits_the_cpu_budget() {
+    // Two heavy runners hold 4000 millicores when a reload turns on a CPU budget of 3000. Once a job ends, a queued
+    // one may stop the runner left waiting only if its room pays the 1000 past the budget back first.
+    let steps = [
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        Step::Queue {
+            second: true,
+            labels: Labels::Heavy,
+        },
+        Step::Tick,
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        Step::Reload(Change::CpuOvercommit),
+        Step::AssignListed(1),
+        Step::InspectFails(1),
+        Step::Finish(2),
+        Step::Tick,
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
+
+#[tokio::test]
+async fn a_job_taking_a_waiting_runners_room_still_fits_the_slice_under_measured_admission() {
+    let steps = [
+        // Three heavy slots, so the third job lacks only memory.
+        Step::Reload(Change::Policy),
+        Step::Reload(Change::HeavySlots(3)),
+        // o/s gets a runner, then its job is cancelled: the runner waits for nothing.
+        Step::Queue {
+            second: true,
+            labels: Labels::Heavy,
+        },
+        Step::Tick,
+        Step::Cancel(0),
+        // o/r's runner takes a job and uses past its cap: the two take more than the slice's 8.5G.
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        Step::Tick,
+        Step::Assign(0),
+        Step::Sample {
+            percent: 120,
+            available: 50,
+            stalled: false,
+        },
+        // Stopping the waiting runner pays that back first, which leaves no room for another 4G.
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        Step::Tick,
     ];
     assert_eq!(broken(&steps).await, None);
 }

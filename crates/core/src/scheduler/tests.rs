@@ -47,8 +47,8 @@ fn repository(name: &str, profile: &str, queued: Vec<QueuedJob>) -> Repository {
 
 fn budget(memory: Option<u64>, cpu: Option<u64>) -> Budget {
     Budget {
-        memory,
-        cpu,
+        memory: memory.map(|memory| super::left(memory, 0)),
+        cpu: cpu.map(|cpu| super::left(cpu, 0)),
         host: None,
         held: false,
     }

@@ -267,8 +267,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             &repositories,
             &profiles,
             Budget {
-                memory: admitting.free,
-                cpu: admitting.cpu.as_ref().map(|cpu| cpu.free),
+                // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
+                memory: if admitting.held {
+                    Some(0)
+                } else {
+                    self.memory_max
+                        .map(|max| crate::scheduler::left(max, self.memory_in_use()))
+                },
+                cpu: admitting
+                    .cpu
+                    .as_ref()
+                    .and(self.cpu_budget())
+                    .map(|budget| crate::scheduler::left(budget, self.cpu_in_use())),
                 host: admitting
                     .host
                     .as_ref()
