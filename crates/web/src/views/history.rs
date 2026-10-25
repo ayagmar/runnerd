@@ -417,7 +417,7 @@ fn per_day(title: &str, series: Vec<Series>, value: fn(u64) -> String, days: &[D
         window: None,
         live: None,
         series,
-        limit: None,
+        limits: vec![],
         value,
         time: format::short_date,
         gap: 86_400,

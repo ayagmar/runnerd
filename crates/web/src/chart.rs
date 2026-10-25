@@ -55,6 +55,15 @@ impl Series {
     }
 }
 
+/// A horizontal line across a chart, such as a cap, with its label.
+#[derive(Debug)]
+pub(crate) struct Limit {
+    pub(crate) value: u64,
+    pub(crate) label: String,
+    /// The line's class beside `limit`, such as `reserved`; empty for a plain one.
+    pub(crate) class: &'static str,
+}
+
 /// A chart of values over time.
 #[derive(Debug)]
 pub(crate) struct TimeChart {
@@ -67,8 +76,8 @@ pub(crate) struct TimeChart {
     /// A live chart's id, which names its parts. Its end follows the page's clock.
     pub(crate) live: Option<String>,
     pub(crate) series: Vec<Series>,
-    /// A horizontal line, such as a memory cap, with its label.
-    pub(crate) limit: Option<(u64, String)>,
+    /// Horizontal lines, such as a memory cap, each with its label.
+    pub(crate) limits: Vec<Limit>,
     /// Writes a value on the y axis.
     pub(crate) value: fn(u64) -> String,
     /// Writes a time on the x axis.
@@ -83,6 +92,56 @@ pub(crate) struct TimeChart {
 )]
 fn y_of(value: u64, top: u64) -> f64 {
     HEIGHT - (value as f64 / top.max(1) as f64 * HEIGHT).clamp(0.0, HEIGHT)
+}
+
+/// A label's height in percent of a job chart's plot, with a gap: what two labels keep apart.
+const LABEL: f64 = 16.0;
+
+/// Where a line's label goes.
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct Placement {
+    /// The height it hangs from, in percent from the top.
+    at: f64,
+    /// The line at that height.
+    line: usize,
+    /// Under `at` rather than above it.
+    below: bool,
+    /// How many labels above it sit between it and `at`.
+    stack: u32,
+}
+
+/// Places the labels of lines at `ys`, in percent from the top, so that none overlaps another or leaves the plot:
+/// the highest line's label (the first of equals) above it, each lower one's under its line, or where there is no
+/// room under it, above its line, or stacked under the label above when that is too close.
+fn place(ys: &[f64]) -> Vec<Placement> {
+    let mut order: Vec<usize> = (0..ys.len()).collect();
+    order.sort_by(|a, b| ys[*a].total_cmp(&ys[*b]));
+    let mut placements: Vec<Placement> = ys
+        .iter()
+        .enumerate()
+        .map(|(line, y)| Placement {
+            at: *y,
+            line,
+            below: false,
+            stack: 0,
+        })
+        .collect();
+    for pair in order.windows(2) {
+        let (upper, lower) = (pair[0], pair[1]);
+        let above = placements[upper];
+        if ys[lower] + LABEL <= 100.0 {
+            placements[lower].below = true;
+        } else if !above.below && ys[lower] - above.at < LABEL {
+            // The upper label climbs one place and this one takes its spot, so they read in the lines' order.
+            for placement in &mut placements {
+                if !placement.below && placement.line == above.line {
+                    placement.stack += 1;
+                }
+            }
+            placements[lower] = above;
+        }
+    }
+    placements
 }
 
 /// The time a chart shows, and how its series are placed in it.
@@ -406,6 +465,22 @@ impl TimeChart {
         self.render_with(top, &[], parts)
     }
 
+    /// Each line with its height, in the box's units, and where its label goes.
+    fn placed_limits(&self, top: u64) -> Vec<(&Limit, f64, Placement)> {
+        let ys: Vec<f64> = self
+            .limits
+            .iter()
+            .map(|limit| y_of(limit.value, top))
+            .collect();
+        let placements = place(&ys.iter().map(|y| y / HEIGHT * 100.0).collect::<Vec<_>>());
+        self.limits
+            .iter()
+            .zip(ys)
+            .zip(placements)
+            .map(|((limit, y), placement)| (limit, y, placement))
+            .collect()
+    }
+
     /// The chart with bands over it, each drawn while its expression holds. A band needs a chart without a window,
     /// whose start stays put.
     pub(crate) fn render_with(&self, top: u64, bands: &[Band], parts: &Parts) -> Markup {
@@ -425,6 +500,7 @@ impl TimeChart {
                     None => format!("{}: no samples", series.label),
                 }
             })
+            .chain(self.limits.iter().map(|limit| limit.label.clone()))
             .collect::<Vec<_>>()
             .join(", ");
         let live = self.live.as_deref().map(|id| {
@@ -450,7 +526,7 @@ impl TimeChart {
                 (series, stretches)
             })
             .collect();
-        let limit_y = self.limit.as_ref().map(|(limit, _)| y_of(*limit, top));
+        let limits = self.placed_limits(top);
         let span_style = format!("--span: {}", frame.span());
         let span_style = if live.is_some() {
             parts.clocked(span_style)
@@ -478,13 +554,14 @@ impl TimeChart {
                             role="img" aria-label=(format!("{}: {summary}", self.title)) {
                             line.grid x1="0" x2=(WIDTH) y1=(HEIGHT / 2.0) y2=(HEIGHT / 2.0) vector-effect="non-scaling-stroke" {}
                             (series_group(&series, frame, live.as_ref().map(|(id, transform, _)| (*id, transform.as_str())), parts))
-                            @if let Some(y) = limit_y {
-                                line.limit x1="0" x2=(WIDTH) y1=(format!("{y:.0}")) y2=(format!("{y:.0}"))
+                            @for (limit, y, _) in &limits {
+                                line class={ "limit " (limit.class) } x1="0" x2=(WIDTH) y1=(format!("{y:.0}")) y2=(format!("{y:.0}"))
                                     vector-effect="non-scaling-stroke" {}
                             }
                         }
-                        @if let (Some((_, label)), Some(y)) = (&self.limit, limit_y) {
-                            span.limit-label style=(format!("--y: {:.1}%", y / HEIGHT * 100.0)) { (label) }
+                        @for (limit, _, placement) in &limits {
+                            span class={ "limit-label " (limit.class) @if placement.below { " below" } }
+                                style=(format!("--y: {:.1}%; --stack: {}", placement.at, placement.stack)) { (limit.label) }
                         }
                         @for (index, band) in bands.iter().enumerate() {
                             (band.render(index, frame.from, frame.end, live.as_ref().map(|(id, _, _)| *id), parts))
@@ -656,7 +733,7 @@ mod tests {
             window: None,
             live: live.then(|| "memory".to_owned()),
             series: vec![Series::line("memory", "memory", points)],
-            limit: None,
+            limits: vec![],
             value: |_| String::new(),
             time: |_| String::new(),
             gap: 6,
@@ -697,6 +774,45 @@ mod tests {
         );
         let top = drawn.iter().map(|point| point.1).min().unwrap();
         assert_eq!(top, y_of(9000, 2 << 30).round() as i64, "the peak is drawn");
+    }
+
+    /// The span each label of lines at `ys` covers, in percent from the top, as the stylesheet places it.
+    fn label_spans(ys: &[f64]) -> Vec<(f64, f64)> {
+        place(ys)
+            .iter()
+            .map(|placement| {
+                let top = if placement.below {
+                    placement.at
+                } else {
+                    placement.at - LABEL * f64::from(placement.stack + 1)
+                };
+                (top, top + LABEL)
+            })
+            .collect()
+    }
+
+    #[test]
+    fn labels_of_lines_together_near_the_bottom_stack_apart_inside_the_plot() {
+        // First, a runner reserving 1 CPU with its profile now at 1, on a chart topped at 40 cores: both at 97.5%.
+        for ys in [
+            [97.5, 97.5],
+            [80.0, 95.0],
+            [20.0, 22.0],
+            [50.0, 50.0],
+            [20.0, 97.5],
+        ] {
+            let spans = label_spans(&ys);
+            assert!(
+                spans[0].1 <= spans[1].0 || spans[1].1 <= spans[0].0,
+                "labels of lines at {ys:?} overlap: {spans:?}"
+            );
+            assert!(
+                spans
+                    .iter()
+                    .all(|(top, bottom)| *top >= 0.0 && *bottom <= 100.0),
+                "labels of lines at {ys:?} leave the plot: {spans:?}"
+            );
+        }
     }
 
     #[test]

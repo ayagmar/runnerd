@@ -81,6 +81,101 @@ pub struct Job {
     pub admission: Option<super::Admission>,
 }
 
+impl Job {
+    /// The lines across its memory and CPU charts, as every client labels them: what admission reserved of the
+    /// budget, when the record has it, and the cap its container ran with, or for a record without it, `profile`'s
+    /// limit as configured now. A reservation of the whole cap is one line.
+    pub fn chart_lines(&self, profile: Option<&super::ProfileStatus>) -> ChartLines {
+        let runner = self.summary.runner.as_ref();
+        let admission = self.admission.as_ref();
+        let name = profile.map_or("profile", |profile| profile.name.as_str());
+        ChartLines {
+            memory: chart_lines(
+                runner.and_then(|runner| runner.memory_cap),
+                profile.map(|profile| profile.memory),
+                admission.map(|admission| admission.reserved),
+                |value| crate::config::ByteSize(value).to_string(),
+                name,
+            ),
+            cpu: chart_lines(
+                runner.and_then(|runner| runner.cpu_cap),
+                profile.map(|profile| u64::from(profile.cpus) * 1000),
+                admission
+                    .and_then(|admission| admission.cpu)
+                    .map(|cpu| cpu.reserved),
+                super::cpus,
+                name,
+            ),
+        }
+    }
+}
+
+/// One resource's lines: `value` writes a figure, such as `8.5G` or `3.6 CPUs`.
+fn chart_lines(
+    cap: Option<u64>,
+    now: Option<u64>,
+    reserved: Option<u64>,
+    value: fn(u64) -> String,
+    profile: &str,
+) -> Vec<ChartLine> {
+    let line = |figure, kind, label: &str| ChartLine {
+        value: figure,
+        kind,
+        label: format!("{label} {}", value(figure)),
+    };
+    let mut lines = vec![];
+    match (cap, now) {
+        (Some(cap), _) if reserved == Some(cap) => {
+            return vec![line(cap, ChartLineKind::CapAndReserved, "cap and reserved")];
+        }
+        (Some(cap), _) => lines.push(line(cap, ChartLineKind::Cap, "cap")),
+        (None, Some(now)) => lines.push(line(
+            now,
+            ChartLineKind::ProfileNow,
+            &format!("{profile} now"),
+        )),
+        (None, None) => {}
+    }
+    if let Some(reserved) = reserved {
+        lines.push(line(reserved, ChartLineKind::Reserved, "reserved"));
+    }
+    lines
+}
+
+/// The lines across a job's memory and CPU charts, from `Job::chart_lines`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChartLines {
+    /// In bytes.
+    pub memory: Vec<ChartLine>,
+    /// In millicores.
+    pub cpu: Vec<ChartLine>,
+}
+
+/// A line across a job's memory or CPU chart.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ChartLine {
+    /// Bytes or millicores.
+    pub value: u64,
+    /// What it stands for.
+    pub kind: ChartLineKind,
+    /// Its label, such as `cap 8.5G` or `reserved 3.6 CPUs`.
+    pub label: String,
+}
+
+/// What a line across a job's chart stands for.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChartLineKind {
+    /// The most its container may use: its cap.
+    Cap,
+    /// Its profile's limit in the config now, for a record without its container's cap; a reload since may have
+    /// changed it.
+    ProfileNow,
+    /// What admission counted against the budget for its runner.
+    Reserved,
+    /// A reservation of the whole cap, as admission by caps makes.
+    CapAndReserved,
+}
+
 /// The runner a job ran on.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct JobRunner {

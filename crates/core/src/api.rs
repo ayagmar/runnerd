@@ -65,10 +65,10 @@ pub use insights::{
 };
 pub use jobs::{
     Activity, ActivityQuery, Bucket, BuildCacheCounts, BuildCacheStats, CacheHistory,
-    CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, Holder, HostMemory, HostSample,
-    HostSampleQuery, HostSamples, Job, JobMetrics, JobPage, JobQuery, JobRunner, JobState,
-    JobSummary, LogQuery, LogSummary, Pressure, Sample, SampleSeries, Started, Stats, StatsQuery,
-    StatsRow, Step, Timeline,
+    CacheHistoryQuery, CacheKind, CacheSize, CacheVolume, Caches, ChartLine, ChartLineKind,
+    ChartLines, Holder, HostMemory, HostSample, HostSampleQuery, HostSamples, Job, JobMetrics,
+    JobPage, JobQuery, JobRunner, JobState, JobSummary, LogQuery, LogSummary, Pressure, Sample,
+    SampleSeries, Started, Stats, StatsQuery, StatsRow, Step, Timeline,
 };
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,

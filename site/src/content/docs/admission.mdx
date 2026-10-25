@@ -105,7 +105,7 @@ slots = 8       # how many run at once; 8 × 7G may exceed MemoryMax
 - Nothing starts while the slice uses 90% of `MemoryMax` or more, counted as [`docker stats` does](#what-a-jobs-memory-is). Without a sample of the slice from the last few seconds, runners reserve their caps. Switching back to `admission = "caps"` counts every running runner at its cap.
 - The check asks only that one runner of each profile, with the mirror, fits `MemoryMax`, and that the slice has one.
 
-The caps still stop a container that goes over them. What measured admission trades for the shorter waits is that several jobs going over their predictions at once can fill the slice, which the kernel then answers by reclaiming page cache and killing a process inside it, a runner's before the mirror's. Each job's record says what its runner reserved and why (`runnerctl job <id>`, the dashboard's job page).
+The caps still stop a container that goes over them. What measured admission trades for the shorter waits is that several jobs going over their predictions at once can fill the slice, which the kernel then answers by reclaiming page cache and killing a process inside it, a runner's before the mirror's. Each job's record says what its runner reserved and why (`runnerctl job <id>`, the dashboard's job page). The job page's charts draw the reservation as a line under the cap, so a container capped at 22 CPUs that reserved 3.6 shows both.
 
 ### Try it first
 
