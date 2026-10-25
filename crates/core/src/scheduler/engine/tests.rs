@@ -2887,8 +2887,7 @@ async fn until_polled(github: &FakeGithub, count: usize) {
         .await;
 }
 
-/// Wakes the engine and waits until a tick that started after now has run in full. A command the engine answers
-/// during a tick is followed by the next poll only, an interval later.
+/// Wakes the engine and waits until a tick that started after now has run in full.
 async fn a_whole_tick(github: &FakeGithub, handle: &Handle) {
     let polled = polls(&github.calls());
     // The second poll comes after the first one's tick has planned and started runners.
@@ -2925,10 +2924,26 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
     a_whole_tick(&github, &handle).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
 
+    // The new config arrives while a tick waits for GitHub's listings of the old one's repositories, and polls
+    // only every hour: the tick it is answered in lists none of its repositories, so only a tick that follows the
+    // command starts `o/x`'s job.
+    github.hold();
+    handle.control.wake.notify_one();
+    github.until_waiting(1).await;
+    let hourly = Config::parse(
+        &CONFIG
+            .replace("name = \"o/r\"", "name = \"o/x\"")
+            .replace(
+                "labels = [\"self-hosted\", \"app\"]",
+                "labels = [\"self-hosted\", \"other\"]",
+            )
+            .replace("[host]\n", "[host]\npoll_interval = \"1h\"\n"),
+    )
+    .unwrap();
     let committed = handle
         .control
         .replace_config(
-            other_repository(),
+            hourly,
             None,
             None,
             Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
@@ -2941,7 +2956,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
     );
     // Answered once it runs with the config: the status shows `o/x` already.
     assert_eq!(handle.status.borrow().repositories[0].name, "o/x");
-    handle.control.wake.notify_one();
+    github.release();
     github
         .until_calls(
             |calls| !registered(calls).is_empty(),

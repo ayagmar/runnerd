@@ -567,8 +567,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Runs `work` as a task of its own, answering commands and publishing after each until it is done, so a command
-    /// waits for a slow GitHub no longer than for the command before it. The task goes on while a command runs: a
-    /// request's timeout runs on the clock, not on polls.
+    /// waits for a slow GitHub no longer than for the command before it. A tick follows each such command, as one
+    /// follows a command answered between ticks. The task goes on while a command runs: a request's timeout runs on
+    /// the clock, not on polls.
     async fn serving<T: Send + 'static>(
         &mut self,
         work: impl Future<Output = T> + Send + 'static,
@@ -587,6 +588,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Some(command) = self.commands.recv() => {
                     self.command(command).await;
                     self.publish();
+                    // A tick follows it, as one follows a command answered between ticks: a config it replaced
+                    // polls its repositories then, not a poll interval later.
+                    self.control.wake.notify_one();
                 }
             }
         }
