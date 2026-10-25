@@ -4,6 +4,8 @@
 # Options before the command (`runnerctl --socket <path> status`) are checked against the program's own `--help`, and
 # their values skipped; so are a command's options before its subcommand (`runnerctl sizing --since 7d apply`). Reads command lines from inline code, `sh`/`shell`/`bash` blocks (but not `cargo` lines),
 # and the `$ ` lines of `console` blocks; output and prose are not commands.
+# A word that is not an option counts against the arguments the usage line takes, so a subcommand the command lacks
+# (`runnerctl caches clean`) fails.
 # Usage: check-docs-commands.sh <directory with runnerd and runnerctl>, such as target/debug.
 set -eu
 
@@ -30,6 +32,23 @@ has_option() {
 # takes_value HELP OPTION: whether the help text shows the option with a value (`--socket <SOCKET>`).
 takes_value() {
   printf '%s\n' "$1" | grep -qE -- "(^|[ ,])$2 <"
+}
+
+# positionals HELP: how many arguments the help's usage line takes after its options and subcommand: `<ID>` or
+# `[PATH]` count one each, and one ending in `...` makes it `any`.
+positionals() {
+  printf '%s\n' "$1" | awk '
+    /^Usage: / {
+      n = 0
+      for (i = 2; i <= NF; i++) {
+        if ($i !~ /^[[<]/ || $i == "[OPTIONS]" || $i == "<COMMAND>" || $i == "[COMMAND]") continue
+        if ($i ~ /\.\.\.$/) { print "any"; exit }
+        n++
+      }
+      print n
+      exit
+    }
+  '
 }
 
 # leading_options HELP WHERE WORD…: checks the options at the start of the words against HELP, skipping the value
@@ -88,10 +107,28 @@ echo "$lines" | {
       else
         problem="$program has no command $1"
       fi
-      for word in "$@"; do
-        [ -z "$problem" ] || break
+      # Every option after them, skipping the value of one that takes it, and no more arguments than the usage line
+      # has (`<ID>`, `[PATH]`; any number after one ending in `...`).
+      allowed=$(positionals "$help")
+      given=0
+      while [ -z "$problem" ] && [ $# -gt 0 ]; do
+        word=$1
+        shift
         case $word in
-          -*) has_option "$help" "${word%%=*}" || problem="$where has no ${word%%=*}" ;;
+          -*)
+            option=${word%%=*}
+            if ! has_option "$help" "$option"; then
+              problem="$where has no $option"
+            elif [ "$option" = "$word" ] && takes_value "$help" "$option" && [ $# -gt 0 ]; then
+              shift
+            fi
+            ;;
+          *)
+            given=$((given + 1))
+            if [ "$allowed" != any ] && [ "$given" -gt "$allowed" ]; then
+              problem="$where takes no argument $word"
+            fi
+            ;;
         esac
       done
     fi
