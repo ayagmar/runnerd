@@ -1094,7 +1094,7 @@ fn records_list_their_sizes_and_limits_and_go_by_age_or_one_by_one() {
     assert!(listed.status.success(), "{}", stderr(&listed));
     let text = stdout(&listed);
     assert!(
-        text.starts_with("2 records, 4G of 20G; at most 10, each for 7d"),
+        text.starts_with("2 of 10 records, 4G of 20G, each kept 7 days"),
         "{text}"
     );
     assert!(text.contains("9002"), "{text}");

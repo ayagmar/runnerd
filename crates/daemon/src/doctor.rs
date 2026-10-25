@@ -687,12 +687,12 @@ fn sysbox_fix(os_release: &str, platform: &str) -> String {
     }
 }
 
-/// Warns when the records take 80% of `[records] max_total`, past which new ones evict the oldest.
+/// Warns when the records near `[records] max_total` (`api::records_near_full`), past which new ones evict the oldest.
 fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
     let max_total = config.records.max_total;
     match records {
         Err(error) => skip("records", &format!("cannot list them: {error}")),
-        Ok(bytes) if u128::from(*bytes) * 5 >= u128::from(max_total.0) * 4 => Check {
+        Ok(bytes) if api::records_near_full(*bytes, max_total.0) => Check {
             name: "records".to_owned(),
             status: Status::Warn,
             detail: format!(

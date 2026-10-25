@@ -53,6 +53,7 @@ mod jobs;
 mod records;
 mod sizing;
 mod slots;
+mod storage;
 mod tone;
 mod units;
 
@@ -87,6 +88,9 @@ pub use sizing::{
     period, sampled_note,
 };
 pub use slots::{Health, SlotState};
+pub use storage::{
+    BuildCacheActivity, CacheLimit, RECORDS_NEAR_FULL, RecordState, records_near_full,
+};
 pub use tone::{Tone, Toned};
 pub use units::{ago, cores_used, cpu_time, duration, in_cores};
 

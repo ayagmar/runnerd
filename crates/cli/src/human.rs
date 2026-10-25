@@ -6,8 +6,8 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    self, BuildCacheCounts, CacheKind, Caches, Digest, Event, EventEnvelope, Insights, Job,
-    JobPage, JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, Records, RemovedRecords,
+    self, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
+    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, RemovedRecords,
     Sizing, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
@@ -394,30 +394,17 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
 
 /// What became of a failed job's record.
 fn record_note(job: u64, note: &RecordNote, now: u64, paint: Paint) -> String {
-    match (note, note.removed_at) {
-        (
-            RecordNote {
-                skipped: Some(why), ..
-            },
-            _,
-        ) => {
-            format!(
-                "record {}",
-                paint.paint(Tone::Dim, &format!("not kept: {why}"))
-            )
-        }
-        (RecordNote { removed_by, .. }, Some(at)) => {
-            let why = removed_by.map_or_else(|| "removed".to_owned(), |by| by.to_string());
-            format!(
-                "record {}",
-                paint.paint(Tone::Dim, &format!("{why}, {}", ago(at, now)))
-            )
-        }
-        (RecordNote { bytes, .. }, None) => format!(
-            "record kept{}: `runnerctl shell {job}` opens a shell in it",
-            bytes
-                .map(|bytes| format!(", {}", self::bytes(bytes)))
-                .unwrap_or_default()
+    let state = note.state();
+    match state {
+        RecordState::Skipped { .. } => format!("record {}", paint.paint(Tone::Dim, &state.line())),
+        RecordState::Removed { at, .. } => format!(
+            "record {}",
+            paint.paint(Tone::Dim, &format!("{}, {}", state.line(), ago(at, now)))
+        ),
+        RecordState::Kept { .. } => format!(
+            "{}: `{}` opens a shell in it",
+            state.line(),
+            RecordNote::shell_command(job)
         ),
     }
 }
@@ -433,27 +420,19 @@ pub(crate) fn removed(removed: &RemovedRecords) -> String {
 
 /// `runnerctl records`.
 pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
-    let limits = &records.limits;
     let mut out = format!(
-        "{} records, {} of {}; at most {}, each for {}\n",
-        records.records.len(),
-        bytes(records.bytes()),
-        bytes(limits.max_total),
-        limits.max_count,
-        duration(limits.max_age)
+        "{}\n",
+        paint.paint(records.summary_tone().into(), &records.summary())
     );
     if records.records.is_empty() {
-        out.push_str(&paint.paint(
-            Tone::Dim,
-            "none kept: a profile with record_failures = true keeps each failed job's runner as a record, to open a \
-             shell where it failed\n",
-        ));
+        out.push_str(&paint.paint(Tone::Dim, Records::empty_reason()));
+        out.push('\n');
         return out;
     }
     let mut table = Table::new(&["JOB", "REPOSITORY", "NAME", "SIZE", "MADE"]).right(&[3]);
     for record in &records.records {
         let mut made = ago(record.created_at, now);
-        if records.shells.contains(&record.job) {
+        if records.shell_open(record.job) {
             made.push_str(", shell open");
         }
         table.row(vec![
@@ -564,10 +543,8 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
         plain("log"),
         // The last column: the hint's colour codes pad nothing after it.
         plain(format!(
-            "{} lines, {}{}  {}",
-            log.lines,
-            bytes(log.bytes),
-            if log.truncated { ", truncated" } else { "" },
+            "{}  {}",
+            log.description(),
             paint.paint(Tone::Dim, &format!("runnerctl logs {}", summary.id))
         )),
     ]);
@@ -754,63 +731,29 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
     }
     let mut table = Table::new(&["VOLUME", "HOLDS", "SIZE", "LIMIT"]).right(&[2, 3]);
     for volume in &caches.volumes {
-        let holds = match &volume.kind {
-            CacheKind::Snapshot { profile } => format!("snapshot of {profile}"),
-            CacheKind::Slot { profile, slot } => format!("{profile} slot {slot}"),
-            CacheKind::Pnpm => "pnpm store".to_owned(),
-            CacheKind::Maven => "Maven repository".to_owned(),
-            CacheKind::Mirror => "Docker Hub mirror".to_owned(),
-            CacheKind::Build => "build cache".to_owned(),
-        };
-        let over = volume.limit.is_some_and(|limit| volume.bytes > limit);
+        let limit = volume.limit_status();
         table.row(vec![
             plain(&volume.name),
-            cell(holds, Tone::Dim),
+            cell(volume.kind.description(), Tone::Dim),
             cell(
                 bytes(volume.bytes),
-                if over { Tone::Busy } else { Tone::Plain },
+                limit
+                    .as_ref()
+                    .map_or(Tone::Plain, |limit| limit.tone().into()),
             ),
-            volume.limit.map_or_else(dash, |limit| plain(bytes(limit))),
+            limit.map_or_else(dash, |limit| plain(limit.label)),
         ]);
     }
     out.push_str(&table.render(paint, ""));
     if let Some(build) = &caches.build {
-        let week = &build.week;
-        let served = match week.hit_percent() {
-            Some(percent) => format!(
-                "{percent}% of {} lookups hit in 7 days, {} served, {} stored",
-                week.lookups(),
-                bytes(week.read_bytes),
-                bytes(week.written_bytes)
-            ),
-            None => "no lookups in 7 days".to_owned(),
-        };
-        let _ = writeln!(out, "build cache: {} entries; {served}", build.entries);
+        let _ = writeln!(out, "build cache: {}", build.week_line());
     }
     out
 }
 
-/// What the build cache did for a job, if it had it: `None` for a job without it, or one that never asked.
+/// What the build cache did for a job, if it had it: `None` for a job without it, or one that never used it.
 fn build_cache(counts: &BuildCacheCounts) -> Option<String> {
-    if counts.lookups() == 0 && counts.written_bytes == 0 && counts.refused == 0 {
-        return None;
-    }
-    let mut parts = vec![format!(
-        "{} of {} lookups hit ({}%)",
-        counts.hits,
-        counts.lookups(),
-        counts.hit_percent().unwrap_or(0)
-    )];
-    parts.push(format!("{} served", bytes(counts.read_bytes)));
-    if counts.writer {
-        parts.push(format!("{} stored", bytes(counts.written_bytes)));
-    } else {
-        parts.push("read only".to_owned());
-    }
-    if counts.refused > 0 {
-        parts.push(format!("{} uploads refused", counts.refused));
-    }
-    Some(parts.join(", "))
+    counts.activity().map(|activity| activity.line())
 }
 
 /// `runnerctl insights`: one line per insight, warnings first, then each repository's waits this week against the

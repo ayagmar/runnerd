@@ -15,8 +15,9 @@ use ratatui::widgets::{
 };
 use runnerd_core::api::{
     self, Activity, AutoPlan, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart, Insights,
-    Job, JobSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus,
-    RunComparison, Sample, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores, job_title,
+    Job, JobSummary, LogSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus, QueuedJob,
+    RecordNote, RecordState, Records, RepositoryStatus, RunComparison, Sample, Sizing, SlotStatus,
+    Status, Step, WaitKind, cpus, in_cores, job_title,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -1627,29 +1628,11 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         frame.render_widget(Line::styled("reading…", theme.dim()), table_area);
         return;
     };
-    let limits = &records.limits;
-    heading(
-        frame,
-        title,
-        "Records",
-        format!(
-            "{} of {} · {} of {} · each for {}",
-            records.records.len(),
-            limits.max_count,
-            bytes(records.bytes()),
-            bytes(limits.max_total),
-            duration(limits.max_age)
-        ),
-        theme,
-    );
+    heading(frame, title, "Records", records.summary(), theme);
     if records.records.is_empty() {
         frame.render_widget(
-            Paragraph::new(Line::styled(
-                "none kept: a profile with record_failures = true keeps each failed job's runner as a record, \
-                 to open a shell where it failed",
-                theme.dim(),
-            ))
-            .wrap(Wrap { trim: true }),
+            Paragraph::new(Line::styled(Records::empty_reason(), theme.dim()))
+                .wrap(Wrap { trim: true }),
             table_area,
         );
         return;
@@ -1659,7 +1642,7 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         .iter()
         .map(|record| {
             let mut made = human::ago(record.created_at, now);
-            if records.shells.contains(&record.job) {
+            if records.shell_open(record.job) {
                 made.push_str(", shell open");
             }
             made
@@ -1699,8 +1682,8 @@ fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme)
         frame.render_widget(
             Line::styled(
                 format!(
-                    "runnerctl shell {} opens a shell in its workspace",
-                    record.job
+                    "{} opens a shell in its workspace",
+                    RecordNote::shell_command(record.job)
                 ),
                 theme.dim(),
             ),
@@ -2143,9 +2126,12 @@ fn job_details(app: &App, job: &Job, now: u64) -> Vec<(u8, String)> {
     if job
         .record
         .as_ref()
-        .is_some_and(|note| note.bytes.is_some() && note.removed_at.is_none())
+        .is_some_and(|note| matches!(note.state(), RecordState::Kept { .. }))
     {
-        details.push((1, format!("record kept: runnerctl shell {}", summary.id)));
+        details.push((
+            1,
+            format!("record kept: {}", RecordNote::shell_command(summary.id)),
+        ));
     }
     details
 }
@@ -2519,8 +2505,12 @@ fn metrics_line(open: &JobView, width: usize, theme: Theme) -> Line<'static> {
     if metrics.mirror_bytes > 0 {
         parts.push(("mirror", Some(bytes(metrics.mirror_bytes))));
     }
-    if let Some(percent) = metrics.build_cache.hit_percent() {
-        parts.push(("build cache", Some(format!("{percent}% hit"))));
+    if let Some(activity) = metrics.build_cache.activity() {
+        let what = match activity.counts.hit_percent() {
+            Some(percent) => format!("{percent}% hit"),
+            None => activity.stored_line(),
+        };
+        parts.push(("build cache", Some(what)));
     }
     let mut line = Line::default();
     for (label, value) in parts {
@@ -2616,10 +2606,12 @@ fn log(frame: &mut Frame<'_>, area: Rect, open: &JobView, theme: Theme) {
         .title_top(
             Line::styled(
                 format!(
-                    " {} lines, {}{} · {following} ",
-                    summary.lines.max(open.log.len() as u64),
-                    bytes(summary.bytes),
-                    if summary.truncated { ", cut" } else { "" }
+                    " {} · {following} ",
+                    LogSummary {
+                        lines: summary.lines.max(open.log.len() as u64),
+                        ..summary.clone()
+                    }
+                    .description()
                 ),
                 theme.dim(),
             )

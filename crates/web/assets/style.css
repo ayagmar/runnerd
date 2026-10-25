@@ -1916,6 +1916,11 @@ dl.health-figures {
   color: var(--failure-ink);
 }
 
+/* Past a limit runnerd acts on by itself: worth a look, not a failure. */
+.over-limit {
+  color: var(--wait-ink);
+}
+
 .advice {
   display: flex;
   flex-wrap: wrap;
