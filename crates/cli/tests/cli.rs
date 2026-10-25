@@ -268,7 +268,9 @@ async fn check_config(State(fake): State<Shared>, body: String) -> axum::Json<Co
         valid: false,
         message: "memory caps sum to 20G, more than runnerd.slice's MemoryMax of 16G".to_owned(),
         warnings: Vec::new(),
+        admission: runnerd_core::api::AdmissionPolicy::Caps,
         memory_caps: Some(20 << 30),
+        memory_needed: Some(20 << 30),
         memory_max: Some(16 << 30),
         revision: None,
     })
@@ -297,7 +299,9 @@ async fn replace_config(
         valid: true,
         message: "valid, memory caps sum to 13G".to_owned(),
         warnings: Vec::new(),
+        admission: runnerd_core::api::AdmissionPolicy::Caps,
         memory_caps: Some(13 << 30),
+        memory_needed: Some(13 << 30),
         memory_max: Some(16 << 30),
         revision: None,
     })

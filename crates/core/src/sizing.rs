@@ -225,10 +225,7 @@ pub fn advise(
         sample_interval: window.sample_interval,
         min_jobs: rules.min_jobs,
         memory_max,
-        admission: match config.host.admission {
-            Admission::Caps => api::AdmissionPolicy::Caps,
-            Admission::Measured => api::AdmissionPolicy::Measured,
-        },
+        admission: config.host.admission.policy(),
         profiles,
         auto: config.sizing.auto,
         changes: Vec::new(),

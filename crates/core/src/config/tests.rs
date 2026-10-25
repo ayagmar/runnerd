@@ -549,9 +549,22 @@ fn measured_admission_lets_the_caps_add_up_past_memory_max() {
     assert!(check.valid, "{}", check.message);
     assert!(check.message.contains("measured"), "{}", check.message);
     assert_eq!(config.unwrap().host.admission, super::Admission::Measured);
-    // The same caps admitted by caps do not fit.
+    // The check names the rule, and the figure it holds to MemoryMax is one runner, not every cap.
+    assert_eq!(check.admission, crate::api::AdmissionPolicy::Measured);
+    let max = size("10G").0;
+    assert!(
+        check.memory_caps > Some(max),
+        "the caps add up past MemoryMax"
+    );
+    assert!(
+        check.memory_needed.is_some_and(|needed| needed <= max),
+        "one runner fits: {check:?}"
+    );
+    // The same caps admitted by caps do not fit, and there the caps are what must fit.
     let caps = MINIMAL.replace("slots = 1", "slots = 8");
-    assert!(!Config::check(&caps, |_| Ok(Some(size("10G")))).1.valid);
+    let refused = Config::check(&caps, |_| Ok(Some(size("10G")))).1;
+    assert!(!refused.valid, "8 × 4G of caps do not fit 10G");
+    assert_eq!(refused.memory_needed, refused.memory_caps);
 }
 
 #[test]
@@ -562,6 +575,34 @@ fn measured_admission_needs_one_runner_of_every_profile_to_fit() {
         .unwrap_err()
         .to_string();
     assert!(error.contains("one runner of app"), "{error}");
+}
+
+#[test]
+fn measured_admission_without_a_profile_still_needs_the_mirror_to_fit() {
+    let text = r#"
+repositories = []
+
+[host]
+slice = "ci.slice"
+isolation = "sysbox"
+admission = "measured"
+
+[caches]
+mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+[profiles]
+"#;
+    let (_, check) = Config::check(text, |_| Ok(Some(size("256M"))));
+    assert!(
+        !check.valid,
+        "a 512M mirror does not fit 256M: {}",
+        check.message
+    );
+    assert!(check.message.contains("512M"), "{}", check.message);
+    let (_, check) = Config::check(text, |_| Ok(Some(size("1G"))));
+    assert!(check.valid, "a 512M mirror fits 1G: {}", check.message);
 }
 
 #[test]

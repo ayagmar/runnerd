@@ -129,7 +129,12 @@ $ runnerd check-config runnerd.toml --memory-max 24G
 error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G
 ```
 
-A slice without a unit file has no `MemoryMax`; the check then passes with a warning, since nothing would hold the runners to their caps. Under [measured admission](../admission/#measured-admission) it holds one runner of each profile, with the mirror, to `MemoryMax`, and refuses a slice without one.
+A slice without a unit file has no `MemoryMax`; the check then passes with a warning, since nothing would hold the runners to their caps. Under [measured admission](../admission/#measured-admission) it holds one runner of each profile, with the mirror, to `MemoryMax`, and refuses a slice without one. The caps may then add up past `MemoryMax`, and the check says both figures:
+
+```text
+$ runnerd check-config runnerd.toml --memory-max 24G
+runnerd.toml: valid under admission = "measured": the largest runner with the mirror needs 9.5G of the 24G MemoryMax; every slot at its cap at once would take 32.5G
+```
 
 ## Isolation
 

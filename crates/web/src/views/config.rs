@@ -7,7 +7,9 @@ use std::fmt::Write as _;
 
 use maud::{Markup, html};
 use qrcode::QrCode;
-use runnerd_core::api::{Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, Resize, Sizing};
+use runnerd_core::api::{
+    AdmissionPolicy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, Resize, Sizing,
+};
 use runnerd_core::client::{Client, ClientError};
 use runnerd_core::config::{ByteSize, Config, resize_profile};
 use serde::Deserialize;
@@ -192,28 +194,39 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
     page("Config", Some(Page::Config), None, &main)
 }
 
-/// A slot or the mirror, as the budget preview draws it.
+/// A profile's slots or the mirror, as the budget preview draws it.
 struct Block {
     label: String,
     bytes: u64,
     class: String,
 }
 
-/// The memory caps a config asks for, a block per slot, from the text itself.
-fn blocks(text: &str) -> Vec<Block> {
-    let Ok(config) = Config::parse(text) else {
-        return Vec::new();
-    };
-    let mut blocks = Vec::new();
-    for (index, (name, profile)) in config.profiles.iter().enumerate() {
-        for slot in 1..=profile.slots {
-            blocks.push(Block {
-                label: format!("{name} {slot}"),
+/// What `admission` holds to `MemoryMax`, a block per profile, from the editor's config: under caps, every slot of
+/// each profile at its cap; under measured, one runner of the largest profile. The mirror with either.
+fn blocks(config: &Config, admission: AdmissionPolicy) -> Vec<Block> {
+    let profiles = config
+        .profiles
+        .iter()
+        .enumerate()
+        .map(|(index, (name, profile))| (index, name, profile));
+    let mut blocks: Vec<Block> = match admission {
+        AdmissionPolicy::Caps => profiles
+            .map(|(index, name, profile)| Block {
+                label: format!("{name} ×{}", profile.slots),
+                bytes: profile.memory.0.saturating_mul(u64::from(profile.slots)),
+                class: format!("p{}", index % 6),
+            })
+            .collect(),
+        AdmissionPolicy::Measured => profiles
+            .max_by_key(|(_, _, profile)| profile.memory.0)
+            .map(|(index, name, profile)| Block {
+                label: format!("{name} ×1"),
                 bytes: profile.memory.0,
                 class: format!("p{}", index % 6),
-            });
-        }
-    }
+            })
+            .into_iter()
+            .collect(),
+    };
     if config.caches.mirror.enabled {
         blocks.push(Block {
             label: "mirror".to_owned(),
@@ -224,16 +237,34 @@ fn blocks(text: &str) -> Vec<Block> {
     blocks
 }
 
-/// The check's verdict, the budget the config asks for against `MemoryMax`, and its warnings.
+/// The check's verdict, what its admission rule holds to `MemoryMax` and the budget that is, and its warnings.
 pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Markup {
-    let blocks = blocks(text);
-    let caps = check.memory_caps.unwrap_or(0);
-    let over = check.memory_max.is_some_and(|max| caps > max);
-    let whole = check.memory_max.unwrap_or(caps).max(caps);
+    let parsed = Config::parse(text).ok();
+    // A daemon from before `memory_needed` sends neither it nor `admission`; the text says both.
+    let (admission, known) = match (check.memory_needed, &parsed) {
+        (Some(needed), _) => (check.admission, Some(needed)),
+        (None, Some(config)) => (
+            config.host.admission.policy(),
+            config.memory_needed().ok().map(|needed| needed.0),
+        ),
+        (None, None) => (check.admission, None),
+    };
+    // Without a total to hold to MemoryMax, as when the caps overflow, there is no budget to show.
+    let blocks = match (&parsed, known) {
+        (Some(config), Some(_)) => blocks(config, admission),
+        _ => Vec::new(),
+    };
+    let needed = known.unwrap_or(0);
+    let over = check.memory_max.is_some_and(|max| needed > max);
+    let whole = check.memory_max.unwrap_or(needed).max(needed);
     let class = if check.valid {
         "check-result valid"
     } else {
         "check-result invalid"
+    };
+    let needed_name = match admission {
+        AdmissionPolicy::Caps => "Memory caps",
+        AdmissionPolicy::Measured => "Largest runner + mirror",
     };
     html! {
         section #config-result class=(class) aria-labelledby="result-title" aria-live="polite" {
@@ -253,29 +284,37 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
             }
             // A valid config's message repeats the figures below it.
             @if !check.valid { p.check-message { (check.message) } }
-            @if check.memory_caps.is_some() {
+            @if known.is_some() {
                 dl.facts {
-                    div { dt { "Memory caps" } dd { (format::bytes(caps)) } }
+                    div { dt { (needed_name) } dd { (format::bytes(needed)) } }
                     div { dt { "MemoryMax" } dd { (check.memory_max.map_or("unlimited".to_owned(), format::bytes)) } }
                     @if let Some(max) = check.memory_max {
                         div {
                             dt { @if over { "Over by" } @else { "Left" } }
-                            dd { (format::bytes(caps.abs_diff(max))) }
+                            dd { (format::bytes(needed.abs_diff(max))) }
+                        }
+                    }
+                }
+                @if admission == AdmissionPolicy::Measured {
+                    p.muted {
+                        "Admission is measured: runners reserve their predicted peaks, and slots only bound how many run at once."
+                        @if let Some(caps) = check.memory_caps {
+                            " Every slot at its cap at once would take " (format::bytes(caps)) "."
                         }
                     }
                 }
             }
             @if !blocks.is_empty() {
-                div.bar.bar-small role="img" aria-label=(format!("Memory caps {} of {}: {}", format::bytes(caps), check.memory_max.map_or("no limit".to_owned(), format::bytes), blocks.iter().map(|block| format!("{} {}", block.label, format::bytes(block.bytes))).collect::<Vec<_>>().join(", "))) {
+                div.bar.bar-small role="img" aria-label=(format!("{needed_name} {} of {}: {}", format::bytes(needed), check.memory_max.map_or("no limit".to_owned(), format::bytes), blocks.iter().map(|block| format!("{} {}", block.label, format::bytes(block.bytes))).collect::<Vec<_>>().join(", "))) {
                     @for block in &blocks {
                         div class=(format!("block {}", block.class)) style=(format!("--size: {:.4}", ratio(block.bytes, whole))) title=(format!("{}: {}", block.label, format::bytes(block.bytes))) {
                             span.size { (format::bytes(block.bytes)) }
                             span.name { (block.label) }
                         }
                     }
-                    @if let Some(max) = check.memory_max.filter(|max| *max > caps) {
-                        div.free style=(format!("--size: {:.4}", ratio(max - caps, whole))) {
-                            span.size { (format::bytes(max - caps)) }
+                    @if let Some(max) = check.memory_max.filter(|max| *max > needed) {
+                        div.free style=(format!("--size: {:.4}", ratio(max - needed, whole))) {
+                            span.size { (format::bytes(max - needed)) }
                             span.name { "free" }
                         }
                     }
