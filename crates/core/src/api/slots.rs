@@ -1,7 +1,7 @@
 //! What a slot is doing and whether CI keeps up, as every client names and counts it. Plain derivations of
 //! [`Status`] and [`Activity`]: a client never infers a slot's state from whether it found the job's details.
 
-use super::{Activity, ProfileStatus, SlotStatus, Status, Tone};
+use super::{Activity, ProfileStatus, RunnerStatus, SlotStatus, Status, Tone};
 
 /// What a slot is doing, from `Status::slot_state`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -28,6 +28,18 @@ pub enum SlotState {
 }
 
 impl SlotState {
+    /// What a slot holding `runner` is doing: running its job, warm for its repository, or starting.
+    pub fn of_runner(runner: &RunnerStatus) -> SlotState {
+        let repository = runner.repository.clone();
+        if runner.busy {
+            SlotState::Running { repository }
+        } else if runner.warm {
+            SlotState::Warm { repository }
+        } else {
+            SlotState::Starting { repository }
+        }
+    }
+
     /// One word for it, as a table column says it: `idle`, `reseeding`, `starting`, `warm` or `running`.
     pub fn word(&self) -> &'static str {
         match self {
@@ -74,15 +86,7 @@ impl Status {
     /// profile reseeds into it.
     pub fn slot_state(profile: &ProfileStatus, slot: &SlotStatus) -> SlotState {
         match &slot.runner {
-            Some(runner) if runner.busy => SlotState::Running {
-                repository: runner.repository.clone(),
-            },
-            Some(runner) if runner.warm => SlotState::Warm {
-                repository: runner.repository.clone(),
-            },
-            Some(runner) => SlotState::Starting {
-                repository: runner.repository.clone(),
-            },
+            Some(runner) => SlotState::of_runner(runner),
             None if profile.reseeding && slot.slot == 1 => SlotState::Reseeding,
             None => SlotState::Idle,
         }

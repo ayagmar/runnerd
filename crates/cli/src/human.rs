@@ -7,8 +7,8 @@ use std::fmt::Write as _;
 
 use runnerd_core::api::{
     self, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
-    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, Sizing, Status,
-    Step, WaitSpread,
+    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, Sizing,
+    SlotState, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
 use runnerd_core::api::{in_cores, job_title};
@@ -878,10 +878,10 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             Some(runner) => format!(
                 "{profile} slot {} {} {}",
                 slot.slot,
-                if runner.busy { "busy" } else { "idle" },
+                SlotState::of_runner(runner).word(),
                 runner.repository
             ),
-            None => format!("{profile} slot {} free", slot.slot),
+            None => format!("{profile} slot {} {}", slot.slot, SlotState::Idle.word()),
         },
         Event::ProfileChanged { profile } => format!(
             "{} {} {} slots{}",
@@ -891,18 +891,7 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
             if profile.reseeding { " reseeding" } else { "" }
         ),
         Event::ProfileRemoved { profile } => format!("{profile} removed"),
-        Event::BudgetChanged { budget } => format!(
-            "{} reserved{}{}",
-            bytes(budget.memory_in_use),
-            budget
-                .memory_max
-                .map(|max| format!(" of {}", bytes(max)))
-                .unwrap_or_default(),
-            budget
-                .cpu
-                .map(|cpu| format!("; {}", cpu.line()))
-                .unwrap_or_default()
-        ),
+        Event::BudgetChanged { budget } => budget.line(),
         Event::RepositoryChanged { repository } => format!(
             "{} {} {} queued",
             repository.name,
@@ -944,7 +933,9 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
 
 #[cfg(test)]
 mod tests {
-    use runnerd_core::api::{Event, EventEnvelope, RepositoryStatus};
+    use runnerd_core::api::{
+        AdmissionPolicy, Budget, Event, EventEnvelope, RepositoryStatus, RunnerStatus, SlotStatus,
+    };
 
     use super::{Paint, Table, Tone, bytes, event_line};
 
@@ -984,6 +975,64 @@ mod tests {
         assert_eq!(
             line(removed).as_deref(),
             Some("repository.removed halyard/ledger removed")
+        );
+    }
+
+    #[test]
+    fn watch_on_a_pipe_names_slots_and_the_budget_as_status_does() {
+        let line = |event| {
+            event_line(
+                &EventEnvelope {
+                    id: Some(9),
+                    at: 1000,
+                    event,
+                },
+                Paint { colour: false },
+            )
+            .unwrap_or_default()
+        };
+        let warm = Event::SlotChanged {
+            profile: "jvm".to_owned(),
+            slot: SlotStatus {
+                slot: 2,
+                runner: Some(RunnerStatus {
+                    repository: "halyard/ledger".to_owned(),
+                    name: "ci-jvm-2".to_owned(),
+                    runner_id: 7,
+                    container: "c".to_owned(),
+                    busy: false,
+                    started_at: 900,
+                    reserved: 8 << 30,
+                    warm: true,
+                }),
+            },
+        };
+        assert_eq!(
+            line(warm),
+            "slot.changed       jvm slot 2 warm halyard/ledger"
+        );
+        let empty = Event::SlotChanged {
+            profile: "jvm".to_owned(),
+            slot: SlotStatus {
+                slot: 2,
+                runner: None,
+            },
+        };
+        assert_eq!(line(empty), "slot.changed       jvm slot 2 idle");
+        let held = Event::BudgetChanged {
+            budget: Budget {
+                slice: "runnerd.slice".to_owned(),
+                memory_max: Some(33 << 30),
+                memory_in_use: 30 << 30,
+                admission: AdmissionPolicy::Measured,
+                held: true,
+                ..Budget::default()
+            },
+        };
+        let held = line(held);
+        assert!(
+            held.contains("so no runner starts"),
+            "a held budget says no runner starts: {held}"
         );
     }
 
