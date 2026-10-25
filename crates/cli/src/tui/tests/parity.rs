@@ -161,7 +161,8 @@ fn a_job_states_its_outcome_steps_caps_build_cache_and_failed_runs_as_core_does(
     }
     assert!(
         app.update(key(KeyCode::Enter))
-            .contains(&Effect::OpenJob(TIMED_OUT))
+            .contains(&Effect::OpenJob(TIMED_OUT)),
+        "Enter on the timed-out row opens its page"
     );
     app.update(Msg::Job(daemon.job(TIMED_OUT).unwrap().clone()));
     let mut runs = daemon.runs(TIMED_OUT);
