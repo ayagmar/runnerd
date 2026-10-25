@@ -285,6 +285,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     info!("removing {}, left by an earlier run", container.name);
                     if let Err(error) = self.docker.remove(&container.id).await {
                         warn!("cannot remove {}: {error}", container.name);
+                        self.leftover.insert(container.id, container.name);
                     }
                 }
             }

@@ -38,16 +38,6 @@ const CASES: u64 = 64;
 /// Events in a case.
 const EVENTS: usize = 40;
 
-/// Bugs the generated sequences find on main, each with its `#[ignore]`d regression test below. The generated test
-/// steers around them so it guards everything else; a fix removes its bug from `KNOWN_BUGS` and the `#[ignore]`.
-#[derive(Debug, Clone, Copy, PartialEq)]
-enum Bug {
-    /// `a_stopped_runner_that_recovery_cannot_remove_is_removed_later`: Docker removes everything at a restart.
-    RecoveryRemovesOnce,
-}
-
-const KNOWN_BUGS: &[Bug] = &[Bug::RecoveryRemovesOnce];
-
 /// A deterministic generator (SplitMix64): the same seed gives the same sequence on every machine.
 struct Rng(u64);
 
@@ -373,8 +363,6 @@ struct Violation {
 
 /// A case: the engine on the fakes, and what GitHub and Docker hold as the world sees it.
 struct Case {
-    /// The bugs it steers around.
-    known: &'static [Bug],
     github: FakeGithub,
     docker: FakeDocker,
     dir: TestDir,
@@ -403,7 +391,7 @@ fn violation(case: &Case, invariant: &'static str, detail: String) -> Result<(),
 }
 
 impl Case {
-    fn new(known: &'static [Bug]) -> Case {
+    fn new() -> Case {
         let github = FakeGithub::default();
         let docker = FakeDocker::default();
         github.0.lock().unwrap().strict = true;
@@ -416,7 +404,6 @@ impl Case {
         let shape = Shape::START;
         let (engine, handle) = Case::engine(&github, &docker, &dir, shape);
         Case {
-            known,
             github,
             docker,
             dir,
@@ -844,12 +831,6 @@ impl Case {
             capture.abort();
         }
         self.handle.store.flush().await;
-        {
-            let mut docker = self.docker.0.lock().unwrap();
-            if self.known.contains(&Bug::RecoveryRemovesOnce) {
-                docker.fail_removes = 0;
-            }
-        }
         let (engine, handle) = Case::engine(&self.github, &self.docker, &self.dir, self.shape);
         self.engine = engine;
         self.handle = handle;
@@ -1258,8 +1239,8 @@ fn runners_of(status: &api::Status) -> impl Iterator<Item = (&str, &api::RunnerS
 }
 
 /// Runs a sequence from a fresh start, then drains it; the first broken invariant.
-async fn run(steps: &[Step], known: &'static [Bug]) -> Result<(), Violation> {
-    let mut case = Case::new(known);
+async fn run(steps: &[Step]) -> Result<(), Violation> {
+    let mut case = Case::new();
     case.recover().await;
     case.tick().await?;
     for (index, step) in steps.iter().enumerate() {
@@ -1273,14 +1254,14 @@ async fn run(steps: &[Step], known: &'static [Bug]) -> Result<(), Violation> {
 /// The shortest sequence found that still breaks `invariant`: drops chunks of steps, then single steps, while it
 /// does.
 async fn shrink(mut steps: Vec<Step>, invariant: &'static str) -> (Vec<Step>, Violation) {
-    let mut last = run(&steps, KNOWN_BUGS).await.unwrap_err();
+    let mut last = run(&steps).await.unwrap_err();
     let mut chunk = steps.len() / 2;
     while chunk >= 1 {
         let mut start = 0;
         while start < steps.len() {
             let mut fewer = steps.clone();
             fewer.drain(start..(start + chunk).min(steps.len()));
-            match run(&fewer, KNOWN_BUGS).await {
+            match run(&fewer).await {
                 Err(found) if found.invariant == invariant => {
                     steps = fewer;
                     last = found;
@@ -1309,13 +1290,7 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
     for batch in seeds.chunks(64) {
         let runs = batch.iter().map(|&seed| async move {
             let steps = generate(&mut Rng(seed));
-            (
-                seed,
-                run(&steps, KNOWN_BUGS)
-                    .await
-                    .err()
-                    .map(|found| (steps, found)),
-            )
+            (seed, run(&steps).await.err().map(|found| (steps, found)))
         });
         for (seed, failed) in futures_util::future::join_all(runs).await {
             if let Some((steps, found)) = failed {
@@ -1329,9 +1304,9 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
     }
 }
 
-/// Runs `steps` as the generated test does, around no known bug, and returns what broke.
+/// Runs `steps` as the generated test does, and returns what broke.
 async fn broken(steps: &[Step]) -> Option<(&'static str, String)> {
-    run(steps, &[])
+    run(steps)
         .await
         .err()
         .map(|found| (found.invariant, found.detail))
@@ -1363,7 +1338,6 @@ async fn a_job_taking_a_waiting_runners_room_still_fits_what_the_host_leaves() {
 }
 
 #[tokio::test]
-#[ignore = "bug: a runner container recovery fails to remove stays in Docker until the next restart"]
 async fn a_stopped_runner_that_recovery_cannot_remove_is_removed_later() {
     let steps = [
         Step::Queue {
