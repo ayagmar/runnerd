@@ -86,6 +86,21 @@ impl Sizing {
         )
     }
 
+    /// `Sizing::method_line` in short parts for a heading, the sampling caveat first: `peaks sampled every 2 s`,
+    /// `+15%, at least 1G, in 256M steps` and `advice after 10 jobs`.
+    pub fn method_parts(&self) -> Vec<String> {
+        vec![
+            format!("peaks sampled every {} s", self.sample_interval),
+            format!(
+                "+{}%, at least {}, in {} steps",
+                self.margin,
+                ByteSize(PAGE_CACHE_ROOM),
+                ByteSize(GRANULE)
+            ),
+            format!("advice after {} jobs", self.min_jobs),
+        ]
+    }
+
     /// The history it was computed from: `since` to when it was computed, however long ago that was.
     pub fn covered(&self) -> u64 {
         self.until.saturating_sub(self.since)

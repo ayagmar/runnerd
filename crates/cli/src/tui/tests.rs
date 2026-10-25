@@ -2088,6 +2088,12 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         );
     }
 
+    let heading = rows_with(&screen(&app, 120, 24, false), "of history")[0].to_owned();
+    assert!(
+        heading.contains("peaks sampled every 2 s"),
+        "the sampling caveat survives a 120-column heading: {heading}"
+    );
+
     sizing.auto_plan.as_mut().unwrap().blocked =
         Some("runnerd.toml changed on disk since runnerd read it".to_owned());
     app.update(Msg::Sizing(sizing));

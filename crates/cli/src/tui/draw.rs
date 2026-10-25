@@ -1720,14 +1720,14 @@ fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) 
         title,
         "Sizing",
         fit_details(
-            vec![
-                (0, format!("{} of history", duration(sizing.covered()))),
-                (2, sizing.method_line()),
-                (
+            [(0, format!("{} of history", duration(sizing.covered())))]
+                .into_iter()
+                .chain([1, 2, 2].into_iter().zip(sizing.method_parts()))
+                .chain([(
                     if sizing.auto_plan.is_some() { 3 } else { 0 },
                     format!("auto sizing {}", if sizing.auto { "on" } else { "off" }),
-                ),
-            ],
+                )])
+                .collect(),
             usize::from(title.width).saturating_sub("Sizing".width() + 2),
         ),
         theme,
