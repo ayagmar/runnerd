@@ -2062,12 +2062,11 @@ async fn a_restart_keeps_a_job_running_in_a_profile_the_config_no_longer_has() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
     running_job(&github, &docker, "o/r", 1, 1);
-    docker
-        .0
-        .lock()
-        .unwrap()
-        .memory
-        .insert("container-1".to_owned(), 4 << 30);
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.memory.insert("container-1".to_owned(), 4 << 30);
+        state.cpus.insert("container-1".to_owned(), 2000);
+    }
     let dir = TestDir::new("engine");
     // A reload moved the repository to `big` while `app` ran its job, then runnerd restarted.
     let config = CONFIG
@@ -2093,6 +2092,45 @@ async fn a_restart_keeps_a_job_running_in_a_profile_the_config_no_longer_has() {
         .map(|profile| profile.name.clone())
         .collect();
     assert_eq!(names, ["big"]);
+}
+
+#[tokio::test]
+async fn a_runner_of_a_profile_the_config_no_longer_has_keeps_its_caps_through_a_failed_inspect_at_restart()
+ {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    running_job(&github, &docker, "o/r", 1, 1);
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.memory.insert("container-1".to_owned(), 4 << 30);
+        state.cpus.insert("container-1".to_owned(), 2000);
+        state.fail_inspects.insert("container-1".to_owned(), 1);
+    }
+    let dir = TestDir::new("engine");
+    // `app` is gone from the config; `big` has room for two 4G runners, the slice for two in all.
+    let config = CONFIG
+        .replace("[profiles.app]", "[profiles.big]")
+        .replace("profile = \"app\"", "profile = \"big\"");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(8 << 30);
+    // Docker does not answer for the runner at first: recovery tries again, having removed nothing.
+    assert!(
+        engine.recover().await.is_err(),
+        "recovery waits for its caps"
+    );
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(3), job(4)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(removed(&docker.calls()), Vec::<&String>::new());
+    assert_eq!(runner_in(&handle, 1).as_deref(), Some("o/r"));
+    assert_eq!(handle.status.borrow().budget.memory_in_use, 8 << 30);
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "one runner beside it fits"
+    );
 }
 
 #[tokio::test]

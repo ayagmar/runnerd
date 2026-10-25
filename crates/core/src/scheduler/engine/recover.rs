@@ -1,8 +1,9 @@
 //! Startup recovery: adopts the runner and seed containers a previous daemon left, removes the rest, and reads what
-//! the history left open. It changes nothing unless Docker lists both kinds of container, so it can be tried again;
-//! it must not delete GitHub registrations: the first poll does.
+//! the history left open. It changes nothing unless Docker lists both kinds of container and tells the caps of the
+//! runners of removed profiles, so it can be tried again; it must not delete GitHub registrations: the first poll
+//! does.
 
-use std::collections::BTreeSet;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
@@ -74,10 +75,57 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// What a runner container left running by an earlier daemon runs as, from its labels, Docker and its record.
-    async fn adopted(&self, container: &docker::Container, profile: &str) -> Occupant {
+    /// The caps of the running runner containers of profiles the config no longer has, which only Docker can tell,
+    /// by container ID. An error unless Docker answered for each; one that it says nothing of is left out.
+    async fn retired_caps(
+        &self,
+        containers: &[docker::Container],
+    ) -> Result<BTreeMap<String, Caps>, docker::Error> {
+        let mut caps = BTreeMap::new();
+        for container in containers {
+            let profile = container.labels.get("runnerd.profile");
+            if !container.running
+                || container.labels.contains_key(record::SHELL_LABEL)
+                || profile.is_none_or(|profile| {
+                    profile.is_empty() || self.config.profiles.contains_key(profile)
+                })
+            {
+                continue;
+            }
+            let state = match self.docker.inspect(&container.id).await {
+                Ok(state) => state,
+                Err(error) if is_not_found(&error) => continue,
+                Err(error) => return Err(error),
+            };
+            if let (Some(memory), Some(cpus)) = (state.memory, state.cpus) {
+                caps.insert(
+                    container.id.clone(),
+                    Caps {
+                        memory,
+                        cpus,
+                        started_at: state
+                            .started_at
+                            .map(|ms| SystemTime::UNIX_EPOCH + Duration::from_millis(ms)),
+                    },
+                );
+            }
+        }
+        Ok(caps)
+    }
+
+    /// Removes the shell containers an earlier run left.
+    async fn remove_shells(&self, shells: Vec<docker::Container>) {
+        for shell in shells {
+            info!("removing {}, a shell an earlier run left", shell.name);
+            if let Err(error) = self.docker.remove(&shell.id).await {
+                warn!("cannot remove {}: {error}", shell.name);
+            }
+        }
+    }
+
+    /// What a runner container left running by an earlier daemon runs as, from its labels, `caps` and its record.
+    async fn adopted(&self, container: &docker::Container, caps: Caps) -> Occupant {
         let label = |name: &str| container.labels.get(name).cloned().unwrap_or_default();
-        let caps = self.running_caps(&container.id, profile).await;
         Occupant {
             repository: label("runnerd.repository"),
             runner_name: container.name.clone(),
@@ -136,21 +184,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// room for, which drain as after a reload, and removes the runners that stopped, or that run under this
     /// machine's names without a slot to adopt them in. Their registrations, and any of this host's runners without a
     /// container, go at the first poll.
-    /// Changes nothing unless Docker lists both kinds, so it can be tried again.
+    /// Changes nothing unless Docker lists both kinds and tells the caps of the runners of removed profiles, so it can
+    /// be tried again.
     pub(super) async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
+        // Before anything changes: a retired profile's runner counts at zero if its caps are not known.
+        let mut retired_caps = self.retired_caps(&containers).await?;
         self.recover_reseeds(seeds).await;
         // A shell's terminal does not outlive the daemon that served it. Shells carry their record's runner labels.
         let (shells, containers): (Vec<_>, Vec<_>) = containers
             .into_iter()
             .partition(|container| container.labels.contains_key(record::SHELL_LABEL));
-        for shell in shells {
-            info!("removing {}, a shell an earlier run left", shell.name);
-            if let Err(error) = self.docker.remove(&shell.id).await {
-                warn!("cannot remove {}: {error}", shell.name);
-            }
-        }
+        self.remove_shells(shells).await;
         self.list_records().await;
         // A reload may have lowered the configured cap since the mirror started.
         match self.docker.inspect(&self.names.mirror()).await {
@@ -174,11 +220,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .parse::<usize>()
                 .ok()
                 .and_then(|slot| slot.checked_sub(1));
-            let occupant = self.adopted(&container, &profile).await;
+            let retired = retired_caps.remove(&container.id);
+            let known_caps = retired.is_some() || self.config.profiles.contains_key(&profile);
+            let caps = match retired {
+                Some(caps) => caps,
+                None => self.running_caps(&container.id, &profile).await,
+            };
+            let occupant = self.adopted(&container, caps).await;
             // A runner the config no longer has room for drains as it would have without the restart: in a slot
-            // past a lowered count, of a removed profile or for a removed repository.
+            // past a lowered count, of a removed profile or for a removed repository. One of a removed profile
+            // whose caps Docker does not tell is removed, as it would count at zero.
             if ours
                 && container.running
+                && known_caps
                 && !profile.is_empty()
                 && !occupant.repository.is_empty()
                 && let Some(index) = index
