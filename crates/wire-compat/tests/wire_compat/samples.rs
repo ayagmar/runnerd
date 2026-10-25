@@ -38,10 +38,13 @@ pub(crate) fn status() -> Status {
     }
 }
 
-/// A status with nothing that serializing skips: no host or CPU budget, a queued job without a pool or a reason.
+/// A status with nothing that serializing skips: a host reading that names no programs, no CPU budget, a queued job
+/// without a pool or a reason.
 pub(crate) fn status_empty() -> Status {
     let mut status = status();
-    status.budget.host = None;
+    if let Some(host) = &mut status.budget.host {
+        host.memory.holders = Vec::new();
+    }
     status.budget.cpu = None;
     status.budget.slice_cpus = None;
     status.queued[0].profile = None;
