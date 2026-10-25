@@ -185,6 +185,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             repository,
             profile: slot.profile.clone(),
         };
+        self.refresh_free(admitting);
         let mut admission = admitting.admit(&pool, memory, cpu);
         let repository = pool.repository;
         if warm {
