@@ -533,11 +533,20 @@ impl Waiting {
                 "The host is short of memory: its programs stall waiting for it, so nothing starts"
                     .to_owned()
             }
-            Waiting::HostMemory { needs, free } => format!(
-                "The host is short of memory: needs {}; the host has {} to spare",
-                size(*needs),
-                size(*free)
-            ),
+            Waiting::HostMemory { needs, free } => {
+                let reason = format!(
+                    "The host is short of memory: needs {}; the host has {} to spare",
+                    size(*needs),
+                    size(*free)
+                );
+                match &status.budget.host {
+                    Some(host) => format!(
+                        "{reason}; programs outside CI hold {}",
+                        size(host.memory.outside())
+                    ),
+                    None => reason,
+                }
+            }
             Waiting::Cpu { needs, free } => {
                 format!(
                     "Needs {}; {} are free",

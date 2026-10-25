@@ -321,6 +321,16 @@ pub struct HostMemory {
     pub full: Option<Pressure>,
 }
 
+impl HostMemory {
+    /// What the host holds outside the slice's runners, in bytes: its other programs, tmpfs and the kernel, without
+    /// page cache it can drop.
+    pub fn outside(&self) -> u64 {
+        self.total
+            .saturating_sub(self.available)
+            .saturating_sub(self.slice)
+    }
+}
+
 /// One line of a pressure stall file, in hundredths of a percent: 250 is 2.5% of the time.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct Pressure {

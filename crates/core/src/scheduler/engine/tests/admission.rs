@@ -1141,6 +1141,12 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
         reason.starts_with("The host is short of memory"),
         "{reason}"
     );
+    // The runners hold nothing yet, so all that is not available is held by the host's other programs.
+    let outside = crate::config::ByteSize(64 * G - (4 * G + 2 * 1280 * M + 100 * M));
+    assert!(
+        reason.ends_with(&format!("programs outside CI hold {outside}")),
+        "{reason}"
+    );
 
     // Room for both again by the 4G margin alone: at the edge, so they wait until the host has the larger margin.
     tokio::time::sleep(Duration::from_millis(20)).await;
