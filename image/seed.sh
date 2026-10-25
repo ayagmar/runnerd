@@ -46,7 +46,8 @@ if [ "$max" -gt 0 ]; then
         echo "the snapshot would hold $size bytes, over its limit of $max: started over from the image"
         for layer in "${LAYERS[@]}"; do
             name=${layer%%:*}
-            rm -rf "/base/$name" /workers/*/"$name"
+            # With a copy an interrupted reseed left.
+            rm -rf "/base/$name" "/base/$name.new" /workers/*/"$name"
         done
         exit 0
     fi
