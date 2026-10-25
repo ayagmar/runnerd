@@ -39,8 +39,8 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{
-    ConfigCheck, Event, EventEnvelope, HostSample, JobState, Sample, SeedMemory, ShellMemory,
-    Waiting,
+    Admission, AdmissionPolicy, Basis, ConfigCheck, CpuAdmission, Event, EventEnvelope, HostSample,
+    JobPeak, JobState, Sample, SeedMemory, ShellMemory, Waiting,
 };
 
 use crate::views::{repository_id, slot_id};
@@ -76,6 +76,17 @@ impl Dashboard {
         let runner = job.summary.runner.as_mut().unwrap();
         runner.memory_cap = memory;
         runner.cpu_cap = cpus;
+    }
+
+    /// Sets how the running job's runner was admitted.
+    fn admission(&self, admission: Option<Admission>) {
+        let mut fixtures = self.fake.fixtures.lock().unwrap();
+        let job = fixtures
+            .jobs
+            .iter_mut()
+            .find(|job| job.summary.id == LEDGER_RUNNING)
+            .unwrap();
+        job.admission = admission;
     }
 
     async fn start() -> Dashboard {
@@ -1384,12 +1395,122 @@ async fn a_job_chart_shows_the_caps_its_container_ran_with_not_the_profiles_now(
     let job = dashboard
         .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
         .await;
-    for expected in ["slot cap 12G", "6 CPUs"] {
-        assert!(job.body.contains(expected), "job page lacks {expected:?}");
-    }
+    assert_eq!(
+        chart_lines(&job.body),
+        [vec!["cap 12G"], vec!["cap 6 CPUs"]],
+        "a job without admission data is charted against its caps alone"
+    );
     assert!(
         !job.body.contains("jvm now"),
         "the job page shows today's config next to the job's own caps"
+    );
+}
+
+/// The labelled lines of the job page's memory chart, then of its CPU chart.
+fn chart_lines(page: &str) -> Vec<Vec<String>> {
+    page.split(r#"<div class="chart-card">"#)
+        .skip(1)
+        .map(|chart| {
+            chart
+                .split(r#"<span class="limit-label"#)
+                .skip(1)
+                .map(|label| {
+                    let text = &label[label.find('>').unwrap() + 1..];
+                    text[..text.find('<').unwrap()].to_owned()
+                })
+                .collect()
+        })
+        .collect()
+}
+
+/// A runner admitted by measured peaks: 6.5G and 3.6 CPUs reserved.
+fn measured() -> Admission {
+    Admission {
+        policy: AdmissionPolicy::Measured,
+        reserved: 6656 << 20,
+        basis: Basis::Job {
+            runs: 6,
+            peak: JobPeak::Largest,
+        },
+        free: Some(25 << 30),
+        slice: None,
+        cpu: Some(CpuAdmission {
+            reserved: 3600,
+            basis: Basis::Job {
+                runs: 10,
+                peak: JobPeak::P95,
+            },
+            free: 38_700,
+            waited: None,
+        }),
+    }
+}
+
+#[tokio::test]
+async fn a_measured_jobs_charts_show_what_it_reserved_under_its_caps() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    dashboard.runner_caps(Some(8704 << 20), Some(22_000));
+    dashboard.admission(Some(measured()));
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await;
+    assert_eq!(
+        chart_lines(&job.body),
+        [
+            vec!["cap 8.5G", "reserved 6.5G"],
+            vec!["cap 22 CPUs", "reserved 3.6 CPUs"]
+        ],
+        "each chart shows the reservation and the cap, labelled apart"
+    );
+}
+
+#[tokio::test]
+async fn a_job_admitted_by_caps_shows_one_line_per_chart() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    dashboard.runner_caps(Some(12 << 30), Some(6000));
+    dashboard.admission(Some(Admission {
+        policy: AdmissionPolicy::Caps,
+        reserved: 12 << 30,
+        basis: Basis::Cap,
+        cpu: Some(CpuAdmission {
+            reserved: 6000,
+            basis: Basis::Cap,
+            free: 20_000,
+            waited: None,
+        }),
+        ..measured()
+    }));
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await;
+    assert_eq!(
+        chart_lines(&job.body),
+        [
+            vec!["cap and reserved 12G"],
+            vec!["cap and reserved 6 CPUs"]
+        ],
+        "a reservation of the whole cap is one line"
+    );
+}
+
+#[tokio::test]
+async fn without_cpu_overcommit_only_memory_shows_a_reservation() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    dashboard.runner_caps(Some(8704 << 20), Some(22_000));
+    dashboard.admission(Some(Admission {
+        cpu: None,
+        ..measured()
+    }));
+    let job = dashboard
+        .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
+        .await;
+    assert_eq!(
+        chart_lines(&job.body),
+        [vec!["cap 8.5G", "reserved 6.5G"], vec!["cap 22 CPUs"]],
+        "the CPU chart has no reservation without CPU admission"
     );
 }
 
@@ -1401,12 +1522,14 @@ async fn a_job_recorded_without_its_caps_is_charted_against_the_profiles_limits_
     let job = dashboard
         .page(&cookie, &format!("/jobs/{LEDGER_RUNNING}"))
         .await;
-    for expected in ["jvm now 9G", "jvm now 8 CPUs", "limits in the config now"] {
-        assert!(job.body.contains(expected), "job page lacks {expected:?}");
-    }
+    assert_eq!(
+        chart_lines(&job.body),
+        [vec!["jvm now 9G"], vec!["jvm now 8 CPUs"]],
+        "a record without its caps is charted against its profile's limits now"
+    );
     assert!(
-        !job.body.contains("slot cap"),
-        "the job page presents today's config as the job's caps"
+        job.body.contains("limits in the config now"),
+        "the job page says its lines are today's config"
     );
 }
 

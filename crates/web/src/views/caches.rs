@@ -8,7 +8,7 @@ use runnerd_core::api::{
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, Parts, page, profile_class, time_ago};
-use crate::chart::{Base, Series, TimeChart, nice_top};
+use crate::chart::{Base, Limit, Series, TimeChart, nice_top};
 use crate::format;
 
 const WINDOW: u64 = 30 * 86_400;
@@ -135,7 +135,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                             window: None,
                             live: None,
                             series: vec![Series { label: "size".to_owned(), class: "memory", points, area: true }],
-                            limit: volume.limit.map(|limit| (limit, limit_label(volume, limit))),
+                            limits: volume.limit.map(|limit| Limit { value: limit, label: limit_label(volume, limit), class: "" }).into_iter().collect(),
                             value: format::bytes,
                             time: format::short_date,
                             gap: u64::MAX,

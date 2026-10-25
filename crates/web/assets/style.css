@@ -833,6 +833,11 @@ html {
   stroke-dasharray: 6 4;
 }
 
+/* What admission counted against the budget, under the cap the container may use. */
+.limit.reserved {
+  stroke-dasharray: 2 3;
+}
+
 .limit-label {
   position: absolute;
   right: 0;
@@ -840,8 +845,15 @@ html {
   transform: translateY(-115%);
   font-size: 0.75rem;
   font-weight: 600;
+  white-space: nowrap;
   background: var(--surface);
   padding: 0 0.25rem;
+}
+
+/* A lower line labels itself under it, clear of the higher line's label, and stays above the axis. */
+.limit-label.below {
+  top: min(calc(var(--y) + 2px), calc(100% - 1.6em));
+  transform: none;
 }
 
 .bars rect.success { fill: var(--memory); }

@@ -14,9 +14,9 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    Activity, AdmissionPolicy, Advice, AutoPlan, Job, JobSummary, ProfileSizing, ProfileStatus,
-    QueuedJob, RepositoryStatus, Sample, Severity, Sizing, SlotStatus, Status, Step, WaitKind,
-    period,
+    Activity, AdmissionPolicy, Advice, AutoPlan, ChartLine, ChartLineKind, ChartLines, Job,
+    JobSummary, ProfileSizing, ProfileStatus, QueuedJob, RepositoryStatus, Sample, Severity,
+    Sizing, SlotStatus, Status, Step, WaitKind, period,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -1295,6 +1295,7 @@ fn slice(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     Chart {
         title: "Memory",
         limit_label: memory_max.map_or_else(String::new, |max| format!("MemoryMax {}", bytes(max))),
+        reserved_label: String::new(),
         values: app.host.iter().map(|sample| sample.memory).collect(),
         limit: memory_max.unwrap_or(0),
         unit: bytes,
@@ -1308,6 +1309,7 @@ fn slice(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
             .budget
             .slice_cpus
             .map_or_else(String::new, |cpus| format!("slice {} CPUs", cores(cpus))),
+        reserved_label: String::new(),
         values: app.host.iter().map(|sample| sample.cpu).collect(),
         limit: status.budget.slice_cpus.unwrap_or(0),
         unit: in_cores,
@@ -1321,6 +1323,8 @@ fn slice(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 struct Chart {
     title: &'static str,
     limit_label: String,
+    /// Under it on the right, such as a job's reservation.
+    reserved_label: String,
     values: Vec<u64>,
     limit: u64,
     unit: fn(u64) -> String,
@@ -1358,7 +1362,18 @@ impl Chart {
                     |peak| format!(" sampled peak {} ", unit(peak)),
                 ),
                 theme.dim(),
-            ));
+            ))
+            .title_bottom(
+                Line::styled(
+                    if self.reserved_label.is_empty() {
+                        String::new()
+                    } else {
+                        format!(" {} ", self.reserved_label)
+                    },
+                    theme.dim(),
+                )
+                .right_aligned(),
+            );
         let inner = block.inner(area);
         frame.render_widget(block, area);
         let shown = &self.values[self.values.len().saturating_sub(usize::from(inner.width))..];
@@ -2657,26 +2672,48 @@ fn step_line(
     Line::from(spans)
 }
 
-/// The open job's caps: its container's, or the profile's current ones for a record from before caps were kept.
-fn caps(app: &App, job: &JobSummary) -> (u64, u64) {
-    let runner = job.runner.as_ref();
-    let profile = runner.and_then(|runner| {
+/// The open job's chart lines, as `Job::chart_lines` labels them for every client.
+fn chart_lines(app: &App, job: &Job) -> ChartLines {
+    let profile = job.summary.runner.as_ref().and_then(|runner| {
         app.live
             .status
             .profiles
             .iter()
             .find(|profile| profile.name == runner.profile)
     });
-    (
-        runner
-            .and_then(|runner| runner.memory_cap)
-            .or(profile.map(|profile| profile.memory))
-            .unwrap_or(0),
-        runner
-            .and_then(|runner| runner.cpu_cap)
-            .or(profile.map(|profile| u64::from(profile.cpus) * 1000))
-            .unwrap_or(0),
-    )
+    job.chart_lines(profile)
+}
+
+/// The highest of a chart's lines, which tops it.
+fn highest(lines: &[ChartLine]) -> u64 {
+    lines.iter().map(|line| line.value).max().unwrap_or(0)
+}
+
+/// A job's chart of `values` with its lines: the cap on top, the reservation under it.
+fn job_chart(
+    title: &'static str,
+    lines: &[ChartLine],
+    values: Vec<u64>,
+    unit: fn(u64) -> String,
+    style: Style,
+) -> Chart {
+    let labels = |reserved: bool| {
+        lines
+            .iter()
+            .filter(|line| (line.kind == ChartLineKind::Reserved) == reserved)
+            .map(|line| line.label.as_str())
+            .collect::<Vec<_>>()
+            .join(" · ")
+    };
+    Chart {
+        title,
+        limit_label: labels(false),
+        reserved_label: labels(true),
+        values,
+        limit: highest(lines),
+        unit,
+        style,
+    }
 }
 
 /// The job's figures that fit `width`, in order; the rest go whole.
@@ -2721,24 +2758,22 @@ fn job_charts(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, them
         Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
     let [memory_area, cpu_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(charts);
-    let (memory_cap, cpu_cap) = caps(app, &open.job.summary);
-    Chart {
-        title: "Memory",
-        limit_label: format!("cap {}", bytes(memory_cap)),
-        values: open.samples.iter().map(|sample| sample.memory).collect(),
-        limit: memory_cap,
-        unit: bytes,
-        style: theme.memory(),
-    }
+    let lines = chart_lines(app, &open.job);
+    job_chart(
+        "Memory",
+        &lines.memory,
+        open.samples.iter().map(|sample| sample.memory).collect(),
+        bytes,
+        theme.memory(),
+    )
     .render(frame, memory_area, theme);
-    Chart {
-        title: "CPU",
-        limit_label: format!("cap {} CPUs", cores(cpu_cap)),
-        values: open.samples.iter().map(|sample| sample.cpu).collect(),
-        limit: cpu_cap,
-        unit: in_cores,
-        style: theme.cpu(),
-    }
+    job_chart(
+        "CPU",
+        &lines.cpu,
+        open.samples.iter().map(|sample| sample.cpu).collect(),
+        in_cores,
+        theme.cpu(),
+    )
     .render(frame, cpu_area, theme);
     frame.render_widget(
         metrics_line(open, usize::from(metrics.width), theme),
@@ -2749,7 +2784,8 @@ fn job_charts(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, them
 /// Memory and CPU as one line of sparklines, for a terminal too small for charts.
 fn job_spark(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, theme: Theme) {
     let [sparks, metrics] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
-    let (memory_cap, cpu_cap) = caps(app, &open.job.summary);
+    let lines = chart_lines(app, &open.job);
+    let (memory_cap, cpu_cap) = (highest(&lines.memory), highest(&lines.cpu));
     let width = usize::from(area.width / 2).saturating_sub(16);
     let last = open.samples.back();
     frame.render_widget(

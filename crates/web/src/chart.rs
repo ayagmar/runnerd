@@ -55,6 +55,15 @@ impl Series {
     }
 }
 
+/// A horizontal line across a chart, such as a cap, with its label.
+#[derive(Debug)]
+pub(crate) struct Limit {
+    pub(crate) value: u64,
+    pub(crate) label: String,
+    /// The line's class beside `limit`, such as `reserved`; empty for a plain one.
+    pub(crate) class: &'static str,
+}
+
 /// A chart of values over time.
 #[derive(Debug)]
 pub(crate) struct TimeChart {
@@ -67,8 +76,8 @@ pub(crate) struct TimeChart {
     /// A live chart's id, which names its parts. Its end follows the page's clock.
     pub(crate) live: Option<String>,
     pub(crate) series: Vec<Series>,
-    /// A horizontal line, such as a memory cap, with its label.
-    pub(crate) limit: Option<(u64, String)>,
+    /// Horizontal lines, such as a memory cap, each with its label.
+    pub(crate) limits: Vec<Limit>,
     /// Writes a value on the y axis.
     pub(crate) value: fn(u64) -> String,
     /// Writes a time on the x axis.
@@ -425,6 +434,7 @@ impl TimeChart {
                     None => format!("{}: no samples", series.label),
                 }
             })
+            .chain(self.limits.iter().map(|limit| limit.label.clone()))
             .collect::<Vec<_>>()
             .join(", ");
         let live = self.live.as_deref().map(|id| {
@@ -450,7 +460,14 @@ impl TimeChart {
                 (series, stretches)
             })
             .collect();
-        let limit_y = self.limit.as_ref().map(|(limit, _)| y_of(*limit, top));
+        // The highest line's label sits above it, the others' below theirs, so the labels of close lines do not
+        // overlap.
+        let highest = self.limits.iter().map(|limit| limit.value).max();
+        let limits: Vec<(&Limit, f64, bool)> = self
+            .limits
+            .iter()
+            .map(|limit| (limit, y_of(limit.value, top), Some(limit.value) == highest))
+            .collect();
         let span_style = format!("--span: {}", frame.span());
         let span_style = if live.is_some() {
             parts.clocked(span_style)
@@ -478,13 +495,14 @@ impl TimeChart {
                             role="img" aria-label=(format!("{}: {summary}", self.title)) {
                             line.grid x1="0" x2=(WIDTH) y1=(HEIGHT / 2.0) y2=(HEIGHT / 2.0) vector-effect="non-scaling-stroke" {}
                             (series_group(&series, frame, live.as_ref().map(|(id, transform, _)| (*id, transform.as_str())), parts))
-                            @if let Some(y) = limit_y {
-                                line.limit x1="0" x2=(WIDTH) y1=(format!("{y:.0}")) y2=(format!("{y:.0}"))
+                            @for (limit, y, _) in &limits {
+                                line class={ "limit " (limit.class) } x1="0" x2=(WIDTH) y1=(format!("{y:.0}")) y2=(format!("{y:.0}"))
                                     vector-effect="non-scaling-stroke" {}
                             }
                         }
-                        @if let (Some((_, label)), Some(y)) = (&self.limit, limit_y) {
-                            span.limit-label style=(format!("--y: {:.1}%", y / HEIGHT * 100.0)) { (label) }
+                        @for (limit, y, above) in &limits {
+                            span class={ "limit-label " (limit.class) @if !above { " below" } }
+                                style=(format!("--y: {:.1}%", y / HEIGHT * 100.0)) { (limit.label) }
                         }
                         @for (index, band) in bands.iter().enumerate() {
                             (band.render(index, frame.from, frame.end, live.as_ref().map(|(id, _, _)| *id), parts))
@@ -656,7 +674,7 @@ mod tests {
             window: None,
             live: live.then(|| "memory".to_owned()),
             series: vec![Series::line("memory", "memory", points)],
-            limit: None,
+            limits: vec![],
             value: |_| String::new(),
             time: |_| String::new(),
             gap: 6,

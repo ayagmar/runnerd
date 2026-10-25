@@ -1,19 +1,19 @@
-//! `/jobs/{id}`: one job's phases, its steps on a shared time axis, its CPU and memory over time against the caps
-//! its container ran with (or, for records without them, the profile's limits as configured now), and its log, live
-//! while it runs, and the same job's latest runs (wait, run time, outcome and memory peak) beside it. A failed job
-//! whose runner was kept as a record gets the command that opens a shell in it.
+//! `/jobs/{id}`: one job's phases, its steps on a shared time axis, its CPU and memory over time against what
+//! admission reserved and the caps its container ran with (or, for records without them, the profile's limits as
+//! configured now), and its log, live while it runs, and the same job's latest runs (wait, run time, outcome and
+//! memory peak) beside it. A failed job whose runner was kept as a record gets the command that opens a shell in it.
 
 use std::fmt::Write as _;
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    BuildCacheCounts, Job, JobPage, JobQuery, JobState, JobSummary, Sample, SampleSeries, Status,
-    Step,
+    BuildCacheCounts, ChartLine, ChartLineKind, Job, JobPage, JobQuery, JobState, JobSummary,
+    ProfileStatus, Sample, SampleSeries, Status, Step,
 };
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Live, Parts, badge, digest, durations, outcome_class, page, profile_class, time_ago};
-use crate::chart::{Band, Base, Series, TimeChart, nice_top};
+use crate::chart::{Band, Base, Limit, Series, TimeChart, nice_top};
 use crate::format;
 
 /// Log lines the page shows; the full log is at `/jobs/{id}/log`.
@@ -27,9 +27,9 @@ pub(crate) struct JobView {
     pub(crate) now: u64,
     pub(crate) job: Job,
     pub(crate) samples: SampleSeries,
-    /// The memory and CPUs the job's profile has in the config now, while it is configured: what the charts show for
-    /// records without their container's caps, which a reload since may have changed.
-    pub(crate) limits: Option<(u64, u32)>,
+    /// The job's profile as configured now, while it is: its memory and CPUs are what the charts show for records
+    /// without their container's caps, which a reload since may have changed.
+    pub(crate) profile: Option<ProfileStatus>,
     /// The number of the first line in `log`.
     pub(crate) log_from: u64,
     pub(crate) log: Vec<String>,
@@ -78,7 +78,7 @@ impl JobView {
         Ok(JobView {
             runs,
             profile_class,
-            limits: limits(&status, &job),
+            profile: configured(&status, &job),
             now,
             job,
             samples,
@@ -92,14 +92,14 @@ impl JobView {
     }
 }
 
-/// The memory and CPUs of the job's profile as configured now.
-pub(crate) fn limits(status: &Status, job: &Job) -> Option<(u64, u32)> {
+/// The job's profile as configured now.
+fn configured(status: &Status, job: &Job) -> Option<ProfileStatus> {
     let runner = job.summary.runner.as_ref()?;
     status
         .profiles
         .iter()
         .find(|profile| profile.name == runner.profile)
-        .map(|profile| (profile.memory, profile.cpus))
+        .cloned()
 }
 
 impl JobView {
@@ -358,8 +358,8 @@ pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
     }
 }
 
-/// CPU and memory over the job's life, against its container's caps or else its profile's limits as configured now,
-/// with the totals.
+/// CPU and memory over the job's life, against what admission reserved and its container's caps or else its profile's
+/// limits as configured now, with the totals.
 pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
     let summary = &view.job.summary;
     let metrics = &summary.metrics;
@@ -381,8 +381,9 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
         cpu: cpu_line,
         configured_now,
     } = limit_lines(view);
-    let memory_limit = memory_line.as_ref().map(|(limit, _)| *limit);
-    let cpu_limit = cpu_line.as_ref().map(|(limit, _)| *limit);
+    let highest = |lines: &[Limit]| lines.iter().map(|line| line.value).max().unwrap_or(0);
+    let memory_limit = highest(&memory_line);
+    let cpu_limit = highest(&cpu_line);
     let profile = summary
         .runner
         .as_ref()
@@ -400,7 +401,7 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
             points: samples.iter().map(|s| (s.at, s.memory)).collect(),
             area: true,
         }],
-        limit: memory_line,
+        limits: memory_line,
         value: format::bytes,
         time,
         gap,
@@ -417,7 +418,7 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
             points: samples.iter().map(|s| (s.at, s.cpu)).collect(),
             area: true,
         }],
-        limit: cpu_line,
+        limits: cpu_line,
         value: |millicores| format!("{} cores", format::cores(millicores)),
         time,
         gap,
@@ -429,7 +430,7 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
         section #metrics .metrics aria-labelledby="metrics-title" {
             h2 #metrics-title .visually-hidden { "Resources" }
             @if configured_now {
-                p.muted { "This record lacks its container's caps: the dashed lines are " (profile) "'s limits in the config now, which may not be the ones the job ran with." }
+                p.muted { "This record lacks its container's caps: the lines marked “" (profile) " now” are its limits in the config now, which may not be the ones the job ran with." }
             }
             @if samples.is_empty() {
                 p.muted { "No samples: the runner's container never ran, or its samples are past `history.samples`." }
@@ -437,11 +438,11 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
                 div.charts {
                     div.chart-card {
                         h3 { "Memory" (parts.html("metrics-memory-peak", html! { span.reading #metrics-memory-peak { "sampled peak " (format::bytes(memory_peak)) } })) }
-                        (memory.render_with(nice_top(memory_peak.max(memory_limit.unwrap_or(0)), Base::Binary), &bands.memory, parts))
+                        (memory.render_with(nice_top(memory_peak.max(memory_limit), Base::Binary), &bands.memory, parts))
                     }
                     div.chart-card {
                         h3 { "CPU" (parts.html("metrics-cpu-peak", html! { span.reading #metrics-cpu-peak { "sampled peak " (format::cores(cpu_peak)) " cores" } })) }
-                        (cpu.render_with(nice_top(cpu_peak.max(cpu_limit.unwrap_or(0)), Base::Decimal), &bands.cpu, parts))
+                        (cpu.render_with(nice_top(cpu_peak.max(cpu_limit), Base::Decimal), &bands.cpu, parts))
                     }
                 }
             }
@@ -678,39 +679,38 @@ fn step_bands(view: &JobView) -> StepBands {
 }
 
 struct LimitLines {
-    memory: Option<(u64, String)>,
-    cpu: Option<(u64, String)>,
+    memory: Vec<Limit>,
+    cpu: Vec<Limit>,
     /// Some line is the profile's limit in the config now, the record lacking its container's cap.
     configured_now: bool,
 }
 
-/// The caps the job's container ran with, or for a record without them, its profile's limits in the config now.
+/// The job's chart lines as `Job::chart_lines` labels them, a reservation drawn apart from a cap.
 fn limit_lines(view: &JobView) -> LimitLines {
-    let runner = view.job.summary.runner.as_ref();
-    let profile = runner.map_or("profile", |runner| runner.profile.as_str());
-    let memory_cap = runner.and_then(|runner| runner.memory_cap);
-    let cpu_cap = runner.and_then(|runner| runner.cpu_cap);
-    let memory = match memory_cap {
-        Some(cap) => Some((cap, format!("slot cap {}", format::bytes(cap)))),
-        None => view
-            .limits
-            .map(|(memory, _)| (memory, format!("{profile} now {}", format::bytes(memory)))),
-    };
-    let cpu = match cpu_cap {
-        Some(cap) => Some((cap, format!("{} CPUs", format::cores(cap)))),
-        None => view.limits.map(|(_, cpus)| {
-            let millicores = u64::from(cpus) * 1000;
-            (
-                millicores,
-                format!("{profile} now {} CPUs", format::cores(millicores)),
-            )
-        }),
+    let lines = view.job.chart_lines(view.profile.as_ref());
+    let configured_now = lines
+        .memory
+        .iter()
+        .chain(&lines.cpu)
+        .any(|line| line.kind == ChartLineKind::ProfileNow);
+    let limits = |lines: Vec<ChartLine>| {
+        lines
+            .into_iter()
+            .map(|line| Limit {
+                value: line.value,
+                class: if line.kind == ChartLineKind::Reserved {
+                    "reserved"
+                } else {
+                    ""
+                },
+                label: line.label,
+            })
+            .collect()
     };
     LimitLines {
-        configured_now: (memory_cap.is_none() && memory.is_some())
-            || (cpu_cap.is_none() && cpu.is_some()),
-        memory,
-        cpu,
+        memory: limits(lines.memory),
+        cpu: limits(lines.cpu),
+        configured_now,
     }
 }
 

@@ -1101,6 +1101,61 @@ fn opening_a_job_from_the_latest_jobs_follows_only_its_log() {
     assert!(!job.contains("another job's line"), "{job}");
 }
 
+#[test]
+fn an_open_jobs_charts_say_what_it_reserved_beside_its_caps() {
+    use runnerd_core::api::{Admission, AdmissionPolicy, Basis, CpuAdmission};
+    let mut app = app();
+    running_job(&mut app);
+    app.update(key(KeyCode::Enter));
+    let measured = Admission {
+        policy: AdmissionPolicy::Measured,
+        reserved: 6656 << 20,
+        basis: Basis::Cap,
+        free: None,
+        slice: None,
+        cpu: Some(CpuAdmission {
+            reserved: 3600,
+            basis: Basis::Cap,
+            free: 38_700,
+            waited: None,
+        }),
+    };
+    let caps = Admission {
+        policy: AdmissionPolicy::Caps,
+        reserved: 9 << 30,
+        cpu: None,
+        ..measured
+    };
+    let cases: [(_, &[&str], &str); 3] = [
+        (
+            Some(measured),
+            &["cap 9G", "reserved 6.5G", "cap 8 CPUs", "reserved 3.6 CPUs"],
+            "cap and reserved",
+        ),
+        // The reservation is the cap's, not a line of its own.
+        (
+            Some(caps),
+            &["cap and reserved 9G", "cap 8 CPUs"],
+            "─ reserved",
+        ),
+        (None, &["cap 9G", "cap 8 CPUs"], "reserved"),
+    ];
+    for (admission, expected, unexpected) in cases {
+        let summary = app.job.as_ref().unwrap().job.summary.clone();
+        app.update(Msg::Job(Job {
+            admission,
+            summary,
+            steps: vec![],
+            record: None,
+        }));
+        let job = screen(&app, 120, 40, false);
+        for expected in expected {
+            assert!(job.contains(expected), "{expected}: {job}");
+        }
+        assert!(!job.contains(unexpected), "no {unexpected:?}: {job}");
+    }
+}
+
 fn sample(at: u64) -> Sample {
     Sample {
         at,
