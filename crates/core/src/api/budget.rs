@@ -53,8 +53,8 @@ impl Budget {
 
     /// The host's line as clients show it, such as `host: 31G of 64G available, 1.5% stalled for memory; leaves the
     /// slice 40G`; when that is less room than `MemoryMax` leaves (`Budget::host_withheld`), `…; leaves the slice 25G
-    /// of its 46G, so 6.5G is free`;
-    /// while it stalls, `…; stalling, so no runner starts`. While the slice is held
+    /// of its 46G, so 6.5G is free`, and without `MemoryMax`, where the host alone bounds it, `…; leaves the slice
+    /// 25G, so 6.5G is free`; while it stalls, `…; stalling, so no runner starts`. While the slice is held
     /// (`Budget::held`), nothing is free, so it says no figure of it. With programs outside the slice large enough to
     /// name, `…; programs outside CI hold 30G, most java 9.3G` (`HostMemory::outside_line`). `None` without a recent
     /// reading of the host.
@@ -79,7 +79,8 @@ impl Budget {
                     "{line}; leaves the slice {limit} of its {}, so {free} is free",
                     ByteSize(max)
                 ),
-                _ => format!("{line}; leaves the slice {limit}"),
+                Some(_) => format!("{line}; leaves the slice {limit}"),
+                None => format!("{line}; leaves the slice {limit}, so {free} is free"),
             }
         };
         if !host.memory.holders.is_empty() {

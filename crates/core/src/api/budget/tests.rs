@@ -239,6 +239,16 @@ fn nothing_is_free_while_the_slice_is_held_though_the_host_leaves_room() {
     );
 }
 
+#[test]
+fn without_memory_max_the_host_line_says_what_the_host_leaves_free() {
+    let mut budget = status(AdmissionPolicy::Measured, None).budget;
+    budget.host = Some(host(13 * G, false));
+    assert_eq!(
+        budget.host_line().as_deref(),
+        Some("host: 20G of 64G available; leaves the slice 13G, so 5G is free")
+    );
+}
+
 fn job(memory_cap: Option<u64>, cpu_cap: Option<u64>) -> Job {
     Job {
         summary: JobSummary {
