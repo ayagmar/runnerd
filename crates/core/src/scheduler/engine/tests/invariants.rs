@@ -8,6 +8,10 @@
 //! it shrank to. `RUNNERD_INVARIANT_CASES` runs more cases than the default, `RUNNERD_INVARIANT_SEED` one seed.
 
 use std::fmt::Write as _;
+use std::panic::AssertUnwindSafe;
+use std::time::SystemTime;
+
+use futures_util::FutureExt as _;
 
 use super::*;
 use crate::config::Admission;
@@ -15,7 +19,6 @@ use crate::observe::metrics::Events;
 use crate::scheduler::IDLE_TIMEOUT;
 use crate::store::SampleRecord;
 use crate::time;
-use std::time::SystemTime;
 
 const G: u64 = 1 << 30;
 const M: u64 = 1 << 20;
@@ -1329,18 +1332,35 @@ async fn run(steps: &[Step]) -> Result<(), Violation> {
     case.drain().await
 }
 
-/// The shortest sequence found that still breaks `invariant`: drops chunks of steps, then single steps, while it
-/// does.
-async fn shrink(mut steps: Vec<Step>, invariant: &'static str) -> (Vec<Step>, Violation) {
-    let mut last = run(&steps).await.unwrap_err();
+/// `run`, with a panic reported as the broken invariant `no_panic`, so it keeps its seed and shrinks like any other;
+/// its step is not known, and says 0.
+async fn attempt(steps: &[Step]) -> Result<(), Violation> {
+    match AssertUnwindSafe(run(steps)).catch_unwind().await {
+        Ok(outcome) => outcome,
+        Err(panic) => Err(Violation {
+            invariant: "no_panic",
+            step: 0,
+            detail: panic
+                .downcast_ref::<&str>()
+                .map(|message| (*message).to_owned())
+                .or_else(|| panic.downcast_ref::<String>().cloned())
+                .unwrap_or_default(),
+        }),
+    }
+}
+
+/// The shortest sequence found that still breaks what `found` broke: drops chunks of steps, then single steps, while
+/// it does.
+async fn shrink(mut steps: Vec<Step>, found: Violation) -> (Vec<Step>, Violation) {
+    let mut last = found;
     let mut chunk = steps.len() / 2;
     while chunk >= 1 {
         let mut start = 0;
         while start < steps.len() {
             let mut fewer = steps.clone();
             fewer.drain(start..(start + chunk).min(steps.len()));
-            match run(&fewer).await {
-                Err(found) if found.invariant == invariant => {
+            match attempt(&fewer).await {
+                Err(found) if found.invariant == last.invariant => {
                     steps = fewer;
                     last = found;
                 }
@@ -1359,6 +1379,10 @@ fn env_u64(name: &str) -> Option<u64> {
 }
 
 #[tokio::test]
+#[expect(
+    clippy::print_stderr,
+    reason = "names the failing seed before shrinking, which takes a while and may itself fail"
+)]
 async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
     let seeds: Vec<u64> = match env_u64("RUNNERD_INVARIANT_SEED") {
         Some(seed) => vec![seed],
@@ -1368,14 +1392,23 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
     for batch in seeds.chunks(64) {
         let runs = batch.iter().map(|&seed| async move {
             let steps = generate(&mut Rng(seed));
-            (seed, run(&steps).await.err().map(|found| (steps, found)))
+            (
+                seed,
+                attempt(&steps).await.err().map(|found| (steps, found)),
+            )
         });
         for (seed, failed) in futures_util::future::join_all(runs).await {
             if let Some((steps, found)) = failed {
-                let (shortest, violation) = shrink(steps, found.invariant).await;
+                // Before shrinking, which may itself fail: the seed alone replays it.
+                eprintln!(
+                    "seed {seed} breaks {} at step {}: {}; shrinking",
+                    found.invariant, found.step, found.detail
+                );
+                let (invariant, detail) = (found.invariant, found.detail.clone());
+                let (shortest, violation) = shrink(steps, found).await;
                 panic!(
-                    "seed {seed} breaks {}: {}\nshrunk to {:#?}\nwhich breaks it at step {}: {}",
-                    found.invariant, found.detail, shortest, violation.step, violation.detail
+                    "seed {seed} breaks {invariant}: {detail}\nshrunk to {shortest:#?}\nwhich breaks it at step {}: {}",
+                    violation.step, violation.detail
                 );
             }
         }
