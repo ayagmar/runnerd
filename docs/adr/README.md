@@ -12,7 +12,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md) | GPUI desktop app pinned to a Zed commit (superseded by 0034) |
 | [0005](0005-isolation-backends-sysbox-by-default.md) | Isolation backends: sysbox by default, privileged DinD only when asked |
 | [0006](0006-ephemeral-jit-runners.md) | Ephemeral JIT runners, one per job |
-| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041, 0052 and 0054) |
+| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041, 0052, 0054 and 0066) |
 | [0008](0008-auth-with-the-gh-token.md) | Authenticate with the `gh` CLI's token |
 | [0009](0009-newest-stable-and-locked-dependencies.md) | Every dependency newest stable and locked (in part superseded by 0025) |
 | [0010](0010-mit-license-public-repository.md) | MIT license, public repository |
@@ -71,3 +71,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md) | A warm runner's room pays the host's deficit first, and a seed container fits the budget |
 | [0064](0064-each-notify-kind-is-a-sender.md) | Each notification target kind is a sender of its own, and Discord is one |
 | [0065](0065-a-snapshot-starts-over-from-the-image.md) | A snapshot over its limit starts over from the image |
+| [0066](0066-a-reseed-that-did-not-finish.md) | A reseed that did not finish starts the profile over from the image |
