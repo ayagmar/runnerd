@@ -82,7 +82,7 @@ jobs:
 
 A job runs in the pool whose labels include every label in its `runs-on`. The light pool leaves out `self-hosted` on purpose: every job nobody relabelled still asks for `self-hosted`, which only the `node` pool has, so it can never land on a 1G runner. Each pool reserves only for its own queued jobs, and has its own `warm` and `build_cache`.
 
-The config check refuses two pools of a repository that share a label (a job asking only for that label could run in either), two in the same profile, and pools that set `build_cache_writers` differently. A job whose labels no pool has, such as a typo in `runs-on`, waits with *No profile serves the label …* in `runnerctl status` and the dashboard, and so does a job that asks for no labels. Only jobs asking for a single GitHub-hosted image, such as `ubuntu-latest` or `macos-15`, are left to GitHub and not listed. Pause and resume apply to the whole repository; a pool whose runners keep failing holds back only itself.
+The config check refuses two pools of a repository that share a label (a job asking only for that label could run in either), two in the same profile, and pools that set `build_cache_writers` differently. A job whose labels no pool has, such as a typo in `runs-on`, waits with *No profile serves the label …* in `runnerctl status` and the dashboard, and so does a job that asks for no labels. Only jobs asking for a single GitHub-hosted runner label, such as `ubuntu-latest` or `macos-15`, are left to GitHub and not listed. Pause and resume apply to the whole repository; a pool whose runners keep failing holds back only itself.
 
 ## Runner images
 

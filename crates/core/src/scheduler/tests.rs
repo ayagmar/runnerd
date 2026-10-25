@@ -1023,21 +1023,30 @@ fn a_job_asking_for_no_labels_starts_no_runner_in_any_pool() {
 
 #[test]
 fn only_jobs_for_githubs_own_images_go_unlisted() {
-    let ids = [
-        (1, "ubuntu-latest"),
-        (2, "ubuntu-24.04-arm"),
-        (3, "windows-2025"),
-        (4, "macos-15-xlarge"),
-        (5, "ubuntu-2404"),
-        (6, "macos-builder"),
-        (7, "windows-big"),
+    let labels = [
+        "ubuntu-latest",
+        "ubuntu-slim",
+        "ubuntu-24.04-arm",
+        "windows-2025-vs2026",
+        "windows-11-vs2026-arm",
+        "macos-15-intel",
+        "macos-26-intel",
+        "xcode-27",
+        // Not GitHub's: fake versions, a typo and custom names.
+        "ubuntu-99.04",
+        "ubuntu-2404",
+        "macos-99",
+        "macos-builder",
+        "windows-big",
     ];
-    let queued: Vec<QueuedJob> = ids.iter().map(|(id, label)| job(*id, &[label])).collect();
-    let mut with_self_hosted = queued;
-    with_self_hosted.push(job(8, &["self-hosted", "ubuntu-latest"]));
-    let (repositories, profiles) = two_pools(with_self_hosted);
+    let mut queued: Vec<QueuedJob> = (1..)
+        .zip(labels)
+        .map(|(id, label)| job(id, &[label]))
+        .collect();
+    queued.push(job(14, &["self-hosted", "ubuntu-latest"]));
+    let (repositories, profiles) = two_pools(queued);
     let waiting = plan(&repositories, &profiles, budget(None, None), now()).waiting;
     let unserved: Vec<u64> = waiting.keys().copied().collect();
-    // A typo or a custom label is the owner's to fix; so is `self-hosted` with an image name no pool has.
-    assert_eq!(unserved, [5, 6, 7, 8]);
+    // GitHub's own labels are left to it; the rest, `self-hosted` beside an image name too, are the owner's to fix.
+    assert_eq!(unserved, [9, 10, 11, 12, 13, 14]);
 }

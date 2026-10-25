@@ -36,11 +36,13 @@ queued; another's 600M design jobs waited 6-12 minutes behind its Android gate.
   run attempt in any pool, as a run seen live counts from its first job, so a pool whose jobs wait on another
   pool's still expects them. Whether a repository is active stays per repository.
 - A queued job of a served repository that no pool's labels match waits with `Waiting::NoPool`, an act-on-it reason
-  (`No profile serves the label halyard-lite`). Only a job asking for exactly one GitHub-hosted image label is
-  GitHub's and not listed: `ubuntu-latest`, `ubuntu-NN.04`, `ubuntu-NN.04-arm`, `windows-latest`, `windows-NNNN`,
-  `windows-11-arm`, `macos-latest`, `macos-NN`, and macOS ones ending `-large` or `-xlarge`. A typo such as
-  `ubuntu-2404`, a custom label such as `macos-builder`, or an image name beside `self-hosted` waits with
-  `NoPool`.
+  (`No profile serves the label halyard-lite`). Only a job asking for exactly one GitHub-hosted runner label is
+  GitHub's and not listed. The labels are one explicit list (`scheduler::GITHUB_HOSTED`), copied from GitHub's
+  [supported runners table](https://github.com/github/docs/blob/main/data/reusables/actions/supported-github-runners.md)
+  and its single-CPU row, not a pattern: a pattern flagged real labels such as `ubuntu-slim` and `macos-15-intel`
+  and hid fake versions such as `ubuntu-99.04`. A typo, a custom label such as `macos-builder`, or a hosted label
+  beside `self-hosted` waits with `NoPool`. The list must be updated when GitHub adds an image; until then such a
+  job also waits with `NoPool`, whose wording (`No profile serves the label …`) stays true.
 - `Waiting` gains `Unknown` (`#[serde(other)]`), shown as a neutral reason (`WaitKind::Other`), so a reason a later
   daemon adds no longer keeps a client from reading the status. There is no API negotiation: runnerctl, the TUI and
   the dashboard ship and install with the daemon.

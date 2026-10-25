@@ -218,41 +218,39 @@ pub struct Budget {
     pub held: bool,
 }
 
-/// Whether GitHub runs a job on its own runners: it asks for exactly one label, one of GitHub's image names. No pool
-/// of this daemon is meant for it. A typo, a custom label and an image name beside `self-hosted` are the owner's
-/// to fix, so they wait for a pool instead.
-fn hosted_by_github(job: &QueuedJob) -> bool {
-    matches!(&job.labels[..], [label] if github_image(&label.to_ascii_lowercase()))
-}
+/// The workflow labels of GitHub-hosted runners, from
+/// <https://github.com/github/docs/blob/main/data/reusables/actions/supported-github-runners.md> and its single-CPU
+/// row (`single-cpu-table-row.md`), as of 2026-10-16. Update it when GitHub adds or retires an image: a label
+/// missing here makes its jobs wait with `Waiting::NoPool`, whose wording stays true for them.
+const GITHUB_HOSTED: &[&str] = &[
+    "ubuntu-slim",
+    "ubuntu-latest",
+    "ubuntu-26.04",
+    "ubuntu-24.04",
+    "ubuntu-22.04",
+    "ubuntu-26.04-arm",
+    "ubuntu-24.04-arm",
+    "ubuntu-22.04-arm",
+    "windows-latest",
+    "windows-2025",
+    "windows-2025-vs2026",
+    "windows-2022",
+    "windows-11-arm",
+    "windows-11-vs2026-arm",
+    "macos-latest",
+    "macos-26",
+    "macos-15",
+    "macos-14",
+    "macos-26-intel",
+    "macos-15-intel",
+    "xcode-27",
+];
 
-/// Whether `label`, in lower case, names a GitHub-hosted image: `ubuntu-latest`, `ubuntu-24.04`, `ubuntu-24.04-arm`,
-/// `windows-latest`, `windows-2025`, `windows-11-arm`, `macos-latest`, `macos-15`, or a macOS one with `-large` or
-/// `-xlarge`.
-fn github_image(label: &str) -> bool {
-    let digits = |text: &str, count: usize| {
-        text.len() == count && text.bytes().all(|byte| byte.is_ascii_digit())
-    };
-    let ubuntu = |version: &str| {
-        version == "latest"
-            || version
-                .split_once('.')
-                .is_some_and(|(year, month)| digits(year, 2) && month == "04")
-    };
-    let macos = |version: &str| version == "latest" || digits(version, 2);
-    if let Some(version) = label.strip_prefix("ubuntu-") {
-        return ubuntu(version.strip_suffix("-arm").unwrap_or(version));
-    }
-    if let Some(version) = label.strip_prefix("windows-") {
-        return version == "latest" || version == "11-arm" || digits(version, 4);
-    }
-    if let Some(version) = label.strip_prefix("macos-") {
-        let version = version
-            .strip_suffix("-xlarge")
-            .or_else(|| version.strip_suffix("-large"))
-            .unwrap_or(version);
-        return macos(version);
-    }
-    false
+/// Whether GitHub runs a job on its own runners: it asks for exactly one label, one of `GITHUB_HOSTED`. No pool of
+/// this daemon is meant for it. A typo, a custom label and an image name beside `self-hosted` are the owner's to
+/// fix, so they wait for a pool instead.
+fn hosted_by_github(job: &QueuedJob) -> bool {
+    matches!(&job.labels[..], [label] if GITHUB_HOSTED.iter().any(|hosted| hosted.eq_ignore_ascii_case(label)))
 }
 
 /// Whether a job may run on a repository's runners: every label it asks for is one of theirs. GitHub compares
