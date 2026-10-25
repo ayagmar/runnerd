@@ -138,25 +138,24 @@ impl BuildCacheActivity {
 
 impl BuildCacheStats {
     /// Its entries and the last 7 days' jobs: `120 entries; 75% of 400 lookups hit in 7 days, 3G served, 1G
-    /// stored, 2 uploads refused`, or `120 entries; no lookups in 7 days`.
+    /// stored, 2 uploads refused`, `120 entries; no lookups in 7 days, 1G stored`, or `120 entries; no lookups in 7
+    /// days`.
     pub fn week_line(&self) -> String {
         let week = &self.week;
-        let served = match week.hit_percent() {
-            Some(percent) => {
-                let mut served = format!(
-                    "{percent}% of {} lookups hit in 7 days, {} served, {} stored",
-                    week.lookups(),
-                    ByteSize(week.read_bytes),
-                    ByteSize(week.written_bytes)
-                );
-                if week.refused > 0 {
-                    served = format!("{served}, {} uploads refused", week.refused);
-                }
-                served
-            }
-            None => "no lookups in 7 days".to_owned(),
+        let mut parts = match week.hit_percent() {
+            Some(percent) => vec![
+                format!("{percent}% of {} lookups hit in 7 days", week.lookups()),
+                format!("{} served", ByteSize(week.read_bytes)),
+            ],
+            None => vec!["no lookups in 7 days".to_owned()],
         };
-        format!("{} entries; {served}", self.entries)
+        if week.activity().is_some() {
+            parts.push(format!("{} stored", ByteSize(week.written_bytes)));
+        }
+        if week.refused > 0 {
+            parts.push(format!("{} uploads refused", week.refused));
+        }
+        format!("{} entries; {}", self.entries, parts.join(", "))
     }
 }
 

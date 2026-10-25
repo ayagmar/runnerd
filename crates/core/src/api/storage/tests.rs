@@ -1,8 +1,8 @@
 //! What every client says of caches, the build cache and records.
 
 use crate::api::{
-    BuildCacheCounts, CacheKind, CacheVolume, Record, RecordLimits, RecordNote, RecordRemoval,
-    RecordState, Records, Tone, records_near_full,
+    BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume, Record, RecordLimits, RecordNote,
+    RecordRemoval, RecordState, Records, Tone, records_near_full,
 };
 
 const G: u64 = 1 << 30;
@@ -56,6 +56,30 @@ fn a_job_that_only_stored_build_cache_entries_still_shows_it() {
         Some("no lookups, 0B served, read only, 2 uploads refused")
     );
     assert!(BuildCacheCounts::default().activity().is_none());
+}
+
+#[test]
+fn a_week_without_lookups_still_says_what_was_stored_and_refused() {
+    let stats = |week| BuildCacheStats {
+        bytes: G,
+        entries: 120,
+        limit: 5 * G,
+        week,
+    };
+    let stored_and_refused = BuildCacheCounts {
+        written_bytes: G,
+        refused: 2,
+        writer: true,
+        ..BuildCacheCounts::default()
+    };
+    assert_eq!(
+        stats(stored_and_refused).week_line(),
+        "120 entries; no lookups in 7 days, 1G stored, 2 uploads refused"
+    );
+    assert_eq!(
+        stats(BuildCacheCounts::default()).week_line(),
+        "120 entries; no lookups in 7 days"
+    );
 }
 
 #[test]
