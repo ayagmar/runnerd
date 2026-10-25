@@ -38,6 +38,12 @@ versions.
 - Clients (`crates/cli`, `crates/web`, later `crates/desktop`) talk to the daemon's API. They never depend on
   `bollard`, `reqwest` or core's `host` feature; `check-boundaries.sh` fails if they do.
 - Every module starts with a `//!` doc saying what it owns and what it must not do.
+- Clients show what core computes. A client lays out, fits and colours; core decides and words every fact it shows:
+  durations, ages, sizes and CPU figures (`api::units`, `ByteSize`, `api::cpus`), a job's and a step's outcome, a
+  job's name, wait and run time, a slot's state, why a job waits, the budget, records, caches and their tones
+  (`api::Tone`, `OutcomeKind`, `WaitKind`). A fact core lacks is added to core with a test, never to a client.
+  `check-boundaries.sh` fails on a client function named for one of core's formatters or classifiers; each client's
+  parity test draws `crates/fixtures` and asserts core's facts, so a new tricky case goes there.
 
 When you change a boundary (a crate's dependencies, what a module owns, an invariant), update ARCHITECTURE.md and
 add an ADR in the same change.
@@ -87,3 +93,5 @@ it.
 - Branch names: `<type>/<topic>`, such as `feat/scheduler` or `ci/release-workflow`.
 - Commits follow [Conventional Commits](https://www.conventionalcommits.org): `feat:`, `fix:`, `refactor:`, `test:`,
   `docs:`, `ci:`, `chore:`. One logical change per commit.
+- runnerd squash-merges PRs, even where a global default keeps their history: the PR's title becomes the commit on
+  `main`, so it follows the same convention.

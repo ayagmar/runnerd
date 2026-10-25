@@ -88,6 +88,8 @@ struct GithubState {
     /// While true, registering a runner fails.
     register_fails: bool,
     calls: Vec<String>,
+    /// How many calls there were, for tests that wait for one.
+    called: tokio::sync::watch::Sender<usize>,
     /// While true, the runners and queued jobs listings do not answer, like a GitHub that hangs.
     held: tokio::sync::watch::Sender<bool>,
     /// While true, `GET /actions/jobs/{id}` does not answer.
@@ -96,12 +98,35 @@ struct GithubState {
     waiting: usize,
 }
 
+impl GithubState {
+    fn call(&mut self, call: String) {
+        self.calls.push(call);
+        self.called.send_replace(self.calls.len());
+    }
+}
+
 #[derive(Clone, Default)]
 struct FakeGithub(Arc<Mutex<GithubState>>);
 
 impl FakeGithub {
     fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap().calls.clone()
+    }
+
+    /// Waits, however loaded the machine, until the calls made satisfy `done`, which says what they wait for.
+    async fn until_calls(&self, done: impl Fn(&[String]) -> bool, what: &str) {
+        let mut called = self.0.lock().unwrap().called.subscribe();
+        let waited = tokio::time::timeout(Duration::from_secs(60), async {
+            while !done(&self.calls()) {
+                called.changed().await.unwrap();
+            }
+        })
+        .await;
+        assert!(
+            waited.is_ok(),
+            "GitHub was never {what}: {:?}",
+            self.calls()
+        );
     }
 
     /// Holds the runners and queued jobs listings until `release`.
@@ -164,7 +189,7 @@ impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
         self.answer().await;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("queued {repository}"));
+        state.call(format!("queued {repository}"));
         let queued = state.queued.clone();
         FakeGithub::polled(&mut state);
         Ok(queued)
@@ -173,7 +198,7 @@ impl GithubApi for FakeGithub {
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
         self.answer().await;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("runners {repository}"));
+        state.call(format!("runners {repository}"));
         let runners = state
             .runners
             .iter()
@@ -196,7 +221,7 @@ impl GithubApi for FakeGithub {
         _labels: &[String],
     ) -> Result<(Runner, JitConfig), github::Error> {
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("register {name}"));
+        state.call(format!("register {name}"));
         if state.register_fails {
             return Err(github::Error::Token("register fails".to_owned()));
         }
@@ -212,7 +237,7 @@ impl GithubApi for FakeGithub {
 
     async fn delete_runner(&self, _repository: &str, id: u64) -> Result<Deleted, github::Error> {
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("delete {id}"));
+        state.call(format!("delete {id}"));
         if state.busy_deletes > 0 {
             state.busy_deletes -= 1;
             return Ok(Deleted::Busy);
@@ -237,7 +262,7 @@ impl GithubApi for FakeGithub {
         run: u64,
     ) -> Result<github::RunTrigger, github::Error> {
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("run {run}"));
+        state.call(format!("run {run}"));
         state
             .triggers
             .get(&run)
@@ -251,7 +276,7 @@ impl GithubApi for FakeGithub {
         number: u64,
     ) -> Result<github::PullRequest, github::Error> {
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("pull request {number}"));
+        state.call(format!("pull request {number}"));
         state
             .pulls
             .get(&number)
@@ -261,7 +286,7 @@ impl GithubApi for FakeGithub {
 
     async fn default_branch(&self, repository: &str) -> Result<String, github::Error> {
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("default branch {repository}"));
+        state.call(format!("default branch {repository}"));
         Ok(state
             .default_branch
             .clone()
@@ -275,7 +300,7 @@ impl GithubApi for FakeGithub {
         sha: &str,
     ) -> Result<bool, github::Error> {
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("compare {branch}...{sha}"));
+        state.call(format!("compare {branch}...{sha}"));
         if state.compare_fails {
             return Err(github::Error::Token("compare fails".to_owned()));
         }
@@ -284,7 +309,7 @@ impl GithubApi for FakeGithub {
 
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), github::Error> {
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("cancel {repository} {run}"));
+        state.call(format!("cancel {repository} {run}"));
         Ok(())
     }
 }
@@ -2844,20 +2869,32 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
     assert_eq!(engine.config.repositories[0].name, "o/r");
 }
 
+/// How many times the engine polled GitHub's queue.
+fn polls(calls: &[String]) -> usize {
+    calls
+        .iter()
+        .filter(|call| call.starts_with("queued "))
+        .count()
+}
+
 /// Waits until the engine polled GitHub's queue `count` times.
 async fn until_polled(github: &FakeGithub, count: usize) {
-    for _ in 0..500 {
-        let polls = github
-            .calls()
-            .iter()
-            .filter(|call| call.starts_with("queued "))
-            .count();
-        if polls >= count {
-            return;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
+    github
+        .until_calls(
+            |calls| polls(calls) >= count,
+            &format!("polled {count} times"),
+        )
+        .await;
+}
+
+/// Wakes the engine and waits until a tick that started after now has run in full.
+async fn a_whole_tick(github: &FakeGithub, handle: &Handle) {
+    let polled = polls(&github.calls());
+    // The second poll comes after the first one's tick has planned and started runners.
+    for more in 1..=2 {
+        handle.control.wake.notify_one();
+        until_polled(github, polled + more).await;
     }
-    panic!("the engine polled fewer than {count} times");
 }
 
 #[tokio::test]
@@ -2882,14 +2919,31 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
         )
         .await;
     assert!(matches!(refused, Err(ControlError::Failed(_))));
-    // The command is followed by a tick: it runs under the old config and starts nothing for `o/x`.
-    until_polled(&github, 2).await;
+    assert_eq!(handle.status.borrow().repositories[0].name, "o/r");
+    // A tick after it runs under the old config and starts nothing for `o/x`.
+    a_whole_tick(&github, &handle).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
 
+    // The new config arrives while a tick waits for GitHub's listings of the old one's repositories, and polls
+    // only every hour: the tick it is answered in lists none of its repositories, so only a tick that follows the
+    // command starts `o/x`'s job.
+    github.hold();
+    handle.control.wake.notify_one();
+    github.until_waiting(1).await;
+    let hourly = Config::parse(
+        &CONFIG
+            .replace("name = \"o/r\"", "name = \"o/x\"")
+            .replace(
+                "labels = [\"self-hosted\", \"app\"]",
+                "labels = [\"self-hosted\", \"other\"]",
+            )
+            .replace("[host]\n", "[host]\npoll_interval = \"1h\"\n"),
+    )
+    .unwrap();
     let committed = handle
         .control
         .replace_config(
-            other_repository(),
+            hourly,
             None,
             None,
             Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
@@ -2902,8 +2956,15 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
     );
     // Answered once it runs with the config: the status shows `o/x` already.
     assert_eq!(handle.status.borrow().repositories[0].name, "o/x");
+    github.release();
+    github
+        .until_calls(
+            |calls| !registered(calls).is_empty(),
+            "asked to register a runner for o/x's job",
+        )
+        .await;
     handle.control.shutdown(RunningJobs::Kill);
-    tokio::time::timeout(Duration::from_secs(5), run)
+    tokio::time::timeout(Duration::from_secs(60), run)
         .await
         .unwrap()
         .unwrap();

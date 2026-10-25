@@ -37,6 +37,7 @@ flowchart TB
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
+| `runnerd-fixtures` | `crates/fixtures` | tests only: the daemon data every client's parity test draws, and the facts core computes from it ([ADR 0062](docs/adr/0062-client-parity-is-checked.md)); not published | `runnerd-core` without `host`; clients take it as a dev-dependency only |
 | `runnerd-wire-compat` | `crates/wire-compat` | tests only: this version and the previous release read each other's JSON ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)); a workspace of its own | `runnerd-core` without `host`, and the previous release's, pinned by commit |
 
 `runnerd-core` modules:
@@ -65,7 +66,9 @@ The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs i
 writes only through the API on the Unix socket ([ADR 0020](docs/adr/0020-dashboard-is-an-api-client-on-loopback.md)).
 The optional tray client (`crates/desktop`, [ADR 0034](docs/adr/0034-desktop-framework.md)) will be another.
 [`.github/scripts/check-boundaries.sh`](.github/scripts/check-boundaries.sh) fails CI when any workspace crate other
-than `runnerd` and `runnerd-core` builds `bollard`, `reqwest` or core's `host` feature.
+than `runnerd` and `runnerd-core` builds `bollard`, `reqwest` or core's `host` feature, and when the cli, the
+dashboard or the daemon defines its own formatter or classifier for a fact core owns ([ADR
+0062](docs/adr/0062-client-parity-is-checked.md)).
 
 ## Request path
 
@@ -187,7 +190,9 @@ adopted too and drains as it would after a reload.
   badges, insights and the digest, caches, the build cache and records, the history's daily statistics, and what an
   action did. Core returns the label, the figure and its kind or `api::Tone`; the dashboard, the TUI and `runnerctl`
   only draw them ([ADR 0059](docs/adr/0059-clients-show-what-core-computes.md),
-  [ADR 0060](docs/adr/0060-clients-show-what-core-computes-about-the-host.md)).
+  [ADR 0060](docs/adr/0060-clients-show-what-core-computes-about-the-host.md)). Every client's parity test draws
+  the same fixtures (`crates/fixtures`) and asserts core's facts, and the boundary check fails on a client's own
+  formatter or classifier ([ADR 0062](docs/adr/0062-client-parity-is-checked.md)).
 - Clients never talk to Docker or GitHub; they talk to the daemon.
 - The GitHub token stays inside `github::Github`: never in a log line, a `Debug` output or an error. A `[notify]`
   target's URL and header values (`config::Secret`) are as secret: only the request that sends a message reads them,

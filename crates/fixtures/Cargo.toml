@@ -1,0 +1,16 @@
+[package]
+name = "runnerd-fixtures"
+description = "Daemon data every client's parity test draws, and the facts runnerd-core computes from it"
+version.workspace = true
+edition.workspace = true
+rust-version.workspace = true
+license.workspace = true
+repository.workspace = true
+# Test support for the clients' tests; never a dependency of a client itself.
+publish = false
+
+[dependencies]
+runnerd-core.workspace = true
+
+[lints]
+workspace = true
