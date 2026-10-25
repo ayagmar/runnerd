@@ -57,7 +57,7 @@ flowchart TB
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)).
 
 `runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing, `api/notify` sends `[notify]`'s
-notifications), `init`, `doctor`, `simulate`, and
+notifications, each kind of target a `Sender` in a module of its own), `init`, `doctor`, `simulate`, and
 `output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session secret, the login links and pairing codes, and the `Origin`
 check), `views` (one per page), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
 `assets` (the files the pages load, the web app manifest and icons included).
@@ -201,7 +201,10 @@ adopted too and drains as it would after a reload.
 - Nothing leaves the machine but GitHub's and Docker's requests, unless `[notify]` names targets. The notifier
   (`api/notify`) reads the store's durable events and the history off the engine's loop; the engine never waits
   for it, and a target's cursor moves only once a delivery succeeded
-  ([ADR 0051](docs/adr/0051-insights-and-notifications.md)).
+  ([ADR 0051](docs/adr/0051-insights-and-notifications.md)). Each kind of target is a `Sender`
+  (`api/notify/send.rs`) that turns a notification into its kind's URL and body; built from the target's config at each
+  send, and the shared post adds the headers, so no sender can log them
+  ([ADR 0064](docs/adr/0064-each-notify-kind-is-a-sender.md)).
 - A runner's build cache uploads become entries only once GitHub says its job runs on that runner and is a push,
   schedule or manual run of the repository itself on its default branch or one of `[caches.build] branches`, of a
   commit that branch has, or, where `build_cache_writers = "pull-requests"`, a `pull_request` run of the

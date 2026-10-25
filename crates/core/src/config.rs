@@ -602,7 +602,8 @@ pub struct NotifyTarget {
     pub name: String,
     /// What it takes.
     pub kind: NotifyKind,
-    /// Where it is posted: the webhook's URL, or the ntfy topic's, such as `https://ntfy.sh/<topic>`. A secret.
+    /// Where it is posted: the webhook's URL, Discord's included, or the ntfy topic's, such as `https://ntfy.sh/<topic>`.
+    /// A secret.
     pub url: Secret,
     /// Headers sent with each post, such as an ntfy access token's `Authorization`. Their values are secrets.
     #[serde(default)]
@@ -629,6 +630,8 @@ pub enum NotifyKind {
     Webhook,
     /// An ntfy topic: the title, message, priority and link, published as ntfy's JSON.
     Ntfy,
+    /// A Discord channel's webhook: the title, message and link as one embed, coloured by event, that pings no one.
+    Discord,
 }
 
 /// A value no `Debug` output, log line or error shows: a notification target's URL or header.

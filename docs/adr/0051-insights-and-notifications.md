@@ -1,7 +1,7 @@
 # 0051. Insights from the history, and notifications the daemon sends
 
 Status: **Accepted** (2026-10-24). Builds option 1 of [0034](0034-desktop-framework.md) and answers its open
-questions about notifications.
+questions about notifications. Amended by [0064](0064-each-notify-kind-is-a-sender.md).
 
 ## Context
 
@@ -67,7 +67,8 @@ optional `headers` and the `events` it wants:
 Events: `failed` (a job failed or timed out), `lost` (a job's runner vanished), `runner` (a runner could not be
 registered or started: the first hold of a streak), `insights` (a new `warning` insight), `digest` (once a day
 at `[notify] digest_at`, local time, default `09:00`). By default a target gets `failed`, `lost`, `runner` and
-`insights`; the digest is opt-in, as it is a message every day whatever happened. Discord, Slack and the daemon
+`insights`; the digest is opt-in, as it is a message every day whatever happened. Discord (a kind since
+[0064](0064-each-notify-kind-is-a-sender.md)), Slack and the daemon
 stopping are not targets or events: a webhook covers the first two through a relay, and a stopped daemon cannot
 say it stopped; systemd and the dashboard do.
 

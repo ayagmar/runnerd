@@ -1,6 +1,6 @@
 //! The notifier against a fake HTTP endpoint on loopback: a failure delivered once across a restart, a burst folded
 //! into one message, a failing endpoint retried while the history goes on, a target added later replaying nothing,
-//! an insight told once, the daily digest, ntfy's JSON, and no URL or token in a log line.
+//! an insight told once, the daily digest, ntfy's and Discord's JSON, and no URL or token in a log line.
 
 use std::io::Write as _;
 use std::sync::atomic::{AtomicU16, Ordering};
@@ -20,8 +20,8 @@ use runnerd_core::store::Store;
 use tokio::sync::{Mutex, Notify, watch};
 
 use super::{
-    ConfigText, Notifier, Setup, Timing, client, digest_due, digest_message, parse_offset, run,
-    send_due, start,
+    ConfigText, Notifier, Setup, Timing, client, deliver, digest_due, digest_message, parse_offset,
+    run, send_due, start, test_message,
 };
 use crate::testdir::Dir;
 
@@ -512,6 +512,125 @@ async fn an_ntfy_target_gets_ntfys_json_at_the_server_with_its_topic() {
     assert_eq!(
         body["click"],
         "https://github.com/halyard/api/actions/runs/7/job/2"
+    );
+}
+
+/// `CONFIG` with a Discord target `chat` at `url`.
+fn discord(url: &str) -> String {
+    format!("{CONFIG}\n[[notify.targets]]\nname = \"chat\"\nkind = \"discord\"\nurl = \"{url}\"\n")
+}
+
+#[tokio::test]
+async fn a_discord_target_gets_one_red_embed_for_a_burst_of_failures_that_pings_no_one() {
+    let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
+    endpoint.status.store(204, Ordering::SeqCst);
+    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let config = config_text(
+        &dir,
+        &discord(&format!("http://{}/api/webhooks/123/abc", endpoint.address)),
+    );
+    let notifier = Running::start(&store, &config).await;
+
+    for id in 1..=7 {
+        store.event(failed(id));
+    }
+    endpoint.wait_for(1).await;
+    notifier.stop().await;
+
+    let received = endpoint.received.lock().unwrap().clone();
+    assert_eq!(received.len(), 1, "one message, delivered on Discord's 204");
+    let (path, _, body, _) = &received[0];
+    assert_eq!(path, "/api/webhooks/123/abc");
+    let body: serde_json::Value = serde_json::from_slice(body).unwrap();
+    assert_eq!(body["allowed_mentions"], serde_json::json!({ "parse": [] }));
+    let embeds = body["embeds"].as_array().unwrap();
+    assert_eq!(embeds.len(), 1, "{body:#}");
+    assert_eq!(embeds[0]["title"], "7 jobs failed");
+    assert_eq!(embeds[0]["color"], 0x00ED_4245, "failures are red");
+    assert_eq!(
+        embeds[0]["url"],
+        "https://github.com/halyard/api/actions/runs/7/job/1"
+    );
+    let description = embeds[0]["description"].as_str().unwrap();
+    assert_eq!(
+        description.lines().collect::<Vec<_>>(),
+        [
+            "halyard/api: CI / test 1 failed on main",
+            "halyard/api: CI / test 2 failed on main",
+            "halyard/api: CI / test 3 failed on main",
+            "halyard/api: CI / test 4 failed on main",
+            "halyard/api: CI / test 5 failed on main",
+            "and 2 more",
+        ]
+    );
+}
+
+#[tokio::test]
+async fn a_long_message_is_cut_to_discords_limits_and_a_429_is_not_delivered() {
+    let endpoint = Endpoint::start().await;
+    let config = Config::parse(&discord(&format!(
+        "http://{}/api/webhooks/123/abc",
+        endpoint.address
+    )))
+    .unwrap();
+    let target = &config.notify.targets[0];
+    let http = client(SETUP.timing.timeout).unwrap();
+    let long = Notification {
+        title: "é".repeat(300),
+        message: "halyard/api: CI / test failed on main\n".repeat(200),
+        ..test_message("chat")
+    };
+
+    assert_eq!(deliver(&http, target, &long).await, Ok(()));
+    endpoint.status.store(429, Ordering::SeqCst);
+    assert_eq!(
+        deliver(&http, target, &long).await,
+        Err("the target answered HTTP 429 Too Many Requests".to_owned()),
+        "rate limited is a failed send, retried like any other"
+    );
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&endpoint.received.lock().unwrap()[0].2).unwrap();
+    let embed = &body["embeds"][0];
+    let title = embed["title"].as_str().unwrap();
+    let description = embed["description"].as_str().unwrap();
+    assert_eq!(title.chars().count(), 256);
+    assert_eq!(description.chars().count(), 4096);
+    assert!(
+        title.ends_with('…') && description.ends_with('…'),
+        "both say they were cut"
+    );
+    assert!(title.chars().count() + description.chars().count() <= 6000);
+    assert_eq!(body["allowed_mentions"], serde_json::json!({ "parse": [] }));
+}
+
+#[tokio::test]
+async fn a_discord_test_message_is_a_green_embed() {
+    let endpoint = Endpoint::start().await;
+    let config = Config::parse(&discord(&format!(
+        "http://{}/api/webhooks/123/abc",
+        endpoint.address
+    )))
+    .unwrap();
+    let (target, http) = (
+        &config.notify.targets[0],
+        client(SETUP.timing.timeout).unwrap(),
+    );
+
+    deliver(&http, target, &test_message("chat")).await.unwrap();
+
+    let body: serde_json::Value =
+        serde_json::from_slice(&endpoint.received.lock().unwrap()[0].2).unwrap();
+    assert_eq!(
+        body,
+        serde_json::json!({
+            "embeds": [{
+                "title": "runnerd can reach you",
+                "description": "A test from runnerd: notify target \"chat\" works.",
+                "color": 0x0057_F287,
+            }],
+            "allowed_mentions": { "parse": [] },
+        })
     );
 }
 

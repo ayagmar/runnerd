@@ -56,7 +56,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0048](0048-slice-charts-scaled-to-the-slice.md) | The slice's charts reach up to the slice |
 | [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling |
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued |
-| [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends |
+| [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends (amended by 0064) |
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache |
 | [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk |
@@ -69,3 +69,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0061](0061-the-previous-release-reads-the-wire.md) | The previous release reads the wire, checked both ways in CI |
 | [0062](0062-client-parity-is-checked.md) | Client parity is checked, not remembered |
 | [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md) | A warm runner's room pays the host's deficit first, and a seed container fits the budget |
+| [0064](0064-each-notify-kind-is-a-sender.md) | Each notification target kind is a sender of its own, and Discord is one |

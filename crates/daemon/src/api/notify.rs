@@ -1,5 +1,5 @@
-//! Notifications (ADR 0051): under `[notify]`, sends failed and lost jobs, runners that cannot start, new warning
-//! insights and the daily digest to webhook and ntfy targets. A reader of the store's durable events beside auto
+//! Notifications (ADR 0051, 0064): under `[notify]`, sends failed and lost jobs, runners that cannot start, new
+//! warning insights and the daily digest to each target through its kind's `send::Sender`. A reader of the store's durable events beside auto
 //! sizing, off the engine's loop: the engine never waits for it. Each target's cursor, the insights it was told and
 //! its last digest are stored once a delivery succeeds, so a restart drops no message, and repeats one only if it stops
 //! between sending and storing: at least once. It folds a burst into one message, keeping the first `KEEP` of each
@@ -17,17 +17,22 @@ use runnerd_core::api::{
     Delivery, Digest, Event, EventEnvelope, Insight, JobState, JobSummary, Notification,
     NotifyEvent, NotifyTest, NotifyTestQuery, Priority, RunnerFailure, Severity, job_title,
 };
-use runnerd_core::config::{Config, DayTime, Notify, NotifyKind, NotifyTarget};
+use runnerd_core::config::{Config, DayTime, Notify, NotifyTarget};
 use runnerd_core::insights;
 use runnerd_core::store::Store;
-use serde_json::json;
 use tokio::sync::broadcast::error::RecvError;
 use tokio::sync::{Mutex, broadcast, watch};
 use tokio::time::Instant;
 use tracing::{info, warn};
 
+use self::send::{client, deliver};
 use super::history::{insight_runs_of, now};
 use super::{AppState, Authenticated, ConfigText, error};
+
+mod discord;
+mod ntfy;
+mod send;
+mod webhook;
 
 /// How the notifier paces itself: `TIMING` in the daemon, shorter in tests.
 #[derive(Debug, Clone, Copy)]
@@ -850,94 +855,6 @@ fn digest_message(digest: Digest) -> Notification {
     }
 }
 
-/// An HTTP client for targets, with the daemon's TLS provider and `timeout` per request. It follows no redirect:
-/// a POST followed on a 301 or 302 arrives as a GET without its body, which a server can answer with 200, and its
-/// headers would go on to the other host.
-fn client(timeout: Duration) -> Result<reqwest::Client, String> {
-    runnerd_core::github::install_crypto_provider();
-    reqwest::Client::builder()
-        .user_agent(concat!("runnerd/", env!("CARGO_PKG_VERSION")))
-        .timeout(timeout)
-        .redirect(reqwest::redirect::Policy::none())
-        .build()
-        // Built before any URL is set, so its error names none.
-        .map_err(|build_error| build_error.to_string())
-}
-
-/// Posts `notification` to `target`; the error says what failed in words that never hold the URL or a header.
-async fn deliver(
-    http: &reqwest::Client,
-    target: &NotifyTarget,
-    notification: &Notification,
-) -> Result<(), String> {
-    let (url, body) = match target.kind {
-        NotifyKind::Webhook => (
-            target.url.expose().to_owned(),
-            serde_json::to_vec(notification).map_err(|encode| encode.to_string())?,
-        ),
-        NotifyKind::Ntfy => {
-            // Checked by `Config::validate`: `scheme://host/topic`.
-            let url = target.url.expose();
-            let (server, topic) = url
-                .rsplit_once('/')
-                .ok_or_else(|| "the url is not an ntfy topic's".to_owned())?;
-            let priority = match notification.priority {
-                Priority::Low => 2,
-                Priority::Default => 3,
-                Priority::High => 4,
-            };
-            let tag = match notification.event {
-                NotifyEvent::Failed => "x",
-                NotifyEvent::Lost | NotifyEvent::Runner => "warning",
-                NotifyEvent::Insights => "chart_with_upwards_trend",
-                NotifyEvent::Digest => "memo",
-                NotifyEvent::Test => "white_check_mark",
-            };
-            let mut body = json!({
-                "topic": topic,
-                "title": notification.title,
-                "message": notification.message,
-                "priority": priority,
-                "tags": [tag],
-            });
-            if let Some(click) = &notification.url {
-                body["click"] = json!(click);
-            }
-            (
-                format!("{server}/"),
-                serde_json::to_vec(&body).map_err(|encode| encode.to_string())?,
-            )
-        }
-    };
-    let mut request = http
-        .post(url)
-        .header(reqwest::header::CONTENT_TYPE, "application/json")
-        .body(body);
-    for (name, value) in &target.headers {
-        request = request.header(name.as_str(), value.expose());
-    }
-    let response = request.send().await.map_err(|send| describe(&send))?;
-    let status = response.status();
-    if status.is_success() {
-        Ok(())
-    } else {
-        Err(format!("the target answered HTTP {status}"))
-    }
-}
-
-/// What failed, in words that hold neither the URL nor anything a TLS or DNS error might quote from it.
-fn describe(send: &reqwest::Error) -> String {
-    if send.is_timeout() {
-        "the request timed out".to_owned()
-    } else if send.is_connect() {
-        "cannot connect to the target".to_owned()
-    } else if send.is_builder() {
-        "the url or a header cannot be sent".to_owned()
-    } else {
-        "the request failed".to_owned()
-    }
-}
-
 /// `POST /v1/notify/test?target=`: sends a test message to every target, or to the one named, and answers what each
 /// did.
 pub(super) async fn test(
@@ -976,21 +893,9 @@ pub(super) async fn test(
     info!("notify: test message requested by {principal:?}");
     // All at once, so slow targets together still answer within the client's wait.
     let deliveries = futures_util::future::join_all(targets.iter().map(|target| async {
-        let notification = Notification {
-            event: NotifyEvent::Test,
-            title: "runnerd can reach you".to_owned(),
-            message: format!(
-                "A test from runnerd: notify target {:?} works.",
-                target.name
-            ),
-            url: None,
-            priority: Priority::Default,
-            jobs: Vec::new(),
-            runners: Vec::new(),
-            insights: Vec::new(),
-            digest: None,
-        };
-        let error = deliver(&http, target, &notification).await.err();
+        let error = deliver(&http, target, &test_message(&target.name))
+            .await
+            .err();
         if let Some(why) = &error {
             warn!("notify {}: test not delivered: {why}", target.name);
         }
@@ -1004,6 +909,21 @@ pub(super) async fn test(
         targets: deliveries,
     })
     .into_response()
+}
+
+/// What `runnerctl notify test` sends the target named `name`.
+fn test_message(name: &str) -> Notification {
+    Notification {
+        event: NotifyEvent::Test,
+        title: "runnerd can reach you".to_owned(),
+        message: format!("A test from runnerd: notify target {name:?} works."),
+        url: None,
+        priority: Priority::Default,
+        jobs: Vec::new(),
+        runners: Vec::new(),
+        insights: Vec::new(),
+        digest: None,
+    }
 }
 
 #[cfg(test)]
