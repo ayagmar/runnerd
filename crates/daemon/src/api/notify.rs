@@ -29,6 +29,7 @@ use self::send::{Sender, client, deliver, sender};
 use super::history::{insight_runs_of, now};
 use super::{AppState, Authenticated, ConfigText, error};
 
+mod discord;
 mod ntfy;
 mod send;
 mod webhook;
@@ -903,21 +904,7 @@ pub(super) async fn test(
     info!("notify: test message requested by {principal:?}");
     // All at once, so slow targets together still answer within the client's wait.
     let deliveries = futures_util::future::join_all(targets.iter().map(|target| async {
-        let notification = Notification {
-            event: NotifyEvent::Test,
-            title: "runnerd can reach you".to_owned(),
-            message: format!(
-                "A test from runnerd: notify target {:?} works.",
-                target.name
-            ),
-            url: None,
-            priority: Priority::Default,
-            jobs: Vec::new(),
-            runners: Vec::new(),
-            insights: Vec::new(),
-            digest: None,
-        };
-        let error = deliver(&http, &*sender(target), target, &notification)
+        let error = deliver(&http, &*sender(target), target, &test_message(&target.name))
             .await
             .err();
         if let Some(why) = &error {
@@ -933,6 +920,21 @@ pub(super) async fn test(
         targets: deliveries,
     })
     .into_response()
+}
+
+/// What `runnerctl notify test` sends the target named `name`.
+fn test_message(name: &str) -> Notification {
+    Notification {
+        event: NotifyEvent::Test,
+        title: "runnerd can reach you".to_owned(),
+        message: format!("A test from runnerd: notify target {name:?} works."),
+        url: None,
+        priority: Priority::Default,
+        jobs: Vec::new(),
+        runners: Vec::new(),
+        insights: Vec::new(),
+        digest: None,
+    }
 }
 
 #[cfg(test)]

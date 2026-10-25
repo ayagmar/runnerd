@@ -3,7 +3,7 @@ title: Insights and notifications
 description: What runnerd reads from its job history without being asked, and how it reaches a phone or a webhook when a job fails.
 ---
 
-runnerd reads its [job history](../running/#job-history) for what changed in your CI, and with `[notify]` it sends failures and new findings to an [ntfy](https://ntfy.sh) topic or a webhook. Nothing leaves the machine without `[notify]`.
+runnerd reads its [job history](../running/#job-history) for what changed in your CI, and with `[notify]` it sends failures and new findings to an [ntfy](https://ntfy.sh) topic, a Discord channel or a webhook. Nothing leaves the machine without `[notify]`.
 
 ## Insights
 
@@ -69,6 +69,22 @@ Each `[[notify.targets]]` entry is a place messages go. A burst is one message: 
    ```
 
 On a self-hosted ntfy server with access control, add its token: `headers = { Authorization = "Bearer tk_…" }`.
+
+### In a Discord channel
+
+1. In the channel's settings, under Integrations, create a webhook and copy its URL.
+2. Add the target to `runnerd.toml`:
+
+   ```toml
+   [[notify.targets]]
+   name = "chat"
+   kind = "discord"
+   url = "https://discord.com/api/webhooks/123/abc"
+   ```
+
+3. Reload or restart runnerd, then run `runnerctl notify test`.
+
+Each message is one embed: the title, the message below it, a link to the job, red for failures, amber for lost jobs and runners, grey for insights and the digest. Mentions are off, so a job named `@everyone` pings no one. A title past 256 characters or a message past 4096 is cut, ending in `…`. When Discord limits the rate, runnerd retries as for any failed send. A `kind = "webhook"` target pointed at Discord fails with `HTTP 400 Bad Request`: Discord does not read runnerd's own JSON.
 
 ### A webhook
 

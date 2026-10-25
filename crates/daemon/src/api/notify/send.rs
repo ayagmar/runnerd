@@ -8,7 +8,7 @@ use std::time::Duration;
 use runnerd_core::api::Notification;
 use runnerd_core::config::{NotifyKind, NotifyTarget};
 
-use super::{ntfy, webhook};
+use super::{discord, ntfy, webhook};
 
 /// What a sender posts: a JSON body to a URL. Not `Debug`: the URL is a secret.
 pub(super) struct Post {
@@ -38,6 +38,7 @@ pub(super) fn sender(target: &NotifyTarget) -> Box<dyn Sender> {
     match target.kind {
         NotifyKind::Webhook => Box::new(webhook::Webhook::new(target.url.clone())),
         NotifyKind::Ntfy => Box::new(ntfy::Ntfy::new(target.url.clone())),
+        NotifyKind::Discord => Box::new(discord::Discord::new(target.url.clone())),
     }
 }
 

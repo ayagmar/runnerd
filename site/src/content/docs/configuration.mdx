@@ -303,8 +303,8 @@ Each `[[notify.targets]]`:
 | Key | Default | Means |
 |---|---|---|
 | `name` | required | what logs and `runnerctl notify test` call it; where it got to is kept under this name |
-| `kind` | required | `"ntfy"` or `"webhook"` |
-| `url` | required | an ntfy topic's URL (`https://ntfy.sh/<topic>`) or the webhook's, where it answers without a redirect: a redirect counts as a failed send; a secret that no log line, error or client shows |
+| `kind` | required | `"ntfy"`, `"discord"` or `"webhook"` |
+| `url` | required | an ntfy topic's URL (`https://ntfy.sh/<topic>`), a Discord webhook's (`https://discord.com/api/webhooks/123/abc`) or the webhook's, where it answers without a redirect: a redirect counts as a failed send; a secret that no log line, error or client shows |
 | `headers` | `{}` | sent with each post, such as `{ Authorization = "Bearer tk_…" }`; their values are secrets too |
 | `events` | `["failed", "lost", "runner", "insights"]` | what it is sent; add `"digest"` for the daily digest |
 

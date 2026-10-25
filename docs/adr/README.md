@@ -69,4 +69,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0061](0061-the-previous-release-reads-the-wire.md) | The previous release reads the wire, checked both ways in CI |
 | [0062](0062-client-parity-is-checked.md) | Client parity is checked, not remembered |
 | [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md) | A warm runner's room pays the host's deficit first, and a seed container fits the budget |
-| [0064](0064-each-notify-kind-is-a-sender.md) | Each notification target kind is a sender of its own |
+| [0064](0064-each-notify-kind-is-a-sender.md) | Each notification target kind is a sender of its own, and Discord is one |
