@@ -23,8 +23,9 @@ a newer one stored. `[notify]` webhooks parse what the daemon sends.
     written back and compared with the sample: every key it writes must be in a full sample, which sets every
     field, with the same value. A key that is not is a field renamed or removed; a value that differs, a fallback.
   - This version reads the previous release's output: the samples that release wrote, committed under
-    `crates/wire-compat/fixtures/` with one file for every document, parse as this version's types, and the keys
-    both have keep their values.
+    `crates/wire-compat/fixtures/` with one file for every document, parse as this version's types, and written
+    back they keep every key and value of a full fixture. A field skipped when empty leaves no key in what the
+    previous release writes back, so only this way sees it renamed or removed.
 - The samples are one Rust value per document (the responses, the events, the requests, a notification), built
   from struct literals that name every field and lists of every enum variant guarded by an exhaustive `match`. A
   new field or variant does not compile until it has a sample, so the check sees every one. Where serializing skips

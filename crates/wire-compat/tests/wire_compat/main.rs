@@ -10,8 +10,8 @@
 //!   and value of the sample it read. That catches a removed or renamed field, defaulted and optional ones too, an
 //!   enum variant its readers have no fallback for or read as their fallback, and a changed representation.
 //! - This one reads what the previous release wrote: `fixtures/`, which that release's samples wrote, one file for
-//!   every document, parse as this version's types with the values they hold. That catches a newly required field
-//!   and a removed variant.
+//!   every document, parse as this version's types, and written back keep every key and value of a full fixture.
+//!   That catches a newly required field, a removed variant, and a renamed or removed field skipped when empty.
 //!
 //! A break made on purpose is one line in [`ACCEPTED`], naming the ADR that records it. An entry that no longer
 //! fails fails the check too, so the list stays true. CONTRIBUTING.md says how to move both to a new release.
@@ -73,54 +73,89 @@ fn reads<T: DeserializeOwned + Serialize>(value: &Value) -> Result<Value, String
         .map_err(|error| format!("does not parse: {error}"))
 }
 
-/// Which keys of what a reader writes back the JSON it read must have.
+/// Which keys of one side's JSON the other must have.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Keys {
-    /// Every one: a full sample sets every field, so a key it lacks is a field the reader filled in with its
-    /// default, one the writer renamed or removed.
+    /// Every one: a full sample sets every field, so a key one side lacks is a field renamed or removed, which the
+    /// reader filled in with its default or, skipped when empty, left out.
     Every,
     /// Those both have: an empty sample leaves fields out, and a field newer than the JSON is the reader's own.
     Shared,
 }
 
-/// Where what a reader `read` and wrote back differs from what was `written`, beyond keys only the writer has: a
-/// key [`Keys`] says it must have and lacks, or another value, such as a fallback variant's tag.
-fn misread(read: &Value, written: &Value, keys: Keys, path: &str) -> Option<String> {
-    match (read, written) {
-        (Value::Object(read), Value::Object(written)) => read.iter().find_map(|(key, value)| {
+/// Which keys a reader's reading of some JSON and that JSON must both have, each way.
+#[derive(Debug, Clone, Copy)]
+struct Expect {
+    /// Of what the reader wrote back, which keys the JSON it was sent must have.
+    read: Keys,
+    /// Of what it was sent, which keys what it wrote back must have.
+    sent: Keys,
+}
+
+/// Where two JSON values differ: a key `left` has and `right` lacks, where [`Keys`] says it must have it, or a
+/// value, such as a fallback variant's tag.
+#[derive(Debug)]
+enum Difference {
+    Missing(String),
+    Value {
+        path: String,
+        left: Value,
+        right: Value,
+    },
+}
+
+fn difference(left: &Value, right: &Value, keys: Keys, path: &str) -> Option<Difference> {
+    match (left, right) {
+        (Value::Object(left), Value::Object(right)) => left.iter().find_map(|(key, value)| {
             let path = if path.is_empty() {
                 key.clone()
             } else {
                 format!("{path}.{key}")
             };
-            match written.get(key) {
-                Some(written) => misread(value, written, keys, &path),
-                None if keys == Keys::Every => {
-                    Some(format!("reads `{path}`, which it was not sent"))
-                }
+            match right.get(key) {
+                Some(right) => difference(value, right, keys, &path),
+                None if keys == Keys::Every => Some(Difference::Missing(path)),
                 None => None,
             }
         }),
-        (Value::Array(read), Value::Array(written)) if read.len() == written.len() => read
+        (Value::Array(left), Value::Array(right)) if left.len() == right.len() => left
             .iter()
-            .zip(written)
+            .zip(right)
             .enumerate()
-            .find_map(|(index, (read, written))| {
-                misread(read, written, keys, &format!("{path}[{index}]"))
+            .find_map(|(index, (left, right))| {
+                difference(left, right, keys, &format!("{path}[{index}]"))
             }),
-        _ if read == written => None,
-        _ => Some(format!("reads `{path}` as {read}, sent {written}")),
+        _ if left == right => None,
+        _ => Some(Difference::Value {
+            path: path.to_owned(),
+            left: left.clone(),
+            right: right.clone(),
+        }),
     }
 }
 
-/// Whether `reader` reads `written` and sees what it says.
+/// Whether `reader` reads `sent` and sees what it says, with the keys `expect` asks for.
 fn check(
     reader: fn(&Value) -> Result<Value, String>,
-    written: &Value,
-    keys: Keys,
+    sent: &Value,
+    expect: Expect,
 ) -> Result<(), String> {
-    let read = reader(written)?;
-    misread(&read, written, keys, "").map_or(Ok(()), Err)
+    let read = reader(sent)?;
+    if let Some(difference) = difference(&read, sent, expect.read, "") {
+        return Err(match difference {
+            Difference::Missing(path) => format!("reads `{path}`, which it was not sent"),
+            Difference::Value { path, left, right } => {
+                format!("reads `{path}` as {left}, sent {right}")
+            }
+        });
+    }
+    match difference(sent, &read, expect.sent, "") {
+        None => Ok(()),
+        Some(Difference::Missing(path)) => Err(format!("drops `{path}`, which it was sent")),
+        Some(Difference::Value { path, left, right }) => {
+            Err(format!("reads `{path}` as {right}, sent {left}"))
+        }
+    }
 }
 
 fn json(value: impl Serialize) -> Value {
@@ -280,12 +315,16 @@ fn the_previous_release_reads_what_this_one_writes() {
             if document.name == "events" && !known_events.contains_key(label) {
                 continue;
             }
-            let keys = if label == "empty" {
+            let read = if label == "empty" {
                 Keys::Shared
             } else {
                 Keys::Every
             };
-            if let Err(error) = check(document.previous, value, keys) {
+            let expect = Expect {
+                read,
+                sent: Keys::Shared,
+            };
+            if let Err(error) = check(document.previous, value, expect) {
                 failures.insert(format!("{}/{label}", document.name), error);
             }
         }
@@ -310,7 +349,18 @@ fn this_version_reads_what_the_previous_release_wrote() {
             continue;
         };
         for (label, value) in &fixture(&name) {
-            if let Err(error) = check(document.current, value, Keys::Shared) {
+            // Every key a full fixture holds must survive this version's reading: a field renamed or removed and
+            // skipped when empty leaves no key behind for the other way to miss.
+            let sent = if label == "empty" {
+                Keys::Shared
+            } else {
+                Keys::Every
+            };
+            let expect = Expect {
+                read: Keys::Shared,
+                sent,
+            };
+            if let Err(error) = check(document.current, value, expect) {
                 failures.insert(format!("{name}/{label}"), error);
             }
         }
