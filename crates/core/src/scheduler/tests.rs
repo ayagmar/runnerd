@@ -1032,6 +1032,15 @@ fn only_jobs_for_githubs_own_images_go_unlisted() {
         "macos-15-intel",
         "macos-26-intel",
         "xcode-27",
+        "macos-latest-large",
+        "macos-14-large",
+        "macos-15-large",
+        "macos-26-large",
+        "macos-latest-xlarge",
+        "macos-14-xlarge",
+        "macos-15-xlarge",
+        "macos-26-xlarge",
+        "xcode-27-xlarge",
         // Not GitHub's: fake versions, a typo and custom names.
         "ubuntu-99.04",
         "ubuntu-2404",
@@ -1043,10 +1052,10 @@ fn only_jobs_for_githubs_own_images_go_unlisted() {
         .zip(labels)
         .map(|(id, label)| job(id, &[label]))
         .collect();
-    queued.push(job(14, &["self-hosted", "ubuntu-latest"]));
+    queued.push(job(23, &["self-hosted", "ubuntu-latest"]));
     let (repositories, profiles) = two_pools(queued);
     let waiting = plan(&repositories, &profiles, budget(None, None), now()).waiting;
     let unserved: Vec<u64> = waiting.keys().copied().collect();
     // GitHub's own labels are left to it; the rest, `self-hosted` beside an image name too, are the owner's to fix.
-    assert_eq!(unserved, [9, 10, 11, 12, 13, 14]);
+    assert_eq!(unserved, [18, 19, 20, 21, 22, 23]);
 }

@@ -39,7 +39,9 @@ queued; another's 600M design jobs waited 6-12 minutes behind its Android gate.
   (`No profile serves the label halyard-lite`). Only a job asking for exactly one GitHub-hosted runner label is
   GitHub's and not listed. The labels are one explicit list (`scheduler::GITHUB_HOSTED`), copied from GitHub's
   [supported runners table](https://github.com/github/docs/blob/main/data/reusables/actions/supported-github-runners.md)
-  and its single-CPU row, not a pattern: a pattern flagged real labels such as `ubuntu-slim` and `macos-15-intel`
+  and its single-CPU row, and the larger macOS runners of its
+  [larger runners table](https://github.com/github/docs/blob/main/data/reusables/actions/larger-runners-table.md)
+  (`macos-15-xlarge` and the like), not a pattern: a pattern flagged real labels such as `ubuntu-slim` and `macos-15-intel`
   and hid fake versions such as `ubuntu-99.04`. A typo, a custom label such as `macos-builder`, or a hosted label
   beside `self-hosted` waits with `NoPool`. The list must be updated when GitHub adds an image; until then such a
   job also waits with `NoPool`, whose wording (`No profile serves the label …`) stays true.

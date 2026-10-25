@@ -220,7 +220,8 @@ pub struct Budget {
 
 /// The workflow labels of GitHub-hosted runners, from
 /// <https://github.com/github/docs/blob/main/data/reusables/actions/supported-github-runners.md> and its single-CPU
-/// row (`single-cpu-table-row.md`), as of 2026-10-16. Update it when GitHub adds or retires an image: a label
+/// row (`single-cpu-table-row.md`), and the larger macOS runners of
+/// <https://github.com/github/docs/blob/main/data/reusables/actions/larger-runners-table.md>, as of 2026-10-16. Update it when GitHub adds or retires an image: a label
 /// missing here makes its jobs wait with `Waiting::NoPool`, whose wording stays true for them.
 const GITHUB_HOSTED: &[&str] = &[
     "ubuntu-slim",
@@ -244,6 +245,15 @@ const GITHUB_HOSTED: &[&str] = &[
     "macos-26-intel",
     "macos-15-intel",
     "xcode-27",
+    "macos-latest-large",
+    "macos-26-large",
+    "macos-15-large",
+    "macos-14-large",
+    "macos-latest-xlarge",
+    "macos-26-xlarge",
+    "macos-15-xlarge",
+    "macos-14-xlarge",
+    "xcode-27-xlarge",
 ];
 
 /// Whether GitHub runs a job on its own runners: it asks for exactly one label, one of `GITHUB_HOSTED`. No pool of
