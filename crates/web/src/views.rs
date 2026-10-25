@@ -336,13 +336,16 @@ pub(crate) fn slot_id(profile: &str, slot: usize) -> String {
 }
 
 /// A budget block's size: its figure as `runnerd.toml` writes it, and when shorter, `ByteSize::short`'s, which only a
-/// narrow block shows.
+/// narrow block shows. A figure longer than five characters, such as `767.5M`, would not fit a block's font at its
+/// largest, so the block shows the short one alone.
 pub(crate) fn block_size(memory: u64) -> Markup {
     let full = format::bytes(memory);
     let short = runnerd_core::config::ByteSize(memory).short();
     html! {
         span.size {
-            @if short == full {
+            @if full.chars().count() > 5 {
+                (short)
+            } @else if short == full {
                 (full)
             } @else {
                 span.full { (full) }
@@ -373,6 +376,11 @@ mod tests {
         assert_eq!(
             block_size(8 << 30).into_string(),
             r#"<span class="size">8G</span>"#
+        );
+        assert_eq!(
+            block_size(1535 << 19).into_string(),
+            r#"<span class="size">768M</span>"#,
+            "767.5M is too long for a block, so it reads short whatever the width"
         );
     }
 
