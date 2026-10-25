@@ -158,7 +158,8 @@ queued → slot → container → removed
 6. When a profile is idle after its slot 1 ran a job, or after the caches' check measured its snapshot over
    `[caches] snapshot_max`, `cache::reseed` makes slot 1's layers the profile's snapshot, which starts over above
    that limit, from the image ([ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md),
-   [ADR 0065](docs/adr/0065-a-snapshot-starts-over-from-the-image.md)).
+   [ADR 0065](docs/adr/0065-a-snapshot-starts-over-from-the-image.md)). What slot 1's jobs deleted of the image goes
+   in whiteouts beside the snapshot ([ADR 0067](docs/adr/0067-whiteouts-of-the-image-beside-the-snapshot.md)).
 
 On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`) and schedules
 nothing until Docker has listed them. A running runner in a slot, profile or repository the config no longer has is

@@ -6,7 +6,9 @@ emptied above `mirror.max_size`. Amended by [0052](0052-shared-build-cache.md): 
 repository is shared by every slot, written only by the default branch's pushes, schedules and manual runs. Amended
 by [0054](0054-slot-docker-stores-share-the-disk.md): the slots' Docker stores share a quarter of the disk not
 otherwise used. Amended by [0066](0066-a-reseed-that-did-not-finish.md): a reseed that did not finish starts the
-profile over from the image, and containers use neither its snapshot nor their slot's changes until then.
+profile over from the image, and containers use neither its snapshot nor their slot's changes until then. Amended
+by [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md): whiteouts in `/base/<layer>.hidden`, between the
+snapshot and the image, hide what a job deleted of the image.
 
 ## Context
 

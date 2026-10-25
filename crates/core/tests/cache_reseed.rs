@@ -13,15 +13,73 @@
 )]
 
 use std::collections::BTreeMap;
+use std::sync::OnceLock;
 
 use runnerd_core::cache::{self, Names, Reseed, runner_mounts};
 use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
 const PROFILE: &str = "cache";
-/// The runner image the containers run.
-fn image() -> String {
+/// The runner image the fixture image is made from.
+fn runner_image() -> String {
     std::env::var("RUNNERD_TEST_IMAGE").unwrap_or("runnerd-runner:base".to_owned())
+}
+
+/// The image every container runs, the seed container's too: the runner image with `IMAGE_FILES`.
+static FIXTURE_IMAGE: OnceLock<String> = OnceLock::new();
+
+fn image() -> String {
+    FIXTURE_IMAGE.get().cloned().unwrap_or_else(runner_image)
+}
+
+/// What the fixture image holds in the cache layer's path: a file a job deletes, a directory it replaces, a file it
+/// leaves, and cargo's settings, of which the image's own copy stays.
+const IMAGE_FILES: &str = "mkdir -p /home/runner/.cache/fixture/replaced /home/runner/.cache/cargo \
+    && echo image > /home/runner/.cache/fixture/deleted && echo image > /home/runner/.cache/fixture/replaced/old \
+    && echo image > /home/runner/.cache/fixture/kept && echo image > /home/runner/.cache/cargo/config.toml \
+    && chown -R runner:runner /home/runner/.cache";
+
+/// Makes `tag` the runner image with `IMAGE_FILES`.
+async fn fixture_image(docker: &Docker, api: &bollard::Docker, tag: &str) -> Result<(), String> {
+    let spec = RunnerSpec {
+        name: format!("{tag}-build"),
+        image: runner_image(),
+        profile: PROFILE.to_owned(),
+        slice: "system.slice".to_owned(),
+        cpus: 1,
+        memory: "1G".parse().map_err(|e: String| e)?,
+        env: Vec::new(),
+        mounts: Vec::new(),
+        network: Some("none".to_owned()),
+        labels: BTreeMap::new(),
+        entrypoint: Some(vec![
+            "bash".to_owned(),
+            "-c".to_owned(),
+            IMAGE_FILES.to_owned(),
+        ]),
+        jit_config: None,
+    };
+    let id = docker
+        .start(&spec, &Sysbox)
+        .await
+        .map_err(|e| e.to_string())?;
+    let code = docker.wait(&id).await.map_err(|e| e.to_string());
+    let committed = api
+        .commit_container(
+            bollard::query_parameters::CommitContainerOptions {
+                container: Some(id.clone()),
+                repo: Some(tag.to_owned()),
+                ..Default::default()
+            },
+            bollard::models::ContainerConfig::default(),
+        )
+        .await
+        .map_err(|e| e.to_string());
+    docker.remove(&id).await.map_err(|e| e.to_string())?;
+    match code? {
+        0 => committed.map(drop),
+        code => Err(format!("making the fixture image exited {code}")),
+    }
 }
 
 /// Runs the rest of a command as the runner user, as a job does.
@@ -202,7 +260,60 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     let capped = reseed("0K", "3M");
     fitting_snapshot(docker, names, &capped).await?;
     capped_snapshot(docker, names, &capped).await?;
-    interrupted_reseed(docker, names, &reseed("1T", "1T")).await
+    interrupted_reseed(docker, names, &reseed("1T", "1T")).await?;
+    image_entries_hidden(docker, names, &reseed("0K", "1T")).await
+}
+
+/// What slot 1's job deleted of the image, or replaced, stays hidden from every slot after a reseed, and after the
+/// next one, which copies a view that leaves the image out; what it left stays, and so does the image's own copy of
+/// cargo's settings when the job deleted cargo's home.
+async fn image_entries_hidden(
+    docker: &Docker,
+    names: &Names,
+    reseed: &Reseed<'_>,
+) -> Result<(), String> {
+    let cache = "/home/runner/.cache";
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        1,
+        &format!(
+            "{AS_RUNNER} sh -c 'rm {cache}/fixture/deleted && rm -r {cache}/fixture/replaced \
+             && mkdir {cache}/fixture/replaced && echo job > {cache}/fixture/replaced/new && rm -r {cache}/cargo'"
+        ),
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!("the job in slot 1 exited {code}:\n{output}"));
+    }
+    let hidden = format!(
+        "test ! -e {cache}/fixture/deleted && test ! -e {cache}/fixture/replaced/old \
+         && test -f {cache}/fixture/replaced/new && test -f {cache}/fixture/kept \
+         && test \"$(cat {cache}/{IMAGE_CONFIG})\" = image"
+    );
+    for round in ["the reseed", "the next reseed"] {
+        let output = cache::reseed(docker, reseed)
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("{output}");
+        let (code, output) = run_in_slot(docker, names, 2, &hidden).await?;
+        if code != 0 {
+            return Err(format!(
+                "after {round}, slot 2 sees what slot 1 deleted of the image, or not what it left (exit {code}):\n{output}"
+            ));
+        }
+        let (code, output) = run_in_slot(
+            docker,
+            names,
+            1,
+            &format!("{AS_RUNNER} sh -c 'echo {round:?} > {cache}/unrelated'"),
+        )
+        .await?;
+        if code != 0 {
+            return Err(format!("the job in slot 1 exited {code}:\n{output}"));
+        }
+    }
+    Ok(())
 }
 
 /// A reseed killed between changing the snapshot and dropping the slots' changes leaves its marker: a slot's changes
@@ -461,9 +572,16 @@ async fn old_snapshot(
 async fn a_reseed_shares_slot_1s_cache_with_slot_2_read_only() {
     let names = Names::new(&format!("runnerd-test-{}", std::process::id()));
     let docker = Docker::connect().unwrap();
-    let result = scenario(&docker, &names).await;
-
     let api = bollard::Docker::connect_with_local_defaults().unwrap();
+    let fixture = format!("{}-image", names.network());
+    let made = fixture_image(&docker, &api, &fixture).await;
+    let made_image = made.is_ok();
+    FIXTURE_IMAGE.set(fixture.clone()).unwrap();
+    let result = match made {
+        Ok(()) => scenario(&docker, &names).await,
+        Err(error) => Err(error),
+    };
+
     let mut cleanup = Vec::new();
     for volume in [
         names.base(PROFILE),
@@ -484,6 +602,18 @@ async fn a_reseed_shares_slot_1s_cache_with_slot_2_read_only() {
             .await
             .map_err(|e| e.to_string()),
     );
+    if made_image {
+        cleanup.push(
+            api.remove_image(
+                &fixture,
+                None::<bollard::query_parameters::RemoveImageOptions>,
+                None,
+            )
+            .await
+            .map(drop)
+            .map_err(|e| e.to_string()),
+        );
+    }
     result.unwrap();
     for removed in cleanup {
         removed.unwrap();

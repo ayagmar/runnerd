@@ -6,6 +6,8 @@
 # that would outgrow that many bytes starts over from the image, which drops what no job changed since, such as a
 # superseded tool version, with every slot's changes. Only the image is whole on its own: slot 1's changes hold
 # what its jobs wrote, not what they only read from the snapshot, such as the files a cache's updated index names.
+# Slot 1's view is copied without the image, so what its jobs deleted of the image would come back: whiteouts for it
+# go in /base/<layer>.hidden, which containers mount between the snapshot and the image (layers.sh).
 # RESEED_MARKER is there from the first change to the snapshot or a slot's layers until the last is on disk; a run
 # that finds it, left by one killed in between, starts over from the image whatever its arguments.
 set -euo pipefail
@@ -39,7 +41,7 @@ start_over() {
     begin_change
     for layer in "${LAYERS[@]}"; do
         name=${layer%%:*}
-        rm -rf "/base/$name" "/base/$name.new" /workers/*/"$name"
+        rm -rf "/base/$name" "/base/$name.new" "/base/$name.hidden" "/base/$name.hidden.new" /workers/*/"$name"
     done
     end_change
 }
@@ -53,8 +55,8 @@ fi
 changes=0
 for layer in "${LAYERS[@]}"; do
     name=${layer%%:*}
-    # A copy a run killed before its first change left.
-    rm -rf "/base/$name.new"
+    # What a run killed before its first change left.
+    rm -rf "/base/$name.new" "/base/$name.hidden.new"
     [ ! -d "/workers/1/$name/upper" ] \
         || changes=$((changes + $(du -sxb "/workers/1/$name/upper" | cut -f1)))
 done
@@ -63,19 +65,95 @@ if [ "$changes" -lt "${1:-0}" ]; then
     exit 0
 fi
 
-mkdir -p /mnt/merged
+mkdir -p /mnt/merged /mnt/view
 # Mounts slot 1's view of layer $1, its changes over the snapshot, at /mnt/merged.
 mount_view() {
     mkdir -p "/base/$1"
     mount -t overlay overlay -o "ro,lowerdir=/workers/1/$1/upper:/base/$1" /mnt/merged
 }
 
+# Whether the cache layer's entry $1 is one of CACHE_SECRETS.
+is_secret() {
+    local file
+    for file in "${CACHE_SECRETS[@]}"; do
+        [ "$file" != "$1" ] || return 0
+    done
+    return 1
+}
+
+# Whether the cache layer's entry $1 is a directory of one of CACHE_SECRETS.
+holds_secret() {
+    local file
+    for file in "${CACHE_SECRETS[@]}"; do
+        [ "${file#"$1"/}" = "$file" ] || return 0
+    done
+    return 1
+}
+
+# Makes the directory $3 of the image's $2, with each one above it, in the whiteouts' layer $1 as the image has them.
+make_hidden_dir() {
+    local dir=$1${3:+/$3}
+    [ ! -d "$dir" ] || return 0
+    if [ -n "$3" ]; then
+        if [ "${3%/*}" = "$3" ]; then
+            make_hidden_dir "$1" "$2" ""
+        else
+            make_hidden_dir "$1" "$2" "${3%/*}"
+        fi
+    fi
+    mkdir "$dir"
+    chown --reference="$2${3:+/$3}" "$dir"
+    chmod --reference="$2${3:+/$3}" "$dir"
+}
+
+# Puts a whiteout in /base/$1.hidden.new for each entry of the image's $2 that slot 1's view hides: one a job
+# deleted, or one under a directory it replaced. The image's CACHE_SECRETS get none, as its own copies stay
+# (layers.sh), and a directory or symlink of theirs none either: only what else such a directory held. Nothing under a symlink or a file of the
+# view is looked at, and the layer holds only directories it makes.
+hide_image_entries() {
+    local hidden=/base/$1.hidden.new image=$2 entry done_with='' lower=/base/$1 entries
+    [ -d "$image" ] && [ ! -L "$image" ] || return 0
+    [ ! -d "/base/$1.hidden" ] || lower=$lower:/base/$1.hidden
+    # Listed in full first, so a find that fails fails the reseed instead of leaving whiteouts out.
+    entries=$(mktemp)
+    find "$image" -mindepth 1 -printf '%P\0' > "$entries"
+    mount -t overlay overlay -o "ro,lowerdir=/workers/1/$1/upper:$lower:$image" /mnt/view
+    while IFS= read -r -d '' entry; do
+        # find lists a directory before what it holds.
+        [ -z "$done_with" ] || [ "${entry#"$done_with"/}" = "$entry" ] || continue
+        done_with=
+        if [ -e "/mnt/view/$entry" ] || [ -L "/mnt/view/$entry" ]; then
+            { [ -d "/mnt/view/$entry" ] && [ ! -L "/mnt/view/$entry" ]; } || done_with=$entry
+        elif [ "$1" = cache ] && is_secret "$entry"; then
+            done_with=$entry
+        elif [ "$1" = cache ] && holds_secret "$entry"; then
+            if [ -d "$image/$entry" ] && [ ! -L "$image/$entry" ]; then
+                make_hidden_dir "$hidden" "$image" "$entry"
+            else
+                done_with=$entry
+            fi
+        else
+            if [ "${entry%/*}" = "$entry" ]; then
+                make_hidden_dir "$hidden" "$image" ""
+            else
+                make_hidden_dir "$hidden" "$image" "${entry%/*}"
+            fi
+            mknod "$hidden/$entry" c 0 0
+            done_with=$entry
+        fi
+    done < "$entries"
+    umount /mnt/view
+    rm -f "$entries"
+}
+
 max=${2:-0}
 if [ "$max" -gt 0 ]; then
-    # What the new snapshot would hold: slot 1's view of each layer it changed, the snapshot of each other one.
+    # What the new snapshot would hold: slot 1's view of each layer it changed, the snapshot of each other one, and
+    # the whiteouts there are now.
     size=0
     for layer in "${LAYERS[@]}"; do
         name=${layer%%:*}
+        [ ! -d "/base/$name.hidden" ] || size=$((size + $(du -sxb "/base/$name.hidden" | cut -f1)))
         if [ -d "/workers/1/$name/upper" ]; then
             mount_view "$name"
             size=$((size + $(du -sxb /mnt/merged | cut -f1)))
@@ -91,18 +169,20 @@ if [ "$max" -gt 0 ]; then
     fi
 fi
 for layer in "${LAYERS[@]}"; do
-    name=${layer%%:*}
+    name=${layer%%:*} path=${layer#*:}
     [ -d "/workers/1/$name/upper" ] || continue
     mount_view "$name"
     cp -a /mnt/merged "/base/$name.new"
     umount /mnt/merged
+    hide_image_entries "$name" "$path"
     # Gradle daemon logs and registry: only meaningful to the daemons of the slot that wrote them. Not through a
     # symlink, which would delete outside the copy.
     [ -L "/base/$name.new/gradle" ] || rm -rf "/base/$name.new/gradle/daemon"
     [ "$name" != cache ] || drop_cache_secrets "/base/$name.new"
     begin_change
-    rm -rf "/base/$name"
+    rm -rf "/base/$name" "/base/$name.hidden"
     mv "/base/$name.new" "/base/$name"
+    [ ! -d "/base/$name.hidden.new" ] || mv "/base/$name.hidden.new" "/base/$name.hidden"
     rm -rf /workers/*/"$name"
     echo "seeded $name: $(du -sh "/base/$name" | cut -f1)"
 done
