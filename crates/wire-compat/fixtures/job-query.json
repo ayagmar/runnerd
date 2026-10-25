@@ -1,0 +1,13 @@
+{
+  "full": {
+    "before": 42,
+    "conclusion": "failure",
+    "limit": 50,
+    "name": "build",
+    "repository": "tidewater/halyard",
+    "since": 1760800000,
+    "state": "completed",
+    "until": 1761400000,
+    "workflow": "ci"
+  }
+}

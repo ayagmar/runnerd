@@ -9,7 +9,7 @@ starts only the jobs those paths can affect:
 
 | Job | Runs on a pull request that changes |
 |---|---|
-| `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh` |
+| `rust`: fmt, clippy (also core without `host`, alone and with `client`, tests included), tests, `cargo doc`, the client boundary check, the wire check against the previous release, `cargo-machete` | `crates/**`, `examples/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `rustfmt.toml`, `.cargo/**`, `clippy.toml`, `.clippy.toml`, `deny.toml`, `.github/scripts/check-boundaries.sh`, `.github/scripts/check-wire-compat.sh` |
 | `docs-commands`: builds `runnerd` and `runnerctl` and checks every command and option the docs show against their `--help` | `README.md`, `site/src/content/docs/**`, `crates/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.github/scripts/check-docs-commands.sh` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `jvm` and `node` stages, pushes nothing | `image/**` |
@@ -74,6 +74,19 @@ owner's slot layers and can reseed the owner's snapshot, and smaller shared-cach
 5. Stop the test daemon with `runnerd stop --socket <scratch>/runnerd.sock`, check that `docker ps` lists none of
    its runners, then `systemctl --user start runnerd`.
 
+## The wire between releases
+
+`.github/scripts/check-wire-compat.sh` fails when the previous release cannot read what this version writes, or this
+version cannot read what the previous release wrote: the daemon's responses and events, the requests clients send,
+the events and admissions the history stores, and what `[notify]` webhooks receive. A new field or variant makes it
+fail to compile until `crates/wire-compat/tests/wire_compat/samples.rs` has a sample of it. A new document type,
+such as a new response, joins `documents!` in `main.rs` when the first release that has it becomes the previous one.
+
+Fix a failure with a serde default or a fallback (`#[serde(other)]`) where one keeps both sides reading. When the
+break is the point, write the ADR that says what an older client or daemon does with it, and add one line to
+`ACCEPTED` naming the item the failure names and the ADR. A new event type needs neither: clients and the history
+skip events they do not know.
+
 ## Releases
 
 `.github/workflows/release.yml` runs when a tag like `v0.0.1` or `v0.0.1-rc.1` is pushed; a suffix makes a pre-release.
@@ -81,8 +94,9 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
 `plan` job fails. To cut one:
 
 1. On a branch, bump `version` under `[workspace.package]` in `Cargo.toml` and the `version` of the internal
-   dependencies under `[workspace.dependencies]` (`runnerd-core`, `runnerd-web`), then run `cargo check` without
-   `--locked` so `Cargo.lock` follows.
+   dependencies under `[workspace.dependencies]` (`runnerd-core`, `runnerd-web`), then run `cargo check` and
+   `cargo check --manifest-path crates/wire-compat/Cargo.toml --tests` without `--locked` so both `Cargo.lock`s
+   follow.
 2. Update every place that names the version. `git grep -nF <old version> -- ':!Cargo.lock' ':!site/pnpm-lock.yaml'`
    finds them; today they are:
    - `README.md`: the installer's `--version` example;
@@ -91,6 +105,7 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    - the site: `install.md`, `configuration.mdx`, `clients.mdx`, `src/pages/index.astro` and the TUI frames in
      `src/assets/tui/`, which are recaptured rather than edited.
 
+   `crates/wire-compat` names the previous release, not this one; it moves after the tag (step 6).
    Tests that use a version only as an example, such as `store/tests.rs`'s "as runnerd 0.0.5 stored it", stay, and
    so does the site's `upgrading.md`, which names the versions each section is about. Give it a section for the new
    release when an upgrade asks anything of the owner: a migration, a changed image, a new default.
@@ -112,6 +127,17 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    (an anonymous pull, with an empty Docker config so the host's login stays:
    `docker --config "$(mktemp -d)" pull ghcr.io/ayagmar/runnerd-runner:base-<version>`), `install.sh` installs the
    new version, and crates.io lists it.
+6. Make the new release the one the wire check reads against
+   ([ADR 0060](docs/adr/0060-the-previous-release-reads-the-wire.md)). On a branch from the tagged commit:
+   - write its fixtures: `cargo test --manifest-path crates/wire-compat/Cargo.toml --target-dir target/wire-compat
+     --test wire_compat -- --ignored write_fixtures` replaces `crates/wire-compat/fixtures/` with its samples;
+   - in `crates/wire-compat/Cargo.toml`, set `runnerd-core-previous`'s `rev` to the tag's commit
+     (`git rev-parse v0.0.6^{commit}`) and its comment to the tag, and `PREVIOUS` in
+     `crates/wire-compat/tests/wire_compat/main.rs` to the tag; run `cargo check --manifest-path
+     crates/wire-compat/Cargo.toml --tests` so its `Cargo.lock` follows;
+   - add to `documents!` the document types the release added, with their samples;
+   - run `.github/scripts/check-wire-compat.sh`. It names every `ACCEPTED` entry the new release no longer breaks;
+     remove them.
 
 A new package on ghcr.io has so far come out public, as the repository is. If one does not, make it public once:
 the package's Package settings → Danger Zone → Change visibility → Public. To publish the images of a release that

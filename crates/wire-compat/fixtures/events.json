@@ -1,0 +1,406 @@
+{
+  "budget.changed": {
+    "at": 1761400000,
+    "budget": {
+      "admission": "measured",
+      "cpu": {
+        "budget": 24000,
+        "cpus": 16000,
+        "held": false,
+        "in_use": 8000
+      },
+      "held": false,
+      "host": {
+        "limit": 42949672960,
+        "memory": {
+          "at": 1761400000,
+          "available": 33285996544,
+          "full": {
+            "avg10": 150,
+            "avg60": 60
+          },
+          "slice": 9663676416,
+          "some": {
+            "avg10": 250,
+            "avg60": 120
+          },
+          "total": 68719476736
+        },
+        "spare": 12884901888,
+        "stalled": false
+      },
+      "memory_in_use": 9663676416,
+      "memory_max": 34359738368,
+      "mirror_memory": 1073741824,
+      "seed_memory": [
+        {
+          "memory": 2147483648,
+          "profile": "halyard"
+        }
+      ],
+      "shell_memory": [
+        {
+          "job": 41,
+          "memory": 1073741824
+        }
+      ],
+      "slice": "runnerd.slice",
+      "slice_cpus": 16000
+    },
+    "id": 7,
+    "type": "budget.changed"
+  },
+  "cache.reseeded": {
+    "at": 1761400000,
+    "error": "the seed container failed",
+    "id": 7,
+    "output": "reseeded",
+    "profile": "halyard",
+    "type": "cache.reseeded"
+  },
+  "host.sample": {
+    "at": 1761400000,
+    "id": 7,
+    "sample": {
+      "at": 1761400100,
+      "cpu": 9000,
+      "memory": 21474836480
+    },
+    "type": "host.sample"
+  },
+  "job.finished": {
+    "at": 1761400000,
+    "id": 7,
+    "job": {
+      "branch": "main",
+      "conclusion": "success",
+      "id": 42,
+      "labels": [
+        "self-hosted"
+      ],
+      "log": {
+        "bytes": 90000,
+        "lines": 1200,
+        "truncated": false
+      },
+      "metrics": {
+        "build_cache": {
+          "hits": 80,
+          "misses": 20,
+          "read_bytes": 314572800,
+          "refused": 1,
+          "writer": true,
+          "written_bytes": 41943040
+        },
+        "cpu_average": 2000,
+        "cpu_peak": 3900,
+        "cpu_time": 1200000,
+        "memory_average": 3221225472,
+        "memory_peak": 5368709120,
+        "mirror_bytes": 157286400,
+        "network_received": 209715200,
+        "network_sent": 10485760,
+        "sock_throttled": 2
+      },
+      "name": "build",
+      "repository": "tidewater/halyard",
+      "run_attempt": 1,
+      "run_id": 900,
+      "runner": {
+        "cpu_cap": 4000,
+        "memory_cap": 8589934592,
+        "name": "runnerd-halyard-0",
+        "profile": "halyard",
+        "slot": 0
+      },
+      "state": "completed",
+      "timeline": {
+        "cleaned_at": 1761400610,
+        "container_started_at": 1761400010,
+        "finished_at": 1761400600,
+        "queued_at": 1761400000,
+        "started_at": 1761400020
+      },
+      "url": "https://github.com/tidewater/halyard/actions/runs/900",
+      "workflow": "ci"
+    },
+    "type": "job.finished"
+  },
+  "job.queued": {
+    "at": 1761400000,
+    "id": 7,
+    "job": {
+      "branch": "main",
+      "conclusion": "success",
+      "id": 42,
+      "labels": [
+        "self-hosted"
+      ],
+      "log": {
+        "bytes": 90000,
+        "lines": 1200,
+        "truncated": false
+      },
+      "metrics": {
+        "build_cache": {
+          "hits": 80,
+          "misses": 20,
+          "read_bytes": 314572800,
+          "refused": 1,
+          "writer": true,
+          "written_bytes": 41943040
+        },
+        "cpu_average": 2000,
+        "cpu_peak": 3900,
+        "cpu_time": 1200000,
+        "memory_average": 3221225472,
+        "memory_peak": 5368709120,
+        "mirror_bytes": 157286400,
+        "network_received": 209715200,
+        "network_sent": 10485760,
+        "sock_throttled": 2
+      },
+      "name": "build",
+      "repository": "tidewater/halyard",
+      "run_attempt": 1,
+      "run_id": 900,
+      "runner": {
+        "cpu_cap": 4000,
+        "memory_cap": 8589934592,
+        "name": "runnerd-halyard-0",
+        "profile": "halyard",
+        "slot": 0
+      },
+      "state": "completed",
+      "timeline": {
+        "cleaned_at": 1761400610,
+        "container_started_at": 1761400010,
+        "finished_at": 1761400600,
+        "queued_at": 1761400000,
+        "started_at": 1761400020
+      },
+      "url": "https://github.com/tidewater/halyard/actions/runs/900",
+      "workflow": "ci"
+    },
+    "type": "job.queued"
+  },
+  "job.sample": {
+    "at": 1761400000,
+    "id": 7,
+    "job": 42,
+    "sample": {
+      "at": 1761400100,
+      "cpu": 3000,
+      "memory": 4294967296,
+      "network_received": 1048576,
+      "network_sent": 1024
+    },
+    "type": "job.sample"
+  },
+  "job.started": {
+    "at": 1761400000,
+    "id": 7,
+    "job": {
+      "branch": "main",
+      "conclusion": "success",
+      "id": 42,
+      "labels": [
+        "self-hosted"
+      ],
+      "log": {
+        "bytes": 90000,
+        "lines": 1200,
+        "truncated": false
+      },
+      "metrics": {
+        "build_cache": {
+          "hits": 80,
+          "misses": 20,
+          "read_bytes": 314572800,
+          "refused": 1,
+          "writer": true,
+          "written_bytes": 41943040
+        },
+        "cpu_average": 2000,
+        "cpu_peak": 3900,
+        "cpu_time": 1200000,
+        "memory_average": 3221225472,
+        "memory_peak": 5368709120,
+        "mirror_bytes": 157286400,
+        "network_received": 209715200,
+        "network_sent": 10485760,
+        "sock_throttled": 2
+      },
+      "name": "build",
+      "repository": "tidewater/halyard",
+      "run_attempt": 1,
+      "run_id": 900,
+      "runner": {
+        "cpu_cap": 4000,
+        "memory_cap": 8589934592,
+        "name": "runnerd-halyard-0",
+        "profile": "halyard",
+        "slot": 0
+      },
+      "state": "completed",
+      "timeline": {
+        "cleaned_at": 1761400610,
+        "container_started_at": 1761400010,
+        "finished_at": 1761400600,
+        "queued_at": 1761400000,
+        "started_at": 1761400020
+      },
+      "url": "https://github.com/tidewater/halyard/actions/runs/900",
+      "workflow": "ci"
+    },
+    "type": "job.started"
+  },
+  "job.step": {
+    "at": 1761400000,
+    "id": 7,
+    "job": 42,
+    "step": {
+      "completed_at": 1761400025,
+      "conclusion": "success",
+      "name": "Set up job",
+      "number": 1,
+      "started_at": 1761400020,
+      "status": "completed"
+    },
+    "type": "job.step"
+  },
+  "log.line": {
+    "at": 1761400000,
+    "id": 7,
+    "job": 42,
+    "line": 7,
+    "text": "Compiling runnerd",
+    "type": "log.line"
+  },
+  "profile.changed": {
+    "at": 1761400000,
+    "id": 7,
+    "profile": {
+      "cpus": 4,
+      "image": "runnerd-runner:base",
+      "memory": 8589934592,
+      "name": "halyard",
+      "reseeding": false,
+      "slots": [
+        {
+          "runner": {
+            "busy": true,
+            "container": "runnerd-halyard-0",
+            "name": "runnerd-halyard-0",
+            "repository": "tidewater/halyard",
+            "reserved": 6442450944,
+            "runner_id": 7,
+            "started_at": 1761400000,
+            "warm": true
+          },
+          "slot": 0
+        }
+      ]
+    },
+    "type": "profile.changed"
+  },
+  "profile.removed": {
+    "at": 1761400000,
+    "id": 7,
+    "profile": "halyard",
+    "type": "profile.removed"
+  },
+  "record.created": {
+    "at": 1761400000,
+    "id": 7,
+    "record": {
+      "bytes": 2147483648,
+      "created_at": 1761400610,
+      "image": "runnerd-record-42",
+      "job": 42,
+      "name": "build",
+      "profile": "halyard",
+      "repository": "tidewater/halyard",
+      "workflow": "ci"
+    },
+    "type": "record.created"
+  },
+  "record.deleted": {
+    "at": 1761400000,
+    "id": 7,
+    "job": 42,
+    "removed_by": "age",
+    "type": "record.deleted"
+  },
+  "repository.changed": {
+    "at": 1761400000,
+    "id": 7,
+    "repository": {
+      "labels": [
+        "self-hosted"
+      ],
+      "name": "tidewater/halyard",
+      "paused": false,
+      "profile": "halyard",
+      "queued_jobs": 1
+    },
+    "type": "repository.changed"
+  },
+  "repository.removed": {
+    "at": 1761400000,
+    "id": 7,
+    "repository": "tidewater/halyard",
+    "type": "repository.removed"
+  },
+  "runner.failed": {
+    "at": 1761400000,
+    "failure": {
+      "error": "the image does not start",
+      "held_for": 300,
+      "profile": "halyard",
+      "repository": "tidewater/halyard"
+    },
+    "id": 7,
+    "type": "runner.failed"
+  },
+  "sizing.changed": {
+    "at": 1761400000,
+    "change": {
+      "at": 1761400000,
+      "from": {
+        "cpus": 4,
+        "memory": 8589934592,
+        "slots": 2
+      },
+      "profile": "halyard",
+      "reason": "its p95 rose",
+      "to": {
+        "cpus": 4,
+        "memory": 10737418240,
+        "slots": 2
+      },
+      "uncertain": true
+    },
+    "id": 7,
+    "type": "sizing.changed"
+  },
+  "slot.changed": {
+    "at": 1761400000,
+    "id": 7,
+    "profile": "halyard",
+    "slot": {
+      "runner": {
+        "busy": true,
+        "container": "runnerd-halyard-0",
+        "name": "runnerd-halyard-0",
+        "repository": "tidewater/halyard",
+        "reserved": 6442450944,
+        "runner_id": 7,
+        "started_at": 1761400000,
+        "warm": true
+      },
+      "slot": 0
+    },
+    "type": "slot.changed"
+  }
+}

@@ -1,0 +1,491 @@
+{
+  "empty": {
+    "admission": "measured",
+    "auto": true,
+    "changes": [
+      {
+        "at": 1761400000,
+        "from": {
+          "memory": 8589934592,
+          "slots": 2
+        },
+        "profile": "halyard",
+        "reason": "its p95 rose",
+        "to": {
+          "memory": 10737418240,
+          "slots": 2
+        },
+        "uncertain": true
+      }
+    ],
+    "margin": 20,
+    "memory_max": 34359738368,
+    "min_jobs": 10,
+    "profiles": [
+      {
+        "advice": {
+          "kind": "keep",
+          "memory": 8589934592
+        },
+        "busy": 1,
+        "cpus": 4,
+        "jobs": [
+          {
+            "advice": {
+              "jobs": 3,
+              "kind": "too-few"
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          },
+          {
+            "advice": {
+              "kind": "keep",
+              "memory": 8589934592
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          },
+          {
+            "advice": {
+              "kind": "lower",
+              "memory": 6442450944,
+              "slots": 3
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          },
+          {
+            "advice": {
+              "kind": "raise",
+              "memory": 10737418240,
+              "slots": 2
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          },
+          {
+            "advice": {
+              "kind": "slice-too-small",
+              "memory": 42949672960
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          }
+        ],
+        "memory": 8589934592,
+        "name": "halyard",
+        "peaks": {
+          "at_cap": 1,
+          "cpu": {
+            "max": 7516192768,
+            "p50": 3221225472,
+            "p95": 5368709120,
+            "p99": 6442450944
+          },
+          "jobs": 30,
+          "memory": {
+            "max": 7516192768,
+            "p50": 3221225472,
+            "p95": 5368709120,
+            "p99": 6442450944
+          }
+        },
+        "slots": 2,
+        "starts": {
+          "cold": 3,
+          "cold_p50": 40,
+          "warm": 10,
+          "warm_p50": 5
+        },
+        "wait": {
+          "max": 7516192768,
+          "p50": 3221225472,
+          "p95": 5368709120,
+          "p99": 6442450944
+        },
+        "wants_slots": true
+      }
+    ],
+    "sample_interval": 5,
+    "since": 1760800000,
+    "until": 1761400000
+  },
+  "full": {
+    "admission": "measured",
+    "auto": true,
+    "auto_plan": {
+      "blocked": "the slice is full",
+      "every": 86400,
+      "held": [
+        {
+          "changed": 1761300000,
+          "lower_until": 1761900000,
+          "profile": "halyard",
+          "until": 1761500000
+        }
+      ],
+      "interval": 3600,
+      "max_step": 25,
+      "next": [
+        {
+          "at": 1761400000,
+          "from": {
+            "cpus": 4,
+            "memory": 8589934592,
+            "slots": 2
+          },
+          "profile": "halyard",
+          "reason": "its p95 rose",
+          "to": {
+            "cpus": 4,
+            "memory": 10737418240,
+            "slots": 2
+          },
+          "uncertain": true
+        }
+      ],
+      "raise_interval": 600
+    },
+    "changes": [
+      {
+        "at": 1761400000,
+        "from": {
+          "cpus": 4,
+          "memory": 8589934592,
+          "slots": 2
+        },
+        "profile": "halyard",
+        "reason": "its p95 rose",
+        "to": {
+          "cpus": 4,
+          "memory": 10737418240,
+          "slots": 2
+        },
+        "uncertain": true
+      }
+    ],
+    "margin": 20,
+    "memory_max": 34359738368,
+    "min_jobs": 10,
+    "profiles": [
+      {
+        "advice": {
+          "kind": "keep",
+          "memory": 8589934592
+        },
+        "busy": 1,
+        "cpus": 4,
+        "jobs": [
+          {
+            "advice": {
+              "jobs": 3,
+              "kind": "too-few"
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          },
+          {
+            "advice": {
+              "kind": "keep",
+              "memory": 8589934592
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          },
+          {
+            "advice": {
+              "kind": "lower",
+              "memory": 6442450944,
+              "slots": 3
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          },
+          {
+            "advice": {
+              "kind": "raise",
+              "memory": 10737418240,
+              "slots": 2
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          },
+          {
+            "advice": {
+              "kind": "slice-too-small",
+              "memory": 42949672960
+            },
+            "name": "build",
+            "peaks": {
+              "at_cap": 1,
+              "cpu": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              },
+              "jobs": 30,
+              "memory": {
+                "max": 7516192768,
+                "p50": 3221225472,
+                "p95": 5368709120,
+                "p99": 6442450944
+              }
+            },
+            "repository": "tidewater/halyard",
+            "wait": {
+              "max": 7516192768,
+              "p50": 3221225472,
+              "p95": 5368709120,
+              "p99": 6442450944
+            },
+            "workflow": "ci"
+          }
+        ],
+        "memory": 8589934592,
+        "name": "halyard",
+        "peaks": {
+          "at_cap": 1,
+          "cpu": {
+            "max": 7516192768,
+            "p50": 3221225472,
+            "p95": 5368709120,
+            "p99": 6442450944
+          },
+          "jobs": 30,
+          "memory": {
+            "max": 7516192768,
+            "p50": 3221225472,
+            "p95": 5368709120,
+            "p99": 6442450944
+          }
+        },
+        "slots": 2,
+        "starts": {
+          "cold": 3,
+          "cold_p50": 40,
+          "warm": 10,
+          "warm_p50": 5
+        },
+        "wait": {
+          "max": 7516192768,
+          "p50": 3221225472,
+          "p95": 5368709120,
+          "p99": 6442450944
+        },
+        "wants_slots": true
+      }
+    ],
+    "sample_interval": 5,
+    "since": 1760800000,
+    "until": 1761400000
+  }
+}

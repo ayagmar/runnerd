@@ -1,0 +1,12 @@
+{
+  "full": {
+    "memory_caps": 17179869184,
+    "memory_max": 34359738368,
+    "message": "the config is valid",
+    "revision": "3f2a",
+    "valid": true,
+    "warnings": [
+      "a warning"
+    ]
+  }
+}

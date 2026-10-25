@@ -1,0 +1,8 @@
+{
+  "full": {
+    "bucket": "hour",
+    "repository": "tidewater/halyard",
+    "since": 1760800000,
+    "until": 1761400000
+  }
+}

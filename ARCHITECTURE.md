@@ -37,6 +37,7 @@ flowchart TB
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
 | `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
+| `runnerd-wire-compat` | `crates/wire-compat` | tests only: this version and the previous release read each other's JSON ([ADR 0060](docs/adr/0060-the-previous-release-reads-the-wire.md)); a workspace of its own | `runnerd-core` without `host`, and the previous release's, pinned by commit |
 
 `runnerd-core` modules:
 
@@ -176,6 +177,8 @@ adopted too and drains as it would after a reload.
 ## Invariants
 
 - API types live only in `runnerd-core::api`. Clients deserialize the same types the daemon serializes.
+- The previous release reads what this version writes, and this version what it wrote, unless an ADR accepts the
+  break (`crates/wire-compat`, [ADR 0060](docs/adr/0060-the-previous-release-reads-the-wire.md)).
 - What clients show of the same thing is computed once in `runnerd-core::api`: a job's outcome and whether it
   failed, its steps' outcomes, how long it waited and ran, its phases, its name, its peaks as samples come in, its
   latest runs compared, and how durations, ages, CPU time and cores in use are written (`api::jobs::facts`,

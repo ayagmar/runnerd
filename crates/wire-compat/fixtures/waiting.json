@@ -1,0 +1,48 @@
+{
+  "backoff": {
+    "cause": "start",
+    "kind": "backoff",
+    "until": 1761400300
+  },
+  "behind-cpu": {
+    "job": 41,
+    "kind": "behind-cpu"
+  },
+  "behind-start": {
+    "job": 41,
+    "kind": "behind-start"
+  },
+  "cpu": {
+    "free": 1,
+    "kind": "cpu",
+    "needs": 4
+  },
+  "host-memory": {
+    "free": 2,
+    "kind": "host-memory",
+    "needs": 6
+  },
+  "memory": {
+    "free": 2,
+    "kind": "memory",
+    "needs": 6
+  },
+  "no-slot": {
+    "kind": "no-slot",
+    "profile": "halyard"
+  },
+  "paused": {
+    "kind": "paused"
+  },
+  "pulling-image": {
+    "kind": "pulling-image",
+    "profile": "halyard"
+  },
+  "reseeding": {
+    "kind": "reseeding",
+    "profile": "halyard"
+  },
+  "runner-starting": {
+    "kind": "runner-starting"
+  }
+}

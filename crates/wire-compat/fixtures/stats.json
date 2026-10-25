@@ -1,0 +1,21 @@
+{
+  "full": {
+    "bucket": "day",
+    "rows": [
+      {
+        "cancelled": 1,
+        "cpu_time": 14400000,
+        "failed": 1,
+        "jobs": 12,
+        "memory_peak": 5368709120,
+        "mirror_bytes": 1073741824,
+        "network_received": 2147483648,
+        "queue_seconds": 300,
+        "repository": "tidewater/halyard",
+        "run_seconds": 7200,
+        "start": 1761350400,
+        "succeeded": 10
+      }
+    ]
+  }
+}
