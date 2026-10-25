@@ -201,7 +201,69 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     old_snapshot(docker, names, &reseed("1T", "1T")).await?;
     let capped = reseed("0K", "3M");
     fitting_snapshot(docker, names, &capped).await?;
-    capped_snapshot(docker, names, &capped).await
+    capped_snapshot(docker, names, &capped).await?;
+    interrupted_reseed(docker, names, &reseed("1T", "1T")).await
+}
+
+/// A reseed killed between changing the snapshot and dropping the slots' changes leaves its marker: a slot's changes
+/// may name what the snapshot no longer holds. Until the next reseed starts both over from the image, whatever its
+/// threshold, a container sees neither.
+async fn interrupted_reseed(
+    docker: &Docker,
+    names: &Names,
+    below_threshold: &Reseed<'_>,
+) -> Result<(), String> {
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        2,
+        &format!("{AS_RUNNER} sh -c 'echo slot-2 > /home/runner/.cache/index'"),
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!("the job in slot 2 exited {code}:\n{output}"));
+    }
+    let (code, output) = run(
+        docker,
+        names,
+        1,
+        Snapshot::Writable,
+        "",
+        "mkdir -p /base/cache && echo half > /base/cache/content && touch /base/.reseeding",
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!("planting a killed reseed exited {code}:\n{output}"));
+    }
+    let unseen = "test ! -e /home/runner/.cache/content && test ! -e /home/runner/.cache/index";
+    let (code, output) = run_in_slot(docker, names, 2, unseen).await?;
+    if code != 0 {
+        return Err(format!(
+            "slot 2 used a snapshot or changes a killed reseed left (exit {code}):\n{output}"
+        ));
+    }
+    let output = cache::reseed(docker, below_threshold)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("{output}");
+    if !output.contains("did not finish") {
+        return Err(format!(
+            "the reseed after a killed one did not start over:\n{output}"
+        ));
+    }
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        2,
+        &format!("test ! -e /base/.reseeding && test ! -e /base/cache && {unseen}"),
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!(
+            "the reseed after a killed one left its marker or snapshot (exit {code}):\n{output}"
+        ));
+    }
+    Ok(())
 }
 
 /// A reseed measures the snapshot it would make, not the old snapshot plus slot 1's changes: one within its limit

@@ -14,6 +14,10 @@ LAYERS=(cache:/home/runner/.cache tools:/home/runner/_work/_tool android:/opt/an
 # image's own copies, if any, stay.
 CACHE_SECRETS=(cargo/credentials cargo/credentials.toml cargo/config cargo/config.toml gradle/gradle.properties)
 
+# Present while seed.sh changes the profile's snapshot or a slot's layers (docs/adr/0066). One a reseed that did not
+# finish left means the snapshot and the slots' changes may not match: a container leaves out both.
+RESEED_MARKER=/base/.reseeding
+
 # Disk budgets per slot, in GB. A layer whose changes outgrow LAYER_BUDGET_GB starts over from the snapshot when
 # a container starts; after a job and when a container starts, the build cache is trimmed to about half of
 # DOCKER_BUDGET_GB, and a Docker store still over it is emptied. runnerd sets the slot's Docker budget, its share of the disk (docs/adr/0054), in the container's
@@ -79,15 +83,21 @@ keep_docker_budget() {
 # from the slot's changes while the layer is unmounted, as overlayfs does not define changes to a mounted upper;
 # the snapshot's, from a snapshot seeded before seed.sh dropped them, are then deleted through the mounted layer,
 # which leaves a whiteout in the slot's changes that the next mount drops and makes again. The whiteout would hide
-# the image's own copy too, so that copy is put back over it.
+# the image's own copy too, so that copy is put back over it. While RESEED_MARKER is there, each layer is the image
+# alone with no changes of the slot's, until the profile's next reseed starts it over.
 mount_layers() {
-    local layer name path lower image_copies
+    local layer name path lower image_copies interrupted=
+    if [ -e "$RESEED_MARKER" ]; then
+        interrupted=1
+        echo "runnerd: the profile's last reseed did not finish: this job's caches start from the image" >&2
+    fi
     for layer in "${LAYERS[@]}"; do
         name=${layer%%:*} path=${layer#*:}
         [ -d "$path" ] || continue
+        [ -z "$interrupted" ] || rm -rf "/state/$name"
         [ "$(size_gb "/state/$name")" -le "$LAYER_BUDGET_GB" ] || rm -rf "/state/$name"
         lower=$path
-        [ ! -d "/base/$name" ] || lower=/base/$name:$lower
+        [ -n "$interrupted" ] || [ ! -d "/base/$name" ] || lower=/base/$name:$lower
         mkdir -p "/state/$name/upper" "/state/$name/work"
         if [ "$name" = cache ]; then
             drop_cache_secrets "/state/$name/upper"
@@ -102,17 +112,22 @@ mount_layers() {
     done
 }
 
-# Deletes CACHE_SECRETS from a copy of the cache layer: a slot's changes or a snapshot.
+# Deletes CACHE_SECRETS from a copy of the cache layer: a slot's changes or a snapshot. A directory of theirs that is a
+# symlink goes instead: deleting through it would delete outside the copy.
 drop_cache_secrets() {
     local file
     for file in "${CACHE_SECRETS[@]}"; do
-        rm -f "$1/$file"
+        if [ -L "$1/${file%/*}" ]; then
+            rm -f "$1/${file%/*}"
+        else
+            rm -f "$1/$file"
+        fi
     done
 }
 
-# Whether the profile's snapshot holds the cache layer's file $1.
+# Whether the profile's snapshot holds the cache layer's file $1, and containers use the snapshot.
 in_snapshot() {
-    [ -e "/base/cache/$1" ] || [ -L "/base/cache/$1" ]
+    [ ! -e "$RESEED_MARKER" ] && { [ -e "/base/cache/$1" ] || [ -L "/base/cache/$1" ]; }
 }
 
 # Copies into $2 the image's own copies, in the unmounted cache layer's path $1, of the CACHE_SECRETS the profile's

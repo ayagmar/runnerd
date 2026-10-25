@@ -5,7 +5,8 @@ next reseed, from the image since [0065](0065-a-snapshot-starts-over-from-the-im
 emptied above `mirror.max_size`. Amended by [0052](0052-shared-build-cache.md): a build cache the daemon keeps per
 repository is shared by every slot, written only by the default branch's pushes, schedules and manual runs. Amended
 by [0054](0054-slot-docker-stores-share-the-disk.md): the slots' Docker stores share a quarter of the disk not
-otherwise used.
+otherwise used. Amended by [0066](0066-a-reseed-that-did-not-finish.md): a reseed that did not finish starts the
+profile over from the image, and containers use neither its snapshot nor their slot's changes until then.
 
 ## Context
 

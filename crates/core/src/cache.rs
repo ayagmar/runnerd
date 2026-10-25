@@ -428,8 +428,8 @@ pub struct Reseed<'profile> {
 
 /// Makes slot 1's layers the profile's new snapshot and drops every slot's own layer changes (`image/seed.sh`),
 /// if slot 1 changed at least `min_changes`. A snapshot that would outgrow `max_size` starts over from the image,
-/// as every slot's changes go too (docs/adr/0065). Call only while none of the profile's slots runs. Returns the
-/// seed container's output.
+/// as every slot's changes go too (docs/adr/0065); after a reseed that did not finish, it starts over whatever the
+/// limits (docs/adr/0066). Call only while none of the profile's slots runs. Returns the seed container's output.
 pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<String, Error> {
     let names = reseed.names;
     let mut mounts = vec![volume(names.base(reseed.profile), "/base", false)];

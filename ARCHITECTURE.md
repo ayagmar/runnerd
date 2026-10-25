@@ -229,6 +229,9 @@ adopted too and drains as it would after a reload.
 - A warm runner never holds back upkeep: a reseed, or the shared caches' check an hour after the last, stops idle
   warm runners and starts none until it runs. A due reseed whose seed would not fit even once they stop leaves
   them waiting ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
+- A runner never mounts a slot's changes over a snapshot other than the one they were made against: `seed.sh` keeps
+  `/base/.reseeding` from its first change to its last, a runner that finds it uses the image alone, and the next
+  reseed starts the profile over ([ADR 0066](docs/adr/0066-a-reseed-that-did-not-finish.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
