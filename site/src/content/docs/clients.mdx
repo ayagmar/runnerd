@@ -106,7 +106,7 @@ Above the charts, links filter by repository, workflow and outcome; each keeps t
 | Insights | a card per [insight](../insights/), warnings first, with links to the runs in the history and on GitHub; the last 24 hours in a line; each repository's waits this week against the week before, warm and cold apart |
 | Caches | each volume, its bound and its size over 30 days; reseed a snapshot or empty a cache; the records of failed jobs, removed one at a time or all at once |
 | Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../admission/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; whether [auto sizing](../admission/#auto-sizing) is on and, per profile, what its next look changes or until when a recent change holds it, or why no look changes anything, such as a hand edit runnerd does not run with yet; the changes it made, with a link that opens the last one undone in the editor |
-| Config | `runnerd.toml` in an editor that checks it as you type by the rule its `admission` sets: every slot at its cap under `caps`, the largest runner and the mirror under `measured`, against `MemoryMax` on a bar of one block per profile; it saves and reloads only when it fits; the doctor's checks |
+| Config | `runnerd.toml` in an editor that checks it as you type by the rule its `admission` sets, on a bar against `MemoryMax`: under `caps` every slot at its cap, a block per profile; under `measured` one runner of the largest profile and the mirror. It saves and reloads only when it fits; the doctor's checks |
 
 <Shot
   name="insights"
@@ -170,37 +170,32 @@ JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FO
 
 ```console wrap=false
 $ runnerctl sizing
-from the last 30d 0h of history; peaks are sampled every 2 s, so advice adds 15% to the largest and waits for 10 jobs
+from the last 30d 0h of history; peaks are sampled every 2 s, so advice adds 15% to the largest and waits for 10 jobs; auto sizing applies it
 
 jvm  9G × 2, 8 CPUs; 400 jobs, slots busy 41%, waited p50 8s p95 35s
+  warm runners took 31 of 40 jobs: waited p50 2s, the others 21s
   memory p50 5.2G p95 7.4G p99 7.7G max 7.8G
   cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9
   keep 9G: its largest peak + 15% is 9G
+  auto sizing 2d 0h ago: memory 10G → 9G, slots 2
+  runnerctl sizing undo jvm
 
   REPOSITORY      JOB                     RUNS   P50   P95   P99   MAX  CPU P99  WAIT P95  NEEDS
-  halyard/ledger  CI / build               212  3.1G  4.2G  4.5G  4.6G      7.6       30s  5.5G
+  halyard/ledger  CI / build               212  3.1G  4.2G  4.5G  4.6G      7.6       30s  5.75G
   halyard/ledger  CI / integration tests   188  5.2G  7.4G  7.7G  7.8G      7.6       35s  9G
 
 node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
+  warm runners took 31 of 40 jobs: waited p50 2s, the others 21s
   memory p50 1.4G p95 1.9G p99 2G max 2.1G
   cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9
-  lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G
-  runnerctl sizing apply node
+  lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G
 
   REPOSITORY          JOB         RUNS   P50   P95  P99   MAX  CPU P99  WAIT P95  NEEDS
-  halyard/storefront  CI / build   236  1.4G  1.9G   2G  2.1G      7.6    4m 20s  2.5G
+  halyard/storefront  CI / build   236  1.4G  1.9G   2G  2.1G      7.6    4m 20s  3.25G
   halyard/storefront  CI / e2e       6  1.8G    2G   2G    2G      7.6    4m 40s  max 2G
 ```
 
-`runnerctl sizing apply node` shows `memory = "7G" -> "2.5G"` and `slots = 2 -> 5` under `[profiles.node]` and asks before it writes. Without a terminal to ask on it needs `--yes`. The rest of the file, comments included, stays as written.
-
-Under [auto sizing](../admission/#auto-sizing) the first line ends with `auto sizing applies it`, the `apply` hint goes, and each change shows under its profile:
-
-```console wrap=false
-  lower memory to 2.5G from 5.25G, its largest peak + 15%; 5 slots fit in the same 10.5G
-  auto sizing 2d 3h ago: memory 7G → 5.25G, slots 2
-  runnerctl sizing undo node
-```
+With [auto sizing](../admission/#auto-sizing) on, as here, the first line ends with `auto sizing applies it`, and each change it made shows under its profile with the command that undoes it. Without it, the first line ends at `10 jobs` and a profile the advice would change ends with `runnerctl sizing apply node`, which shows `memory = "7G" -> "3.25G"` and `slots = 2 -> 4` under `[profiles.node]` and asks before it writes. Without a terminal to ask on it needs `--yes`. The rest of the file, comments included, stays as written.
 
 ### Jobs and watch
 

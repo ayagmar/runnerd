@@ -201,7 +201,8 @@ fn auto_sizing(fake: &fake::Fake) {
                 slots: 2,
                 cpus: None,
             },
-            reason: "lower memory to 2.5G from 7G, its largest peak + 15%".to_owned(),
+            reason: "lower memory to 3.25G from 7G, its largest peak + 1G for page cache"
+                .to_owned(),
             uncertain: false,
         }],
         held: vec![SizingHold {

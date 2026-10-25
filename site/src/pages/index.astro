@@ -90,10 +90,10 @@ JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FO
 
 // runnerctl sizing's node profile, as the clients page prints it.
 const sizing = `node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
+  warm runners took 31 of 40 jobs: waited p50 2s, the others 21s
   memory p50 1.4G p95 1.9G p99 2G max 2.1G
   cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9`;
-const sizingAdvice = `  lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G
-  runnerctl sizing apply node`;
+const sizingAdvice = `  lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G`;
 
 // The quick start, from the install page: its commands, and runnerd init's output there on a 62G, 32-CPU host
 // with no slice yet. The doctor's passing checks between the two parts are left out.
