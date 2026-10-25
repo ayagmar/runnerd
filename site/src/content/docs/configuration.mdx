@@ -59,9 +59,14 @@ You see it in two places:
 - The linter waits for room it does not need: `Needs 6.5G of memory; 3G of the budget is free`, or `All 2 node slots are busy`.
 - In `runnerctl sizing`, its row has a `P95` peak far under the profile's `memory` and a `WAIT P95` as long as the build's.
 
-Serve the repository in a second, smaller profile: another `[[repositories]]` entry with the same `name`, its own `profile` and a label of its own.
+Serve the repository in a second, smaller profile: another `[[repositories]]` entry with the same `name`, its own `profile` and a label of its own. Added to [the example above](#an-example), under measured admission:
 
 ```toml
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+admission = "measured"   # the check holds the largest runner and the mirror, 9.5G, to MemoryMax
+
 [profiles.small]
 image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.13"
 cpus = 2
@@ -86,6 +91,8 @@ jobs:
   lint:
     runs-on: storefront-small   # was [self-hosted, linux, x64]
 ```
+
+Under `caps` the check holds every slot at its cap to `MemoryMax`: the small profile's 4 × 1G takes the example to 36.5G, past its 33G, so lower another profile's `slots` or raise `MemoryMax` to make room.
 
 A job runs in the pool that has every label in its `runs-on`. The `small` pool leaves out `self-hosted` on purpose: every job you did not move still asks for `self-hosted`, which only the `node` pool has, so a heavy job can never land on a 1G runner. Each pool runs in its own profile's slots, reserves only for its own queued jobs, and has its own `warm` and `build_cache`. `runnerctl status` lists the repository once per pool, and the clients name a waiting job's pool (`halyard/storefront · small`).
 
@@ -167,7 +174,7 @@ A new record pushes out the oldest past `max_count` or `max_total`; without room
 $ runnerd check-config runnerd.toml
 runnerd.toml: valid, memory caps sum to 32.5G
 $ runnerd check-config runnerd.toml --memory-max 24G
-error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G
+error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G; lower `slots` or `memory`, or raise the slice's MemoryMax (`runnerd doctor` prints its unit)
 ```
 
 A slice without a unit file has no `MemoryMax`; the check then passes with a warning, since nothing would hold the runners to their caps. Under [measured admission](../admission/#measured-admission) it holds one runner of each profile, with the mirror, to `MemoryMax`, and refuses a slice without one. The caps may then add up past `MemoryMax`, and the check says both figures:
