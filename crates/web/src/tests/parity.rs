@@ -1,0 +1,190 @@
+//! The dashboard's pages of the shared parity fixtures state core's facts in core's words, and give each outcome and
+//! wait the class of core's meaning, as the TUI's and `runnerctl`'s tests check theirs (ADR 0062). Facts, not layout:
+//! each is found in its row or element, read as text. The dashboard reads the wall clock, so only facts that do not
+//! change with it are checked: no ages, and no waits or run times of jobs still going.
+
+use runnerd_fixtures::{Daemon, Facts, JobRow, TIMED_OUT, daemon, facts};
+
+use super::{Dashboard, fake};
+use crate::format::sentence;
+use crate::views::outcome_kind_class;
+use crate::views::overview::reason_class;
+
+/// The dashboard of a fake daemon answering with the fixtures, signed in, and the facts.
+async fn dashboard() -> (Dashboard, String, Daemon, Facts) {
+    let daemon = daemon();
+    let facts = facts(&daemon);
+    let mut fixtures = fake::Fixtures::new(runnerd_fixtures::NOW);
+    fixtures.status = daemon.status.clone();
+    fixtures.jobs = daemon.jobs.clone();
+    fixtures.samples.clear();
+    fixtures.records = daemon.records.clone();
+    fixtures.caches = daemon.caches.clone();
+    let dashboard = Dashboard::serving(&[], fixtures).await;
+    let cookie = dashboard.sign_in().await;
+    (dashboard, cookie, daemon, facts)
+}
+
+/// The text a page shows: each tag a space, entities decoded and spaces collapsed.
+fn text(html: &str) -> String {
+    let mut text = String::new();
+    let mut tag = false;
+    for c in html.chars() {
+        match c {
+            '<' => tag = true,
+            '>' => {
+                tag = false;
+                text.push(' ');
+            }
+            c if !tag => text.push(c),
+            _ => {}
+        }
+    }
+    let text = text
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&quot;", "\"")
+        .replace("&#39;", "'")
+        .replace("&amp;", "&");
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+/// The markup of the row that links to `job`'s page, up to the end of its list item or table row.
+fn row_of(html: &str, job: u64) -> &str {
+    let from = html
+        .find(&format!("href=\"/jobs/{job}\""))
+        .unwrap_or_else(|| panic!("no row links to job {job}"));
+    let rest = &html[from..];
+    let to = ["</li>", "</tr>"]
+        .iter()
+        .filter_map(|end| rest.find(end))
+        .min()
+        .unwrap_or(rest.len());
+    &rest[..to]
+}
+
+/// Each finished job's row has its outcome as a badge of its meaning, and its name; `figures` adds its wait and run
+/// time.
+fn assert_rows(html: &str, facts: &[JobRow], figures: bool) {
+    for fact in facts {
+        let row = row_of(html, fact.job);
+        let badge = format!(
+            "<span class=\"badge {}\">{}</span>",
+            outcome_kind_class(fact.kind),
+            fact.label
+        );
+        assert!(row.contains(&badge), "{badge}: {row}");
+        assert!(text(row).contains(&fact.name), "{}: {row}", fact.name);
+        if figures {
+            for figure in [&fact.waited, &fact.ran].into_iter().flatten() {
+                assert!(row.contains(&format!(">{figure}<")), "{figure}: {row}");
+            }
+        }
+    }
+}
+
+#[tokio::test]
+async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_does() {
+    let (dashboard, cookie, _, facts) = dashboard().await;
+    let html = dashboard.page(&cookie, "/").await.body;
+    let shown = text(&html);
+    assert!(shown.contains(&facts.budget), "{shown}");
+    assert!(shown.contains(&facts.cpu), "{shown}");
+    let health = &facts.health;
+    for figure in [
+        format!("Running {} of {} slots", health.running, health.slots),
+        format!("{} runners starting", health.starting),
+        format!("{} warm", health.warm),
+        format!("Waiting {}", health.waiting),
+    ] {
+        assert!(shown.contains(&figure), "{figure}: {shown}");
+    }
+    // A running slot shows its job instead.
+    for slot in facts.slots.iter().filter(|slot| slot.word != "running") {
+        let line = sentence(&slot.line);
+        assert!(shown.contains(&line), "{line}: {shown}");
+    }
+    for wait in &facts.waits {
+        let reason = format!(
+            "<span class=\"reason {}\">{}</span>",
+            reason_class(wait.kind),
+            wait.reason
+        );
+        assert!(html.contains(&reason), "{reason}");
+    }
+    // The latest eight jobs, the two running ones among them: all but the oldest finished one.
+    let (_, latest) = facts.rows.split_last().unwrap();
+    assert_rows(&html, latest, false);
+}
+
+#[tokio::test]
+async fn the_history_states_each_outcome_wait_and_run_time_as_core_does() {
+    let (dashboard, cookie, _, facts) = dashboard().await;
+    let html = dashboard.page(&cookie, "/history").await.body;
+    // The job list, below the charts that link to days.
+    let jobs = &html[html.find("<table").unwrap()..];
+    assert_rows(jobs, &facts.rows, true);
+}
+
+#[tokio::test]
+async fn a_job_states_its_outcome_steps_build_cache_and_failed_runs_as_core_does() {
+    let (dashboard, cookie, _, facts) = dashboard().await;
+    let html = dashboard
+        .page(&cookie, &format!("/jobs/{TIMED_OUT}"))
+        .await
+        .body;
+    let shown = text(&html);
+    let job = &facts.job;
+    let badge = format!(
+        "<span class=\"badge {}\">{}</span>",
+        outcome_kind_class(job.row.kind),
+        job.row.label
+    );
+    assert!(html.contains(&badge), "{badge}");
+    // Its caps show on its charts, which a job without samples has none of.
+    for figure in [
+        job.cpu_time.clone(),
+        format!("Failed {} of {}", job.failed, job.finished),
+    ]
+    .iter()
+    .chain(&job.build_cache)
+    {
+        assert!(shown.contains(figure.as_str()), "{figure}: {shown}");
+    }
+    for step in &job.steps {
+        let name = format!("<span class=\"step-name\">{}</span>", step.name);
+        let from = html
+            .find(&name)
+            .unwrap_or_else(|| panic!("no step {}", step.name));
+        let item = &html[html[..from].rfind("<li").unwrap()..];
+        let item = &item[..item.find("</li>").unwrap()];
+        let class = format!("<li class=\"{}\">", outcome_kind_class(step.kind));
+        assert!(
+            item.starts_with(&class),
+            "{} is {:?}: {item}",
+            step.name,
+            step.kind
+        );
+        // Without its end, a step's time is `–`.
+        let took = step.took.as_deref().unwrap_or("–");
+        assert!(text(item).ends_with(took), "{took}: {item}");
+    }
+}
+
+#[tokio::test]
+async fn records_and_the_build_cache_state_their_limits_as_core_does() {
+    let (dashboard, cookie, _, facts) = dashboard().await;
+    let html = dashboard.page(&cookie, "/caches").await.body;
+    let shown = text(&html);
+    assert!(shown.contains(&facts.build_cache_week), "{shown}");
+    let summary = format!("{}; {}", facts.records_usage, facts.records_pressure);
+    let at = html
+        .find(&sentence(&summary))
+        .unwrap_or_else(|| panic!("no summary {summary}: {shown}"));
+    let element = &html[html[..at].rfind('<').unwrap()..at];
+    assert_eq!(
+        element.contains("over-limit"),
+        facts.records_tone == runnerd_core::api::Tone::Warn,
+        "the summary stands out exactly when core's tone warns: {element}"
+    );
+}

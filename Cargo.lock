@@ -1474,6 +1474,7 @@ dependencies = [
  "qrcode",
  "ratatui",
  "runnerd-core",
+ "runnerd-fixtures",
  "rustix",
  "serde",
  "serde_json",
@@ -1509,6 +1510,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "runnerd-fixtures"
+version = "0.0.13"
+dependencies = [
+ "runnerd-core",
+]
+
+[[package]]
 name = "runnerd-web"
 version = "0.0.13"
 dependencies = [
@@ -1521,6 +1529,7 @@ dependencies = [
  "maud",
  "qrcode",
  "runnerd-core",
+ "runnerd-fixtures",
  "rustix",
  "serde",
  "serde_json",

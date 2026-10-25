@@ -75,7 +75,7 @@ impl Theme {
         self.fg(Color::Indexed(WAIT))
     }
 
-    fn tone(self, tone: Tone) -> Style {
+    pub(super) fn tone(self, tone: Tone) -> Style {
         match tone {
             Tone::Plain => Style::new(),
             Tone::Bold => Style::new().add_modifier(Modifier::BOLD),

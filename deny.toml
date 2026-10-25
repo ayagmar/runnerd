@@ -20,6 +20,8 @@ exceptions = [{ crate = "runnerd-web", allow = ["OFL-1.1"] }]
 [bans]
 multiple-versions = "warn"
 wildcards = "deny"
+# A path dependency without a version: only crates/fixtures, a dev-dependency of the clients that publishing drops.
+allow-wildcard-paths = true
 
 [sources]
 unknown-registry = "deny"

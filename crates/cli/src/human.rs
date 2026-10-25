@@ -932,6 +932,9 @@ pub(crate) fn event_line(envelope: &EventEnvelope, paint: Paint) -> Option<Strin
 }
 
 #[cfg(test)]
+mod parity;
+
+#[cfg(test)]
 mod tests {
     use runnerd_core::api::{
         AdmissionPolicy, Budget, Event, EventEnvelope, RepositoryStatus, RunnerStatus, SlotStatus,

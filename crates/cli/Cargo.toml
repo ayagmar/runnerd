@@ -34,6 +34,7 @@ tui = ["dep:ratatui", "dep:unicode-width", "tokio/signal"]
 [dev-dependencies]
 axum.workspace = true
 futures-util.workspace = true
+runnerd-fixtures.workspace = true
 rustix = { workspace = true, features = ["fs", "process", "pty", "termios"] }
 tokio = { workspace = true, features = ["macros", "net", "rt-multi-thread", "time"] }
 

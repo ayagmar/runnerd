@@ -45,6 +45,8 @@ use runnerd_core::api::{
 
 use crate::views::{repository_id, slot_id};
 
+mod parity;
+
 /// 2026-10-22T14:03:07Z.
 const NOW: u64 = 1_792_677_787;
 const LEDGER_RUNNING: u64 = 120_055_991_700;
@@ -95,13 +97,18 @@ impl Dashboard {
 
     /// The dashboard that also takes writes from the pages of `proxies`, as `[web] origins` sets.
     async fn behind(proxies: &[&str]) -> Dashboard {
+        Dashboard::serving(proxies, fake::Fixtures::new(NOW)).await
+    }
+
+    /// The dashboard of a fake daemon answering with `fixtures`, behind `proxies` as `behind` takes them.
+    async fn serving(proxies: &[&str], fixtures: fake::Fixtures) -> Dashboard {
         let proxies = proxies
             .iter()
             .map(|origin| origin.parse().unwrap())
             .collect();
         let dir = TempDir::new();
         let socket = dir.0.join("runnerd.sock");
-        let fake = fake::Fake::new(fake::Fixtures::new(NOW));
+        let fake = fake::Fake::new(fixtures);
         fake::serve(&socket, fake.clone());
         let listener = crate::listen("127.0.0.1:0").await.unwrap().unwrap();
         let addr = listener.local_addr().unwrap();

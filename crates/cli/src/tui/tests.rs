@@ -45,6 +45,8 @@ use crate::watch;
 
 const NOW: u64 = 1100;
 
+mod parity;
+
 fn profile(name: &str, slots: usize, memory: u64) -> ProfileStatus {
     ProfileStatus {
         name: name.to_owned(),
