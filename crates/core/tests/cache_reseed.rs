@@ -24,6 +24,9 @@ fn image() -> String {
     std::env::var("RUNNERD_TEST_IMAGE").unwrap_or("runnerd-runner:base".to_owned())
 }
 
+/// Runs the rest of a command as the runner user, as a job does.
+const AS_RUNNER: &str = "setpriv --reuid=runner --regid=runner --init-groups --";
+
 /// A registry token a job leaves in cargo's home in the cache layer.
 const CREDENTIALS: &str = "/home/runner/.cache/cargo/credentials.toml";
 
@@ -113,16 +116,15 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
     }
-    let as_runner = "setpriv --reuid=runner --regid=runner --init-groups --";
     let leave_credentials = format!(
-        "{as_runner} sh -c 'mkdir -p /home/runner/.cache/cargo && echo token > {CREDENTIALS}'"
+        "{AS_RUNNER} sh -c 'mkdir -p /home/runner/.cache/cargo && echo token > {CREDENTIALS}'"
     );
     let (code, output) = run_in_slot(
         docker,
         names,
         1,
         &format!(
-            "{as_runner} sh -c 'echo warm > /home/runner/.cache/runnerd-test' && {leave_credentials}"
+            "{AS_RUNNER} sh -c 'echo warm > /home/runner/.cache/runnerd-test' && {leave_credentials}"
         ),
     )
     .await?;
@@ -197,37 +199,42 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     }
 
     old_snapshot(docker, names, &reseed("1T", "1T")).await?;
-    capped_snapshot(docker, names, &reseed("0K", "3M")).await
+    let capped = reseed("0K", "3M");
+    fitting_snapshot(docker, names, &capped).await?;
+    capped_snapshot(docker, names, &capped).await
 }
 
-/// A snapshot that would outgrow its limit starts over from slot 1's changes alone, which drops what only the old
-/// snapshot held; when slot 1's changes outgrow it too, from the image alone.
-async fn capped_snapshot(
+/// A reseed measures the snapshot it would make, not the old snapshot plus slot 1's changes: one within its limit
+/// keeps what slot 1's job only read beside what it changed, as a cache's updated index names files it only read.
+async fn fitting_snapshot(
     docker: &Docker,
     names: &Names,
     capped: &Reseed<'_>,
 ) -> Result<(), String> {
-    let write = |file: &str, megabytes: u32| {
-        format!(
-            "setpriv --reuid=runner --regid=runner --init-groups -- \
-             head -c {megabytes}M /dev/zero > /home/runner/.cache/{file}"
-        )
-    };
     let (code, output) = run(
         docker,
         names,
         1,
         Snapshot::Writable,
         "",
-        "mkdir -p /base/cache && head -c 2M /dev/zero > /base/cache/superseded",
+        "mkdir -p /base/cache/npm && head -c 1M /dev/zero > /base/cache/npm/content \
+         && head -c 1536K /dev/zero > /base/cache/npm/index && chown -R runner:runner /base/cache/npm",
     )
     .await?;
     if code != 0 {
-        return Err(format!(
-            "planting a large snapshot exited {code}:\n{output}"
-        ));
+        return Err(format!("planting a cache exited {code}:\n{output}"));
     }
-    let (code, output) = run_in_slot(docker, names, 1, &write("current", 2)).await?;
+    // 2.5M of snapshot and 1.5M of changes reach the 3M limit; the 2.5M snapshot they make does not.
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        1,
+        &format!(
+            "{AS_RUNNER} sh -c 'cat /home/runner/.cache/npm/content > /dev/null \
+             && echo entry >> /home/runner/.cache/npm/index'"
+        ),
+    )
+    .await?;
     if code != 0 {
         return Err(format!("the job in slot 1 exited {code}:\n{output}"));
     }
@@ -239,17 +246,27 @@ async fn capped_snapshot(
         docker,
         names,
         2,
-        "test -f /base/cache/current && test ! -e /base/cache/superseded \
-         && test ! -e /base/cache/runnerd-test",
+        "grep -qa entry /home/runner/.cache/npm/index && test -s /home/runner/.cache/npm/content",
     )
     .await?;
     if code != 0 {
         return Err(format!(
-            "the snapshot over its limit did not start over from slot 1's changes (exit {code}):\n{output}"
+            "a snapshot within its limit lost what slot 1 only read (exit {code}):\n{output}"
         ));
     }
+    Ok(())
+}
 
-    let (code, output) = run_in_slot(docker, names, 1, &write("huge", 4)).await?;
+/// A snapshot over its limit starts over from the image, as slot 1's changes alone miss what its jobs only read.
+async fn capped_snapshot(
+    docker: &Docker,
+    names: &Names,
+    capped: &Reseed<'_>,
+) -> Result<(), String> {
+    let write = |file: &str, megabytes: u32| {
+        format!("{AS_RUNNER} head -c {megabytes}M /dev/zero > /home/runner/.cache/{file}")
+    };
+    let (code, output) = run_in_slot(docker, names, 1, &write("current", 1)).await?;
     if code != 0 {
         return Err(format!("the job in slot 1 exited {code}:\n{output}"));
     }
@@ -261,12 +278,13 @@ async fn capped_snapshot(
         docker,
         names,
         2,
-        "test ! -e /base/cache && test ! -e /home/runner/.cache/huge",
+        "test ! -e /base/cache && test ! -e /home/runner/.cache/current \
+         && test ! -e /home/runner/.cache/npm",
     )
     .await?;
     if code != 0 {
         return Err(format!(
-            "slot 1's changes over the limit did not start the snapshot over from the image (exit {code}):\n{output}"
+            "a snapshot over its limit did not start over from the image (exit {code}):\n{output}"
         ));
     }
 

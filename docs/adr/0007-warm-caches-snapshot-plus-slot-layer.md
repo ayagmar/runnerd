@@ -1,11 +1,11 @@
 # 0007. Warm caches: per-profile snapshot plus per-slot layer
 
-Amended by [0041](0041-snapshot-and-mirror-limits.md): a snapshot over `[caches] snapshot_max` starts over from slot
-1's changes at its next reseed, and the mirror's storage is emptied above `mirror.max_size`. Amended by
-[0052](0052-shared-build-cache.md): a build cache the daemon keeps per repository is shared by every slot, written
-only by the default branch's pushes, schedules and manual runs. Amended by
-[0054](0054-slot-docker-stores-share-the-disk.md): the slots' Docker stores share a quarter of the disk not otherwise
-used.
+Amended by [0041](0041-snapshot-and-mirror-limits.md): a snapshot over `[caches] snapshot_max` starts over at its
+next reseed, from the image since [0065](0065-a-snapshot-starts-over-from-the-image.md), and the mirror's storage is
+emptied above `mirror.max_size`. Amended by [0052](0052-shared-build-cache.md): a build cache the daemon keeps per
+repository is shared by every slot, written only by the default branch's pushes, schedules and manual runs. Amended
+by [0054](0054-slot-docker-stores-share-the-disk.md): the slots' Docker stores share a quarter of the disk not
+otherwise used.
 
 ## Context
 
