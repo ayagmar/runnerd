@@ -106,6 +106,8 @@
 }
 
 html {
+  /* The top bar below the sidebar's width sticks over the page: a link to a place in it lands under the bar. */
+  scroll-padding-top: calc(3.5rem + env(safe-area-inset-top, 0));
   background: var(--frame);
   color: var(--ink);
   -webkit-text-size-adjust: 100%;
@@ -345,6 +347,10 @@ html {
 }
 
 @media (min-width: 60rem) {
+  html {
+    scroll-padding-top: 0;
+  }
+
   body {
     display: grid;
     grid-template-columns: 14rem minmax(0, 1fr);
@@ -1033,13 +1039,14 @@ html {
 .legend .run { --profile: var(--memory); }
 .legend .wait { --profile: var(--wait); }
 
-/* The overview: the machine (budget, slots, the slice's charts) beside the work (the queue, the latest jobs, the
-   repositories) on a wide screen. A narrow one stacks the regions as the grid's items, the queue first: what waits and
-   why is read before the rest. */
-.overview,
-.machine,
-.work {
-  display: contents;
+/* The overview's regions come in reading order, the queue first: what waits and why is read before the rest. A wide
+   screen places them in two columns, the machine (budget, slots, the slice's charts) beside the work (the queue, the
+   latest jobs, the repositories), a pair to a row, by grid placement: the order the keyboard and a screen reader
+   follow stays the narrow screen's. */
+.overview {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: clamp(2rem, 4vw, 3rem);
 }
 
 .overview h2 {
@@ -1051,29 +1058,19 @@ html {
   margin-bottom: 0;
 }
 
-@media (max-width: 79.99rem) {
-  #queue { order: 1; }
-  #budget { order: 2; }
-  #slots { order: 3; }
-  #recent { order: 4; }
-  #repositories { order: 5; }
-  #host { order: 6; }
-}
-
 @media (min-width: 80rem) {
   .overview {
-    display: grid;
     grid-template-columns: minmax(0, 1.65fr) minmax(23rem, 1fr);
     gap: clamp(2rem, 3vw, 3rem);
     align-items: start;
   }
 
-  .machine,
-  .work {
-    display: grid;
-    min-width: 0;
-    gap: clamp(2rem, 4vw, 3rem);
-  }
+  #budget { grid-area: 1 / 1; }
+  #slots { grid-area: 2 / 1; }
+  #host { grid-area: 3 / 1; }
+  #queue { grid-area: 1 / 2; }
+  #recent { grid-area: 2 / 2; }
+  #repositories { grid-area: 3 / 2; }
 }
 
 .repo-list,
@@ -2580,6 +2577,7 @@ dl.health-figures {
   .filter-group {
     flex-direction: column;
     align-items: stretch;
+    min-width: 0;
     gap: 0.15rem;
   }
 

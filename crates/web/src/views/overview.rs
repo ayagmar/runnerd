@@ -1,7 +1,8 @@
 //! `/`: first whether CI is keeping up (the slots running, the jobs waiting, the waits and failures of the last
-//! day); then, side by side on a wide screen, the machine (the memory budget as blocks, every slot and the job it
-//! runs, the slice's CPU and memory over the last half hour) and the work (every queued job with why it waits, the
-//! latest jobs, the repositories with pause and resume). A narrow screen stacks them with the queue first.
+//! day); then every queued job with why it waits, the memory budget as blocks, every slot and the job it runs, the
+//! latest jobs, the repositories with pause and resume, and the slice's CPU and memory over the last half hour. That is
+//! the order of the page for reading and for the keyboard; a wide screen places the regions in two columns, the machine
+//! (budget, slots, slice) beside the work (queue, latest jobs, repositories), with the grid, not a different order.
 
 use std::collections::BTreeMap;
 
@@ -204,16 +205,12 @@ pub(crate) fn render(overview: &Overview) -> Markup {
         h1.visually-hidden { "Overview" }
         (health.1)
         div.overview {
-            div.machine {
-                (budget.1)
-                (slots.1)
-                (host.1)
-            }
-            div.work {
-                (queue.1)
-                (recent.1)
-                (repositories.1)
-            }
+            (queue.1)
+            (budget.1)
+            (slots.1)
+            (recent.1)
+            (repositories.1)
+            (host.1)
         }
     };
     page("Overview", Some(Page::Overview), Some(&live), &main)
