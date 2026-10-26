@@ -101,6 +101,18 @@ pub struct Held {
     pub removed_at: Option<u64>,
 }
 
+/// A profile's `cpus` as the daemon ran it from `at` (ms), by its `profile.changed` event: one when it started with
+/// the profile, and after each reload or restart that changed the profile's image, CPUs, memory or slots.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CpusSet {
+    /// The profile.
+    pub profile: String,
+    /// Its `cpus` from then.
+    pub cpus: u32,
+    /// When, in milliseconds.
+    pub at: u64,
+}
+
 /// What the store reads for sizing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {

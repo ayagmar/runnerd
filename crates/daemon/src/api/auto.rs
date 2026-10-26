@@ -12,7 +12,7 @@ use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
 use runnerd_core::config::{Config, resize_profile};
 use runnerd_core::scheduler::engine::RunningSlots;
 use runnerd_core::sizing::auto::{Context, changes, next_look};
-use runnerd_core::sizing::{History, Window};
+use runnerd_core::sizing::{CpusSet, History, Window};
 use runnerd_core::store::{AutoSizing, Resolution, StoreError};
 use tracing::{info, warn};
 
@@ -87,6 +87,7 @@ async fn look(state: &AppState, refused: &mut BTreeMap<String, String>) {
         cpus: read.cpus,
         window: read.window,
         last: &read.last,
+        cpus_set: &read.cpus_set,
         running: &read.running,
     };
     for change in changes(&config, &read.history, context) {
@@ -104,6 +105,8 @@ struct Read {
     cpus: Option<u64>,
     /// When each profile last changed, read after `history`.
     last: BTreeMap<String, u64>,
+    /// Each profile's `cpus` as the daemon ran them, read with `last`.
+    cpus_set: Vec<CpusSet>,
     running: BTreeMap<String, u32>,
 }
 
@@ -120,7 +123,11 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
         .sizing(window.since)
         .await
         .map_err(history_error)?;
-    let last = last_changes(state).await.map_err(history_error)?;
+    let AutoSizing {
+        last,
+        cpus: cpus_set,
+        ..
+    } = last_changes(state).await.map_err(history_error)?;
     let (read, slice) = (state.memory_max, config.host.slice.clone());
     let memory_max = tokio::task::spawn_blocking(move || read(&slice))
         .await
@@ -133,15 +140,17 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
         memory_max,
         cpus: slice_cpus(state, config).await,
         last,
+        cpus_set,
         running: running(state),
     })
 }
 
-/// When auto sizing last changed each profile, pending changes included. Read after the history it sizes from, never
-/// before: a change recorded between the two reads would otherwise be missing from the holds while the runs after it,
-/// which the history has, ask for another, and a profile would be changed twice in one interval.
-async fn last_changes(state: &AppState) -> Result<BTreeMap<String, u64>, StoreError> {
-    Ok(state.handle.store.auto_sizing().await?.last)
+/// When auto sizing last changed each profile, pending changes included, and each profile's `cpus` as the daemon ran
+/// them. Read after the history it sizes from, never before: a change recorded between the two reads would otherwise
+/// be missing from the holds while the runs after it, which the history has, ask for another, and a profile would be
+/// changed twice in one interval.
+async fn last_changes(state: &AppState) -> Result<AutoSizing, StoreError> {
+    state.handle.store.auto_sizing().await
 }
 
 /// The slice's CPUs, in millicores; `None` when they cannot be read, which only keeps auto sizing from raising
@@ -208,7 +217,11 @@ pub(super) async fn plan(
         .sizing(window.since)
         .await
         .map_err(history_error)?;
-    let last = last_changes(state).await.map_err(history_error)?;
+    let AutoSizing {
+        last,
+        cpus: cpus_set,
+        ..
+    } = last_changes(state).await.map_err(history_error)?;
     let running = running(state);
     let blocked = on_disk(&*state.config.lock().await).err();
     let context = Context {
@@ -216,6 +229,7 @@ pub(super) async fn plan(
         cpus: slice_cpus(state, config).await,
         window,
         last: &last,
+        cpus_set: &cpus_set,
         running: &running,
     };
     let interval = config.sizing.interval.as_secs();

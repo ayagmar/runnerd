@@ -620,6 +620,57 @@ fn profile(name: &str) -> crate::api::ProfileStatus {
 }
 
 #[tokio::test]
+async fn auto_sizing_reads_each_profile_s_cpus_as_the_daemon_ran_them_and_a_restart_reads_them_back()
+ {
+    use crate::api::Event;
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    let at = |cpus| crate::api::ProfileStatus {
+        cpus,
+        ..profile("app")
+    };
+    // Started at 2 CPUs, a reload to 4 and one back to 2, with no run between: what a `cpus` change reads runs since.
+    for cpus in [2, 4, 2] {
+        store.event(Event::ProfileChanged { profile: at(cpus) });
+    }
+    store.event(Event::ProfileChanged {
+        profile: profile("small"),
+    });
+    store.flush().await;
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let seen = |store: &Store| {
+        let store = store.clone();
+        async move {
+            store
+                .auto_sizing()
+                .await
+                .unwrap()
+                .cpus
+                .into_iter()
+                .map(|set| (set.profile, set.cpus))
+                .collect::<Vec<_>>()
+        }
+    };
+    assert_eq!(
+        seen(&store).await,
+        [("app", 2), ("app", 4), ("app", 2), ("small", 2)]
+            .map(|(profile, cpus)| (profile.to_owned(), cpus))
+    );
+    // Pruned, each profile keeps its latest: the `cpus` it has had since before what the history keeps.
+    let later = crate::time::now_ms() + 400 * 24 * 3600 * 1000;
+    store
+        .prune(later, &crate::config::History::default())
+        .await
+        .unwrap();
+    assert_eq!(
+        seen(&store).await,
+        [("app", 2), ("small", 2)].map(|(profile, cpus)| (profile.to_owned(), cpus))
+    );
+}
+
+#[tokio::test]
 async fn pruning_keeps_what_a_restart_needs_to_announce_a_removed_repository_or_profile() {
     use crate::api::Event;
     let dir = TestDir::new("store");

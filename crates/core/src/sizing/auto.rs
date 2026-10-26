@@ -4,8 +4,8 @@
 //! it. Never lowers a profile a run met the cap of, never changes `memory` from fewer than `[sizing] min_jobs` jobs,
 //! never lowers within `[sizing] interval` of a profile's last change or raises within `raise_interval`, never
 //! leaves a profile outside its bounds, and sizes each profile against the budget the changes before it in the same
-//! look leave. Moves `cpus` only on the CPU averages of runs at the profile's current `cpus` since its last change,
-//! never on CPU peaks: a parallel build peaks at whatever cap it gets.
+//! look leave. Moves `cpus` only on the CPU averages of runs at the profile's current `cpus` since its last change
+//! and since the daemon got them, never on CPU peaks: a parallel build peaks at whatever cap it gets.
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -15,7 +15,9 @@ use crate::api::{
 };
 use crate::config::{Admission, ByteSize, Config, Profile, cpu_budget};
 
-use super::{BUSY, GRANULE, History, WAITED, Window, advise, busy, first_runner, spread, waits};
+use super::{
+    BUSY, CpusSet, GRANULE, History, WAITED, Window, advise, busy, first_runner, spread, waits,
+};
 
 /// The fewest runs a raise of `slots` or `cpus` reads: the jobs queued since the profile's last change, or one job's
 /// runs at its current `cpus`. It does not wait for `min_jobs`: a slot too few costs every queued job a wait now.
@@ -42,6 +44,9 @@ pub struct Context<'run> {
     pub window: Window,
     /// When auto sizing last changed each profile, in seconds, by name, however long ago.
     pub last: &'run BTreeMap<String, u64>,
+    /// Each profile's `cpus` as the daemon ran them, oldest first: what a `cpus` change reads runs since, as a
+    /// hand edit, a reload or an undo leaves no change of auto sizing's.
+    pub cpus_set: &'run [CpusSet],
     /// How many runners each profile runs now, by name.
     pub running: &'run BTreeMap<String, u32>,
 }
@@ -57,12 +62,12 @@ pub struct Context<'run> {
 /// `memory` adds the slots the advice gives. Each change is sized as if the ones before it were written: they take
 /// budget the later ones cannot.
 ///
-/// `cpus` go up `max_step` percent, at least 1, when one job's runs at them since the profile's last change, 3 at
-/// least, averaged `BOUND` percent of them at the median; up to the slice's CPUs, and under `caps` with a CPU budget
+/// `cpus` go up `max_step` percent, at least 1, when one job's runs at them since the profile's last change and since
+/// the daemon got them (`Context::cpus_set`), 3 at least, averaged `BOUND` percent of them at the median; up to the slice's CPUs, and under `caps` with a CPU budget
 /// only as far as every profile's `slots × cpus` fit it. They come down, `interval` after the last change and by
 /// `max_step` percent at most, toward `HEADROOM` times the heaviest job's p95 average, rounded up to whole CPUs, at
-/// least 1, once `min_jobs` such runs say so. Only successful runs with a measured average count; see
-/// [`next_look`] for the raises it cannot make.
+/// least 1, once `min_jobs` such runs say so and every job among them has a measured average. Only successful runs
+/// with a measured average count; see [`next_look`] for the raises it cannot make.
 pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<SizingChange> {
     next_look(config, history, context).changes
 }
@@ -564,38 +569,43 @@ struct Cpus {
 /// A job: its repository, workflow and name.
 type JobKey<'run> = (&'run str, Option<&'run str>, &'run str);
 
+/// When the daemon started running the profile with `cpus`, in ms, by `set`: its first event since the last one
+/// with other `cpus`. `now` when its latest has other `cpus`, as before a reload announces them; 0 with no events.
+fn cpus_since(set: &[CpusSet], profile: &str, cpus: u32, now: u64) -> u64 {
+    let mut since = None;
+    let mut seen = false;
+    for event in set.iter().filter(|event| event.profile == profile) {
+        seen = true;
+        if event.cpus != cpus {
+            since = None;
+        } else if since.is_none() {
+            since = Some(event.at);
+        }
+    }
+    since.unwrap_or(if seen { now } else { 0 })
+}
+
 /// The CPU averages, millicores, of the profile's runs a `cpus` change reads, by job: successful runs whose container
-/// had `cap`, queued at or after `since` (ms), the profile's last change, and after its last run under another CPU
-/// cap, so a hand edit, a reload or an undo starts the evidence over as a change does. A run without a measured
-/// average says nothing; nor does an average of 0, which only a run sampled once records.
+/// had `cap`, queued at or after `since` (ms), the later of the profile's last change and when it got these `cpus`
+/// (`cpus_since`). A run without a measured average adds none; nor does an average of 0, which only a run sampled
+/// once records. Its job is still listed, so a lowering can tell a job it knows nothing of from one it lacks.
 fn averages<'run>(
     history: &'run History,
     profile: &str,
     cap: u64,
     since: u64,
 ) -> BTreeMap<JobKey<'run>, Vec<u64>> {
-    let other_cap = history
-        .jobs
-        .iter()
-        .chain(&history.cancelled)
-        .filter(|job| job.profile == profile && job.cpu_cap.is_some_and(|other| other != cap))
-        .map(|job| job.queued_at.saturating_add(1))
-        .max()
-        .unwrap_or(0);
-    let start = since.max(other_cap);
     let mut jobs: BTreeMap<JobKey<'run>, Vec<u64>> = BTreeMap::new();
     for job in &history.jobs {
-        let Some(average) = job.cpu_average.filter(|average| *average > 0) else {
-            continue;
-        };
         if job.profile == profile
             && job.cpu_cap == Some(cap)
             && job.succeeded
-            && job.queued_at >= start
+            && job.queued_at >= since
         {
-            jobs.entry((&job.repository, job.workflow.as_deref(), &job.name))
-                .or_default()
-                .push(average);
+            let averages = jobs
+                .entry((&job.repository, job.workflow.as_deref(), &job.name))
+                .or_default();
+            averages.extend(job.cpu_average.filter(|average| *average > 0));
         }
     }
     jobs
@@ -608,10 +618,11 @@ fn job_named(job: JobKey<'_>) -> String {
 }
 
 /// The profile's next `cpus`, from the CPU averages of its runs at its current `cpus` since `since` (ms), the last
-/// change (`averages`). A raise, `max_step` percent, at least 1, when one job's `RAISE_RUNS` runs or more averaged
+/// change, and since it got them (`averages`). A raise, `max_step` percent, at least 1, when one job's `RAISE_RUNS` runs or more averaged
 /// `BOUND` percent of the cap at the median: up to the slice's CPUs, and under `caps` admission with a CPU budget
 /// only as many as every profile's `slots × cpus` fit in it, at the `slots` this change gives; refused, with why,
-/// when that is none. A lowering, while `lowering` allows it, with `min_jobs` runs: toward `HEADROOM` times the
+/// when that is none. A lowering, while `lowering` allows it, with `min_jobs` runs and none of a job without a
+/// measured average: toward `HEADROOM` times the
 /// heaviest job's p95 average, rounded up to whole CPUs, at least 1, by at most `max_step` percent.
 #[expect(
     clippy::too_many_arguments,
@@ -630,6 +641,12 @@ fn cpus(
 ) -> CpuStep {
     let current = profile.cpus;
     let cap = u64::from(current) * 1000;
+    let since = since.max(cpus_since(
+        context.cpus_set,
+        &advised.name,
+        current,
+        context.window.now,
+    ));
     let jobs = averages(history, &advised.name, cap, since);
     let step = (current.saturating_mul(config.sizing.max_step) / 100).max(1);
     let bound = jobs
@@ -675,7 +692,11 @@ fn cpus(
         };
     }
     let runs: usize = jobs.values().map(Vec::len).sum();
-    if lowering == Lowering::Held || (runs as u64) < u64::from(config.sizing.min_jobs) {
+    // A job whose runs at the cap have no measured average may be the one that needs it.
+    if lowering == Lowering::Held
+        || (runs as u64) < u64::from(config.sizing.min_jobs)
+        || jobs.values().any(Vec::is_empty)
+    {
         return CpuStep::Keep;
     }
     let Some((job, heaviest)) = jobs

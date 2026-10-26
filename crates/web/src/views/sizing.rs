@@ -100,9 +100,7 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
     let next = plan.profile_plan(&profile.name, view.now);
     let class = match next {
         ProfilePlan::Next { .. } => "plan-what changes",
-        ProfilePlan::Refused { .. } | ProfilePlan::Held { .. } | ProfilePlan::LowerHeld { .. } => {
-            "plan-what held"
-        }
+        ProfilePlan::Held { .. } | ProfilePlan::LowerHeld { .. } => "plan-what held",
         ProfilePlan::Nothing => "plan-what",
     };
     let reason = next.reason(&view.sizing, profile);
@@ -119,6 +117,10 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
                 span.muted { "Changed " (format::ago(changed, view.now)) "; " (reason) "." }
             } @else {
                 span.muted { (reason) }
+            }
+            // Beside the change, which can still be to its memory or slots.
+            @if let Some(refusal) = plan.refusal(&profile.name) {
+                span.plan-refused { (refusal) }
             }
         }
     }

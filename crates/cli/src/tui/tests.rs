@@ -2089,7 +2089,7 @@ fn a_job_s_page_compares_it_with_the_same_job_s_latest_runs() {
 
 #[test]
 fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
-    use runnerd_core::api::{AutoPlan, SizingChange, SizingHold, SizingRefused};
+    use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
     let mut app = app();
     app.update(key(KeyCode::Char('4')));
     let mut sizing = sizing();
@@ -2159,25 +2159,22 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         "{shown}"
     );
 
-    let plan = sizing.auto_plan.as_mut().unwrap();
-    plan.blocked = None;
-    plan.held.clear();
-    plan.refused = vec![SizingRefused {
-        profile: "jvm".to_owned(),
-        reason: "the cap holds them back; 9 CPUs for each of its 2 slots do not fit the CPU budget"
-            .to_owned(),
-    }];
+    // A refused CPU raise shows beside the memory change the same look makes, here and in runnerctl sizing.
+    let plan = runnerd_fixtures::auto_plan(NOW);
+    let refusal = plan.refusal("node").unwrap();
+    sizing.auto_plan = Some(plan);
     app.update(Msg::Sizing(sizing.clone()));
-    let shown = screen(&app, 120, 24, false);
+    let shown = screen(&app, 120, 40, false);
     assert!(
-        rows_with(&shown, "■ jvm")[0].contains("No CPU raise"),
-        "a raise the CPU budget refuses shows: {shown}"
+        rows_with(&shown, "■ node")[0].contains("Next look, within 5 minutes: memory 7G → 5.25G"),
+        "{shown}"
+    );
+    assert!(
+        shown.contains(&refusal[..60]),
+        "the refusal shows beside it: {shown}"
     );
     let printed = crate::human::sizing(&sizing, NOW, crate::human::Paint { colour: false });
-    assert!(
-        printed.contains("No CPU raise: the cap holds them back; 9 CPUs for each of its 2 slots"),
-        "runnerctl sizing says it too: {printed}"
-    );
+    assert!(printed.contains(&refusal), "{printed}");
 }
 
 /// Whether an effect reads the day's activity.

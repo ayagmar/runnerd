@@ -477,6 +477,42 @@ fn caches() -> Caches {
     }
 }
 
+/// Auto sizing's plan at `at` (s): its next look lowers node's memory and cannot raise node's `cpus`, which its tests
+/// sit at, for want of CPU budget. Every client shows both: the change, and `api::AutoPlan::refusal`.
+pub fn auto_plan(at: u64) -> api::AutoPlan {
+    api::AutoPlan {
+        every: 300,
+        interval: 86_400,
+        raise_interval: 3600,
+        max_step: 25,
+        next: vec![api::SizingChange {
+            at,
+            profile: "node".to_owned(),
+            from: api::Resize {
+                memory: 7 * GIB,
+                slots: 2,
+                cpus: None,
+            },
+            to: api::Resize {
+                memory: 5376 * MIB,
+                slots: 2,
+                cpus: None,
+            },
+            reason: "lower memory".to_owned(),
+            uncertain: false,
+        }],
+        held: Vec::new(),
+        blocked: None,
+        refused: vec![api::SizingRefused {
+            profile: "node".to_owned(),
+            reason: format!(
+                "3 runs of {STOREFRONT} CI / test averaged 7.6 of its 8 CPUs (median): the cap holds them back; 9 \
+                 CPUs for each of its 2 slots do not fit the CPU budget beside the other profiles'"
+            ),
+        }],
+    }
+}
+
 /// The fixtures.
 pub fn daemon() -> Daemon {
     Daemon {

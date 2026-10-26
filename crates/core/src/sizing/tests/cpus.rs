@@ -8,7 +8,7 @@ use super::{CONFIG, G, HOUR, NOW, job};
 use crate::api::{Resize, SizingChange};
 use crate::config::{Admission, Config, cpu_budget, resize_profile};
 use crate::sizing::auto::{Context, Look, next_look};
-use crate::sizing::{History, Ran, Window, spread};
+use crate::sizing::{CpusSet, History, Ran, Window, spread};
 
 const DAY: u64 = 24 * HOUR;
 
@@ -61,13 +61,15 @@ fn history(jobs: Vec<Ran>) -> History {
     }
 }
 
-/// The look at `now` (ms) in a 33G slice of `cpus` millicores, after the last changes `last`, nothing running.
-fn look_at(
+/// The look at `now` (ms) in a 33G slice of `cpus` millicores, after the last changes `last`, nothing running, the
+/// daemon having run each profile's `cpus` as `cpus_set` says.
+fn look_set(
     config: &Config,
     history: &History,
     cpus: Option<u64>,
     now: u64,
     last: &BTreeMap<String, u64>,
+    cpus_set: &[CpusSet],
 ) -> Look {
     next_look(
         config,
@@ -81,9 +83,21 @@ fn look_at(
                 sample_interval: 2,
             },
             last,
+            cpus_set,
             running: &BTreeMap::new(),
         },
     )
+}
+
+/// `look_set` with no `profile.changed` events.
+fn look_at(
+    config: &Config,
+    history: &History,
+    cpus: Option<u64>,
+    now: u64,
+    last: &BTreeMap<String, u64>,
+) -> Look {
+    look_set(config, history, cpus, now, last, &[])
 }
 
 fn look(config: &Config, history: &History, cpus: Option<u64>) -> Look {
@@ -314,23 +328,17 @@ fn a_lowering_waits_the_interval_and_min_jobs_runs_since_the_last_change() {
 }
 
 #[test]
-fn a_cap_lowered_undone_or_edited_back_reads_only_the_runs_since() {
+fn a_cap_lowered_back_by_auto_sizing_reads_only_the_runs_since() {
     let config = jvm_at(8, "");
-    // Runs pinned at 8 CPUs, then a raise to 10, ten light runs there, and a lowering, undo or hand edit back to 8.
+    // Runs pinned at 8 CPUs, a raise to 10, ten light runs there, and a lowering back to 8 two hours ago.
     let mut jobs = runs("test", 3, 7900, 8000, NOW - 80 * HOUR);
     jobs.extend(runs("test", 10, 2000, 10_000, NOW - 3 * HOUR));
-    let raised = BTreeMap::from([("jvm".to_owned(), (NOW - 80 * HOUR + HOUR) / 1000)]);
     let lowered = BTreeMap::from([("jvm".to_owned(), (NOW - 2 * HOUR) / 1000)]);
-    for (last, how) in [
-        (&lowered, "a lowering"),
-        (&raised, "an undo or a hand edit"),
-    ] {
-        assert_eq!(
-            look_at(&config, &history(jobs.clone()), Some(32_000), NOW, last).changes,
-            Vec::new(),
-            "after {how}, the old runs at 8 say nothing new"
-        );
-    }
+    assert_eq!(
+        look_at(&config, &history(jobs.clone()), Some(32_000), NOW, &lowered).changes,
+        Vec::new(),
+        "the old runs at 8 say nothing new"
+    );
     jobs.extend(runs("test", 3, 7900, 8000, NOW - HOUR));
     assert_eq!(
         cpus_to(&look_at(
@@ -338,10 +346,133 @@ fn a_cap_lowered_undone_or_edited_back_reads_only_the_runs_since() {
             &history(jobs),
             Some(32_000),
             NOW,
-            &raised
+            &lowered
         )),
         vec![("jvm", Some(8), Some(10))],
         "runs at the cap since then raise it"
+    );
+}
+
+/// jvm's `cpus` as the daemon ran them, each from `hours_ago`.
+fn ran_at(set: &[(u32, u64)]) -> Vec<CpusSet> {
+    set.iter()
+        .map(|&(cpus, hours_ago)| CpusSet {
+            profile: "jvm".to_owned(),
+            cpus,
+            at: NOW - hours_ago * HOUR,
+        })
+        .collect()
+}
+
+#[test]
+fn a_cap_edited_or_undone_away_and_back_reads_only_the_runs_since_even_with_none_between() {
+    let config = jvm_at(8, "");
+    // Tests pinned at 8 CPUs and ten idle lint runs, then a reload or an undo to 10 and one back to 8, no run at 10:
+    // nothing auto sizing recorded, and no run under another cap, marks the return.
+    let mut jobs = runs("test", 3, 7900, 8000, NOW - 6 * HOUR);
+    jobs.extend(runs("lint", 10, 500, 8000, NOW - 6 * HOUR));
+    let pinned = history(jobs.clone());
+    let none = BTreeMap::new();
+    let back = ran_at(&[(8, 40 * 24), (10, 5), (8, 4)]);
+    let looked = look_set(&config, &pinned, Some(32_000), NOW, &none, &back);
+    assert_eq!(
+        (looked.changes, looked.refused),
+        (Vec::new(), Vec::new()),
+        "neither a raise nor a lowering on the runs before"
+    );
+    // A restart announces the profile again at the same CPUs: the return still counts from when it came.
+    let restarted = ran_at(&[(8, 40 * 24), (10, 5), (8, 4), (8, 1)]);
+    assert_eq!(
+        look_set(&config, &pinned, Some(32_000), NOW, &none, &restarted).changes,
+        Vec::new()
+    );
+    // Edited back to 10 while the daemon was down, and not announced yet: runs at 10 from before say nothing.
+    let mut old_ten = jobs.clone();
+    old_ten.extend(runs("test", 3, 9500, 10_000, NOW - 4 * HOUR - HOUR / 2));
+    assert_eq!(
+        look_set(
+            &jvm_at(10, ""),
+            &history(old_ten),
+            Some(32_000),
+            NOW,
+            &none,
+            &back
+        )
+        .changes,
+        Vec::new(),
+        "the daemon has not run with them yet"
+    );
+    jobs.extend(runs("test", 3, 7900, 8000, NOW - HOUR));
+    assert_eq!(
+        cpus_to(&look_set(
+            &config,
+            &history(jobs),
+            Some(32_000),
+            NOW,
+            &none,
+            &restarted
+        )),
+        vec![("jvm", Some(8), Some(10))],
+        "runs at the cap since the return raise it"
+    );
+}
+
+#[test]
+fn a_job_without_a_measured_average_keeps_the_cpus_from_coming_down() {
+    // Ten lint runs a tenth of a CPU, and three builds at the same cap whose averages were never measured: the lint
+    // runs alone would bring 8 CPUs down toward 1, with nothing known of what the builds need.
+    let config = jvm_at(8, "");
+    let builds = runs("build", 3, 3000, 8000, NOW - HOUR);
+    let mut jobs = runs("lint", 10, 100, 8000, NOW - HOUR);
+    jobs.extend(builds.iter().cloned().map(|run| Ran {
+        cpu_average: None,
+        ..run
+    }));
+    assert_eq!(
+        look(&config, &history(jobs.clone()), Some(32_000)).changes,
+        Vec::new(),
+        "no lowering past a job it knows nothing of"
+    );
+    let mut sampled_once = runs("lint", 10, 100, 8000, NOW - HOUR);
+    sampled_once.extend(builds.iter().cloned().map(|run| Ran {
+        cpu_average: Some(0),
+        ..run
+    }));
+    assert_eq!(
+        look(&config, &history(sampled_once), Some(32_000)).changes,
+        Vec::new(),
+        "nor of one sampled once"
+    );
+    jobs.extend(builds);
+    assert_eq!(
+        cpus_to(&look(&config, &history(jobs), Some(32_000))),
+        vec![("jvm", Some(8), Some(6))],
+        "measured, the builds' 3 CPUs ask for 6: a step to 6"
+    );
+}
+
+#[test]
+fn a_day_of_contention_lowers_a_busy_job_a_step_and_it_asks_the_step_back_once_it_is_over() {
+    // A job averaging 14 of its 16 CPUs, held to 2 by other programs on the host for a whole day: the lowering cannot
+    // tell, and takes one step toward 4. Once the host is free the job sits at its new 12 and is raised again. The
+    // step and the interval bound what contention costs; nothing in the averages tells it apart.
+    let config = jvm_at(16, "");
+    let slowed = history(runs("build", 10, 2000, 16_000, NOW - HOUR));
+    let day_ago = BTreeMap::from([("jvm".to_owned(), (NOW - 25 * HOUR) / 1000)]);
+    let lowered = look_at(&config, &slowed, Some(32_000), NOW, &day_ago);
+    assert_eq!(cpus_to(&lowered), vec![("jvm", Some(16), Some(12))]);
+    let config = jvm_at(12, "");
+    let free = history(runs("build", 3, 11_500, 12_000, NOW + HOUR));
+    let changed = BTreeMap::from([("jvm".to_owned(), NOW / 1000)]);
+    assert_eq!(
+        cpus_to(&look_at(
+            &config,
+            &free,
+            Some(32_000),
+            NOW + 2 * HOUR,
+            &changed
+        )),
+        vec![("jvm", Some(12), Some(15))]
     );
 }
 
@@ -392,6 +523,7 @@ fn a_slot_the_cpu_budget_refuses_does_not_also_refuse_a_cpu_raise_that_fits_with
                 sample_interval: 2,
             },
             last: &BTreeMap::new(),
+            cpus_set: &[],
             running: &BTreeMap::new(),
         },
     );
@@ -476,15 +608,40 @@ mod invariants {
         }
     }
 
-    /// A host: its config file as auto sizing and hand edits leave it, the history the store would read, when auto
-    /// sizing last changed each profile and what each change replaced.
-    struct World {
-        text: String,
-        rules: String,
-        slice: Option<u64>,
+    /// What the store keeps, as a restarted daemon reads it back: the runs, auto sizing's change records and each
+    /// `profile.changed` event.
+    struct Stored {
         jobs: Vec<Ran>,
         cancelled: Vec<Ran>,
+        /// Auto sizing's changes: the profile, and when in seconds.
+        changes: Vec<(String, u64)>,
+        events: Vec<CpusSet>,
+    }
+
+    /// What a running daemon holds between looks, kept as it goes.
+    struct Daemon {
+        /// The config it runs with.
+        running: String,
+        /// When auto sizing last changed each profile, in seconds, as it made the changes.
         last: BTreeMap<String, u64>,
+        /// Each profile's `cpus` as it announced them.
+        cpus_set: Vec<CpusSet>,
+    }
+
+    /// A host: its config file, the store, the daemon, and the oracle's record of the transitions it accepted.
+    struct World {
+        /// The config file on disk, which hand edits change before a reload or a restart runs it.
+        file: String,
+        rules: String,
+        slice: Option<u64>,
+        store: Stored,
+        daemon: Daemon,
+        /// The oracle: from when, in ms, runs at each profile's `cpus` are fresh, set by each accepted transition:
+        /// the daemon running other `cpus`, or auto sizing changing the profile.
+        fresh: BTreeMap<String, u64>,
+        /// The oracle: when auto sizing last changed each profile, in seconds.
+        changed: BTreeMap<String, u64>,
+        /// What each profile's last change replaced, for an undo.
         undo: BTreeMap<String, Resize>,
         now: u64,
         log: String,
@@ -492,41 +649,89 @@ mod invariants {
 
     impl World {
         fn config(&self) -> Config {
-            on(&self.text, &self.rules)
+            on(&self.daemon.running, &self.rules)
         }
 
         /// The last 30 days, as the store reads them.
         fn history(&self) -> History {
             let since = self.now - 30 * DAY;
+            let recent = |runs: &[Ran]| -> Vec<Ran> {
+                runs.iter()
+                    .filter(|job| job.queued_at >= since)
+                    .cloned()
+                    .collect()
+            };
             History {
-                jobs: self
-                    .jobs
-                    .iter()
-                    .filter(|job| job.queued_at >= since)
-                    .cloned()
-                    .collect(),
-                cancelled: self
-                    .cancelled
-                    .iter()
-                    .filter(|job| job.queued_at >= since)
-                    .cloned()
-                    .collect(),
+                jobs: recent(&self.store.jobs),
+                cancelled: recent(&self.store.cancelled),
                 runners: Vec::new(),
             }
         }
 
         fn look(&self) -> Look {
-            look_at(
+            look_set(
                 &self.config(),
                 &self.history(),
                 self.slice,
                 self.now,
-                &self.last,
+                &self.daemon.last,
+                &self.daemon.cpus_set,
             )
         }
 
+        /// Runs `text`, as a reload, a restart or a write of the config does: the profiles whose `cpus` it changes
+        /// start their evidence over, and the daemon announces each profile whose `cpus` differ from its latest event.
+        fn run_with(&mut self, text: String) {
+            let before = self.config();
+            self.daemon.running = text;
+            let after = self.config();
+            for (name, profile) in &after.profiles {
+                if before.profiles[name].cpus != profile.cpus {
+                    self.fresh.insert(name.clone(), self.now);
+                }
+                let latest = self
+                    .store
+                    .events
+                    .iter()
+                    .rfind(|event| event.profile == *name)
+                    .map(|event| event.cpus);
+                if latest != Some(profile.cpus) {
+                    let event = CpusSet {
+                        profile: name.clone(),
+                        cpus: profile.cpus,
+                        at: self.now,
+                    };
+                    self.store.events.push(event.clone());
+                    self.daemon.cpus_set.push(event);
+                }
+            }
+        }
+
+        /// Writes `to` into the profile, on disk and in what the daemon runs, as `PUT /v1/config` does.
         fn write(&mut self, profile: &str, to: Resize) {
-            self.text = resize_profile(&self.text, profile, to).unwrap();
+            self.file = resize_profile(&self.file, profile, to).unwrap();
+            self.run_with(self.file.clone());
+        }
+
+        /// Restarts the daemon: it reads the file and rebuilds the rest from the store. Run with the same file, it
+        /// decides as it did before; `Err` when it does not.
+        fn restart(&mut self) -> Result<(), String> {
+            let unchanged = self.file == self.daemon.running;
+            let before = unchanged.then(|| self.look());
+            let mut last = BTreeMap::new();
+            for (profile, at) in &self.store.changes {
+                let latest = last.entry(profile.clone()).or_insert(*at);
+                *latest = (*latest).max(*at);
+            }
+            self.daemon.last = last;
+            self.daemon.cpus_set = self.store.events.clone();
+            self.run_with(self.file.clone());
+            match before {
+                Some(before) if before != self.look() => {
+                    Err("a restart decides otherwise".to_owned())
+                }
+                _ => Ok(()),
+            }
         }
 
         /// Runs of one of `profile`'s jobs at its cap now, some failed, cancelled or unmeasured.
@@ -556,44 +761,37 @@ mod invariants {
                     3 => ran.cpu_cap = None,
                     4 => ran.cpu_average = Some(0),
                     5 | 6 => {
-                        self.cancelled.push(ran);
+                        self.store.cancelled.push(ran);
                         continue;
                     }
                     _ => {}
                 }
-                self.jobs.push(ran);
+                self.store.jobs.push(ran);
             }
             self.now += 1000 * rng.below(600);
         }
     }
 
-    /// What `cpus` of `profile` at `cap` (ms) may move on: successful runs at the cap with a measured average, since
-    /// its last change and its last run under another cap. Written apart from the rule it checks.
+    /// What `cpus` of `profile` at `cap` (ms) may move on, by job: successful runs at the cap since the oracle's
+    /// last transition of the profile, each job's measured averages. A job without one is listed with none.
     fn evidence(world: &World, profile: &str, cap: u64) -> BTreeMap<&'static str, Vec<u64>> {
-        let history = world.history();
         let since = world
-            .last
+            .fresh
             .get(profile)
-            .map_or(0, |at| at * 1000)
+            .copied()
+            .unwrap_or(0)
             .max(world.now - 30 * DAY);
-        let other = history
-            .jobs
-            .iter()
-            .chain(&history.cancelled)
-            .filter(|job| job.profile == profile && job.cpu_cap.is_some_and(|other| other != cap))
-            .map(|job| job.queued_at + 1)
-            .max()
-            .unwrap_or(0);
         let mut jobs: BTreeMap<&str, Vec<u64>> = BTreeMap::new();
-        for job in history.jobs.iter().filter(|job| {
+        for job in world.history().jobs.iter().filter(|job| {
             job.profile == profile
                 && job.cpu_cap == Some(cap)
                 && job.succeeded
-                && job.queued_at >= since.max(other)
-                && job.cpu_average.is_some_and(|average| average > 0)
+                && job.queued_at >= since
         }) {
             let name = JOBS.iter().find(|(name, _)| *name == job.name).unwrap().0;
-            jobs.entry(name).or_default().push(job.cpu_average.unwrap());
+            jobs.entry(name)
+                .or_default()
+                .extend(job.cpu_average.filter(|average| *average > 0));
         }
         jobs
     }
@@ -625,7 +823,7 @@ mod invariants {
             let cap = u64::from(current) * 1000;
             let jobs = evidence(world, profile, cap);
             let since = world
-                .last
+                .changed
                 .get(profile)
                 .map_or(u64::MAX, |at| world.now / 1000 - at);
             let step = (current * rules.max_step / 100).max(1);
@@ -657,6 +855,11 @@ mod invariants {
                 if runs < rules.min_jobs as usize {
                     return Err(format!("{profile}: lowered on {runs} runs"));
                 }
+                if jobs.values().any(Vec::is_empty) {
+                    return Err(format!(
+                        "{profile}: lowered past a job without a measured average: {jobs:?}"
+                    ));
+                }
                 let heaviest = jobs
                     .values()
                     .map(|averages| spread(averages.clone()).p95)
@@ -677,7 +880,7 @@ mod invariants {
             config.host.cpu_overcommit,
             world.slice,
         ) {
-            let mut after = world.text.clone();
+            let mut after = world.daemon.running.clone();
             for change in &look.changes {
                 after = resize_profile(&after, &change.profile, change.to).unwrap();
             }
@@ -688,6 +891,38 @@ mod invariants {
                     "slots × cpus {before} → {after} past the budget {budget}"
                 ));
             }
+        }
+        Ok(())
+    }
+
+    /// Looks, checks what the look picks and applies it, as the daemon does every 5 minutes; nothing while the file
+    /// on disk differs from what the daemon runs.
+    fn look_and_apply(world: &mut World) -> Result<(), String> {
+        if world.file != world.daemon.running {
+            let _ = writeln!(world.log, "look: blocked by the file on disk");
+            return Ok(());
+        }
+        let look = world.look();
+        check(world, &look)?;
+        let config = world.config();
+        for change in look.changes {
+            let _ = writeln!(world.log, "look: {} {}", change.profile, change.line());
+            let profile = &config.profiles[&change.profile];
+            world.undo.insert(
+                change.profile.clone(),
+                Resize {
+                    cpus: Some(profile.cpus),
+                    ..change.from
+                },
+            );
+            world
+                .store
+                .changes
+                .push((change.profile.clone(), change.at));
+            world.daemon.last.insert(change.profile.clone(), change.at);
+            world.changed.insert(change.profile.clone(), change.at);
+            world.fresh.insert(change.profile.clone(), world.now);
+            world.write(&change.profile, change.to);
         }
         Ok(())
     }
@@ -703,80 +938,92 @@ mod invariants {
             );
         }
         let mut world = World {
-            text,
+            file: text.clone(),
             rules: rng
                 .pick(&["", "min_jobs = 3", "max_step = 50\nmin_jobs = 5"])
                 .to_owned(),
             slice: rng.pick(&[Some(32_000), Some(48_000), None]),
-            jobs: Vec::new(),
-            cancelled: Vec::new(),
-            last: BTreeMap::new(),
+            store: Stored {
+                jobs: Vec::new(),
+                cancelled: Vec::new(),
+                changes: Vec::new(),
+                events: Vec::new(),
+            },
+            daemon: Daemon {
+                running: text.clone(),
+                last: BTreeMap::new(),
+                cpus_set: Vec::new(),
+            },
+            fresh: BTreeMap::new(),
+            changed: BTreeMap::new(),
             undo: BTreeMap::new(),
             now: NOW,
             log: String::new(),
         };
+        // The daemon starts: it announces every profile.
+        world.run_with(text);
         let _ = writeln!(
             world.log,
             "budget {budget}, rules {:?}, slice {:?}",
             world.rules, world.slice
         );
         for _ in 0..EVENTS {
-            match rng.below(10) {
+            let step = match rng.below(12) {
                 0..=3 => {
                     let profile = rng.pick(&PROFILES);
                     world.run(&mut rng, profile);
                     let _ = writeln!(world.log, "runs of {profile}");
+                    Ok(())
                 }
                 4 | 5 => {
                     let hours = rng.pick(&[1, 2, 25, 72]);
                     world.now += hours * HOUR;
                     let _ = writeln!(world.log, "{hours}h pass");
+                    Ok(())
                 }
-                6 | 7 => {
-                    let look = world.look();
-                    // Stateless beyond the history and the change records: a restart decides the same.
-                    if world.look() != look {
-                        return Err(format!("{}a restart decides otherwise", world.log));
-                    }
-                    check(&world, &look).map_err(|broke| format!("{}{broke}", world.log))?;
-                    let config = world.config();
-                    for change in look.changes {
-                        let _ = writeln!(world.log, "look: {} {}", change.profile, change.line());
-                        let profile = &config.profiles[&change.profile];
-                        world.undo.insert(
-                            change.profile.clone(),
-                            Resize {
-                                cpus: Some(profile.cpus),
-                                ..change.from
-                            },
-                        );
-                        world.write(&change.profile, change.to);
-                        world.last.insert(change.profile.clone(), change.at);
-                    }
-                }
+                6 | 7 => look_and_apply(&mut world),
                 8 => {
+                    // A hand edit of `cpus`, run at once as the dashboard's editor does, or left on disk.
                     let profile = rng.pick(&PROFILES);
-                    let config = world.config();
-                    let limits = &config.profiles[profile];
+                    let limits = world.config().profiles[profile].clone();
                     let cpus = u32::try_from(1 + rng.below(32)).unwrap();
-                    world.write(
-                        profile,
-                        Resize {
-                            memory: limits.memory.0,
-                            slots: limits.slots,
-                            cpus: Some(cpus),
-                        },
+                    let to = Resize {
+                        memory: limits.memory.0,
+                        slots: limits.slots,
+                        cpus: Some(cpus),
+                    };
+                    world.file = resize_profile(&world.file, profile, to).unwrap();
+                    let reloaded = rng.below(2) == 0;
+                    if reloaded {
+                        world.run_with(world.file.clone());
+                    }
+                    let _ = writeln!(
+                        world.log,
+                        "hand edit: {profile} cpus {cpus}, reloaded {reloaded}"
                     );
-                    let _ = writeln!(world.log, "hand edit: {profile} cpus {cpus}");
+                    Ok(())
+                }
+                9 => {
+                    world.run_with(world.file.clone());
+                    let _ = writeln!(world.log, "reload");
+                    Ok(())
+                }
+                10 => {
+                    let _ = writeln!(world.log, "restart");
+                    world.restart()
                 }
                 _ => {
                     let profile = rng.pick(&PROFILES);
-                    if let Some(from) = world.undo.remove(profile) {
+                    if world.file == world.daemon.running
+                        && let Some(from) = world.undo.remove(profile)
+                    {
                         world.write(profile, from);
                         let _ = writeln!(world.log, "undo {profile}: {from:?}");
                     }
+                    Ok(())
                 }
-            }
+            };
+            step.map_err(|broke| format!("{}{broke}", world.log))?;
         }
         Ok(())
     }

@@ -2592,6 +2592,11 @@ dl.health-figures {
   color: var(--wait-ink);
 }
 
+/* A `cpus` raise auto sizing cannot make, beside what it does next. */
+.plan-refused {
+  color: var(--failure-ink);
+}
+
 .sizing-changes {
   margin: 1rem 0;
 }

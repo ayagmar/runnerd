@@ -585,6 +585,7 @@ mod auto {
                 cpus: Some(32_000),
                 window: window(),
                 last,
+                cpus_set: &[],
                 running: &BTreeMap::new(),
             },
         )
@@ -762,6 +763,7 @@ mod auto {
                 cpus: Some(32_000),
                 window: window(),
                 last: &BTreeMap::new(),
+                cpus_set: &[],
                 running: &running,
             },
         );
@@ -915,6 +917,7 @@ labels = ["node"]
                 cpus: Some(32_000),
                 window: window(),
                 last: &BTreeMap::new(),
+                cpus_set: &[],
                 running: &BTreeMap::new(),
             },
         );
@@ -1064,6 +1067,7 @@ labels = ["node"]
                 cpus: Some(cpus),
                 window: window(),
                 last: &BTreeMap::new(),
+                cpus_set: &[],
                 running: &BTreeMap::new(),
             },
         )

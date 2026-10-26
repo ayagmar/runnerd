@@ -25,8 +25,15 @@ same days, partly before any CPU raise, so this decision makes no claim about me
 A `cpus` change reads each run's average CPU (CPU time over the run, which the history already records), grouped by
 job: profile, repository, workflow and name. A run counts when it succeeded, has a measured average (none, or 0 from a
 run sampled once, is unknown, never zero), its container had the profile's current `cpus`, and it was queued since the
-profile's last change and since the profile's last run under another cap. A hand edit, a reload or an undo starts the
-evidence over as a change does, without a record of its own. No runs since then: nothing moves.
+profile's last change and since the daemon started running these `cpus`.
+
+That second boundary comes from the `profile.changed` events the history already stores: one when the daemon starts
+with a profile, and one after each reload or restart that changes its CPUs, memory, slots or image. The run of events
+since the last one with other `cpus` starts at the boundary. So a hand edit, a reload or an undo away and back starts
+the evidence over even when no job ran at the cap in between, and a restart reads it back. A config the daemon has
+not announced yet, as after an edit made while it was down, has no evidence until it does. Pruning keeps each
+profile's latest event, and drops older ones after `[history] events` (30 days, the sizing window): a boundary it
+dropped can only move later, which reads fewer runs, never older ones. No runs since then: nothing moves.
 
 ### Raise
 
@@ -39,16 +46,22 @@ of the cap spent most of its build at it. The history's heaviest job sits at 37%
 parallel phase and a low average; that phase runs slower than it could, which is accepted.
 
 A raise the slice's CPUs or the CPU budget leave no room for is not written. `GET /v1/sizing`'s `auto_plan` lists it
-in `refused` with why, and every client shows "No CPU raise" and the reason for that profile, as core words it.
+in `refused` with why, and every client shows "No CPU raise" and the reason for that profile, as core words it, beside
+whatever the same look still changes in its memory or slots.
 
 ### Lowering
 
 `interval` after the last change, with `min_jobs` such runs, `cpus` come down toward twice the heaviest job's p95
-average, rounded up to whole CPUs, at least 1, by at most `max_step` percent a change. Twice: a burst at twice the
-run's average still runs uncapped, and the job that set the target then averages half the cap at p95, far under the
-raise's 70%, so a lowering does not ask for its raise back. The heaviest job's p95, not a mean, so a burst of cheap or
-failed jobs, or other programs slowing the runs, does not pull the target down; and a day between steps leaves time
-to see it. Replayed on the owner's history, the old rule makes each of the seven raises the host saw and this one
+average, rounded up to whole CPUs, at least 1, by at most `max_step` percent a change. A job whose runs at the cap
+have no measured average keeps the profile where it is: it may be the one that needs the CPUs. Twice: a burst at
+twice the run's average still runs uncapped, and while the jobs keep the demand they showed, the one that set the
+target then averages half the cap at p95, far under the raise's 70%, so the lowering does not ask for its raise back.
+The heaviest job's p95, not a mean, so a burst of cheap or failed jobs does not pull the target down.
+
+Contention is not ruled out. A day in which other programs hold every run of the heaviest job to a fraction of its
+demand looks like a job that needs less, and the profile comes down a step; once the host is free the job sits at
+the lower cap and is raised back. The step and the interval bound what that costs, a quarter of the CPUs for a day or
+so; nothing in the averages tells contention from a lighter job, and a trial that could is below. Replayed on the owner's history, the old rule makes each of the seven raises the host saw and this one
 none; from where they left JVM and Node, it steps 31 → 24 toward 13 CPUs and 22 → 17 toward 11, a day after their
 last change. A memory change resets that day too, so a profile whose memory keeps rising waits for it to settle.
 
@@ -70,6 +83,7 @@ at all, only once those windows pass with lower peaks: weeks, not a day.
 - No schema change. `AutoPlan` gains `refused`, skipped when empty; 0.0.16 ignores it.
 - A profile far over its jobs' needs comes down a step a day without a hand edit; one that a lowering made too small
   for a short-burst build stays there. Undo it, or set `cpus` by hand.
+- A day of host contention can cost the heaviest profile one step down and one back up (above).
 - A lowering can free CPU budget that memory or wait sizing then gives to slots; a later raise that no longer fits
   is refused and shown, not written.
 - Rejected: peaks at a higher percentile or over more runs (a burst reaches any cap), quota throttling counters (not

@@ -7,8 +7,8 @@ use std::fmt::Write as _;
 
 use runnerd_core::api::{
     self, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
-    JobSizing, JobSummary, NotifyTest, ProfilePlan, QueuedJob, RecordNote, RecordState, Records,
-    Sizing, SlotState, Status, Step, WaitSpread,
+    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, Sizing,
+    SlotState, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
 use runnerd_core::api::{in_cores, job_title};
@@ -623,18 +623,13 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             paint.paint(profile.advice.tone().into(), &sizing.advice_line(profile))
         );
         // A raise of `cpus` its jobs ask for and auto sizing cannot make.
-        if let Some(plan) = sizing.auto_plan.as_ref().filter(|_| sizing.auto) {
-            let next = plan.profile_plan(&profile.name, now);
-            if matches!(next, ProfilePlan::Refused { .. }) {
-                let _ = writeln!(
-                    out,
-                    "  {}",
-                    paint.paint(
-                        api::Tone::Warn.into(),
-                        &format!("{}: {}", next.headline(plan), next.reason(sizing, profile))
-                    )
-                );
-            }
+        if let Some(refusal) = sizing
+            .auto_plan
+            .as_ref()
+            .filter(|_| sizing.auto)
+            .and_then(|plan| plan.refusal(&profile.name))
+        {
+            let _ = writeln!(out, "  {}", paint.paint(api::Tone::Warn.into(), &refusal));
         }
         out.push_str(&sizing_changes(sizing, &profile.name, now, paint));
         // Under auto sizing the daemon applies it.

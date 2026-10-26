@@ -96,19 +96,29 @@ fn a_hold_is_judged_by_the_readers_clock_not_by_when_the_plan_was_made() {
 }
 
 #[test]
-fn a_cpu_raise_auto_sizing_cannot_make_says_why_until_a_change_is_due() {
-    let mut plan = AutoPlan {
+fn a_cpu_raise_auto_sizing_cannot_make_shows_beside_the_memory_change_it_makes() {
+    let plan = AutoPlan {
         every: 300,
         interval: 86_400,
         raise_interval: 3_600,
         max_step: 25,
-        next: vec![],
-        held: vec![SizingHold {
+        next: vec![SizingChange {
+            at: 0,
             profile: "jvm".to_owned(),
-            changed: 0,
-            until: 3_600,
-            lower_until: 86_400,
+            from: Resize {
+                memory: 9 * G,
+                slots: 2,
+                cpus: None,
+            },
+            to: Resize {
+                memory: 10 * G,
+                slots: 2,
+                cpus: None,
+            },
+            reason: "raise memory".to_owned(),
+            uncertain: false,
         }],
+        held: Vec::new(),
         blocked: None,
         refused: vec![SizingRefused {
             profile: "jvm".to_owned(),
@@ -117,38 +127,19 @@ fn a_cpu_raise_auto_sizing_cannot_make_says_why_until_a_change_is_due() {
                 .to_owned(),
         }],
     };
-    let refused = plan.profile_plan("jvm", 7_200);
-    assert_eq!(refused.headline(&plan), "No CPU raise");
     assert!(
-        refused
-            .reason(
-                &sizing(vec![]),
-                &profile("jvm", G, Advice::TooFew { jobs: 3 })
-            )
-            .ends_with("do not fit the CPU budget beside the other profiles'"),
-        "it says why, over the lowering's hold"
+        matches!(plan.profile_plan("jvm", 60), ProfilePlan::Next { .. }),
+        "the memory change is due"
     );
-    let change = SizingChange {
-        at: 0,
-        profile: "jvm".to_owned(),
-        from: Resize {
-            memory: 9 * G,
-            slots: 2,
-            cpus: None,
-        },
-        to: Resize {
-            memory: 10 * G,
-            slots: 2,
-            cpus: None,
-        },
-        reason: "raise memory".to_owned(),
-        uncertain: false,
-    };
-    plan.next.push(change);
-    assert!(
-        matches!(plan.profile_plan("jvm", 7_200), ProfilePlan::Next { .. }),
-        "a change due comes first"
+    assert_eq!(
+        plan.refusal("jvm").as_deref(),
+        Some(
+            "No CPU raise: 3 runs of halyard/ledger CI / test averaged 7.9 of its 8 CPUs (median): the cap holds \
+             them back; 9 CPUs for each of its 2 slots do not fit the CPU budget beside the other profiles'"
+        ),
+        "and why its cpus cannot rise, beside it"
     );
+    assert_eq!(plan.refusal("node"), None);
 }
 
 #[test]
