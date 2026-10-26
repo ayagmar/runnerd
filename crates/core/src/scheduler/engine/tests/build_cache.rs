@@ -677,6 +677,10 @@ async fn jobs_that_end_having_stored_nothing_are_not_asked_about_on_github() {
         cache.undecided(&main) && cache.undecided(&pull),
         "GitHub has not been asked yet"
     );
+    // The first tick's visibility ask runs in a task of its own; let it finish so its call is not counted below.
+    if let Some(asking) = engine.visibility_asking.take() {
+        asking.await.unwrap();
+    }
     let before = github.calls().len();
     jobs_end(&docker, &mut engine).await;
     let asked: Vec<String> = github.calls()[before..]
