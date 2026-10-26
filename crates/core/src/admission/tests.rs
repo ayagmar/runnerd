@@ -71,8 +71,12 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         reserved: None,
         host_waited: 0,
         hit_cap: Some(false),
+        own_cap: Some(false),
         measure: Measure::WithoutPageCache,
         succeeded: true,
+        failed: false,
+        run_id: queued,
+        branch: Some("main".to_owned()),
     }
 }
 
@@ -128,13 +132,13 @@ fn a_job_with_one_run_takes_its_profiles_p95_or_its_peak_whichever_is_more() {
         7 * G,
         NOW,
     );
-    // The profile's p95 is 2G, but e2e reached 5G: 5.75G.
+    // The profile's p95 is 2G, but e2e reached 5G: 5.75G. The build counts its last 20 runs.
     let e2e = predictor.predict(&key("e2e"), "node", 7 * G, NOW, Copies::Alone);
-    assert_eq!(e2e.basis, Basis::Profile { runs: 62 });
+    assert_eq!(e2e.basis, Basis::Profile { runs: 22 });
     assert_eq!(e2e.memory, 5888 * M);
     // One light run may not be the job's heaviest: 2G + 15%, rounded up to 2.5G.
     let lint = predictor.predict(&key("lint"), "node", 7 * G, NOW, Copies::Alone);
-    assert_eq!(lint.basis, Basis::Profile { runs: 62 });
+    assert_eq!(lint.basis, Basis::Profile { runs: 22 });
     assert_eq!(lint.memory, 2560 * M);
 }
 
@@ -239,7 +243,7 @@ fn a_job_never_seen_reserves_the_largest_peak_of_its_profile() {
     );
     // A new workflow may be the profile's heaviest: 5G + 15%, not the p95's 2G.
     let prediction = predictor.predict(&key("lint"), "node", 7 * G, NOW, Copies::Alone);
-    assert_eq!(prediction.basis, Basis::ProfileMax { runs: 61 });
+    assert_eq!(prediction.basis, Basis::ProfileMax { runs: 21 });
     assert_eq!(prediction.memory, 5888 * M);
 }
 
@@ -337,6 +341,7 @@ fn a_run_out_of_memory_at_its_cap_makes_its_job_unpredictable_for_a_week() {
     // Reclaim failed at the cap; what it held between samples stayed under 3G.
     let starved = Ran {
         hit_cap: Some(true),
+        own_cap: Some(true),
         ..build(3 * G)
     };
     predictor.learn(&starved, "node", 7 * G, NOW);
@@ -358,7 +363,7 @@ fn a_run_out_of_memory_at_its_cap_makes_its_job_unpredictable_for_a_week() {
     assert_eq!(
         later.basis,
         Basis::Job {
-            runs: 21,
+            runs: 20,
             peak: JobPeak::P95
         }
     );
@@ -376,7 +381,7 @@ fn a_job_whose_page_cache_fills_its_cap_is_not_put_back_on_its_cap() {
     assert_eq!(
         prediction.basis,
         Basis::Job {
-            runs: 21,
+            runs: 20,
             peak: JobPeak::P95
         }
     );
@@ -391,6 +396,7 @@ fn without_its_containers_events_a_run_that_peaked_near_its_cap_makes_its_job_un
     }
     let unknown = Ran {
         hit_cap: None,
+        own_cap: None,
         ..build(6900 * M)
     };
     predictor.learn(&unknown, "node", 7 * G, NOW);
@@ -828,3 +834,5 @@ fn a_job_of_one_name_in_two_pools_is_predicted_from_its_runs_in_each() {
         "the light pool's job goes by its own runs: {light:?}"
     );
 }
+
+mod recent;

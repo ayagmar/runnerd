@@ -25,7 +25,6 @@ use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{Decision, Pool, Repository, matches};
-use crate::sizing::{Measure, Ran};
 use crate::time;
 
 /// How often the predictor reads the job history again.
@@ -195,44 +194,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 return;
             }
         };
-        let mut runs: Vec<(Ran, bool)> = history
-            .jobs
-            .into_iter()
-            .map(|run| (run, true))
-            .chain(history.cancelled.into_iter().map(|run| (run, false)))
-            .collect();
-        runs.sort_by_key(|(run, _)| run.finished_at.unwrap_or(run.queued_at));
-        let mut predictor = Predictor::new(&self.config.sizing);
-        for (run, finished) in &runs {
-            let cap = run
-                .memory_cap
-                .or_else(|| self.config.profiles.get(&run.profile).map(|p| p.memory.0))
-                .unwrap_or(u64::MAX);
-            let at = run.finished_at.unwrap_or(run.queued_at);
-            if run.measure == Measure::WithActiveFile {
-                // Its peak counted page cache read twice, so neither it nor a peak near the cap says what the job
-                // needs; a kill for memory still does, and its CPU is counted as ever.
-                if *finished {
-                    predictor.learn_cpu(run, &run.profile);
-                }
-                if run.oom_killed {
-                    predictor.mark(
-                        &Ran {
-                            reserved: None,
-                            ..run.clone()
-                        },
-                        &run.profile,
-                        cap,
-                        at,
-                    );
-                }
-            } else if *finished {
-                predictor.learn(run, &run.profile, cap, at);
-            } else {
-                // A cancelled run's peak may be cut short, so only how it ended counts.
-                predictor.mark(run, &run.profile, cap, at);
-            }
-        }
+        let profiles = &self.config.profiles;
+        let predictor = Predictor::read(&self.config.sizing, &history, |profile| {
+            profiles.get(profile).map(|limits| limits.memory.0)
+        });
         self.measured.predictor = Some((predictor, SystemTime::now()));
     }
 

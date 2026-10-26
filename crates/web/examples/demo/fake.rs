@@ -1002,6 +1002,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                 at_cap: 0,
                 memory,
                 cpu: spread(3100, 6900, 7600, 7900),
+                on_cap: 0,
             },
             wait,
             advice,
@@ -1090,6 +1091,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                     at_cap: 0,
                     memory,
                     cpu: spread(3100, 6900, 7600, 7900),
+                    on_cap: 0,
                 },
                 wait,
                 starts: Starts {
@@ -1102,6 +1104,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                 wants_slots: busy >= 50,
                 advice,
                 jobs,
+                revert: None,
             }
         })
         .collect();

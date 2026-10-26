@@ -56,8 +56,7 @@ fn runs(name: &str, count: usize, average: u64, cpu_cap: u64, at: u64) -> Vec<Ra
 fn history(jobs: Vec<Ran>) -> History {
     History {
         jobs,
-        cancelled: Vec::new(),
-        runners: Vec::new(),
+        ..History::default()
     }
 }
 
@@ -256,6 +255,7 @@ fn failed_cancelled_and_unmeasured_runs_raise_nothing() {
         jobs: Vec::new(),
         cancelled: pinned,
         runners: Vec::new(),
+        ..History::default()
     };
     assert_eq!(
         look(&config, &cancelled, Some(32_000)).changes,
@@ -664,7 +664,7 @@ mod invariants {
             History {
                 jobs: recent(&self.store.jobs),
                 cancelled: recent(&self.store.cancelled),
-                runners: Vec::new(),
+                ..History::default()
             }
         }
 

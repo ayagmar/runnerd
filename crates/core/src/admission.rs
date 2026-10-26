@@ -1,19 +1,22 @@
 //! Admission by measured peaks: a job's memory peak and average CPU predicted from the job history (`Predictor`),
 //! and the history replayed through admission by caps and by predictions, with or without a CPU budget
 //! (`simulate`), to show what each would have done with the same jobs; and what the host's memory leaves runners
-//! (`host`). Pure: no I/O, no clock.
+//! (`host`). A job's memory goes by its last runs (`recent`, ADR 0070). Pure: no I/O, no clock.
 
 pub mod host;
+pub mod recent;
 
 use std::collections::{BTreeMap, BTreeSet};
 
 use crate::api::Spread;
 use crate::api::{Basis, JobPeak};
 use crate::config::{self, Config};
-use crate::sizing::{GRANULE, Ran, spread};
+use crate::sizing::{GRANULE, History, Ran, spread};
+use recent::{Ending, RECENT_RUNS, Recent};
 
-/// For this long after a run at its cap or killed for memory, in milliseconds, its job is admitted at its cap: 7
-/// days. After a run past what it reserved, its job reserves its largest peak for as long.
+/// For at most this long after a run at its cap or killed for memory, in milliseconds, its job is admitted at its
+/// cap: 7 days, or until `recent::CLEAN_RUNS` clear runs. After a run past what it reserved, its job reserves its
+/// largest peak for at most as long, or until the run leaves its window.
 pub const UNPREDICTABLE_FOR: u64 = 7 * 24 * 3600 * 1000;
 
 /// From this many successful runs of its own, fewer than `[sizing] min_jobs` runs, a job reserves its own largest
@@ -103,39 +106,7 @@ impl Averages {
     }
 }
 
-/// The peaks of a set of runs, sorted, until when a run at its cap makes them unpredictable, and until when a run
-/// past what it reserved makes the largest of them, or that run's peak if more, the prediction.
-#[derive(Debug, Clone, Default)]
-struct Peaks {
-    sorted: Vec<u64>,
-    /// How many of those runs succeeded.
-    succeeded: u64,
-    unpredictable_until: u64,
-    overran_until: u64,
-    /// The largest peak of a run past what it reserved, cancelled runs' included.
-    overran_peak: u64,
-}
-
-impl Peaks {
-    fn add(&mut self, peak: u64) {
-        let at = self.sorted.partition_point(|known| *known <= peak);
-        self.sorted.insert(at, peak);
-    }
-
-    fn runs(&self) -> u64 {
-        self.sorted.len() as u64
-    }
-
-    fn p95(&self) -> u64 {
-        spread(self.sorted.clone()).p95
-    }
-
-    fn max(&self) -> u64 {
-        self.sorted.last().copied().unwrap_or(0)
-    }
-}
-
-/// A job in one profile, as the predictor keeps its runs.
+/// A job in one profile, as the predictor keeps its CPU averages.
 #[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
 struct InProfile {
     key: Key,
@@ -156,10 +127,8 @@ impl InProfile {
 pub struct Predictor {
     margin: u32,
     min_jobs: u32,
-    /// By job and the profile it ran in: a job of one name may run in several pools of its repository, whose runs
-    /// say nothing of each other's (ADR 0058).
-    jobs: BTreeMap<InProfile, Peaks>,
-    profiles: BTreeMap<String, Peaks>,
+    /// Each job's last runs, by job and the profile it ran in (ADR 0070).
+    recent: Recent,
     /// The CPU averages of the runs that have one, apart from the peaks: a run whose peak says nothing of its
     /// memory still says what CPU it used, and must not make its job known to memory predictions.
     cpu_jobs: BTreeMap<InProfile, Averages>,
@@ -172,30 +141,42 @@ impl Predictor {
         Predictor {
             margin: rules.margin,
             min_jobs: rules.min_jobs,
-            jobs: BTreeMap::new(),
-            profiles: BTreeMap::new(),
+            recent: Recent::new(RECENT_RUNS.max(u64::from(rules.min_jobs))),
             cpu_jobs: BTreeMap::new(),
             cpu_profiles: BTreeMap::new(),
         }
     }
 
-    /// Learns a run of `profile` that finished at `at` (ms), having run under `cap`: its peak, and how it ended.
-    pub fn learn(&mut self, run: &Ran, profile: &str, cap: u64, at: u64) {
-        self.mark(run, profile, cap, at);
-        let peak = run.memory_peak;
-        if let Some(job) = self.jobs.get_mut(&InProfile::new(&Key::of(run), profile)) {
-            job.add(peak);
-            job.succeeded += u64::from(run.succeeded);
+    /// A predictor that learned every row of `history`, in the order they finished, each under the cap its
+    /// container had, else `cap_of(profile)`: what the daemon reads every minute, and again after a restart.
+    pub fn read(
+        rules: &config::Sizing,
+        history: &History,
+        cap_of: impl Fn(&str) -> Option<u64>,
+    ) -> Predictor {
+        let mut predictor = Predictor::new(rules);
+        for (run, ending) in recent::rows(history) {
+            let cap = run
+                .memory_cap
+                .or_else(|| cap_of(&run.profile))
+                .unwrap_or(u64::MAX);
+            let at = recent::finished(run);
+            match ending {
+                Ending::Finished => predictor.learn(run, &run.profile, cap, at),
+                Ending::Cancelled => predictor.mark(run, &run.profile, cap, at),
+            }
         }
-        self.profiles
-            .entry(profile.to_owned())
-            .or_default()
-            .add(peak);
+        predictor
+    }
+
+    /// Learns a finished run of `profile` that ended at `at` (ms), having run under `cap`: its peak, how it ended,
+    /// and its CPU. Runs must come in the order they finished (`recent::Recent::read`).
+    pub fn learn(&mut self, run: &Ran, profile: &str, cap: u64, at: u64) {
+        self.recent.read(run, profile, Ending::Finished, cap, at);
         self.learn_cpu(run, profile);
     }
 
-    /// Learns the CPU a finished run of `profile` used, without its peak: as `learn` does, and alone for a run whose
-    /// peak says nothing of its memory, as one sampled with page cache counted.
+    /// Learns the CPU a finished run of `profile` used, without its peak.
     pub fn learn_cpu(&mut self, run: &Ran, profile: &str) {
         let Some(average) = run.cpu_average else {
             return;
@@ -251,22 +232,11 @@ impl Predictor {
         }
     }
 
-    /// Learns only how a run of `profile` ended, not its peak, as for a cancelled one: a run that met its cap
-    /// (`Ran::met_cap`) makes its job in that profile unpredictable for `UNPREDICTABLE_FOR`, a peak past what it
-    /// reserved makes it reserve its largest peak for as long.
+    /// Learns a cancelled run of `profile`: how it ended, and its peak only when it met its cap. A run that met
+    /// its cap or was killed for memory holds its job in that profile at its cap (`Ran::capped`), a peak past what
+    /// it reserved makes it reserve its largest peak while that run is in its window.
     pub fn mark(&mut self, run: &Ran, profile: &str, cap: u64, at: u64) {
-        let peak = run.memory_peak;
-        let job = self
-            .jobs
-            .entry(InProfile::new(&Key::of(run), profile))
-            .or_default();
-        if run.met_cap(cap) {
-            job.unpredictable_until = job.unpredictable_until.max(at + UNPREDICTABLE_FOR);
-        }
-        if run.reserved.is_some_and(|reserved| peak > reserved) {
-            job.overran_until = job.overran_until.max(at + UNPREDICTABLE_FOR);
-            job.overran_peak = job.overran_peak.max(peak);
-        }
+        self.recent.read(run, profile, Ending::Cancelled, cap, at);
     }
 
     /// The memory to reserve for a run of `key` in `profile`, whose cap is `cap`, at `now` (ms), with `copies`
@@ -279,56 +249,58 @@ impl Predictor {
         now: u64,
         copies: Copies,
     ) -> Prediction {
-        let job = self.jobs.get(&InProfile::new(key, profile));
-        if let Some(until) = job
-            .map(|job| job.unpredictable_until)
-            .filter(|until| *until > now)
-        {
+        let job = self.recent.job(key, profile);
+        if let Some(hold) = job.and_then(|job| job.held(now, Some(UNPREDICTABLE_FOR))) {
             return Prediction {
                 memory: cap,
                 basis: Basis::Unpredictable {
-                    until: until / 1000,
+                    until: hold.at.saturating_add(UNPREDICTABLE_FOR) / 1000,
                 },
             };
         }
         let min_jobs = u64::from(self.min_jobs);
-        let (memory, basis) = match (job, self.profiles.get(profile)) {
+        let peers = self.recent.profile(profile);
+        let peers_runs = peers.len() as u64;
+        let overran = job.and_then(|job| {
+            job.overruns(now, UNPREDICTABLE_FOR)
+                .fold(None, |most: Option<(u64, u64)>, overrun| {
+                    let until = overrun.at.saturating_add(UNPREDICTABLE_FOR);
+                    Some(most.map_or((overrun.peak, until), |(peak, last)| {
+                        (peak.max(overrun.peak), last.max(until))
+                    }))
+                })
+        });
+        let (memory, basis) = match (job, peers_runs >= min_jobs) {
             // Seen only cancelled, so its peaks say nothing.
             (Some(job), _) if job.runs() == 0 => (cap, Basis::Cap),
-            (Some(job), _) if job.overran_until > now => (
-                self.with_margin(job.max().max(job.overran_peak)),
+            (Some(job), _) if let Some((peak, until)) = overran => (
+                self.with_margin(job.max().max(peak)),
                 Basis::Overran {
-                    until: job.overran_until / 1000,
+                    until: until / 1000,
                 },
             ),
             (Some(job), _) if job.runs() >= min_jobs => (
-                self.with_margin(job.p95()),
+                self.with_margin(spread(job.peaks().to_vec()).p95),
                 Basis::Job {
                     runs: job.runs(),
                     peak: JobPeak::P95,
                 },
             ),
-            (Some(job), Some(peers))
-                if peers.runs() >= min_jobs
-                    && job.succeeded >= OWN_RUNS
-                    && copies == Copies::Alone =>
-            {
-                (
-                    self.with_margin(job.max()),
-                    Basis::Job {
-                        runs: job.runs(),
-                        peak: JobPeak::Largest,
-                    },
-                )
-            }
-            (Some(job), Some(peers)) if peers.runs() >= min_jobs => (
-                self.with_margin(job.max().max(peers.p95())),
-                Basis::Profile { runs: peers.runs() },
+            (Some(job), true) if job.succeeded() >= OWN_RUNS && copies == Copies::Alone => (
+                self.with_margin(job.max()),
+                Basis::Job {
+                    runs: job.runs(),
+                    peak: JobPeak::Largest,
+                },
+            ),
+            (Some(job), true) => (
+                self.with_margin(job.max().max(spread(peers.to_vec()).p95)),
+                Basis::Profile { runs: peers_runs },
             ),
             // A job never seen may be the profile's heaviest.
-            (None, Some(peers)) if peers.runs() >= min_jobs => (
-                self.with_margin(peers.max()),
-                Basis::ProfileMax { runs: peers.runs() },
+            (None, true) => (
+                self.with_margin(peers.last().copied().unwrap_or(0)),
+                Basis::ProfileMax { runs: peers_runs },
             ),
             _ => (cap, Basis::Cap),
         };
@@ -337,7 +309,6 @@ impl Predictor {
             basis,
         }
     }
-
     /// `peak` plus the margin, rounded up to 256M.
     fn with_margin(&self, peak: u64) -> u64 {
         let memory = peak.saturating_add(peak.saturating_mul(u64::from(self.margin)) / 100);
@@ -516,14 +487,21 @@ struct Replayer<'run> {
 }
 
 impl<'run> Replayer<'run> {
-    /// Ends the jobs that end by `now`; measured admission learns their peaks.
+    /// Ends the jobs that end by `now`, in the order they end; measured admission learns them as the daemon reads
+    /// their rows.
     fn finish(&mut self, now: u64) {
         let (ended, running): (Vec<_>, Vec<_>) = std::mem::take(&mut self.running)
             .into_iter()
             .partition(|running| running.ends <= now);
         self.running = running;
+        let mut ended = ended;
+        ended.sort_by_key(|ended| ended.ends);
         for ended in ended {
-            let cap = self.config.profiles[ended.profile].memory.0;
+            // As the daemon reads the row: under the cap its container had.
+            let cap = ended
+                .run
+                .memory_cap
+                .unwrap_or(self.config.profiles[ended.profile].memory.0);
             self.under_predicted += u64::from(ended.peak > ended.reserved);
             let reserved = (self.policy == Policy::Measured).then_some(ended.reserved);
             let run = Ran {

@@ -42,6 +42,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0011_notify.sql"),
     include_str!("store/migrations/0012_build_cache.sql"),
     include_str!("store/migrations/0013_host_memory.sql"),
+    include_str!("store/migrations/0014_local_ooms.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -333,6 +334,8 @@ pub struct AutoSizing {
     /// Each profile's `cpus` as the daemon ran them, from its `profile.changed` events, oldest first: those `[history]
     /// events` keeps, and each profile's latest however old.
     pub cpus: Vec<sizing::CpusSet>,
+    /// Each profile's `memory` as the daemon ran it, from the same events.
+    pub memory: Vec<sizing::MemorySet>,
 }
 
 /// The job history. Cloning shares it.
@@ -940,15 +943,20 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
         return Ok(sizing::History::default());
     }
     // Columns sizing reads that later versions added: before them, a temporary view gives each runner none.
-    let added = match found {
+    let mut added = match found {
         1 => {
             "NULL AS memory_cap, NULL AS cpu_cap, NULL AS admission, NULL AS oom_kills, NULL AS ooms, \
-             NULL AS memory_measure"
+             NULL AS memory_measure, "
         }
-        2..=6 => "NULL AS admission, NULL AS oom_kills, NULL AS ooms, NULL AS memory_measure",
-        7 => "NULL AS ooms, NULL AS memory_measure",
+        2..=6 => "NULL AS admission, NULL AS oom_kills, NULL AS ooms, NULL AS memory_measure, ",
+        7 => "NULL AS ooms, NULL AS memory_measure, ",
         _ => "",
-    };
+    }
+    .to_owned();
+    if found < 14 {
+        added.push_str("NULL AS local_ooms");
+    }
+    let added = added.trim_end_matches(", ");
     if found < 13 {
         db.execute_batch("CREATE TEMP VIEW jobs AS SELECT *, 0 AS host_waited FROM main.jobs")?;
     }
@@ -957,7 +965,13 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
             "CREATE TEMP VIEW runners AS SELECT *, {added} FROM main.runners"
         ))?;
     }
-    Ok(read::sizing(db, since)?)
+    let mut history = read::sizing(db, since)?;
+    // What a revert reads, from a history that has it all; an older one shows no revert.
+    if found >= 14 {
+        history.memory_set = read::auto_sizing(db)?.memory;
+        history.changes = read::sizing_changes(db, since.saturating_sub(sizing::memory::HISTORY))?;
+    }
+    Ok(history)
 }
 
 /// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error.

@@ -709,6 +709,12 @@ impl Writer<'_> {
                     params![sample.runner, ooms],
                 )?;
             }
+            if let Some(ooms) = sample.events.local_oom {
+                self.db.execute(
+                    "UPDATE runners SET local_ooms = max(coalesce(local_ooms, 0), ?2) WHERE name = ?1",
+                    params![sample.runner, ooms],
+                )?;
+            }
             if let Some(throttled) = sample.events.sock_throttled {
                 self.db.execute(
                     "UPDATE runners SET sock_throttled = max(coalesce(sock_throttled, 0), ?2) WHERE name = ?1",

@@ -1000,6 +1000,7 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
                 oom: Some(kills),
                 oom_kill: Some(kills),
                 sock_throttled: None,
+                local_oom: None,
             },
             ..sample(name, 1_000_300, 0, 0)
         }]);
@@ -1042,6 +1043,7 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
             oom: Some(1),
             oom_kill: Some(1),
             sock_throttled: None,
+            local_oom: None,
         },
         ..sample("r1", 1_000_300, 0, 0)
     }]);
@@ -1164,6 +1166,7 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
                 oom,
                 oom_kill: Some(0),
                 sock_throttled: None,
+                local_oom: None,
             },
             ..sample(name, 1_000_300, 0, 0)
         }]);
@@ -1180,6 +1183,38 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
             (Measure::WithoutPageCache, None),
         ]
     );
+}
+
+#[tokio::test]
+async fn a_runners_own_limit_failing_reclaim_is_read_apart_from_a_limit_below_it() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    database_of_version(&path, 13);
+    let own = |history: &crate::sizing::History| -> Vec<Option<bool>> {
+        history.jobs.iter().map(|job| job.own_cap).collect()
+    };
+    // `runnerd doctor` reads a version 13 history, which never had the counter, as it is.
+    assert_eq!(own(&super::sizing_at(&path, 0).unwrap().unwrap()), [None]);
+    let store = Store::open(&path).unwrap();
+    // r2's limit held while a service container's did not; r3's own failed; r4's kernel had no counter.
+    for (id, name, local_oom) in [(2, "r2", Some(0)), (3, "r3", Some(2)), (4, "r4", None)] {
+        store.queued("o/r", &queued(id));
+        store.runner_started(runner(name, 1_000_100));
+        store.claimed(id, 10, name, 1_000_200);
+        store.samples(vec![SampleRecord {
+            events: Events {
+                oom: Some(2),
+                oom_kill: Some(1),
+                sock_throttled: None,
+                local_oom,
+            },
+            ..sample(name, 1_000_300, 0, 0)
+        }]);
+        store.lost(id, 1_000_400);
+    }
+    store.flush().await;
+    let after = store.sizing(0).await.unwrap();
+    assert_eq!(own(&after), [None, Some(false), Some(true), None]);
 }
 
 #[test]

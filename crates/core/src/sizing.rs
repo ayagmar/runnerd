@@ -3,8 +3,8 @@
 //! (`api::Sizing`). It never changes the config: a client applies advice through `PUT /v1/config`, which validates
 //! it like any other config, and under `[sizing] auto` the daemon applies what `auto::changes` picks the same way.
 
-use std::collections::BTreeMap;
-
+use crate::admission::Key;
+use crate::admission::recent::Recent;
 use crate::api::{self, Advice, Peaks, Spread};
 use crate::config::{Admission, Config};
 use crate::observe::metrics::SAMPLE_INTERVAL;
@@ -53,13 +53,22 @@ pub struct Ran {
     pub finished_at: Option<u64>,
     /// Whether the kernel killed a process in its container for memory.
     pub oom_killed: bool,
-    /// Whether its container's memory reached a limit with nothing left to reclaim (`memory.events` `oom`); `None`
-    /// when its events were not recorded.
+    /// Whether its container's memory, or a descendant's, reached a limit with nothing left to reclaim
+    /// (`memory.events` `oom`); `None` when its events were not recorded.
     pub hit_cap: Option<bool>,
+    /// Whether its container's own limit failed reclaim (`memory.events.local` `oom`), not a descendant's; `None`
+    /// when not recorded, as before schema 14.
+    pub own_cap: Option<bool>,
     /// What its sampled memory counts.
     pub measure: Measure,
     /// Whether it completed with success: a failed or lost run may have stopped before its heaviest step.
     pub succeeded: bool,
+    /// Whether it completed with `failure` or `timed_out`: not lost, not cancelled.
+    pub failed: bool,
+    /// Its workflow run on GitHub: a re-run of its failed jobs has the same.
+    pub run_id: u64,
+    /// The branch it ran for, when known.
+    pub branch: Option<String>,
     /// What measured admission reserved for it; `None` under caps or for an adopted runner.
     pub reserved: Option<u64>,
     /// How long of its wait it waited because the host's memory could not take its runner, in ms: no more slots
@@ -78,14 +87,59 @@ pub enum Measure {
     WithoutPageCache,
 }
 
+/// What a run says about its container's memory cap (ADR 0070).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Capped {
+    /// The container's own limit failed reclaim: it needed more than the cap.
+    Met,
+    /// Recorded without the local counter: by the reading before it, a kill or a limit hit in the container, or
+    /// without events a peak within `AT_CAP` percent of the cap. Holds and floors as `Met`, never raises a cap.
+    Assumed,
+    /// A process in it was killed for memory while its own limit held: the slice or the host ran out.
+    Killed,
+    /// None of those. A peak near the cap with no `oom` at it is clear: a JVM fills the room it has.
+    Clear,
+}
+
+impl Capped {
+    /// Whether it says the job needed its cap: `Met` or `Assumed`.
+    pub fn met(self) -> bool {
+        matches!(self, Capped::Met | Capped::Assumed)
+    }
+
+    /// Whether it puts its job on its cap: anything but `Clear`.
+    pub fn holds(self) -> bool {
+        self != Capped::Clear
+    }
+}
+
 impl Ran {
-    /// Whether it met its container's `cap`: killed for memory, or at the cap with nothing left to reclaim. Without
-    /// its container's events, whether its peak came within `AT_CAP` percent of the cap.
-    pub fn met_cap(&self, cap: u64) -> bool {
-        self.oom_killed
-            || self.hit_cap.unwrap_or_else(|| {
-                self.memory_peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP)
-            })
+    /// What it says about its container's `cap`. A kill that only a descendant's own limit explains, the counters
+    /// showing a limit hit below the container and none at it, is a service container the job capped itself: clear.
+    /// A kill no sample saw an `oom` before, its last sample within `AT_CAP` percent of the cap, met it in the last
+    /// interval.
+    pub fn capped(&self, cap: u64) -> Capped {
+        match self.own_cap {
+            Some(true) => Capped::Met,
+            // No sample saw `oom` at any level and its last came near the cap: its own limit killed it before the
+            // next sample could count it.
+            Some(false)
+                if self.oom_killed
+                    && self.hit_cap == Some(false)
+                    && self.memory_peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP) =>
+            {
+                Capped::Met
+            }
+            Some(false) if self.oom_killed && self.hit_cap != Some(true) => Capped::Killed,
+            None if self.oom_killed
+                || self.hit_cap.unwrap_or_else(|| {
+                    self.memory_peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP)
+                }) =>
+            {
+                Capped::Assumed
+            }
+            Some(false) | None => Capped::Clear,
+        }
     }
 }
 
@@ -113,6 +167,18 @@ pub struct CpusSet {
     pub at: u64,
 }
 
+/// A profile's `memory` as the daemon ran it from `at` (ms), by its `profile.changed` event, as `CpusSet` has its
+/// `cpus`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct MemorySet {
+    /// The profile.
+    pub profile: String,
+    /// Its `memory` from then, in bytes.
+    pub memory: u64,
+    /// When, in milliseconds.
+    pub at: u64,
+}
+
 /// What the store reads for sizing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
@@ -123,6 +189,11 @@ pub struct History {
     pub cancelled: Vec<Ran>,
     /// Runners that held a slot at some point after the history's start.
     pub runners: Vec<Held>,
+    /// Auto sizing's changes, oldest first, from `CHANGES_READ` before now: what a revert reads (ADR 0070). Empty
+    /// where nothing reads them, as for admission.
+    pub changes: Vec<api::SizingChange>,
+    /// Each profile's `memory` as the daemon ran it, oldest first: since when a raise reads runs at it.
+    pub memory_set: Vec<MemorySet>,
 }
 
 /// What `advise` sizes against besides the history.
@@ -152,7 +223,8 @@ impl Window {
 }
 
 /// The advice for every profile of `config` from `history`, against the slice's `memory_max` as `config`'s
-/// admission policy budgets it.
+/// admission policy budgets it. Peaks, and the memory advice, go by each job's sizing window over the history's last
+/// 30 days (`memory`, ADR 0070); `window.since` narrows only the waits, the busy share and the starts.
 pub fn advise(
     config: &Config,
     memory_max: Option<u64>,
@@ -163,6 +235,7 @@ pub fn advise(
     let caps = config.memory_caps().map_or(u64::MAX, |caps| caps.0);
     let mirror = config.mirror_memory();
     let rules = &config.sizing;
+    let recent = memory::windows(config, history, window.now);
     let profiles = config
         .profiles
         .iter()
@@ -170,20 +243,16 @@ pub fn advise(
             let jobs: Vec<&Ran> = history
                 .jobs
                 .iter()
-                .filter(|job| job.profile == *name)
+                .filter(|job| job.profile == *name && job.queued_at >= window.since)
                 .collect();
             let share = profile.memory.0.saturating_mul(u64::from(profile.slots));
             let busy = busy(history, name, profile.slots, since, window.now);
-            let mut keys: BTreeMap<(&str, Option<&str>, &str), Vec<&Ran>> = BTreeMap::new();
-            for job in &jobs {
-                keys.entry((&job.repository, job.workflow.as_deref(), &job.name))
-                    .or_default()
-                    .push(job);
-            }
             let wait = waits(&jobs);
             let starts = starts(&jobs);
+            let cap = profile.memory.0;
+            let took = memory::took(&history.memory_set, name, cap, window.now);
             let sized = Sized {
-                cap: profile.memory.0,
+                cap,
                 slots: profile.slots,
                 share,
                 admission: config.host.admission,
@@ -195,37 +264,54 @@ pub fn advise(
                     Admission::Measured => max.saturating_sub(mirror),
                 }),
                 wants_slots: wait.p95 >= WAITED || busy >= BUSY,
-                margin: rules.margin,
                 min_jobs: rules.min_jobs,
             };
-            let job_sizings: Vec<api::JobSizing> = keys
-                .into_iter()
-                .map(|((repository, workflow, job_name), runs)| {
-                    let peaks = peaks(&runs);
-                    let wait = waits(&runs);
-                    api::JobSizing {
-                        repository: repository.to_owned(),
-                        workflow: workflow.map(str::to_owned),
-                        name: job_name.to_owned(),
-                        advice: sized.advice(&peaks, wait.p95 >= WAITED || busy >= BUSY),
-                        peaks,
-                        wait,
-                    }
-                })
-                .collect();
-            let peaks = peaks(&jobs);
+            let raises = Raises {
+                history,
+                recent: &recent,
+                profile: name,
+                cap,
+                took,
+                margin: rules.margin,
+            };
+            let memory = job_memory(&raises, &jobs, &sized, window.now, busy);
+            let peaks = memory::peaks(
+                recent.jobs_of(name).flat_map(|(_, runs)| runs.window()),
+                memory.on_cap,
+            );
+            let current = api::Resize {
+                memory: cap,
+                slots: profile.slots,
+                cpus: None,
+            };
+            let revert = memory::revert(config, history, name, current);
+            let advice = match &revert {
+                Some((_, to)) => Advice::Raise {
+                    memory: to.memory,
+                    slots: to.slots,
+                },
+                None => sized.advice(
+                    &peaks,
+                    Needs {
+                        raise: raises.need(None),
+                        floor: memory.floor.max(memory::revert_floor(history, name)),
+                    },
+                    sized.wants_slots,
+                ),
+            };
             api::ProfileSizing {
                 name: name.clone(),
-                memory: profile.memory.0,
+                memory: cap,
                 cpus: profile.cpus,
                 slots: profile.slots,
-                advice: sized.advice(&peaks, sized.wants_slots),
+                advice,
+                revert: revert.map(|(revert, _)| revert),
                 peaks,
                 wait,
                 starts,
                 busy,
                 wants_slots: sized.wants_slots,
-                jobs: job_sizings,
+                jobs: memory.jobs,
             }
         })
         .collect();
@@ -241,6 +327,84 @@ pub fn advise(
         auto: config.sizing.auto,
         changes: Vec::new(),
         auto_plan: None,
+    }
+}
+
+/// What a raise of one profile reads (`memory::raise_need`).
+struct Raises<'history> {
+    history: &'history History,
+    recent: &'history Recent,
+    profile: &'history str,
+    /// Its `memory`.
+    cap: u64,
+    /// Since when it has had it, in ms.
+    took: u64,
+    margin: u32,
+}
+
+impl Raises<'_> {
+    /// What a raise needs from the job `key`, or from every job for `None`.
+    fn need(&self, key: Option<&Key>) -> u64 {
+        memory::raise_need(
+            self.history,
+            self.recent,
+            self.profile,
+            self.cap,
+            self.took,
+            self.margin,
+            key,
+        )
+    }
+}
+
+/// What a profile's jobs say about its `memory`.
+struct JobMemory {
+    /// Each job's sizing.
+    jobs: Vec<api::JobSizing>,
+    /// How many of them are on their cap.
+    on_cap: u64,
+    /// The largest of their floors.
+    floor: u64,
+}
+
+/// Each job of `raises.profile` with runs in its window: its peaks, waits and advice; `jobs` are the profile's runs
+/// since the window's start, for the waits.
+fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy: u32) -> JobMemory {
+    let mut on_cap = 0;
+    let mut floor = 0;
+    let sizings = raises
+        .recent
+        .jobs_of(raises.profile)
+        .filter(|(_, runs)| runs.runs() > 0)
+        .map(|(key, runs)| {
+            let held = memory::on_cap(runs, now);
+            on_cap += u64::from(held);
+            let peaks = memory::peaks(runs.window(), u64::from(held));
+            let needs = Needs {
+                raise: raises.need(Some(key)),
+                floor: memory::floor(runs, raises.margin),
+            };
+            floor = floor.max(needs.floor);
+            let runs_of: Vec<&Ran> = jobs
+                .iter()
+                .copied()
+                .filter(|job| Key::of(job) == *key)
+                .collect();
+            let wait = waits(&runs_of);
+            api::JobSizing {
+                repository: key.repository.clone(),
+                workflow: key.workflow.clone(),
+                name: key.name.clone(),
+                advice: sized.advice(&peaks, needs, wait.p95 >= WAITED || busy >= BUSY),
+                peaks,
+                wait,
+            }
+        })
+        .collect();
+    JobMemory {
+        jobs: sizings,
+        on_cap,
+        floor,
     }
 }
 
@@ -285,25 +449,28 @@ struct Sized {
     room: Option<u64>,
     /// Whether its jobs waited for a slot at p95, or its slots were busy, enough to want more.
     wants_slots: bool,
-    margin: u32,
     min_jobs: u32,
 }
 
-impl Sized {
-    /// The memory a set of jobs needs: its largest peak plus the margin, or `PAGE_CACHE_ROOM` when that is more,
-    /// rounded up to `GRANULE`. The largest, not a percentile: the cap kills a job that goes over it, so a cap below
-    /// a peak a job reached kills it again.
-    fn need(&self, peaks: &Peaks) -> u64 {
-        api::need(peaks.memory.max, self.margin)
-    }
+/// What a set of jobs' runs say its `memory` needs (`memory`, ADR 0070).
+#[derive(Debug, Clone, Copy)]
+struct Needs {
+    /// What a raise goes to: from runs that met the current cap since the profile took it; 0 without one.
+    raise: u64,
+    /// What a lowering stays at or above: every windowed run's need, and any revert's floor.
+    floor: u64,
+}
 
-    fn advice(&self, peaks: &Peaks, wants_slots: bool) -> Advice {
+impl Sized {
+    /// A raise toward `needs.raise` when it is above the cap; a lowering toward `needs.floor` when that saves a tenth
+    /// and no job is on its cap; else keep, with `needs.floor` as what the jobs need, above the cap or not.
+    fn advice(&self, peaks: &Peaks, needs: Needs, wants_slots: bool) -> Advice {
         if peaks.jobs < u64::from(self.min_jobs) {
             return Advice::TooFew { jobs: peaks.jobs };
         }
-        let need = self.need(peaks);
-        let fit = |memory: u64| u32::try_from(memory / need).unwrap_or(u32::MAX);
-        if need > self.cap {
+        if needs.raise > self.cap {
+            let need = needs.raise;
+            let fit = |memory: u64| u32::try_from(memory / need).unwrap_or(u32::MAX);
             let slots = match (self.admission, self.room) {
                 (Admission::Caps, Some(room)) => fit(room).min(self.slots),
                 (Admission::Measured, Some(room)) if room < need => 0,
@@ -317,9 +484,13 @@ impl Sized {
                 slots,
             };
         }
-        // A run at its cap, this one or a smaller one it had then, may have been held back or killed by it: its
-        // peak is a floor, not what it needs, so the cap is never lowered under it.
-        if peaks.at_cap == 0 && self.cap - need >= self.cap * WORTH_LOWERING / 100 {
+        let need = needs.floor.max(GRANULE);
+        // A job on its cap may have been held back or killed by it: no lowering until it ran clear of it again.
+        if peaks.on_cap == 0
+            && need <= self.cap
+            && self.cap - need >= self.cap * WORTH_LOWERING / 100
+        {
+            let fit = |memory: u64| u32::try_from(memory / need).unwrap_or(u32::MAX);
             // Under measured admission slots are not bought with caps: the advice line says when more may help.
             return Advice::Lower {
                 memory: need,
@@ -331,19 +502,6 @@ impl Sized {
             };
         }
         Advice::Keep { memory: need }
-    }
-}
-
-fn peaks(jobs: &[&Ran]) -> Peaks {
-    let at_cap = jobs
-        .iter()
-        .filter(|job| job.memory_cap.is_some_and(|cap| job.met_cap(cap)))
-        .count();
-    Peaks {
-        jobs: jobs.len() as u64,
-        at_cap: at_cap as u64,
-        memory: spread(jobs.iter().map(|job| job.memory_peak).collect()),
-        cpu: spread(jobs.iter().map(|job| job.cpu_peak).collect()),
     }
 }
 
@@ -393,6 +551,7 @@ pub(crate) fn spread(mut values: Vec<u64>) -> Spread {
 }
 
 pub mod auto;
+pub mod memory;
 
 #[cfg(test)]
 mod tests;

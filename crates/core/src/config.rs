@@ -457,7 +457,8 @@ pub struct Sizing {
     /// `slots` or `cpus`; at most `interval`, which a longer one counts as. Default 1 hour.
     #[serde(deserialize_with = "duration")]
     pub raise_interval: Duration,
-    /// The most a change moves a profile's `memory` or `cpus`, in percent of them. Default 25.
+    /// The most a change lowers a profile's `memory` or moves its `cpus`, in percent of them; a raise of `memory`,
+    /// which only a run that met the cap gives, goes straight to the advice. Default 25.
     pub max_step: u32,
 }
 

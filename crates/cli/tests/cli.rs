@@ -322,6 +322,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
         at_cap: 0,
         memory: spread(1500 << 20, 2 << 30, 2150 << 20, 2200 << 20),
         cpu: spread(3000, 6000, 7500, 8000),
+        on_cap: 0,
     };
     let advice = Advice::Lower {
         memory: 3328 << 20,
@@ -377,6 +378,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
                 wait: spread(30, 240, 300, 320),
                 advice,
             }],
+            revert: None,
         }],
     })
 }

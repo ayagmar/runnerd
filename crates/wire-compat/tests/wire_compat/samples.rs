@@ -20,11 +20,11 @@ use runnerd_core::api::{
     Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Pairing, PairingQuery, Pairings,
     PauseQuery, Paused, Peaks, PoolStatus, Pressure, Priority, ProfileSizing, ProfileStatus,
     QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
-    RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RunLink,
+    RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, RunLink,
     RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries, SeedMemory, Severity,
     ShellMemory, ShellQuery, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery,
-    SizingRefused, SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow, Status, Step,
-    Timeline, WaitSpread, Waiting, WeekWaits,
+    SizingRefused, SizingRevert, SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow,
+    Status, Step, Timeline, WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -727,6 +727,7 @@ fn peaks() -> Peaks {
     Peaks {
         jobs: 30,
         at_cap: 1,
+        on_cap: 1,
         memory: spread(),
         cpu: spread(),
     }
@@ -791,6 +792,12 @@ pub(crate) fn sizing() -> Sizing {
             wants_slots: true,
             advice: Advice::Keep { memory: 8 << 30 },
             jobs,
+            revert: Some(SizingRevert {
+                from: 6 << 30,
+                to: 8 << 30,
+                job: "tidewater/halyard ci / build".to_owned(),
+                cause: RevertCause::Failed { runs: 3 },
+            }),
         }],
         auto: true,
         changes: vec![sizing_change()],

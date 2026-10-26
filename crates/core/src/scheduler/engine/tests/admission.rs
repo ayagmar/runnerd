@@ -85,6 +85,7 @@ async fn runs_of(
                 oom: Some(0),
                 oom_kill: Some(if i == count - 1 { oom_kills } else { 0 }),
                 sock_throttled: None,
+                local_oom: None,
             },
         }]);
         match ended {

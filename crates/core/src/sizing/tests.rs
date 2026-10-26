@@ -67,8 +67,20 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         reserved: None,
         host_waited: 0,
         hit_cap: None,
+        own_cap: None,
         measure: Measure::WithoutPageCache,
         succeeded: true,
+        failed: false,
+        run_id: 0,
+        branch: Some("main".to_owned()),
+    }
+}
+
+/// `run` with its container's own limit having failed reclaim: it ran out of memory at its cap.
+fn oom(run: Ran) -> Ran {
+    Ran {
+        own_cap: Some(true),
+        ..run
     }
 }
 
@@ -107,9 +119,10 @@ fn a_cap_far_above_the_peaks_is_lowered_and_waiting_jobs_get_the_slots_that_fit(
         jobs: builds(100, 1200 * M, 2150 * M, 300),
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     };
     let node = profile(&sizing(&history), "node").clone();
-    assert_eq!(node.peaks.jobs, 100);
+    assert_eq!(node.peaks.jobs, 60, "the job's last 60 runs");
     assert_eq!(
         node.advice,
         Advice::Lower {
@@ -126,6 +139,7 @@ fn small_peaks_keep_a_gigabyte_of_page_cache_room_under_the_cap() {
         jobs: builds(20, 300 * M, 300 * M, 5),
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     };
     assert_eq!(
         profile(&sizing(&history), "node").advice,
@@ -142,6 +156,7 @@ fn a_lowered_cap_keeps_its_slots_when_no_job_waited_for_one() {
         jobs: builds(20, 1000 * M, 2000 * M, 5),
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     };
     // 2000M + 1G of page cache room = 3024M, rounded up to 3G.
     assert_eq!(
@@ -162,6 +177,7 @@ fn a_rare_heavy_job_keeps_the_cap_above_its_largest_peak() {
         jobs,
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     });
     let node = profile(&sizing, "node");
     // 6G + 15% = 6.9G, rounded up to 7G: the cap stays.
@@ -172,22 +188,31 @@ fn a_rare_heavy_job_keeps_the_cap_above_its_largest_peak() {
 
 #[test]
 fn jobs_that_reach_their_cap_raise_it_within_what_the_slice_holds() {
-    // Ledger tests peak at 8.8G of 9G: 10.25G with the margin. The slice has 0.5G spare, so 2 slots of 10.25G
-    // (20.5G) do not fit in the 18.5G there is; one does.
+    // Ledger tests ran out of memory at 9G, their last samples at 8.8G: they needed more than 9G, so 9G + 15%,
+    // 10.5G. The slice has 0.5G spare, so 2 slots of 10.5G (21G) do not fit in the 18.5G there is; one does.
     let jobs = (0..12)
-        .map(|i| job("halyard/ledger", "test", "jvm", 8 * G + (800 + i) * M, 10))
+        .map(|i| {
+            oom(job(
+                "halyard/ledger",
+                "test",
+                "jvm",
+                8 * G + (800 + i) * M,
+                10,
+            ))
+        })
         .collect();
     let sizing = sizing(&History {
         jobs,
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     });
     let jvm = profile(&sizing, "jvm");
-    assert_eq!(jvm.peaks.at_cap, 12, "every run peaked within 5% of 9G");
+    assert_eq!(jvm.peaks.at_cap, 12, "every run met 9G");
     assert_eq!(
         jvm.advice,
         Advice::Raise {
-            memory: 10496 * M,
+            memory: 10752 * M,
             slots: 1
         }
     );
@@ -199,6 +224,7 @@ fn too_few_jobs_give_no_advice_but_still_show_their_peaks() {
         jobs: builds(4, G, 2 * G, 0),
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     });
     let node = profile(&sizing, "node");
     assert_eq!(node.advice, Advice::TooFew { jobs: 4 });
@@ -208,15 +234,19 @@ fn too_few_jobs_give_no_advice_but_still_show_their_peaks() {
 
 #[test]
 fn percentiles_are_nearest_rank_over_the_jobs_peaks() {
-    // Peaks 1M … 200M: p50 the 100th, p95 the 190th, p99 the 198th.
+    // Peaks 1M … 200M of four jobs, each within its window: p50 the 100th, p95 the 190th, p99 the 198th.
     let jobs = (1..=200)
-        .map(|i| job("halyard/storefront", "build", "node", i * M, i))
+        .map(|i| {
+            let name = format!("build {}", i % 4);
+            job("halyard/storefront", &name, "node", i * M, i)
+        })
         .collect();
     let node = profile(
         &sizing(&History {
             jobs,
             cancelled: Vec::new(),
             runners: Vec::new(),
+            ..History::default()
         }),
         "node",
     )
@@ -251,6 +281,7 @@ fn jobs_a_warm_runner_took_are_told_apart_with_their_waits() {
         jobs,
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     });
     assert_eq!(
         profile(&sizing, "node").starts,
@@ -282,6 +313,7 @@ fn busy_is_the_share_of_slot_time_runners_held_since_the_first_runner() {
         jobs: Vec::new(),
         cancelled: Vec::new(),
         runners,
+        ..History::default()
     });
     assert_eq!(sizing.since, (NOW - 10 * HOUR) / 1000);
     assert_eq!(profile(&sizing, "jvm").busy, 25);
@@ -298,6 +330,7 @@ fn each_advised_change_written_into_the_config_still_fits_the_slice() {
                 jobs,
                 cancelled: Vec::new(),
                 runners: Vec::new(),
+                ..History::default()
             });
             for profile in &sizing.profiles {
                 let Some(change) = profile.advice.change() else {
@@ -325,6 +358,7 @@ fn a_job_killed_for_memory_keeps_its_cap_however_low_its_sampled_peaks() {
         jobs,
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     });
     let node = profile(&sizing, "node");
     assert_eq!(node.peaks.at_cap, 1);
@@ -349,6 +383,7 @@ fn runs_killed_at_an_older_smaller_cap_keep_the_raised_cap() {
         jobs,
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     });
     let node = profile(&sizing, "node");
     assert_eq!(node.peaks.at_cap, 20);
@@ -373,9 +408,14 @@ fn the_heaviest_runs_of_a_job_with_hundreds_of_runs_keep_the_cap_they_need() {
         jobs,
         cancelled: Vec::new(),
         runners: Vec::new(),
+        ..History::default()
     });
     let node = profile(&sizing, "node");
-    assert_eq!(node.peaks.memory.p99, 2 * G, "the p99 is shown as it is");
+    assert_eq!(
+        node.peaks.memory.p95,
+        2 * G,
+        "the p95 of its last 60 runs is shown as it is"
+    );
     // 6G + 15% = 6.9G, rounded up to 7G.
     assert_eq!(node.advice, Advice::Keep { memory: 7 * G });
     assert_eq!(node.jobs[0].advice, Advice::Keep { memory: 7 * G });
@@ -385,7 +425,7 @@ fn the_heaviest_runs_of_a_job_with_hundreds_of_runs_keep_the_cap_they_need() {
 fn jobs_that_need_more_than_the_slice_holds_for_one_slot_ask_for_a_larger_slice() {
     // Ledger tests need 10.5G and the slice is 9G: no number of slots fits, so there is nothing to write.
     let jobs = (0..12)
-        .map(|_| job("halyard/ledger", "test", "jvm", 9 * G, 0))
+        .map(|_| oom(job("halyard/ledger", "test", "jvm", 9 * G, 0)))
         .collect();
     let sizing = advise(
         &config(),
@@ -394,6 +434,7 @@ fn jobs_that_need_more_than_the_slice_holds_for_one_slot_ask_for_a_larger_slice(
             jobs,
             cancelled: Vec::new(),
             runners: Vec::new(),
+            ..History::default()
         },
         Window::new(None, NOW / 1000),
     );
@@ -449,13 +490,17 @@ fn capped_builds(count: u64, peak: u64, wait_secs: u64) -> Vec<Ran> {
 
 #[test]
 fn applying_memory_advice_under_measured_admission_keeps_the_profiles_slots() {
-    // Builds reach 5.4G of 5.5G: 6.4G with 1G of page cache room, 6.5G rounded. Four of them at their caps would not fit
+    // Builds ran out of memory at 5.5G: 6.5G with 1G of page cache room. Four of them at their caps would not fit
     // beside jvm's caps, but measured admission never reserves caps, so the slots stay.
     let sizing = measured_sizing(
         &History {
-            jobs: capped_builds(20, 5400 * M, 0),
+            jobs: capped_builds(20, 5400 * M, 0)
+                .into_iter()
+                .map(oom)
+                .collect(),
             cancelled: Vec::new(),
             runners: Vec::new(),
+            ..History::default()
         },
         33 * G,
     );
@@ -483,9 +528,13 @@ fn under_measured_admission_a_raise_is_refused_only_when_one_runner_and_the_mirr
     // 6.5G and the 512M mirror need 7G: a 6.5G slice holds no runner of it.
     let sizing = measured_sizing(
         &History {
-            jobs: capped_builds(20, 5400 * M, 0),
+            jobs: capped_builds(20, 5400 * M, 0)
+                .into_iter()
+                .map(oom)
+                .collect(),
             cancelled: Vec::new(),
             runners: Vec::new(),
+            ..History::default()
         },
         6656 * M,
     );
@@ -509,6 +558,7 @@ fn under_measured_admission_waiting_jobs_are_told_about_slots_without_changing_t
             jobs,
             cancelled: Vec::new(),
             runners: Vec::new(),
+            ..History::default()
         },
         33 * G,
     );
@@ -542,7 +592,7 @@ mod auto {
     use std::collections::BTreeMap;
 
     use super::{
-        CONFIG, G, HOUR, History, M, NOW, Ran, Window, builds, capped_builds, job, measured,
+        CONFIG, G, HOUR, History, M, NOW, Ran, Window, builds, capped_builds, job, measured, oom,
     };
     use crate::api::{Resize, SizingChange};
     use crate::config::Config;
@@ -564,8 +614,7 @@ mod auto {
     fn history(jobs: Vec<Ran>) -> History {
         History {
             jobs,
-            cancelled: Vec::new(),
-            runners: Vec::new(),
+            ..History::default()
         }
     }
 
@@ -701,11 +750,11 @@ mod auto {
         );
     }
 
-    /// Ten ledger tests at jvm's 9G cap: they need 10.5G a slot.
+    /// Ten ledger tests that ran out of memory at jvm's 9G cap: they need 10.5G a slot.
     fn at_jvm_cap() -> History {
         history(
             (0..10)
-                .map(|_| job("halyard/ledger", "test", "jvm", 9 * G, 5))
+                .map(|_| oom(job("halyard/ledger", "test", "jvm", 9 * G, 5)))
                 .collect(),
         )
     }
@@ -1130,3 +1179,4 @@ labels = ["node"]
 }
 
 mod cpus;
+mod memory;
