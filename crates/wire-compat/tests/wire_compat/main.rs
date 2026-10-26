@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.0.20";
+const PREVIOUS: &str = "v0.0.21";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,33 +49,7 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[
-    Accepted {
-        reader: Reader::Previous,
-        item: "events/repository.changed",
-        adr: "0073",
-    },
-    Accepted {
-        reader: Reader::Previous,
-        item: "status/empty",
-        adr: "0073",
-    },
-    Accepted {
-        reader: Reader::Previous,
-        item: "status/full",
-        adr: "0073",
-    },
-    Accepted {
-        reader: Reader::Current,
-        item: "events/repository.changed",
-        adr: "0073",
-    },
-    Accepted {
-        reader: Reader::Current,
-        item: "status/full",
-        adr: "0073",
-    },
-];
+const ACCEPTED: &[Accepted] = &[];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
