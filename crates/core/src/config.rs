@@ -223,7 +223,7 @@ pub struct CacheLimit {
 }
 
 /// Where runnerd's release workflow publishes the runner images, one tag per stage and version, such as
-/// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.20`.
+/// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.21`.
 pub const PUBLISHED_RUNNER: &str = "ghcr.io/ayagmar/runnerd-runner";
 
 /// A runner image with its limits; every job of the profile gets one container with these limits.
@@ -257,7 +257,7 @@ pub enum Image {
     /// `image_stage`: a stage of `image/Dockerfile` built on this host as `runnerd-runner:<stage>`.
     Stage(String),
     /// `image`: a reference runnerd pulls when Docker lacks it, such as
-    /// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.20`.
+    /// `ghcr.io/ayagmar/runnerd-runner:jvm-0.0.21`.
     Pulled(String),
 }
 
