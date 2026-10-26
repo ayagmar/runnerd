@@ -1,0 +1,1339 @@
+/* The landing page: one board of tiles on a 12-column grid, 8px gaps and 10px margins, like the slice's blocks. A tile
+   is a flat rectangle holding one thing; mint is the jvm profile's colour, pink the node profile's, as everywhere on
+   the site. The page's behaviour is in scripts/landing.ts. */
+*,
+*::before,
+*::after {
+  box-sizing: border-box;
+}
+
+html {
+  background: var(--bg);
+  color: var(--ink);
+  color-scheme: dark;
+  -webkit-text-size-adjust: 100%;
+  scroll-padding-top: 1rem;
+}
+
+html[data-theme='light'] {
+  color-scheme: light;
+}
+
+body {
+  margin: 0;
+  font-family: var(--font-text);
+  font-size: clamp(1.0625rem, 1rem + 0.25vw, 1.1875rem);
+  line-height: 1.55;
+  overflow-x: clip;
+}
+
+:root {
+  --gutter: 10px;
+  --gap: 8px;
+  --pad: clamp(1rem, 1.7vw, 1.5rem);
+  --step-small: 0.875rem;
+  --step-lead: clamp(1.25rem, 1.1rem + 0.7vw, 1.625rem);
+  --step-head: clamp(2rem, 1.2rem + 2.6vw, 3.5rem);
+  --step-display: clamp(2.6rem, 0.9rem + 5.2vw, 6.25rem);
+  --tile-ink: #070807;
+  --tile-ink-text: #f2f3f2;
+  --ease: cubic-bezier(0.2, 0.7, 0.2, 1);
+  --mono: ui-monospace, 'SFMono-Regular', Menlo, Consolas, 'Liberation Mono', monospace;
+}
+
+h1,
+h2,
+h3 {
+  font-family: var(--font-display);
+  font-weight: 700;
+  margin: 0;
+  text-wrap: balance;
+}
+
+h2 {
+  font-size: var(--step-head);
+  line-height: 1;
+  letter-spacing: -0.035em;
+}
+
+h3 {
+  font-size: 1.25rem;
+  line-height: 1.2;
+  letter-spacing: -0.01em;
+}
+
+p {
+  margin: 0;
+  max-width: 62ch;
+  text-wrap: pretty;
+}
+
+a {
+  color: inherit;
+  text-underline-offset: 0.18em;
+}
+
+code,
+pre {
+  font-family: var(--mono);
+}
+
+p code,
+dd code {
+  font-size: 0.88em;
+  background: color-mix(in srgb, currentColor 12%, transparent);
+  padding: 0.08em 0.3em;
+}
+
+.skip {
+  position: absolute;
+  left: var(--gutter);
+  top: -4rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  padding: 0.75rem 1rem;
+  font-family: var(--font-display);
+  z-index: 10;
+}
+
+.skip:focus {
+  top: 0.5rem;
+}
+
+.visually-hidden {
+  position: absolute;
+  width: 1px;
+  height: 1px;
+  overflow: hidden;
+  clip-path: inset(50%);
+  white-space: nowrap;
+}
+
+/* The board. */
+.board {
+  display: grid;
+  grid-template-columns: repeat(12, minmax(0, 1fr));
+  gap: var(--gap);
+  width: 100%;
+  max-width: 1920px;
+  margin-inline: auto;
+  padding-inline: var(--gutter);
+}
+
+.board + .board,
+main > .board {
+  margin-top: var(--gap);
+}
+
+main > .board:first-child {
+  margin-top: 0;
+}
+
+/* Sections are the board continuing; a heavier gap marks where a new subject starts. */
+main > .board.part {
+  margin-top: clamp(3.5rem, 8.5vw, 9rem);
+}
+
+.tile {
+  grid-column: span var(--c, 12);
+  grid-row: span var(--r, 1);
+  display: grid;
+  align-content: start;
+  gap: 1rem;
+  min-width: 0;
+  padding: var(--pad);
+  background: var(--surface);
+  color: var(--ink);
+}
+
+.tile.bare {
+  padding: 0;
+  background: none;
+}
+
+.tile.bare.install-links {
+  padding: 0 var(--pad);
+}
+
+.tile.mint {
+  background: var(--mint);
+  color: var(--block-ink);
+}
+
+.tile.pink {
+  background: var(--pink);
+  color: var(--block-ink);
+}
+
+.tile.ink {
+  background: var(--tile-ink);
+  color: var(--tile-ink-text);
+}
+
+.tile.accent {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+.tile.base {
+  background: var(--surface-2);
+}
+
+.tile.end {
+  align-content: end;
+}
+
+.tile.between {
+  align-content: space-between;
+}
+
+.tile.mint a,
+.tile.pink a,
+.tile.accent a {
+  color: inherit;
+}
+
+.tile > :where(p, h2, h3) {
+  max-width: 100%;
+}
+
+.tile p {
+  max-width: 44ch;
+}
+
+/* Entrance: the parts of a tile rise in once, staggered by their column in the row. */
+.reveal {
+  opacity: 0;
+  transform: translateY(1.5rem);
+  transition:
+    opacity 600ms var(--ease) var(--d, 0ms),
+    transform 600ms var(--ease) var(--d, 0ms);
+}
+
+.reveal.in {
+  opacity: 1;
+  transform: none;
+}
+
+/* Navigation: wordmark, three links, the theme switch, each a tile. */
+.nav {
+  font-family: var(--font-display);
+  margin-top: var(--gutter);
+}
+
+.nav .tile {
+  --c: 2;
+  padding-block: 0;
+  min-height: 3.5rem;
+}
+
+.nav .wordmark-tile {
+  --c: 4;
+}
+
+.nav a,
+.theme {
+  display: flex;
+  align-items: center;
+  min-height: 3.5rem;
+  padding-inline: var(--pad);
+  font-size: 1.0625rem;
+  font-weight: 600;
+  text-decoration: none;
+}
+
+.nav a:hover,
+.theme:hover {
+  text-decoration: underline;
+}
+
+.nav .wordmark {
+  display: inline-flex;
+  align-items: center;
+  gap: 0.6rem;
+  font-weight: 700;
+  font-size: 1.25rem;
+  letter-spacing: -0.03em;
+}
+
+.mark svg {
+  display: block;
+  width: 1.75rem;
+  height: 1.75rem;
+}
+
+.tile-theme {
+  padding-inline: 0;
+}
+
+.theme {
+  width: 100%;
+  justify-content: center;
+  font-family: inherit;
+  color: inherit;
+  background: none;
+  border: 0;
+  cursor: pointer;
+}
+
+html:not(.js) .tile-theme {
+  display: none;
+}
+
+/* Hero: the name and what it does, the dashboard replaying beside it, four facts under. */
+.hero {
+  grid-template-rows: auto 1fr 1fr;
+}
+
+.hero-text {
+  --c: 6;
+  align-content: space-between;
+  gap: 2.5rem;
+  padding: clamp(1.25rem, 2.4vw, 2.25rem);
+}
+
+.hero h1 {
+  font-size: var(--step-display);
+  line-height: 0.92;
+  letter-spacing: -0.045em;
+}
+
+.lead {
+  font-size: var(--step-lead);
+  line-height: 1.4;
+  max-width: 28ch;
+}
+
+.hero-text p.lead {
+  max-width: 28ch;
+}
+
+.actions {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.75rem 1.75rem;
+  font-family: var(--font-display);
+}
+
+.button {
+  display: inline-flex;
+  align-items: center;
+  min-height: 52px;
+  padding: 0 1.75rem;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-weight: 700;
+  font-size: 1.0625rem;
+  text-decoration: none;
+  transition:
+    transform 160ms var(--ease),
+    filter 160ms;
+}
+
+.button:hover {
+  transform: translateY(-2px);
+  filter: brightness(1.08);
+}
+
+.button:active {
+  transform: translateY(1px);
+}
+
+.tile.accent .button {
+  background: var(--tile-ink);
+  color: var(--tile-ink-text);
+}
+
+.text-link {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+  font-family: var(--font-display);
+  font-weight: 600;
+}
+
+.hero-stage {
+  --c: 6;
+  --r: 3;
+  padding: var(--gap);
+  align-content: stretch;
+  background: var(--surface-2);
+}
+
+.hero-stage .dash {
+  height: 100%;
+}
+
+.hero .fact {
+  --c: 3;
+  align-content: end;
+  gap: 0.2rem;
+  min-height: 7.5rem;
+  font-family: var(--font-display);
+}
+
+.fact strong {
+  font-size: clamp(1.25rem, 0.9rem + 1.1vw, 2rem);
+  line-height: 1.12;
+  letter-spacing: -0.025em;
+}
+
+.fact span {
+  font-size: 0.9375rem;
+  line-height: 1.35;
+  opacity: 0.78;
+}
+
+/* Admission: the same slice packed twice, each runner a block sized by what it reserves. */
+.big-head {
+  --c: 12;
+  align-content: end;
+  min-height: clamp(11rem, 26vw, 20rem);
+}
+
+.big-head h2 {
+  font-size: clamp(2.6rem, 0.9rem + 7.2vw, 9rem);
+  line-height: 0.92;
+  letter-spacing: -0.045em;
+  max-width: 14ch;
+}
+
+.pack-label {
+  --c: 3;
+  align-content: space-between;
+  gap: 1rem;
+  font-family: var(--font-display);
+}
+
+.stat {
+  display: block;
+  font-family: var(--font-display);
+  font-size: clamp(3.5rem, 1.5rem + 6vw, 8rem);
+  font-weight: 700;
+  line-height: 0.85;
+  letter-spacing: -0.05em;
+  font-variant-numeric: tabular-nums;
+}
+
+.pack-label .unit,
+.pack-label .pack-waits {
+  font-size: var(--step-lead);
+  line-height: 1.25;
+  font-weight: 600;
+}
+
+.pack-label .unit code {
+  font-size: 0.8em;
+  font-weight: 400;
+}
+
+.pack-waits {
+  font-variant-numeric: tabular-nums;
+}
+
+.pack-label.measured {
+  margin-top: 1.5rem;
+}
+
+.pack-label.measured .stat {
+  color: var(--accent);
+}
+
+.pack-bar {
+  --c: 9;
+  list-style: none;
+  margin: 0;
+  padding: var(--gap);
+  display: flex;
+  gap: 4px;
+  height: clamp(8rem, 24vh, 14rem);
+  background: var(--surface);
+  min-width: 0;
+}
+
+.block,
+.free {
+  flex: var(--size) 1 0;
+  min-width: 0;
+}
+
+.block {
+  position: relative;
+  display: flex;
+  flex-direction: column;
+  justify-content: flex-end;
+  container-type: inline-size;
+  gap: 0.1rem;
+  padding: clamp(0.35rem, 1vw, 0.75rem);
+  line-height: 1.1;
+  color: var(--block-ink);
+  font-family: var(--font-display);
+  overflow: hidden;
+  transform-origin: bottom;
+  background-image: linear-gradient(to top, rgb(0 0 0 / 0.16) calc(var(--used, 0) * 100%), transparent 0);
+}
+
+.block.jvm {
+  background-color: var(--mint);
+}
+
+.block.node {
+  background-color: var(--pink);
+}
+
+.block.mirror {
+  background: var(--ink);
+  flex-basis: 3px;
+  padding: 0;
+}
+
+.pack-size {
+  font-weight: 700;
+  font-size: clamp(1rem, 0.8rem + 0.8vw, 1.5rem);
+  letter-spacing: -0.03em;
+}
+
+.pack-job {
+  font-size: 1rem;
+  font-weight: 500;
+}
+
+@container (max-width: 7rem) {
+  .pack-job {
+    display: none;
+  }
+}
+
+@container (max-width: 4.25rem) {
+  .pack-size {
+    font-size: 1rem;
+  }
+}
+
+@container (max-width: 2.75rem) {
+  .pack-size {
+    display: none;
+  }
+}
+
+/* Entrance of the bars: each block grows from the floor in turn. */
+.js .pack-bar:not(.in) .block {
+  transform: scaleY(0.05);
+}
+
+.pack-bar .block {
+  transition: transform 700ms var(--ease) calc(var(--i, 0) * 70ms);
+}
+
+.pack-note {
+  --c: 5;
+  font-size: 1rem;
+}
+
+.pack-note p {
+  font-size: 1rem;
+}
+
+.tile.pack-table {
+  --c: 7;
+}
+
+/* Terminals: real output, in a tile of its own. */
+.terminal {
+  margin: 0;
+  color: inherit;
+  font-size: clamp(0.8125rem, 0.75rem + 0.2vw, 0.9375rem);
+  line-height: 1.6;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.terminal.wide {
+  white-space: pre;
+  overflow-wrap: normal;
+  overflow-x: auto;
+}
+
+.terminal .prompt {
+  opacity: 0.62;
+}
+
+.terminal mark {
+  background: var(--mint);
+  color: var(--block-ink);
+}
+
+.terminal .advice,
+.terminal .fail {
+  display: block;
+  margin-inline: calc(-1 * var(--pad));
+  padding-inline: var(--pad);
+  color: var(--block-ink);
+}
+
+.terminal .advice {
+  background: var(--mint);
+}
+
+.terminal .fail {
+  background: var(--pink);
+}
+
+.terminal.wide .advice {
+  width: max-content;
+  min-width: calc(100% + 2 * var(--pad));
+}
+
+.tile.mint .terminal mark,
+.tile.pink .terminal mark {
+  background: var(--tile-ink);
+  color: var(--tile-ink-text);
+}
+
+.lines code > span {
+  display: block;
+  padding-left: 2ch;
+  text-indent: -2ch;
+}
+
+/* Containers. */
+.iso-text {
+  --c: 8;
+  align-content: space-between;
+  gap: 1.5rem;
+}
+
+.iso-config {
+  --c: 4;
+}
+
+.iso-steps {
+  --c: 4;
+  --r: 3;
+  list-style: none;
+  margin: 0;
+  gap: var(--gap);
+  grid-auto-rows: 1fr;
+  background: var(--surface-2);
+}
+
+.iso-steps li {
+  display: grid;
+  align-content: center;
+  gap: 0.15rem;
+  padding: 0.5rem 1rem;
+  background: var(--surface);
+  font-family: var(--font-display);
+}
+
+.iso-steps strong {
+  font-size: 1.25rem;
+  letter-spacing: -0.02em;
+}
+
+.iso-steps span {
+  font-size: 0.9375rem;
+  opacity: 0.78;
+}
+
+.iso-steps li.last {
+  background: var(--tile-ink);
+  color: var(--tile-ink-text);
+}
+
+.iso-refuse {
+  --c: 4;
+}
+
+.iso-warn {
+  --c: 8;
+  align-content: center;
+}
+
+.statement {
+  font-size: var(--step-lead);
+  line-height: 1.3;
+  max-width: 24ch;
+}
+
+p.statement {
+  max-width: 30ch;
+}
+
+/* Sizing and records. */
+.size-text {
+  --c: 5;
+  align-content: space-between;
+  gap: 2rem;
+}
+
+.size-out {
+  --c: 7;
+}
+
+.size-conf {
+  --c: 5;
+}
+
+.size-note {
+  --c: 7;
+  align-content: center;
+}
+
+.rec-text {
+  --c: 5;
+  --r: 2;
+  align-content: space-between;
+  gap: 2rem;
+}
+
+.rec-shell {
+  --c: 7;
+}
+
+.rec-list {
+  --c: 7;
+}
+
+/* What the minutes would have cost. */
+.cost-fig {
+  --c: 5;
+  align-content: space-between;
+  gap: 2rem;
+}
+
+.cost-fig .stat {
+  font-size: clamp(4rem, 1.5rem + 9vw, 11rem);
+}
+
+.cost-out {
+  --c: 7;
+  align-content: end;
+}
+
+.cost-out .terminal {
+  font-size: clamp(1rem, 0.9rem + 0.35vw, 1.25rem);
+}
+
+/* Pools: the config beside what status says of it; the wait reasons run as a band, then what each asks of you. */
+.pools-head {
+  --c: 5;
+  align-content: space-between;
+  gap: 2rem;
+}
+
+.pools-config {
+  --c: 7;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: var(--gap);
+  padding: 0;
+  background: none;
+}
+
+.pools-config .tile {
+  --c: 12;
+}
+
+.pools-status {
+  --c: 12;
+}
+
+.marquee {
+  grid-column: 1 / -1;
+  overflow: hidden;
+  background: var(--accent);
+  color: var(--accent-ink);
+  margin-inline: calc(-1 * var(--gutter));
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(2.5rem, 1rem + 6vw, 7rem);
+  letter-spacing: -0.04em;
+  line-height: 1;
+  padding-block: 0.3em 0.34em;
+}
+
+.marquee-track {
+  display: flex;
+  width: max-content;
+}
+
+.marquee ul {
+  display: flex;
+  flex: none;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.marquee li {
+  flex: none;
+  white-space: nowrap;
+  padding-right: 0.7em;
+}
+
+.marquee li::after {
+  content: ' ·' / '';
+  padding-left: 0.5em;
+  opacity: 0.55;
+}
+
+@media (prefers-reduced-motion: no-preference) {
+  .marquee-track {
+    animation: marquee 60s linear infinite;
+  }
+
+  .marquee:hover .marquee-track,
+  .marquee:focus-within .marquee-track {
+    animation-play-state: paused;
+  }
+
+  @keyframes marquee {
+    to {
+      transform: translateX(-50%);
+    }
+  }
+}
+
+@media (prefers-reduced-motion: reduce) {
+  .marquee {
+    overflow-x: auto;
+  }
+
+  .marquee-track > [aria-hidden='true'] {
+    display: none;
+  }
+}
+
+.waits {
+  grid-column: 1 / -1;
+  display: grid;
+  gap: var(--gap);
+  margin: 0;
+  padding: 0;
+  list-style: none;
+}
+
+.waits li {
+  display: grid;
+  grid-template-columns: minmax(0, 7fr) minmax(0, 5fr);
+  gap: 0.5rem 1.5rem;
+  padding: var(--pad);
+  background: var(--surface);
+  align-items: baseline;
+}
+
+.waits li:first-child {
+  background: var(--pink);
+  color: var(--block-ink);
+}
+
+.waits code {
+  font-size: clamp(0.8125rem, 0.75rem + 0.2vw, 0.9375rem);
+  line-height: 1.5;
+  overflow-wrap: anywhere;
+}
+
+.waits p {
+  font-family: var(--font-display);
+  font-weight: 600;
+  max-width: none;
+}
+
+.waits p code {
+  background: color-mix(in srgb, currentColor 12%, transparent);
+}
+
+/* The clients. */
+.cl-tui {
+  --c: 7;
+  background: var(--tile-ink);
+  padding: var(--gap);
+}
+
+.cl-job {
+  --c: 5;
+  --r: 2;
+  padding: 0;
+  grid-template-rows: minmax(0, 1fr);
+}
+
+.cl-job .shot,
+.cl-job picture,
+.cl-job img {
+  height: 100%;
+}
+
+.cl-job img {
+  object-fit: cover;
+  object-position: top left;
+}
+
+.cl-cli {
+  --c: 7;
+}
+
+.cl-phone-text {
+  --c: 3;
+  align-content: space-between;
+  gap: 1.5rem;
+}
+
+.cl-phone {
+  --c: 3;
+  padding: var(--gap);
+  background: var(--surface-2);
+}
+
+.cl-ins {
+  --c: 6;
+  padding: 0;
+}
+
+.cl-hist-text p.statement {
+  max-width: 40ch;
+}
+
+.cl-hist-text {
+  --c: 5;
+  align-content: space-between;
+  gap: 1.5rem;
+}
+
+.cl-hist {
+  --c: 7;
+  padding: 0;
+}
+
+.cl-phone .shot,
+.cl-job .shot,
+.cl-ins .shot,
+.cl-hist .shot {
+  padding: 0;
+  background: none;
+}
+
+.tile h3 a {
+  text-decoration: none;
+}
+
+.tile h3 a::after {
+  content: ' →' / '';
+  white-space: pre;
+  opacity: 0.6;
+}
+
+.tile h3 a:hover {
+  text-decoration: underline;
+}
+
+.tile .tui-frame {
+  padding: 0;
+  background: none;
+}
+
+.cl-tui .tui {
+  padding: var(--pad);
+}
+
+/* The quick start: each step's words on a tile, what it types or prints beside it. */
+.start-head {
+  --c: 12;
+  align-content: end;
+  min-height: clamp(9rem, 18vw, 14rem);
+}
+
+.start-head h2 {
+  font-size: clamp(2.6rem, 0.9rem + 7.2vw, 9rem);
+  line-height: 0.92;
+  letter-spacing: -0.045em;
+  max-width: 14ch;
+}
+
+.step-text {
+  --c: 4;
+  gap: 0.5rem;
+  align-content: start;
+}
+
+.step-text p {
+  font-size: 1rem;
+}
+
+.step-shows {
+  --c: 8;
+  align-content: stretch;
+  display: grid;
+  gap: var(--gap);
+  min-width: 0;
+  padding: 0;
+  background: none;
+}
+
+.step-shows > * {
+  min-width: 0;
+}
+
+.step-shows .terminal-tile {
+  background: var(--surface);
+  padding: var(--pad);
+}
+
+.command {
+  display: flex;
+  align-items: stretch;
+  gap: var(--gap);
+  max-width: 100%;
+}
+
+.command pre {
+  flex: 1;
+  min-width: 0;
+  margin: 0;
+  padding: 1rem 1.25rem;
+  background: var(--tile-ink);
+  color: var(--tile-ink-text);
+  font-size: clamp(0.8125rem, 0.75rem + 0.25vw, 1rem);
+  line-height: 1.5;
+  white-space: pre-wrap;
+  overflow-wrap: anywhere;
+}
+
+.copy {
+  min-width: 5.5rem;
+  min-height: 48px;
+  border: 0;
+  background: var(--accent);
+  color: var(--accent-ink);
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: 1rem;
+  cursor: pointer;
+  transition:
+    transform 160ms var(--ease),
+    filter 160ms;
+}
+
+.copy:hover {
+  filter: brightness(1.08);
+}
+
+.copy:active {
+  transform: translateY(1px);
+}
+
+.install-links {
+  --c: 12;
+  padding: 0 var(--pad);
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem 2rem;
+  font-family: var(--font-display);
+  font-weight: 600;
+  max-width: none;
+}
+
+.install-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+/* Footer: the name built from blocks, one per letter, like runner slots in the slice. */
+.footer {
+  margin-top: clamp(5rem, 12vw, 7rem);
+  padding-bottom: var(--gutter);
+}
+
+.mark-large {
+  --c: 12;
+  display: flex;
+  align-items: flex-end;
+  gap: 4px;
+  height: clamp(9rem, 28svh, 18rem);
+  padding: 0;
+  background: none;
+}
+
+.mark-large span {
+  flex: 1;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  height: calc(100% - var(--i) * 6%);
+  padding-bottom: 0.08em;
+  font-family: var(--font-display);
+  font-weight: 700;
+  font-size: clamp(3rem, 1rem + 9vw, 14rem);
+  line-height: 0.8;
+  letter-spacing: -0.04em;
+  color: var(--block-ink);
+  background: var(--mint);
+  transform-origin: bottom;
+  transition: transform 700ms var(--ease) calc(var(--i) * 60ms);
+}
+
+.mark-large span:nth-child(n + 5) {
+  background: var(--pink);
+}
+
+.js .mark-large:not(.in) span {
+  transform: scaleY(0.05);
+}
+
+.foot-links {
+  --c: 8;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0 2rem;
+  font-family: var(--font-display);
+  font-size: 1.0625rem;
+  align-content: center;
+}
+
+.foot-links a {
+  display: inline-flex;
+  align-items: center;
+  min-height: 44px;
+}
+
+.foot-note {
+  --c: 4;
+  align-content: center;
+}
+
+.foot-note p {
+  font-size: 0.9375rem;
+  color: var(--muted);
+}
+
+::selection {
+  background: var(--mint);
+  color: var(--block-ink);
+}
+
+.command pre ::selection,
+.tui ::selection,
+.tile.ink ::selection {
+  background: var(--accent);
+  color: var(--accent-ink);
+}
+
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 1ms !important;
+    animation-delay: 0ms !important;
+    transition-duration: 1ms !important;
+    transition-delay: 0ms !important;
+  }
+
+  .reveal {
+    opacity: 1;
+    transform: none;
+  }
+
+  .js .pack-bar:not(.in) .block,
+  .js .mark-large:not(.in) span {
+    transform: none;
+  }
+}
+
+/* Tablet: the board keeps its 12 columns but the big rows restack. */
+@media (max-width: 1100px) {
+  .hero {
+    grid-template-rows: none;
+  }
+
+  .hero-stage,
+  .hero-text {
+    --c: 12;
+    --r: 1;
+  }
+
+  .hero .fact {
+    --c: 6;
+  }
+
+  .pack-label,
+  .pack-bar,
+  .pack-note,
+  .tile.pack-table {
+    --c: 12;
+  }
+
+  .pack-label {
+    grid-template-columns: auto minmax(0, 1fr);
+    align-items: end;
+  }
+
+  .pack-label.measured {
+    margin-top: 4.5rem;
+  }
+
+  .iso-text,
+  .iso-config {
+    --c: 6;
+  }
+
+  .iso-steps {
+    --c: 6;
+    --r: 1;
+  }
+
+  .iso-refuse {
+    --c: 6;
+  }
+
+  .iso-warn {
+    --c: 12;
+  }
+
+  .size-text,
+  .size-out,
+  .size-conf,
+  .size-note,
+  .rec-text,
+  .rec-shell,
+  .rec-list,
+  .cost-fig,
+  .cost-out,
+  .pools-head,
+  .pools-config,
+  .cl-tui,
+  .cl-job,
+  .cl-cli,
+  .cl-ins {
+    --c: 12;
+    --r: 1;
+  }
+
+  .cl-phone-text {
+    --c: 6;
+  }
+
+  .cl-phone {
+    --c: 6;
+  }
+
+  .cl-hist-text,
+  .cl-hist {
+    --c: 12;
+  }
+
+  .step-text,
+  .step-shows {
+    --c: 12;
+  }
+
+  .foot-links,
+  .foot-note {
+    --c: 12;
+  }
+}
+
+/* Phone: a two-column board; the name and its sentence lead. */
+@media (max-width: 640px) {
+  :root {
+    --gutter: 8px;
+    --gap: 6px;
+  }
+
+  .board {
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+  }
+
+  .tile,
+  .hero-stage,
+  .hero .fact,
+  .pack-label,
+  .pack-bar,
+  .pack-note,
+  .tile.pack-table,
+  .iso-text,
+  .iso-config,
+  .iso-steps,
+  .iso-refuse,
+  .iso-warn,
+  .size-text,
+  .size-out,
+  .size-conf,
+  .size-note,
+  .rec-text,
+  .rec-shell,
+  .rec-list,
+  .cost-fig,
+  .cost-out,
+  .pools-head,
+  .pools-config,
+  .cl-tui,
+  .cl-job,
+  .cl-cli,
+  .cl-ins,
+  .cl-phone-text,
+  .cl-phone,
+  .cl-hist-text,
+  .cl-hist,
+  .step-text,
+  .step-shows,
+  .foot-links,
+  .foot-note {
+    --c: 2;
+    --r: 1;
+  }
+
+  .nav .tile {
+    --c: 1;
+  }
+
+  .nav .wordmark-tile {
+    --c: 2;
+  }
+
+  .nav .tile-install {
+    display: none;
+  }
+
+  .nav .tile-theme {
+    --c: 2;
+  }
+
+  .hero .fact {
+    --c: 1;
+    min-height: 6.5rem;
+  }
+
+  .hero-text {
+    --c: 2;
+  }
+
+  .hero h1 {
+    font-size: clamp(2rem, 0.4rem + 9.4vw, 4rem);
+  }
+
+  .pack-label {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .pack-bar {
+    height: 9rem;
+  }
+
+  .waits li {
+    grid-template-columns: minmax(0, 1fr);
+  }
+
+  .mark-large {
+    height: 9rem;
+  }
+
+  .mark-large span {
+    font-size: 2.5rem;
+  }
+
+  .command .copy {
+    min-width: 4.5rem;
+  }
+}

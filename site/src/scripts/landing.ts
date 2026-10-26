@@ -1,6 +1,6 @@
-// The landing page's behaviour: the copy buttons and the theme switch, which also picks the theme of the clients
-// grid's captures. Both are enhancements; without the script the commands stay plain, selectable text and the page
-// stays dark.
+// The landing page's behaviour: the copy buttons, the theme switch (which also picks the theme of the phone's
+// capture) and the entrance of the board's tiles. All are enhancements; without the script the commands stay plain,
+// selectable text, the page stays dark and every tile is already in place.
 
 function copyButton() {
   for (const button of document.querySelectorAll<HTMLButtonElement>('[data-copy]')) {
@@ -35,7 +35,37 @@ function themeToggle() {
   label();
 }
 
+// Each tile below the first screen rises in once as it nears the viewport, staggered by its place in its row. The
+// class that hides it is added here, so a failed script never leaves a tile hidden.
+function reveal() {
+  if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
+  const tiles = document.querySelectorAll<HTMLElement>('main .board > :is(.tile, .marquee, .waits li), main .waits li, footer .tile');
+  const observer = new IntersectionObserver(
+    (entries) => {
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        entry.target.classList.add('in');
+        observer.unobserve(entry.target);
+      }
+    },
+    { rootMargin: '0px 0px -8% 0px' },
+  );
+  // Read every position before writing any style, so the page lays out once.
+  const tops = Array.from(tiles, (tile) => tile.getBoundingClientRect().top);
+  for (const [i, tile] of tiles.entries()) {
+    // What the first screen already shows stays put: an entrance would only delay the largest paint.
+    if (tops[i]! < innerHeight) {
+      tile.classList.add('in');
+      continue;
+    }
+    tile.style.setProperty('--d', `${(i % 4) * 70}ms`);
+    tile.classList.add('reveal');
+    requestAnimationFrame(() => observer.observe(tile));
+  }
+}
+
 export function setup() {
   copyButton();
   themeToggle();
+  reveal();
 }
