@@ -614,13 +614,20 @@ impl Writer<'_> {
     }
 
     fn elsewhere(&self, details: &JobDetails, announced: &mut Announced) -> rusqlite::Result<()> {
+        // GitHub gives a job no runner took, as one a newer push cancelled while queued, a start time: its creation.
+        // Its runner's name is null, or empty for a job GitHub skipped.
+        let started_at = details
+            .runner_name
+            .as_ref()
+            .filter(|name| !name.is_empty())
+            .and_then(|_| timestamp(details.started_at.as_deref()));
         let closed = self.db.execute(
             "UPDATE jobs SET state = 'elsewhere', conclusion = ?2, started_at = ?3, finished_at = ?4 \
              WHERE id = ?1 AND state = 'queued'",
             params![
                 details.id,
                 details.conclusion,
-                timestamp(details.started_at.as_deref()),
+                started_at,
                 timestamp(details.completed_at.as_deref()),
             ],
         )?;

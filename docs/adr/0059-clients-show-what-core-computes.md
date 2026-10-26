@@ -23,7 +23,8 @@ its own colours.
   colour (a CSS class, an ANSI code, a ratatui style) and lays the figures out. A client never decides a fact from
   a colour or a class.
 - A job fails as `GET /v1/stats` counts it: it concluded `failure` or `timed_out`, or lost its runner. A job
-  another machine ran is `elsewhere` whatever its conclusion.
+  another machine ran is `elsewhere` whatever its conclusion; one no runner took is worded by its conclusion
+  ([0069](0069-a-job-no-runner-took-did-not-run-elsewhere.md)).
 - `runnerd simulate`'s table keeps its own `4m20s`: no other client shows it, and its columns are split on spaces.
 
 ## Consequences

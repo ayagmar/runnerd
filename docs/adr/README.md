@@ -74,3 +74,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0066](0066-a-reseed-that-did-not-finish.md) | A reseed that did not finish starts the profile over from the image |
 | [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md) | What a job deleted of the image is hidden by whiteouts beside the snapshot |
 | [0068](0068-cpus-follow-run-averages.md) | Auto sizing moves `cpus` on each job's run average, not on CPU peaks |
+| [0069](0069-a-job-no-runner-took-did-not-run-elsewhere.md) | A job no runner took did not run elsewhere |

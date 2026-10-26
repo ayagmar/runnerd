@@ -1235,7 +1235,12 @@ async fn a_job_whose_capture_never_reported_it_leaves_the_queue_once_github_comp
         .jobs
         .insert(1, details(1, "completed", Some("success")));
     engine.tick(Shutdown::No).await;
-    until_state(&handle, 1, JobState::Elsewhere).await;
+    let job = until_state(&handle, 1, JobState::Elsewhere).await.summary;
+    assert!(
+        job.timeline.started_at.is_some(),
+        "this machine's runner started it"
+    );
+    assert_eq!(job.outcome().label, "elsewhere");
 }
 
 #[tokio::test]
@@ -2770,6 +2775,41 @@ fn idle_runner(github: &FakeGithub, docker: &FakeDocker) {
 }
 
 #[tokio::test]
+async fn a_job_cancelled_in_the_queue_did_not_run_on_another_machine() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    // Too little memory for any runner: the job stays queued.
+    engine.memory_max = Some(1 << 30);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(5)];
+    engine.tick(Shutdown::No).await;
+    until_state(&handle, 5, JobState::Queued).await;
+
+    // A newer push cancels its run: GitHub completes it without a runner, its start time its creation.
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = Vec::new();
+        let mut cancelled = details(5, "completed", Some("cancelled"));
+        cancelled.runner_name = None;
+        cancelled.started_at.clone_from(&cancelled.created_at);
+        cancelled.steps = Vec::new();
+        state.jobs.insert(5, cancelled);
+    }
+    engine.tick(Shutdown::No).await;
+    let job = until_state(&handle, 5, JobState::Elsewhere).await.summary;
+    assert_eq!(job.outcome().label, "cancelled in queue");
+    assert_eq!(job.timeline.started_at, None);
+    let activity = handle.store.activity(0, u64::MAX / 1000).await.unwrap();
+    assert!(
+        activity.started.is_empty(),
+        "a job no runner took did not start: {:?}",
+        activity.started
+    );
+}
+
+#[tokio::test]
 async fn a_queued_job_of_a_repository_a_reload_removed_closes_once_github_says_it_ran_elsewhere() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
@@ -2793,7 +2833,8 @@ async fn a_queued_job_of_a_repository_a_reload_removed_closes_once_github_says_i
         state.jobs.insert(5, elsewhere);
     }
     engine.tick(Shutdown::No).await;
-    until_state(&handle, 5, JobState::Elsewhere).await;
+    let job = until_state(&handle, 5, JobState::Elsewhere).await.summary;
+    assert_eq!(job.outcome().label, "elsewhere");
 }
 
 #[tokio::test]

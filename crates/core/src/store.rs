@@ -456,7 +456,8 @@ impl Store {
         self.send(Write::Details { details });
     }
 
-    /// Closes a queued job that left the queue without a runner of this daemon.
+    /// Closes a queued job that left the queue without a runner of this daemon: another machine's runner took it, or
+    /// none did and it has no start.
     pub fn elsewhere(&self, details: JobDetails) {
         self.send(Write::Elsewhere { details });
     }

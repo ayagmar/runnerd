@@ -20,7 +20,7 @@ pub enum OutcomeKind {
     Running,
     /// It has not begun: waiting for a runner, or a step not reached yet.
     Waiting,
-    /// It ended without succeeding or failing: cancelled, skipped, or run elsewhere.
+    /// It ended without succeeding or failing: cancelled, skipped, run elsewhere, or ended before any runner took it.
     Ended,
 }
 
@@ -72,12 +72,21 @@ impl JobSummary {
     }
 
     /// Its outcome: where it is while it can change, then how it ended. Its kind is [`OutcomeKind::Failed`] exactly
-    /// when it [failed](JobSummary::is_failure).
+    /// when it [failed](JobSummary::is_failure). A job that left the queue without starting, as one a newer push
+    /// cancelled, did not run elsewhere: it reads `cancelled in queue`, or as it concluded.
     pub fn outcome(&self) -> Outcome {
+        let started = self.timeline.started_at.is_some();
         match (self.state, self.conclusion.as_deref()) {
             (JobState::Queued, _) => Outcome::new("queued", OutcomeKind::Waiting),
             (JobState::Running, _) => Outcome::new("running", OutcomeKind::Running),
             (JobState::Lost, _) => Outcome::new("lost", OutcomeKind::Failed),
+            (JobState::Elsewhere, Some("cancelled")) if !started => {
+                Outcome::new("cancelled in queue", OutcomeKind::Ended)
+            }
+            (JobState::Elsewhere, Some(conclusion)) if !started => Outcome {
+                kind: OutcomeKind::Ended,
+                ..Outcome::concluded(conclusion)
+            },
             (JobState::Elsewhere, _) => Outcome::new("elsewhere", OutcomeKind::Ended),
             (JobState::Completed, None) => Outcome::new("completed", OutcomeKind::Ended),
             (JobState::Completed, Some(conclusion)) => Outcome::concluded(conclusion),
@@ -351,9 +360,13 @@ impl Job {
                 }
             })
             .collect();
+        // Another machine's runs are not this daemon's to compare.
         let finished: Vec<&JobSummary> = runs
             .iter()
-            .filter(|run| run.state.is_final() && run.timeline.started_at.is_some())
+            .filter(|run| {
+                matches!(run.state, JobState::Completed | JobState::Lost)
+                    && run.timeline.started_at.is_some()
+            })
             .collect();
         // The lower of the middle two for an even count: a duration one of the runs took.
         let median = |mut values: Vec<u64>| {
@@ -380,7 +393,7 @@ pub struct RunComparison {
     pub median_ran: Option<u64>,
     /// The median of the finished runs' waits.
     pub median_waited: Option<u64>,
-    /// The runs that started and ended: those the medians and failures count.
+    /// The runs that started and ended here: those the medians and failures count.
     pub finished: usize,
     /// Of those, the ones that [failed](JobSummary::is_failure).
     pub failed: usize,

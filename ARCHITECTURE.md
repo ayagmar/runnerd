@@ -216,7 +216,8 @@ adopted too and drains as it would after a reload.
   only its repository's entries, through its own socket. The cache is trimmed only while no runner runs
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)).
 - A JIT config reaches a container only as a root-only file (`docker::JIT_CONFIG_PATH`), never the create request
-  or a log line.
+  or a log line. The entrypoint hands it to the runner's listener in `ACTIONS_RUNNER_INPUT_JITCONFIG`, never its
+  arguments, which every user of the host reads; the listener drops it from the environment its job inherits.
 - The engine deletes only GitHub runner registrations whose names start with this machine's prefix
   (`HostIdentity::prefix`); other machines serve the same repositories. Runner containers on the local Docker are
   this machine's whatever their name: `Engine::recover` adopts or removes them without checking the prefix.
