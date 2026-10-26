@@ -20,6 +20,7 @@ async fn dashboard() -> (Dashboard, String, Daemon, Facts) {
     fixtures.samples.clear();
     fixtures.records = daemon.records.clone();
     fixtures.caches = daemon.caches.clone();
+    fixtures.savings = Some(daemon.savings.clone());
     let dashboard = Dashboard::serving(&[], fixtures).await;
     let cookie = dashboard.sign_in().await;
     (dashboard, cookie, daemon, facts)
@@ -93,6 +94,7 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
     for fact in [&facts.host, &facts.free, &facts.host_part] {
         assert!(shown.contains(fact.as_str()), "{fact}: {shown}");
     }
+    assert!(shown.contains(&facts.savings), "{}: {shown}", facts.savings);
     let health = &facts.health;
     for figure in [
         format!("Running {} of {} slots", health.running, health.slots),

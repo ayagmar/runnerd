@@ -1429,3 +1429,86 @@ async fn sizing_reads_how_long_each_job_waited_for_the_hosts_memory() {
         "job 1's two waits add up; job 2's is none"
     );
 }
+
+#[tokio::test]
+async fn pricing_reads_the_jobs_this_machine_ran_by_when_they_ended_and_visibility_across_a_restart()
+ {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    let since = 864_000;
+    completed_in_window(&store, since, 1, "r1", "success", Oom::No);
+    store.queued("o/r", &queued(2));
+    store.runner_started(runner("r2", 1_000_100));
+    store.claimed(2, 10, "r2", 1_000_200);
+    store.lost(2, 1_000_300);
+    store.queued("o/r", &queued(3));
+    store.visibility("o/r".to_owned(), crate::api::Visibility::Public, 5);
+    store.visibility("o/r".to_owned(), crate::api::Visibility::Private, 6);
+    store.flush().await;
+    drop(store);
+
+    let store = Store::open(&path).unwrap();
+    let history = store.pricing(0).await.unwrap();
+    let runs: Vec<(JobState, Option<&str>)> = history
+        .runs
+        .iter()
+        .map(|run| (run.state, run.profile.as_deref()))
+        .collect();
+    assert_eq!(
+        runs,
+        [
+            (JobState::Completed, Some("app")),
+            (JobState::Lost, Some("app"))
+        ],
+        "a job still queued is not priced"
+    );
+    assert_eq!(
+        history.visibility,
+        BTreeMap::from([("o/r".to_owned(), crate::api::Visibility::Private)]),
+        "the latest answer stands"
+    );
+    let later = store.pricing((since + 300) * 1000).await.unwrap();
+    assert_eq!(later.runs.len(), 1, "the lost job ended before");
+}
+
+#[tokio::test]
+async fn pruning_job_records_moves_where_the_priced_history_starts_across_a_restart() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.queued("o/r", &queued(1));
+    store.runner_started(runner("r1", 1_000_100));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.lost(1, 1_000_300);
+    // Never final, so never pruned: it must not stand for the history's start.
+    store.queued("o/r", &queued(2));
+    store.flush().await;
+    let created = store.pricing(0).await.unwrap().kept_since;
+    assert!(
+        created > 1_000_300,
+        "a new history starts when it was created"
+    );
+
+    let now = created + 2 * DAY_MS;
+    let history = crate::config::History {
+        jobs: Duration::from_hours(24),
+        ..crate::config::History::default()
+    };
+    store.prune(now, &history).await.unwrap();
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    let history = store.pricing(0).await.unwrap();
+    assert_eq!(history.kept_since, now - DAY_MS);
+    assert!(history.runs.is_empty(), "job 1 was pruned");
+    let pricing = crate::api::Pricing {
+        profiles: BTreeMap::new(),
+        default_sku: crate::api::Sku::ActionsLinux,
+    };
+    let window = crate::api::Savings::of(&history, &pricing, now).last_30_days;
+    assert!(
+        window.cut,
+        "the window reads as cut short, not as one without jobs: {}",
+        window.headline()
+    );
+}

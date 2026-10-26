@@ -480,7 +480,7 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
     daemon.stop().await;
 }
 
-/// Records ten finished `o/app` jobs of `profile` at a `cap`, each peaking at `peak`.
+/// Records ten finished `o/app` jobs of `profile` at a `cap`, each peaking at `peak`, lost 20 s ago.
 async fn finished_jobs(store: &Store, profile: &str, cap: u64, peak: u64) {
     let now = u64::try_from(
         std::time::SystemTime::now()
@@ -489,6 +489,11 @@ async fn finished_jobs(store: &Store, profile: &str, cap: u64, peak: u64) {
             .as_millis(),
     )
     .unwrap();
+    finished_jobs_at(store, profile, cap, peak, now).await;
+}
+
+/// [`finished_jobs`], lost 20 s before `now` (ms).
+async fn finished_jobs_at(store: &Store, profile: &str, cap: u64, peak: u64, now: u64) {
     for id in 1..=10 {
         let runner = format!("runner-{id}");
         store.queued(
@@ -2294,4 +2299,40 @@ async fn insights_and_the_digest_read_the_history() {
     assert_eq!(response.status(), StatusCode::OK);
     let digest: runnerd_core::api::Digest = serde_json::from_slice(&body(response).await).unwrap();
     assert_eq!((digest.finished, digest.failed), (0, 0));
+}
+
+#[tokio::test]
+async fn the_savings_leave_lost_jobs_out_and_say_so() {
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    // Lost in the second the request is made, after the history began with the database.
+    let lost_now = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .unwrap()
+        .as_secs()
+        * 1000
+        + 20_000;
+    finished_jobs_at(&daemon.store, "app", 4 << 30, 1 << 30, lost_now).await;
+    daemon.store.visibility(
+        "o/app".to_owned(),
+        runnerd_core::api::Visibility::Private,
+        0,
+    );
+    daemon.store.flush().await;
+    let response = daemon
+        .client
+        .get("http://runnerd/v1/savings")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let savings: runnerd_core::api::Savings =
+        serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!((savings.month.jobs, savings.month.lost), (0, 10));
+    assert!(
+        savings.month.headline().ends_with("(10 jobs not priced)"),
+        "{}",
+        savings.month.headline()
+    );
+    daemon.stop().await;
 }

@@ -874,6 +874,7 @@ fn a_digests_longest_wait_of_a_job_without_a_name_names_it_by_its_id() {
             waited: 60,
             url: None,
         }],
+        savings: None,
     })
     .message;
     assert!(

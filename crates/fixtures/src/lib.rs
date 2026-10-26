@@ -5,7 +5,9 @@
 //! a step without an end time and a cancelled one with times; a job no pool serves; a measured budget of which the
 //! host's memory leaves less free than `MemoryMax` does, and a job waiting for the host; warm and starting runners
 //! and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records near
-//! `max_total`; a build cache that refused uploads and had no lookups.
+//! `max_total`; a build cache that refused uploads and had no lookups; and jobs priced at GitHub's rates on two
+//! runners, with a 61-second and a 0-second job, and jobs of a public repository, of Dependabot, of a repository
+//! GitHub has not answered for, lost, without an end and run elsewhere.
 //!
 //! Test support only: client tests depend on it, a client never does, so no client depends on another to share it.
 //! It computes nothing itself; every fact is core's.
@@ -62,6 +64,8 @@ pub struct Daemon {
     pub records: Records,
     /// `GET /v1/caches`.
     pub caches: Caches,
+    /// `GET /v1/savings`.
+    pub savings: api::Savings,
 }
 
 impl Daemon {
@@ -543,7 +547,67 @@ pub fn daemon() -> Daemon {
         jobs: jobs(),
         records: records(),
         caches: caches(),
+        savings: savings(),
     }
+}
+
+/// A job of the pricing history that ran `seconds` and ended `ago` seconds before [`NOW`].
+fn priced(repository: &str, profile: &str, seconds: u64, ago: u64) -> api::PricedRun {
+    let finished = (NOW - ago) * 1000;
+    api::PricedRun {
+        repository: repository.to_owned(),
+        workflow: Some("CI".to_owned()),
+        labels: vec!["self-hosted".to_owned()],
+        state: JobState::Completed,
+        profile: Some(profile.to_owned()),
+        queued_at: finished - seconds * 1000 - 20_000,
+        started_at: Some(finished - seconds * 1000),
+        finished_at: Some(finished),
+    }
+}
+
+/// What the history's jobs would have cost: ledger's jvm jobs at `linux_8_core`, storefront's node jobs at the
+/// standard runner, and docs, a public repository.
+fn savings() -> api::Savings {
+    let mut dependabot = priced(STOREFRONT, "node", 120, 600);
+    dependabot.workflow = Some("Dependabot Updates".to_owned());
+    let mut lost = priced(LEDGER, "jvm", 7200, 700);
+    lost.state = JobState::Lost;
+    let mut untimed = priced(STOREFRONT, "node", 60, 800);
+    untimed.finished_at = None;
+    let mut elsewhere = priced(STOREFRONT, "node", 60, 900);
+    elsewhere.state = JobState::Elsewhere;
+    let history = api::PricingHistory {
+        runs: vec![
+            priced(LEDGER, "jvm", 1260, 3600),
+            priced(LEDGER, "jvm", 61, 3000),
+            priced(STOREFRONT, "node", 0, 2400),
+            priced(STOREFRONT, "node", 600, 25 * 86_400),
+            priced("halyard/docs", "node", 300, 1800),
+            priced("halyard/docs", "jvm", 300, 1200),
+            priced("halyard/archive", "node", 300, 1000),
+            dependabot,
+            lost,
+            untimed,
+            elsewhere,
+        ],
+        visibility: [
+            (LEDGER, api::Visibility::Private),
+            (STOREFRONT, api::Visibility::Private),
+            ("halyard/docs", api::Visibility::Public),
+        ]
+        .into_iter()
+        .map(|(name, visibility)| (name.to_owned(), visibility))
+        .collect(),
+        kept_since: (NOW - 60 * 86_400) * 1000,
+    };
+    let pricing = api::Pricing {
+        profiles: [("jvm".to_owned(), api::Sku::Linux8Core)]
+            .into_iter()
+            .collect(),
+        default_sku: api::Sku::ActionsLinux,
+    };
+    api::Savings::of(&history, &pricing, NOW * 1000)
 }
 
 /// A finished job as every job list shows it.
@@ -657,6 +721,10 @@ pub struct Facts {
     pub records_tone: Tone,
     /// The build cache's week.
     pub build_cache_week: String,
+    /// The month's job minutes priced at GitHub's rates, with their basis.
+    pub savings: String,
+    /// The last 30 days', which reach the jobs of September.
+    pub savings_30_days: String,
 }
 
 fn row(job: &JobSummary) -> JobRow {
@@ -778,6 +846,8 @@ pub fn facts(daemon: &Daemon) -> Facts {
             .as_ref()
             .expect("the build cache's week")
             .week_line(),
+        savings: daemon.savings.month.headline(),
+        savings_30_days: daemon.savings.last_30_days.headline(),
     }
 }
 
@@ -831,6 +901,18 @@ mod tests {
             facts.waits[0].reason.starts_with("No profile serves"),
             "{:?}",
             facts.waits
+        );
+        assert_eq!(
+            facts.savings,
+            "This month: 29 job-minutes here, an estimated $0.62 at GitHub's rates for each profile's runner, before your \
+             plan's free minutes, by today's profiles and repository visibility (5 jobs not priced)"
+        );
+        assert!(
+            facts
+                .savings_30_days
+                .starts_with("Last 30 days: 39 job-minutes here, an estimated $0.68"),
+            "{}",
+            facts.savings_30_days
         );
     }
 }

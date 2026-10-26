@@ -73,6 +73,7 @@ fn the_digest_names_each_long_wait_with_its_workflow_and_a_readable_time() {
             waited: 90,
             url: None,
         }],
+        savings: None,
     };
     assert_eq!(digest.summary_line(), "12 jobs finished, 2 failed");
     assert_eq!(

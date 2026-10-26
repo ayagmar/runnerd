@@ -42,21 +42,9 @@ pub(crate) fn parse_ns(text: &str) -> Option<u64> {
         return None;
     }
     let nanos = format!("{fraction:0<9}")[..9].parse::<u64>().ok()?;
-    let days = days_from_civil(year, month, day);
+    let days = crate::api::days_from_civil(year, month, day);
     let seconds = ((days * 24 + hour) * 60 + minute) * 60 + second;
     seconds.checked_mul(1_000_000_000)?.checked_add(nanos)
-}
-
-/// Days from 1970-01-01 to a date of the proleptic Gregorian calendar, for years from 1970 (Howard Hinnant's
-/// `days_from_civil`).
-fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
-    let year = if month <= 2 { year - 1 } else { year };
-    let era = year / 400;
-    let year_of_era = year - era * 400;
-    let month_index = (month + 9) % 12;
-    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
-    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
-    era * 146_097 + day_of_era - 719_468
 }
 
 #[cfg(test)]

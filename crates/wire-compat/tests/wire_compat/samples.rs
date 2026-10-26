@@ -18,13 +18,14 @@ use runnerd_core::api::{
     HostSamples, Insight, InsightKind, Insights, InsightsQuery, Job, JobMetrics, JobPage, JobPeak,
     JobQuery, JobRunner, JobSizing, JobState, JobSummary, LogQuery, LogSummary, LongWait,
     Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Pairing, PairingQuery, Pairings,
-    PauseQuery, Paused, Peaks, PoolStatus, Pressure, Priority, ProfileSizing, ProfileStatus,
-    QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery,
-    RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RevertCause, RunLink,
-    RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries, SeedMemory, Severity,
-    ShellMemory, ShellQuery, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery,
-    SizingRefused, SizingRevert, SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow,
-    Status, Step, Timeline, WaitSpread, Waiting, WeekWaits,
+    PauseQuery, Paused, Peaks, Period, PoolStatus, Pressure, PricedRunner, Priority, ProfileSizing,
+    ProfileStatus, QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval, Records,
+    RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize,
+    RevertCause, RunLink, RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries,
+    SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery, ShutdownRequest, Sizing,
+    SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread,
+    Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, Timeline, Usd, WaitSpread, Waiting,
+    WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -993,6 +994,45 @@ pub(crate) fn digest() -> Digest {
             waited: 900,
             url: Some("https://github.com/tidewater/halyard/actions/runs/900".to_owned()),
         }],
+        savings: Some(saved_window(Period::Month)),
+    }
+}
+
+fn saved_window(period: Period) -> SavedWindow {
+    SavedWindow {
+        period,
+        since: 1_759_276_800,
+        cut: true,
+        jobs: 12,
+        minutes: 340,
+        cost: Usd(4_020_000),
+        runners: vec![
+            PricedRunner {
+                sku: Sku::ActionsLinux,
+                jobs: 10,
+                minutes: 300,
+                cost: Usd(1_800_000),
+            },
+            PricedRunner {
+                sku: Sku::Linux8Core,
+                jobs: 2,
+                minutes: 40,
+                cost: Usd(880_000),
+            },
+        ],
+        free: 3,
+        services: 1,
+        unknown: 1,
+        lost: 2,
+        untimed: 1,
+    }
+}
+
+pub(crate) fn savings() -> Savings {
+    Savings {
+        until: 1_761_400_000,
+        month: saved_window(Period::Month),
+        last_30_days: saved_window(Period::Last30Days),
     }
 }
 

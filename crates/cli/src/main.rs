@@ -13,7 +13,7 @@ use runnerd_core::api::{
     Caches, ConfigCheck, ConfigFile, Dashboard, Digest, Doctor, Event, EventQuery, Insights,
     InsightsQuery, Job, JobPage, JobQuery, JobState, LogQuery, NotifyTest, NotifyTestQuery,
     PairingQuery, Pairings, PauseQuery, Paused, Records, RemoveRecordsQuery, RemovedRecords,
-    Resize, ShellQuery, Sizing, SizingQuery, Status,
+    Resize, Savings, ShellQuery, Sizing, SizingQuery, Status,
 };
 use runnerd_core::config::{self, ByteSize, resize_profile};
 use serde::Serialize;
@@ -149,8 +149,9 @@ enum Command {
         #[command(subcommand)]
         command: Option<SizingCommand>,
     },
-    /// Show what the history says: jobs that got slower and stayed so, jobs that fail and pass on a re-run, jobs near
-    /// their memory cap, and how long each repository's jobs wait this week against the last. One line per insight.
+    /// Show what the history says: what the job minutes would have cost on GitHub's runners, jobs that got slower and
+    /// stayed so, jobs that fail and pass on a re-run, jobs near their memory cap, and how long each repository's jobs
+    /// wait this week against the last. One line per insight.
     Insights {
         /// Days of history to read [default: 14, at most 90].
         #[arg(long)]
@@ -688,6 +689,10 @@ async fn insights(
             .await?;
         if json {
             return print_json(&insights);
+        }
+        // A daemon before the savings route has none to show.
+        if let Ok(savings) = client.get::<Savings>("/v1/savings").await {
+            output::text(&format!("{}\n", human::savings(&savings)));
         }
         output::text(&human::insights(&insights, output::paint()));
     }

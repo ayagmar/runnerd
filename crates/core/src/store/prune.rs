@@ -1,7 +1,8 @@
 //! Pruning: deletes what is older than `[history]` keeps, on its own connection off the writer thread, a batch per
 //! transaction with a pause after each as long as the batch took, so the writer's transactions get the lock in
 //! between. It stops between two batches once the store is closed. It keeps each repository's latest
-//! `repository.*` event, and jobs that are not final. It must not write anything but deletions.
+//! `repository.*` event, and jobs that are not final. It must not write anything but deletions, and, before it
+//! deletes job records, the time from which the history still holds every final job (`history_kept`).
 
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
@@ -149,6 +150,12 @@ fn jobs(db: &Db<'_>, before: u64) -> rusqlite::Result<()> {
         )?
         .query_map([before], |row| row.get(0))?
         .collect::<rusqlite::Result<_>>()?;
+    if !jobs.is_empty() {
+        db.execute(
+            "UPDATE history_kept SET jobs_since = max(jobs_since, ?1)",
+            [before],
+        )?;
+    }
     delete_logs(db, &jobs)?;
     let mut steps = db.prepare("DELETE FROM steps WHERE job = ?1")?;
     let mut kept = db.prepare("DELETE FROM records WHERE job = ?1")?;

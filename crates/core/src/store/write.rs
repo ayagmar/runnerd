@@ -153,6 +153,20 @@ impl Writer<'_> {
             Write::RecordMade(record) => self.record_made(record),
             Write::RecordSkipped { job, why } => self.record_skipped(job, &why),
             Write::RecordRemoved { job, at, by } => self.record_removed(job, at, by),
+            Write::Visibility {
+                repository,
+                visibility,
+                at,
+            } => {
+                self.change("record a repository's visibility", |_| {
+                    self.db.execute(
+                        "INSERT INTO repositories (name, visibility, checked_at) VALUES (?1, ?2, ?3) \
+                         ON CONFLICT (name) DO UPDATE SET visibility = ?2, checked_at = ?3",
+                        params![repository, visibility_text(visibility), at],
+                    )?;
+                    Ok(())
+                });
+            }
             Write::Paused { repositories, done } => {
                 let _ = done.send(self.paused(&repositories));
             }
@@ -900,6 +914,15 @@ impl Writer<'_> {
             )?;
             Ok(())
         })
+    }
+}
+
+/// A visibility as the `repositories` table keeps it, GitHub's word for it.
+fn visibility_text(visibility: api::Visibility) -> &'static str {
+    match visibility {
+        api::Visibility::Public => "public",
+        api::Visibility::Private => "private",
+        api::Visibility::Internal => "internal",
     }
 }
 

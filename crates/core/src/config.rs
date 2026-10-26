@@ -246,6 +246,9 @@ pub struct Profile {
     pub max_memory: Option<ByteSize>,
     /// The most `slots` auto sizing raises them to; `None` for as many as the slice's `MemoryMax` holds.
     pub max_slots: Option<u32>,
+    /// The GitHub-hosted runner its jobs are priced at (ADR 0072); `None` for the daemon's architecture's 2-core
+    /// standard runner.
+    pub priced_as: Option<api::Sku>,
 }
 
 /// The image a profile's runners run.
@@ -282,6 +285,7 @@ struct ProfileToml {
     min_memory: Option<ByteSize>,
     max_memory: Option<ByteSize>,
     max_slots: Option<u32>,
+    priced_as: Option<api::Sku>,
 }
 
 impl TryFrom<ProfileToml> for Profile {
@@ -314,6 +318,7 @@ impl TryFrom<ProfileToml> for Profile {
             min_memory: profile.min_memory,
             max_memory: profile.max_memory,
             max_slots: profile.max_slots,
+            priced_as: profile.priced_as,
         })
     }
 }
@@ -1208,6 +1213,18 @@ impl Config {
         self.repositories
             .iter()
             .find(|pool| pool.name == repository && pool.profile == profile)
+    }
+
+    /// The GitHub-hosted runner each profile's jobs are priced at (ADR 0072).
+    pub fn pricing(&self) -> api::Pricing {
+        api::Pricing {
+            profiles: self
+                .profiles
+                .iter()
+                .filter_map(|(name, profile)| Some((name.clone(), profile.priced_as?)))
+                .collect(),
+            default_sku: api::Sku::standard_for(std::env::consts::ARCH),
+        }
     }
 
     /// The repositories served, each once, in the order the config first names them.

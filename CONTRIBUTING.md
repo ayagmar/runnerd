@@ -80,7 +80,8 @@ owner's slot layers and can reseed the owner's snapshot, and smaller shared-cach
 version cannot read what the previous release wrote: the daemon's responses and events, the requests clients send,
 the events and admissions the history stores, and what `[notify]` webhooks receive. A new field or variant makes it
 fail to compile until `crates/wire-compat/tests/wire_compat/samples.rs` has a sample of it. A new document type,
-such as a new response, joins `documents!` in `main.rs` when the first release that has it becomes the previous one.
+such as a new response, joins `documents!` in `main.rs` under `new:`, which only this version reads; it moves up
+with the others when the first release that has it becomes the previous one.
 
 Fix a failure with a serde default or a fallback (`#[serde(other)]`) where one keeps both sides reading. When the
 break is the point, write the ADR that says what an older client or daemon does with it, and add one line to

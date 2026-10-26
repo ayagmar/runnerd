@@ -764,6 +764,53 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
     })
 }
 
+/// The completed and lost jobs dated at or after `since` (ms) by their end, start or queue time, as
+/// `api::PricedRun::at` dates them; each repository's visibility; and since when the history holds every final job.
+pub(super) fn pricing(db: &Connection, since: u64) -> rusqlite::Result<api::PricingHistory> {
+    let runs = db
+        .prepare_cached(
+            "SELECT j.repository, j.workflow, j.labels, j.state, r.profile, j.queued_at, j.started_at, \
+             j.finished_at FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+             WHERE j.state IN ('completed', 'lost') AND coalesce(j.finished_at, j.started_at, j.queued_at) >= ?1 \
+             ORDER BY j.id",
+        )?
+        .query_map([since], |row| {
+            let labels: String = row.get(2)?;
+            Ok(api::PricedRun {
+                repository: row.get(0)?,
+                workflow: row.get(1)?,
+                labels: serde_json::from_str(&labels).unwrap_or_default(),
+                state: state(&row.get::<_, String>(3)?),
+                profile: row.get(4)?,
+                queued_at: row.get(5)?,
+                started_at: row.get(6)?,
+                finished_at: row.get(7)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    let visibility = db
+        .prepare_cached("SELECT name, visibility FROM repositories")?
+        .query_map([], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?))
+        })?
+        .filter_map(|row| match row {
+            Ok((name, text)) => match text.as_str() {
+                "public" => Some(Ok((name, api::Visibility::Public))),
+                "private" => Some(Ok((name, api::Visibility::Private))),
+                "internal" => Some(Ok((name, api::Visibility::Internal))),
+                _ => None,
+            },
+            Err(error) => Some(Err(error)),
+        })
+        .collect::<rusqlite::Result<_>>()?;
+    let kept_since = db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))?;
+    Ok(api::PricingHistory {
+        runs,
+        visibility,
+        kept_since,
+    })
+}
+
 /// The jobs completed or lost that were queued at or after `since` (ms), with their runners, as insights read them.
 pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<Vec<crate::insights::Run>> {
     db.prepare_cached(

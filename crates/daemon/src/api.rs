@@ -175,6 +175,7 @@ fn router(state: AppState) -> Router {
         .route("/v1/activity", get(history::activity))
         .route("/v1/insights", get(history::insights))
         .route("/v1/digest", get(history::digest))
+        .route("/v1/savings", get(history::savings))
         .route("/v1/notify/test", post(notify::test))
         .route("/v1/caches", get(history::caches))
         .route("/v1/caches/history", get(history::cache_history))

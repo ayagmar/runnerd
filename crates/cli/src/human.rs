@@ -7,8 +7,8 @@ use std::fmt::Write as _;
 
 use runnerd_core::api::{
     self, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
-    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, Sizing,
-    SlotState, Status, Step, WaitSpread,
+    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, Savings,
+    Sizing, SlotState, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
 use runnerd_core::api::{in_cores, job_title};
@@ -810,6 +810,19 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
     out
 }
 
+/// What the jobs' minutes this month and in the last 30 days would have cost on GitHub's runners, as `runnerctl
+/// insights` opens with: each window's headline, then what it sums and leaves out.
+pub(crate) fn savings(savings: &Savings) -> String {
+    let mut out = String::new();
+    for window in [&savings.month, &savings.last_30_days] {
+        let _ = writeln!(out, "{}", window.headline());
+        for line in window.details() {
+            let _ = writeln!(out, "  {line}");
+        }
+    }
+    out
+}
+
 /// `runnerctl insights --digest`: the last 24 hours.
 pub(crate) fn digest(digest: &Digest) -> String {
     let mut out = format!("last 24 hours: {}\n", digest.summary_line());
@@ -821,6 +834,9 @@ pub(crate) fn digest(digest: &Digest) -> String {
     }
     for wait in &digest.waits {
         let _ = writeln!(out, "  {}", wait.line());
+    }
+    if let Some(savings) = &digest.savings {
+        let _ = writeln!(out, "{}", savings.headline());
     }
     out
 }

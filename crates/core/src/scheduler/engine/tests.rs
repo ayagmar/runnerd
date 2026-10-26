@@ -67,6 +67,8 @@ fn runner_names_are_short_safe_and_hide_the_machine_id() {
 struct GithubState {
     /// Every repository's default branch; `main` when unset.
     default_branch: Option<String>,
+    /// Repositories' visibility; private when unset.
+    visibility: BTreeMap<String, api::Visibility>,
     queued: Vec<QueuedJob>,
     runners: Vec<Runner>,
     /// GitHub gives this queued job to this runner right after the first poll that sees them.
@@ -101,6 +103,8 @@ struct GithubState {
     held: tokio::sync::watch::Sender<bool>,
     /// While true, `GET /actions/jobs/{id}` does not answer.
     held_jobs: tokio::sync::watch::Sender<bool>,
+    /// While true, `GET /repos/{owner}/{name}` does not answer.
+    held_repositories: tokio::sync::watch::Sender<bool>,
     /// Listings and job reads waiting for an answer.
     waiting: usize,
 }
@@ -152,6 +156,11 @@ impl FakeGithub {
 
     fn release_jobs(&self) {
         self.0.lock().unwrap().held_jobs.send_replace(false);
+    }
+
+    /// Holds repository reads, which never answer.
+    fn hold_repositories(&self) {
+        self.0.lock().unwrap().held_repositories.send_replace(true);
     }
 
     /// Waits while the listings are held.
@@ -315,13 +324,28 @@ impl GithubApi for FakeGithub {
             .ok_or(github::Error::Token(format!("no pull request {number}")))
     }
 
-    async fn default_branch(&self, repository: &str) -> Result<String, github::Error> {
-        let mut state = self.0.lock().unwrap();
-        state.call(format!("default branch {repository}"));
-        Ok(state
-            .default_branch
-            .clone()
-            .unwrap_or_else(|| "main".to_owned()))
+    async fn repository(
+        &self,
+        repository: &str,
+    ) -> Result<github::RepositoryDetails, github::Error> {
+        self.0
+            .lock()
+            .unwrap()
+            .call(format!("repository {repository}"));
+        self.wait(|state| &state.held_repositories).await;
+        let state = self.0.lock().unwrap();
+        let visibility = state
+            .visibility
+            .get(repository)
+            .copied()
+            .unwrap_or(api::Visibility::Private);
+        Ok(github::RepositoryDetails {
+            default_branch: state
+                .default_branch
+                .clone()
+                .unwrap_or_else(|| "main".to_owned()),
+            visibility,
+        })
     }
 
     async fn on_branch(
@@ -4314,4 +4338,59 @@ async fn a_closed_slots_volume_a_kept_record_still_uses_does_not_keep_the_others
     let (mut engine, _handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
     until_called(&mut engine, &docker, "remove volume runnerd-app-slot-4").await;
+}
+
+#[tokio::test]
+async fn a_repository_s_visibility_is_asked_once_a_day_and_kept_in_the_history() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github
+        .0
+        .lock()
+        .unwrap()
+        .visibility
+        .insert("o/r".to_owned(), api::Visibility::Public);
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    // The answer is stored by the task that asked, beside the ticks.
+    let stored = tokio::time::timeout(Duration::from_secs(60), async {
+        loop {
+            handle.store.flush().await;
+            let visibility = handle.store.pricing(0).await.unwrap().visibility;
+            if !visibility.is_empty() {
+                return visibility;
+            }
+            tokio::task::yield_now().await;
+        }
+    })
+    .await
+    .expect("the visibility is stored");
+    assert_eq!(
+        stored,
+        BTreeMap::from([("o/r".to_owned(), api::Visibility::Public)])
+    );
+    engine.tick(Shutdown::No).await;
+    let asked = github
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("repository "))
+        .count();
+    assert_eq!(asked, 1, "asked at start, not on every poll");
+}
+
+#[tokio::test]
+async fn a_repository_read_that_never_answers_holds_up_no_runner() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    github.hold_repositories();
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    tokio::time::timeout(Duration::from_secs(30), engine.tick(Shutdown::No))
+        .await
+        .expect("the tick ends while GitHub keeps the repository's visibility");
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "the queued job gets its runner"
+    );
 }

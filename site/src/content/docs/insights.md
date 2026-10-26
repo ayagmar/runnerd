@@ -38,6 +38,31 @@ halyard/storefront   212        9s  4m 10s        2s       47s           1m 30s
 
 The dashboard's Insights page shows the same as cards, with links to each run in the history and on GitHub. `runnerctl tui` counts the warnings on its health line.
 
+## What the minutes would have cost
+
+`runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days. The dashboard's overview, `runnerctl tui` and the daily digest show the month's line, whole: the TUI wraps it, and leaves it out rather than cut it when the terminal has no room.
+
+```console wrap=false
+This month: 2,184 job-minutes here, an estimated $13.10 at GitHub's 2-core Linux rate, before your plan's free minutes, by today's profiles and repository visibility (14 jobs not priced)
+  2,184 minutes of 412 jobs at actions_linux (2-core Linux, $0.006 a minute): $13.10
+  9 jobs free on GitHub: on a standard runner, of a public repository
+  5 jobs not priced: lost, so how long they ran is not known
+  An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
+```
+
+Each job that a runner here took and GitHub reported completed is billed as GitHub bills it: its minutes rounded up, at least one, at the per-minute rate of the runner its profile's [`priced_as`](../configuration/#profilesname) names. A profile with more CPUs than GitHub's 2-core runner may be worth pricing at `linux_4_core` or `linux_8_core`; the figure moves with that choice, for the whole history.
+
+What it leaves out, and counts:
+
+- Jobs of public repositories on a standard runner, which GitHub runs free. On a larger runner they are priced, as GitHub bills them.
+- Jobs on a standard runner whose workflow is named as GitHub's Dependabot or Pages workflow (`Dependabot Updates`, `pages build and deployment`), which GitHub runs free. A name is not proof, so they are not priced and not called free. A `dependabot` runner label changes nothing.
+- Jobs of a repository GitHub has not said is public or private. runnerd asks once a day, beside its scheduling.
+- Lost jobs, and jobs without a start or an end: how long they ran is not known.
+
+When pruning (`[history] jobs`) has dropped jobs a window covers, or the history is younger than the window, the line starts with the day the history holds every job from, such as "Since Oct 3".
+
+The figure is before your plan's included minutes. Those are shared with everything your account runs on GitHub's runners, which runnerd does not see, so it does not subtract them.
+
 ## Notifications
 
 Each `[[notify.targets]]` entry is a place messages go. A burst is one message: runnerd waits 10 seconds after the first event, then sends to a target at most once a minute, so twenty jobs failing on a broken main arrive as "20 jobs failed" with the first five named; a webhook's body carries the first 20 of each kind. A failed delivery is retried, from 5 seconds up to every 10 minutes, with what came meanwhile folded in. Where each target got to is kept in the job history, so a restart drops no message; one stopped between sending and recording may send it again. A target added later starts with the events from then on.

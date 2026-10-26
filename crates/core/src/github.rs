@@ -12,6 +12,7 @@ use reqwest::{Method, StatusCode};
 use serde::Deserialize;
 use serde::de::DeserializeOwned;
 
+use crate::api;
 use crate::docker::JitConfig;
 use crate::sync::lock;
 use crate::time;
@@ -203,6 +204,15 @@ pub struct PullRequest {
     pub head_branch: String,
 }
 
+/// A repository, as `GET /repos/{owner}/{repo}` says.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct RepositoryDetails {
+    /// Its default branch.
+    pub default_branch: String,
+    /// Whether it is public, private or internal.
+    pub visibility: api::Visibility,
+}
+
 fn first_attempt() -> u32 {
     1
 }
@@ -288,11 +298,11 @@ pub trait GithubApi: Send + Sync {
         repository: &str,
         number: u64,
     ) -> impl Future<Output = Result<PullRequest, Error>> + Send;
-    /// The repository's default branch.
-    fn default_branch(
+    /// The repository's default branch and visibility.
+    fn repository(
         &self,
         repository: &str,
-    ) -> impl Future<Output = Result<String, Error>> + Send;
+    ) -> impl Future<Output = Result<RepositoryDetails, Error>> + Send;
     /// Whether `branch` of the repository has the commit `sha`: its head or an ancestor of it. A tag of the same
     /// name, which git would take for it, does not count.
     fn on_branch(
@@ -455,6 +465,7 @@ struct CommitBody {
 #[derive(Deserialize)]
 struct RepositoryBody {
     default_branch: String,
+    visibility: api::Visibility,
 }
 
 #[derive(Deserialize)]
@@ -747,9 +758,12 @@ impl GithubApi for Github {
         })
     }
 
-    async fn default_branch(&self, repository: &str) -> Result<String, Error> {
+    async fn repository(&self, repository: &str) -> Result<RepositoryDetails, Error> {
         let body: RepositoryBody = self.get(&format!("/repos/{repository}")).await?;
-        Ok(body.default_branch)
+        Ok(RepositoryDetails {
+            default_branch: body.default_branch,
+            visibility: body.visibility,
+        })
     }
 
     async fn on_branch(&self, repository: &str, branch: &str, sha: &str) -> Result<bool, Error> {

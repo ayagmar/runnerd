@@ -54,12 +54,16 @@ const ACCEPTED: &[Accepted] = &[];
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
 
+/// How one side reads a document: what it makes of the JSON, written back as JSON.
+type Reads = fn(&Value) -> Result<Value, String>;
+
 /// One JSON document and how each side reads it.
 struct Document {
     name: &'static str,
     items: Items,
-    current: fn(&Value) -> Result<Value, String>,
-    previous: fn(&Value) -> Result<Value, String>,
+    current: Reads,
+    /// `None` for a document newer than the previous release, which it never asks for and wrote no fixture of.
+    previous: Option<Reads>,
 }
 
 /// What a reader makes of `value`, written back as JSON.
@@ -131,11 +135,7 @@ fn difference(left: &Value, right: &Value, keys: Keys, path: &str) -> Option<Dif
 }
 
 /// Whether `reader` reads `sent` and sees what it says, with the keys `expect` asks for.
-fn check(
-    reader: fn(&Value) -> Result<Value, String>,
-    sent: &Value,
-    expect: Expect,
-) -> Result<(), String> {
+fn check(reader: Reads, sent: &Value, expect: Expect) -> Result<(), String> {
     let read = reader(sent)?;
     if let Some(difference) = difference(&read, sent, expect.read, "") {
         return Err(match difference {
@@ -189,13 +189,18 @@ fn variants<T: Serialize>(every: Vec<T>) -> Items {
 }
 
 macro_rules! documents {
-    ($($name:literal: $type:ident => $items:expr,)*) => {
+    ($($name:literal: $type:ident => $items:expr,)* new: $($new_name:literal: $new_type:ident => $new_items:expr,)*) => {
         fn documents() -> Vec<Document> {
             vec![$(Document {
                 name: $name,
                 items: $items,
                 current: reads::<api::$type>,
-                previous: reads::<previous::$type>,
+                previous: Some(reads::<previous::$type>),
+            },)* $(Document {
+                name: $new_name,
+                items: $new_items,
+                current: reads::<api::$new_type>,
+                previous: None,
             },)*]
         }
     };
@@ -260,6 +265,9 @@ documents! {
     "event-query": EventQuery => full(samples::event_query(), None),
     "remove-records-query": RemoveRecordsQuery => full(samples::remove_records_query(), None),
     "shell-query": ShellQuery => full(samples::shell_query(), None),
+    // Documents the previous release does not have; the release after this one reads their fixtures.
+    new:
+    "savings": Savings => full(samples::savings(), None),
 }
 
 /// The previous release's samples, one file per document.
@@ -307,6 +315,9 @@ fn the_previous_release_reads_what_this_one_writes() {
     let known_events = fixture("events");
     let mut failures = BTreeMap::new();
     for document in documents() {
+        let Some(previous) = document.previous else {
+            continue;
+        };
         for (label, value) in &document.items {
             if document.name == "events" && !known_events.contains_key(label) {
                 continue;
@@ -320,7 +331,7 @@ fn the_previous_release_reads_what_this_one_writes() {
                 read,
                 sent: Keys::Shared,
             };
-            if let Err(error) = check(document.previous, value, expect) {
+            if let Err(error) = check(previous, value, expect) {
                 failures.insert(format!("{}/{label}", document.name), error);
             }
         }
@@ -361,7 +372,26 @@ fn this_version_reads_what_the_previous_release_wrote() {
             }
         }
     }
-    for name in documents.keys().filter(|name| !names.contains(**name)) {
+    // A document the previous release lacks has no fixture yet: this version reads its own samples instead.
+    for document in documents
+        .values()
+        .filter(|document| document.previous.is_none())
+    {
+        for (label, value) in &document.items {
+            let expect = Expect {
+                read: Keys::Every,
+                sent: Keys::Every,
+            };
+            if let Err(error) = check(document.current, value, expect) {
+                failures.insert(format!("{}/{label}", document.name), error);
+            }
+        }
+    }
+    for name in documents
+        .iter()
+        .filter(|(name, document)| document.previous.is_some() && !names.contains(**name))
+        .map(|(name, _)| name)
+    {
         failures.insert(
             (*name).to_owned(),
             format!("has no fixture: {PREVIOUS} wrote none"),
