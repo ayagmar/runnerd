@@ -130,9 +130,12 @@ sizing writes.
 
 Core computes two needs per profile, from different runs, and the advice goes by them:
 
-- **`raise_need`**: the largest `need(max(peak, X))` of the runs that met the profile's current `memory` X and
-  finished since the profile last took X, by its `profile.changed` events, as `cpus` reads runs since it took its
-  `cpus` (0068). Nothing else raises `memory`: not a run clear of X however near it peaked, not a run that met
+- **`raise_need`**: over the runs that met the profile's current `memory` X and finished since the profile last
+  took X, by its `profile.changed` events, as `cpus` reads runs since it took its `cpus` (0068): the largest of
+  `need(max(peak, X))` and, for each such run's job, that job's `lower_floor` (below) from its windowed runs at
+  larger caps. A run's last 2 s sample before a kill rarely shows what it needed, so `need(X)` alone would climb
+  back one kill per step; a job that ran clear at 14G and is killed at a hand-set 8G is raised toward what its 14G
+  runs needed at once. Nothing else raises `memory`: not a run clear of X however near it peaked, not a run that met
   another cap, not a run at X from an earlier time at X. A peak that grows with the cap never asks for more, and a
   hand-set cap stands until a run at it meets it. This drops 0055's "at least the largest peak plus 1G" for raises:
   a run clear of its cap had the room it needed. Lowerings keep it.
@@ -163,9 +166,12 @@ it from F, by its recorded change (`SizingChange`), and the profile has run X si
 events. The lowering went too far when, since then, either:
 
 - a run at X met it; or
-- a job with a successful run at F in its sizing window failed `FAILED_RUNS` (3) runs in a row at X, with no
-  success between: the case a heap sized from the cgroup's limit fails without a kernel event. A broken branch can
-  look the same; reverting it costs memory, not jobs.
+- a job with a successful run at F in its sizing window failed `FAILED_RUNS` (3) times in a row at X, with no
+  success between: the case a heap sized from the cgroup's limit fails without a kernel event. Only conclusions
+  `failure` and `timed_out` count (a heap thrashing in GC times out); `lost` and `cancelled` neither count nor break
+  the row. At most one failure counts per workflow run (`run_id`), so a re-run of failed jobs adds nothing, and the
+  three must come from at least two branches, so one broken pull request pushed three times does not revert. Red CI
+  across branches can still look the same; reverting it costs memory, not jobs.
 
 The next look then writes `memory` F back, with the slots that change took away under caps admission, without waiting
 for `raise_interval`: it takes back auto sizing's own change, as an undo would. Under caps it waits, as a raise does,
@@ -175,6 +181,10 @@ clear runs.
 
 A cap the owner set by hand is not reverted: a run that meets it raises toward `raise_need` in `max_step` steps
 after `raise_interval`, as now.
+
+The revert is advice like any other: `sizing::advise` takes the recorded changes beside the history, and words a
+pending revert as `Raise` to F with the revert's reason, and its floor as part of `lower_floor`, so `runnerctl
+sizing` shows during and after a revert what auto sizing writes.
 
 Auto sizing's steps are otherwise unchanged: a lowering waits `interval` after the last change and moves at most
 `max_step` percent, a raise waits `raise_interval`.
@@ -233,8 +243,9 @@ kills, and is accepted, as 0068 accepted it for CPUs: the history cannot tell it
 - Accepted: after a hold at the cap ends, admission's p95 can leave the at-cap run out. If that peak comes back
   within the window, it is an overrun, and the job reserves the window's largest from then on. A job that meets its
   cap twice in its window reserves the cap at p95 anyway.
-- A hand-lowered cap under a non-JVM job's real need is met once before sizing raises it, in `max_step` steps
-  toward `need(X)`: runs at a larger cap no longer raise, and only auto sizing's own lowerings are reverted.
+- A hand-lowered cap under a non-JVM job's real need is met once, then raised in `max_step` steps toward what that
+  job's runs at a larger cap needed. A job with no runs at a larger cap may be met once per step, as each raise goes
+  to `need(X)`. Only auto sizing's own lowerings are reverted.
 - A run clear of its cap with less than 1G of room may see its downloads throttled (0055). Sizing no longer raises
   for that; the `throttled` insight still names the repository.
 - A kill only a descendant's limit explains no longer holds a job in admission, and no longer holds its profile's
@@ -267,8 +278,9 @@ under a cap that changes mid-way by hand and by auto sizing. Over each sequence:
    reservation as not clear, or that judges a run against today's cap instead of its own.
 4. **Auto sizing never lowers under `lower_floor` or a revert's floor, nor while `on_cap` is above 0; never raises
    without a run that met the current cap since the profile took it; and no two changes of a profile come closer
-   than `raise_interval`, or a lowering closer than `interval` to the last change, except a revert.** Catches a raise
-   from old runs or from a peak that follows the room, and a ping-pong.
+   than `raise_interval`, or a lowering closer than `interval` to the last change, except a revert. A broken pull
+   request pushed three times, or re-run twice, right after a lowering reverts nothing, nor do lost runs.** Catches
+   a raise from old runs or from a peak that follows the room, a ping-pong, and a revert on ordinary red CI.
 5. **Kills per lowering.** Over generated days of a JVM-like job, whose peak is a share of its cap and which fails on
    its heap under a fixed working set, and of a cold-cache job: each auto-sizing lowering is followed by at most one
    burst of kills or `FAILED_RUNS` failures at the lowered cap, and the profile is back at the cap it came from at
@@ -299,7 +311,9 @@ Cases:
     `oom`: `Keep` with core's reason, no raise, no lowering, and no revert. A run at 8G that meets it raises toward
     `need(8G)`. jvm set by hand to 9G, where runs met 9G a week earlier at the same value: no raise until a run since
     the change meets it. Catches undoing the owner's trial from runs at another cap or another time.
-14. `runnerctl sizing --since 2d` gives the advice auto sizing writes. Catches windows read from `since`.
+14. `runnerctl sizing --since 2d` gives the advice auto sizing writes, and so does `runnerctl sizing` during and
+    after a revert. A job killed at a hand-set 8G with runs clear at 14G is raised toward their need, not 9.25G.
+    Catches windows read from `since`, a revert outside the advice, and a raise that climbs one kill per step.
 15. `simulate` reads each row as the engine does: with room for every job, the reservation of each start equals what
     the predictor built from the rows finished before it gives. Catches simulate learning a run under today's cap or
     its sampled-with-page-cache peak.
