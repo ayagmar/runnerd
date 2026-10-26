@@ -20,12 +20,13 @@ state it does not know.
 - Core words an `elsewhere` job without a start by its conclusion: `cancelled in queue`, or the conclusion itself,
   such as `skipped`; still an ended outcome, never a failure. One with a start, or without a conclusion, stays
   `elsewhere`.
-- Migration 14 drops the start of the cancelled and skipped `elsewhere` jobs recorded before, whose start is their
-  queue time.
+- Jobs recorded before keep their start, and so their `elsewhere` wording. Their rows do not keep GitHub's runner
+  name, and a start equal to the queue time does not prove no runner took the job: another machine's runner can take
+  it within the second it was queued, then a newer push cancel it.
 - A job's page compares it with the runs this machine ran only: another machine's runs do not set its medians.
 
 ## Consequences
 
-A 0.0.16 client reads the new records and still writes them `elsewhere`. The migration can take a job another
-machine's runner started within the second it was queued, then cancelled, for one cancelled in the queue. The state
-filter `elsewhere` lists both kinds; the dashboard calls it "Not run here".
+A 0.0.16 client reads the new records and still writes them `elsewhere`. A job cancelled in the queue before this
+change still reads `elsewhere` with a run time until the history prunes it; its zero wait no longer sets a job page's
+medians. The state filter `elsewhere` lists both kinds; the dashboard calls it "Not run here".

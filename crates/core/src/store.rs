@@ -42,7 +42,6 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0011_notify.sql"),
     include_str!("store/migrations/0012_build_cache.sql"),
     include_str!("store/migrations/0013_host_memory.sql"),
-    include_str!("store/migrations/0014_never_started.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
