@@ -450,7 +450,7 @@ pub struct Sizing {
     /// `min_memory`, `max_memory` and `max_slots`. Default off.
     pub auto: bool,
     /// The least time between a change auto sizing makes to one profile and one that lowers anything in it. Default
-    /// 24 hours.
+    /// 1 hour: a lowering that went too far is taken back at its first kill (docs/adr/0071).
     #[serde(deserialize_with = "duration")]
     pub interval: Duration,
     /// The least time between a change auto sizing makes to one profile and one that only raises its `memory`,
@@ -458,7 +458,7 @@ pub struct Sizing {
     #[serde(deserialize_with = "duration")]
     pub raise_interval: Duration,
     /// The most a change lowers a profile's `memory` or moves its `cpus`, in percent of them; a raise of `memory`,
-    /// which only a run that met the cap gives, goes straight to the advice. Default 25.
+    /// which only a run that met the cap gives, goes straight to the advice. Default 50.
     pub max_step: u32,
 }
 
@@ -476,9 +476,9 @@ impl Default for Sizing {
             margin: 15,
             min_jobs: 10,
             auto: false,
-            interval: Duration::from_hours(24),
+            interval: Duration::from_hours(1),
             raise_interval: Duration::from_hours(1),
-            max_step: 25,
+            max_step: 50,
         }
     }
 }

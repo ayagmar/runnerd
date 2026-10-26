@@ -14,7 +14,21 @@ const DAY: u64 = 24 * HOUR;
 
 /// `text` with `[sizing] auto` on and `rules` added.
 fn on(text: &str, rules: &str) -> Config {
-    Config::parse(&format!("{text}\n[sizing]\nauto = true\n{rules}")).unwrap()
+    // The pace these tests were written for, unless they set their own.
+    let interval = if rules.lines().any(|line| line.starts_with("interval")) {
+        ""
+    } else {
+        "interval = \"24h\"\n"
+    };
+    let step = if rules.lines().any(|line| line.starts_with("max_step")) {
+        ""
+    } else {
+        "max_step = 25\n"
+    };
+    Config::parse(&format!(
+        "{text}\n[sizing]\nauto = true\n{interval}{step}{rules}"
+    ))
+    .unwrap()
 }
 
 /// `CONFIG` with jvm at `cpus`.

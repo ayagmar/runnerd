@@ -201,8 +201,8 @@ fn auto_sizing_is_off_and_bounded_unless_configured() {
         !config.sizing.auto,
         "auto sizing stays off unless asked for"
     );
-    assert_eq!(config.sizing.interval, Duration::from_hours(24));
-    assert_eq!(config.sizing.max_step, 25);
+    assert_eq!(config.sizing.interval, Duration::from_hours(1));
+    assert_eq!(config.sizing.max_step, 50);
     // app has 4G and 1 slot.
     for (bounds, why) in [
         (
