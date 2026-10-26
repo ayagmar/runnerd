@@ -33,8 +33,11 @@ export HOME=/home/runner USER=runner LOGNAME=runner
 cd "$HOME"
 # What the job changes from here on, runnerd-scrub deletes from the dot-files and temporary directories.
 touch /run/runnerd-since
-setpriv --reuid=runner --regid=runner --init-groups -- ./run.sh --jitconfig "$jitconfig" &
+# Not as `--jitconfig`: any user of the host reads a process's arguments. The listener reads the config from its
+# environment, which only root and the runner user read, and drops it from what its job's processes inherit.
+ACTIONS_RUNNER_INPUT_JITCONFIG=$jitconfig setpriv --reuid=runner --regid=runner --init-groups -- ./run.sh &
 runner=$!
+unset jitconfig
 # docker stop's signal goes to the runner's listener, which cancels its job; run.sh passes on no signal. Before the
 # listener runs, run.sh takes it.
 trap 'pkill -TERM -x Runner.Listener || kill -TERM "$runner" 2> /dev/null' TERM INT
