@@ -23,7 +23,8 @@ pub enum JobState {
     Completed,
     /// Its runner's container is gone and GitHub did not report the job completed in time.
     Lost,
-    /// A runner of another machine took it, or it was cancelled before any runner did.
+    /// A runner of another machine took it, or it ended before any runner did, as when a newer push cancelled it.
+    /// Only one another machine's runner took has `started_at`.
     Elsewhere,
 }
 

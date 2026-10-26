@@ -54,15 +54,44 @@ fn sample(at: u64, memory: u64, cpu: u64) -> Sample {
 
 #[test]
 fn a_job_another_machine_ran_is_neither_its_success_nor_its_failure() {
-    let elsewhere = job(JobState::Elsewhere, Some("success"));
+    for conclusion in ["success", "failure", "cancelled"] {
+        let elsewhere = JobSummary {
+            conclusion: Some(conclusion.to_owned()),
+            ..timed(
+                JobState::Elsewhere,
+                Timeline {
+                    queued_at: 100,
+                    started_at: Some(110),
+                    finished_at: Some(130),
+                    ..Timeline::default()
+                },
+            )
+        };
+        assert_eq!(
+            elsewhere.outcome(),
+            Outcome::new("elsewhere", OutcomeKind::Ended),
+            "{conclusion}"
+        );
+        assert!(
+            !elsewhere.is_failure(),
+            "another machine's {conclusion} job is not counted"
+        );
+    }
+}
+
+#[test]
+fn a_job_cancelled_in_the_queue_did_not_run_elsewhere() {
+    let cancelled = job(JobState::Elsewhere, Some("cancelled"));
     assert_eq!(
-        elsewhere.outcome(),
-        Outcome::new("elsewhere", OutcomeKind::Ended)
+        cancelled.outcome(),
+        Outcome::new("cancelled in queue", OutcomeKind::Ended)
     );
-    assert!(
-        !elsewhere.is_failure(),
-        "another machine's job is not counted"
+    assert_eq!(
+        job(JobState::Elsewhere, Some("skipped")).outcome(),
+        Outcome::new("skipped", OutcomeKind::Ended)
     );
+    assert!(!cancelled.is_failure(), "a cancelled job did not fail");
+    assert_eq!(cancelled.waited(160), None);
 }
 
 #[test]
@@ -242,6 +271,37 @@ fn a_run_that_failed_since_its_runs_were_read_counts_as_failed() {
     let compared = this.compare(&runs, 400);
     assert_eq!((compared.failed, compared.finished), (1, 2));
     assert_eq!(compared.median_ran, Some(60), "the lower of 60 and 100");
+}
+
+#[test]
+fn runs_another_machine_ran_do_not_set_this_jobs_waits() {
+    let ran_here = |id: u64, state: JobState, started: u64| JobSummary {
+        id,
+        conclusion: Some("success".to_owned()),
+        ..timed(
+            state,
+            Timeline {
+                queued_at: 100,
+                started_at: Some(started),
+                finished_at: Some(started + 60),
+                ..Timeline::default()
+            },
+        )
+    };
+    let this = Job {
+        summary: ran_here(7, JobState::Completed, 130),
+        steps: vec![],
+        record: None,
+        admission: None,
+    };
+    let runs = [
+        ran_here(5, JobState::Elsewhere, 100),
+        ran_here(6, JobState::Elsewhere, 101),
+        this.summary.clone(),
+    ];
+    let compared = this.compare(&runs, 400);
+    assert_eq!(compared.finished, 1);
+    assert_eq!(compared.median_waited, Some(30));
 }
 
 #[test]

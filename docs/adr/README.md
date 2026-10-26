@@ -73,3 +73,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0065](0065-a-snapshot-starts-over-from-the-image.md) | A snapshot over its limit starts over from the image |
 | [0066](0066-a-reseed-that-did-not-finish.md) | A reseed that did not finish starts the profile over from the image |
 | [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md) | What a job deleted of the image is hidden by whiteouts beside the snapshot |
+| [0069](0069-a-job-no-runner-took-did-not-run-elsewhere.md) | A job no runner took did not run elsewhere |

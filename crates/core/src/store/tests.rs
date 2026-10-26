@@ -70,6 +70,42 @@ async fn a_job_recorded_before_runners_kept_their_caps_reads_without_them() {
     assert_eq!((runner.memory_cap, runner.cpu_cap), (None, None));
 }
 
+#[tokio::test]
+async fn a_job_recorded_before_version_14_as_cancelled_in_the_queue_reads_as_never_started() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    {
+        let db = Connection::open(&path).unwrap();
+        for migration in &MIGRATIONS[..13] {
+            db.execute_batch(migration).unwrap();
+        }
+        db.pragma_update(None, "user_version", 13).unwrap();
+        // GitHub's start of a job no runner took is its creation; another machine's runner starts later.
+        db.execute_batch(
+            "INSERT INTO jobs (id, repository, run_id, run_attempt, name, labels, state, conclusion, queued_at, \
+             started_at, finished_at) VALUES \
+             (1, 'o/r', 10, 1, 'build', '[]', 'elsewhere', 'cancelled', 1000, 1000, 9000), \
+             (2, 'o/r', 10, 1, 'build', '[]', 'elsewhere', 'cancelled', 1000, 4000, 9000), \
+             (3, 'o/r', 10, 1, 'build', '[]', 'elsewhere', 'success', 1000, 1000, 9000);",
+        )
+        .unwrap();
+    }
+    let store = Store::open(&path).unwrap();
+    let mut read = Vec::new();
+    for id in [1, 2, 3] {
+        let job = store.job(id).await.unwrap().unwrap().summary;
+        read.push((job.outcome().label.into_owned(), job.timeline.started_at));
+    }
+    assert_eq!(
+        read,
+        [
+            ("cancelled in queue".to_owned(), None),
+            ("elsewhere".to_owned(), Some(4)),
+            ("elsewhere".to_owned(), Some(1)),
+        ]
+    );
+}
+
 #[test]
 fn a_database_from_a_newer_runnerd_is_refused() {
     let dir = TestDir::new("store");

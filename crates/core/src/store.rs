@@ -42,6 +42,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0011_notify.sql"),
     include_str!("store/migrations/0012_build_cache.sql"),
     include_str!("store/migrations/0013_host_memory.sql"),
+    include_str!("store/migrations/0014_never_started.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -453,7 +454,8 @@ impl Store {
         self.send(Write::Details { details });
     }
 
-    /// Closes a queued job that left the queue without a runner of this daemon.
+    /// Closes a queued job that left the queue without a runner of this daemon: another machine's runner took it, or
+    /// none did and it has no start.
     pub fn elsewhere(&self, details: JobDetails) {
         self.send(Write::Elsewhere { details });
     }

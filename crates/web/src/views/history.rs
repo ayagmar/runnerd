@@ -28,7 +28,7 @@ const OUTCOMES: [(&str, &str); 8] = [
     ("running", "Running"),
     ("queued", "Queued"),
     ("lost", "Lost"),
-    ("elsewhere", "Ran elsewhere"),
+    ("elsewhere", "Not run here"),
 ];
 
 /// The page's query string.
