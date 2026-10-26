@@ -13,7 +13,7 @@ starts only the jobs those paths can affect:
 | `docs-commands`: builds `runnerd` and `runnerctl` and checks every command and option the docs show against their `--help` | `README.md`, `site/src/content/docs/**`, `crates/**`, any `Cargo.toml`, `Cargo.lock`, `rust-toolchain.toml`, `.github/scripts/check-docs-commands.sh` |
 | `deny`: cargo deny | any `Cargo.toml`, `Cargo.lock`, `deny.toml` |
 | `image`: builds the `jvm` and `node` stages, pushes nothing | `image/**` |
-| `site-build`: Astro build | `site/**` |
+| `site-build`: Astro build, then a check that every internal link and `#anchor` of the built pages resolves | `site/**`, `.github/scripts/check-site-links.py` |
 | `lint`: shellcheck, actionlint, zizmor | `.github/**`, any `*.sh` |
 | `text`: typos, `taplo fmt --check` | any file |
 
@@ -111,9 +111,7 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
      `src/assets/tui/`, which are recaptured rather than edited.
 
    `crates/wire-compat` names the previous release, not this one; it moves after the tag (step 6).
-   Tests that use a version only as an example, such as `store/tests.rs`'s "as runnerd 0.0.5 stored it", stay, and
-   so does the site's `upgrading.md`, which names the versions each section is about. Give it a section for the new
-   release when an upgrade asks anything of the owner: a migration, a changed image, a new default.
+   Tests that use a version only as an example, such as `store/tests.rs`'s "as runnerd 0.0.5 stored it", stay.
 3. Merge the pull request, then tag the merge commit on `main` and push the tag:
    `git tag v0.0.6 && git push origin v0.0.6`.
 4. The release run then:

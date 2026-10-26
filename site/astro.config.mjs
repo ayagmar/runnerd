@@ -53,7 +53,7 @@ export default defineConfig({
       head: card,
       expressiveCode: { defaultProps: { wrap: true } },
       social: [{ icon: 'github', label: 'GitHub', href: 'https://github.com/ayagmar/runnerd' }],
-      sidebar: [{ label: 'Start here', items: ['install', 'configuration', 'admission', 'running', 'insights', 'clients', 'upgrading'] }],
+      sidebar: [{ label: 'Start here', items: ['install', 'configuration', 'admission', 'running', 'insights', 'clients'] }],
     }),
   ],
 });
