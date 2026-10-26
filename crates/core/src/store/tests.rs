@@ -1,4 +1,4 @@
-//! The history database: migrations, the log cap, and job listing.
+//! The history database: its schema version, the log cap, and job listing.
 
 use std::collections::BTreeMap;
 use std::sync::Arc;
@@ -8,8 +8,8 @@ use std::time::Duration;
 use rusqlite::Connection;
 
 use super::{
-    LOG_BACKLOG, LogPosition, MIGRATIONS, Measured, MirrorPosition, RunnerRecord, SampleRecord,
-    Store, StoreError,
+    LOG_BACKLOG, LogPosition, Measured, MirrorPosition, RunnerRecord, SampleRecord, Store,
+    StoreError, VERSION,
 };
 use crate::api::{Bucket, HostSample, JobQuery, JobState, Started, StatsQuery};
 use crate::github::QueuedJob;
@@ -30,7 +30,7 @@ fn queued(id: u64) -> QueuedJob {
 }
 
 #[tokio::test]
-async fn a_fresh_database_migrates_to_the_latest_version() {
+async fn a_fresh_database_is_created_at_the_schema_version() {
     let dir = TestDir::new("store");
     let path = dir.0.join("nested/runnerd.db");
     let store = Store::open(&path).unwrap();
@@ -38,36 +38,48 @@ async fn a_fresh_database_migrates_to_the_latest_version() {
     store.flush().await;
     let job = store.job(1).await.unwrap().unwrap();
     assert_eq!(job.summary.state, JobState::Queued);
-    let version: usize = Connection::open(&path)
-        .unwrap()
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, MIGRATIONS.len());
-    // Opening it again runs nothing twice.
+    assert_eq!(user_version(&path), VERSION);
+    // Opening it again creates nothing twice, and keeps what it holds.
     drop(store);
-    assert!(Store::open(&path).is_ok());
+    let store = Store::open(&path).unwrap();
+    assert!(
+        store.job(1).await.unwrap().is_some(),
+        "job 1 stays in the history"
+    );
 }
 
-#[tokio::test]
-async fn a_job_recorded_before_runners_kept_their_caps_reads_without_them() {
+/// The database's `user_version`.
+fn user_version(path: &std::path::Path) -> u32 {
+    Connection::open(path)
+        .unwrap()
+        .pragma_query_value(None, "user_version", |row| row.get(0))
+        .unwrap()
+}
+
+#[test]
+fn a_database_from_before_0_0_19_is_refused_and_left_as_it_is() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
-    {
-        let db = Connection::open(&path).unwrap();
-        db.execute_batch(MIGRATIONS[0]).unwrap();
-        db.execute_batch(
-            "INSERT INTO runners (name, repository, profile, slot, container, started_at) \
-             VALUES ('r1', 'o/r', 'app', 1, 'c1', 1000); \
-             INSERT INTO jobs (id, repository, run_id, run_attempt, name, labels, state, runner, queued_at) \
-             VALUES (1, 'o/r', 10, 1, 'build', '[]', 'running', 'r1', 900);",
-        )
+    let db = Connection::open(&path).unwrap();
+    db.execute_batch("CREATE TABLE jobs (id INTEGER PRIMARY KEY)")
         .unwrap();
-        db.pragma_update(None, "user_version", 1).unwrap();
-    }
-    let store = Store::open(&path).unwrap();
-    let runner = store.job(1).await.unwrap().unwrap().summary.runner.unwrap();
-    assert_eq!((runner.name.as_str(), runner.slot), ("r1", 1));
-    assert_eq!((runner.memory_cap, runner.cpu_cap), (None, None));
+    db.pragma_update(None, "user_version", 14).unwrap();
+    drop(db);
+    let error = Store::open(&path).unwrap_err();
+    assert!(
+        matches!(error, StoreError::Older { found: 14, .. }),
+        "{error}"
+    );
+    assert!(
+        error.to_string().contains("version 14") && error.to_string().contains("before 0.0.19"),
+        "{error}"
+    );
+    assert_eq!(user_version(&path), 14);
+    let error = super::sizing_at(&path, 0).unwrap_err();
+    assert!(
+        matches!(error, StoreError::Older { found: 14, .. }),
+        "doctor refuses it too: {error}"
+    );
 }
 
 #[test]
@@ -841,59 +853,6 @@ async fn a_closed_store_stops_a_prune_after_its_batch() {
 }
 
 #[tokio::test]
-async fn a_history_from_before_version_4_keeps_the_latest_event_of_each_repository_through_pruning()
-{
-    let dir = TestDir::new("store");
-    let path = dir.0.join("runnerd.db");
-    {
-        let db = Connection::open(&path).unwrap();
-        for migration in &MIGRATIONS[..3] {
-            db.execute_batch(migration).unwrap();
-        }
-        db.pragma_update(None, "user_version", 3).unwrap();
-        let event = |event: crate::api::Event| {
-            db.execute(
-                "INSERT INTO events (at, body) VALUES (1000, ?1)",
-                [serde_json::to_string(&event).unwrap()],
-            )
-            .unwrap();
-        };
-        event(crate::api::Event::RepositoryChanged {
-            repository: repository("o/r"),
-        });
-        event(crate::api::Event::RepositoryChanged {
-            repository: repository("o/s"),
-        });
-        event(crate::api::Event::RepositoryRemoved {
-            repository: "o/s".to_owned(),
-        });
-    }
-    let store = Store::open(&path).unwrap();
-    store
-        .prune(400 * DAY_MS, &crate::config::History::default())
-        .await
-        .unwrap();
-    assert_eq!(store.announced().unwrap().repositories, [repository("o/r")]);
-    assert_eq!(store.events_after(0, 10).await.unwrap().len(), 2);
-}
-
-#[tokio::test]
-async fn a_budget_event_an_older_daemon_stored_still_reads() {
-    let dir = TestDir::new("store");
-    let path = dir.0.join("runnerd.db");
-    let store = Store::open(&path).unwrap();
-    // As runnerd 0.0.5 stored it, without the mirror's and seed containers' memory.
-    Connection::open(&path)
-        .unwrap()
-        .execute_batch(
-            r#"INSERT INTO events (at, body) VALUES (1000,
-                '{"type":"budget.changed","budget":{"slice":"ci.slice","memory_max":null,"memory_in_use":0}}')"#,
-        )
-        .unwrap();
-    assert_eq!(store.events_after(0, 10).await.unwrap().len(), 1);
-}
-
-#[tokio::test]
 async fn a_repository_event_that_does_not_read_fails_the_startup_read() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
@@ -1079,15 +1038,13 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
     assert_eq!(ended, [("job 1", true, Some(1 << 30))]);
 }
 
-/// A database at `path` written by a runnerd that knew the first `version` migrations, in WAL mode as the daemon
-/// leaves it, with one finished job that peaked at 3G in a runner of `node`.
-fn database_of_version(path: &std::path::Path, version: usize) {
+/// A database at `path` in WAL mode as the daemon leaves it, with one finished job that peaked at 3G in a runner of
+/// `node`, whose row an older runnerd wrote: no caps, its samples counting active page cache, no `oom` counters.
+fn database(path: &std::path::Path) {
     let db = Connection::open(path).unwrap();
     db.pragma_update(None, "journal_mode", "wal").unwrap();
-    for migration in &MIGRATIONS[..version] {
-        db.execute_batch(migration).unwrap();
-    }
-    db.pragma_update(None, "user_version", version).unwrap();
+    db.execute_batch(super::SCHEMA).unwrap();
+    db.pragma_update(None, "user_version", VERSION).unwrap();
     db.execute_batch(
         "INSERT INTO runners (name, repository, profile, slot, container, started_at, removed_at) \
          VALUES ('r1', 'o/r', 'node', 1, 'c1', 1000, 9000); \
@@ -1103,7 +1060,7 @@ fn doctor_reads_the_history_in_a_directory_it_cannot_write() {
     use std::os::unix::fs::PermissionsExt as _;
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
-    database_of_version(&path, MIGRATIONS.len());
+    database(&path);
     std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o555)).unwrap();
     let history = super::sizing_at(&path, 0);
     std::fs::set_permissions(&dir.0, std::fs::Permissions::from_mode(0o755)).unwrap();
@@ -1121,7 +1078,7 @@ fn doctor_reads_the_history_in_a_directory_it_cannot_write() {
 fn doctor_refuses_a_history_it_cannot_write_beside_while_its_wal_holds_changes() {
     use std::os::unix::fs::PermissionsExt as _;
     let (written, copied) = (TestDir::new("store"), TestDir::new("store"));
-    database_of_version(&written.0.join("runnerd.db"), MIGRATIONS.len());
+    database(&written.0.join("runnerd.db"));
     // A daemon still running, or killed before a checkpoint: its last change is in the -wal only.
     let open = Connection::open(written.0.join("runnerd.db")).unwrap();
     open.pragma_update(None, "wal_autocheckpoint", 0).unwrap();
@@ -1144,7 +1101,7 @@ fn doctor_refuses_a_history_it_cannot_write_beside_while_its_wal_holds_changes()
 async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
-    database_of_version(&path, 7);
+    database(&path);
     let measures = |history: &crate::sizing::History| -> Vec<(Measure, Option<bool>)> {
         history
             .jobs
@@ -1152,7 +1109,6 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
             .map(|job| (job.measure, job.hit_cap))
             .collect()
     };
-    // `runnerd doctor` reads a version 7 history as it is.
     let before = super::sizing_at(&path, 0).unwrap().unwrap();
     assert_eq!(measures(&before), [(Measure::WithActiveFile, None)]);
     let store = Store::open(&path).unwrap();
@@ -1189,11 +1145,11 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
 async fn a_runners_own_limit_failing_reclaim_is_read_apart_from_a_limit_below_it() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
-    database_of_version(&path, 13);
+    database(&path);
     let own = |history: &crate::sizing::History| -> Vec<Option<bool>> {
         history.jobs.iter().map(|job| job.own_cap).collect()
     };
-    // `runnerd doctor` reads a version 13 history, which never had the counter, as it is.
+    // r1's row never had the counter.
     assert_eq!(own(&super::sizing_at(&path, 0).unwrap().unwrap()), [None]);
     let store = Store::open(&path).unwrap();
     // r2's limit held while a service container's did not; r3's own failed; r4's kernel had no counter.
@@ -1215,25 +1171,6 @@ async fn a_runners_own_limit_failing_reclaim_is_read_apart_from_a_limit_below_it
     store.flush().await;
     let after = store.sizing(0).await.unwrap();
     assert_eq!(own(&after), [None, Some(false), Some(true), None]);
-}
-
-#[test]
-fn doctor_reads_the_peaks_of_a_history_from_before_runners_had_caps() {
-    let dir = TestDir::new("store");
-    let path = dir.0.join("runnerd.db");
-    database_of_version(&path, 1);
-    let history = super::sizing_at(&path, 0).unwrap().unwrap();
-    let peaks: Vec<_> = history
-        .jobs
-        .iter()
-        .map(|job| (job.memory_peak, job.memory_cap))
-        .collect();
-    assert_eq!(peaks, [(3 << 30, None)]);
-    let version: u32 = Connection::open(&path)
-        .unwrap()
-        .pragma_query_value(None, "user_version", |row| row.get(0))
-        .unwrap();
-    assert_eq!(version, 1, "doctor does not migrate it");
 }
 
 fn sizing_change(profile: &str, at: u64) -> crate::api::SizingChange {
