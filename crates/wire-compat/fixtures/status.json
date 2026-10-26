@@ -78,9 +78,6 @@
     ],
     "repositories": [
       {
-        "labels": [
-          "self-hosted"
-        ],
         "name": "tidewater/halyard",
         "paused": false,
         "pools": [
@@ -92,7 +89,6 @@
             "queued_jobs": 1
           }
         ],
-        "profile": "halyard",
         "queued_jobs": 1
       }
     ],
@@ -197,9 +193,6 @@
     ],
     "repositories": [
       {
-        "labels": [
-          "self-hosted"
-        ],
         "name": "tidewater/halyard",
         "paused": false,
         "pools": [
@@ -211,7 +204,6 @@
             "queued_jobs": 1
           }
         ],
-        "profile": "halyard",
         "queued_jobs": 1
       }
     ],
