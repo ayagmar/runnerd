@@ -204,8 +204,8 @@ pub struct Digest {
     pub new: Vec<Insight>,
     /// The three longest waits of the jobs that started, longest first.
     pub waits: Vec<LongWait>,
-    /// What the month's job minutes would have cost on GitHub's runners (ADR 0072); `None` from a daemon before
-    /// it, or when the history could not say.
+    /// What the month's job minutes would have cost on GitHub's runners (ADR 0072); `None` when the history could
+    /// not say.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub savings: Option<super::SavedWindow>,
 }

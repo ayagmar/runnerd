@@ -64,9 +64,8 @@ pub struct ConfigFile {
     /// values shown as `config::SECRET_SHOWN`; `PUT /v1/config` puts them back.
     pub text: String,
     /// `config::revision` of `text`: send it as `PUT /v1/config?revision=` and a config replaced meanwhile, as
-    /// by auto sizing, is not overwritten (409). `None` from a daemon before it.
-    #[serde(default)]
-    pub revision: Option<String>,
+    /// by auto sizing, is not overwritten (409).
+    pub revision: String,
 }
 
 /// `PUT /v1/config` query parameters.
@@ -87,20 +86,17 @@ pub struct ConfigCheck {
     /// What a valid config should still fix.
     pub warnings: Vec<String>,
     /// `[host] admission`, which decides what must fit `MemoryMax`: `memory_caps` under caps, `memory_needed`
-    /// under measured. Caps from a daemon before it said.
-    #[serde(default)]
+    /// under measured.
     pub admission: AdmissionPolicy,
     /// Bytes every slot and the mirror take at their caps, all at once, when it parses.
     pub memory_caps: Option<u64>,
     /// Bytes the admission rule must fit in `MemoryMax`, when it parses: `memory_caps` under caps; under measured,
-    /// the largest single runner with the mirror. `None` from a daemon before it said.
-    #[serde(default)]
+    /// the largest single runner with the mirror.
     pub memory_needed: Option<u64>,
     /// The `MemoryMax` of the slice it names; `None` when unlimited or unknown.
     pub memory_max: Option<u64>,
     /// From `PUT /v1/config`, once written: the revision of the text written, to make the next change against.
-    /// `None` from a check, or from a daemon before it.
-    #[serde(default)]
+    /// `None` from a check.
     pub revision: Option<String>,
 }
 

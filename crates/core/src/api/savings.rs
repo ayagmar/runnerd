@@ -319,7 +319,6 @@ pub struct SavedWindow {
     pub free: u64,
     /// Jobs on a standard runner whose workflow is named as GitHub's Dependabot or Pages workflow, which GitHub runs
     /// free: not priced, as the name does not prove it.
-    #[serde(default)]
     pub services: u64,
     /// Jobs of repositories whose visibility GitHub has not given: not priced.
     pub unknown: u64,

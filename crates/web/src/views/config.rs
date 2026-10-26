@@ -147,7 +147,7 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
             p.muted { code { (view.file.path) } }
         }
         div.config-layout {
-            section.editor aria-labelledby="editor-title" "data-signals:revision"=[view.file.revision.as_deref().and_then(quoted)] {
+            section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)] {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
                 label.visually-hidden for="toml" { "runnerd.toml" }
                 textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"

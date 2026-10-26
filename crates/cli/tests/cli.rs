@@ -289,7 +289,7 @@ async fn get_config() -> axum::Json<ConfigFile> {
     axum::Json(ConfigFile {
         path: "/home/u/.config/runnerd/runnerd.toml".to_owned(),
         text: CONFIG.to_owned(),
-        revision: Some("c0ffee".to_owned()),
+        revision: "c0ffee".to_owned(),
     })
 }
 

@@ -838,10 +838,7 @@ pub(crate) async fn write_resize(
     let file: ConfigFile = client.get("/v1/config").await?;
     let text = resize_profile(&file.text, profile, resize)
         .map_err(|error| Error::Local(error.to_string()))?;
-    let path = match &file.revision {
-        Some(revision) => format!("/v1/config?revision={revision}"),
-        None => "/v1/config".to_owned(),
-    };
+    let path = format!("/v1/config?revision={}", file.revision);
     let reply = client
         .request(Method::PUT, &path, Some(Body::toml(text)))
         .await?;

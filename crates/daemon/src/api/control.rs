@@ -143,7 +143,7 @@ pub(super) async fn config(_: Authenticated, State(state): State<AppState>) -> R
     Json(ConfigFile {
         path: file.path.display().to_string(),
         text,
-        revision: Some(revision(&file.text)),
+        revision: revision(&file.text),
     })
     .into_response()
 }

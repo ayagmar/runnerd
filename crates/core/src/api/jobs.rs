@@ -343,7 +343,6 @@ pub struct JobMetrics {
     /// Of the bytes received, those the Docker Hub mirror served.
     pub mirror_bytes: u64,
     /// What the shared build cache served it and took from it.
-    #[serde(default)]
     pub build_cache: BuildCacheCounts,
     /// Times the kernel held its container's sockets' receive windows small because the container's memory was
     /// under pressure (`memory.events` `sock_throttled`): reclaim went badly, mostly because the host was short of
@@ -521,7 +520,7 @@ pub struct HostMemory {
     /// Its `full` line: the share of time every task that could run waited for memory.
     pub full: Option<Pressure>,
     /// The programs outside the slice that hold the most memory, largest first: at most a few, none under a floor.
-    /// Read less often than the rest. Empty when none is that large, and from a daemon before it said.
+    /// Read less often than the rest. Empty when none is that large.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holders: Vec<Holder>,
 }
@@ -621,7 +620,6 @@ pub struct Activity {
     pub failed: u64,
     /// Of the failed, the ones their runner failed rather than their own steps: lost with their runner, or failed
     /// after the kernel killed a process of theirs for memory at their cap.
-    #[serde(default)]
     pub runner_failed: u64,
 }
 
@@ -766,7 +764,6 @@ pub struct Caches {
     /// By name.
     pub volumes: Vec<CacheVolume>,
     /// The shared build cache now, when it is on.
-    #[serde(default)]
     pub build: Option<BuildCacheStats>,
 }
 
