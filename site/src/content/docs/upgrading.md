@@ -5,11 +5,36 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.18 to 0.0.19
+
+### Before
+
+The first start of 0.0.19 migrates the job history to version 15, and 0.0.18 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-5), into a directory such as `~/runnerd-0.0.18`.
+
+### Upgrade
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.19/install.sh | sh -s -- --version v0.0.19
+```
+
+Move each profile's published `image` to its `-0.0.19` tag, then check the file and start runnerd:
+
+```sh
+runnerd check-config
+systemctl --user start runnerd
+runnerctl doctor
+```
+
+### What changes on its own
+
+- **Auto sizing runs every hour and moves a value by up to half** (`[sizing] interval = "1h"`, `max_step = 50`), so a cap that is too high comes down within hours instead of days. A file that sets `interval` or `max_step` keeps its own values.
+- **runnerd prices this machine's job minutes at GitHub-hosted rates**: `runnerctl insights`, the TUI, the dashboard and the daily digest show what they would have cost, before your plan's free minutes. runnerd asks GitHub once a day whether each repository is private; public ones read as free. A profile's `priced_as` names a larger runner to price its jobs at.
+
 ## 0.0.17 to 0.0.18
 
 ### Before
 
-The first start of 0.0.18 migrates the job history to version 14, and 0.0.17 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-4), into a directory such as `~/runnerd-0.0.17`.
+The first start of 0.0.18 migrates the job history to version 14, and 0.0.17 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-5), into a directory such as `~/runnerd-0.0.17`.
 
 ### Upgrade
 
@@ -118,7 +143,7 @@ Upgrade `runnerctl` with the daemon: a 0.0.13 client cannot read a status that l
 
 ### Before
 
-The first start of 0.0.13 migrates the job history to version 13, and 0.0.12 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-4), into a directory such as `~/runnerd-0.0.12`.
+The first start of 0.0.13 migrates the job history to version 13, and 0.0.12 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-5), into a directory such as `~/runnerd-0.0.12`.
 
 ### Upgrade
 
@@ -166,7 +191,7 @@ runnerctl doctor
 
 ### Before
 
-The first start of 0.0.11 migrates the job history to version 12, and 0.0.10 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-4), into a directory such as `~/runnerd-0.0.10`.
+The first start of 0.0.11 migrates the job history to version 12, and 0.0.10 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-5), into a directory such as `~/runnerd-0.0.10`.
 
 ### Upgrade
 
@@ -195,7 +220,7 @@ Jobs reach the build cache only from the 0.0.11 images; an older image ignores i
 
 ### Before
 
-The first start of 0.0.10 migrates the job history to version 11, and 0.0.9 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-4), into a directory such as `~/runnerd-0.0.9`.
+The first start of 0.0.10 migrates the job history to version 11, and 0.0.9 refuses a database that new. To keep a way back, copy the database while runnerd is stopped, as in [0.0.7 to 0.0.8](#before-5), into a directory such as `~/runnerd-0.0.9`.
 
 ### Upgrade
 
