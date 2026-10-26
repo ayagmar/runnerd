@@ -76,4 +76,5 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0068](0068-cpus-follow-run-averages.md) | Auto sizing moves `cpus` on each job's run average, not on CPU peaks |
 | [0069](0069-a-job-no-runner-took-did-not-run-elsewhere.md) | A job no runner took did not run elsewhere |
 | [0070](0070-predictions-follow-recent-runs.md) | Predictions and memory sizing follow each job's recent runs |
+| [0071](0071-lowerings-every-hour.md) | Auto sizing lowers every hour, by up to half |
 | [0072](0072-job-minutes-priced-at-github-hosted-rates.md) | What this machine's job minutes would have cost on GitHub-hosted runners |

@@ -757,7 +757,9 @@ async fn met_cap(store: &Store, profile: &str, cap: u64) {
 
 /// The example with auto sizing on.
 fn auto_sizing() -> String {
-    format!("{EXAMPLE}\n# Let runnerd follow the advice.\n[sizing]\nauto = true\n")
+    format!(
+        "{EXAMPLE}\n# Let runnerd follow the advice.\n[sizing]\nauto = true\n# The pace these tests were written for.\ninterval = \"24h\"\nmax_step = 25\n"
+    )
 }
 
 /// The advice, with the changes auto sizing made.

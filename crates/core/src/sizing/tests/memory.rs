@@ -18,7 +18,7 @@ fn jvm_at(memory: &str, slots: u32) -> String {
         "memory = \"9G\"\nslots = 2",
         &format!("memory = \"{memory}\"\nslots = {slots}"),
         1,
-    ) + "\n[sizing]\nauto = true\n"
+    ) + "\n[sizing]\nauto = true\n# The pace these tests were written for.\ninterval = \"24h\"\nmax_step = 25\n"
 }
 
 /// A run of halyard/ledger's `test` in jvm at `cap`, queued at `at`, peaking at `peak`, clear of its cap.
