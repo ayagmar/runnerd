@@ -569,6 +569,34 @@ fn a_kill_at_a_hand_set_cap_raises_it_at_once_to_what_the_job_needed_at_larger_c
 }
 
 #[test]
+fn a_kill_at_a_hand_set_cap_raises_it_no_higher_than_a_cap_the_job_ran_clear_of() {
+    // At 14G: one run recorded before the local counter, killed, and runs clear peaking 10.5G (12.25G with the
+    // margin). The owner sets 8G; a run is killed at it.
+    let mut jobs = vec![Ran {
+        own_cap: None,
+        hit_cap: None,
+        ..met(ledger(NOW - 20 * DAY, 14 * G, 0))
+    }];
+    jobs.extend((1..12).map(|i| ledger(NOW - 20 * DAY + i * HOUR, 14 * G, 10752 * M)));
+    jobs.extend((0..10).map(|i| ledger(NOW - DAY + i * HOUR, 8 * G, 5 * G)));
+    jobs.push(met(ledger(NOW - HOUR, 8 * G, 0)));
+    let history = History {
+        jobs,
+        memory_set: vec![set(14 * G, NOW - 21 * DAY), set(8 * G, NOW - 2 * DAY)],
+        ..History::default()
+    };
+    let changed = look(&jvm_at("8G", 2), &history, NOW, None);
+    assert_eq!(
+        changed
+            .iter()
+            .map(|change| (change.from.memory, change.to.memory))
+            .collect::<Vec<_>>(),
+        [(8 * G, 12544 * M)],
+        "the old kill at 14G says nothing of a need above 14G"
+    );
+}
+
+#[test]
 fn a_revert_outside_the_profiles_bounds_raises_as_far_as_they_allow_and_the_profile_is_not_held() {
     let mut after = clear_at_ten(LOWERED + HOUR, 10);
     after.push(met(ledger(NOW - 2 * HOUR, 10 * G, 0)));

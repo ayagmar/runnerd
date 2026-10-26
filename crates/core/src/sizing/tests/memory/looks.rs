@@ -57,6 +57,18 @@ impl Daemon {
         }
     }
 
+    /// jvm's `memory` set to `memory` by hand and the daemon reloaded: announced, but no change of auto sizing's.
+    fn set_by_hand(&mut self, memory: u64) {
+        let slots = self.config().profiles["jvm"].slots;
+        let resize = api::Resize {
+            memory,
+            slots,
+            cpus: None,
+        };
+        self.text = resize_profile(&self.text, "jvm", resize).unwrap();
+        self.announce();
+    }
+
     /// A look at `now`: the changes due, each written and recorded.
     fn look(&mut self, now: u64) -> Vec<SizingChange> {
         self.now = now;
@@ -326,17 +338,17 @@ fn a_job_heavy_once_in_30_runs_keeps_the_cap_its_heavy_run_needs() {
 mod generated {
     //! Seeded sequences of runs of three jobs (an elastic JVM test, a cold-cache build, a lint), killed at the cap,
     //! by the slice, at a service container's limit, failing on one broken branch, re-run, lost, cancelled, without
-    //! the local counter, slow to start (so slots go up) and CPU-bound (so `cpus` go up), with a hand edit of jvm's
-    //! `memory` under the cold build's need late on, and auto sizing looking every 3 hours. Invariants in ADR 0070's
+    //! the local counter (killed, in the first days), slow to start (so slots go up) and CPU-bound (so `cpus` go up), with a hand edit of jvm's
+    //! `memory` under the cold build's need twice, and auto sizing looking every 3 hours. Invariants in ADR 0070's
     //! terms, after each look.
 
     use super::{DAY, Daemon, G, HOUR, M, NOW, Ran, SizingChange, api, is_revert, jvm_at, ledger};
-    use crate::config::resize_profile;
     use crate::sizing::memory::HISTORY;
 
     const DAYS: u64 = 90;
-    /// When the owner edits jvm's `memory` by hand.
-    const HAND_EDIT: u64 = 70;
+    /// The days the owner sets jvm's `memory` by hand, the first while killed runs recorded before the local counter
+    /// are in its windows.
+    const HAND_EDITS: [u64; 2] = [12, 70];
     const SEEDS: u64 = 4;
 
     /// A deterministic generator (`SplitMix64`).
@@ -429,6 +441,12 @@ mod generated {
                 run.own_cap = None;
                 run.hit_cap = None;
             }
+            // Killed, recorded by a daemon before the local counter, in the first days.
+            7 if at < NOW + 10 * DAY => {
+                run.own_cap = None;
+                run.hit_cap = None;
+                run.oom_killed = true;
+            }
             _ => {}
         }
         (run, cancelled)
@@ -516,19 +534,9 @@ mod generated {
         let mut changes: Vec<SizingChange> = Vec::new();
         let mut now = NOW;
         while now < NOW + DAYS * DAY {
-            if now == NOW + HAND_EDIT * DAY {
+            if HAND_EDITS.iter().any(|day| now == NOW + day * DAY) {
                 // The owner sets jvm to 6G by hand, under the cold build's need; the daemon runs it from then.
-                daemon.text = resize_profile(
-                    &daemon.text,
-                    "jvm",
-                    api::Resize {
-                        memory: 6 * G,
-                        slots: daemon.config().profiles["jvm"].slots,
-                        cpus: None,
-                    },
-                )
-                .unwrap();
-                daemon.announce();
+                daemon.set_by_hand(6 * G);
             }
             let profile = daemon.config().profiles["jvm"].clone();
             for _ in 0..rng.below(4) {
@@ -570,6 +578,18 @@ mod generated {
                         return Err(format!(
                             "raised without a run that met {}M: {context}",
                             from / M
+                        ));
+                    }
+                    // Back at most to a cap a job ran at, or to what the run that met the cap needs above it.
+                    let ran_at = rows
+                        .iter()
+                        .filter_map(|(run, _)| run.memory_cap)
+                        .max()
+                        .unwrap_or(0);
+                    if to > ran_at.max(api::need(from, 15)) {
+                        return Err(format!(
+                            "raised above {}M, the largest cap run at: {context}",
+                            ran_at / M
                         ));
                     }
                 }

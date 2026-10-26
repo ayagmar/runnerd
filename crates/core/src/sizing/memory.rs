@@ -71,11 +71,21 @@ fn run_need(run: &Counted, margin: u32) -> u64 {
     }
 }
 
-/// The largest need of a job's windowed runs, or of those at a cap above `above` only.
-pub(super) fn floor(runs: &JobRuns, margin: u32, above: u64) -> u64 {
+/// The largest need of a job's windowed runs.
+pub(super) fn floor(runs: &JobRuns, margin: u32) -> u64 {
     runs.window()
-        .filter(|run| run.cap > above)
         .map(|run| run_need(run, margin))
+        .max()
+        .unwrap_or(0)
+}
+
+/// What a job's windowed runs at caps above `above` say it needs, each at most its own cap: a raise goes back at
+/// most to a cap the job ran at, and a need above that comes from a run that meets it. A run recorded without the
+/// local counter (`Capped::Assumed`) says nothing here: it never raises a cap.
+fn larger_caps(runs: &JobRuns, margin: u32, above: u64) -> u64 {
+    runs.window()
+        .filter(|run| run.cap > above && run.capped != Capped::Assumed)
+        .map(|run| run_need(run, margin).min(run.cap))
         .max()
         .unwrap_or(0)
 }
@@ -103,7 +113,8 @@ pub(super) fn took(set: &[MemorySet], profile: &str, memory: u64, now: u64) -> u
 
 /// What a raise of `profile`, whose `memory` is `cap` since `took` (ms), needs from the job `key`, `None` for every
 /// job: the largest of `need(max(peak, cap))` over its runs that met `cap` since then, and of that job's need at
-/// larger caps (`floor`), since its last sample before a kill rarely shows what it needed. 0 without such a run.
+/// larger caps (`larger_caps`), since its last sample before a kill rarely shows what it needed. 0 without such a
+/// run.
 pub(super) fn raise_need(
     history: &History,
     recent: &Recent,
@@ -127,7 +138,7 @@ pub(super) fn raise_need(
         .map(|run| {
             let larger = recent
                 .job(&Key::of(run), profile)
-                .map_or(0, |runs| floor(runs, margin, cap));
+                .map_or(0, |runs| larger_caps(runs, margin, cap));
             api::need(run.memory_peak.max(cap), margin).max(larger)
         })
         .max()

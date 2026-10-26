@@ -382,7 +382,7 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
             let peaks = memory::peaks(runs.window(), u64::from(held));
             let needs = Needs {
                 raise: raises.need(Some(key)),
-                floor: memory::floor(runs, raises.margin, 0),
+                floor: memory::floor(runs, raises.margin),
             };
             floor = floor.max(needs.floor);
             let runs_of: Vec<&Ran> = jobs

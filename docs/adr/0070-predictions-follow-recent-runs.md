@@ -134,7 +134,8 @@ Core computes two needs per profile, from different runs, and the advice goes by
 - **`raise_need`**: over the runs that met the profile's current `memory` X and finished since the profile last
   took X, by its `profile.changed` events, as `cpus` reads runs since it took its `cpus` (0068): the largest of
   `need(max(peak, X))` and, for each such run's job, that job's `lower_floor` (below) from its windowed runs at
-  larger caps. A run's last 2 s sample before a kill rarely shows what it needed, so `need(X)` alone would climb
+  larger caps, each at no more than that run's own cap and without runs recorded before the local counter: a raise
+  goes back at most to a cap the job ran at, and a need above it comes from a run that meets it. A run's last 2 s sample before a kill rarely shows what it needed, so `need(X)` alone would climb
   back one kill per step; a job that ran clear at 14G and is killed at a hand-set 8G is raised toward what its 14G
   runs needed at once. Nothing else raises `memory`: not a run clear of X however near it peaked, not a run that met
   another cap, not a run at X from an earlier time at X. A peak that grows with the cap never asks for more, and a
