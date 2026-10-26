@@ -154,7 +154,7 @@ pub(crate) fn render(view: &JobView) -> Markup {
         (steps.1)
         (metrics.1)
         @if let Some(admission) = &view.job.admission {
-            p.muted.admission { (admission.line()) }
+            p.admission { (format::sentence(&admission.line())) }
         }
         (runs.1)
         (record(view))

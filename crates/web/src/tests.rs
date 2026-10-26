@@ -892,7 +892,7 @@ async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits
     let cookie = dashboard.sign_in().await;
     let overview = dashboard.page(&cookie, "/").await;
     let body = &overview.body;
-    let queue = &body[body.find(r#"id="queue""#).unwrap()..body.find(r#"id="budget""#).unwrap()];
+    let queue = &body[body.find(r#"id="queue""#).unwrap()..body.find(r#"id="recent""#).unwrap()];
     let lint = queue.find("https://github.com/halyard/storefront/actions/runs/1/job/2");
     let visual_diff = queue.find("/job/120055991710");
     assert!(

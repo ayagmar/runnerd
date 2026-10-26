@@ -24,6 +24,7 @@
   --p5: #f6d3b3;
   --block-ink: #0a0a0a;
 
+  --frame: #e9ece9;
   --bg: #f8f8f8;
   --surface: #ececec;
   --surface-2: #dedede;
@@ -52,6 +53,7 @@
 
 @media (prefers-color-scheme: dark) {
   :root:not([data-theme='light']) {
+    --frame: #070908;
     --bg: #0d0f0e;
     --surface: #1a1d1b;
     --surface-2: #262a28;
@@ -75,6 +77,7 @@
 }
 
 :root[data-theme='dark'] {
+  --frame: #070908;
   --bg: #0d0f0e;
   --surface: #1a1d1b;
   --surface-2: #262a28;
@@ -103,7 +106,7 @@
 }
 
 html {
-  background: var(--bg);
+  background: var(--frame);
   color: var(--ink);
   -webkit-text-size-adjust: 100%;
 }
@@ -121,13 +124,14 @@ body {
 
 main {
   width: 100%;
-  max-width: 1440px;
-  margin-inline: auto;
-  padding: 0 max(var(--gutter), env(safe-area-inset-right, 0)) calc(5rem + env(safe-area-inset-bottom, 0))
+  min-height: calc(100vh - 3.5rem);
+  padding: 1.25rem max(var(--gutter), env(safe-area-inset-right, 0)) calc(6rem + env(safe-area-inset-bottom, 0))
     max(var(--gutter), env(safe-area-inset-left, 0));
+  background: var(--bg);
   display: grid;
   grid-template-columns: minmax(0, 1fr);
-  gap: clamp(2.5rem, 5vw, 4rem);
+  align-content: start;
+  gap: clamp(2rem, 4vw, 3rem);
 }
 
 h1,
@@ -140,7 +144,7 @@ h3 {
 }
 
 h1 {
-  font-size: 2.25rem;
+  font-size: 2rem;
   letter-spacing: -0.03em;
   line-height: 1.05;
 }
@@ -221,18 +225,21 @@ html {
   top: 0.5rem;
 }
 
-/* The top bar: wordmark, pages, whether updates arrive, the theme switch. Installed as an app, the page runs
-   under the status bar and around a notch (`viewport-fit=cover`): the safe-area insets keep it clear of them. */
+/* The shell: below 60rem a top bar (wordmark, whether updates arrive, the theme switch) over the page, and the pages
+   as a bar along the bottom edge, where a thumb reaches them. From 60rem the bar is a sidebar on the frame's tint and
+   the page a sheet beside it. Installed as an app, the page runs under the status bar and around a notch
+   (`viewport-fit=cover`): the safe-area insets keep it clear of them. */
 .top {
-  max-width: 1440px;
-  margin: 0 auto;
+  position: sticky;
+  top: 0;
+  z-index: 3;
   padding: env(safe-area-inset-top, 0) max(var(--gutter), env(safe-area-inset-right, 0)) 0
     max(var(--gutter), env(safe-area-inset-left, 0));
-  min-height: 4.5rem;
+  min-height: 3.5rem;
   display: flex;
   align-items: center;
-  gap: clamp(0.5rem, 2vw, 2rem);
-  flex-wrap: wrap;
+  gap: 0.75rem;
+  background: var(--frame);
 }
 
 .wordmark {
@@ -240,6 +247,7 @@ html {
   align-items: center;
   gap: 0.55rem;
   min-height: 44px;
+  margin-right: auto;
   font-weight: 700;
   font-size: 1.2rem;
   letter-spacing: -0.03em;
@@ -253,16 +261,24 @@ html {
 }
 
 .top nav {
+  position: fixed;
+  inset: auto 0 0;
+  z-index: 4;
   display: flex;
-  gap: 0.25rem;
-  margin-right: auto;
+  padding: 0 env(safe-area-inset-right, 0) env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0);
+  background: var(--frame);
+  box-shadow: 0 -1px 0 var(--line);
 }
 
 .top nav a {
+  flex: 1 1 0;
+  min-width: 0;
+  min-height: 3.25rem;
   display: inline-flex;
   align-items: center;
-  min-height: 44px;
-  padding-inline: 0.65rem;
+  justify-content: center;
+  padding-inline: 0.2rem;
+  font-size: 0.875rem;
   font-weight: 500;
   text-decoration: none;
 }
@@ -274,6 +290,7 @@ html {
 .top nav a[aria-current='page'] {
   background: var(--p0);
   color: var(--block-ink);
+  font-weight: 700;
 }
 
 .connection {
@@ -325,6 +342,67 @@ html {
 
 .theme:hover {
   background: var(--surface-2);
+}
+
+@media (min-width: 60rem) {
+  body {
+    display: grid;
+    grid-template-columns: 14rem minmax(0, 1fr);
+    min-height: 100vh;
+  }
+
+  .top {
+    grid-column: 1;
+    grid-row: 1 / span 2;
+    height: 100vh;
+    flex-direction: column;
+    align-items: stretch;
+    gap: 0.25rem;
+    padding: calc(0.75rem + env(safe-area-inset-top, 0)) 0.75rem 0.75rem;
+  }
+
+  .wordmark {
+    margin: 0 0 1rem;
+    padding-left: 0.5rem;
+  }
+
+  .top nav {
+    position: static;
+    flex-direction: column;
+    gap: 2px;
+    padding: 0;
+    background: none;
+    box-shadow: none;
+  }
+
+  .top nav a {
+    flex: none;
+    min-height: 2.5rem;
+    justify-content: flex-start;
+    padding-inline: 0.75rem;
+    font-size: 1rem;
+  }
+
+  .connection {
+    margin-top: auto;
+    padding-left: 0.5rem;
+  }
+
+  .theme {
+    align-self: flex-start;
+  }
+
+  main {
+    grid-column: 2;
+    grid-row: 1 / span 2;
+    min-height: calc(100vh - 16px);
+    margin: 8px 8px 8px 0;
+    padding: 2rem max(var(--gutter), calc((100% - 84rem) / 2)) 4rem;
+  }
+
+  #notice {
+    bottom: var(--gutter);
+  }
 }
 
 /* Section heads: a title with its numbers to the right. */
@@ -491,34 +569,72 @@ html {
   background: repeating-linear-gradient(-45deg, var(--line) 0 2px, transparent 2px 8px);
 }
 
-/* The readout above the bar: the slice's total, and the selected block's line beside it. */
+/* The readout above the bar: the slice's total, what is in use and reserved of CPU, and the selected block's line. */
 .budget .figures {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  justify-content: space-between;
-  gap: 0.25rem 1.5rem;
-  margin: 0.75rem 0 1rem;
-}
-
-.readout {
-  display: flex;
-  flex-wrap: wrap;
-  align-items: baseline;
-  gap: 0 0.35rem;
-}
-
-/* Room for the widest figure (` · 1023.99M in use`), so a live figure gaining a digit never moves where the readout
-   wraps, and with it the page below. */
-.readout .muted {
-  min-width: 8.5em;
-}
-
-/* The lines share one grid cell: the readout keeps the height of the longest, whichever is shown. */
-.lens {
   display: grid;
-  min-height: 1.45em;
+  gap: 0.35rem;
+  margin: 0 0 1rem;
+}
+
+.readout-main {
+  display: flex;
+  flex-wrap: wrap;
+  align-items: baseline;
+  gap: 0 0.4rem;
+  font-size: 1.0625rem;
+}
+
+.readout-facts {
+  align-items: start;
+  list-style: none;
+  margin: 0;
+  padding: 0;
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.1rem 1.5rem;
   color: var(--muted);
+  font-size: 0.9375rem;
+}
+
+/* Room for the widest figure (`1023.99M in use`), so a live figure gaining a digit never moves where the readout
+   wraps, and with it the page below. */
+.readout-facts li:first-child {
+  min-width: 7.5em;
+}
+
+.cpu-reserved {
+  display: grid;
+  flex: 1 1 14rem;
+  gap: 0.3rem;
+}
+
+.meter {
+  display: block;
+  height: 6px;
+  background: var(--surface-2);
+}
+
+.meter::before {
+  content: '';
+  display: block;
+  width: calc(var(--fill) * 100%);
+  height: 100%;
+  background: var(--cpu);
+}
+
+/* The selected block's line floats over the top of the bar, so the readout keeps its height and the bar stays where
+   the pointer is. The lines share one grid cell, hidden but for the selected one. */
+.budget .figures {
+  position: relative;
+}
+
+.lens {
+  position: absolute;
+  inset: 100% 0 auto;
+  z-index: 2;
+  display: grid;
+  margin-top: 0.4rem;
+  pointer-events: none;
 }
 
 .lens > span {
@@ -528,10 +644,15 @@ html {
 
 .lens > span.on {
   visibility: visible;
+  justify-self: start;
+  padding: 0.4rem 0.7rem;
+  background: var(--ink);
+  color: var(--bg);
+  font-size: 0.9375rem;
 }
 
 .lens strong {
-  color: var(--ink);
+  font-weight: 700;
 }
 
 /* Linked views: selecting a slot's block, card, job row or repository (hover, focus or tap) outlines the others
@@ -751,6 +872,10 @@ html {
   gap: var(--gap);
 }
 
+.host .charts {
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 18rem), 1fr));
+}
+
 .chart-card {
   padding: 1rem;
   background: var(--surface);
@@ -908,11 +1033,47 @@ html {
 .legend .run { --profile: var(--memory); }
 .legend .wait { --profile: var(--wait); }
 
-/* Repositories and the latest jobs, side by side. */
-.split {
-  display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(min(100%, 26rem), 1fr));
-  gap: clamp(2.5rem, 5vw, 4rem);
+/* The overview: the machine (budget, slots, the slice's charts) beside the work (the queue, the latest jobs, the
+   repositories) on a wide screen. A narrow one stacks the regions as the grid's items, the queue first: what waits and
+   why is read before the rest. */
+.overview,
+.machine,
+.work {
+  display: contents;
+}
+
+.overview h2 {
+  margin-bottom: 0.75rem;
+  font-size: 1.125rem;
+}
+
+.overview .section-head h2 {
+  margin-bottom: 0;
+}
+
+@media (max-width: 79.99rem) {
+  #queue { order: 1; }
+  #budget { order: 2; }
+  #slots { order: 3; }
+  #recent { order: 4; }
+  #repositories { order: 5; }
+  #host { order: 6; }
+}
+
+@media (min-width: 80rem) {
+  .overview {
+    display: grid;
+    grid-template-columns: minmax(0, 1.65fr) minmax(23rem, 1fr);
+    gap: clamp(2rem, 3vw, 3rem);
+    align-items: start;
+  }
+
+  .machine,
+  .work {
+    display: grid;
+    min-width: 0;
+    gap: clamp(2rem, 4vw, 3rem);
+  }
 }
 
 .repo-list,
@@ -1204,20 +1365,25 @@ dl.health-figures {
   gap: 2px;
 }
 
+.queue {
+  container-type: inline-size;
+}
+
+/* The reason gets a line of its own under the job; a queue wide enough puts it beside. */
 .queue-list a {
   display: grid;
-  grid-template-columns: 5.5rem minmax(0, 1fr) minmax(0, 1.1fr);
-  align-items: center;
-  gap: 0.1rem 1rem;
-  padding: 0.65rem 1rem;
+  grid-template-columns: 4.25rem minmax(0, 1fr);
+  align-items: start;
+  gap: 0.1rem 0.75rem;
+  padding: 0.65rem 0.75rem;
   background: transparent;
   box-shadow: inset 0 0 0 1px var(--line);
   text-decoration: none;
 }
 
 .queue-list .waited {
-  grid-row: 1 / span 2;
-  font-size: 1.25rem;
+  grid-row: 1 / span 3;
+  font-size: 1.125rem;
   font-weight: 700;
   letter-spacing: -0.03em;
   color: var(--wait-ink);
@@ -1249,12 +1415,33 @@ dl.health-figures {
 }
 
 .queue-list .reason {
-  grid-column: 3;
-  grid-row: 1 / span 2;
+  grid-column: 2;
   display: flex;
   align-items: baseline;
   gap: 0.5rem;
+  margin-top: 0.2rem;
+  font-size: 0.9375rem;
   font-weight: 500;
+}
+
+@container (min-width: 40rem) {
+  .queue-list a {
+    grid-template-columns: 5.5rem minmax(0, 1fr) minmax(0, 1.1fr);
+    align-items: center;
+    column-gap: 1rem;
+    padding: 0.65rem 1rem;
+  }
+
+  .queue-list .waited {
+    grid-row: 1 / span 2;
+    font-size: 1.25rem;
+  }
+
+  .queue-list .reason {
+    grid-column: 3;
+    grid-row: 1 / span 2;
+    margin-top: 0;
+  }
 }
 
 .reason::before {
@@ -1295,7 +1482,7 @@ dl.health-figures {
   padding: 0;
   direction: ltr;
   display: grid;
-  grid-template-columns: repeat(var(--runs), minmax(1.75rem, 2.75rem));
+  grid-template-columns: repeat(var(--runs), minmax(1.75rem, 4.5rem));
   gap: 4px;
   min-width: calc(var(--runs) * 1.75rem + (var(--runs) - 1) * 4px);
 }
@@ -1354,8 +1541,7 @@ dl.health-figures {
 /* The job page. */
 .job-head {
   display: grid;
-  gap: 0.75rem;
-  padding-top: 1rem;
+  gap: 0.5rem;
 }
 
 .job-head h1 .badge {
@@ -1372,6 +1558,7 @@ dl.health-figures {
 .job-facts {
   display: flex;
   flex-wrap: wrap;
+  align-items: baseline;
   gap: 0.25rem 1.25rem;
   color: var(--muted);
 }
@@ -1436,9 +1623,9 @@ dl.health-figures {
 .timeline:has(.phase-legend .run:hover) .phase:not(.run),
 .timeline:has(.phase-legend .clean:hover) .phase:not(.clean) { opacity: 0.4; }
 
-/* The phase still going on ends in a fading edge, and breathes. */
+/* The phase still going on is paler than the phases done, and breathes. */
 .phase.ongoing {
-  background: linear-gradient(to right, var(--profile) 70%, color-mix(in srgb, var(--profile) 35%, transparent));
+  background: color-mix(in srgb, var(--profile) 60%, transparent);
   animation: beat 2.4s var(--ease) infinite;
 }
 
@@ -1769,8 +1956,9 @@ dl.health-figures {
 
 /* Caches. */
 .page-head {
-  padding-top: 1rem;
-  margin-bottom: -1.5rem;
+  display: grid;
+  gap: 0.25rem;
+  margin-bottom: -1rem;
 }
 
 /* A file's path breaks anywhere rather than run off a phone's screen. */
@@ -1783,7 +1971,7 @@ dl.health-figures {
   margin: 0;
   padding: 0;
   display: grid;
-  grid-template-columns: repeat(auto-fill, minmax(min(100%, 20rem), 1fr));
+  grid-template-columns: repeat(auto-fill, minmax(min(100%, 14.5rem), 1fr));
   gap: var(--gap);
 }
 
@@ -1972,8 +2160,10 @@ dl.health-figures {
 /* Insights: a card each, its edge in the colour of what it says. */
 .insight-list {
   display: grid;
-  gap: 2px;
-  margin: 1rem 0 2rem;
+  grid-template-columns: repeat(auto-fit, minmax(min(100%, 30rem), 1fr));
+  align-items: start;
+  gap: var(--gap);
+  margin: 0;
   padding: 0;
   list-style: none;
 }
@@ -1992,6 +2182,9 @@ dl.health-figures {
 
 .insight .sentence {
   overflow-wrap: anywhere;
+  color: var(--ink);
+  font-size: 1.0625rem;
+  font-weight: 500;
 }
 
 .insight.warn { border-left-color: var(--wait); }
@@ -2248,7 +2441,7 @@ dl.health-figures {
 #notice {
   position: fixed;
   right: var(--gutter);
-  bottom: var(--gutter);
+  bottom: calc(3.25rem + env(safe-area-inset-bottom, 0) + 0.75rem);
   max-width: min(28rem, calc(100vw - 2 * var(--gutter)));
   z-index: 5;
 }
@@ -2312,36 +2505,27 @@ dl.health-figures {
   }
 }
 
-@media (max-width: 40rem) {
-  /* Five pages do not fit beside the wordmark: on a phone they are a bar along the bottom edge, where a thumb
-     reaches them, above the home indicator of an installed app. */
+@media (max-width: 30rem) {
+  h1 {
+    font-size: 1.5rem;
+  }
+
+  /* Six labels share the width: 12px, inside the page's margin. */
   .top nav {
-    position: fixed;
-    inset: auto 0 0;
-    z-index: 4;
-    margin: 0;
-    gap: 0;
-    padding: 0 env(safe-area-inset-right, 0) env(safe-area-inset-bottom, 0) env(safe-area-inset-left, 0);
-    background: var(--bg);
-    box-shadow: 0 -1px 0 var(--line);
+    padding-left: max(0.5rem, env(safe-area-inset-left, 0));
+    padding-right: max(0.5rem, env(safe-area-inset-right, 0));
   }
 
   .top nav a {
-    flex: 1 1 0;
-    min-width: 0;
-    min-height: 3.25rem;
-    justify-content: center;
-    padding-inline: 0.2rem;
-    font-size: 0.875rem;
+    padding-inline: 0;
+    font-size: 0.75rem;
   }
+}
 
-  #notice {
-    bottom: calc(3.25rem + env(safe-area-inset-bottom, 0) + 0.75rem);
-  }
-
-  /* The theme switch stays at the right edge, with or without the live indicator before it. */
-  .wordmark {
-    margin-right: auto;
+@media (max-width: 40rem) {
+  .slot {
+    min-height: 0;
+    padding: 0.75rem 0.85rem;
   }
 
   /* Narrow blocks keep their labels: less padding and gap, and a name that may wrap. */
@@ -2392,9 +2576,28 @@ dl.health-figures {
     overflow-wrap: anywhere;
   }
 
+  /* A group's links scroll sideways inside their own row, so the page's first rows stay on the first screen. */
   .filter-group {
     flex-direction: column;
-    gap: 0.25rem;
+    align-items: stretch;
+    gap: 0.15rem;
+  }
+
+  .filter-name {
+    width: auto;
+  }
+
+  .filter-group ul {
+    flex-wrap: nowrap;
+    max-width: 100%;
+    overflow-x: auto;
+    scrollbar-width: none;
+    margin-inline: calc(-1 * var(--gutter));
+    padding-inline: var(--gutter);
+  }
+
+  .filter-group li {
+    flex: none;
   }
 
   /* A job a card: its name and outcome, then when it was queued and its figures, each named. */
@@ -2483,28 +2686,17 @@ dl.health-figures {
     grid-template-columns: repeat(2, minmax(0, 1fr));
   }
 
+  .health-figures > div {
+    gap: 0.1rem;
+    padding: 0.65rem 0.8rem 0.75rem;
+  }
+
   .health-figures .figure-main {
-    font-size: 1.875rem;
+    font-size: 1.75rem;
   }
 
-  /* The reason gets a line of its own under the job. */
-  .queue-list a {
-    grid-template-columns: 4.25rem minmax(0, 1fr);
-    padding: 0.65rem 0.75rem;
-    column-gap: 0.75rem;
-  }
-
-  .queue-list .waited {
-    grid-row: 1 / span 3;
-    align-self: start;
-    font-size: 1.125rem;
-  }
-
-  .queue-list .reason {
-    grid-column: 2;
-    grid-row: auto;
-    margin-top: 0.2rem;
-    font-size: 0.9375rem;
+  .health-figures .figure-note {
+    font-size: 0.8125rem;
   }
 }
 
@@ -2617,4 +2809,12 @@ dl.health-figures {
 .sizing-changes ol {
   margin: 0 0 0.75rem;
   padding-left: 1.25rem;
+}
+
+/* Why the job was admitted and what it reserved: a note under its figures. */
+.admission {
+  padding: 0.75rem 1rem;
+  background: var(--surface);
+  border-left: 4px solid var(--profile, var(--muted));
+  font-size: 0.9375rem;
 }
