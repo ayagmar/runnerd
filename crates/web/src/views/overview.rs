@@ -1,6 +1,8 @@
 //! `/`: first whether CI is keeping up (the slots running, the jobs waiting, the waits and failures of the last
-//! day) and every queued job with why it waits; then the memory budget as blocks, every slot and the job it runs,
-//! the latest jobs, the repositories with pause and resume, and the slice's CPU and memory over the last half hour.
+//! day); then every queued job with why it waits, the memory budget as blocks, every slot and the job it runs, the
+//! latest jobs, the repositories with pause and resume, and the slice's CPU and memory over the last half hour. That is
+//! the order of the page for reading and for the keyboard; a wide screen places the regions in two columns, the machine
+//! (budget, slots, slice) beside the work (queue, latest jobs, repositories), with the grid, not a different order.
 
 use std::collections::BTreeMap;
 
@@ -202,14 +204,14 @@ pub(crate) fn render(overview: &Overview) -> Markup {
     let main = html! {
         h1.visually-hidden { "Overview" }
         (health.1)
-        (queue.1)
-        (budget.1)
-        (slots.1)
-        div.split {
+        div.overview {
+            (queue.1)
+            (budget.1)
+            (slots.1)
             (recent.1)
             (repositories.1)
+            (host.1)
         }
-        (host.1)
     };
     page("Overview", Some(Page::Overview), Some(&live), &main)
 }
@@ -371,7 +373,7 @@ pub(crate) fn budget(overview: &Overview, parts: &Parts) -> Markup {
     html! {
         section #budget .budget aria-labelledby="budget-title"
             "data-signals:_slot__ifmissing"="''" "data-signals:_repo__ifmissing"="''" {
-            h2 #budget-title .visually-hidden { "Budget" }
+            h2 #budget-title { "Budget" }
             (readout(overview, used_now, &lenses, parts))
             div.bar role="group" aria-label=(label) {
                 @for (profile, slot, memory) in &slot_blocks {
@@ -426,17 +428,24 @@ fn readout(
     html! {
         div.figures {
             (parts.html("budget-readout", html! {
-                p #budget-readout .readout {
-                    span.big { (reading.figure) }
-                    span { " " (reading.text) }
-                    @if let Some(used) = used_now {
-                        span.muted { " · " (format::bytes(used)) " in use" }
+                div #budget-readout .readout {
+                    p.readout-main {
+                        span.big { (reading.figure) }
+                        " " (reading.text)
                     }
-                    @if let Some(cpu) = budget.cpu {
-                        span.muted { " · " (cpu.line()) }
-                    }
-                    @if let Some(host) = budget.host_line() {
-                        span.muted { " · " (host) }
+                    ul.readout-facts {
+                        @if let Some(used) = used_now {
+                            li { (format::bytes(used)) " in use" }
+                        }
+                        @if let Some(cpu) = budget.cpu {
+                            li.cpu-reserved {
+                                (cpu.line())
+                                span.meter aria-hidden="true" style=(format!("--fill: {:.3}", crate::chart::ratio(cpu.in_use, cpu.budget).min(1.0))) {}
+                            }
+                        }
+                        @if let Some(host) = budget.host_line() {
+                            li { (host) }
+                        }
                     }
                 }
             }))
@@ -589,7 +598,7 @@ pub(crate) fn slots(overview: &Overview, parts: &Parts) -> Markup {
     let status = &overview.status;
     html! {
         section #slots .slots aria-labelledby="slots-title" {
-            h2 #slots-title .visually-hidden { "Slots" }
+            h2 #slots-title { "Slots" }
             @if status.profiles.is_empty() {
                 p.muted { "No profiles in runnerd.toml, so no slots." }
             }
@@ -831,7 +840,7 @@ pub(crate) fn host(overview: &Overview, parts: &Parts) -> Markup {
     );
     html! {
         section #host .host aria-labelledby="host-title" {
-            h2 #host-title .visually-hidden { "Slice" }
+            h2 #host-title { "Slice" }
             div.charts {
                 div.chart-card {
                     h3 {
@@ -883,7 +892,7 @@ pub(crate) fn repositories(status: &Status) -> Markup {
     }
     html! {
         section #repositories .repositories aria-labelledby="repositories-title" {
-            h2 #repositories-title .visually-hidden { "Repositories" }
+            h2 #repositories-title { "Repositories" }
             @if status.repositories.is_empty() {
                 p.muted { "No repositories yet. Add a " code { "[[repositories]]" } " table to runnerd.toml." }
             }
