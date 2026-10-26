@@ -2,7 +2,8 @@
 
 Status: **Proposed** (2026-10-26). Amends [0032](0032-sizing-advice-from-sampled-peaks.md),
 [0033](0033-measured-admission.md), [0036](0036-young-jobs-predicted-from-their-own-runs.md),
-[0039](0039-auto-sizing.md) and [0055](0055-admission-follows-the-hosts-memory.md).
+[0037](0037-memory-without-page-cache.md), [0039](0039-auto-sizing.md) and
+[0055](0055-admission-follows-the-hosts-memory.md).
 
 ## Context
 
@@ -17,8 +18,8 @@ job used.
 - A runner takes whichever of its repository's queued jobs GitHub hands it, so it starts only when the largest
   queued prediction fits (0033). A 1.7G trellis job waits for 14G free, a 1.5G image build for 9.75G.
 - Auto sizing never lowers `memory` while a run of the profile in the 30 days met its cap, and advises the 30
-  days' largest peak. jvm went 9G → 14G over two days, partly because a JVM's default heap is a quarter of its
-  cgroup's limit, and stays there for 30 days after its jobs stopped needing it.
+  days' largest peak. jvm went 9G → 14G over two days and stays there for 30 days after its jobs stopped needing
+  it.
 
 A job that got lighter keeps its old reservation for 7 days and its profile's cap for 30. Every window is a time,
 so a job that runs ten times a day needs 70 light runs to shed one heavy run, and 300 to shed it from sizing.
@@ -30,185 +31,249 @@ the margin, or plus 1G of page cache room (0055), as the job's need, so a peak n
 raise gives the heap more room, and the next peak asks again. The owner set jvm to 8G × 4 slots by hand on
 2026-10-26 to try it.
 
+The two uses of a peak carry different risks. A reservation too small lets runs overlap past the slice's budget,
+which the samples and the caps bound. A cap too small kills a job. So admission may follow a job's last runs
+closely, and the cap must not.
+
 ## Decision
 
-A job's evidence is its last runs, counted, not its last days. One function in core reads it from the history
-(`admission::Recent`, built from `sizing::History`); the predictor, `admission::simulate`, `sizing::advise` and auto
-sizing all take it from there, so `runnerctl sizing`, `runnerd simulate` and admission say the same thing. A job is
-keyed, as now, by repository, workflow, name and the profile it ran in (0058).
+A job's evidence is its last runs, counted, not its last days. One module in core reads it from the history
+(`admission::Recent`, from `sizing::History` rows), with one rule for what each row says; the predictor,
+`admission::simulate`, `sizing::advise` and auto sizing all take it from there. A job is keyed, as now, by
+repository, workflow, name and the profile it ran in (0058).
 
-### The window
+### What a run says about its cap
+
+The kernel's `oom` counter tells when a container's limit stopped an allocation. It is not a signal of memory
+failures in general: a JVM or Node process whose heap is sized from the cgroup's limit fails on its own heap
+(`OutOfMemoryError`, "JavaScript heap out of memory") without the kernel ever reaching the limit. That case has its
+own rule under [Sizing](#sizing).
+
+- **Met its cap**: the container's own limit failed reclaim, `oom` in `memory.events.local` above 0. The
+  hierarchical `memory.events`, read until now, also counts a limit any descendant cgroup hit: under sysbox a job's
+  own containers (`services:` with `--memory`, a compose `mem_limit`, a Testcontainers limit) are descendants, so a
+  512M test container killed at its own limit made a 3G run "meet" its 14G cap. Each runner's row gains the local
+  counter (schema 14, `runners.local_ooms`, the largest value sampled, as `ooms` is).
+- **Killed for memory**: a process in the container was killed (hierarchical `oom_kill`, or Docker's `OOMKilled`)
+  and the run did not meet its cap. When the counters show only a descendant's limit (hierarchical `oom` above
+  the local one), the kill was inside a container the job set its own limit for, and it says nothing of the job's
+  memory: it is ignored. Otherwise the slice or the host ran out, which admission must learn.
+  `memory.events.local`'s own `oom_kill` is not read: the kernel counts a kill at the victim's cgroup, which under
+  sysbox can be a child of the container even when the container's limit was hit.
+- **Clear of its cap**: neither. A run whose events were recorded and show no local `oom` is clear however near its
+  cap it peaked. That is reliable as "no 2 s sample saw this container's limit fail reclaim"; an `oom` without a kill
+  in a run's last interval is missed, which is rare. A kill in the last interval is still caught by Docker's flag.
+- **Rows without the local counter**, from before schema 14, and runs whose events could not be read: today's
+  reading holds for holds and lowering floors (the hierarchical `oom`, or without events a peak within 5% of the cap
+  met it), but such a run never raises a cap or reverts a lowering.
+
+### The windows
 
 - **Counted runs.** A finished run, failed or lost ones included, whose memory was sampled without page cache; and
-  a cancelled run that met its cap (`Ran::met_cap`, against the cap its container had). Other cancelled runs, and
-  runs sampled with `active_file` (`Measure::WithActiveFile`), add no peak, as now.
+  a cancelled run that met its cap. Other cancelled runs, and runs sampled with `active_file`
+  (`Measure::WithActiveFile`), add no peak, as now.
 - **A run that met its cap counts at its cap**, or its peak if more: the cap stopped it, so it needed at least that.
-  A run that met an older, smaller cap counts at that cap, not at today's.
-- **The window** is the job's counted runs from its `RECENT_RUNS`-th latest successful one on, in the order they
-  finished; all of them with fewer. `RECENT_RUNS` is 20, or `[sizing] min_jobs` when that is more. Failed runs in it
-  add their peaks but never push a successful run out, so a burst of failures cannot shrink the window to them.
-  Within the history's 30 days, as now.
-- 20 because under nearest rank a p95 of fewer than 20 values is their largest: 20 is the fewest at which the p95
-  can leave one outlier out. A job that got lighter is predicted from its new runs once 19 of them finished.
+  A run that met an older, smaller cap counts at that cap, not at today's. A run killed for memory counts at its peak.
+- **A window** is the job's counted runs from its n-th latest successful one on, in the order they finished; all of
+  them with fewer. Failed runs in it add their peaks but never push a successful run out, so a burst of failures
+  cannot shrink it to them. Within the history's 30 days.
+- **Admission's window** is `RECENT_RUNS` = 20 successful runs, or `[sizing] min_jobs` when that is more: under
+  nearest rank a p95 of fewer than 20 values is their largest, so 20 is the fewest at which it can leave one outlier
+  out. A job that got lighter reserves its new peaks once 19 of them finished.
+- **Sizing's window** is three times as long, `SIZING_RUNS` = 60 successful runs by default. A cold-cache run, after a
+  dependency bump or a lockfile change, is heavy once in 20 to 50 runs; a cap lowered on 20 runs would sit under it
+  for a third of the time. 60 runs is about 6 days of the Android gate, against 30 now.
 
-Order: by `finished_at` (`queued_at` without one), ties in the store's row order, so the same rows give the same
-window. Nothing is kept in memory between reads: the engine already rebuilds its predictor from the store every
-minute, so a restart reads what the daemon would have.
+Rows are read in `finished_at` order (`queued_at` without one), ties in the store's row order. `Recent` takes the
+rows in that order whoever feeds it, and does the per-row handling the engine does inline now: the cap of record,
+`measure`, and cancelled runs. Each job keeps its window as runs in that order and drops the ones before the
+window's start as a new successful run arrives; its sorted peaks, and its profile's, are rebuilt from the window
+when it changes, at most 60 values a job. Nothing else is kept between reads, so a restart reads what the daemon
+would have.
 
 ### Predictions
 
-Each of 0033's and 0036's rules reads the window in place of the job's 30 days: its `runs` is the window's count
-(at most 20 by default), its p95 and largest the window's, its successful runs for `OWN_RUNS` the window's. A
-profile's peaks, for `Basis::Profile` and `Basis::ProfileMax`, are its jobs' windows together, so a heavy job that got
-lighter stops setting the size of a new one.
+Each of 0033's and 0036's rules reads admission's window in place of the job's 30 days: its `runs` is the
+window's count, its p95 and largest the window's, its successful runs for `OWN_RUNS` the window's. A profile's peaks,
+for `Basis::Profile` and `Basis::ProfileMax`, are its jobs' windows together, so a heavy job that got lighter stops
+setting the size of a new one. A prediction is never above the cap the job runs under now (0033), so runs that
+peaked higher under a larger cap reserve the current one, not more.
 
-### A peak near the cap
+**The hold at the cap** (`Basis::Unpredictable`). A job's latest run that met its cap or was killed for memory,
+cancelled or not, puts the job on its cap. The hold ends at the earlier of:
 
-A run met its cap when the kernel says so: its container's `memory.events` counted an `oom`, or the kernel killed a
-process in it for memory (`oom_kill`, or Docker's `OOMKilled`). A run whose events were recorded and show neither
-(`hit_cap: Some(false)`) did not meet its cap, however near it peaked: the kernel found the memory it asked for,
-and a JVM in it collected instead of growing. Such a run says its job needs **at most** the cap it had, never more.
-It does not start a hold, does not count at its cap in the window, and does not ask for a raise. `max`, which counts
-every reclaim at the limit, page cache's included, is not read for this, as now (0037).
-
-Only a run without recorded events (`hit_cap: None`, a container whose `memory.events` could not be read) keeps
-the old fallback: a peak within 5% of its cap met it, since nothing else tells.
-
-**The hold at the cap** (`Basis::Unpredictable`). A job's latest run that met its cap, cancelled or not, and one
-sampled with `active_file` that was killed for memory, puts the job on its cap. The hold ends at the earlier of:
-
-- `CLEAN_RUNS` (3) successful runs in a row after it that were each clear of their cap: did not meet it, as above,
-  and peaked no more than they reserved when that was recorded. A peak near the cap with no `oom` is clear. A
-  successful run that is not clear starts the count again. Failed runs and cancelled ones that did not meet their
-  cap neither count nor start it again: they may have stopped before their heaviest step.
-- `UNPREDICTABLE_FOR` (7 days) after it, as now. On the wire `until` stays that time and now reads "at the latest".
-
-A prediction is never above the cap the job runs under now (0033), so runs that peaked higher under a larger cap
-reserve the current one, not more.
+- `CLEAN_RUNS` (3) successful runs in a row after it, each clear of its cap and, when a reservation was recorded,
+  peaking no more than it. A run with no recorded reservation, under caps admission or adopted, is clear when it is
+  clear of its cap. A successful run that is not clear starts the count again. Failed runs and cancelled ones that
+  are clear neither count nor start it again: they may have stopped before their heaviest step.
+- `UNPREDICTABLE_FOR` (7 days) after it, as now. On the wire `until` stays that time and now means "at the latest".
 
 **A run past what it reserved** (`Basis::Overran`): while a run of the job, cancelled or not, that peaked past what it
-reserved is in its window (finished at or after the window's start), the job reserves the larger of the window's
-largest peak and those runs' peaks, plus the margin. It ends when 20 later successful runs push that run out of the
-window, or 7 days after it, whichever comes first.
+reserved finished at or after its window's start, the job reserves the larger of the window's largest peak and those
+runs' peaks, plus the margin. It ends when 20 later successful runs push that run out of the window, or 7 days
+after it, whichever comes first.
 
-This hold does not end after 3 clear runs, as the hold at the cap does. An overrun means the window's p95 missed one of its
-peaks. Three lighter runs do not say the peak is gone, and after them the p95 would leave that run out again, so a
-job heavy once in 20 runs would overrun once in every 20. Holding to the window's largest while the run is in the
-window keeps that job reserving its heavy peak, and a job that really got lighter loses the hold in 20 runs instead
-of 7 days.
+This hold does not end after 3 clear runs, as the hold at the cap does. An overrun means the window's p95 missed one
+of its peaks. Three lighter runs do not say the peak is gone, and after them the p95 would leave that run out again,
+so a job heavy once in 20 runs would overrun once in every 20. Holding to the window's largest while the run is in
+the window keeps that job reserving its heavy peak, and a job that really got lighter loses the hold in 20 runs.
+
+A job's run failing on its own heap holds nothing in admission: it used less of the slice, not more.
 
 ### Sizing
 
-A job's peaks (`api::JobSizing::peaks`) are its window; a profile's (`api::ProfileSizing::peaks`) its jobs' windows
-together. `jobs`, `at_cap` and the spreads are counted over those runs, so the advice and the numbers it names
-agree. Each run in a window says something different about the profile's `memory`, by how it ended:
+A job's peaks (`api::JobSizing::peaks`) are its sizing window; a profile's (`api::ProfileSizing::peaks`) its jobs'
+sizing windows together. `jobs`, `at_cap` and the spreads are counted over those runs, so the numbers the advice
+names are the ones it went by. The windows always come from the 30 days to now: `GET /v1/sizing?since=`, and
+`runnerctl sizing --since`, narrow only the waits, the busy share and the starts, so the advice stays what auto
+sizing writes.
 
-| The run | It needs | `api::need` is the peak plus `margin` or `PAGE_CACHE_ROOM`, rounded |
-|---|---|---|
-| Met its cap X | more than X | `need(max(peak, X))`, above X |
-| Ran clear of its cap X | at most X, and maybe its peak | `need(peak)`, but no more than X |
+Core computes two needs per profile, from different runs, and the advice goes by them:
 
-- **A raise** goes by the runs whose container had the profile's current `memory` and met it: the advice raises
-  toward the largest of their needs. Nothing else raises `memory`. A run clear of the current cap does not, however
-  near it peaked, and nor does a run at another cap: one that met a larger cap was too big for that cap, not shown
-  too big for this one, and one that ran under a larger cap had other room. So a peak that grows with the cap never
-  asks for more, and a hand-set cap stands until a run at it meets it. This drops 0055's "at least the largest peak
-  plus 1G" for raises: a run that ran clear of its cap had the room it needed. Lowerings keep it.
-- **A lowering** goes toward the largest need over every window, each run's by the table, so it never goes under a
-  peak in a window, plus the margin or room, nor to or under a cap a run in a window met. Runs at a larger cap count
-  too, at no more than that cap: a job heavy at 14G that has not run at 10G yet still holds 10G up.
-- **A cap the profile outgrew.** A run that met a cap X smaller than the profile's current `memory` holds every
-  lowering at `need(X)` or more for the history's 30 days, inside the window or not: the profile went past X because
-  X was too small. A run that met the current cap or a larger one holds only through its window and the hold below:
-  that is the Android gate's 14G run, and holding a lowering under it for 30 days is what this replaces.
-- **The hold.** `Peaks` gains `held`: how many of the jobs are on a hold at the cap by the rule above, without its 7
-  days (sizing reads 30 days of history; a job held past 7 days that has not run since is still one that may need
-  its cap). No lowering is advised, and auto sizing lowers nothing, while `held` is above 0. That replaces 0032's
-  "a set with a run at its cap is never lowered" and 0039's "no lowering while a run in the 30 days met its cap".
-- Auto sizing's steps are unchanged: a lowering waits `interval` after the last change and moves at most `max_step`
-  percent, a raise waits `raise_interval`. So jvm comes down toward its jobs' recent largest peak plus the room one
-  step per interval, once the at-cap run left the Android gate's window and no job is held.
+- **`raise_need`**: the largest `need(max(peak, X))` of the runs that met the profile's current `memory` X and
+  finished since the profile last took X, by its `profile.changed` events, as `cpus` reads runs since it took its
+  `cpus` (0068). Nothing else raises `memory`: not a run clear of X however near it peaked, not a run that met
+  another cap, not a run at X from an earlier time at X. A peak that grows with the cap never asks for more, and a
+  hand-set cap stands until a run at it meets it. This drops 0055's "at least the largest peak plus 1G" for raises:
+  a run clear of its cap had the room it needed. Lowerings keep it.
+- **`lower_floor`**: the largest of each windowed run's need, by how it ended:
+
+  | The run | It needs | Its need (`api::need`: the peak plus `margin` or 1G, rounded) |
+  |---|---|---|
+  | Met its cap X | more than X | `need(max(peak, X))`, above X |
+  | Clear of its cap X, or killed for memory under it | at most X, and maybe its peak | `need(peak)`, at most X |
+
+  and the floor of any revert in the 30 days (below). Runs at a larger cap count, at no more than that cap: a job
+  heavy at 14G that has not run at 10G yet still holds 10G up.
+
+`Advice` is `Raise` toward `raise_need` when it is above the cap, `Lower` toward `lower_floor` when that saves a
+tenth and no job is on its cap, and `Keep` otherwise. A `Keep` whose `lower_floor` is above the cap says why
+without asking for more, as core words it: "keep 8G: runs at 14G peaked 8.8G; none met 8G". `SliceTooSmall` goes
+by `raise_need`. Profiles under measured admission add slots on the windows' p95 peaks (`measured_slots`); that is
+intended, and adds slots sooner after a job got lighter.
+
+**On its cap.** `Peaks` gains `on_cap`: how many of the jobs are on a hold at the cap by the rule above, without its
+7 days (a job held past 7 days that has not run since may still need its cap). Not `held`, which
+`api::AutoSizing` already uses for profiles a recent change holds. No lowering is advised while `on_cap` is above 0.
+That replaces 0032's "a set with a run at its cap is never lowered" and 0039's "no lowering while a run in the 30
+days met its cap".
+
+**A lowering that went too far is reverted.** Auto sizing's change that set the profile's current `memory` X lowered
+it from F, by its recorded change (`SizingChange`), and the profile has run X since, by its `profile.changed`
+events. The lowering went too far when, since then, either:
+
+- a run at X met it; or
+- a job with a successful run at F in its sizing window failed `FAILED_RUNS` (3) runs in a row at X, with no
+  success between: the case a heap sized from the cgroup's limit fails without a kernel event. A broken branch can
+  look the same; reverting it costs memory, not jobs.
+
+The next look then writes `memory` F back, with the slots that change took away under caps admission, without waiting
+for `raise_interval`: it takes back auto sizing's own change, as an undo would. Under caps it waits, as a raise does,
+while more runners run than F's slots hold. For the 30 days after, no lowering goes under F. That floor is read from
+the recorded changes and the runs, so a restart keeps it. Each job that met X, or failed at it, is on its cap until 3
+clear runs.
+
+A cap the owner set by hand is not reverted: a run that meets it raises toward `raise_need` in `max_step` steps
+after `raise_interval`, as now.
+
+Auto sizing's steps are otherwise unchanged: a lowering waits `interval` after the last change and moves at most
+`max_step` percent, a raise waits `raise_interval`.
 
 **Why it converges.**
 
-- *Up.* A raise needs a run at the current cap that the kernel stopped at it. A JVM that fills whatever room it has
-  without an `oom` never raises its profile, so there is no loop of peak → raise → bigger heap → peak.
-- *Down.* A peak that shrinks with the cap can lead lowering down, one step at a time: each step waits `interval`,
-  moves at most `max_step`, saves at least a tenth (`WORTH_LOWERING`), and waits for the runs at the larger cap to
-  leave the windows, since they hold the need at their own peaks. It stops at the first cap where the heaviest job's
-  peak plus the margin or room comes within a tenth of the cap without an `oom`: there the job collects instead of
-  growing, which the 8G trial shows the Android gate does. If a step goes too far and a run meets the new cap X,
-  the profile is raised toward `need(X)` after `raise_interval` and never lowered under `need(X)` for 30 days. So a
-  profile is killed at a lowered cap at most once per cap per 30 days, and each such kill moves its floor up.
-- *No swing faster than the intervals.* A raise waits `raise_interval` after the last change, a lowering `interval`,
-  and no lowering comes while a job is held: 3 clear runs at the new cap after a kill.
+- *Up.* A raise needs a run at the current cap, since the profile took it, that the cap stopped. A JVM that fills
+  whatever room it has without an `oom` never raises its profile, and a limit a job's own container hit never does.
+- *Down.* A peak that shrinks with the cap can lead lowering down, one step at a time: each waits `interval`, moves
+  at most `max_step`, saves a tenth (`WORTH_LOWERING`), and waits until the runs at the larger cap left the sizing
+  windows, about 60 runs of the heaviest job, since they hold `lower_floor` at their own peaks. It stops at the first
+  cap where the heaviest job's peak plus the margin or room comes within a tenth of it, which the 8G trial suggests
+  for the Android gate: there the JVM collects instead of growing. A step that goes too far is reverted to the cap
+  it came from on the first run that meets it, or the third failure in a row, and the profile stays at or above that
+  cap for 30 days.
+- *What a lowering costs.* At most the runs of the job that run at X before the revert is written: the run that met
+  X, the copies of it already running beside it, and the 3 failures of the heap case. Then 30 days at F. A revert to
+  `need(X)` instead could be met again at each step on the way back up, since a run's last 2 s sample before a kill
+  rarely shows what it needed.
+- *No swing faster than the intervals.* A raise waits `raise_interval` after the last change, a lowering `interval`
+  and a revert's 30 days; no lowering comes while a job is on its cap.
 
 Peaks do not say whether a job at a lower cap runs slower because it collects more often. That costs run time, not
 kills, and is accepted, as 0068 accepted it for CPUs: the history cannot tell it from other changes to the job.
 
-### The wire
+### The wire and the store
 
-No schema change and no stored-data migration: every input is a column the history already has.
-
-- `api::Peaks` gains `held`, skipped when 0. A 0.0.17 reader ignores it.
+- Schema 14 adds `runners.local_ooms`. A 0.0.17 daemon refuses the newer database, as with every schema change;
+  `runnerd simulate` and `doctor` read older ones, as `sizing_of` does.
+- `api::Peaks` gains `on_cap`, `#[serde(default)]` and skipped when 0: a 0.0.17 reader ignores it, and a new client
+  reads a 0.0.17 daemon's `Peaks` as none on their cap.
 - `Basis` is unchanged. `Unpredictable` and `Overran` keep `until`, now the latest the hold lasts. A 0.0.17 reader
   shows the same line as before.
-- Core words the new facts: `Admission::line` says a `Job` basis is the p95 or largest of "its last N runs", and a
-  held profile's advice line says how many of its jobs met their cap and how few runs since were clear of it. Clients
-  render these, with `crates/fixtures` cases for both; wire-compat samples gain a `Peaks` with `held`.
+- Core words the new facts: `Admission::line` says a `Job` basis is the p95 or largest of "its last N runs"; a
+  profile's advice line says how many of its jobs are on their cap, and a `Keep` above the cap says which runs the
+  floor came from and that none met the current cap; a revert's reason names the run that met X or the job that
+  failed at it. Clients render these, with `crates/fixtures` cases for each; wire-compat samples gain a `Peaks` with
+  `on_cap`.
 
 ## Consequences
 
 - The Android quality gate reserves its p95 again 3 clear runs after its at-cap run, and its new peaks once 19 runs
   at them finished: a day or two at its rate, not 7 days. web-verify's reservation follows its 5G peaks in the same
-  number of runs. Left at 14G, jvm would step down once the at-cap run left the window, a step per `interval`.
-- Accepted: a job heavy less often than once in 20 successful runs is predicted, and sized, for its light runs. Each
-  heavy run then goes past what it reserved, bounded by its cap, or meets a cap auto sizing lowered and is killed or
-  held at it. The job then reserves and is sized for that run until 20 more push it out. Under the old rule that
-  cost came once a week for admission and once a month for sizing. A job like that should get its cap from
-  `min_memory`.
-- Accepted: after a hold at the cap ends, the window's p95 can leave the at-cap run out. If that peak comes back
+  number of runs.
+- The owner's 8G jvm stays. Runs at 14G peaked higher, but they ran at another cap and none met 8G, so nothing
+  raises it. While they are in the sizing windows, about 6 days, they hold `lower_floor` at 10.25G, above 8G, so
+  nothing lowers it. After that it goes lower only once its runs at 8G peak at about 6.2G or less: their need, with
+  the 1G room, must save a tenth of 8G.
+- Accepted: a job heavy less often than once in 60 successful runs is sized for its light runs. Its next heavy run
+  meets the lowered cap: that run, and copies of it running then, are killed or fail, the profile goes back to the
+  cap the lowering came from and stays at or above it for 30 days. Under the old rule a job like that was never
+  killed and its profile never lowered. A job like that can keep its cap with `min_memory`.
+- Accepted: admission's job heavy less often than once in 20 runs reserves its light runs; its heavy run goes past
+  its reservation, bounded by its cap, and the job then reserves it for 20 runs. Under the old rule that cost came
+  once a week.
+- Accepted: after a hold at the cap ends, admission's p95 can leave the at-cap run out. If that peak comes back
   within the window, it is an overrun, and the job reserves the window's largest from then on. A job that meets its
   cap twice in its window reserves the cap at p95 anyway.
-- A job whose runs keep failing ends a hold only after 7 days, as now.
-- A job that runs a few times a month has fewer than 20 runs in 30 days, so its window is its whole history, as now.
-- `held` ignores the 7 days, so sizing holds a profile longer than admission holds its job when the job stops
+- A hand-lowered cap under a non-JVM job's real need is met once before sizing raises it, in `max_step` steps
+  toward `need(X)`: runs at a larger cap no longer raise, and only auto sizing's own lowerings are reverted.
+- A run clear of its cap with less than 1G of room may see its downloads throttled (0055). Sizing no longer raises
+  for that; the `throttled` insight still names the repository.
+- A kill only a descendant's limit explains no longer holds a job in admission, and no longer holds its profile's
+  memory.
+- A job whose runs keep failing ends a hold only after 7 days in admission, as now.
+- A job that runs a few times a month has fewer runs than a window in 30 days, so its windows are its whole history,
+  as now.
+- `on_cap` ignores the 7 days, so sizing holds a profile longer than admission holds its job when the job stops
   running after meeting its cap. It holds at most as long as now.
-- The owner's 8G jvm stays: runs at 14G peaked higher, but they ran at another cap and met none at 8G, so nothing
-  raises it, and while they are in the windows they hold any lowering under 10.25G off. Without them, it goes lower
-  only once its runs at 8G peak at about 6.2G or less: their need, with the 1G room, must save a tenth of 8G.
-- A non-JVM job whose cap is lowered by hand under its real need is killed once at the new cap before sizing raises
-  it: runs at the larger cap no longer raise.
-- A run that ran clear of its cap with less than 1G of room may still see its downloads throttled (0055). Sizing no
-  longer raises for that; the `throttled` insight still names the repository.
+- `admission::simulate` replays a different past than happened: other starts, other reservations, other overlaps.
+  It agrees with the daemon on the rule and on how each row is read, not on the outcome.
 
 ## Tests
 
-Each through `Predictor`, `simulate`, `sizing::advise` or `auto::changes`, named in domain terms, with the bug it
-catches.
+Each through `Recent`, `Predictor`, `simulate`, `sizing::advise` or `auto::changes`, named in domain terms, with the
+bug it catches.
 
 Generated sequences: a seeded generator in the test module (no new dependency) draws runs of a few jobs: light,
-heavy, at the cap, killed for memory, failed, cancelled, cancelled at the cap, past what they reserved, sampled with
-`active_file`, under a cap that changes mid-way. Over each sequence and every prefix of it:
+heavy, cold-cache heavy once in 30, at the cap, killed for memory, killed at a descendant's limit, failed on its own
+heap, cancelled, cancelled at the cap, past what they reserved, sampled with `active_file`, without the local counter,
+under a cap that changes mid-way by hand and by auto sizing. Over each sequence:
 
-1. **Rebuilding from the history decides as learning run by run did**: the prediction from a predictor built from
-   the stored rows of a prefix equals the one `simulate`'s incremental predictor holds at that point, and a
+1. **Rows learned one at a time in finished order give the predictor built from those rows at once**, and a
    restarted engine reserves what one that did not restart reserves. Catches state that lives only in memory, and a
-   window that depends on the order runs were learned in rather than finished.
-2. **Never above the cap; never under a peak in the window that went past what it reserved.** Catches an `Overran`
-   hold that ends early or reads the wrong window.
+   window that depends on the order rows were fed in.
+2. **Never above the cap; never under a peak in admission's window that went past what it reserved.** Catches an
+   `Overran` hold that ends early or reads the wrong window.
 3. **On the cap while fewer than 3 clear successful runs followed its latest cap event, within 7 days.** Catches a
-   counter that a failed or cancelled run advances, that a non-clear success does not reset, or that judges a run
-   against today's cap instead of its own.
-4. **Advice and auto sizing never lower under a peak, or a met cap, in a job's window, nor while `held` > 0**, and
-   no two changes of a profile come closer than `raise_interval`, nor a lowering closer than `interval` to the last
-   change. Catches a ping-pong after an OOM at a lowered cap.
-
-5. **No change without a cap event raises `memory`, and no lowering goes under the need of a run in a window or
-   `need(X)` of a cap X the profile outgrew in 30 days.** Over generated days of a job whose peak is a share of its
-   cap (a JVM) and that is killed only under a fixed working set: `memory` never rises without a run at the current
-   cap that met it, ends at a fixed point, and is killed at most once per cap. Catches a raise from a peak that
-   follows the room, and a lowering that keeps chasing it.
+   counter that a failed or cancelled run advances, that a non-clear success does not reset, that reads a missing
+   reservation as not clear, or that judges a run against today's cap instead of its own.
+4. **Auto sizing never lowers under `lower_floor` or a revert's floor, nor while `on_cap` is above 0; never raises
+   without a run that met the current cap since the profile took it; and no two changes of a profile come closer
+   than `raise_interval`, or a lowering closer than `interval` to the last change, except a revert.** Catches a raise
+   from old runs or from a peak that follows the room, and a ping-pong.
+5. **Kills per lowering.** Over generated days of a JVM-like job, whose peak is a share of its cap and which fails on
+   its heap under a fixed working set, and of a cold-cache job: each auto-sizing lowering is followed by at most one
+   burst of kills or `FAILED_RUNS` failures at the lowered cap, and the profile is back at the cap it came from at
+   the next look. `memory` ends at a fixed point. Catches a revert that climbs back a step at a time, and a lowering
+   that keeps chasing a shrinking peak.
 
 Cases:
 
@@ -220,15 +285,28 @@ Cases:
    comparing old runs with the new cap.
 9. A job with only cancelled runs reserves its cap; a never-seen job its profile's largest windowed peak; a run
    sampled with `active_file` adds no peak, and its kill for memory still holds the job.
-10. jvm at 14G whose jobs now peak at 8.8G steps down by `max_step` per `interval` toward 10.25G and stops there; an
-   OOM at a lowered cap raises it after `raise_interval` and keeps it above that cap while the run is in the window.
-11. `runnerd simulate` on the trellis-like history: the measured replay's reservations follow the light runs as the
-    predictor's do (shared rule), and `runnerctl sizing`'s advice is the change auto sizing writes.
-12. A run that peaked within 5% of its cap with events recorded and no `oom` starts no hold and raises nothing; with no
-    events recorded it does both, as now. Catches a near-cap peak read as a need.
-13. jvm set by hand to 8G, with the Android gate's 14G runs in its window and runs at 8G peaking at 7.6G without an
-    `oom`: no raise, no lowering. A run at 8G that meets it raises toward `need(8G)`. Catches undoing the owner's
-    trial from runs at another cap.
+10. jvm at 14G whose jobs now peak at 8.8G steps down by `max_step` per `interval` toward 10.25G once the at-cap run
+    left the sizing window, and stops there. A run then meets the lowered cap: the next look writes the cap it came
+    from, and no lowering goes under it for 30 days, across a restart. The same with 3 failures in a row at the
+    lowered cap and no kernel event. Catches a revert that waits `raise_interval`, goes to `need(X)`, or forgets its
+    floor on restart.
+11. A cold-cache job heavy once in 30 runs keeps its cap: its heavy run stays in the 60-run window. Catches sizing on
+    admission's window.
+12. A run that peaked within 5% of its cap with no local `oom` starts no hold and raises nothing; with no events
+    recorded it holds and floors, as now, and raises nothing. A 3G run whose test container was killed at its own
+    512M limit raises nothing and holds nothing. Catches a near-cap peak or a descendant's limit read as the cap.
+13. jvm set by hand to 8G, with the Android gate's 14G runs in its windows and runs at 8G peaking at 7.6G without an
+    `oom`: `Keep` with core's reason, no raise, no lowering, and no revert. A run at 8G that meets it raises toward
+    `need(8G)`. jvm set by hand to 9G, where runs met 9G a week earlier at the same value: no raise until a run since
+    the change meets it. Catches undoing the owner's trial from runs at another cap or another time.
+14. `runnerctl sizing --since 2d` gives the advice auto sizing writes. Catches windows read from `since`.
+15. `simulate` reads each row as the engine does: with room for every job, the reservation of each start equals what
+    the predictor built from the rows finished before it gives. Catches simulate learning a run under today's cap or
+    its sampled-with-page-cache peak.
 
-Fixtures in `crates/fixtures`: a held profile and a job predicted from its last 20 runs, for each client's parity
-test. Wire compat: a 0.0.17 reader reads `Peaks` with `held`.
+The local counter's meaning gets an `#[ignore]`d Docker test with sysbox, as README's "Building" runs them: a child
+container killed at its own limit leaves the runner's `local_ooms` at 0, and the runner's own limit raises it.
+
+Fixtures in `crates/fixtures`: a profile with jobs on their cap, a job predicted from its last 20 runs, a `Keep`
+above the cap with none met, and a revert's reason, for each client's parity test. Wire compat: a 0.0.17 reader reads
+`Peaks` with `on_cap`, and the new reader reads 0.0.17's without it.
