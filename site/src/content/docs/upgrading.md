@@ -5,6 +5,26 @@ description: What changes when you upgrade runnerd, and what to do before and af
 
 Upgrade the daemon, `runnerctl` and the runner images together: the images' scripts and the daemon change in step, and `runnerd doctor` warns when a profile's image is from another version.
 
+## 0.0.16 to 0.0.17
+
+The job history stays at version 13, so either version reads it. Install 0.0.17, move each profile's published `image` to its `-0.0.17` tag, and restart runnerd:
+
+```sh
+curl -fsSL https://github.com/ayagmar/runnerd/releases/download/v0.0.17/install.sh | sh -s -- --version v0.0.17
+runnerd check-config
+systemctl --user restart runnerd
+runnerctl doctor
+```
+
+Going back to an older image after 0.0.17's has seeded a profile needs that profile's snapshot and slot volumes removed (`docker volume rm runnerd-<profile>-base runnerd-<profile>-slot-1 …`): older images do not read the files a 0.0.17 snapshot keeps beside it.
+
+### What changes on its own
+
+- **Auto sizing moves `cpus` on each job's average CPU over its runs, not on its CPU peaks.** A parallel build that spikes to any cap no longer raises it. A profile whose jobs all average far under their cap comes down by at most `max_step` a day, toward twice its heaviest job's p95 average, so a profile the old rule raised steps down over the following days. A raise the slice or the CPU budget cannot hold is not written, and `runnerctl sizing`, the TUI and the dashboard say why.
+- **A job cancelled before any runner took it reads `cancelled in queue`**, with no start or run time, instead of `elsewhere`. Jobs recorded before the upgrade keep their old wording.
+- **The runner's JIT config is no longer in any process's arguments**, so other users of the host cannot read it with `ps`.
+- **A reseed that did not finish starts the profile over from the image**, and a reseed keeps the image files a job deleted hidden, instead of bringing them back.
+
 ## 0.0.15 to 0.0.16
 
 The job history stays at version 13, so either version reads it. Install 0.0.16, move each profile's published `image` to its `-0.0.16` tag, and restart runnerd:
