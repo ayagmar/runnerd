@@ -43,7 +43,7 @@ The dashboard's Insights page shows the same as cards, with links to each run in
 `runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days. The dashboard's overview, `runnerctl tui` and the daily digest show the month's line, whole: the TUI wraps it, and leaves it out rather than cut it when the terminal has no room.
 
 ```console wrap=false
-This month: 2,184 job-minutes here, an estimated $13.10 at GitHub's 2-core Linux rate, before your plan's free minutes, by today's profiles and repository visibility (14 jobs not priced)
+This month: 2,184 job-minutes here, about $13.10 at GitHub's 2-core Linux rate before your plan's free minutes (14 jobs not priced)
   2,184 minutes of 412 jobs at actions_linux (2-core Linux, $0.006 a minute): $13.10
   9 jobs free on GitHub: on a standard runner, of a public repository
   5 jobs not priced: lost, so how long they ran is not known

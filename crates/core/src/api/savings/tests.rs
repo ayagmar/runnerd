@@ -127,8 +127,8 @@ fn jobs_that_cannot_be_priced_are_counted_and_said() {
     );
     assert_eq!(
         window.headline(),
-        "This month: 1 job-minute here, an estimated $0.00 at GitHub's 2-core Linux rate, before your plan's free minutes, \
-         by today's profiles and repository visibility (3 jobs not priced)"
+        "This month: 1 job-minute here, about $0.00 at GitHub's 2-core Linux rate before your plan's free minutes \
+         (3 jobs not priced)"
     );
     assert_eq!(
         window.details(),
@@ -166,8 +166,7 @@ fn a_history_younger_than_the_window_says_where_it_starts() {
     assert!(window.cut, "the window starts where the history does");
     assert_eq!(
         window.headline(),
-        "Since Oct 3: 10 job-minutes here, an estimated $0.22 at GitHub's 8-core Linux rate, before your plan's free minutes, \
-         by today's profiles and repository visibility"
+        "Since Oct 3: 10 job-minutes here, about $0.22 at GitHub's 8-core Linux rate before your plan's free minutes"
     );
 }
 
@@ -203,7 +202,7 @@ fn jobs_from_before_the_history_s_start_are_left_out_while_pruning_deletes_them(
     assert!(
         window
             .headline()
-            .starts_with("Since Oct 19: 10 job-minutes here, an estimated $0.06"),
+            .starts_with("Since Oct 19: 10 job-minutes here, about $0.06"),
         "{}",
         window.headline()
     );
@@ -220,12 +219,10 @@ fn a_repository_made_private_prices_its_whole_history_and_the_figure_says_so() {
     let private = Savings::of(&private, &pricing(), NOW).month;
     assert_eq!((public.cost, private.cost), (Usd(0), Usd(10 * 6_000)));
     for window in [public, private] {
+        let basis = window.details().pop().unwrap_or_default();
         assert!(
-            window
-                .headline()
-                .contains("by today's profiles and repository visibility"),
-            "{}",
-            window.headline()
+            basis.contains("each repository's visibility as they are now"),
+            "{basis}"
         );
     }
 }
@@ -239,8 +236,8 @@ fn several_runners_are_one_figure_with_a_line_each() {
     ]);
     assert_eq!(
         window.headline(),
-        "This month: 21 job-minutes here, an estimated $0.28 at GitHub's rates for each profile's runner, before your plan's \
-         free minutes, by today's profiles and repository visibility"
+        "This month: 21 job-minutes here, about $0.28 at GitHub's rates for each profile's runner before your plan's free \
+         minutes"
     );
     assert_eq!(
         window

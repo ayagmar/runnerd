@@ -77,5 +77,6 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0069](0069-a-job-no-runner-took-did-not-run-elsewhere.md) | A job no runner took did not run elsewhere |
 | [0070](0070-predictions-follow-recent-runs.md) | Predictions and memory sizing follow each job's recent runs |
 | [0071](0071-lowerings-every-hour.md) | Auto sizing lowers every hour, by up to half |
-| [0072](0072-job-minutes-priced-at-github-hosted-rates.md) | What this machine's job minutes would have cost on GitHub-hosted runners |
+| [0072](0072-job-minutes-priced-at-github-hosted-rates.md) | What this machine's job minutes would have cost on GitHub-hosted runners (amended by 0074) |
 | [0073](0073-no-compatibility-before-0-0-19.md) | No compatibility before 0.0.19: the history starts at schema 15 |
+| [0074](0074-the-cost-line-names-only-what-it-is-before.md) | The cost line names only what it is before |

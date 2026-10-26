@@ -2,6 +2,9 @@
 
 Status: **Accepted** (2026-10-26).
 
+Amended by [0074](0074-the-cost-line-names-only-what-it-is-before.md): the headline names only what the figure is
+before; its basis is the last line of `details`.
+
 ## Context
 
 The owner runs the CI of private repositories on runnerd instead of GitHub-hosted runners and wants to see what

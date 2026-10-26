@@ -902,13 +902,13 @@ mod tests {
         );
         assert_eq!(
             facts.savings,
-            "This month: 29 job-minutes here, an estimated $0.62 at GitHub's rates for each profile's runner, before your \
-             plan's free minutes, by today's profiles and repository visibility (5 jobs not priced)"
+            "This month: 29 job-minutes here, about $0.62 at GitHub's rates for each profile's runner before your plan's \
+             free minutes (5 jobs not priced)"
         );
         assert!(
             facts
                 .savings_30_days
-                .starts_with("Last 30 days: 39 job-minutes here, an estimated $0.68"),
+                .starts_with("Last 30 days: 39 job-minutes here, about $0.68"),
             "{}",
             facts.savings_30_days
         );
