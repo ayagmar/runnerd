@@ -111,7 +111,7 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
      `src/assets/tui/`, which are recaptured rather than edited.
 
    `crates/wire-compat` names the previous release, not this one; it moves after the tag (step 6).
-   Tests that use a version only as an example, such as `store/tests.rs`'s "as runnerd 0.0.5 stored it", stay.
+   Tests that use a version only as an example stay.
 3. Merge the pull request, then tag the merge commit on `main` and push the tag:
    `git tag v0.0.6 && git push origin v0.0.6`.
 4. The release run then:
@@ -143,7 +143,9 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
      --test wire_compat -- --ignored write_fixtures` replaces `crates/wire-compat/fixtures/` with its samples, one
      file per document (the check fails on a document without one);
    - run `.github/scripts/check-wire-compat.sh`. It names every `ACCEPTED` entry the new release no longer breaks;
-     remove them.
+     remove them;
+   - remove what is kept only for the release before: once the check reads 0.0.20 or later, `RepositoryStatus`'s
+     `profile` and `labels` ([ADR 0073](docs/adr/0073-no-compatibility-before-0-0-19.md)).
 
 A new package on ghcr.io has so far come out public, as the repository is. If one does not, make it public once:
 the package's Package settings → Danger Zone → Change visibility → Public. To publish the images of a release that

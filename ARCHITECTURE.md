@@ -240,6 +240,8 @@ adopted too and drains as it would after a reload.
 - A runner never mounts a slot's changes over a snapshot other than the one they were made against: `seed.sh` keeps
   `/base/.reseeding` from its first change to its last, a runner that finds it uses the image alone, and the next
   reseed starts the profile over ([ADR 0066](docs/adr/0066-a-reseed-that-did-not-finish.md)).
+- The history's schema is version 15 (`store/schema.sql`) or a migration from it: `Store::open` creates it in a new
+  database and refuses any other version, older or newer ([ADR 0073](docs/adr/0073-no-compatibility-before-0-0-19.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).

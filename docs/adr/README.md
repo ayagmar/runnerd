@@ -22,7 +22,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0014](0014-host-feature-for-daemon-only-code.md) | Daemon-only code behind core's `host` feature |
 | [0015](0015-engine-behind-github-and-docker-traits.md) | The engine calls GitHub and Docker through traits |
 | [0016](0016-strict-lints.md) | Strict lints, every exception with a reason |
-| [0017](0017-job-history-in-sqlite.md) | Job history in SQLite, written by one thread (amended by 0027, 0028) |
+| [0017](0017-job-history-in-sqlite.md) | Job history in SQLite, written by one thread (amended by 0027, 0028, 0073) |
 | [0018](0018-job-identity-and-logs-from-inside-the-runner.md) | Job identity and logs from inside the runner container |
 | [0019](0019-control-commands-through-the-engine.md) | Control commands go through the engine; a reload keeps running jobs (amended by 0026) |
 | [0020](0020-dashboard-is-an-api-client-on-loopback.md) | The dashboard is an API client, on loopback behind a one-time login (amended by 0042, 0043) |
@@ -78,3 +78,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0070](0070-predictions-follow-recent-runs.md) | Predictions and memory sizing follow each job's recent runs |
 | [0071](0071-lowerings-every-hour.md) | Auto sizing lowers every hour, by up to half |
 | [0072](0072-job-minutes-priced-at-github-hosted-rates.md) | What this machine's job minutes would have cost on GitHub-hosted runners |
+| [0073](0073-no-compatibility-before-0-0-19.md) | No compatibility before 0.0.19: the history starts at schema 15 |
