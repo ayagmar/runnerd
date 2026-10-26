@@ -143,9 +143,7 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
      --test wire_compat -- --ignored write_fixtures` replaces `crates/wire-compat/fixtures/` with its samples, one
      file per document (the check fails on a document without one);
    - run `.github/scripts/check-wire-compat.sh`. It names every `ACCEPTED` entry the new release no longer breaks;
-     remove them;
-   - remove what is kept only for the release before: once the check reads 0.0.20 or later, `RepositoryStatus`'s
-     `profile` and `labels` ([ADR 0073](docs/adr/0073-no-compatibility-before-0-0-19.md)).
+     remove them.
 
 A new package on ghcr.io has so far come out public, as the repository is. If one does not, make it public once:
 the package's Package settings → Danger Zone → Change visibility → Public. To publish the images of a release that

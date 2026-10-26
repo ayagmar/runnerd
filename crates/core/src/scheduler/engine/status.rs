@@ -106,14 +106,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     })
                     .collect();
                 api::RepositoryStatus {
-                    profile: pools
-                        .first()
-                        .map(|pool| pool.profile.clone())
-                        .unwrap_or_default(),
-                    labels: pools
-                        .first()
-                        .map(|pool| pool.labels.clone())
-                        .unwrap_or_default(),
                     pools,
                     paused: self.control.is_paused(&name),
                     queued_jobs: queued.iter().filter(|job| job.repository == name).count(),

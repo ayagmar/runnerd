@@ -608,8 +608,6 @@ async fn a_log_batch_larger_than_the_backlog_waits_for_the_writer_too() {
 fn repository(name: &str) -> crate::api::RepositoryStatus {
     crate::api::RepositoryStatus {
         name: name.to_owned(),
-        profile: "app".to_owned(),
-        labels: vec!["self-hosted".to_owned()],
         pools: vec![crate::api::PoolStatus {
             profile: "app".to_owned(),
             labels: vec!["self-hosted".to_owned()],

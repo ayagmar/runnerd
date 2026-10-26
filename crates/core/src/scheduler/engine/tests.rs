@@ -3238,8 +3238,6 @@ async fn events_of(handle: &Handle, after: &mut u64, prefix: &str) -> Vec<api::E
 fn repository_status(paused: bool, queued_jobs: usize) -> api::RepositoryStatus {
     api::RepositoryStatus {
         name: "o/r".to_owned(),
-        profile: "app".to_owned(),
-        labels: vec!["self-hosted".to_owned(), "app".to_owned()],
         pools: vec![api::PoolStatus {
             profile: "app".to_owned(),
             labels: vec!["self-hosted".to_owned(), "app".to_owned()],
@@ -3306,8 +3304,6 @@ async fn each_change_to_a_repository_is_announced_once_with_its_new_state() {
         [api::Event::RepositoryChanged {
             repository: api::RepositoryStatus {
                 name: "o/s".to_owned(),
-                profile: "app".to_owned(),
-                labels: vec!["self-hosted".to_owned()],
                 pools: vec![api::PoolStatus {
                     profile: "app".to_owned(),
                     labels: vec!["self-hosted".to_owned()],

@@ -596,13 +596,6 @@ impl Fixtures {
             repositories: vec![
                 RepositoryStatus {
                     name: "halyard/ledger".to_owned(),
-                    profile: "jvm".to_owned(),
-                    labels: vec![
-                        "self-hosted".to_owned(),
-                        "linux".to_owned(),
-                        "x64".to_owned(),
-                        "jvm".to_owned(),
-                    ],
                     pools: vec![runnerd_core::api::PoolStatus {
                         profile: "jvm".to_owned(),
                         labels: vec![
@@ -618,13 +611,6 @@ impl Fixtures {
                 },
                 RepositoryStatus {
                     name: "halyard/storefront".to_owned(),
-                    profile: "node".to_owned(),
-                    labels: vec![
-                        "self-hosted".to_owned(),
-                        "linux".to_owned(),
-                        "x64".to_owned(),
-                        "node".to_owned(),
-                    ],
                     pools: vec![runnerd_core::api::PoolStatus {
                         profile: "node".to_owned(),
                         labels: vec![

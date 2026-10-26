@@ -130,8 +130,6 @@ fn pool(profile: &str, labels: &[&str]) -> PoolStatus {
 fn repository(name: &str, pool: PoolStatus, queued_jobs: usize) -> RepositoryStatus {
     RepositoryStatus {
         name: name.to_owned(),
-        profile: pool.profile.clone(),
-        labels: pool.labels.clone(),
         pools: vec![pool],
         paused: false,
         queued_jobs,

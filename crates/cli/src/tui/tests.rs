@@ -63,8 +63,6 @@ fn profile(name: &str, slots: usize, memory: u64) -> ProfileStatus {
 fn repository(name: &str, profile: &str) -> RepositoryStatus {
     RepositoryStatus {
         name: name.to_owned(),
-        profile: profile.to_owned(),
-        labels: vec!["self-hosted".to_owned()],
         pools: vec![runnerd_core::api::PoolStatus {
             profile: profile.to_owned(),
             labels: vec!["self-hosted".to_owned()],
