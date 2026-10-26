@@ -65,6 +65,16 @@ const ACCEPTED: &[Accepted] = &[
         item: "status/full",
         adr: "0073",
     },
+    Accepted {
+        reader: Reader::Current,
+        item: "events/repository.changed",
+        adr: "0073",
+    },
+    Accepted {
+        reader: Reader::Current,
+        item: "status/full",
+        adr: "0073",
+    },
 ];
 
 /// A document's items as JSON, by label.

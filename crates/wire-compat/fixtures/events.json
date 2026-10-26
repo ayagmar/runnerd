@@ -342,6 +342,9 @@
     "at": 1761400000,
     "id": 7,
     "repository": {
+      "labels": [
+        "self-hosted"
+      ],
       "name": "tidewater/halyard",
       "paused": false,
       "pools": [
@@ -353,6 +356,7 @@
           "queued_jobs": 1
         }
       ],
+      "profile": "halyard",
       "queued_jobs": 1
     },
     "type": "repository.changed"
