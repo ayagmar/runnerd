@@ -401,6 +401,15 @@ impl Savings {
             ),
         }
     }
+    /// The windows to show, the month first. The last 30 days are left out when they start where the month does,
+    /// as when the history is younger than both: they hold the same jobs.
+    pub fn windows(&self) -> Vec<&SavedWindow> {
+        if self.last_30_days.since == self.month.since {
+            vec![&self.month]
+        } else {
+            vec![&self.month, &self.last_30_days]
+        }
+    }
 }
 
 impl SavedWindow {

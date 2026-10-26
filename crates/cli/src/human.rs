@@ -814,7 +814,7 @@ pub(crate) fn insights(insights: &Insights, paint: Paint) -> String {
 /// insights` opens with: each window's headline, then what it sums and leaves out.
 pub(crate) fn savings(savings: &Savings) -> String {
     let mut out = String::new();
-    for window in [&savings.month, &savings.last_30_days] {
+    for window in savings.windows() {
         let _ = writeln!(out, "{}", window.headline());
         for line in window.details() {
             let _ = writeln!(out, "  {line}");

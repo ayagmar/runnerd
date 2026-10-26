@@ -172,6 +172,16 @@ fn a_history_younger_than_the_window_says_where_it_starts() {
 }
 
 #[test]
+fn a_history_younger_than_both_windows_shows_one() {
+    let mut young = history(vec![ran("o/app", "default", 60, 1000)]);
+    young.kept_since = OCTOBER + 22 * 86_400_000;
+    let savings = Savings::of(&young, &pricing(), NOW);
+    assert_eq!(savings.windows(), vec![&savings.month]);
+    let old = Savings::of(&history(vec![]), &pricing(), NOW);
+    assert_eq!(old.windows(), vec![&old.month, &old.last_30_days]);
+}
+
+#[test]
 fn jobs_from_before_the_history_s_start_are_left_out_while_pruning_deletes_them() {
     // Pruning has raised the start to Oct 19 but not yet deleted the Oct 15 jobs.
     let mut pruning = history(vec![
