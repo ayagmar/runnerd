@@ -89,8 +89,8 @@ pub use records::{
 pub use results::{force_pause_consequence, reseed_requested, reseeded};
 pub use sizing::{
     Advice, AutoPlan, GRANULE, JobSizing, Need, PAGE_CACHE_ROOM, Peaks, ProfilePlan, ProfileSizing,
-    Resize, SAMPLE_INTERVAL, Sizing, SizingChange, SizingHold, SizingQuery, Spread, Starts, need,
-    period, sampled_note,
+    Resize, SAMPLE_INTERVAL, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused, Spread,
+    Starts, need, period, sampled_note,
 };
 pub use slots::{Health, SlotState};
 pub use stats::StatsSummary;

@@ -1,6 +1,7 @@
 # 0046. Sizing says what auto sizing does next
 
-Status: **Accepted** (2026-10-24). Builds on [0039](0039-auto-sizing.md).
+Status: **Accepted** (2026-10-24). Builds on [0039](0039-auto-sizing.md). Amended by
+[0068](0068-cpus-follow-run-averages.md): a `cpus` raise auto sizing cannot make is shown with why.
 
 ## Context
 

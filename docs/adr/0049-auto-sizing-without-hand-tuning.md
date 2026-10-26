@@ -1,6 +1,7 @@
 # 0049. Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling
 
 Status: **Accepted** (2026-10-24). Amends [0039](0039-auto-sizing.md) and [0046](0046-sizing-says-what-auto-sizing-does-next.md).
+Amended by [0068](0068-cpus-follow-run-averages.md): `cpus` move on each job's run average, not on CPU peaks.
 
 ## Context
 
@@ -49,6 +50,8 @@ A lowering keeps its memory change and adds only the slots the budget holds.
 added. Slots are never lowered under what runs.
 
 ### CPU caps
+
+[0068](0068-cpus-follow-run-averages.md) replaces this rule: a parallel build's peaks reach any cap.
 
 `cpus` follows the CPU peak runs reach under it. Only runs whose container had the profile's current `cpus` count
 (the runner's recorded CPU cap); a run under another cap says nothing about this one.

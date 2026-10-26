@@ -118,6 +118,10 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
             } @else {
                 span.muted { (reason) }
             }
+            // Beside the change, which can still be to its memory or slots.
+            @if let Some(refusal) = plan.refusal(&profile.name) {
+                span.plan-refused { (refusal) }
+            }
         }
     }
 }

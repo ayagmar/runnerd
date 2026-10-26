@@ -247,6 +247,15 @@ pub enum ProfilePlan<'plan> {
 }
 
 impl AutoPlan {
+    /// The `cpus` raise `profile`'s jobs ask for and the next look cannot make, as a line of its own beside what it
+    /// does next, which can still change its memory or slots: `No CPU raise: 3 runs of … the cap holds them back; …`.
+    pub fn refusal(&self, profile: &str) -> Option<String> {
+        self.refused
+            .iter()
+            .find(|refused| refused.profile == profile)
+            .map(|refused| format!("No CPU raise: {}", refused.reason))
+    }
+
     /// What it does next with `profile` at `now`: a hold whose time has passed holds nothing, however old the plan.
     pub fn profile_plan(&self, profile: &str, now: u64) -> ProfilePlan<'_> {
         if let Some(change) = self.next.iter().find(|change| change.profile == profile) {

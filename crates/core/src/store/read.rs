@@ -444,7 +444,24 @@ pub(super) fn auto_sizing(db: &Connection) -> rusqlite::Result<super::AutoSizing
         .prepare_cached("SELECT * FROM auto_sizing WHERE state = 'pending' ORDER BY id")?
         .query_map([], |row| Ok((row.get("id")?, sizing_change(row)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    Ok(super::AutoSizing { last, pending })
+    let cpus = db
+        .prepare_cached(
+            "SELECT json_extract(body, '$.profile.name'), json_extract(body, '$.profile.cpus'), at FROM events \
+             WHERE json_extract(body, '$.type') = 'profile.changed' ORDER BY id",
+        )?
+        .query_map([], |row| {
+            Ok(sizing::CpusSet {
+                profile: row.get(0)?,
+                cpus: row.get(1)?,
+                at: row.get(2)?,
+            })
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    Ok(super::AutoSizing {
+        last,
+        pending,
+        cpus,
+    })
 }
 
 /// The newest durable event's ID; 0 before the first.

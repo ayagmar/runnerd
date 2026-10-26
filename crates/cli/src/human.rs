@@ -622,6 +622,15 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             "  {}",
             paint.paint(profile.advice.tone().into(), &sizing.advice_line(profile))
         );
+        // A raise of `cpus` its jobs ask for and auto sizing cannot make.
+        if let Some(refusal) = sizing
+            .auto_plan
+            .as_ref()
+            .filter(|_| sizing.auto)
+            .and_then(|plan| plan.refusal(&profile.name))
+        {
+            let _ = writeln!(out, "  {}", paint.paint(api::Tone::Warn.into(), &refusal));
+        }
         out.push_str(&sizing_changes(sizing, &profile.name, now, paint));
         // Under auto sizing the daemon applies it.
         if !sizing.auto && profile.advice.change().is_some() {

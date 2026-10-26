@@ -23,8 +23,8 @@ use runnerd_core::api::{
     RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits, Resize, RunLink,
     RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries, SeedMemory, Severity,
     ShellMemory, ShellQuery, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery,
-    SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, Timeline,
-    WaitSpread, Waiting, WeekWaits,
+    SizingRefused, SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow, Status, Step,
+    Timeline, WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -807,6 +807,10 @@ pub(crate) fn sizing() -> Sizing {
                 lower_until: 1_761_900_000,
             }],
             blocked: Some("the slice is full".to_owned()),
+            refused: vec![SizingRefused {
+                profile: "halyard".to_owned(),
+                reason: "the CPU budget is full".to_owned(),
+            }],
         }),
     }
 }

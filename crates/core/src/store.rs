@@ -330,6 +330,9 @@ pub struct AutoSizing {
     pub last: BTreeMap<String, u64>,
     /// Changes recorded before their file was written and not resolved since, by row.
     pub pending: Vec<(i64, api::SizingChange)>,
+    /// Each profile's `cpus` as the daemon ran them, from its `profile.changed` events, oldest first: those `[history]
+    /// events` keeps, and each profile's latest however old.
+    pub cpus: Vec<sizing::CpusSet>,
 }
 
 /// The job history. Cloning shares it.

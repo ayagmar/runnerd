@@ -1909,6 +1909,18 @@ fn auto_plan(
             ));
         }
         lines.push(Line::from(spans));
+        // Beside the change, which can still be to its memory or slots.
+        if let Some(refusal) = plan.refusal(&profile.name) {
+            let indent = 2 + name_width + 1;
+            lines.push(Line::styled(
+                format!(
+                    "{:indent$}{}",
+                    "",
+                    fit(&refusal, width.saturating_sub(indent))
+                ),
+                theme.tone(Tone::Busy),
+            ));
+        }
     }
     lines
 }

@@ -1,8 +1,8 @@
 //! What every client says the sizing advice means: what it sizes for, how it reads, and what auto sizing does next.
 
 use crate::api::{
-    AdmissionPolicy, Advice, AutoPlan, CheckStatus, Peaks, ProfilePlan, ProfileSizing, Sizing,
-    SizingHold, Spread, Starts, Tone, need,
+    AdmissionPolicy, Advice, AutoPlan, CheckStatus, Peaks, ProfilePlan, ProfileSizing, Resize,
+    Sizing, SizingChange, SizingHold, SizingRefused, Spread, Starts, Tone, need,
 };
 
 const G: u64 = 1 << 30;
@@ -75,6 +75,7 @@ fn a_hold_is_judged_by_the_readers_clock_not_by_when_the_plan_was_made() {
             lower_until: 86_400,
         }],
         blocked: None,
+        refused: Vec::new(),
     };
     assert!(
         matches!(plan.profile_plan("jvm", 60), ProfilePlan::Held { .. }),
@@ -92,6 +93,53 @@ fn a_hold_is_judged_by_the_readers_clock_not_by_when_the_plan_was_made() {
         ProfilePlan::Nothing,
         "a hold that ended holds nothing"
     );
+}
+
+#[test]
+fn a_cpu_raise_auto_sizing_cannot_make_shows_beside_the_memory_change_it_makes() {
+    let plan = AutoPlan {
+        every: 300,
+        interval: 86_400,
+        raise_interval: 3_600,
+        max_step: 25,
+        next: vec![SizingChange {
+            at: 0,
+            profile: "jvm".to_owned(),
+            from: Resize {
+                memory: 9 * G,
+                slots: 2,
+                cpus: None,
+            },
+            to: Resize {
+                memory: 10 * G,
+                slots: 2,
+                cpus: None,
+            },
+            reason: "raise memory".to_owned(),
+            uncertain: false,
+        }],
+        held: Vec::new(),
+        blocked: None,
+        refused: vec![SizingRefused {
+            profile: "jvm".to_owned(),
+            reason: "3 runs of halyard/ledger CI / test averaged 7.9 of its 8 CPUs (median): the cap holds them \
+                     back; 9 CPUs for each of its 2 slots do not fit the CPU budget beside the other profiles'"
+                .to_owned(),
+        }],
+    };
+    assert!(
+        matches!(plan.profile_plan("jvm", 60), ProfilePlan::Next { .. }),
+        "the memory change is due"
+    );
+    assert_eq!(
+        plan.refusal("jvm").as_deref(),
+        Some(
+            "No CPU raise: 3 runs of halyard/ledger CI / test averaged 7.9 of its 8 CPUs (median): the cap holds \
+             them back; 9 CPUs for each of its 2 slots do not fit the CPU budget beside the other profiles'"
+        ),
+        "and why its cpus cannot rise, beside it"
+    );
+    assert_eq!(plan.refusal("node"), None);
 }
 
 #[test]
