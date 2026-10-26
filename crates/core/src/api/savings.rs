@@ -429,7 +429,7 @@ impl SavedWindow {
             untimed: 0,
         };
         let mut runners: BTreeMap<Sku, PricedRunner> = BTreeMap::new();
-        let from = start.saturating_mul(1000);
+        let from = start.saturating_mul(1000).max(history.kept_since);
         for run in history
             .runs
             .iter()
@@ -470,8 +470,8 @@ impl SavedWindow {
     }
 
     /// The figure with its basis, for compact places, which show it whole or not at all: "This month: 1,234
-    /// job-minutes here, an estimated $7.40 at GitHub's 2-core Linux rate, before your plan's free minutes (3 jobs not
-    /// priced)".
+    /// job-minutes here, an estimated $7.40 at GitHub's 2-core Linux rate, before your plan's free minutes, by today's
+    /// profiles and repository visibility (3 jobs not priced)".
     pub fn headline(&self) -> String {
         let when = if self.cut {
             format!("Since {}", short_date(self.since))
@@ -490,7 +490,8 @@ impl SavedWindow {
             _ => "at GitHub's rates for each profile's runner".to_owned(),
         };
         let mut line = format!(
-            "{when}: {} here, an estimated {} {rate}, before your plan's free minutes",
+            "{when}: {} here, an estimated {} {rate}, before your plan's free minutes, by today's profiles and \
+             repository visibility",
             count(self.minutes, "job-minute", "job-minutes"),
             self.cost,
         );

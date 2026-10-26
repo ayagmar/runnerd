@@ -60,7 +60,7 @@ machine's run times, not a bill and not money saved.
   `ubuntu-latest` gives a private repository; `actions_linux_arm` on aarch64.
 - A job is priced at what its profile's `priced_as` says now, and a job whose profile is gone from the config at the
   default. `priced_as` is the owner's judgement of what runner the jobs need, so a change applies to the whole history
-  and a reload changes the figure at once. Core says so in the figure's detail.
+  and a reload changes the figure at once. Core says so beside the figure.
 - The rates are one table in core (`api::Sku::rate`), in integer micro-dollars a minute (`actions_linux` = 6,000).
   What a minute costs here is one constant, `api::SELF_HOSTED_RATE` = 0, subtracted from each rate; if GitHub brings
   the platform charge back, it is that one change.
@@ -88,7 +88,7 @@ machine's run times, not a bill and not money saved.
 - **Unknown visibility.** A repository with no stored answer (deleted, or GitHub not asked or not answering since it
   was added) is not priced and its jobs are counted, so the figure never prices a job that may have been free.
 - Jobs are judged by the repository's latest stored visibility: one made public reads as free over its whole history.
-  Core says so in the figure's detail.
+  Core says so beside the figure.
 
 ### Plan minutes
 
@@ -104,8 +104,9 @@ so the first days of a month do not read near nothing.
 The oldest job left says nothing of what pruning dropped: a month whose jobs were all pruned has none left, and a
 job never final is never pruned. So the store keeps since when it holds every final job (schema 15's
 `history_kept`): when the database was made, or, for one from before, its oldest final job; pruning raises it to its
-cutoff before it deletes job records. When that is after a window's start, the window starts there and core words it
-"Since Oct 3", also with no jobs left: "Since Oct 3: no job-minutes here yet". The default 90 days hold both.
+cutoff before it deletes job records. When that is after a window's start, the window starts there, and counts no
+job before it that pruning has yet to delete, and core words it "Since Oct 3", also with no jobs left: "Since Oct 3:
+no job-minutes here yet". The default 90 days hold both.
 
 ### The wire and the words
 
@@ -121,13 +122,13 @@ cutoff before it deletes job records. When that is after a window's start, the w
   never asks for; a client facing a daemon without the route shows no figure. `Sku` is a closed enum: a SKU added
   later is a break for older clients, recorded then.
 - Core words it. `SavedWindow::headline`, for compact places, carries the figure with its basis: "This month: 1,234
-  job-minutes here, an estimated $7.40 at GitHub's 2-core Linux rate, before your plan's free minutes". A client shows
-  it whole or not at all: wrapped, never cut, as the basis and what it leaves out are part of the figure. With
-  several SKUs, "at
-  GitHub's rates for each profile's runner"; a window the history cut short starts "Since Oct 3"; jobs not in the
-  figure add "(5 jobs not priced)". `SavedWindow::details` gives a line per SKU, one per kind of job not priced and
-  why, and the basis: `priced_as` and visibility as they are now, from this machine's run times. One module,
-  `api::savings`, computes and words all of it; the daemon only reads the rows.
+  job-minutes here, an estimated $7.40 at GitHub's 2-core Linux rate, before your plan's free minutes, by today's
+  profiles and repository visibility". A client shows it whole or not at all: wrapped, never cut, as the basis and
+  what it leaves out are part of the figure. With several SKUs, "at GitHub's rates for each profile's runner"; a
+  window the history cut short starts "Since Oct 3"; jobs not in the figure add "(5 jobs not priced)".
+  `SavedWindow::details` gives a line per SKU, one per kind of job not priced and why, and the basis: `priced_as` and
+  visibility as they are now, from this machine's run times. One module, `api::savings`, computes and words all of
+  it; the daemon only reads the rows.
 
 ### Where it shows
 

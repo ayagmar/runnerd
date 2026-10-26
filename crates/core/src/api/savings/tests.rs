@@ -127,8 +127,8 @@ fn jobs_that_cannot_be_priced_are_counted_and_said() {
     );
     assert_eq!(
         window.headline(),
-        "This month: 1 job-minute here, an estimated $0.00 at GitHub's 2-core Linux rate, before your plan's free minutes \
-         (3 jobs not priced)"
+        "This month: 1 job-minute here, an estimated $0.00 at GitHub's 2-core Linux rate, before your plan's free minutes, \
+         by today's profiles and repository visibility (3 jobs not priced)"
     );
     assert_eq!(
         window.details(),
@@ -166,8 +166,58 @@ fn a_history_younger_than_the_window_says_where_it_starts() {
     assert!(window.cut, "the window starts where the history does");
     assert_eq!(
         window.headline(),
-        "Since Oct 3: 10 job-minutes here, an estimated $0.22 at GitHub's 8-core Linux rate, before your plan's free minutes"
+        "Since Oct 3: 10 job-minutes here, an estimated $0.22 at GitHub's 8-core Linux rate, before your plan's free minutes, \
+         by today's profiles and repository visibility"
     );
+}
+
+#[test]
+fn jobs_from_before_the_history_s_start_are_left_out_while_pruning_deletes_them() {
+    // Pruning has raised the start to Oct 19 but not yet deleted the Oct 15 jobs.
+    let mut pruning = history(vec![
+        ran("o/app", "default", 60_000, NOW - OCTOBER - 14 * 86_400_000),
+        {
+            let mut lost = ran("o/app", "default", 60, NOW - OCTOBER - 14 * 86_400_000);
+            lost.state = JobState::Lost;
+            lost
+        },
+        ran("o/app", "default", 600, 86_400_000),
+    ]);
+    pruning.kept_since = OCTOBER + 18 * 86_400_000;
+    let window = Savings::of(&pruning, &pricing(), NOW).month;
+    assert_eq!(
+        (window.jobs, window.minutes, window.cost, window.lost),
+        (1, 10, Usd(10 * 6_000), 0),
+        "only the jobs since Oct 19 are counted"
+    );
+    assert!(
+        window
+            .headline()
+            .starts_with("Since Oct 19: 10 job-minutes here, an estimated $0.06"),
+        "{}",
+        window.headline()
+    );
+}
+
+#[test]
+fn a_repository_made_private_prices_its_whole_history_and_the_figure_says_so() {
+    let runs = vec![ran("o/site", "default", 600, 1000)];
+    let public = month(runs.clone());
+    let mut private = history(runs);
+    private
+        .visibility
+        .insert("o/site".to_owned(), Visibility::Private);
+    let private = Savings::of(&private, &pricing(), NOW).month;
+    assert_eq!((public.cost, private.cost), (Usd(0), Usd(10 * 6_000)));
+    for window in [public, private] {
+        assert!(
+            window
+                .headline()
+                .contains("by today's profiles and repository visibility"),
+            "{}",
+            window.headline()
+        );
+    }
 }
 
 #[test]
@@ -180,7 +230,7 @@ fn several_runners_are_one_figure_with_a_line_each() {
     assert_eq!(
         window.headline(),
         "This month: 21 job-minutes here, an estimated $0.28 at GitHub's rates for each profile's runner, before your plan's \
-         free minutes"
+         free minutes, by today's profiles and repository visibility"
     );
     assert_eq!(
         window

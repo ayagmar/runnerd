@@ -905,7 +905,7 @@ mod tests {
         assert_eq!(
             facts.savings,
             "This month: 29 job-minutes here, an estimated $0.62 at GitHub's rates for each profile's runner, before your \
-             plan's free minutes (5 jobs not priced)"
+             plan's free minutes, by today's profiles and repository visibility (5 jobs not priced)"
         );
         assert!(
             facts
