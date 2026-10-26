@@ -260,7 +260,13 @@
           "uncertain": true
         }
       ],
-      "raise_interval": 600
+      "raise_interval": 600,
+      "refused": [
+        {
+          "profile": "halyard",
+          "reason": "the CPU budget is full"
+        }
+      ]
     },
     "changes": [
       {
