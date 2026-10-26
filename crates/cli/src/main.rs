@@ -690,7 +690,7 @@ async fn insights(
         if json {
             return print_json(&insights);
         }
-        // A daemon before the savings route has none to show.
+        // The insights stand on their own: savings the history could not read are left out.
         if let Ok(savings) = client.get::<Savings>("/v1/savings").await {
             output::text(&format!("{}\n", human::savings(&savings)));
         }

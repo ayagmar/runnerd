@@ -48,7 +48,7 @@ pub(crate) struct Overview {
     pub(crate) recent: Vec<JobSummary>,
     /// The jobs started and finished in the last `DAY`, for the health figures.
     pub(crate) day: Activity,
-    /// What the jobs' minutes would have cost on GitHub's runners; `None` from a daemon before it.
+    /// What the jobs' minutes would have cost on GitHub's runners; `None` when the history could not say.
     pub(crate) savings: Option<Savings>,
 }
 
@@ -98,7 +98,7 @@ impl Overview {
                 },
             )
             .await?;
-        // A daemon before the savings route has none to show.
+        // The overview stands without them: savings the history could not read are left out.
         self.savings = daemon.get("/v1/savings").await.ok();
         Ok(())
     }
