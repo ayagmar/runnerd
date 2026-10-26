@@ -86,7 +86,9 @@ const costRows = `2,184 minutes of 412 jobs at actions_linux (2-core Linux, $0.0
 
 // The quick start, from the install page.
 const install = 'curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh';
-const init = 'runnerd init halyard/ledger halyard/storefront';
+const init = `runnerd init halyard/ledger halyard/storefront
+systemctl --user daemon-reload
+systemctl --user enable --now runnerd`;
 const runsOn = 'runs-on: [self-hosted, linux, x64]';
 ---
 <!doctype html>
@@ -225,7 +227,7 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
           <div>
             <p>
               runnerd prices each job at GitHub's per-minute rate, rounded up to the minute as GitHub bills, before your
-              plan's free minutes. Public repositories count as free.
+              plan's free minutes. Public repositories on standard runners count as free.
             </p>
             <pre class="terminal" tabindex="0" data-ui aria-label="runnerctl insights: the cost estimate"><code>{costRows}</code></pre>
           </div>
@@ -260,7 +262,7 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
           <li>
             <div>
               <h3>Install</h3>
-              <p>A static binary for x86-64 or arm64 Linux, into <code>~/.local/bin</code>.</p>
+              <p>A static binary for x86-64 Linux, into <code>~/.local/bin</code>.</p>
             </div>
             <div class="command">
               <pre class="terminal" tabindex="0" data-ui><code>{install}</code></pre>
@@ -269,8 +271,11 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
           </li>
           <li>
             <div>
-              <h3>Point it at your repositories</h3>
-              <p>It sizes the slots to your machine and writes the config and the service.</p>
+              <h3>Point it at your repositories and start it</h3>
+              <p>
+                <code>init</code> sizes the slots to your machine, writes the config and the service, and prints any
+                root commands to run before you start it.
+              </p>
             </div>
             <div class="command">
               <pre class="terminal" tabindex="0" data-ui><code>{init}</code></pre>
