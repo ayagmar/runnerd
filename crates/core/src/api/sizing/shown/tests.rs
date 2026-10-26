@@ -23,12 +23,14 @@ fn profile(name: &str, max: u64, advice: Advice) -> ProfileSizing {
                 max,
             },
             cpu: Spread::default(),
+            on_cap: 0,
         },
         wait: Spread::default(),
         starts: Starts::default(),
         busy: 0,
         wants_slots: false,
         advice,
+        revert: None,
         jobs: vec![],
     }
 }

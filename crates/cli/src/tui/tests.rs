@@ -571,6 +571,7 @@ fn sizing() -> Sizing {
             at_cap: 0,
             memory: spread(peak / 2, peak, peak, peak),
             cpu: spread(2000, 6000, 7000, 7000),
+            on_cap: 0,
         };
         ProfileSizing {
             name: name.to_owned(),
@@ -596,6 +597,7 @@ fn sizing() -> Sizing {
                 wait: spread(20, 300, 400, 400),
                 advice,
             }],
+            revert: None,
         }
     };
     Sizing {

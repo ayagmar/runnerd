@@ -651,8 +651,12 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             reserved: None,
             host_waited: 0,
             hit_cap: Some(false),
+            own_cap: Some(false),
             measure: sizing::Measure::WithoutPageCache,
             succeeded: true,
+            failed: false,
+            run_id: i,
+            branch: None,
         })
         .collect()
 }
@@ -663,8 +667,7 @@ fn sizing_of(jobs: Vec<sizing::Ran>) -> Sizing {
         Some(33 << 30),
         &sizing::History {
             jobs,
-            cancelled: Vec::new(),
-            runners: Vec::new(),
+            ..sizing::History::default()
         },
         sizing::Window::new(Some(0), 2_000_000),
     )
@@ -681,7 +684,14 @@ fn sizing_check(sizing: Sizing) -> Check {
 
 #[test]
 fn jobs_at_their_cap_warn_and_name_the_command_that_raises_it() {
-    let mut jobs = ran("halyard/ledger", "jvm", 12, 8900 << 20);
+    // Ledger tests ran out of memory at their 9G cap.
+    let mut jobs: Vec<sizing::Ran> = ran("halyard/ledger", "jvm", 12, 8900 << 20)
+        .into_iter()
+        .map(|run| sizing::Ran {
+            own_cap: Some(true),
+            ..run
+        })
+        .collect();
     jobs.extend(ran("halyard/storefront", "node", 12, 2 << 30));
     let check = sizing_check(sizing_of(jobs));
     assert_eq!(check.status, Status::Warn, "{check}");

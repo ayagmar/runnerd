@@ -18,6 +18,7 @@ use runnerd_core::api::{
 use runnerd_core::config::Config;
 use runnerd_core::insights::{self, Run};
 use runnerd_core::observe::metrics::SAMPLE_INTERVAL;
+use runnerd_core::sizing::memory::HISTORY;
 use runnerd_core::sizing::{Window, advise};
 use runnerd_core::store::{Store, StoreError};
 use tokio::sync::broadcast::error::RecvError;
@@ -143,10 +144,17 @@ pub(super) async fn sizing(
 /// The advice for the config the daemon runs with, from the history in `window`, against the slice's `MemoryMax`
 /// read now, as a config check reads it: one raised since the daemon started counts without a restart.
 pub(super) async fn sizing_now(state: &AppState, window: Window) -> Result<Sizing, String> {
-    let history = state
+    // The windows always read the last 30 days; `since` narrows only the waits, the busy share and the starts.
+    let mut history = state
         .handle
         .store
-        .sizing(window.since)
+        .sizing(window.since.min(window.now.saturating_sub(HISTORY)))
+        .await
+        .map_err(|store_error| store_error.to_string())?;
+    let auto = super::auto::last_changes(state)
+        .await
+        .map_err(|store_error| store_error.to_string())?;
+    super::auto::recorded(state, &mut history, &auto, window)
         .await
         .map_err(|store_error| store_error.to_string())?;
     let text = state.config.lock().await.text.clone();

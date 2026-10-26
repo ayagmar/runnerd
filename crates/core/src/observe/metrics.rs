@@ -91,14 +91,17 @@ pub struct Usage {
     pub memory_with_active_file: u64,
 }
 
-/// What a cgroup's `memory.events` counted so far, its descendants' included; `None` for a counter the file lacks
-/// or that doesn't parse, which says nothing either way.
+/// What a cgroup's `memory.events` counted so far, its descendants' included, and `memory.events.local`'s `oom`, its
+/// own; `None` for a counter the file lacks or that doesn't parse, which says nothing either way.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
 pub struct Events {
     /// Times its memory, or a descendant's under its own limit, reached the limit, reclaim could not bring it down
     /// and an allocation was about to fail (`oom`). Not `max`, which counts every reclaim at the limit, page
     /// cache's included.
     pub oom: Option<u64>,
+    /// Times its own limit, not a descendant's, failed reclaim (`memory.events.local` `oom`): its cap stopped an
+    /// allocation. `None` on a kernel without the file.
+    pub local_oom: Option<u64>,
     /// Processes the kernel killed in it for memory (`oom_kill`).
     pub oom_kill: Option<u64>,
     /// Times a socket's receive window was held small because its memory, or a descendant's, was under pressure
@@ -158,13 +161,20 @@ pub fn read_unavailable(cgroup: &Path) -> u64 {
     read_usage(cgroup).map_or(0, |usage| usage.memory.saturating_sub(slab))
 }
 
-/// A cgroup's `memory.events`; every counter `None` when the file can't be read.
+/// A cgroup's `memory.events` and `memory.events.local`; a file's counters `None` when it can't be read.
 pub fn read_events(cgroup: &Path) -> Events {
+    let local_oom = read(&cgroup.join("memory.events.local"))
+        .ok()
+        .and_then(|local| field(&local, "oom"));
     let Ok(events) = read(&cgroup.join("memory.events")) else {
-        return Events::default();
+        return Events {
+            local_oom,
+            ..Events::default()
+        };
     };
     Events {
         oom: field(&events, "oom"),
+        local_oom,
         oom_kill: field(&events, "oom_kill"),
         sock_throttled: field(&events, "sock_throttled"),
     }

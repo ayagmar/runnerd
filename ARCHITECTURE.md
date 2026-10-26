@@ -49,8 +49,11 @@ flowchart TB
   `sizing`, `store`: `host` only
   ([`crates/core/src/lib.rs`](crates/core/src/lib.rs)). `admission` predicts a job's memory peak and average CPU,
   replays the history for `runnerd simulate`, and works out what the host's memory leaves the slice
-  (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `sizing` turns the history into advice, and `sizing::auto` picks
-  the changes auto sizing makes; `insights` reads the history for jobs that got slower, are flaky or near their cap,
+  (`admission::host`, [ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)); `admission::recent` reads
+  each job's recent runs, the one window both admission and sizing read memory from
+  ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)); `sizing` turns the history into advice,
+  `sizing::memory` says what a raise and a lowering of `memory` read and which lowering went too far, and
+  `sizing::auto` picks the changes auto sizing makes; `insights` reads the history for jobs that got slower, are flaky or near their cap,
   and the waits of each week ([ADR 0051](docs/adr/0051-insights-and-notifications.md)). All three are pure: the
   engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
   shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
@@ -257,8 +260,9 @@ adopted too and drains as it would after a reload.
   ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)). Under `[sizing] auto` the daemon applies what
   `sizing::auto::changes` picks through the same check and commit (`api::control::replace`): `memory`, `slots` and
   `cpus`, one change per profile at a time, a raise at most once per `[sizing] raise_interval` and a lowering once
-  per `interval` ([ADR 0049](docs/adr/0049-auto-sizing-without-hand-tuning.md)), never lowering a profile a run met
-  the cap of, never leaving a profile's bounds,
+  per `interval` ([ADR 0049](docs/adr/0049-auto-sizing-without-hand-tuning.md)), never lowering a profile while a
+  job is on its cap, taking back at the next look a lowering a run met or a job failed at
+  ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)), never leaving a profile's bounds,
   and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
   before the commit). Each change is recorded as pending in the history, synced to disk, before its file is written,
   then done (with a durable `sizing.changed` event) or failed; a pending one is settled at every look, auto sizing

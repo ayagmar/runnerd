@@ -148,6 +148,7 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
         events_after("low 0\nhigh 0\nmax 10171\noom 0\noom_kill 0\n", 1_000),
         Events {
             oom: Some(0),
+            local_oom: None,
             oom_kill: Some(0),
             sock_throttled: None,
         },
@@ -157,6 +158,7 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
         events_after("low 0\nhigh 0\nmax 10173\noom 1\noom_kill 1\n", 3_000),
         Events {
             oom: Some(1),
+            local_oom: None,
             oom_kill: Some(1),
             sock_throttled: None,
         }
@@ -180,6 +182,7 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
         events_after("max 10173\noom many\noom_kill 2\n", 7_000),
         Events {
             oom: None,
+            local_oom: None,
             oom_kill: Some(2),
             sock_throttled: None,
         }
@@ -190,6 +193,32 @@ fn running_out_of_memory_and_a_kill_for_it_show_in_a_containers_samples() {
         Events::default(),
         "no memory.events"
     );
+}
+
+#[test]
+fn a_limit_a_jobs_own_container_hit_is_told_from_the_runners_own() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    container(&paths, "a", 10, 4_000, 0, 0);
+    let cgroup = paths.container("ci.slice", "a");
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let runners = [tracked("runner-a", "a", 10)];
+    // A service container the job started with its own 512M limit ran out of memory inside the runner's cgroup.
+    std::fs::write(cgroup.join("memory.events"), "max 3\noom 1\noom_kill 1\n").unwrap();
+    std::fs::write(
+        cgroup.join("memory.events.local"),
+        "max 0\noom 0\noom_kill 0\n",
+    )
+    .unwrap();
+    let inner = state.sample(&runners, 1_000).0[0].events;
+    assert_eq!((inner.oom, inner.local_oom), (Some(1), Some(0)));
+    // Then the runner's own cap stopped an allocation.
+    std::fs::write(
+        cgroup.join("memory.events.local"),
+        "max 9\noom 1\noom_kill 0\n",
+    )
+    .unwrap();
+    assert_eq!(state.sample(&runners, 3_000).0[0].events.local_oom, Some(1));
 }
 
 #[test]

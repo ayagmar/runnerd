@@ -46,16 +46,17 @@ pub enum Basis {
         /// How many runs of the profile.
         runs: u64,
     },
-    /// A run of the job went past what it reserved lately: the job's largest peak plus the margin.
+    /// A run of the job among its recent runs went past what it reserved: the job's largest peak plus the margin.
     Overran {
-        /// When the job is predicted from its p95 again.
+        /// When the job is predicted from its p95 again at the latest: sooner once that run leaves its recent runs.
         until: u64,
     },
     /// The cap: admission by caps, or too few runs of the job and of its profile.
     Cap,
-    /// The cap: a run of the job ran out of memory at its cap or was killed for memory lately.
+    /// The cap: a run of the job ran out of memory at its cap or was killed for memory, and fewer than 3 of its runs
+    /// since succeeded clear of it.
     Unpredictable {
-        /// When the job may be predicted again.
+        /// When the job may be predicted again at the latest: sooner after 3 clear runs.
         until: u64,
     },
     /// The cap: measured admission had no recent sample of the slice's memory to check.
@@ -121,7 +122,7 @@ pub struct CpuAdmission {
 
 impl Admission {
     /// One line on how the runner was admitted, as `runnerctl job` and the dashboard say it, such as `admitted by
-    /// measured peaks: reserved 1.25G, the p95 peak of 10 runs of its job + the margin; 10G of the budget was free,
+    /// measured peaks: reserved 1.25G, the p95 peak of its job's last 10 runs + the margin; 10G of the budget was free,
     /// the slice at 2G`.
     pub fn line(&self) -> String {
         let size = |bytes: u64| ByteSize(bytes).to_string();
@@ -131,14 +132,16 @@ impl Admission {
                 runs,
                 peak: JobPeak::P95,
             } => {
-                format!("reserved {reserved}, the p95 peak of {runs} runs of its job + the margin")
+                format!(
+                    "reserved {reserved}, the p95 peak of its job's last {runs} runs + the margin"
+                )
             }
             Basis::Job {
                 runs,
                 peak: JobPeak::Largest,
             } => {
                 format!(
-                    "reserved {reserved}, the largest peak of {runs} runs of its job + the margin"
+                    "reserved {reserved}, the largest peak of its job's last {runs} runs + the margin"
                 )
             }
             Basis::Profile { runs } => format!(

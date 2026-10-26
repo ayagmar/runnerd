@@ -429,8 +429,13 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
             cpu_cap: Some(8000),
         });
         daemon.store.claimed(id, 2, &runner, now - 40_000);
+        // The container's own 9G limit stopped an allocation.
         daemon.store.samples(vec![SampleRecord {
-            events: runnerd_core::observe::metrics::Events::default(),
+            events: runnerd_core::observe::metrics::Events {
+                oom: Some(1),
+                local_oom: Some(1),
+                ..runnerd_core::observe::metrics::Events::default()
+            },
             runner: runner.clone(),
             at: now - 30_000,
             cpu: 0,
@@ -586,26 +591,7 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
         .unwrap();
     // Ten node jobs at their 7G cap peaking at 2G: lowered, by at most 25% a change.
     finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
-    let sizing = async || -> Sizing {
-        let response = daemon
-            .client
-            .get("http://runnerd/v1/sizing")
-            .send()
-            .await
-            .unwrap();
-        serde_json::from_slice(&body(response).await).unwrap()
-    };
-    let changed = tokio::time::timeout(Duration::from_secs(10), async {
-        loop {
-            let sizing = sizing().await;
-            if !sizing.changes.is_empty() {
-                return sizing;
-            }
-            tokio::time::sleep(Duration::from_millis(20)).await;
-        }
-    })
-    .await
-    .expect("auto sizing changes node within 10 s");
+    let changed = changes_made(&daemon, 1).await;
     assert!(changed.auto, "the advice says auto sizing is on");
     let resized = Resize {
         memory: 5376 << 20,
@@ -651,7 +637,7 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
     assert_eq!(announced, changed.changes[0]);
     // Many looks later, the intervals still hold node where it is, and the plan says until when.
     tokio::time::sleep(Duration::from_millis(300)).await;
-    let later = sizing().await;
+    let later = read_sizing(&daemon).await;
     assert_eq!(later.changes.len(), 1);
     let plan = later.auto_plan.expect("auto sizing says what it does next");
     assert_eq!(
@@ -676,7 +662,97 @@ async fn auto_sizing_writes_advice_into_the_file_keeping_its_comments_and_waits_
         "the file runnerd wrote is the one it runs with"
     );
     assert!(daemon.reloads.try_recv().is_err(), "no second reload");
+    // A build meets the lowered cap: the next look takes node back to 7G, without waiting the hour a raise waits.
+    met_cap(&daemon.store, "node", resized.memory).await;
+    let reverted = changes_made(&daemon, 2).await.changes[1].clone();
+    assert_eq!(
+        (reverted.from, reverted.to.memory, reverted.to.slots),
+        (resized, 7 << 30, 2)
+    );
+    assert!(
+        reverted
+            .reason
+            .starts_with("raise memory back to 7G: o/app build met the 5.25G cap"),
+        "{}",
+        reverted.reason
+    );
     daemon.stop().await;
+}
+
+/// The advice once auto sizing has made `count` changes, within 10 s.
+async fn changes_made(daemon: &Daemon, count: usize) -> Sizing {
+    tokio::time::timeout(Duration::from_secs(10), async {
+        loop {
+            let sizing = read_sizing(daemon).await;
+            if sizing.changes.len() >= count {
+                return sizing;
+            }
+            tokio::time::sleep(Duration::from_millis(20)).await;
+        }
+    })
+    .await
+    .expect("auto sizing makes its changes within 10 s")
+}
+
+/// `profile` run at `cap`, as the engine announces a reload, and one job of it lost just now after its runner's own
+/// cap failed reclaim.
+async fn met_cap(store: &Store, profile: &str, cap: u64) {
+    store.event(Event::ProfileChanged {
+        profile: ProfileStatus {
+            name: profile.to_owned(),
+            image: format!("runnerd-runner:{profile}"),
+            cpus: 8,
+            memory: cap,
+            reseeding: false,
+            slots: Vec::new(),
+        },
+    });
+    let now = u64::try_from(
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap()
+            .as_millis(),
+    )
+    .unwrap();
+    store.queued(
+        "o/app",
+        &QueuedJob {
+            id: 11,
+            run_id: 3,
+            name: "build".to_owned(),
+            created_at: now - 60_000,
+            ..QueuedJob::default()
+        },
+    );
+    store.runner_started(RunnerRecord {
+        admission: None,
+        name: "runner-11".to_owned(),
+        repository: "o/app".to_owned(),
+        profile: profile.to_owned(),
+        slot: 1,
+        container: "c11".to_owned(),
+        started_at: now - 50_000,
+        memory_cap: Some(cap),
+        cpu_cap: Some(8000),
+    });
+    store.claimed(11, 3, "runner-11", now - 40_000);
+    store.samples(vec![SampleRecord {
+        events: runnerd_core::observe::metrics::Events {
+            oom: Some(1),
+            oom_kill: Some(1),
+            sock_throttled: None,
+            local_oom: Some(1),
+        },
+        runner: "runner-11".to_owned(),
+        at: now - 30_000,
+        cpu: 6000,
+        cpu_usage: 0,
+        memory: cap - (64 << 20),
+        network_received: 0,
+        network_sent: 0,
+    }]);
+    store.lost(11, now);
+    store.flush().await;
 }
 
 /// The example with auto sizing on.

@@ -11,7 +11,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::api::{
-    Advice, ProfileSizing, Resize, Sizing, SizingChange, SizingRefused, cores, job_title,
+    Advice, ProfileSizing, Resize, Sizing, SizingChange, SizingRefused, SizingRevert, cores,
+    job_title,
 };
 use crate::config::{Admission, ByteSize, Config, Profile, cpu_budget};
 
@@ -100,6 +101,14 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
         };
         let last = context.last.get(&advised.name).copied();
         let since = last.map_or(u64::MAX, |at| now.saturating_sub(at));
+        if let Some(revert) = &advised.revert {
+            if let Some(change) = reverted(config, profile, advised, revert, &sizing, &context, now)
+            {
+                budget.take(&advised.name, profile, change.from, change.to);
+                changes.push(change);
+            }
+            continue;
+        }
         if since < rules.raise_after().as_secs() {
             continue;
         }
@@ -110,13 +119,7 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
         };
         let fresh = Fresh::read(history, advised, last, window);
         let mut reasons = Vec::new();
-        let memory = memory(
-            config,
-            profile,
-            advised.advice,
-            met_cap(history, &advised.name),
-            lowering,
-        );
+        let memory = memory(config, profile, advised.advice, lowering);
         let running = context.running.get(&advised.name).copied().unwrap_or(0);
         let slots = match config.host.admission {
             Admission::Caps => {
@@ -327,29 +330,56 @@ fn within(profile: &Profile, from: Resize, to: Resize) -> bool {
         && (to.slots <= from.slots || profile.max_slots.is_none_or(|max| to.slots <= max))
 }
 
-/// Whether a run of the profile in the history, cancelled ones too, was killed for memory or met its cap.
-fn met_cap(history: &History, profile: &str) -> bool {
-    history
-        .jobs
-        .iter()
-        .chain(&history.cancelled)
-        .filter(|job| job.profile == profile)
-        .any(|job| job.oom_killed || job.memory_cap.is_some_and(|cap| job.met_cap(cap)))
+/// The change that takes back a lowering that went too far (`ProfileSizing::revert`): straight to the `memory`
+/// it came from and, under caps, the slots it had, without waiting for `raise_interval` or keeping to `max_step`,
+/// as an undo would. None while more runners run than those slots hold, or outside the profile's bounds.
+fn reverted(
+    config: &Config,
+    profile: &Profile,
+    advised: &ProfileSizing,
+    revert: &SizingRevert,
+    sizing: &Sizing,
+    context: &Context<'_>,
+    now: u64,
+) -> Option<SizingChange> {
+    let Advice::Raise { memory, slots } = advised.advice else {
+        return None;
+    };
+    let running = context.running.get(&advised.name).copied().unwrap_or(0);
+    let from = Resize {
+        memory: profile.memory.0,
+        slots: profile.slots,
+        cpus: None,
+    };
+    let to = Resize {
+        memory,
+        slots,
+        cpus: None,
+    };
+    if (config.host.admission == Admission::Caps && running > slots)
+        || memory != revert.to
+        || !within(profile, from, to)
+    {
+        return None;
+    }
+    Some(SizingChange {
+        at: now,
+        profile: advised.name.clone(),
+        from,
+        to,
+        reason: sizing.memory_line(advised),
+        uncertain: false,
+    })
 }
 
 /// The profile's next `memory`: the advice's, at most `max_step` percent away and within its bounds, in steps of
-/// `GRANULE` toward the advice. A lowering waits while a run met the cap, and while `lowering` holds it.
-fn memory(
-    config: &Config,
-    profile: &Profile,
-    advice: Advice,
-    met_cap: bool,
-    lowering: Lowering,
-) -> u64 {
+/// `GRANULE` toward the advice. The advice lowers nothing while a job is on its cap; a lowering waits while
+/// `lowering` holds it.
+fn memory(config: &Config, profile: &Profile, advice: Advice, lowering: Lowering) -> u64 {
     let current = profile.memory.0;
     let step = current.saturating_mul(u64::from(config.sizing.max_step)) / 100;
     match advice {
-        Advice::Lower { memory, .. } if !met_cap && lowering == Lowering::Allowed => {
+        Advice::Lower { memory, .. } if lowering == Lowering::Allowed => {
             let floor = current
                 .saturating_sub(step)
                 .div_ceil(GRANULE)

@@ -12,6 +12,7 @@ use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
 use runnerd_core::config::{Config, resize_profile};
 use runnerd_core::scheduler::engine::RunningSlots;
 use runnerd_core::sizing::auto::{Context, changes, next_look};
+use runnerd_core::sizing::memory::CHANGES_READ;
 use runnerd_core::sizing::{CpusSet, History, Window};
 use runnerd_core::store::{AutoSizing, Resolution, StoreError};
 use tracing::{info, warn};
@@ -117,17 +118,21 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
     let history_error =
         |store_error: StoreError| format!("cannot read the job history: {store_error}");
     let window = Window::new(None, now());
-    let history = state
+    let mut history = state
         .handle
         .store
         .sizing(window.since)
+        .await
+        .map_err(history_error)?;
+    let auto = last_changes(state).await.map_err(history_error)?;
+    recorded(state, &mut history, &auto, window)
         .await
         .map_err(history_error)?;
     let AutoSizing {
         last,
         cpus: cpus_set,
         ..
-    } = last_changes(state).await.map_err(history_error)?;
+    } = auto;
     let (read, slice) = (state.memory_max, config.host.slice.clone());
     let memory_max = tokio::task::spawn_blocking(move || read(&slice))
         .await
@@ -145,15 +150,32 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
     })
 }
 
-/// When auto sizing last changed each profile, pending changes included, and each profile's `cpus` as the daemon ran
-/// them. Read after the history it sizes from, never before: a change recorded between the two reads would otherwise
+/// When auto sizing last changed each profile, pending changes included, and each profile's `cpus` and `memory` as
+/// the daemon ran them. Read after the history it sizes from, never before: a change recorded between the two reads would otherwise
 /// be missing from the holds while the runs after it, which the history has, ask for another, and a profile would be
 /// changed twice in one interval.
-async fn last_changes(state: &AppState) -> Result<AutoSizing, StoreError> {
+pub(super) async fn last_changes(state: &AppState) -> Result<AutoSizing, StoreError> {
     // The `profile.changed` events a reload or restart published are written in order with every other write; reading
     // after they land keeps a quick edit away and back from looking like no edit at all.
     state.handle.store.flush().await;
     state.handle.store.auto_sizing().await
+}
+
+/// Adds to `history` what a revert reads (ADR 0070): each profile's `memory` as the daemon ran it, from `auto`, and
+/// auto sizing's changes since `CHANGES_READ` before `window`'s end, read after the history as `auto` is.
+pub(super) async fn recorded(
+    state: &AppState,
+    history: &mut History,
+    auto: &AutoSizing,
+    window: Window,
+) -> Result<(), StoreError> {
+    history.memory_set.clone_from(&auto.memory);
+    history.changes = state
+        .handle
+        .store
+        .sizing_changes(window.now.saturating_sub(CHANGES_READ))
+        .await?;
+    Ok(())
 }
 
 /// The slice's CPUs, in millicores; `None` when they cannot be read, which only keeps auto sizing from raising
@@ -214,17 +236,21 @@ pub(super) async fn plan(
     let history_error =
         |store_error: StoreError| format!("cannot read the job history: {store_error}");
     let window = Window::new(None, now());
-    let history = state
+    let mut history = state
         .handle
         .store
         .sizing(window.since)
+        .await
+        .map_err(history_error)?;
+    let auto = last_changes(state).await.map_err(history_error)?;
+    recorded(state, &mut history, &auto, window)
         .await
         .map_err(history_error)?;
     let AutoSizing {
         last,
         cpus: cpus_set,
         ..
-    } = last_changes(state).await.map_err(history_error)?;
+    } = auto;
     let running = running(state);
     let blocked = on_disk(&*state.config.lock().await).err();
     let context = Context {

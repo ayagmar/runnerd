@@ -158,8 +158,39 @@ pub struct ProfileSizing {
     pub wants_slots: bool,
     /// What to set `memory` and `slots` to. Sized for its largest peak, so no job gets less than it used.
     pub advice: Advice,
+    /// When the advice is to take back a lowering auto sizing made that went too far: what showed it. `None` from a
+    /// daemon before it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub revert: Option<SizingRevert>,
     /// Each job that ran in it, by repository, workflow and name.
     pub jobs: Vec<JobSizing>,
+}
+
+/// A lowering of a profile's `memory` by auto sizing that went too far, which the advice takes back (ADR 0070).
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizingRevert {
+    /// The `memory` it lowered to, in bytes.
+    pub from: u64,
+    /// The `memory` it lowered from, which the advice goes back to.
+    pub to: u64,
+    /// The job that showed it, as `owner/name workflow / job`.
+    pub job: String,
+    /// How.
+    pub cause: RevertCause,
+}
+
+/// What showed a lowering went too far.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum RevertCause {
+    /// A run met the lowered cap.
+    Met,
+    /// The job, which succeeded before the lowering, failed this many times in a row at it, in different workflow
+    /// runs and on more than one branch: a heap sized from the cgroup's limit fails without the kernel's limit.
+    Failed {
+        /// How many.
+        runs: u32,
+    },
 }
 
 /// A profile's jobs by whether their runner was already up when GitHub queued them (ADR 0050).
@@ -198,14 +229,26 @@ pub struct JobSizing {
 pub struct Peaks {
     /// How many jobs: the number of peaks the percentiles are taken over.
     pub jobs: u64,
-    /// Of those, how many met their container's memory cap: killed for memory, or out of memory at it with
-    /// nothing left to reclaim (for a run whose container's events were not recorded, a peak within 5% of it). They
-    /// may need more than they show.
+    /// Of those, how many met their container's memory cap: its own limit failed reclaim (for a run recorded
+    /// before that was told apart, a kill or a limit hit in the container, or without events a peak within 5% of it).
+    /// They may need more than they show.
     pub at_cap: u64,
+    /// How many of their jobs are on their cap: one of their runs met it or was killed for memory, and fewer than 3
+    /// successful runs since were clear of it. No lowering while any is. 0 from a daemon before it said.
+    #[serde(default, skip_serializing_if = "is_zero")]
+    pub on_cap: u64,
     /// Memory without page cache, in bytes.
     pub memory: Spread,
     /// CPU, in millicores.
     pub cpu: Spread,
+}
+
+#[expect(
+    clippy::trivially_copy_pass_by_ref,
+    reason = "serde's skip_serializing_if passes a reference"
+)]
+fn is_zero(count: &u64) -> bool {
+    *count == 0
 }
 
 /// Percentiles of a set of values, by nearest rank: each is one of the values, and with fewer than 100 values
@@ -405,8 +448,16 @@ impl Sizing {
                 size(peaks.memory.max),
                 size(profile.memory)
             ),
-            Advice::Keep { .. } if peaks.at_cap > 0 => format!(
-                "keep {}: {at_cap}, so they may need more than they show",
+            Advice::Keep { .. } if peaks.on_cap > 0 => format!(
+                "keep {}: {} of its jobs met their cap or were killed for memory, and fewer than 3 runs since ran \
+                 clear of it",
+                size(profile.memory),
+                peaks.on_cap
+            ),
+            Advice::Keep { memory } if memory > profile.memory => format!(
+                "keep {}: its recent runs need {}, but none is known to have run out of memory at {} since it was set",
+                size(profile.memory),
+                size(memory),
                 size(profile.memory)
             ),
             Advice::Keep { memory } => {
@@ -433,6 +484,20 @@ impl Sizing {
                     "lower memory to {} from {}, {need}; {then}",
                     size(memory),
                     size(profile.memory)
+                )
+            }
+            Advice::Raise { memory, .. } if let Some(revert) = &profile.revert => {
+                let how = match revert.cause {
+                    RevertCause::Met => format!("met the {} cap", size(revert.from)),
+                    RevertCause::Failed { runs } => {
+                        format!("failed {runs} times in a row at {}", size(revert.from))
+                    }
+                };
+                format!(
+                    "raise memory back to {}: {} {how} since auto sizing lowered it from {}",
+                    size(memory),
+                    revert.job,
+                    size(revert.to)
                 )
             }
             Advice::Raise { memory, slots } => {

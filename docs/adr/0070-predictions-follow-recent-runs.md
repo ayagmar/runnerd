@@ -151,8 +151,8 @@ Core computes two needs per profile, from different runs, and the advice goes by
 
 `Advice` is `Raise` toward `raise_need` when it is above the cap, `Lower` toward `lower_floor` when that saves a
 tenth and no job is on its cap, and `Keep` otherwise. A `Keep` whose `lower_floor` is above the cap says why
-without asking for more, as core words it: "keep 8G: runs at 14G peaked 8.8G; none met 8G". `SliceTooSmall` goes
-by `raise_need`. Profiles under measured admission add slots on the windows' p95 peaks (`measured_slots`); that is
+without asking for more, as core words it: "keep 8G: its recent runs need 10G, but none is known to have run out of
+memory at 8G since it was set". `SliceTooSmall` goes by `raise_need`. Profiles under measured admission add slots on the windows' p95 peaks (`measured_slots`); that is
 intended, and adds slots sooner after a job got lighter.
 
 **On its cap.** `Peaks` gains `on_cap`: how many of the jobs are on a hold at the cap by the rule above, without its
@@ -166,18 +166,18 @@ it from F, by its recorded change (`SizingChange`), and the profile has run X si
 events. The lowering went too far when, since then, either:
 
 - a run at X met it; or
-- a job with a successful run at F in its sizing window failed `FAILED_RUNS` (3) times in a row at X, with no
+- a job with a successful run at F before the lowering failed `FAILED_RUNS` (3) times in a row at X, with no
   success between: the case a heap sized from the cgroup's limit fails without a kernel event. Only conclusions
   `failure` and `timed_out` count (a heap thrashing in GC times out); `lost` and `cancelled` neither count nor break
   the row. At most one failure counts per workflow run (`run_id`), so a re-run of failed jobs adds nothing, and the
   three must come from at least two branches, so one broken pull request pushed three times does not revert. Red CI
   across branches can still look the same; reverting it costs memory, not jobs.
 
-The next look then writes `memory` F back, with the slots that change took away under caps admission, without waiting
+The next look then writes `memory` F back, and under caps admission the slots it had before, without waiting
 for `raise_interval`: it takes back auto sizing's own change, as an undo would. Under caps it waits, as a raise does,
 while more runners run than F's slots hold. For the 30 days after, no lowering goes under F. That floor is read from
-the recorded changes and the runs, so a restart keeps it. Each job that met X, or failed at it, is on its cap until 3
-clear runs.
+the recorded changes and the runs, so a restart keeps it. A job that met X is on its cap until 3 clear runs;
+the floor holds for one that failed at it.
 
 A cap the owner set by hand is not reverted: a run that meets it raises toward `raise_need` in `max_step` steps
 after `raise_interval`, as now.
@@ -221,8 +221,8 @@ kills, and is accepted, as 0068 accepted it for CPUs: the history cannot tell it
 - Core words the new facts: `Admission::line` says a `Job` basis is the p95 or largest of "its last N runs"; a
   profile's advice line says how many of its jobs are on their cap, and a `Keep` above the cap says which runs the
   floor came from and that none met the current cap; a revert's reason names the run that met X or the job that
-  failed at it. Clients render these, with `crates/fixtures` cases for each; wire-compat samples gain a `Peaks` with
-  `on_cap`.
+  failed at it. Clients render these lines as core words them; wire-compat samples gain a `Peaks` with `on_cap`
+  and a `ProfileSizing` with `revert`.
 
 ## Consequences
 
@@ -318,9 +318,12 @@ Cases:
     the predictor built from the rows finished before it gives. Catches simulate learning a run under today's cap or
     its sampled-with-page-cache peak.
 
-The local counter's meaning gets an `#[ignore]`d Docker test with sysbox, as README's "Building" runs them: a child
-container killed at its own limit leaves the runner's `local_ooms` at 0, and the runner's own limit raises it.
+The local counter's meaning is the kernel's: `memory.events.local` counts events at the cgroup's own limit, not a
+descendant's. `observe`'s tests read it beside `memory.events`, and the store's tests read it back per runner and as
+`None` from a schema 13 history. A Docker test with sysbox that kills a child container at its own limit is left for
+a machine that runs them.
 
-Fixtures in `crates/fixtures`: a profile with jobs on their cap, a job predicted from its last 20 runs, a `Keep`
-above the cap with none met, and a revert's reason, for each client's parity test. Wire compat: a 0.0.17 reader reads
-`Peaks` with `on_cap`, and the new reader reads 0.0.17's without it.
+Clients render core's lines (`advice_line`, `Admission::line`) and its `at_cap` count as they are and compute none of
+these facts, so core's tests assert the lines: a profile with jobs on their cap, a `Keep` above the cap with none
+met, and a revert's reason. Wire compat: a 0.0.17 reader reads `Peaks` with
+`on_cap` and a `ProfileSizing` with `revert`, and the new reader reads 0.0.17's without them.
