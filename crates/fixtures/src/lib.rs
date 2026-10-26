@@ -570,7 +570,7 @@ fn priced(repository: &str, profile: &str, seconds: u64, ago: u64) -> api::Price
 /// standard runner, and docs, a public repository.
 fn savings() -> api::Savings {
     let mut dependabot = priced(STOREFRONT, "node", 120, 600);
-    dependabot.labels = vec!["dependabot".to_owned()];
+    dependabot.workflow = Some("Dependabot Updates".to_owned());
     let mut lost = priced(LEDGER, "jvm", 7200, 700);
     lost.state = JobState::Lost;
     let mut untimed = priced(STOREFRONT, "node", 60, 800);
@@ -599,7 +599,7 @@ fn savings() -> api::Savings {
         .into_iter()
         .map(|(name, visibility)| (name.to_owned(), visibility))
         .collect(),
-        oldest: Some((NOW - 60 * 86_400) * 1000),
+        kept_since: (NOW - 60 * 86_400) * 1000,
     };
     let pricing = api::Pricing {
         profiles: [("jvm".to_owned(), api::Sku::Linux8Core)]
@@ -904,13 +904,13 @@ mod tests {
         );
         assert_eq!(
             facts.savings,
-            "This month: 29 job-minutes here, $0.62 at GitHub's rates for each profile's runner, before your \
+            "This month: 29 job-minutes here, an estimated $0.62 at GitHub's rates for each profile's runner, before your \
              plan's free minutes (5 jobs not priced)"
         );
         assert!(
             facts
                 .savings_30_days
-                .starts_with("Last 30 days: 39 job-minutes here, $0.68"),
+                .starts_with("Last 30 days: 39 job-minutes here, an estimated $0.68"),
             "{}",
             facts.savings_30_days
         );

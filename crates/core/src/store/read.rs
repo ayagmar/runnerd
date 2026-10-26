@@ -765,7 +765,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
 }
 
 /// The completed and lost jobs dated at or after `since` (ms) by their end, start or queue time, as
-/// `api::PricedRun::at` dates them; each repository's visibility; and the oldest job's queue time.
+/// `api::PricedRun::at` dates them; each repository's visibility; and since when the history holds every final job.
 pub(super) fn pricing(db: &Connection, since: u64) -> rusqlite::Result<api::PricingHistory> {
     let runs = db
         .prepare_cached(
@@ -803,11 +803,11 @@ pub(super) fn pricing(db: &Connection, since: u64) -> rusqlite::Result<api::Pric
             Err(error) => Some(Err(error)),
         })
         .collect::<rusqlite::Result<_>>()?;
-    let oldest = db.query_row("SELECT min(queued_at) FROM jobs", [], |row| row.get(0))?;
+    let kept_since = db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))?;
     Ok(api::PricingHistory {
         runs,
         visibility,
-        oldest,
+        kept_since,
     })
 }
 

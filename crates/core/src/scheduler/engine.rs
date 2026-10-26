@@ -26,7 +26,7 @@ mod tick;
 mod warm;
 
 use std::collections::{BTreeMap, BTreeSet};
-use std::sync::Arc;
+use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
 
 use tokio::sync::{mpsc, watch};
@@ -384,8 +384,11 @@ pub struct Engine<G = Github, D = Docker> {
     default_branches: BTreeMap<String, build_cache::DefaultBranch>,
     /// Removed runners' build cache uploads held until `follow_jobs` asks GitHub of their jobs, by runner.
     ended_uploads: BTreeMap<String, build_cache::EndedUploads>,
-    /// When each repository's visibility is next asked of GitHub; the store keeps the answers.
-    visibility_due: BTreeMap<String, SystemTime>,
+    /// When each repository's visibility is next asked of GitHub, which the asking task updates; the store keeps
+    /// the answers.
+    visibility_due: Arc<Mutex<BTreeMap<String, SystemTime>>>,
+    /// The task asking GitHub repositories' visibility, off the tick (`follow_visibility`).
+    visibility_asking: Option<JoinHandle<()>>,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -503,7 +506,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             build_cache: build_cache.clone(),
             default_branches: BTreeMap::new(),
             ended_uploads: BTreeMap::new(),
-            visibility_due: BTreeMap::new(),
+            visibility_due: Arc::default(),
+            visibility_asking: None,
         };
         engine.publish();
         (

@@ -31,7 +31,7 @@ fn history(runs: Vec<PricedRun>) -> PricingHistory {
             ("o/app".to_owned(), Visibility::Private),
             ("o/site".to_owned(), Visibility::Public),
         ]),
-        oldest: Some(OCTOBER - 60 * 86_400_000),
+        kept_since: OCTOBER - 60 * 86_400_000,
     }
 }
 
@@ -86,20 +86,25 @@ fn a_public_repository_is_free_on_a_standard_runner_and_billed_on_a_larger_one()
 }
 
 #[test]
-fn dependabot_and_pages_are_free_on_a_standard_runner_in_a_private_repository() {
+fn a_job_named_as_dependabot_or_pages_is_not_priced_on_a_standard_runner_and_a_label_proves_nothing()
+ {
     let mut labelled = ran("o/app", "default", 60, 1000);
-    labelled.labels = vec!["dependabot".to_owned()];
+    labelled.labels = vec!["self-hosted".to_owned(), "dependabot".to_owned()];
     let mut dynamic = ran("o/app", "default", 60, 2000);
     dynamic.workflow = Some("Dependabot Updates".to_owned());
     let mut pages = ran("o/app", "default", 60, 3000);
     pages.workflow = Some("pages build and deployment".to_owned());
     let mut larger = ran("o/app", "big", 60, 4000);
-    larger.labels = vec!["dependabot".to_owned()];
+    larger.workflow = Some("Dependabot Updates".to_owned());
     let window = month(vec![labelled, dynamic, pages, larger]);
-    assert_eq!(window.free, 3);
     assert_eq!(
-        window.jobs, 1,
-        "Dependabot on a larger runner is billed, as GitHub bills it"
+        (window.services, window.free),
+        (2, 0),
+        "a name is not proof the job was free"
+    );
+    assert_eq!(
+        window.jobs, 2,
+        "CI on a dependabot-labelled pool is priced, and so is Dependabot on a larger runner"
     );
 }
 
@@ -122,7 +127,7 @@ fn jobs_that_cannot_be_priced_are_counted_and_said() {
     );
     assert_eq!(
         window.headline(),
-        "This month: 1 job-minute here, $0.00 at GitHub's 2-core Linux rate, before your plan's free minutes \
+        "This month: 1 job-minute here, an estimated $0.00 at GitHub's 2-core Linux rate, before your plan's free minutes \
          (3 jobs not priced)"
     );
     assert_eq!(
@@ -156,12 +161,12 @@ fn the_month_starts_at_midnight_utc_on_the_first() {
 fn a_history_younger_than_the_window_says_where_it_starts() {
     let mut young = history(vec![ran("o/app", "big", 600, 1000)]);
     // 2026-10-03 08:00 UTC.
-    young.oldest = Some(OCTOBER + 2 * 86_400_000 + 8 * 3_600_000);
+    young.kept_since = OCTOBER + 2 * 86_400_000 + 8 * 3_600_000;
     let window = Savings::of(&young, &pricing(), NOW).month;
-    assert!(window.cut, "the window starts at the history's oldest job");
+    assert!(window.cut, "the window starts where the history does");
     assert_eq!(
         window.headline(),
-        "Since Oct 3: 10 job-minutes here, $0.22 at GitHub's 8-core Linux rate, before your plan's free minutes"
+        "Since Oct 3: 10 job-minutes here, an estimated $0.22 at GitHub's 8-core Linux rate, before your plan's free minutes"
     );
 }
 
@@ -174,7 +179,7 @@ fn several_runners_are_one_figure_with_a_line_each() {
     ]);
     assert_eq!(
         window.headline(),
-        "This month: 21 job-minutes here, $0.28 at GitHub's rates for each profile's runner, before your plan's \
+        "This month: 21 job-minutes here, an estimated $0.28 at GitHub's rates for each profile's runner, before your plan's \
          free minutes"
     );
     assert_eq!(
@@ -186,6 +191,22 @@ fn several_runners_are_one_figure_with_a_line_each() {
         [(Sku::ActionsLinux, 11), (Sku::Linux8Core, 10)],
         "a profile gone from the config is priced at the default runner"
     );
+}
+
+#[test]
+fn a_history_pruned_of_every_job_this_month_says_where_it_starts_not_that_none_ran() {
+    let mut pruned = history(Vec::new());
+    pruned.kept_since = NOW - 86_400_000;
+    assert_eq!(
+        Savings::of(&pruned, &pricing(), NOW).month.headline(),
+        "Since Oct 25: no job-minutes here yet"
+    );
+}
+
+#[test]
+fn a_minute_and_a_millisecond_bills_two_minutes() {
+    assert_eq!(billed_minutes(0, 60_000), 1);
+    assert_eq!(billed_minutes(0, 60_001), 2);
 }
 
 #[test]

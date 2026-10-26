@@ -101,7 +101,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.follow_jobs().await;
         self.count_mirror_bytes().await;
         if mode == Shutdown::No {
-            self.follow_visibility().await;
+            self.follow_visibility();
             self.pull_images().await;
             self.refresh_predictor().await;
             self.rereserve().await;

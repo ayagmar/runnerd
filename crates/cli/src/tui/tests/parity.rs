@@ -38,7 +38,11 @@ fn app(daemon: &Daemon) -> App {
 
 /// A frame wide enough that nothing is fitted, as text rows and as its cells.
 fn frame(app: &App) -> (Vec<String>, Buffer) {
-    let (width, height) = (300, 60);
+    frame_of(app, 300, 60)
+}
+
+/// A frame `width` cells wide and `height` rows high.
+fn frame_of(app: &App, width: u16, height: u16) -> (Vec<String>, Buffer) {
     let mut terminal = Terminal::new(TestBackend::new(width, height)).unwrap();
     terminal
         .draw(|frame| draw(frame, app, NOW, COLOUR))
@@ -222,6 +226,20 @@ fn the_overview_says_what_the_months_job_minutes_would_have_cost_as_core_words_i
     let (daemon, facts) = fixtures();
     let mut app = app(&daemon);
     app.update(Msg::Savings(Box::new(daemon.savings.clone())));
-    let (rows, _) = frame(&app);
-    assert!(shows(&rows, &facts.savings), "{}", rows.join("\n"));
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    for width in [80, 100, 120, 300] {
+        let (rows, _) = frame_of(&app, width, 60);
+        // Wrapped, never cut: its basis and what it leaves out stay with the dollars.
+        assert!(
+            words(&rows.join(" ")).contains(&words(&facts.savings)),
+            "{width} columns:\n{}",
+            rows.join("\n")
+        );
+    }
+    let (rows, _) = frame_of(&app, 80, 12);
+    assert!(
+        !rows.iter().any(|row| row.contains('$')),
+        "too short a terminal leaves the figure out rather than cut it:\n{}",
+        rows.join("\n")
+    );
 }

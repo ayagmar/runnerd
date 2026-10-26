@@ -71,17 +71,20 @@ machine's run times, not a bill and not money saved.
 
 - **Visibility.** `GithubApi::default_branch` becomes `repository`, the same `GET /repos/{owner}/{name}` request,
   returning the default branch and `visibility`. No new request kind and no new permission: the token that registers
-  runners reads it. The engine asks for each configured repository's visibility on its first tick and once a day
+  runners reads it. The engine asks for each configured repository's visibility from its first tick and once a day
   after, an hour after a failed ask, and stores the answer (schema 15: `repositories`, with `name`, `visibility` and
-  `checked_at`). Rows are never removed, so a repository gone from the config keeps its answer, and a failed request
-  keeps the last one.
+  `checked_at`). It asks in a task of its own, at most `CONCURRENT_REQUESTS` requests at once and one such task at a
+  time, which a tick starts and never awaits: nothing for the figure delays or blocks scheduling, and pricing reads
+  what is stored meanwhile. Rows are never removed, so a repository gone from the config keeps its answer, and a
+  failed request keeps the last one.
 - **Public repositories** run free on standard SKUs: those jobs are counted as free. On a larger SKU they are priced,
   as GitHub bills larger runners in public repositories too and `priced_as` says the jobs need one.
-- **Dependabot and Pages** jobs are free on standard SKUs and priced on larger ones, as public jobs are. Core knows
-  them by the workflow name GitHub gives them (`Dependabot Updates`, `pages build and deployment`, or a
-  `dynamic/dependabot/` or `dynamic/pages/` path) or, for Dependabot, by a job asking for the `dependabot` label. A
-  Dependabot job sent to a custom label under another workflow name is not recognised and is priced; this is
-  accepted.
+- **Dependabot and Pages** jobs are free on standard SKUs and billed on larger ones. The history keeps no proof that a
+  job is one: it has the workflow's display name, which any workflow may take, and its runner labels, which route
+  ordinary CI too. So a job on a standard SKU whose workflow is named as GitHub's (`Dependabot Updates`, `pages build
+  and deployment`, or a `dynamic/dependabot/` or `dynamic/pages/` path) is not priced and is counted apart, as one
+  that may have been free; it is not called free. On a larger SKU it is priced, as GitHub bills both. A `dependabot`
+  label changes nothing: CI on a pool with that label is priced.
 - **Unknown visibility.** A repository with no stored answer (deleted, or GitHub not asked or not answering since it
   was added) is not priced and its jobs are counted, so the figure never prices a job that may have been free.
 - Jobs are judged by the repository's latest stored visibility: one made public reads as free over its whole history.
@@ -96,9 +99,13 @@ number from them would claim savings the account may not have had. No setting as
 ### Periods
 
 Two windows: the UTC calendar month so far, as GitHub resets usage at the start of each month; and the last 30 days,
-so the first days of a month do not read near nothing. When the oldest job the history keeps was queued after a
-window's start (`[history] jobs` under a month, or a younger database), the window starts at that job and core words
-it "Since Oct 3". The default 90 days hold both.
+so the first days of a month do not read near nothing.
+
+The oldest job left says nothing of what pruning dropped: a month whose jobs were all pruned has none left, and a
+job never final is never pruned. So the store keeps since when it holds every final job (schema 15's
+`history_kept`): when the database was made, or, for one from before, its oldest final job; pruning raises it to its
+cutoff before it deletes job records. When that is after a window's start, the window starts there and core words it
+"Since Oct 3", also with no jobs left: "Since Oct 3: no job-minutes here yet". The default 90 days hold both.
 
 ### The wire and the words
 
@@ -106,14 +113,17 @@ it "Since Oct 3". The default 90 days hold both.
   `$1,204.18`.
 - `GET /v1/savings` is `api::Savings`: `until`, `month` and `last_30_days`, each an `api::SavedWindow` of `period`,
   `since`, `cut` (the history starts after the window's start), the priced `jobs`, `minutes` and `cost`, one
-  `PricedRunner` per SKU priced at, and the counts of jobs not in the figure: `free`, `unknown`, `lost`, `untimed`.
+  `PricedRunner` per SKU priced at, and the counts of jobs not in the figure: `free`, `services`, `unknown`, `lost`,
+  `untimed`.
   Computed on each request from the store and the running config; nothing is kept in memory.
 - `api::Digest` gains `savings: Option<SavedWindow>`, the month so far, `#[serde(default)]` and skipped when `None`:
   0.0.18 ignores it, and this version reads a 0.0.18 digest as without one. `Savings` is a new document, which 0.0.18
   never asks for; a client facing a daemon without the route shows no figure. `Sku` is a closed enum: a SKU added
   later is a break for older clients, recorded then.
 - Core words it. `SavedWindow::headline`, for compact places, carries the figure with its basis: "This month: 1,234
-  job-minutes here, $7.40 at GitHub's 2-core Linux rate, before your plan's free minutes". With several SKUs, "at
+  job-minutes here, an estimated $7.40 at GitHub's 2-core Linux rate, before your plan's free minutes". A client shows
+  it whole or not at all: wrapped, never cut, as the basis and what it leaves out are part of the figure. With
+  several SKUs, "at
   GitHub's rates for each profile's runner"; a window the history cut short starts "Since Oct 3"; jobs not in the
   figure add "(5 jobs not priced)". `SavedWindow::details` gives a line per SKU, one per kind of job not priced and
   why, and the basis: `priced_as` and visibility as they are now, from this machine's run times. One module,
@@ -124,8 +134,8 @@ it "Since Oct 3". The default 90 days hold both.
 - `runnerctl insights` opens with both windows' headlines and details. Insights is the command for what the history
   says; there is no `runnerctl stats`. `--json` prints the `Insights` document as before; `GET /v1/savings` is the
   JSON. `runnerctl insights --digest` ends with the month's headline.
-- The TUI's overview shows the month's headline under its health line, while the slots and lists keep their room;
-  the dashboard's overview under its health figures.
+- The TUI's overview shows the month's headline under its health line, wrapped to the terminal's width, while the
+  slots and lists keep their room, and leaves it out otherwise; the dashboard's overview under its health figures.
 - The daily digest's message ends with the month's headline.
 - `crates/fixtures` gains a savings set every client's parity test draws.
 
@@ -145,17 +155,21 @@ Through `api::savings`, the store, the engine and the daemon's API, named in dom
 
 1. A 61-second job bills 2 minutes and a 0-second job 1; two attempts bill twice.
 2. An `elsewhere` job, with or without a start, is not counted.
-3. A job of a public repository is free at `actions_linux` and priced at `linux_8_core`; Dependabot and Pages jobs
-   likewise; a repository with no stored visibility is not priced and is counted; a profile gone from the config is
-   priced at the default.
+3. A job of a public repository is free at `actions_linux` and priced at `linux_8_core`. A job named as Dependabot's
+   or Pages' workflow is not priced at `actions_linux`, and priced at `linux_8_core`; CI asking for the `dependabot`
+   label is priced. A repository with no stored visibility is not priced and is counted; a profile gone from the
+   config is priced at the default.
 4. A lost job and a job without an end are not priced and are counted; the store reads them by their end, start or
    queue time, and the daemon's route says how many it left out.
 5. The month starts at 00:00 UTC on the 1st: a job that ended a second before is in the last 30 days, not the month.
-   A history whose oldest job is newer than the window's start says the window starts there.
-6. The store reads a repository's latest visibility back after a reopen; the engine asks once, not on every poll.
+   A history pruned of every job of a window, with a job never final left, says where it starts after a reopen, not
+   that no job ran.
+6. The store reads a repository's latest visibility back after a reopen; the engine asks once, not on every poll,
+   and a repository read that never answers holds up no runner.
 7. `config check` refuses an unknown `priced_as`, a Windows and a GPU SKU, naming the keys it takes.
 8. `Usd` writes 7,409,999 micro-dollars as `$7.40`.
-9. Each client's parity test over the fixtures' savings set shows core's headline.
+9. Each client's parity test over the fixtures' savings set shows core's headline; the TUI's, whole at 80, 100 and
+   120 columns, and not at all in a terminal too short for it.
 
 Wire compat: the `Digest` sample has `savings`, which 0.0.18 reads; `Savings` is sampled under `documents!`'s `new:`,
-read by this version only until 0.0.19 becomes the previous release.
+whose samples this version reads back until 0.0.19 becomes the previous release.

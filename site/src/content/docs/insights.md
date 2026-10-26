@@ -40,12 +40,12 @@ The dashboard's Insights page shows the same as cards, with links to each run in
 
 ## What the minutes would have cost
 
-`runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days. The dashboard's overview, `runnerctl tui` and the daily digest show the month's line.
+`runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days. The dashboard's overview, `runnerctl tui` and the daily digest show the month's line, whole: the TUI wraps it, and leaves it out rather than cut it when the terminal has no room.
 
 ```console wrap=false
-This month: 2,184 job-minutes here, $13.10 at GitHub's 2-core Linux rate, before your plan's free minutes (14 jobs not priced)
+This month: 2,184 job-minutes here, an estimated $13.10 at GitHub's 2-core Linux rate, before your plan's free minutes (14 jobs not priced)
   2,184 minutes of 412 jobs at actions_linux (2-core Linux, $0.006 a minute): $13.10
-  9 jobs free on GitHub: on a standard runner, of a public repository, Dependabot or Pages
+  9 jobs free on GitHub: on a standard runner, of a public repository
   5 jobs not priced: lost, so how long they ran is not known
   An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
 ```
@@ -54,9 +54,12 @@ Each job that a runner here took and GitHub reported completed is billed as GitH
 
 What it leaves out, and counts:
 
-- Jobs GitHub runs free on a standard runner: those of public repositories, Dependabot's and Pages'. On a larger runner they are priced, as GitHub bills them.
-- Jobs of a repository GitHub has not said is public or private. runnerd asks once a day.
+- Jobs of public repositories on a standard runner, which GitHub runs free. On a larger runner they are priced, as GitHub bills them.
+- Jobs on a standard runner whose workflow is named as GitHub's Dependabot or Pages workflow (`Dependabot Updates`, `pages build and deployment`), which GitHub runs free. A name is not proof, so they are not priced and not called free. A `dependabot` runner label changes nothing.
+- Jobs of a repository GitHub has not said is public or private. runnerd asks once a day, beside its scheduling.
 - Lost jobs, and jobs without a start or an end: how long they ran is not known.
+
+When pruning (`[history] jobs`) has dropped jobs a window covers, or the history is younger than the window, the line starts with the day the history holds every job from, such as "Since Oct 3".
 
 The figure is before your plan's included minutes. Those are shared with everything your account runs on GitHub's runners, which runnerd does not see, so it does not subtract them.
 

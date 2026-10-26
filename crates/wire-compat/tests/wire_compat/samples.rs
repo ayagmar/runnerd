@@ -1021,6 +1021,7 @@ fn saved_window(period: Period) -> SavedWindow {
             },
         ],
         free: 3,
+        services: 1,
         unknown: 1,
         lost: 2,
         untimed: 1,

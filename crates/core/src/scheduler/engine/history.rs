@@ -21,6 +21,7 @@ use crate::observe::metrics::Tracked;
 use crate::scheduler::warm::Attempt;
 use crate::scheduler::{Pool, SlotRef};
 use crate::store::{LogPosition, RunnerRecord, Store};
+use crate::sync::lock;
 use crate::time;
 
 /// How long the history waits for GitHub to report a job completed after its container is gone, before it records
@@ -226,52 +227,65 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Records the queued jobs the repositories' runners may run, and closes those that left the queue for another
-    /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
-    /// runners completed.
-    /// Asks GitHub each served repository's visibility, at start and once a day after, and stores the answers.
-    pub(super) async fn follow_visibility(&mut self) {
+    /// Asks GitHub each served repository's visibility, at start and once a day after, in a task of its own that
+    /// stores the answers: a slow or hanging GitHub never holds up a tick, and pricing reads what is stored meanwhile.
+    /// One ask at a time, `CONCURRENT_REQUESTS` requests at once.
+    pub(super) fn follow_visibility(&mut self) {
+        if self
+            .visibility_asking
+            .as_ref()
+            .is_some_and(|task| !task.is_finished())
+        {
+            return;
+        }
         let now = SystemTime::now();
-        let due: Vec<String> = self
-            .config
-            .repository_names()
-            .into_iter()
-            .filter(|repository| {
-                self.visibility_due
-                    .get(repository)
-                    .is_none_or(|due| now >= *due)
-            })
-            .collect();
+        let due: Vec<String> = {
+            let due_at = lock(&self.visibility_due);
+            self.config
+                .repository_names()
+                .into_iter()
+                .filter(|repository| due_at.get(repository).is_none_or(|due| now >= *due))
+                .collect()
+        };
         if due.is_empty() {
             return;
         }
-        let github = self.github.clone();
-        let answers = self
-            .serving(async move {
-                let mut answers = Vec::new();
-                for repository in due {
-                    let answer = github.repository(&repository).await;
-                    answers.push((repository, answer));
-                }
-                answers
-            })
-            .await;
-        for (repository, answer) in answers {
-            let next = match answer {
-                Ok(details) => {
-                    self.store
-                        .visibility(repository.clone(), details.visibility, time::ms(now));
-                    VISIBILITY_FOR
-                }
-                Err(error) => {
-                    warn!("{repository}: cannot read whether it is public: {error}");
-                    VISIBILITY_RETRY
-                }
-            };
-            self.visibility_due.insert(repository, now + next);
-        }
+        let (github, store, due_at) = (
+            self.github.clone(),
+            self.store.clone(),
+            self.visibility_due.clone(),
+        );
+        self.visibility_asking = Some(tokio::spawn(async move {
+            let answers: Vec<_> = futures_util::stream::iter(due)
+                .map(|repository| {
+                    let github = github.clone();
+                    async move {
+                        let answer = github.repository(&repository).await;
+                        (repository, answer)
+                    }
+                })
+                .buffer_unordered(CONCURRENT_REQUESTS)
+                .collect()
+                .await;
+            for (repository, answer) in answers {
+                let next = match answer {
+                    Ok(details) => {
+                        store.visibility(repository.clone(), details.visibility, time::ms(now));
+                        VISIBILITY_FOR
+                    }
+                    Err(error) => {
+                        warn!("{repository}: cannot read whether it is public: {error}");
+                        VISIBILITY_RETRY
+                    }
+                };
+                lock(&due_at).insert(repository, now + next);
+            }
+        }));
     }
 
+    /// Records the queued jobs the repositories' runners may run, and closes those that left the queue for another
+    /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
+    /// runners completed.
     pub(super) async fn follow_jobs(&mut self) {
         let taken: BTreeSet<u64> = self
             .occupied()

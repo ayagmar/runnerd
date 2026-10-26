@@ -1002,7 +1002,7 @@ fn savings(fixtures: &Fixtures) -> runnerd_core::api::Savings {
                 )
             })
             .collect(),
-        oldest: Some(ms(fixtures.now - 60 * 86_400)),
+        kept_since: ms(fixtures.now - 60 * 86_400),
     };
     let pricing = runnerd_core::api::Pricing {
         profiles: BTreeMap::new(),

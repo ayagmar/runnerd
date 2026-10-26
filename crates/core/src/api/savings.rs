@@ -237,19 +237,17 @@ impl PricedRun {
             .unwrap_or(self.queued_at)
     }
 
-    /// Whether GitHub runs it free on a standard runner whatever the repository: a Dependabot update or a Pages
-    /// build, by the workflow GitHub generates for it or Dependabot's runner label.
-    fn free_service(&self) -> bool {
-        self.labels
-            .iter()
-            .any(|label| label.eq_ignore_ascii_case("dependabot"))
-            || self.workflow.as_deref().is_some_and(|workflow| {
-                let workflow = workflow.to_ascii_lowercase();
-                workflow == "dependabot updates"
-                    || workflow == "pages build and deployment"
-                    || workflow.starts_with("dynamic/dependabot/")
-                    || workflow.starts_with("dynamic/pages/")
-            })
+    /// Whether its workflow is named as the ones GitHub generates for Dependabot updates and Pages builds, which
+    /// it runs free on a standard runner. A name is not proof, as any workflow may take it, so such a job is not
+    /// priced, and not called free either.
+    fn named_like_service(&self) -> bool {
+        self.workflow.as_deref().is_some_and(|workflow| {
+            let workflow = workflow.to_ascii_lowercase();
+            workflow == "dependabot updates"
+                || workflow == "pages build and deployment"
+                || workflow.starts_with("dynamic/dependabot/")
+                || workflow.starts_with("dynamic/pages/")
+        })
     }
 }
 
@@ -260,8 +258,9 @@ pub struct PricingHistory {
     pub runs: Vec<PricedRun>,
     /// Each repository's visibility as GitHub last gave it, by repository.
     pub visibility: BTreeMap<String, Visibility>,
-    /// When the oldest job the history keeps was queued, in milliseconds; `None` without jobs.
-    pub oldest: Option<u64>,
+    /// Since when, in milliseconds, the history holds every final job: when it started, or the cutoff of its last
+    /// prune of job records.
+    pub kept_since: u64,
 }
 
 /// From when, in milliseconds, [`Savings::of`] reads the history at `now` (ms): the earlier of the month's start and
@@ -304,9 +303,9 @@ pub enum Period {
 pub struct SavedWindow {
     /// Which window.
     pub period: Period,
-    /// Its start, in seconds: the window's, or the oldest job's the history keeps when that is later.
+    /// Its start, in seconds: the window's, or when the history starts holding every job if that is later.
     pub since: u64,
-    /// Whether the history starts after the window's start, so `since` is its oldest job.
+    /// Whether the history starts after the window's start, so `since` is when it does.
     pub cut: bool,
     /// The jobs priced.
     pub jobs: u64,
@@ -316,8 +315,12 @@ pub struct SavedWindow {
     pub cost: Usd,
     /// The same by runner priced at, by SKU.
     pub runners: Vec<PricedRunner>,
-    /// Jobs GitHub would have run free: on a standard runner, of a public repository, or Dependabot's or Pages'.
+    /// Jobs GitHub would have run free: on a standard runner, of a public repository.
     pub free: u64,
+    /// Jobs on a standard runner whose workflow is named as GitHub's Dependabot or Pages workflow, which GitHub runs
+    /// free: not priced, as the name does not prove it.
+    #[serde(default)]
+    pub services: u64,
     /// Jobs of repositories whose visibility GitHub has not given: not priced.
     pub unknown: u64,
     /// Lost jobs: not priced, as their end is when runnerd saw their runner gone.
@@ -347,6 +350,7 @@ enum Priced {
         minutes: u64,
     },
     Free,
+    Service,
     Unknown,
     Lost,
     Untimed,
@@ -368,8 +372,8 @@ fn price(run: &PricedRun, history: &PricingHistory, pricing: &Pricing) -> Option
         return Some(Priced::Untimed);
     };
     let sku = pricing.of(run.profile.as_deref());
-    if sku.standard() && run.free_service() {
-        return Some(Priced::Free);
+    if sku.standard() && run.named_like_service() {
+        return Some(Priced::Service);
     }
     Some(match history.visibility.get(&run.repository) {
         None => Priced::Unknown,
@@ -408,17 +412,18 @@ impl SavedWindow {
         pricing: &Pricing,
         now: u64,
     ) -> SavedWindow {
-        let oldest = history.oldest.map(|oldest| oldest / 1000);
-        let cut = oldest.is_some_and(|oldest| oldest > start);
+        let kept_since = history.kept_since / 1000;
+        let cut = kept_since > start;
         let mut window = SavedWindow {
             period,
-            since: if cut { oldest.unwrap_or(start) } else { start },
+            since: start.max(kept_since),
             cut,
             jobs: 0,
             minutes: 0,
             cost: Usd(0),
             runners: Vec::new(),
             free: 0,
+            services: 0,
             unknown: 0,
             lost: 0,
             untimed: 0,
@@ -449,6 +454,7 @@ impl SavedWindow {
                     window.cost.0 += cost;
                 }
                 Some(Priced::Free) => window.free += 1,
+                Some(Priced::Service) => window.services += 1,
                 Some(Priced::Unknown) => window.unknown += 1,
                 Some(Priced::Lost) => window.lost += 1,
                 Some(Priced::Untimed) => window.untimed += 1,
@@ -460,11 +466,12 @@ impl SavedWindow {
 
     /// The jobs of the window not in its figure, free or not priced.
     pub fn not_priced(&self) -> u64 {
-        self.free + self.unknown + self.lost + self.untimed
+        self.free + self.services + self.unknown + self.lost + self.untimed
     }
 
-    /// The figure with its basis, for places with room for one line: "This month: 1,234 job-minutes here, $7.40 at
-    /// GitHub's 2-core Linux rate, before your plan's free minutes (3 jobs not priced)".
+    /// The figure with its basis, for compact places, which show it whole or not at all: "This month: 1,234
+    /// job-minutes here, an estimated $7.40 at GitHub's 2-core Linux rate, before your plan's free minutes (3 jobs not
+    /// priced)".
     pub fn headline(&self) -> String {
         let when = if self.cut {
             format!("Since {}", short_date(self.since))
@@ -483,7 +490,7 @@ impl SavedWindow {
             _ => "at GitHub's rates for each profile's runner".to_owned(),
         };
         let mut line = format!(
-            "{when}: {} here, {} {rate}, before your plan's free minutes",
+            "{when}: {} here, an estimated {} {rate}, before your plan's free minutes",
             count(self.minutes, "job-minute", "job-minutes"),
             self.cost,
         );
@@ -518,7 +525,12 @@ impl SavedWindow {
         for (jobs, why) in [
             (
                 self.free,
-                "free on GitHub: on a standard runner, of a public repository, Dependabot or Pages",
+                "free on GitHub: on a standard runner, of a public repository",
+            ),
+            (
+                self.services,
+                "not priced: their workflow is named as GitHub's Dependabot or Pages workflow, free on a standard \
+                 runner",
             ),
             (
                 self.unknown,

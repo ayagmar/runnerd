@@ -372,6 +372,21 @@ fn this_version_reads_what_the_previous_release_wrote() {
             }
         }
     }
+    // A document the previous release lacks has no fixture yet: this version reads its own samples instead.
+    for document in documents
+        .values()
+        .filter(|document| document.previous.is_none())
+    {
+        for (label, value) in &document.items {
+            let expect = Expect {
+                read: Keys::Every,
+                sent: Keys::Every,
+            };
+            if let Err(error) = check(document.current, value, expect) {
+                failures.insert(format!("{}/{label}", document.name), error);
+            }
+        }
+    }
     for name in documents
         .iter()
         .filter(|(name, document)| document.previous.is_some() && !names.contains(**name))

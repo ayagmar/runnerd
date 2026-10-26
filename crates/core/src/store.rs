@@ -834,7 +834,7 @@ impl Store {
     }
 
     /// What pricing at GitHub's rates reads: the completed and lost jobs dated at or after `since` (ms), each
-    /// repository's visibility and the oldest job's queue time.
+    /// repository's visibility and since when the history holds every final job.
     pub async fn pricing(&self, since: u64) -> Result<api::PricingHistory, StoreError> {
         self.read(move |db| read::pricing(db, since)).await
     }
