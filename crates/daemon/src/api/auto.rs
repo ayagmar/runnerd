@@ -150,6 +150,9 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
 /// be missing from the holds while the runs after it, which the history has, ask for another, and a profile would be
 /// changed twice in one interval.
 async fn last_changes(state: &AppState) -> Result<AutoSizing, StoreError> {
+    // The `profile.changed` events a reload or restart published are written in order with every other write; reading
+    // after they land keeps a quick edit away and back from looking like no edit at all.
+    state.handle.store.flush().await;
     state.handle.store.auto_sizing().await
 }
 

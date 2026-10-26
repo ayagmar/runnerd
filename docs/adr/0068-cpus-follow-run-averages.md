@@ -33,7 +33,9 @@ since the last one with other `cpus` starts at the boundary. So a hand edit, a r
 the evidence over even when no job ran at the cap in between, and a restart reads it back. A config the daemon has
 not announced yet, as after an edit made while it was down, has no evidence until it does. Pruning keeps each
 profile's latest event, and drops older ones after `[history] events` (30 days, the sizing window): a boundary it
-dropped can only move later, which reads fewer runs, never older ones. No runs since then: nothing moves.
+dropped can only move later, which reads fewer runs, never older ones. No runs since then: nothing moves. A look waits for the store's queued writes
+before it reads the events, so an announcement still in the queue counts. One case stays open: an announcement whose
+write fails is lost, and an edit away and back across it reads the runs before; the failed write is logged.
 
 ### Raise
 
