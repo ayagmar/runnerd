@@ -7,8 +7,8 @@ use std::collections::{BTreeMap, BTreeSet, VecDeque};
 use ratatui::crossterm::event::{KeyCode, KeyEvent, KeyEventKind, KeyModifiers};
 use runnerd_core::api::{
     Activity, Event, EventEnvelope, HostSample, Insights, Job, JobMetrics, JobPage, JobQuery,
-    JobState, JobSummary, LogSummary, QueuedJob, Records, Resize, Sample, SampleSeries, Sizing,
-    Status, Timeline,
+    JobState, JobSummary, LogSummary, QueuedJob, Records, Resize, Sample, SampleSeries, Savings,
+    Sizing, Status, Timeline,
 };
 
 use crate::watch;
@@ -70,6 +70,8 @@ pub(crate) enum Msg {
     Reasons(Option<Box<Status>>),
     /// What the history says (`GET /v1/insights`).
     Insights(Box<Insights>),
+    /// What the jobs' minutes would have cost on GitHub's runners (`GET /v1/savings`).
+    Savings(Box<Savings>),
     /// The answer to the open job's request for its latest runs.
     Runs {
         job: u64,
@@ -155,7 +157,7 @@ pub(crate) enum Effect {
     },
     /// Read the status again for why each queued job waits.
     Reasons,
-    /// Read the insights again.
+    /// Read the insights, and what the jobs' minutes would have cost, again.
     Insights,
     /// Read the open job's latest runs: the same repository's, workflow's and job name's.
     Runs {
@@ -372,6 +374,8 @@ pub(crate) struct App {
     pub(crate) activity: Option<Activity>,
     /// What the history says; `None` until read, or from a daemon before insights.
     pub(crate) insights: Option<Insights>,
+    /// What the jobs' minutes would have cost on GitHub's runners; `None` until read, or from a daemon before it.
+    pub(crate) savings: Option<Savings>,
     /// The host sample time from which the insights are read again.
     insights_due: u64,
     /// The host sample time from which the activity is read again, unless a job starts or ends first.
@@ -430,6 +434,7 @@ impl App {
             reasons_stale: false,
             activity,
             insights: None,
+            savings: None,
             insights_due: 0,
             history: History::default(),
             job: None,
@@ -550,6 +555,7 @@ impl App {
             } => self.activity(generation, activity),
             Msg::Reasons(status) => return self.reasons(status.as_deref()),
             Msg::Insights(insights) => self.insights = Some(*insights),
+            Msg::Savings(savings) => self.savings = Some(*savings),
             Msg::Runs { job, page } => match page {
                 Ok(page) => {
                     self.history.learn(&page.jobs);

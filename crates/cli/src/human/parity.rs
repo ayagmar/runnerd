@@ -11,7 +11,7 @@
 use runnerd_core::api::JobPage;
 use runnerd_fixtures::{Facts, NOW, TIMED_OUT, daemon, facts};
 
-use super::{Paint, Tone, caches, job, jobs, outcome_tone, records, status};
+use super::{Paint, Tone, caches, job, jobs, outcome_tone, records, savings, status};
 
 const PLAIN: Paint = Paint { colour: false };
 const COLOUR: Paint = Paint { colour: true };
@@ -143,4 +143,13 @@ fn records_and_caches_state_their_limits_as_core_does() {
     );
     let text = caches(&daemon.caches, NOW, PLAIN);
     assert!(text.contains(&facts.build_cache_week), "{text}");
+}
+
+#[test]
+fn insights_open_with_what_the_job_minutes_would_have_cost_as_core_words_it() {
+    let (daemon, facts) = fixtures();
+    let text = savings(&daemon.savings);
+    let lines: Vec<&str> = text.lines().collect();
+    assert_eq!(lines[0], facts.savings);
+    assert!(lines.contains(&facts.savings_30_days.as_str()), "{text}");
 }

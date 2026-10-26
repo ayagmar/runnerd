@@ -344,7 +344,14 @@ fn overview(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme
     let cards = length(slots.div_ceil(columns) * 7 + 1);
     let lines = length(slots + 1);
     let queued = app.live.status.queued.len();
-    let rest = area.height.saturating_sub(4);
+    // What the month's job minutes would have cost, under the health line while the slots and lists keep their room.
+    let savings = app
+        .savings
+        .as_ref()
+        .map(|savings| savings.month.headline())
+        .filter(|_| area.height > 5 + lines + LISTS_MIN);
+    let savings_height = u16::from(savings.is_some());
+    let rest = area.height.saturating_sub(4 + savings_height);
     let queue_least = if queued == 0 {
         0
     } else {
@@ -371,6 +378,7 @@ fn overview(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme
     };
     let [
         health_area,
+        savings_area,
         budget_area,
         slots_area,
         queue_area,
@@ -378,6 +386,7 @@ fn overview(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme
         charts_area,
     ] = Layout::vertical([
         Constraint::Length(1),
+        Constraint::Length(savings_height),
         Constraint::Length(3),
         Constraint::Length(slots_height),
         Constraint::Length(queue_height),
@@ -386,6 +395,15 @@ fn overview(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme
     ])
     .areas(area);
     health(frame, health_area, app, now, theme);
+    if let Some(savings) = savings {
+        frame.render_widget(
+            Line::from(Span::styled(
+                fit(&savings, usize::from(savings_area.width)),
+                theme.dim(),
+            )),
+            savings_area,
+        );
+    }
     budget(frame, budget_area, app, theme);
     if as_cards {
         slot_cards(frame, slots_area, app, columns, now, theme);

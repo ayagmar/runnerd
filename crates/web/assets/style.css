@@ -1170,6 +1170,14 @@ dl.health-figures {
   color: var(--failure-ink);
 }
 
+/* What the month's job minutes would have cost on GitHub's runners, with its basis: a note under the figures. */
+.health-savings {
+  margin: 0.6rem 0 0;
+  font-size: 0.875rem;
+  font-weight: 500;
+  color: var(--muted);
+}
+
 /* The longest wait of each hour of the last day: the shape of the bursts, not their numbers. */
 .wait-hours {
   display: flex;

@@ -38,6 +38,28 @@ halyard/storefront   212        9s  4m 10s        2s       47s           1m 30s
 
 The dashboard's Insights page shows the same as cards, with links to each run in the history and on GitHub. `runnerctl tui` counts the warnings on its health line.
 
+## What the minutes would have cost
+
+`runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days. The dashboard's overview, `runnerctl tui` and the daily digest show the month's line.
+
+```console wrap=false
+This month: 2,184 job-minutes here, $13.10 at GitHub's 2-core Linux rate, before your plan's free minutes (14 jobs not priced)
+  2,184 minutes of 412 jobs at actions_linux (2-core Linux, $0.006 a minute): $13.10
+  9 jobs free on GitHub: on a standard runner, of a public repository, Dependabot or Pages
+  5 jobs not priced: lost, so how long they ran is not known
+  An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
+```
+
+Each job that a runner here took and GitHub reported completed is billed as GitHub bills it: its minutes rounded up, at least one, at the per-minute rate of the runner its profile's [`priced_as`](../configuration/#profilesname) names. A profile with more CPUs than GitHub's 2-core runner may be worth pricing at `linux_4_core` or `linux_8_core`; the figure moves with that choice, for the whole history.
+
+What it leaves out, and counts:
+
+- Jobs GitHub runs free on a standard runner: those of public repositories, Dependabot's and Pages'. On a larger runner they are priced, as GitHub bills them.
+- Jobs of a repository GitHub has not said is public or private. runnerd asks once a day.
+- Lost jobs, and jobs without a start or an end: how long they ran is not known.
+
+The figure is before your plan's included minutes. Those are shared with everything your account runs on GitHub's runners, which runnerd does not see, so it does not subtract them.
+
 ## Notifications
 
 Each `[[notify.targets]]` entry is a place messages go. A burst is one message: runnerd waits 10 seconds after the first event, then sends to a target at most once a minute, so twenty jobs failing on a broken main arrive as "20 jobs failed" with the first five named; a webhook's body carries the first 20 of each kind. A failed delivery is retried, from 5 seconds up to every 10 minutes, with what came meanwhile folded in. Where each target got to is kept in the job history, so a restart drops no message; one stopped between sending and recording may send it again. A target added later starts with the events from then on.

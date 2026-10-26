@@ -626,3 +626,31 @@ async fn a_run_and_its_pull_requests_say_whether_people_or_bots_started_them() {
         "no such pull request"
     );
 }
+
+#[tokio::test]
+async fn a_repository_says_its_default_branch_and_whether_it_is_public() {
+    let (url, _) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r" => {
+            json(r#"{"default_branch":"trunk","private":true,"visibility":"internal"}"#)
+        }
+        "/repos/o/site" => {
+            json(r#"{"default_branch":"main","private":false,"visibility":"public"}"#)
+        }
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let github = client(&url);
+    let details = github.repository("o/r").await.unwrap();
+    assert_eq!(
+        (details.default_branch.as_str(), details.visibility),
+        ("trunk", crate::api::Visibility::Internal)
+    );
+    assert_eq!(
+        github.repository("o/site").await.unwrap().visibility,
+        crate::api::Visibility::Public
+    );
+    assert!(
+        github.repository("o/gone").await.is_err(),
+        "a deleted repository is an error, not a visibility"
+    );
+}

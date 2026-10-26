@@ -31,6 +31,7 @@
 //! | `GET /v1/sizing?`[`SizingQuery`] | [`Sizing`] |
 //! | `GET /v1/insights?`[`InsightsQuery`] | [`Insights`] |
 //! | `GET /v1/digest` | [`Digest`] |
+//! | `GET /v1/savings` | [`Savings`] |
 //! | `POST /v1/notify/test?`[`NotifyTestQuery`] | [`NotifyTest`]; 404 without `[notify]` targets or with no such one |
 //! | `GET /v1/caches` | [`Caches`] |
 //! | `GET /v1/caches/history?`[`CacheHistoryQuery`] | [`CacheHistory`] |
@@ -52,6 +53,7 @@ mod insights;
 mod jobs;
 mod records;
 mod results;
+mod savings;
 mod sizing;
 mod slots;
 mod stats;
@@ -87,6 +89,10 @@ pub use records::{
     SHELL_PROTOCOL, ShellQuery,
 };
 pub use results::{force_pause_consequence, reseed_requested, reseeded};
+pub use savings::{
+    Period, PricedRun, PricedRunner, Pricing, PricingHistory, SELF_HOSTED_RATE, SavedWindow,
+    Savings, Sku, Usd, Visibility, billed_minutes, reads_since,
+};
 pub use sizing::{
     Advice, AutoPlan, GRANULE, JobSizing, Need, PAGE_CACHE_ROOM, Peaks, ProfilePlan, ProfileSizing,
     Resize, RevertCause, SAMPLE_INTERVAL, Sizing, SizingChange, SizingHold, SizingQuery,
@@ -98,6 +104,8 @@ pub use storage::{
     BuildCacheActivity, CacheLimit, RECORDS_NEAR_FULL, RecordState, records_near_full,
 };
 pub use tone::{Tone, Toned};
+#[cfg(feature = "host")]
+pub(crate) use units::days_from_civil;
 pub use units::{ago, cores_used, cpu_time, duration, in_cores};
 
 /// Who sent a request, as the transport authenticated it. Handlers get it from one place, so a new transport only

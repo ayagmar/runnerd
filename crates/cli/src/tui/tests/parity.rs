@@ -216,3 +216,12 @@ fn records_near_max_total_say_so_as_core_does() {
     assert!(shows(&rows, &facts.records_pressure), "{all}");
     assert!(shows(&rows, &facts.records_usage), "{all}");
 }
+
+#[test]
+fn the_overview_says_what_the_months_job_minutes_would_have_cost_as_core_words_it() {
+    let (daemon, facts) = fixtures();
+    let mut app = app(&daemon);
+    app.update(Msg::Savings(Box::new(daemon.savings.clone())));
+    let (rows, _) = frame(&app);
+    assert!(shows(&rows, &facts.savings), "{}", rows.join("\n"));
+}

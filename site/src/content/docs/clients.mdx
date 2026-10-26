@@ -159,7 +159,7 @@ JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FO
 | `runnerctl sizing [--since 7d]` | per profile and per job: percentiles and the largest of the sampled memory and CPU peaks, waits, how busy the slots were, and the [advice](../admission/#sizing) |
 | `runnerctl sizing apply <profile> [--yes]` | writes a profile's advised `memory` and `slots` into the daemon's config after showing the change and asking; the daemon checks it against the budget first |
 | `runnerctl sizing undo <profile> [--yes]` | writes back the `memory` and `slots` [auto sizing](../admission/#auto-sizing) last replaced, the same way; both refuse to write over a config changed since they read it |
-| `runnerctl insights [--days 30]`, `insights --digest` | one line per [insight](../insights/), then each repository's waits this week against the last; or the last 24 hours |
+| `runnerctl insights [--days 30]`, `insights --digest` | what the job minutes [would have cost](../insights/#what-the-minutes-would-have-cost) on GitHub's runners, one line per [insight](../insights/), then each repository's waits this week against the last; or the last 24 hours |
 | `runnerctl notify test [--target phone]` | sends each `[notify]` target a test message and says what each did; fails unless every one got it |
 | `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits; or empties a slot layer or shared cache no job uses, stopping the runners that wait for one |
 | `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |

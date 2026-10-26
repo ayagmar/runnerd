@@ -1,6 +1,7 @@
 //! The job history the engine feeds: each runner's record, sampling and mirror lease, its log capture (which finds
 //! the job it took), the queued jobs it may run, steps from GitHub, and closing the jobs of removed runners. It
-//! must not start or remove containers or runners: that is `runners`.
+//! must not start or remove containers or runners: that is `runners`. Also each repository's visibility, which
+//! pricing at GitHub's rates reads from the store (ADR 0072).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -25,6 +26,12 @@ use crate::time;
 /// How long the history waits for GitHub to report a job completed after its container is gone, before it records
 /// the job as lost. GitHub fails a job whose runner vanished after about 10 minutes.
 pub(super) const LOST_AFTER: Duration = Duration::from_mins(15);
+
+/// How long a repository's visibility stands before GitHub is asked again.
+const VISIBILITY_FOR: Duration = Duration::from_hours(24);
+
+/// How long after a failed ask GitHub is asked a repository's visibility again; the store keeps the last answer.
+const VISIBILITY_RETRY: Duration = Duration::from_hours(1);
 
 /// How long `release` waits for a runner's log capture to end once its container stopped.
 const CAPTURE_DRAIN: Duration = Duration::from_secs(10);
@@ -222,6 +229,49 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Records the queued jobs the repositories' runners may run, and closes those that left the queue for another
     /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
     /// runners completed.
+    /// Asks GitHub each served repository's visibility, at start and once a day after, and stores the answers.
+    pub(super) async fn follow_visibility(&mut self) {
+        let now = SystemTime::now();
+        let due: Vec<String> = self
+            .config
+            .repository_names()
+            .into_iter()
+            .filter(|repository| {
+                self.visibility_due
+                    .get(repository)
+                    .is_none_or(|due| now >= *due)
+            })
+            .collect();
+        if due.is_empty() {
+            return;
+        }
+        let github = self.github.clone();
+        let answers = self
+            .serving(async move {
+                let mut answers = Vec::new();
+                for repository in due {
+                    let answer = github.repository(&repository).await;
+                    answers.push((repository, answer));
+                }
+                answers
+            })
+            .await;
+        for (repository, answer) in answers {
+            let next = match answer {
+                Ok(details) => {
+                    self.store
+                        .visibility(repository.clone(), details.visibility, time::ms(now));
+                    VISIBILITY_FOR
+                }
+                Err(error) => {
+                    warn!("{repository}: cannot read whether it is public: {error}");
+                    VISIBILITY_RETRY
+                }
+            };
+            self.visibility_due.insert(repository, now + next);
+        }
+    }
+
     pub(super) async fn follow_jobs(&mut self) {
         let taken: BTreeSet<u64> = self
             .occupied()

@@ -11,7 +11,7 @@ use std::time::Duration;
 use ratatui::crossterm::event::{self as terminal, Event as TerminalEvent};
 use runnerd_core::api::{
     Activity, ActivityQuery, EventQuery, HostSampleQuery, HostSamples, Insights, InsightsQuery,
-    Job, JobPage, PauseQuery, Paused, Records, SampleSeries, Sizing, Status,
+    Job, JobPage, PauseQuery, Paused, Records, SampleSeries, Savings, Sizing, Status,
 };
 use runnerd_core::client::{Client, ClientError, Events, StatusCode};
 use tokio::signal::unix::{Signal as Stream, SignalKind, signal};
@@ -474,13 +474,17 @@ async fn read_activity(client: Client, send: UnboundedSender<Msg>, generation: u
     }
 }
 
-/// Reads the insights and sends them; a daemon before insights has none to show.
+/// Reads the insights and what the jobs' minutes would have cost, and sends them; a daemon before either has
+/// none to show.
 async fn read_insights(client: Client, send: UnboundedSender<Msg>) {
     if let Ok(insights) = client
         .get_query::<Insights>("/v1/insights", &InsightsQuery::default())
         .await
     {
         let _ = send.send(Msg::Insights(Box::new(insights)));
+    }
+    if let Ok(savings) = client.get::<Savings>("/v1/savings").await {
+        let _ = send.send(Msg::Savings(Box::new(savings)));
     }
 }
 

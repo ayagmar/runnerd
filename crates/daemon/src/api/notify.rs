@@ -26,7 +26,7 @@ use tokio::time::Instant;
 use tracing::{info, warn};
 
 use self::send::{client, deliver};
-use super::history::{insight_runs_of, now};
+use super::history::{insight_runs_of, now, savings_of};
 use super::{AppState, Authenticated, ConfigText, error};
 
 mod discord;
@@ -569,7 +569,15 @@ async fn step(
                 target.last_digest / 1000,
             )
         {
-            target.digest = Some(insights::digest(runs, config, now_ms));
+            let mut digest = insights::digest(runs, config, now_ms);
+            digest.savings = savings_of(store, config, now_ms)
+                .await
+                .map_err(|store_error| {
+                    warn!("notify: cannot price the month's jobs: {store_error}");
+                })
+                .ok()
+                .map(|savings| savings.month);
+            target.digest = Some(digest);
         }
         send_due(store, http, &setup.timing, target).await;
     }
@@ -841,6 +849,9 @@ fn digest_message(digest: Digest) -> Notification {
     if !digest.waits.is_empty() {
         body.push("Longest waits:".to_owned());
         body.extend(digest.waits.iter().map(runnerd_core::api::LongWait::line));
+    }
+    if let Some(savings) = &digest.savings {
+        body.push(format!("{}.", savings.headline()));
     }
     Notification {
         event: NotifyEvent::Digest,

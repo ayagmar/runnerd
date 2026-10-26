@@ -1,4 +1,5 @@
-//! The job history routes: jobs, their samples and logs, the slice's samples, stats, sizing advice, insights and cache sizes,
+//! The job history routes: jobs, their samples and logs, the slice's samples, stats, sizing advice, insights, what the
+//! jobs' minutes would have cost on GitHub's runners and cache sizes,
 //! read from the store. Every handler takes the authenticated principal. Reads only; a log with `follow` streams
 //! until its job's record is final or the server stops.
 
@@ -13,7 +14,7 @@ use futures_util::stream;
 use runnerd_core::api::{
     ActivityQuery, BuildCacheStats, CacheHistory, CacheHistoryQuery, CacheKind, Caches, Event,
     HostSampleQuery, HostSamples, INSIGHT_DAYS, INSIGHT_DAYS_MAX, InsightsQuery, JobQuery,
-    LogQuery, Sizing, SizingQuery, StatsQuery,
+    LogQuery, Savings, Sizing, SizingQuery, StatsQuery, reads_since,
 };
 use runnerd_core::config::Config;
 use runnerd_core::insights::{self, Run};
@@ -209,9 +210,42 @@ pub(super) async fn insights(
 pub(super) async fn digest(_: Authenticated, State(state): State<AppState>) -> Response {
     let now = now() * 1000;
     match insight_runs(&state, INSIGHT_DAYS, now).await {
-        Ok((runs, config)) => Json(insights::digest(&runs, &config, now)).into_response(),
+        Ok((runs, config)) => {
+            let mut digest = insights::digest(&runs, &config, now);
+            digest.savings = savings_of(&state.handle.store, &config, now)
+                .await
+                .ok()
+                .map(|savings| savings.month);
+            Json(digest).into_response()
+        }
         Err(message) => error(StatusCode::INTERNAL_SERVER_ERROR, &message),
     }
+}
+
+/// `GET /v1/savings`: what the jobs' minutes this month and in the last 30 days would have cost on GitHub's runners,
+/// priced at the config running now (ADR 0072).
+pub(super) async fn savings(_: Authenticated, State(state): State<AppState>) -> Response {
+    let text = state.config.lock().await.text.clone();
+    let config = match Config::parse(&text) {
+        Ok(config) => config,
+        Err(parse_error) => {
+            return error(StatusCode::INTERNAL_SERVER_ERROR, &parse_error.to_string());
+        }
+    };
+    match savings_of(&state.handle.store, &config, now() * 1000).await {
+        Ok(savings) => Json(savings).into_response(),
+        Err(store_error) => failed(&store_error),
+    }
+}
+
+/// What the history's job minutes would have cost on GitHub's runners at `now` (ms), priced at `config`.
+pub(super) async fn savings_of(
+    store: &Store,
+    config: &Config,
+    now: u64,
+) -> Result<Savings, StoreError> {
+    let history = store.pricing(reads_since(now)).await?;
+    Ok(Savings::of(&history, &config.pricing(), now))
 }
 
 /// What insights of `days` ending at `now` (ms) read: the jobs of those days, of the 14 the waits compare and of

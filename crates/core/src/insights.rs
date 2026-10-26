@@ -222,6 +222,7 @@ pub fn digest(runs: &[Run], config: &Config, now: u64) -> Digest {
                 url: run.url.clone(),
             })
             .collect(),
+        savings: None,
     }
 }
 

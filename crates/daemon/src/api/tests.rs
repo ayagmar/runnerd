@@ -2293,3 +2293,32 @@ async fn insights_and_the_digest_read_the_history() {
     let digest: runnerd_core::api::Digest = serde_json::from_slice(&body(response).await).unwrap();
     assert_eq!((digest.finished, digest.failed), (0, 0));
 }
+
+#[tokio::test]
+async fn the_savings_leave_lost_jobs_out_and_say_so() {
+    let dir = Dir::new();
+    let daemon = start(&dir.0, None).await;
+    finished_jobs(&daemon.store, "app", 4 << 30, 1 << 30).await;
+    daemon.store.visibility(
+        "o/app".to_owned(),
+        runnerd_core::api::Visibility::Private,
+        0,
+    );
+    daemon.store.flush().await;
+    let response = daemon
+        .client
+        .get("http://runnerd/v1/savings")
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::OK);
+    let savings: runnerd_core::api::Savings =
+        serde_json::from_slice(&body(response).await).unwrap();
+    assert_eq!((savings.month.jobs, savings.month.lost), (0, 10));
+    assert!(
+        savings.month.headline().ends_with("(10 jobs not priced)"),
+        "{}",
+        savings.month.headline()
+    );
+    daemon.stop().await;
+}

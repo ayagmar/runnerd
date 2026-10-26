@@ -52,6 +52,50 @@ pub fn in_cores(millicores: u64) -> String {
     }
 }
 
+/// Days from 1970-01-01 to a date of the proleptic Gregorian calendar, for years from 1970 (Howard Hinnant's
+/// `days_from_civil`).
+pub(crate) fn days_from_civil(year: u64, month: u64, day: u64) -> u64 {
+    let year = if month <= 2 { year - 1 } else { year };
+    let era = year / 400;
+    let year_of_era = year - era * 400;
+    let month_index = (month + 9) % 12;
+    let day_of_year = (153 * month_index + 2) / 5 + day - 1;
+    let day_of_era = year_of_era * 365 + year_of_era / 4 - year_of_era / 100 + day_of_year;
+    era * 146_097 + day_of_era - 719_468
+}
+
+/// The date of a day count since 1970-01-01, as `(year, month, day)` (Howard Hinnant's `civil_from_days`, for days
+/// after the epoch).
+pub(crate) fn civil_from_days(days: u64) -> (u64, u64, u64) {
+    let z = days + 719_468;
+    let era = z / 146_097;
+    let day_of_era = z - era * 146_097;
+    let year_of_era =
+        (day_of_era - day_of_era / 1460 + day_of_era / 36_524 - day_of_era / 146_096) / 365;
+    let day_of_year = day_of_era - (365 * year_of_era + year_of_era / 4 - year_of_era / 100);
+    let month_index = (5 * day_of_year + 2) / 153;
+    let day = day_of_year - (153 * month_index + 2) / 5 + 1;
+    let month = if month_index < 10 {
+        month_index + 3
+    } else {
+        month_index - 9
+    };
+    (year_of_era + era * 400 + u64::from(month <= 2), month, day)
+}
+
+/// A UTC day as a short label: `Oct 3`.
+pub(crate) fn short_date(at: u64) -> String {
+    const MONTHS: [&str; 12] = [
+        "Jan", "Feb", "Mar", "Apr", "May", "Jun", "Jul", "Aug", "Sep", "Oct", "Nov", "Dec",
+    ];
+    let (_, month, day) = civil_from_days(at / 86_400);
+    let name = usize::try_from(month.saturating_sub(1))
+        .ok()
+        .and_then(|index| MONTHS.get(index))
+        .unwrap_or(&"");
+    format!("{name} {day}")
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

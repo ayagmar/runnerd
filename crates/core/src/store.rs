@@ -43,6 +43,7 @@ const MIGRATIONS: &[&str] = &[
     include_str!("store/migrations/0012_build_cache.sql"),
     include_str!("store/migrations/0013_host_memory.sql"),
     include_str!("store/migrations/0014_local_ooms.sql"),
+    include_str!("store/migrations/0015_repositories.sql"),
 ];
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
@@ -279,6 +280,11 @@ enum Write {
         repositories: Vec<String>,
         /// Whether it committed.
         done: oneshot::Sender<bool>,
+    },
+    Visibility {
+        repository: String,
+        visibility: api::Visibility,
+        at: u64,
     },
     SizingIntent {
         change: api::SizingChange,
@@ -619,6 +625,15 @@ impl Store {
         async move { committed.await.unwrap_or(false) }
     }
 
+    /// Records a repository's visibility as GitHub gave it at `at` (ms), in place of the one recorded before.
+    pub fn visibility(&self, repository: String, visibility: api::Visibility, at: u64) {
+        self.send(Write::Visibility {
+            repository,
+            visibility,
+            at,
+        });
+    }
+
     /// Records a change auto sizing is about to write, as pending, before the file is, synced to disk. The future
     /// has its row once it committed, `None` if it did not: then nothing may be written.
     pub fn sizing_intent(
@@ -816,6 +831,12 @@ impl Store {
     /// What sizing reads: the finished jobs queued at or after `since` (ms) and the runners since.
     pub async fn sizing(&self, since: u64) -> Result<sizing::History, StoreError> {
         self.read(move |db| read::sizing(db, since)).await
+    }
+
+    /// What pricing at GitHub's rates reads: the completed and lost jobs dated at or after `since` (ms), each
+    /// repository's visibility and the oldest job's queue time.
+    pub async fn pricing(&self, since: u64) -> Result<api::PricingHistory, StoreError> {
+        self.read(move |db| read::pricing(db, since)).await
     }
 
     /// The jobs completed or lost that were queued at or after `since` (ms), as insights read them.

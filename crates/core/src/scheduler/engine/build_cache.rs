@@ -242,7 +242,10 @@ async fn read_answers<G: GithubApi>(
         .map(|undecided| async move {
             let default_branch = match known.get(&undecided.repository) {
                 Some(branch) => Ok(branch.clone()),
-                None => github.default_branch(&undecided.repository).await,
+                None => github
+                    .repository(&undecided.repository)
+                    .await
+                    .map(|details| details.default_branch),
             };
             let writes = decide(github, &undecided, branches, default_branch.as_ref()).await;
             Answer {

@@ -913,3 +913,31 @@ fn pools_of_a_repository_must_agree_on_who_writes_to_the_build_cache() {
         .to_string();
     assert!(error.contains("build_cache_writers"), "{error}");
 }
+
+#[test]
+fn a_profile_is_priced_at_the_github_runner_it_names() {
+    let config =
+        Config::parse(&MINIMAL.replace("slots = 1\n", "slots = 1\npriced_as = \"linux_8_core\"\n"))
+            .unwrap();
+    assert_eq!(
+        config.pricing().of(Some("app")),
+        crate::api::Sku::Linux8Core
+    );
+    assert_eq!(
+        config.pricing().of(Some("gone")),
+        crate::api::Sku::standard_for(std::env::consts::ARCH),
+        "a profile gone from the config is priced at the standard runner"
+    );
+    for refused in ["windows_4_core", "linux_4_core_gpu", "8-core"] {
+        let error = Config::parse(&MINIMAL.replace(
+            "slots = 1\n",
+            &format!("slots = 1\npriced_as = \"{refused}\"\n"),
+        ))
+        .unwrap_err()
+        .to_string();
+        assert!(
+            error.contains("linux_8_core"),
+            "{refused}: names the runners it takes: {error}"
+        );
+    }
+}

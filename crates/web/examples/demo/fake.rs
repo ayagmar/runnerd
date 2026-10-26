@@ -69,6 +69,8 @@ pub struct Fixtures {
     pub unrecorded: bool,
     /// What `GET /v1/sizing` says auto sizing does next; `None`, auto sizing is off.
     pub auto_plan: Option<runnerd_core::api::AutoPlan>,
+    /// What `GET /v1/savings` answers; `None` prices the jobs at GitHub's 2-core rate, every repository private.
+    pub savings: Option<runnerd_core::api::Savings>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -711,6 +713,7 @@ impl Fixtures {
             controls: Vec::new(),
             unrecorded: false,
             auto_plan: None,
+            savings: None,
         }
     }
 
@@ -964,6 +967,50 @@ fn insights(fixtures: &Fixtures) -> Insights {
     }
 }
 
+/// What the fixtures' jobs would have cost on GitHub's runners, priced by core.
+fn savings(fixtures: &Fixtures) -> runnerd_core::api::Savings {
+    if let Some(savings) = &fixtures.savings {
+        return savings.clone();
+    }
+    let ms = |seconds: u64| seconds * 1000;
+    let history = runnerd_core::api::PricingHistory {
+        runs: fixtures
+            .jobs
+            .iter()
+            .map(|job| runnerd_core::api::PricedRun {
+                repository: job.summary.repository.clone(),
+                workflow: job.summary.workflow.clone(),
+                labels: job.summary.labels.clone(),
+                state: job.summary.state,
+                profile: job
+                    .summary
+                    .runner
+                    .as_ref()
+                    .map(|runner| runner.profile.clone()),
+                queued_at: ms(job.summary.timeline.queued_at),
+                started_at: job.summary.timeline.started_at.map(ms),
+                finished_at: job.summary.timeline.finished_at.map(ms),
+            })
+            .collect(),
+        visibility: fixtures
+            .jobs
+            .iter()
+            .map(|job| {
+                (
+                    job.summary.repository.clone(),
+                    runnerd_core::api::Visibility::Private,
+                )
+            })
+            .collect(),
+        oldest: Some(ms(fixtures.now - 60 * 86_400)),
+    };
+    let pricing = runnerd_core::api::Pricing {
+        profiles: BTreeMap::new(),
+        default_sku: runnerd_core::api::Sku::ActionsLinux,
+    };
+    runnerd_core::api::Savings::of(&history, &pricing, ms(fixtures.now))
+}
+
 /// The last 24 hours of the fixtures.
 fn digest(fixtures: &Fixtures) -> Digest {
     let insights = insights(fixtures);
@@ -981,6 +1028,7 @@ fn digest(fixtures: &Fixtures) -> Digest {
             waited: 262,
             url: None,
         }],
+        savings: Some(savings(fixtures).month),
     }
 }
 
@@ -1474,6 +1522,10 @@ fn router(fake: Fake) -> Router {
         .route(
             "/v1/insights",
             get(|State(fake): State<Fake>| async move { Json(insights(&fake.fixtures.lock().unwrap())) }),
+        )
+        .route(
+            "/v1/savings",
+            get(|State(fake): State<Fake>| async move { Json(savings(&fake.fixtures.lock().unwrap())) }),
         )
         .route(
             "/v1/digest",

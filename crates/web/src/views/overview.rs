@@ -8,7 +8,7 @@ use maud::{Markup, html};
 use runnerd_core::api::{
     Activity, ActivityQuery, ClosedPart, HeldKind, HeldPart, HostSample, HostSamples, Job, JobPage,
     JobQuery, JobState, JobSummary, JobTitle, ProfileStatus, QueuedJob, RepositoryStatus, Sample,
-    SampleSeries, SlotState, SlotStatus, Status, Tone, WaitKind, cpus, in_cores,
+    SampleSeries, Savings, SlotState, SlotStatus, Status, Tone, WaitKind, cpus, in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -46,6 +46,8 @@ pub(crate) struct Overview {
     pub(crate) recent: Vec<JobSummary>,
     /// The jobs started and finished in the last `DAY`, for the health figures.
     pub(crate) day: Activity,
+    /// What the jobs' minutes would have cost on GitHub's runners; `None` from a daemon before it.
+    pub(crate) savings: Option<Savings>,
 }
 
 impl Overview {
@@ -73,13 +75,14 @@ impl Overview {
                 failed: 0,
                 runner_failed: 0,
             },
+            savings: None,
         };
         overview.reload_running(daemon).await?;
         overview.reload_day(daemon, now).await?;
         Ok(overview)
     }
 
-    /// Reads the jobs started and finished in the day up to `now` again.
+    /// Reads the jobs started and finished in the day up to `now` again, and what the jobs' minutes would have cost.
     pub(crate) async fn reload_day(
         &mut self,
         daemon: &Client,
@@ -93,6 +96,8 @@ impl Overview {
                 },
             )
             .await?;
+        // A daemon before the savings route has none to show.
+        self.savings = daemon.get("/v1/savings").await.ok();
         Ok(())
     }
 
@@ -1072,6 +1077,9 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                         a href="/history?outcome=failure" { "failures" }
                     }
                 }
+            }
+            @if let Some(savings) = &overview.savings {
+                p.health-savings { (savings.month.headline()) }
             }
             @if overview.status.shutting_down {
                 p.warning { "runnerd is shutting down: it starts no new runners and stops once running jobs finish." }

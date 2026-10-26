@@ -175,6 +175,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     min_memory: None,
                     max_memory: None,
                     max_slots: None,
+                    priced_as: None,
                 });
         }
         if !self.repositories.contains_key(&occupant.repository) {

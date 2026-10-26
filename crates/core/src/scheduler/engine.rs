@@ -384,6 +384,8 @@ pub struct Engine<G = Github, D = Docker> {
     default_branches: BTreeMap<String, build_cache::DefaultBranch>,
     /// Removed runners' build cache uploads held until `follow_jobs` asks GitHub of their jobs, by runner.
     ended_uploads: BTreeMap<String, build_cache::EndedUploads>,
+    /// When each repository's visibility is next asked of GitHub; the store keeps the answers.
+    visibility_due: BTreeMap<String, SystemTime>,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -501,6 +503,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             build_cache: build_cache.clone(),
             default_branches: BTreeMap::new(),
             ended_uploads: BTreeMap::new(),
+            visibility_due: BTreeMap::new(),
         };
         engine.publish();
         (

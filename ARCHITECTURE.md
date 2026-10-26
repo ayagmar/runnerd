@@ -42,7 +42,10 @@ flowchart TB
 
 `runnerd-core` modules:
 
-- `api`, `config`: build without `host`. Every client reads these.
+- `api`, `config`: build without `host`. Every client reads these. `api::savings` prices this machine's job minutes
+  at GitHub's per-minute rates and words the figure ([ADR 0072](docs/adr/0072-job-minutes-priced-at-github-hosted-rates.md));
+  the daemon passes it the history and the config, and the store keeps each repository's visibility, which the
+  engine asks GitHub for once a day.
 - `client`: the `client` feature. HTTP over the socket, timeouts and the event stream with its reconnects, for every
   client ([ADR 0030](docs/adr/0030-one-socket-client-in-core.md)).
 - `admission`, `buildcache`, `docker`, `github`, `cache`, `insights`, `isolation`, `record`, `scheduler`, `observe`,
