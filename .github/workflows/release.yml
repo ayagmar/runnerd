@@ -231,7 +231,7 @@ jobs:
       - uses: rust-lang/crates-io-auth-action@3268eb413133e2960fa4ae0e963ca76380c54cd9 # v1.0.6
         id: auth
       # Publishes runnerd-core, runnerd-web, runnerd and runnerd-cli in dependency order, each after the one it needs
-      # is in the index.
-      - run: cargo publish --workspace --locked
+      # is in the index, skipping any already published, so a rerun picks up where an index timeout stopped it.
+      - run: .github/scripts/publish-crates.sh
         env:
           CARGO_REGISTRY_TOKEN: ${{ steps.auth.outputs.token }}
