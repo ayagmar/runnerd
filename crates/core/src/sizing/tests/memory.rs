@@ -481,141 +481,143 @@ fn a_narrower_window_advises_memory_as_the_default_one_does() {
     }
 }
 
-mod days {
-    //! Generated days of auto sizing: the ledger's tests in a JVM whose heap grows toward 63% of its cap, needing
-    //! 5G, and 7G when a cold cache makes one run rebuild everything.
+/// `lowered` with a slot added an hour after the lowering, as auto sizing does when jobs waited: 10G × 4 since.
+fn lowered_then_a_slot(after: Vec<Ran>) -> History {
+    let mut history = lowered(after);
+    let slot = LOWERED + HOUR;
+    history.changes.push(SizingChange {
+        at: slot / 1000,
+        profile: "jvm".to_owned(),
+        from: Resize {
+            memory: 10 * G,
+            slots: 3,
+            cpus: None,
+        },
+        to: Resize {
+            memory: 10 * G,
+            slots: 4,
+            cpus: None,
+        },
+        reason: "jobs waited".to_owned(),
+        uncertain: false,
+    });
+    history.memory_set.push(set(10 * G, slot));
+    history
+}
 
-    use std::collections::BTreeMap;
-
-    use super::{DAY, G, HOUR, M, NOW, jvm_at, ledger, look, met, set};
-    use crate::api::SizingChange;
-    use crate::config::{Config, resize_profile};
-    use crate::sizing::History;
-    use crate::sizing::memory::{CHANGES_READ, HISTORY};
-
-    /// The look every 6 hours, with 3 runs before each.
-    const LOOK: u64 = 6 * HOUR;
-
-    /// The run at `cap` of a job that needs `need`: its heap fills 63% of the cap, and it meets a cap under `need`.
-    fn ran(at: u64, cap: u64, need: u64, run_id: u64) -> crate::sizing::Ran {
-        let run = ledger(at, cap, need.max(cap / 100 * 63));
-        let run = crate::sizing::Ran {
-            run_id,
-            branch: Some(
-                if run_id.is_multiple_of(2) {
-                    "main"
-                } else {
-                    "fix/parser"
-                }
-                .to_owned(),
-            ),
-            ..run
-        };
-        if need > cap { met(run) } else { run }
-    }
-
-    /// Days of runs and looks, with a cold cache once every `cold` runs, from 14G × 2; each lowering applied as
-    /// the daemon applies it: written, recorded, and the profile's `memory` set from then.
-    fn generate(days: u64, cold: u64) -> (Vec<(u64, u64)>, Vec<SizingChange>) {
-        let mut text = jvm_at("14G", 2);
-        let mut history = History {
-            memory_set: vec![set(14 * G, NOW)],
-            ..History::default()
-        };
-        let mut last = None;
-        let mut met_at = Vec::new();
-        let mut all = Vec::new();
-        let mut run_id = 0;
-        let mut now = NOW;
-        while now < NOW + days * DAY {
-            let cap = Config::parse(&text).unwrap().profiles["jvm"].memory.0;
-            for i in 0..3 {
-                run_id += 1;
-                let need = if run_id % cold == 0 { 7 * G } else { 5 * G };
-                let run = ran(now + i * HOUR, cap, need, run_id);
-                if run.own_cap == Some(true) {
-                    met_at.push((now + i * HOUR, cap));
-                }
-                history.jobs.push(run);
-            }
-            now += LOOK;
-            // What the daemon reads: 30 days of runs, 60 of changes.
-            history.jobs.retain(|run| run.queued_at >= now - HISTORY);
-            history
-                .changes
-                .retain(|change| change.at * 1000 >= now - CHANGES_READ);
-            for change in look(&text, &history, now, last) {
-                text = resize_profile(&text, &change.profile, change.to).unwrap();
-                history.memory_set.push(set(change.to.memory, now));
-                history.changes.push(change.clone());
-                all.push(change);
-                last = Some(now / 1000);
-            }
-        }
-        (met_at, all)
-    }
-
-    #[test]
-    fn an_elastic_jvm_is_lowered_to_what_it_needs_and_each_lowering_a_cold_run_meets_is_reverted_once()
-     {
-        for cold in [37, 100, 250] {
-            let (met_at, changes) = generate(120, cold);
-            let jvm: Vec<&SizingChange> = changes.iter().filter(|c| c.profile == "jvm").collect();
-            assert!(
-                jvm.last().is_some_and(|change| change.to.memory <= 9 * G),
-                "cold 1 in {cold}: lowered from 14G toward what it needs: {jvm:#?}"
-            );
-            assert!(
-                cold == 37 || !met_at.is_empty(),
-                "cold 1 in {cold}: a lowering under the cold runs' need, met once: {jvm:#?}"
-            );
-            for change in &jvm {
-                if change.to.memory > change.from.memory {
-                    assert!(
-                        change.reason.starts_with("raise memory back to"),
-                        "cold 1 in {cold}: only a revert raises an elastic JVM: {change:#?}"
-                    );
-                }
-            }
-            let mut per_lowering = BTreeMap::new();
-            for &(at, cap) in &met_at {
-                // The lowering it ran under, and the look after it.
-                let lowering = jvm
-                    .iter()
-                    .rposition(|change| change.at * 1000 <= at)
-                    .unwrap();
-                assert!(
-                    jvm[lowering].to.memory == cap && jvm[lowering].from.memory > cap,
-                    "cold 1 in {cold}: only a lowering's cap is met: {:#?}",
-                    jvm[lowering]
-                );
-                *per_lowering.entry(lowering).or_insert(0) += 1;
-                let from = jvm[lowering].from.memory;
-                let next = jvm[lowering + 1];
-                assert!(
-                    next.at * 1000 <= at + LOOK && next.to.memory == from,
-                    "cold 1 in {cold}: the look after a run met {}M reverts to {}M: {next:#?}",
-                    cap / M,
-                    from / M
-                );
-                for later in &jvm[lowering + 1..] {
-                    if later.at * 1000 < at + HISTORY {
-                        assert!(
-                            later.to.memory >= from,
-                            "cold 1 in {cold}: nothing under {}M within 30 days of a revert: {later:#?}",
-                            from / M
-                        );
-                    }
-                }
-            }
-            assert!(
-                per_lowering.values().all(|&runs| runs == 1),
-                "cold 1 in {cold}: one run meets each lowering at most: {per_lowering:?}"
-            );
-            assert!(
-                met_at.len() <= 5,
-                "cold 1 in {cold}: at most one burst in each 30 days: {met_at:?}"
-            );
-        }
+#[test]
+fn a_change_of_slots_after_a_lowering_does_not_keep_the_lowering_from_being_taken_back() {
+    let text = jvm_at("10G", 4);
+    let at = |hours: u64| ledger(NOW - 12 * HOUR + hours * HOUR, 10 * G, 6 * G);
+    let cases = [
+        ("a run that met 10G", vec![met(at(0))], RevertCause::Met),
+        (
+            "three failures on two branches",
+            vec![
+                failed(at(0), "main", 1),
+                failed(at(1), "fix/parser", 2),
+                failed(at(2), "main", 3),
+            ],
+            RevertCause::Failed { runs: 3 },
+        ),
+    ];
+    for (case, runs, cause) in cases {
+        let mut after = clear_at_ten(LOWERED + 2 * HOUR, 10);
+        after.extend(runs);
+        let history = lowered_then_a_slot(after);
+        let changed = look(&text, &history, NOW, Some((LOWERED + HOUR) / 1000));
+        assert_eq!(
+            changed
+                .iter()
+                .map(|change| (change.to.memory, change.to.slots))
+                .collect::<Vec<_>>(),
+            [(14 * G, 2)],
+            "{case}: back to the 14G × 2 the lowering came from"
+        );
+        let sizing = sizing(&text, &history);
+        let jvm = sizing.profiles.iter().find(|p| p.name == "jvm").unwrap();
+        assert_eq!(
+            jvm.revert.as_ref().map(|revert| revert.cause),
+            Some(cause),
+            "{case}"
+        );
     }
 }
+
+#[test]
+fn a_kill_at_a_hand_set_cap_raises_it_at_once_to_what_the_job_needed_at_larger_caps_however_far() {
+    // Runs clear at 14G peaking 10.5G: 12.25G with the margin, more than one 25% step above 8G.
+    let mut jobs: Vec<Ran> = (0..12)
+        .map(|i| ledger(NOW - 20 * DAY + i * HOUR, 14 * G, 10752 * M))
+        .collect();
+    jobs.extend((0..10).map(|i| ledger(NOW - DAY + i * HOUR, 8 * G, 5 * G)));
+    jobs.push(met(ledger(NOW - HOUR, 8 * G, 0)));
+    let history = History {
+        jobs,
+        memory_set: vec![set(14 * G, NOW - 21 * DAY), set(8 * G, NOW - 2 * DAY)],
+        ..History::default()
+    };
+    let changed = look(&jvm_at("8G", 2), &history, NOW, None);
+    assert_eq!(
+        changed
+            .iter()
+            .map(|change| (change.from.memory, change.to.memory))
+            .collect::<Vec<_>>(),
+        [(8 * G, 12544 * M)],
+        "one raise, not a kill at each step"
+    );
+}
+
+#[test]
+fn a_revert_outside_the_profiles_bounds_raises_as_far_as_they_allow_and_the_profile_is_not_held() {
+    let mut after = clear_at_ten(LOWERED + HOUR, 10);
+    after.push(met(ledger(NOW - 2 * HOUR, 10 * G, 0)));
+    // The owner put max_memory under the 14G the lowering came from.
+    let text = jvm_at("10G", 3).replacen(
+        "memory = \"10G\"",
+        "memory = \"10G\"\nmax_memory = \"12G\"",
+        1,
+    );
+    let changed = look(&text, &lowered(after), NOW, Some(LOWERED / 1000));
+    let [change] = &changed[..] else {
+        panic!("one change: {changed:?}")
+    };
+    assert_eq!(change.to.memory, 12 * G);
+    assert!(
+        change.reason.starts_with("raise memory to 12G")
+            && change
+                .reason
+                .ends_with("as far as its max_memory allows, short of 14G"),
+        "{}",
+        change.reason
+    );
+}
+
+#[test]
+fn a_kill_in_the_last_sample_interval_near_the_cap_met_it_and_one_far_under_it_did_not() {
+    // The container's own limit killed it before a sample counted the `oom`; Docker's flag still says it was killed.
+    let killed = |peak: u64| Ran {
+        oom_killed: true,
+        hit_cap: Some(false),
+        own_cap: Some(false),
+        succeeded: false,
+        failed: true,
+        ..ledger(NOW - 2 * HOUR, 10 * G, peak)
+    };
+    let text = jvm_at("10G", 3);
+    for (peak, reverted) in [(9900 * M, Some(RevertCause::Met)), (4 * G, None)] {
+        let mut after = clear_at_ten(LOWERED + HOUR, 10);
+        after.push(killed(peak));
+        let sizing = sizing(&text, &lowered(after));
+        let jvm = sizing.profiles.iter().find(|p| p.name == "jvm").unwrap();
+        assert_eq!(
+            jvm.revert.as_ref().map(|revert| revert.cause),
+            reverted,
+            "killed with its last sample at {}M of 10G",
+            peak / M
+        );
+        assert_eq!(jvm.peaks.on_cap, 1, "either kill holds its job");
+    }
+}
+
+mod looks;

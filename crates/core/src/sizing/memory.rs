@@ -19,7 +19,7 @@ pub const HISTORY: u64 = 30 * 24 * 3600 * 1000;
 /// before the run that met its cap is found while that run is in the history.
 pub const CHANGES_READ: u64 = 2 * HISTORY;
 
-/// A lowering is reverted after this many failures in a row at it, of a job that succeeded before it.
+/// A lowering is reverted after this many failures in a row at it, of a job that succeeded at the cap it came from.
 pub const FAILED_RUNS: usize = 3;
 
 /// Every job's sizing window from `history`'s last 30 days to `now` (ms).
@@ -135,7 +135,7 @@ pub(super) fn raise_need(
 }
 
 /// The lowerings auto sizing made of `profile` that went too far, oldest first: since each, a run at the cap it
-/// lowered to met it, or a job that succeeded before it failed `FAILED_RUNS` times in a row at it.
+/// lowered to met it, or a job that succeeded at the cap it came from failed `FAILED_RUNS` times in a row at it.
 fn too_far<'change>(
     history: &'change History,
     profile: &str,
@@ -190,14 +190,15 @@ fn cause(
     }
     let jobs: BTreeSet<Key> = after.iter().map(|(run, _)| Key::of(run)).collect();
     for key in jobs {
-        let succeeded_before = history.jobs.iter().any(|run| {
+        // Before the revert only runs from before the lowering ran at `from`; after it, its runs at `from` since keep
+        // the floor while the failures are in the history.
+        let succeeded_at_from = history.jobs.iter().any(|run| {
             run.profile == profile
                 && Key::of(run) == key
                 && run.succeeded
                 && run.memory_cap == Some(from)
-                && recent::finished(run) < since
         });
-        if !succeeded_before {
+        if !succeeded_at_from {
             continue;
         }
         let mut row: Vec<(u64, Option<&str>)> = Vec::new();
@@ -225,8 +226,9 @@ fn cause(
 }
 
 /// The revert auto sizing makes now of `profile`, whose `memory` and `slots` are `current`, if any: its latest
-/// recorded change lowered it to what it has, the daemon has run that since (`set`), and that went too far. Under
-/// caps the slots go back to what they were, so the memory fits the slice.
+/// recorded change of `memory` lowered it to what it has, the daemon has run that since (`set`), and that went too
+/// far. Changes of only `slots` or `cpus` since do not hide it. Under caps the slots go back to what they were
+/// before the lowering, so the memory fits the slice.
 pub(super) fn revert(
     config: &Config,
     history: &History,
@@ -236,7 +238,7 @@ pub(super) fn revert(
     let last = history
         .changes
         .iter()
-        .rfind(|change| change.profile == profile)?;
+        .rfind(|change| change.profile == profile && change.to.memory != change.from.memory)?;
     if last.to.memory != current.memory || last.to.memory >= last.from.memory {
         return None;
     }

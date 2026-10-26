@@ -221,10 +221,16 @@ mod invariants {
 
     /// A run of a random job at a random time after `at`, under a cap that grows from 7G to 9G halfway: light, heavy,
     /// at its cap, killed for memory, killed at a service container's limit, failed, cancelled, cancelled at its cap,
-    /// past what it reserved, sampled with page cache, or without the local counter.
-    fn generate(rng: &mut Rng, index: u64, at: u64) -> Row {
+    /// past what it reserved, sampled with page cache, or without the local counter. A run finishing with another,
+    /// `tied`, is of another job: the order of two runs of one job that finished in the same millisecond is the
+    /// store's.
+    fn generate(rng: &mut Rng, index: u64, at: u64, tied: Option<&str>) -> Row {
         let cap = if index < RUNS / 2 { 7 * G } else { 9 * G };
-        let name = NAMES[usize::try_from(rng.below(3)).unwrap()];
+        let pick = usize::try_from(rng.below(3)).unwrap();
+        let name = match tied.and_then(|tied| NAMES.iter().position(|name| *name == tied)) {
+            Some(other) => NAMES[(other + 1 + pick % 2) % 3],
+            None => NAMES[pick],
+        };
         let peak = G + rng.below(cap / M - 1024) * M;
         let mut run = Ran {
             memory_cap: Some(cap),
@@ -265,19 +271,35 @@ mod invariants {
         Row { run, cancelled }
     }
 
-    fn history(rows: &[Row]) -> History {
+    /// The rows as the store returns them: in an order of its own, not the order they finished.
+    fn history(rows: &[Row], rng: &mut Rng) -> History {
+        let mut shuffled: Vec<&Row> = rows.iter().collect();
+        for i in (1..shuffled.len()).rev() {
+            let j = usize::try_from(rng.below(i as u64 + 1)).unwrap();
+            shuffled.swap(i, j);
+        }
         History {
-            jobs: rows
+            jobs: shuffled
                 .iter()
                 .filter(|row| !row.cancelled)
                 .map(|row| row.run.clone())
                 .collect(),
-            cancelled: rows
+            cancelled: shuffled
                 .iter()
                 .filter(|row| row.cancelled)
                 .map(|row| row.run.clone())
                 .collect(),
             ..History::default()
+        }
+    }
+
+    /// Whether a run is a cap event, in ADR 0070's words: its container's own limit failed reclaim, or a process in it
+    /// was killed for memory while no limit below it was hit; recorded without the local counter, a kill, a limit hit
+    /// in the container or, without events, a peak within 5% of the cap.
+    fn cap_event(run: &Ran, cap: u64) -> bool {
+        match run.own_cap {
+            Some(own) => own || (run.oom_killed && run.hit_cap != Some(true)),
+            None => run.oom_killed || run.hit_cap.unwrap_or(run.memory_peak * 100 >= cap * 95),
         }
     }
 
@@ -296,10 +318,19 @@ mod invariants {
         let mut incremental = Predictor::new(&config.sizing);
         let mut holds: std::collections::BTreeMap<&str, Hold> = std::collections::BTreeMap::new();
         let mut log = String::new();
+        let mut store = Rng(!seed);
         let mut at = NOW;
+        let mut tied = None;
         for index in 0..RUNS {
-            at += rng.below(3 * 24 * 60) * MINUTE;
-            let row = generate(&mut rng, index, at);
+            // One run in four finishes with the one before, unless that one did.
+            tied = match (tied, rows.last()) {
+                (None, Some(Row { run, .. })) if rng.below(4) == 0 => Some(run.name.clone()),
+                _ => {
+                    at += (1 + rng.below(3 * 24 * 60)) * MINUTE;
+                    None
+                }
+            };
+            let row = generate(&mut rng, index, at, tied.as_deref());
             let cap = row.run.memory_cap.unwrap();
             let _ = writeln!(log, "{index}: {row:?}");
             if row.cancelled {
@@ -313,7 +344,6 @@ mod invariants {
                 .copied()
                 .unwrap();
             let hold = holds.entry(name).or_default();
-            let capped = row.run.capped(cap);
             if row.run.measure == Measure::WithActiveFile {
                 if row.run.oom_killed {
                     *hold = Hold {
@@ -321,7 +351,7 @@ mod invariants {
                         clean: 0,
                     };
                 }
-            } else if capped.holds() {
+            } else if cap_event(&row.run, cap) {
                 *hold = Hold {
                     at: Some(finished(&row.run)),
                     clean: 0,
@@ -331,7 +361,8 @@ mod invariants {
                 hold.clean = if overran { 0 } else { hold.clean + 1 };
             }
             rows.push(row);
-            let rebuilt = Predictor::read(&config.sizing, &history(&rows), |_| Some(cap));
+            let rebuilt =
+                Predictor::read(&config.sizing, &history(&rows, &mut store), |_| Some(cap));
             let now = at + 2 * MINUTE;
             for name in NAMES {
                 let key = Key {
@@ -377,7 +408,7 @@ mod invariants {
         let mut at = NOW;
         for index in 0..RUNS {
             at += 2 * MINUTE + rng.below(3 * 24 * 60) * MINUTE;
-            let Row { mut run, cancelled } = generate(&mut rng, index, at);
+            let Row { mut run, cancelled } = generate(&mut rng, index, at, None);
             if cancelled {
                 continue;
             }

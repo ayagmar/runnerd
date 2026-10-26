@@ -116,9 +116,20 @@ impl Capped {
 impl Ran {
     /// What it says about its container's `cap`. A kill that only a descendant's own limit explains, the counters
     /// showing a limit hit below the container and none at it, is a service container the job capped itself: clear.
+    /// A kill no sample saw an `oom` before, its last sample within `AT_CAP` percent of the cap, met it in the last
+    /// interval.
     pub fn capped(&self, cap: u64) -> Capped {
         match self.own_cap {
             Some(true) => Capped::Met,
+            // No sample saw `oom` at any level and its last came near the cap: its own limit killed it before the
+            // next sample could count it.
+            Some(false)
+                if self.oom_killed
+                    && self.hit_cap == Some(false)
+                    && self.memory_peak.saturating_mul(100) >= cap.saturating_mul(AT_CAP) =>
+            {
+                Capped::Met
+            }
             Some(false) if self.oom_killed && self.hit_cap != Some(true) => Capped::Killed,
             None if self.oom_killed
                 || self.hit_cap.unwrap_or_else(|| {

@@ -62,7 +62,8 @@ own rule under [Sizing](#sizing).
   sysbox can be a child of the container even when the container's limit was hit.
 - **Clear of its cap**: neither. A run whose events were recorded and show no local `oom` is clear however near its
   cap it peaked. That is reliable as "no 2 s sample saw this container's limit fail reclaim"; an `oom` without a kill
-  in a run's last interval is missed, which is rare. A kill in the last interval is still caught by Docker's flag.
+  in a run's last interval is missed, which is rare. A kill in the last interval is still caught by Docker's flag:
+  when no sample saw an `oom` at any level and the last one came within 5% of the cap, the run met it.
 - **Rows without the local counter**, from before schema 14, and runs whose events could not be read: today's
   reading holds for holds and lowering floors (the hierarchical `oom`, or without events a peak within 5% of the cap
   met it), but such a run never raises a cap or reverts a lowering.
@@ -161,12 +162,14 @@ intended, and adds slots sooner after a job got lighter.
 That replaces 0032's "a set with a run at its cap is never lowered" and 0039's "no lowering while a run in the 30
 days met its cap".
 
-**A lowering that went too far is reverted.** Auto sizing's change that set the profile's current `memory` X lowered
+**A lowering that went too far is reverted.** Auto sizing's latest change of `memory` (changes of only `slots` or
+`cpus` since do not count) set the profile's current `memory` X and lowered
 it from F, by its recorded change (`SizingChange`), and the profile has run X since, by its `profile.changed`
 events. The lowering went too far when, since then, either:
 
 - a run at X met it; or
-- a job with a successful run at F before the lowering failed `FAILED_RUNS` (3) times in a row at X, with no
+- a job with a successful run at F in the history (before the lowering; after the revert, its runs at F since keep
+  the floor while the failures are in the history) failed `FAILED_RUNS` (3) times in a row at X, with no
   success between: the case a heap sized from the cgroup's limit fails without a kernel event. Only conclusions
   `failure` and `timed_out` count (a heap thrashing in GC times out); `lost` and `cancelled` neither count nor break
   the row. At most one failure counts per workflow run (`run_id`), so a re-run of failed jobs adds nothing, and the
@@ -175,19 +178,22 @@ events. The lowering went too far when, since then, either:
 
 The next look then writes `memory` F back, and under caps admission the slots it had before, without waiting
 for `raise_interval`: it takes back auto sizing's own change, as an undo would. Under caps it waits, as a raise does,
-while more runners run than F's slots hold. For the 30 days after, no lowering goes under F. That floor is read from
+while more runners run than F's slots hold. When F is outside the profile's bounds now (the owner lowered
+`max_memory` under it), the profile is sized as any other, a raise going as far as the bounds allow. For the 30 days
+after, no lowering goes under F. That floor is read from
 the recorded changes and the runs, so a restart keeps it. A job that met X is on its cap until 3 clear runs;
 the floor holds for one that failed at it.
 
-A cap the owner set by hand is not reverted: a run that meets it raises toward `raise_need` in `max_step` steps
-after `raise_interval`, as now.
+A cap the owner set by hand is not reverted: a run that meets it raises it straight to `raise_need` after
+`raise_interval`, unbound by `max_step`. A kill is direct evidence, and `raise_need` reads only runs that met the
+current cap, so a stepped raise would stop at its first step until another run is killed at it.
 
 The revert is advice like any other: `sizing::advise` takes the recorded changes beside the history, and words a
 pending revert as `Raise` to F with the revert's reason, and its floor as part of `lower_floor`, so `runnerctl
 sizing` shows during and after a revert what auto sizing writes.
 
 Auto sizing's steps are otherwise unchanged: a lowering waits `interval` after the last change and moves at most
-`max_step` percent, a raise waits `raise_interval`.
+`max_step` percent, a raise waits `raise_interval` and goes straight to the advice.
 
 **Why it converges.**
 
@@ -243,8 +249,8 @@ kills, and is accepted, as 0068 accepted it for CPUs: the history cannot tell it
 - Accepted: after a hold at the cap ends, admission's p95 can leave the at-cap run out. If that peak comes back
   within the window, it is an overrun, and the job reserves the window's largest from then on. A job that meets its
   cap twice in its window reserves the cap at p95 anyway.
-- A hand-lowered cap under a non-JVM job's real need is met once, then raised in `max_step` steps toward what that
-  job's runs at a larger cap needed. A job with no runs at a larger cap may be met once per step, as each raise goes
+- A hand-lowered cap under a non-JVM job's real need is met once, then raised at once to what that job's runs at a
+  larger cap needed. A job with no runs at a larger cap may be met once per raise, as each raise goes
   to `need(X)`. Only auto sizing's own lowerings are reverted.
 - A run clear of its cap with less than 1G of room may see its downloads throttled (0055). Sizing no longer raises
   for that; the `throttled` insight still names the repository.

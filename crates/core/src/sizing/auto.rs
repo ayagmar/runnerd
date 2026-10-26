@@ -1,8 +1,8 @@
 //! Auto sizing: which profiles' `memory`, `slots` and `cpus` the daemon changes now, from the advice, the runs since
 //! each profile's last change and the limits `[sizing]` and each profile set. Pure: the daemon reads the history and
 //! when each profile last changed, writes each change through the config check as `PUT /v1/config` does, and records
-//! it. Never lowers a profile a run met the cap of, never changes `memory` from fewer than `[sizing] min_jobs` jobs,
-//! never lowers within `[sizing] interval` of a profile's last change or raises within `raise_interval`, never
+//! it. Never lowers a profile while a job is on its cap, never changes `memory` from fewer than `[sizing] min_jobs`
+//! jobs, never lowers within `[sizing] interval` of a profile's last change or raises within `raise_interval`, never
 //! leaves a profile outside its bounds, and sizes each profile against the budget the changes before it in the same
 //! look leave. Moves `cpus` only on the CPU averages of runs at the profile's current `cpus` since its last change
 //! and since the daemon got them, never on CPU peaks: a parallel build peaks at whatever cap it gets.
@@ -55,12 +55,13 @@ pub struct Context<'run> {
 /// The changes to make now, in order, one per profile at most. Empty unless `[sizing] auto` is on.
 ///
 /// A change that lowers `memory` or `cpus` waits `[sizing] interval` after the profile's last change; one that only
-/// raises waits `raise_interval`. Each moves `memory` toward the advice, and `cpus` toward what its runs reach, by at
-/// most `[sizing] max_step` percent, `memory` within the profile's `min_memory` and `max_memory`, `cpus` within the
-/// slice's CPUs. A profile whose jobs waited for a slot, or whose slots were busy, since its last change gets one
-/// more slot when every profile's slots still fit `MemoryMax`: at their caps under `caps` admission, at their jobs'
-/// p95 peaks under `measured`; at most `max_slots` when set, and never under what runs. Under `caps` a lowered
-/// `memory` adds the slots the advice gives. Each change is sized as if the ones before it were written: they take
+/// raises waits `raise_interval`. A lowering moves `memory` toward the advice, and `cpus` move toward what their runs
+/// reach, by at most `[sizing] max_step` percent; a raise of `memory` goes straight to the advice, which only a run
+/// that met the cap gives. `memory` stays within the profile's `min_memory` and `max_memory`, `cpus` within the
+/// slice's CPUs. A lowering that went too far is taken back at once (`ProfileSizing::revert`). A profile whose jobs
+/// waited for a slot, or whose slots were busy, since its last change gets one more slot when every profile's slots
+/// still fit `MemoryMax`: at their caps under `caps` admission, at their jobs' p95 peaks under `measured`; at most
+/// `max_slots` when set, and never under what runs. Under `caps` a lowered `memory` adds the slots the advice gives. Each change is sized as if the ones before it were written: they take
 /// budget the later ones cannot.
 ///
 /// `cpus` go up `max_step` percent, at least 1, when one job's runs at them since the profile's last change and since
@@ -102,12 +103,16 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
         let last = context.last.get(&advised.name).copied();
         let since = last.map_or(u64::MAX, |at| now.saturating_sub(at));
         if let Some(revert) = &advised.revert {
-            if let Some(change) = reverted(config, profile, advised, revert, &sizing, &context, now)
-            {
-                budget.take(&advised.name, profile, change.from, change.to);
-                changes.push(change);
+            match reverted(config, profile, advised, revert, &sizing, &context, now) {
+                Revert::Write(change) => {
+                    budget.take(&advised.name, profile, change.from, change.to);
+                    changes.push(change);
+                    continue;
+                }
+                Revert::Wait => continue,
+                // Raised as far as its bounds allow, as any raise is.
+                Revert::Outside => {}
             }
-            continue;
         }
         if since < rules.raise_after().as_secs() {
             continue;
@@ -295,8 +300,8 @@ impl Fresh {
 }
 
 /// Why `memory` changes, as the advice line says it of the `memory` and `slots` this change writes, not the
-/// advice's own: a step of `max_step` stops short of the advice's memory, and the slots that fit follow the step.
-/// A step short of the advice says what it goes toward.
+/// advice's own: a step of `max_step`, or `max_memory`, stops short of the advice's memory, and the slots that fit
+/// follow. A change short of the advice says what it goes toward.
 fn memory_reason(
     sizing: &Sizing,
     advised: &ProfileSizing,
@@ -310,10 +315,16 @@ fn memory_reason(
             Advice::Raise { .. } => Advice::Raise { memory, slots },
             other => other,
         },
+        // A revert `max_memory` stops short of is a raise as far as it allows.
+        revert: advised.revert.clone().filter(|revert| revert.to == memory),
         ..advised.clone()
     };
     let line = sizing.memory_line(&made);
     match advised.advice.change() {
+        Some(advice) if advice.memory != memory && memory > advised.memory => format!(
+            "{line}; as far as its max_memory allows, short of {}",
+            ByteSize(advice.memory)
+        ),
         Some(advice) if advice.memory != memory => format!(
             "{line}; a step toward {}, at most {max_step}% a change",
             ByteSize(advice.memory)
@@ -330,9 +341,19 @@ fn within(profile: &Profile, from: Resize, to: Resize) -> bool {
         && (to.slots <= from.slots || profile.max_slots.is_none_or(|max| to.slots <= max))
 }
 
+/// What a look does with a lowering that went too far.
+enum Revert {
+    /// Takes it back with this change.
+    Write(SizingChange),
+    /// Waits while more runners run than the slots it gives back hold: nothing else changes the profile meanwhile.
+    Wait,
+    /// The `memory` it came from is outside the profile's bounds now: the profile is sized as any other.
+    Outside,
+}
+
 /// The change that takes back a lowering that went too far (`ProfileSizing::revert`): straight to the `memory`
 /// it came from and, under caps, the slots it had, without waiting for `raise_interval` or keeping to `max_step`,
-/// as an undo would. None while more runners run than those slots hold, or outside the profile's bounds.
+/// as an undo would.
 fn reverted(
     config: &Config,
     profile: &Profile,
@@ -341,9 +362,9 @@ fn reverted(
     sizing: &Sizing,
     context: &Context<'_>,
     now: u64,
-) -> Option<SizingChange> {
+) -> Revert {
     let Advice::Raise { memory, slots } = advised.advice else {
-        return None;
+        return Revert::Outside;
     };
     let running = context.running.get(&advised.name).copied().unwrap_or(0);
     let from = Resize {
@@ -356,13 +377,13 @@ fn reverted(
         slots,
         cpus: None,
     };
-    if (config.host.admission == Admission::Caps && running > slots)
-        || memory != revert.to
-        || !within(profile, from, to)
-    {
-        return None;
+    if memory != revert.to || !within(profile, from, to) {
+        return Revert::Outside;
     }
-    Some(SizingChange {
+    if config.host.admission == Admission::Caps && running > slots {
+        return Revert::Wait;
+    }
+    Revert::Write(SizingChange {
         at: now,
         profile: advised.name.clone(),
         from,
@@ -372,9 +393,9 @@ fn reverted(
     })
 }
 
-/// The profile's next `memory`: the advice's, at most `max_step` percent away and within its bounds, in steps of
-/// `GRANULE` toward the advice. The advice lowers nothing while a job is on its cap; a lowering waits while
-/// `lowering` holds it.
+/// The profile's next `memory` within its bounds: a lowering at most `max_step` percent away, in steps of `GRANULE`,
+/// and only while `lowering` allows it; a raise straight to the advice's, since only a run that met the cap raises
+/// it (ADR 0070), and a kill is direct evidence. The advice lowers nothing while a job is on its cap.
 fn memory(config: &Config, profile: &Profile, advice: Advice, lowering: Lowering) -> u64 {
     let current = profile.memory.0;
     let step = current.saturating_mul(u64::from(config.sizing.max_step)) / 100;
@@ -388,9 +409,8 @@ fn memory(config: &Config, profile: &Profile, advice: Advice, lowering: Lowering
             memory.max(floor).max(bound).min(current)
         }
         Advice::Raise { memory, .. } => {
-            let ceiling = current.saturating_add(step) / GRANULE * GRANULE;
             let bound = profile.max_memory.map_or(u64::MAX, |max| max.0);
-            memory.min(ceiling).min(bound).max(current)
+            memory.min(bound).max(current)
         }
         _ => current,
     }
