@@ -3002,6 +3002,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
                 lower_until: crate::now() + 23 * 3600,
             }],
             blocked: None,
+            refused: Vec::new(),
         });
     }
     let on = dashboard.page(&cookie, "/sizing").await.body;

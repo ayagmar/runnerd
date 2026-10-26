@@ -51,10 +51,10 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md) | Phones signed in by QR code, and sessions that outlive a restart |
 | [0044](0044-queued-jobs-say-why-they-wait.md) | Queued jobs say why they wait |
 | [0045](0045-jobs-filtered-by-workflow-and-name.md) | Jobs filtered by workflow and job name |
-| [0046](0046-sizing-says-what-auto-sizing-does-next.md) | Sizing says what auto sizing does next |
+| [0046](0046-sizing-says-what-auto-sizing-does-next.md) | Sizing says what auto sizing does next (amended by 0068) |
 | [0047](0047-activity-of-the-last-day.md) | The jobs started and ended in a window, by those times |
 | [0048](0048-slice-charts-scaled-to-the-slice.md) | The slice's charts reach up to the slice |
-| [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling |
+| [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling (amended by 0068) |
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued |
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends (amended by 0064) |
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch |
@@ -73,3 +73,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0065](0065-a-snapshot-starts-over-from-the-image.md) | A snapshot over its limit starts over from the image |
 | [0066](0066-a-reseed-that-did-not-finish.md) | A reseed that did not finish starts the profile over from the image |
 | [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md) | What a job deleted of the image is hidden by whiteouts beside the snapshot |
+| [0068](0068-cpus-follow-run-averages.md) | Auto sizing moves `cpus` on each job's run average, not on CPU peaks |

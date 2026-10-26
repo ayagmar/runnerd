@@ -2089,7 +2089,7 @@ fn a_job_s_page_compares_it_with_the_same_job_s_latest_runs() {
 
 #[test]
 fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
-    use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
+    use runnerd_core::api::{AutoPlan, SizingChange, SizingHold, SizingRefused};
     let mut app = app();
     app.update(key(KeyCode::Char('4')));
     let mut sizing = sizing();
@@ -2122,6 +2122,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
             lower_until: NOW + 86_400 - 600,
         }],
         blocked: None,
+        refused: Vec::new(),
     });
     app.update(Msg::Sizing(sizing.clone()));
     for width in [80, 120] {
@@ -2147,7 +2148,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
 
     sizing.auto_plan.as_mut().unwrap().blocked =
         Some("runnerd.toml changed on disk since runnerd read it".to_owned());
-    app.update(Msg::Sizing(sizing));
+    app.update(Msg::Sizing(sizing.clone()));
     let shown = screen(&app, 120, 24, false);
     assert!(
         shown.contains("No look changes anything now: runnerd.toml changed on disk"),
@@ -2156,6 +2157,26 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
     assert!(
         rows_with(&shown, "■ node")[0].contains("Once that is fixed: memory 7G → 5.25G"),
         "{shown}"
+    );
+
+    let plan = sizing.auto_plan.as_mut().unwrap();
+    plan.blocked = None;
+    plan.held.clear();
+    plan.refused = vec![SizingRefused {
+        profile: "jvm".to_owned(),
+        reason: "the cap holds them back; 9 CPUs for each of its 2 slots do not fit the CPU budget"
+            .to_owned(),
+    }];
+    app.update(Msg::Sizing(sizing.clone()));
+    let shown = screen(&app, 120, 24, false);
+    assert!(
+        rows_with(&shown, "■ jvm")[0].contains("No CPU raise"),
+        "a raise the CPU budget refuses shows: {shown}"
+    );
+    let printed = crate::human::sizing(&sizing, NOW, crate::human::Paint { colour: false });
+    assert!(
+        printed.contains("No CPU raise: the cap holds them back; 9 CPUs for each of its 2 slots"),
+        "runnerctl sizing says it too: {printed}"
     );
 }
 

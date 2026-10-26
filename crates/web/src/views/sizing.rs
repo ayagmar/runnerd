@@ -100,7 +100,9 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
     let next = plan.profile_plan(&profile.name, view.now);
     let class = match next {
         ProfilePlan::Next { .. } => "plan-what changes",
-        ProfilePlan::Held { .. } | ProfilePlan::LowerHeld { .. } => "plan-what held",
+        ProfilePlan::Refused { .. } | ProfilePlan::Held { .. } | ProfilePlan::LowerHeld { .. } => {
+            "plan-what held"
+        }
         ProfilePlan::Nothing => "plan-what",
     };
     let reason = next.reason(&view.sizing, profile);

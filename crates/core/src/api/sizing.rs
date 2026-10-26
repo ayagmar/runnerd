@@ -74,6 +74,20 @@ pub struct AutoPlan {
     /// runs with. `None` when the next look may write `next`, and from a daemon before it said.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<String>,
+    /// The profiles whose jobs the CPU cap holds back and whose `cpus` the next look cannot raise, and why. Empty
+    /// from a daemon before it said.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused: Vec<SizingRefused>,
+}
+
+/// A raise of a profile's `cpus` its jobs ask for that auto sizing cannot make, as when it does not fit the CPU
+/// budget.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
+pub struct SizingRefused {
+    /// The profile.
+    pub profile: String,
+    /// Which job the cap holds back, and what keeps it from a raise.
+    pub reason: String,
 }
 
 /// A profile auto sizing changes nothing in before `until`, and lowers nothing in before `lower_until`.

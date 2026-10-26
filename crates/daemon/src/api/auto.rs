@@ -11,7 +11,7 @@ use std::time::Duration;
 use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
 use runnerd_core::config::{Config, resize_profile};
 use runnerd_core::scheduler::engine::RunningSlots;
-use runnerd_core::sizing::auto::{Context, changes};
+use runnerd_core::sizing::auto::{Context, changes, next_look};
 use runnerd_core::sizing::{History, Window};
 use runnerd_core::store::{AutoSizing, Resolution, StoreError};
 use tracing::{info, warn};
@@ -187,8 +187,9 @@ fn running(state: &AppState) -> BTreeMap<String, u32> {
         .collect()
 }
 
-/// What auto sizing's next look would change as the history and config are now, and which profiles a recent change
-/// holds, for `GET /v1/sizing`, and what blocks every look, by the same check a look makes; `None` while it is off.
+/// What auto sizing's next look would change as the history and config are now, which `cpus` raises it cannot make,
+/// and which profiles a recent change holds, for `GET /v1/sizing`, and what blocks every look, by the same check a
+/// look makes; `None` while it is off.
 /// It settles nothing and writes nothing.
 pub(super) async fn plan(
     state: &AppState,
@@ -232,14 +233,16 @@ pub(super) async fn plan(
         .filter(|hold| hold.lower_until > at)
         .collect();
     held.sort_by_key(|hold| hold.until);
+    let look = next_look(config, &history, context);
     Ok(Some(AutoPlan {
         every: EVERY.as_secs(),
         interval,
         raise_interval,
         max_step: config.sizing.max_step,
-        next: changes(config, &history, context),
+        next: look.changes,
         held,
         blocked,
+        refused: look.refused,
     }))
 }
 

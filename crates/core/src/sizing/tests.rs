@@ -58,7 +58,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         cpu_cap: Some(8000),
         memory_peak: peak,
         cpu_peak: 6000,
-        cpu_average: Some(1000),
+        cpu_average: Some(4000),
         queued_at: NOW - 2 * HOUR,
         started_at: Some(NOW - 2 * HOUR + wait_secs * 1000),
         runner_started_at: NOW - 2 * HOUR,
@@ -1043,104 +1043,6 @@ labels = ["node"]
         assert_eq!(due(&config, &history(jobs), 64 * G, &changed), Vec::new());
     }
 
-    /// `count` ledger tests on jvm's 8 CPUs, each peaking at `cpu_peak` millicores, at `cpu_cap`.
-    fn ledger_cpu(count: usize, cpu_peak: u64, cpu_cap: u64) -> Vec<Ran> {
-        (0..count)
-            .map(|_| Ran {
-                cpu_peak,
-                cpu_cap: Some(cpu_cap),
-                ..job("halyard/ledger", "test", "jvm", 7 * G, 5)
-            })
-            .collect()
-    }
-
-    /// The changes due at `NOW` in a 33G slice of `cpus` millicores, after the last changes `last`.
-    fn due_cpus(
-        config: &Config,
-        history: &History,
-        cpus: Option<u64>,
-        last: &BTreeMap<String, u64>,
-    ) -> Vec<SizingChange> {
-        changes(
-            config,
-            history,
-            Context {
-                memory_max: Some(33 * G),
-                cpus,
-                window: window(),
-                last,
-                running: &BTreeMap::new(),
-            },
-        )
-    }
-
-    fn cpus_to(changes: &[SizingChange]) -> Vec<(&str, Option<u32>, Option<u32>)> {
-        changes
-            .iter()
-            .map(|change| (change.profile.as_str(), change.from.cpus, change.to.cpus))
-            .collect()
-    }
-
-    #[test]
-    fn a_profile_whose_jobs_sit_at_their_cpu_cap_gets_more_cpus_up_to_the_slices() {
-        let config = on(CONFIG, "");
-        let pinned = history(ledger_cpu(3, 7900, 8000));
-        let raised = due_cpus(&config, &pinned, Some(32_000), &BTreeMap::new());
-        assert_eq!(
-            cpus_to(&raised),
-            vec![("jvm", Some(8), Some(10))],
-            "8 CPUs + 25%"
-        );
-        assert_eq!(
-            (raised[0].to.memory, raised[0].to.slots),
-            (9 * G, 2),
-            "memory and slots stay"
-        );
-        assert!(
-            raised[0].line().contains("cpus 8 → 10"),
-            "{}",
-            raised[0].line()
-        );
-        assert_eq!(
-            cpus_to(&due_cpus(&config, &pinned, Some(9_000), &BTreeMap::new())),
-            vec![("jvm", Some(8), Some(9))],
-            "at most the slice's CPUs"
-        );
-        assert_eq!(
-            due_cpus(&config, &pinned, None, &BTreeMap::new()),
-            Vec::new(),
-            "not without the slice's CPUs"
-        );
-        let elsewhere = history(ledger_cpu(3, 5900, 6000));
-        assert_eq!(
-            due_cpus(&config, &elsewhere, Some(32_000), &BTreeMap::new()),
-            Vec::new(),
-            "runs at another cap say nothing about this one"
-        );
-        let two = history(ledger_cpu(2, 7900, 8000));
-        assert_eq!(
-            due_cpus(&config, &two, Some(32_000), &BTreeMap::new()),
-            Vec::new()
-        );
-    }
-
-    #[test]
-    fn under_caps_a_cpu_raise_stays_within_the_cpu_budget() {
-        // jvm 2 × 8 and node 2 × 8 CPUs: 32 of a 36-CPU budget leave room for jvm's slots at 10, not 12.
-        let config = on(
-            &CONFIG.replace(
-                "isolation = \"sysbox\"",
-                "isolation = \"sysbox\"\ncpu_overcommit = 1.5",
-            ),
-            "max_step = 50",
-        );
-        let pinned = history(ledger_cpu(3, 7900, 8000));
-        assert_eq!(
-            cpus_to(&due_cpus(&config, &pinned, Some(24_000), &BTreeMap::new())),
-            vec![("jvm", Some(8), Some(10))]
-        );
-    }
-
     /// `CONFIG` (jvm and node 2 × 8 CPUs each) under a CPU budget of the slice's CPUs.
     fn cpu_budget(rules: &str) -> Config {
         on(
@@ -1221,85 +1123,6 @@ labels = ["node"]
             "one profile gets the slot 8 more CPUs hold: {raised:?}"
         );
     }
-
-    #[test]
-    fn a_slot_the_cpu_budget_refuses_does_not_also_refuse_a_cpu_raise_that_fits_without_it() {
-        // jvm's three runs sat at its 8 CPUs and waited 5 minutes. A 36-CPU budget beside node's 16 holds 2 jvm slots
-        // at 10 CPUs, not 3 at 8.
-        let waited_pinned: Vec<Ran> = ledger_cpu(3, 7900, 8000)
-            .into_iter()
-            .map(|run| Ran {
-                started_at: Some(run.queued_at + 300_000),
-                ..run
-            })
-            .collect();
-        let raised = due_in(&cpu_budget(""), &history(waited_pinned), 64 * G, 36_000);
-        assert_eq!(
-            raised
-                .iter()
-                .map(|change| (change.profile.as_str(), change.to.slots, change.to.cpus))
-                .collect::<Vec<_>>(),
-            [("jvm", 2, Some(10))],
-            "{raised:?}"
-        );
-    }
-
-    /// Three ledger tests pinned at jvm's 8 CPUs, queued `hours_ago`.
-    fn pinned_hours_ago(hours_ago: u64) -> Vec<Ran> {
-        ledger_cpu(3, 7900, 8000)
-            .into_iter()
-            .map(|run| Ran {
-                queued_at: NOW - hours_ago * HOUR,
-                started_at: Some(NOW - hours_ago * HOUR + 5000),
-                ..run
-            })
-            .collect()
-    }
-
-    #[test]
-    fn cpus_lowered_or_undone_back_to_a_cap_are_not_raised_again_by_its_old_runs() {
-        let config = on(CONFIG, "");
-        // Runs pinned at 8 CPUs raised jvm to 10 three days ago; ten light runs at 10 lowered it back to 8 two hours
-        // ago (or an undo did). The pinned runs are from before that change: nothing new says 8 is too few.
-        let mut jobs = pinned_hours_ago(80);
-        jobs.extend(ledger_cpu(10, 2000, 10_000));
-        let lowered = BTreeMap::from([("jvm".to_owned(), (NOW - 2 * HOUR) / 1000)]);
-        assert_eq!(
-            due_cpus(&config, &history(jobs.clone()), Some(32_000), &lowered),
-            Vec::new()
-        );
-        jobs.extend(pinned_hours_ago(1));
-        assert_eq!(
-            cpus_to(&due_cpus(&config, &history(jobs), Some(32_000), &lowered)),
-            vec![("jvm", Some(8), Some(10))],
-            "runs pinned since the change raise it"
-        );
-    }
-
-    #[test]
-    fn cpus_far_above_every_peak_are_lowered_after_the_interval_by_at_most_a_step() {
-        let config = on(CONFIG, "");
-        // Ten runs peaking at 2 CPUs of 8: + 15% is 2.3, rounded up to 3, but a step is at most 25%: 6.
-        let idle = history(ledger_cpu(10, 2000, 8000));
-        assert_eq!(
-            cpus_to(&due_cpus(&config, &idle, Some(32_000), &BTreeMap::new())),
-            vec![("jvm", Some(8), Some(6))]
-        );
-        let jvm_changed = BTreeMap::from([("jvm".to_owned(), (NOW - 3 * HOUR) / 1000)]);
-        assert_eq!(
-            due_cpus(&config, &idle, Some(32_000), &jvm_changed),
-            Vec::new(),
-            "a lowering waits the interval"
-        );
-        assert_eq!(
-            due_cpus(
-                &config,
-                &history(ledger_cpu(9, 2000, 8000)),
-                Some(32_000),
-                &BTreeMap::new()
-            ),
-            Vec::new(),
-            "a lowering takes min_jobs runs"
-        );
-    }
 }
+
+mod cpus;

@@ -212,6 +212,7 @@ fn auto_sizing(fake: &fake::Fake) {
             lower_until: fixtures.now + 86_400,
         }],
         blocked: None,
+        refused: Vec::new(),
     });
 }
 

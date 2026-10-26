@@ -4,7 +4,7 @@
 
 use super::{
     Advice, AutoPlan, JobSizing, PAGE_CACHE_ROOM, Peaks, ProfileSizing, Sizing, SizingChange,
-    SizingHold, Starts,
+    SizingHold, SizingRefused, Starts,
 };
 use crate::api::{Check, CheckStatus, Tone, Toned};
 use crate::config::ByteSize;
@@ -232,6 +232,11 @@ pub enum ProfilePlan<'plan> {
         /// Whether `AutoPlan::blocked` keeps it from being made.
         blocked: bool,
     },
+    /// Its jobs ask for more `cpus` than the next look can give: `refused` says why.
+    Refused {
+        /// The raise it cannot make.
+        refused: &'plan SizingRefused,
+    },
     /// A recent change holds it from any change until `hold.until`.
     Held {
         /// The hold.
@@ -255,6 +260,13 @@ impl AutoPlan {
                 blocked: self.blocked.is_some(),
             };
         }
+        if let Some(refused) = self
+            .refused
+            .iter()
+            .find(|refused| refused.profile == profile)
+        {
+            return ProfilePlan::Refused { refused };
+        }
         match self.held.iter().find(|hold| hold.profile == profile) {
             Some(hold) if now < hold.until => ProfilePlan::Held { hold },
             Some(hold) if now < hold.lowered_after() => ProfilePlan::LowerHeld { hold },
@@ -269,12 +281,13 @@ impl ProfilePlan<'_> {
         match self {
             ProfilePlan::Held { hold } => Some(hold.until),
             ProfilePlan::LowerHeld { hold } => Some(hold.lowered_after()),
-            ProfilePlan::Next { .. } | ProfilePlan::Nothing => None,
+            ProfilePlan::Next { .. } | ProfilePlan::Refused { .. } | ProfilePlan::Nothing => None,
         }
     }
 
     /// What it does, as the lead of its line, before `until` when it has one: `Next look, within 5 minutes: memory
-    /// 9G → 6.75G, slots 2`, `Once that is fixed: …`, `No change`, `No lowering` or `Nothing to change`.
+    /// 9G → 6.75G, slots 2`, `Once that is fixed: …`, `No CPU raise`, `No change`, `No lowering` or `Nothing to
+    /// change`.
     pub fn headline(&self, plan: &AutoPlan) -> String {
         match self {
             ProfilePlan::Next {
@@ -286,17 +299,19 @@ impl ProfilePlan<'_> {
                 super::period(plan.every),
                 change.line()
             ),
+            ProfilePlan::Refused { .. } => "No CPU raise".to_owned(),
             ProfilePlan::Held { .. } => "No change".to_owned(),
             ProfilePlan::LowerHeld { .. } => "No lowering".to_owned(),
             ProfilePlan::Nothing => "Nothing to change".to_owned(),
         }
     }
 
-    /// Why, after when the hold's change was made for a held profile: the change's reason, `the interval holds it
-    /// until then`, `a raise may come before then`, or the advice's line.
+    /// Why, after when the hold's change was made for a held profile: the change's reason, why a CPU raise cannot be
+    /// made, `the interval holds it until then`, `a raise may come before then`, or the advice's line.
     pub fn reason(&self, sizing: &Sizing, profile: &ProfileSizing) -> String {
         match self {
             ProfilePlan::Next { change, .. } => change.reason.clone(),
+            ProfilePlan::Refused { refused } => refused.reason.clone(),
             ProfilePlan::Held { .. } => "the interval holds it until then".to_owned(),
             ProfilePlan::LowerHeld { .. } => "a raise may come before then".to_owned(),
             ProfilePlan::Nothing => sizing.advice_line(profile),
@@ -307,7 +322,7 @@ impl ProfilePlan<'_> {
     pub fn changed(&self) -> Option<u64> {
         match self {
             ProfilePlan::Held { hold } | ProfilePlan::LowerHeld { hold } => Some(hold.changed),
-            ProfilePlan::Next { .. } | ProfilePlan::Nothing => None,
+            ProfilePlan::Next { .. } | ProfilePlan::Refused { .. } | ProfilePlan::Nothing => None,
         }
     }
 }
