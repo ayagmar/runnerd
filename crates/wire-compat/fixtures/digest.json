@@ -142,6 +142,33 @@
         "workflow": "ci"
       }
     ],
+    "savings": {
+      "cost": 4020000,
+      "cut": true,
+      "free": 3,
+      "jobs": 12,
+      "lost": 2,
+      "minutes": 340,
+      "period": "month",
+      "runners": [
+        {
+          "cost": 1800000,
+          "jobs": 10,
+          "minutes": 300,
+          "sku": "actions_linux"
+        },
+        {
+          "cost": 880000,
+          "jobs": 2,
+          "minutes": 40,
+          "sku": "linux_8_core"
+        }
+      ],
+      "services": 1,
+      "since": 1759276800,
+      "unknown": 1,
+      "untimed": 1
+    },
     "since": 1760800000,
     "until": 1761400000,
     "waits": [
