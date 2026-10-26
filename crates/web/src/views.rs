@@ -143,8 +143,8 @@ pub(crate) fn page(
                 meta name="color-scheme" content="light dark";
                 // The browser's bar and an installed app's status bar take the page's background; theme.js keeps
                 // them on the theme chosen with the switch.
-                meta name="theme-color" content="#f8f8f8" media="(prefers-color-scheme: light)";
-                meta name="theme-color" content="#0d0f0e" media="(prefers-color-scheme: dark)";
+                meta name="theme-color" content="#e9ece9" media="(prefers-color-scheme: light)";
+                meta name="theme-color" content="#070908" media="(prefers-color-scheme: dark)";
                 meta name="description" content="runnerd's dashboard: its slots, jobs, caches and config on this machine.";
                 title { (title) " · runnerd" }
                 link rel="icon" href=(assets::path("mark.svg")) type="image/svg+xml";

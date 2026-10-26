@@ -870,6 +870,29 @@ async fn a_job_waiting_for_cpu_never_reads_as_needing_what_is_free() {
 }
 
 #[tokio::test]
+async fn the_overviews_regions_come_in_the_order_a_narrow_screen_shows_them() {
+    // The keyboard and a screen reader follow the markup, which a narrow screen shows as it is: the queue first. A
+    // wide screen's two columns come from the grid, never from reordering.
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let body = dashboard.page(&cookie, "/").await.body;
+    let at = |id: &str| body.find(&format!(r#"id="{id}""#)).unwrap();
+    let regions = [
+        "health",
+        "queue",
+        "budget",
+        "slots",
+        "recent",
+        "repositories",
+        "host",
+    ];
+    assert!(
+        regions.windows(2).all(|pair| at(pair[0]) < at(pair[1])),
+        "the regions are in the order {regions:?}"
+    );
+}
+
+#[tokio::test]
 async fn the_overviews_queue_lists_waiting_jobs_oldest_first_with_why_each_waits_once_each() {
     let dashboard = Dashboard::start().await;
     {

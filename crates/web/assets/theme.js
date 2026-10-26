@@ -6,7 +6,7 @@ if (stored === 'light' || stored === 'dark') root.dataset.theme = stored;
 // The browser's bar, and an installed app's status bar, take the chosen theme's background over the system's.
 function paintBar() {
   if (!root.dataset.theme) return;
-  const colour = root.dataset.theme === 'dark' ? '#0d0f0e' : '#f8f8f8';
+  const colour = root.dataset.theme === 'dark' ? '#070908' : '#e9ece9';
   for (const meta of document.querySelectorAll('meta[name="theme-color"]')) meta.content = colour;
 }
 paintBar();
