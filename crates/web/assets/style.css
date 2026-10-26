@@ -389,8 +389,12 @@ html {
     font-size: 1rem;
   }
 
-  .connection {
+  /* The live dot and the theme switch sit at the sidebar's foot on every page, with or without the dot. */
+  .top nav + * {
     margin-top: auto;
+  }
+
+  .connection {
     padding-left: 0.5rem;
   }
 
@@ -2573,25 +2577,30 @@ dl.health-figures {
     overflow-wrap: anywhere;
   }
 
-  /* A group's links scroll sideways inside their own row, so the page's first rows stay on the first screen. */
+  /* A group is one row, its name beside links that scroll sideways, so the jobs start near the first screen. */
   .filter-group {
-    flex-direction: column;
-    align-items: stretch;
+    align-items: center;
     min-width: 0;
-    gap: 0.15rem;
+    gap: 0.5rem;
   }
 
   .filter-name {
-    width: auto;
+    width: 5.25rem;
   }
 
   .filter-group ul {
+    flex: 1;
+    min-width: 0;
     flex-wrap: nowrap;
-    max-width: 100%;
     overflow-x: auto;
     scrollbar-width: none;
-    margin-inline: calc(-1 * var(--gutter));
-    padding-inline: var(--gutter);
+    margin-right: calc(-1 * var(--gutter));
+    padding-right: var(--gutter);
+  }
+
+  /* The trends are a summary above the jobs: shorter on a phone, so the jobs start on the second screen. */
+  .trends .chart-area {
+    height: 5.5rem;
   }
 
   .filter-group li {
