@@ -136,8 +136,6 @@ fn slot_status() -> SlotStatus {
 fn repository_status() -> RepositoryStatus {
     RepositoryStatus {
         name: "tidewater/halyard".to_owned(),
-        profile: "halyard".to_owned(),
-        labels: vec!["self-hosted".to_owned()],
         pools: vec![PoolStatus {
             profile: "halyard".to_owned(),
             labels: vec!["self-hosted".to_owned()],

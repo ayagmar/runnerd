@@ -315,11 +315,6 @@ pub struct RunnerStatus {
 pub struct RepositoryStatus {
     /// `owner/name` on GitHub.
     pub name: String,
-    /// Its first pool's profile, which 0.0.19's TUI and dashboard colour it by. Read `pools`; it goes when the wire
-    /// check moves past 0.0.19 (ADR 0073).
-    pub profile: String,
-    /// Its first pool's labels, for 0.0.19's clients as `profile` is.
-    pub labels: Vec<String>,
     /// Its pools in config order, one per `[[repositories]]` entry: a job runs in the one whose labels match it
     /// (ADR 0058).
     pub pools: Vec<PoolStatus>,

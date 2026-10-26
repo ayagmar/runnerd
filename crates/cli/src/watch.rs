@@ -672,8 +672,6 @@ mod tests {
         };
         state.status.repositories.push(RepositoryStatus {
             name: "halyard/ledger".to_owned(),
-            profile: "jvm".to_owned(),
-            labels: vec!["jvm".to_owned()],
             pools: vec![pool("jvm"), pool("light")],
             paused: false,
             queued_jobs: 1,

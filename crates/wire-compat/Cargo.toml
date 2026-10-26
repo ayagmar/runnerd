@@ -16,8 +16,8 @@ publish = false
 
 [dev-dependencies]
 runnerd-core = { path = "../core", default-features = false }
-# The previous release, v0.0.19, by its commit. Moves to each new release when it is cut (CONTRIBUTING.md).
-runnerd-core-previous = { package = "runnerd-core", git = "https://github.com/ayagmar/runnerd", rev = "fe5403014910230b29aa5843373767e9a83181b8", default-features = false }
+# The previous release, v0.0.20, by its commit. Moves to each new release when it is cut (CONTRIBUTING.md).
+runnerd-core-previous = { package = "runnerd-core", git = "https://github.com/ayagmar/runnerd", rev = "6af172cf1d939fcd73aa6f75862fb1897b10b246", default-features = false }
 serde = "1.0.229"
 serde_json = "1.0.154"
 

@@ -29,9 +29,9 @@ client, config, database or image.
     read-only look refuses both the same way.
   - The next schema change adds a migration from version 15.
 - **The wire** is guarded from 0.0.19 on by 0061's check. A default that lets 0.0.19 and the current version read
-  each other's JSON stays. `RepositoryStatus::profile` and `labels`, the first pool's, are still sent because
-  0.0.19's TUI and dashboard colour a repository by them. Current clients read `pools`. Both fields go when the
-  check moves past 0.0.19.
+  each other's JSON stays. `RepositoryStatus::profile` and `labels`, the first pool's, were sent until the check
+  moved to 0.0.20 for 0.0.19's TUI and dashboard, which coloured a repository by them; then they went, with the
+  check accepting that 0.0.20's clients cannot read a newer daemon's status, as nobody runs one beside it.
 - **Stored events** from daemons before 0.0.19 that lack a field 0.0.19 always writes no longer parse. A replay
   from before them skips each one with a warning, and `[history] events` prunes them within 30 days. At startup the
   daemon reads only each repository's and profile's latest event. On the one install, every one of those parses.

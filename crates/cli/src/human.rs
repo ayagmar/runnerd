@@ -982,8 +982,6 @@ mod tests {
         let paused = Event::RepositoryChanged {
             repository: RepositoryStatus {
                 name: "halyard/ledger".to_owned(),
-                profile: "jvm".to_owned(),
-                labels: vec!["self-hosted".to_owned()],
                 pools: vec![runnerd_core::api::PoolStatus {
                     profile: "jvm".to_owned(),
                     labels: vec!["self-hosted".to_owned()],

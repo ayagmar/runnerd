@@ -100,8 +100,6 @@ fn status() -> Status {
         }],
         repositories: vec![RepositoryStatus {
             name: "halyard/ledger".to_owned(),
-            profile: "jvm".to_owned(),
-            labels: vec!["self-hosted".to_owned(), "jvm".to_owned()],
             pools: vec![runnerd_core::api::PoolStatus {
                 profile: "jvm".to_owned(),
                 labels: vec!["self-hosted".to_owned(), "jvm".to_owned()],
