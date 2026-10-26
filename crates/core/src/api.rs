@@ -315,15 +315,13 @@ pub struct RunnerStatus {
 pub struct RepositoryStatus {
     /// `owner/name` on GitHub.
     pub name: String,
-    /// Its first pool's profile, which clients before pools show.
-    #[serde(default)]
+    /// Its first pool's profile, which 0.0.19's TUI and dashboard colour it by. Read `pools`; it goes when the wire
+    /// check moves past 0.0.19 (ADR 0073).
     pub profile: String,
-    /// Its first pool's labels, which clients before pools show.
-    #[serde(default)]
+    /// Its first pool's labels, for 0.0.19's clients as `profile` is.
     pub labels: Vec<String>,
     /// Its pools in config order, one per `[[repositories]]` entry: a job runs in the one whose labels match it
-    /// (ADR 0058). Empty from a daemon before pools; `listed_pools` reads either.
-    #[serde(default)]
+    /// (ADR 0058).
     pub pools: Vec<PoolStatus>,
     /// Paused repositories get no new runners; their running jobs finish.
     pub paused: bool,
@@ -408,21 +406,14 @@ impl QueuedJob {
 }
 
 impl RepositoryStatus {
-    /// Its pools, or from a daemon before pools its one profile and labels.
-    pub fn listed_pools(&self) -> Vec<PoolStatus> {
-        if !self.pools.is_empty() {
-            return self.pools.clone();
-        }
-        vec![PoolStatus {
-            profile: self.profile.clone(),
-            labels: self.labels.clone(),
-            queued_jobs: self.queued_jobs,
-        }]
+    /// The profile of its first pool, which every client colours it by.
+    pub fn first_profile(&self) -> &str {
+        self.pools.first().map_or("", |pool| pool.profile.as_str())
     }
 
     /// Its pools' profiles, as every client lists them on one line: `jvm` or `jvm + light`.
     pub fn profiles(&self) -> String {
-        self.listed_pools()
+        self.pools
             .iter()
             .map(|pool| pool.profile.as_str())
             .collect::<Vec<_>>()
@@ -431,10 +422,10 @@ impl RepositoryStatus {
 
     /// The profile of its pool whose labels match a job asking for `labels`, as the daemon picks it.
     pub fn pool_for(&self, labels: &[String]) -> Option<String> {
-        self.listed_pools()
-            .into_iter()
+        self.pools
+            .iter()
             .find(|pool| crate::config::labels_match(labels, &pool.labels))
-            .map(|pool| pool.profile)
+            .map(|pool| pool.profile.clone())
     }
 }
 

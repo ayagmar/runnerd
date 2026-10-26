@@ -922,7 +922,7 @@ pub(crate) fn repositories(status: &Status) -> Markup {
 /// latest jobs.
 pub(crate) fn repository_row(status: &Status, repository: &RepositoryStatus) -> Markup {
     // Coloured as its first pool's profile.
-    let class = profile_class(status, &repository.profile);
+    let class = profile_class(status, repository.first_profile());
     let (action, label) = if repository.paused {
         ("resume", "Resume")
     } else {

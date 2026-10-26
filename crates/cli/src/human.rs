@@ -229,7 +229,7 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
         Table::new(&["REPOSITORY", "PROFILE", "STATE", "QUEUED", "LABELS"]).right(&[3]);
     // A row per pool; the repository's name and state on its first.
     for repository in &status.repositories {
-        for (at, pool) in repository.listed_pools().iter().enumerate() {
+        for (at, pool) in repository.pools.iter().enumerate() {
             let first = at == 0;
             repositories.row(vec![
                 plain(if first { repository.name.as_str() } else { "" }),

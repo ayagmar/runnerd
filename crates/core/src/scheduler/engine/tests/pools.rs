@@ -317,7 +317,7 @@ async fn a_pool_whose_runners_fail_holds_back_only_itself() {
 }
 
 #[tokio::test]
-async fn clients_and_daemons_before_pools_still_read_the_profile_of_a_repository() {
+async fn a_repository_names_its_first_pool_for_0_0_19_clients_and_a_later_reason_reads_plainly() {
     let (github, docker, dir) = (
         FakeGithub::default(),
         FakeDocker::default(),
@@ -326,20 +326,12 @@ async fn clients_and_daemons_before_pools_still_read_the_profile_of_a_repository
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &pools());
     engine.recover().await.unwrap();
     engine.publish();
-    // An older client reads `profile` and `labels`: its first pool's.
-    let json = serde_json::to_value(&handle.status.borrow().repositories[0]).unwrap();
+    // 0.0.19's TUI and dashboard read `profile` and `labels`: its first pool's.
+    let repository = handle.status.borrow().repositories[0].clone();
+    let json = serde_json::to_value(&repository).unwrap();
     assert_eq!(json["profile"], "app");
     assert_eq!(json["labels"], serde_json::json!(["self-hosted", "app"]));
-    // An older daemon sends no `pools`: its one profile is the pool.
-    let older: api::RepositoryStatus = serde_json::from_value(serde_json::json!({
-        "name": "o/r",
-        "profile": "app",
-        "labels": ["self-hosted"],
-        "paused": false,
-        "queued_jobs": 2,
-    }))
-    .unwrap();
-    assert_eq!(older.profiles(), "app");
+    assert_eq!(repository.first_profile(), "app");
     // A reason added after this client still lets it read the job, said plainly.
     let later: api::QueuedJob = serde_json::from_value(serde_json::json!({
         "id": 1,
@@ -357,9 +349,5 @@ async fn clients_and_daemons_before_pools_still_read_the_profile_of_a_repository
     assert_eq!(
         reason.reason(&later, &handle.status.borrow(), 0),
         "Waits for a reason this client does not know yet"
-    );
-    assert_eq!(
-        older.pool_for(&["self-hosted".to_owned()]).as_deref(),
-        Some("app")
     );
 }
