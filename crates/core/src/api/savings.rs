@@ -477,9 +477,9 @@ impl SavedWindow {
         self.free + self.services + self.unknown + self.lost + self.untimed
     }
 
-    /// The figure with its basis, for compact places, which show it whole or not at all: "This month: 1,234
-    /// job-minutes here, an estimated $7.40 at GitHub's 2-core Linux rate, before your plan's free minutes, by today's
-    /// profiles and repository visibility (3 jobs not priced)".
+    /// The figure with what it is before, for compact places, which show it whole or not at all: "This month: 1,234
+    /// job-minutes here, about $7.40 at GitHub's 2-core Linux rate before your plan's free minutes (3 jobs not
+    /// priced)". What it rests on, today's profiles and repository visibility, is the last of `details`.
     pub fn headline(&self) -> String {
         let when = if self.cut {
             format!("Since {}", short_date(self.since))
@@ -498,8 +498,7 @@ impl SavedWindow {
             _ => "at GitHub's rates for each profile's runner".to_owned(),
         };
         let mut line = format!(
-            "{when}: {} here, an estimated {} {rate}, before your plan's free minutes, by today's profiles and \
-             repository visibility",
+            "{when}: {} here, about {} {rate} before your plan's free minutes",
             count(self.minutes, "job-minute", "job-minutes"),
             self.cost,
         );
