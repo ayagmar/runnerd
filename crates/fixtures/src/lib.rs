@@ -1,6 +1,7 @@
 //! Daemon data every client's parity test draws, and the facts `runnerd-core` computes from it, which the dashboard,
 //! the TUI and `runnerctl` must each state as core words them (ADR 0062). The data is chosen where clients drifted
-//! before: a lost, an elsewhere, a `startup_failure`, a timed-out and a cancelled job; an adopted job without a name;
+//! before: a lost, an elsewhere, a `startup_failure`, a timed-out and a cancelled job, and one cancelled before any
+//! runner took it; an adopted job without a name;
 //! a step without an end time and a cancelled one with times; a job no pool serves; a measured budget of which the
 //! host's memory leaves less free than `MemoryMax` does, and a job waiting for the host; warm and starting runners
 //! and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records near
@@ -38,6 +39,8 @@ pub const ELSEWHERE: u64 = 9202;
 pub const STARTUP_FAILURE: u64 = 9203;
 /// A cancelled job.
 pub const CANCELLED: u64 = 9205;
+/// A job a newer push cancelled while it was queued, which no runner took.
+pub const NEVER_STARTED: u64 = 9207;
 /// A job a runner took before the daemon saw it queued, so the daemon never learnt its name.
 pub const UNNAMED: u64 = 9206;
 /// A queued job asking for a label no pool of its repository has.
@@ -329,7 +332,43 @@ fn job(summary: JobSummary) -> Job {
     }
 }
 
+/// Jobs no runner of this machine ran, newest first: one whose run failed before any runner took it, one a newer
+/// push cancelled while queued, and one another machine's runner ran.
+fn not_run_here() -> [JobSummary; 3] {
+    let mut startup_failure = summary(
+        STARTUP_FAILURE,
+        LEDGER,
+        JobState::Completed,
+        Some("startup_failure"),
+    );
+    startup_failure.timeline = Timeline {
+        queued_at: NOW - 9000,
+        finished_at: Some(NOW - 8990),
+        ..Timeline::default()
+    };
+    let mut elsewhere = summary(ELSEWHERE, LEDGER, JobState::Elsewhere, Some("success"));
+    elsewhere.timeline = Timeline {
+        queued_at: NOW - 9500,
+        started_at: Some(NOW - 9480),
+        finished_at: Some(NOW - 9100),
+        ..Timeline::default()
+    };
+    let mut never_started = summary(
+        NEVER_STARTED,
+        LEDGER,
+        JobState::Elsewhere,
+        Some("cancelled"),
+    );
+    never_started.timeline = Timeline {
+        queued_at: NOW - 9450,
+        finished_at: Some(NOW - 9440),
+        ..Timeline::default()
+    };
+    [startup_failure, never_started, elsewhere]
+}
+
 fn jobs() -> Vec<Job> {
+    let [startup_failure, never_started, elsewhere] = not_run_here();
     let mut running = ran(summary(RUNNING, LEDGER, JobState::Running, None), 240, None);
     "build".clone_into(&mut running.name);
     let mut not_busy = ran(
@@ -377,23 +416,6 @@ fn jobs() -> Vec<Job> {
         refused: 3,
         writer: true,
     };
-    let mut startup_failure = summary(
-        STARTUP_FAILURE,
-        LEDGER,
-        JobState::Completed,
-        Some("startup_failure"),
-    );
-    startup_failure.timeline = Timeline {
-        queued_at: NOW - 9000,
-        finished_at: Some(NOW - 8990),
-        ..Timeline::default()
-    };
-    let mut elsewhere = summary(ELSEWHERE, LEDGER, JobState::Elsewhere, Some("success"));
-    elsewhere.timeline = Timeline {
-        queued_at: NOW - 9500,
-        finished_at: Some(NOW - 9100),
-        ..Timeline::default()
-    };
     let lost = ran(
         summary(LOST, LEDGER, JobState::Lost, None),
         10_000,
@@ -421,6 +443,7 @@ fn jobs() -> Vec<Job> {
             ..job(timed_out)
         },
         job(startup_failure),
+        job(never_started),
         job(elsewhere),
         job(lost),
         job(succeeded),
@@ -741,6 +764,7 @@ mod tests {
         };
         assert_eq!(label(LOST), Some("lost"));
         assert_eq!(label(ELSEWHERE), Some("elsewhere"));
+        assert_eq!(label(NEVER_STARTED), Some("cancelled in queue"));
         assert_eq!(label(STARTUP_FAILURE), Some("startup failure"));
         assert_eq!(label(TIMED_OUT), Some("timed out"));
         assert_eq!(label(CANCELLED), Some("cancelled"));

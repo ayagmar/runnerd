@@ -257,7 +257,7 @@ pub trait GithubApi: Send + Sync {
     ) -> impl Future<Output = Result<Vec<QueuedJob>, Error>> + Send;
     /// The repository's self-hosted runners.
     fn runners(&self, repository: &str) -> impl Future<Output = Result<Vec<Runner>, Error>> + Send;
-    /// Registers a runner for one job and returns it with the config `run.sh --jitconfig` takes.
+    /// Registers a runner for one job and returns it with the config the runner's listener takes.
     fn jit_config(
         &self,
         repository: &str,
