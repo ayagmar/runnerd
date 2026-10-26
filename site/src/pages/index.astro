@@ -116,15 +116,6 @@ const initFail = `FAIL  slice: runnerd.slice has no unit file with a MemoryMax, 
 const start = ['systemctl --user daemon-reload', 'systemctl --user enable --now runnerd'];
 const runsOn = 'runs-on: [self-hosted, linux, x64]';
 
-// What a queued job's wait says, from the wait list in `runnerctl status` above, as the band that runs between the
-// pools and what each reason asks of you.
-const reasons = [
-  'No profile serves the label storefornt-small',
-  'A runner is starting for it in node 2',
-  'All 2 node slots are busy',
-  'The host is short of memory: needs 6G; the host has 2G to spare',
-];
-
 // Isolation, from the configuration page: the one line init writes, and what a privileged profile is refused with.
 const isolationToml = `[host]
 slice = "runnerd.slice"
@@ -431,12 +422,7 @@ labels = ["storefront-small"]</mark></code></pre>
           <pre class="terminal wide" tabindex="0" role="region" aria-label="runnerctl status output"><code><span class="prompt">$ runnerctl status | sed -n '/^REPOSITORY/,$p'</span>
 {pools}</code></pre>
         </div>
-        <div class="marquee">
-          <div class="marquee-track">
-            <ul aria-label="Why a job waits">{reasons.map((reason) => <li>{reason}</li>)}</ul>
-            <ul aria-hidden="true">{reasons.map((reason) => <li>{reason}</li>)}</ul>
-          </div>
-        </div>
+        <p class="band">Every wait says why, and what to do</p>
         <ul class="waits">
           <li>
             <code>No profile serves the label storefornt-small</code>

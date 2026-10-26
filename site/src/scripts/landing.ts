@@ -39,7 +39,7 @@ function themeToggle() {
 // class that hides it is added here, so a failed script never leaves a tile hidden.
 function reveal() {
   if (matchMedia('(prefers-reduced-motion: reduce)').matches) return;
-  const tiles = document.querySelectorAll<HTMLElement>('main .board > :is(.tile, .marquee, .waits li), main .waits li, footer .tile');
+  const tiles = document.querySelectorAll<HTMLElement>('main .board > :is(.tile, .band, .waits li), main .waits li, footer .tile');
   const observer = new IntersectionObserver(
     (entries) => {
       for (const entry of entries) {
@@ -64,8 +64,27 @@ function reveal() {
   }
 }
 
+// A table that is wider than its tile scrolls; a line above it says so, and goes when the tile is wide enough.
+function scrollCues() {
+  const observer = new ResizeObserver((entries) => {
+    for (const { target } of entries) {
+      const cue = target.previousElementSibling;
+      if (cue instanceof HTMLElement && cue.classList.contains('cue')) cue.hidden = target.scrollWidth <= target.clientWidth;
+    }
+  });
+  for (const pre of document.querySelectorAll('pre.terminal.wide')) {
+    const cue = document.createElement('p');
+    cue.className = 'cue';
+    cue.textContent = 'Scroll sideways to read the rest →';
+    cue.hidden = true;
+    pre.before(cue);
+    observer.observe(pre);
+  }
+}
+
 export function setup() {
   copyButton();
+  scrollCues();
   themeToggle();
   reveal();
 }
