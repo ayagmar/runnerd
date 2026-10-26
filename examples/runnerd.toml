@@ -25,7 +25,7 @@ events = "720h"
 jobs = "2160h"
 log_max = "50M"
 
-# Each profile runs one stage of image/Dockerfile. `image` (since 0.0.5) is the stage as the release publishes it,
+# Each profile runs one stage of image/Dockerfile. `image` is the stage as the release publishes it,
 # pulled before the first runner; keep its version at the daemon's. `image_stage = "jvm"` runs `runnerd-runner:jvm` instead, built
 # on this host from a clone: docker build --target jvm -t runnerd-runner:jvm image
 

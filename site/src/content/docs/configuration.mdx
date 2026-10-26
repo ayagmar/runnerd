@@ -122,7 +122,7 @@ runnerd logs the pull's progress, and `runnerd doctor` says whether each image i
 docker build --target jvm -t runnerd-runner:jvm image
 ```
 
-At start, after a reload and after a pull, runnerd removes the published images, `ghcr.io/ayagmar/runnerd-runner`, that no profile names and no container was made from, such as the previous version's after an upgrade ([ADR 0040](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0040-unused-runner-images-removed.md)). It never removes an image built on this host or any other image; remove an old `runnerd-runner:<stage>` yourself.
+At start, after a reload and after a pull, runnerd removes the published images, `ghcr.io/ayagmar/runnerd-runner`, that no profile names and no container was made from, such as an older version's ([ADR 0040](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0040-unused-runner-images-removed.md)). It never removes an image built on this host or any other image; remove an old `runnerd-runner:<stage>` yourself.
 
 ### Your own image
 
@@ -145,7 +145,7 @@ image = "quillstack-runner:0.0.19"
 # cpus, memory and slots as for any profile
 ```
 
-Keep the entrypoint, and root as the image's user: the entrypoint starts as root and runs the job as `runner`. runnerd pulls an `image` only when Docker lacks it, so build yours before the profile's first runner. When you upgrade runnerd, rebuild from the new version's `base` tag: your image inherits its `runnerd.version` label, and `runnerd doctor` warns when that is not the daemon's version.
+Keep the entrypoint, and root as the image's user: the entrypoint starts as root and runs the job as `runner`. runnerd pulls an `image` only when Docker lacks it, so build yours before the profile's first runner. After you update runnerd, rebuild from the new version's `base` tag: your image inherits its `runnerd.version` label, and `runnerd doctor` warns when that is not the daemon's version.
 
 Rebuilds install the same versions: Ubuntu packages come from one snapshot date, and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)). [Install](../install/#verify-a-release) shows how to check where a published image came from.
 
@@ -199,7 +199,7 @@ Never serve public repositories from self-hosted runners: anyone who can open a 
 
 ## Every key
 
-A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them; durations a number and `s`, `m`, `h` or `d`, such as `"168h"` or `"7d"`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, an enabled build cache's `max_size`, `poll_interval`, `records.max_total` and `max_count`, and `sizing.min_jobs`, `interval`, `raise_interval` and `max_step`. A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]`, `history.database` and `caches.build.directory`, which runnerd reads when it starts.
+A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them; durations a number and `s`, `m`, `h` or `d`, such as `"168h"` or `"7d"`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, an enabled build cache's `max_size`, `poll_interval`, `records.max_total` and `max_count`, a profile's `max_slots` when set, and `sizing.min_jobs`, `interval`, `raise_interval` and `max_step`. A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]`, `history.database` and `caches.build.directory`, which runnerd reads when it starts.
 
 ### `[host]`
 

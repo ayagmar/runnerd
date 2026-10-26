@@ -87,8 +87,7 @@ The installer downloads `runnerd` and `runnerctl` for Linux x86_64 or aarch64, c
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.19
 ```
 
-For v0.0.3 and earlier, run that release's own `install.sh`. Every release archive, `install.sh` and `sha256.sum` has
-a GitHub build provenance attestation:
+Every release archive, `install.sh` and `sha256.sum` has a GitHub build provenance attestation:
 
 ```sh
 curl -fsSLO https://github.com/ayagmar/runnerd/releases/latest/download/install.sh
@@ -123,8 +122,8 @@ The site, <https://ayagmar.github.io/runnerd/>, has the guides:
 - [Configuration](https://ayagmar.github.io/runnerd/configuration/): `runnerd.toml`, runner images, records of failed jobs, the budget check, isolation, and every key with its default.
 - [Admission and sizing](https://ayagmar.github.io/runnerd/admission/): what a job's memory counts, sizing advice from the job history and auto sizing, measured and CPU admission, `runnerd simulate`.
 - [Running](https://ayagmar.github.io/runnerd/running/): the service unit and `systemctl`, how runners are scheduled, warm runners that wait for the next job, how caches are kept warm, the shared build cache, records of failed jobs and their shells, the job history, and the JSON API and its events.
+- [Insights and notifications](https://ayagmar.github.io/runnerd/insights/): what runnerd reads from the job history, what the job minutes would have cost on GitHub-hosted runners, and notifications to ntfy, Discord or a webhook.
 - [Dashboard and CLI](https://ayagmar.github.io/runnerd/clients/): the web dashboard, from another device too, every `runnerctl` command, and `runnerctl tui` with its keys.
-- [Upgrading](https://ayagmar.github.io/runnerd/upgrading/): what each release changes on an existing host, and what to do before and after.
 
 [ARCHITECTURE.md](https://github.com/ayagmar/runnerd/blob/main/ARCHITECTURE.md) says where the code lives and [docs/adr](https://github.com/ayagmar/runnerd/blob/main/docs/adr/README.md) why.
 
