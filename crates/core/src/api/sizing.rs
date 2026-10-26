@@ -36,17 +36,14 @@ pub struct Sizing {
     /// The slice's `MemoryMax`; `None` when it is unlimited.
     pub memory_max: Option<u64>,
     /// `[host] admission`, which the advice budgets `MemoryMax` by.
-    #[serde(default)]
     pub admission: AdmissionPolicy,
     /// Every configured profile, by name.
     pub profiles: Vec<ProfileSizing>,
     /// Whether the daemon applies advice itself, `[sizing] auto`.
-    #[serde(default)]
     pub auto: bool,
     /// The changes auto sizing made since `since`, oldest first.
-    #[serde(default)]
     pub changes: Vec<SizingChange>,
-    /// Under auto sizing, what it does next and when. `None` while it is off, and from a daemon before it said.
+    /// Under auto sizing, what it does next and when. `None` while it is off.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub auto_plan: Option<AutoPlan>,
 }
@@ -60,8 +57,7 @@ pub struct AutoPlan {
     /// `[sizing] interval`: the least time between a change to one profile and one that lowers it, in seconds.
     pub interval: u64,
     /// `[sizing] raise_interval`: the least time between a change to one profile and one that only raises it, in
-    /// seconds. 0 from a daemon before it said: `interval` then holds every change.
-    #[serde(default)]
+    /// seconds.
     pub raise_interval: u64,
     /// `[sizing] max_step`: the most one change moves a profile's `memory`, in percent of it.
     pub max_step: u32,
@@ -71,11 +67,10 @@ pub struct AutoPlan {
     /// The profiles a change in the last `interval` holds from some change, the hold that ends first first.
     pub held: Vec<SizingHold>,
     /// Why no look changes anything until the owner acts, as when the file on disk differs from the config runnerd
-    /// runs with. `None` when the next look may write `next`, and from a daemon before it said.
+    /// runs with. `None` when the next look may write `next`.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub blocked: Option<String>,
-    /// The profiles whose jobs the CPU cap holds back and whose `cpus` the next look cannot raise, and why. Empty
-    /// from a daemon before it said.
+    /// The profiles whose jobs the CPU cap holds back and whose `cpus` the next look cannot raise, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<SizingRefused>,
 }
@@ -99,8 +94,7 @@ pub struct SizingHold {
     pub changed: u64,
     /// When it may be raised again, in seconds since the Unix epoch.
     pub until: u64,
-    /// When it may be lowered again; 0 from a daemon before it said, which held every change until `until`.
-    #[serde(default)]
+    /// When it may be lowered again.
     pub lower_until: u64,
 }
 
@@ -126,7 +120,6 @@ pub struct SizingChange {
     pub reason: String,
     /// Whether it may not have been written: recorded before its file was written, and the config no longer said
     /// whether it was when runnerd looked again. It still holds the interval, and `from` is still what it replaced.
-    #[serde(default)]
     pub uncertain: bool,
 }
 
@@ -145,21 +138,17 @@ pub struct ProfileSizing {
     pub peaks: Peaks,
     /// Seconds from queued to started.
     pub wait: Spread,
-    /// Its jobs by whether a warm runner took them, and how long each kind waited. Empty from a daemon before warm
-    /// runners.
-    #[serde(default)]
+    /// Its jobs by whether a warm runner took them, and how long each kind waited.
     pub starts: Starts,
     /// The percent of the time since `since` its slots held a runner for a job, from when the job was queued, over
     /// its `slots` now.
     pub busy: u32,
     /// Whether its jobs waited a minute or more for a slot at p95, or its slots were busy half the time: more slots
     /// would help.
-    #[serde(default)]
     pub wants_slots: bool,
     /// What to set `memory` and `slots` to. Sized for its largest peak, so no job gets less than it used.
     pub advice: Advice,
-    /// When the advice is to take back a lowering auto sizing made that went too far: what showed it. `None` from a
-    /// daemon before it said.
+    /// When the advice is to take back a lowering auto sizing made that went too far: what showed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert: Option<SizingRevert>,
     /// Each job that ran in it, by repository, workflow and name.
@@ -234,7 +223,7 @@ pub struct Peaks {
     /// They may need more than they show.
     pub at_cap: u64,
     /// How many of their jobs are on their cap: one of their runs met it or was killed for memory, and fewer than 3
-    /// successful runs since were clear of it. No lowering while any is. 0 from a daemon before it said.
+    /// successful runs since were clear of it. No lowering while any is.
     #[serde(default, skip_serializing_if = "is_zero")]
     pub on_cap: u64,
     /// Memory without page cache, in bytes.
@@ -521,7 +510,3 @@ impl Sizing {
         }
     }
 }
-
-// The wire format is JSON, which only the host and client features read.
-#[cfg(all(test, any(feature = "host", feature = "client")))]
-mod tests;

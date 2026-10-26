@@ -41,9 +41,9 @@ fn only_a_budget_past_memory_max_does_not_fit() {
     assert_eq!(
         check(CONFIG, Some(6 << 30)).verdict(None),
         Verdict::DoesNotFit,
-        "from an old daemon's check"
+        "without the text, the check's own budget"
     );
-    let budget = check(CONFIG, Some(6 << 30)).budget(None).unwrap();
+    let budget = check(CONFIG, Some(6 << 30)).budget().unwrap();
     let over = budget.remainder().unwrap();
     assert_eq!((over.label, over.memory), ("Over by", 2 << 30));
 }

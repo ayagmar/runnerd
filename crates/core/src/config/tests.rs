@@ -177,7 +177,7 @@ fn config_with_a_zero_limit_names_the_field() {
 }
 
 #[test]
-fn a_config_from_before_the_build_cache_gives_every_repository_one_main_writes() {
+fn a_config_without_build_cache_settings_gives_every_repository_one_main_writes() {
     let config = Config::parse(MINIMAL).unwrap();
     let build = &config.caches.build;
     assert!(build.enabled, "on: its defaults are safe");

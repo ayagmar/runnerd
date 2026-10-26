@@ -332,7 +332,7 @@ pub(crate) fn config_file() -> ConfigFile {
     ConfigFile {
         path: "/home/runner/.config/runnerd/runnerd.toml".to_owned(),
         text: "[host]\n".to_owned(),
-        revision: Some("3f2a".to_owned()),
+        revision: "3f2a".to_owned(),
     }
 }
 

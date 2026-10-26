@@ -147,7 +147,7 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
             p.muted { code { (view.file.path) } }
         }
         div.config-layout {
-            section.editor aria-labelledby="editor-title" "data-signals:revision"=[view.file.revision.as_deref().and_then(quoted)] {
+            section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)] {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
                 label.visually-hidden for="toml" { "runnerd.toml" }
                 textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"
@@ -195,8 +195,7 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
 /// The check's verdict, what its admission rule holds to `MemoryMax` and the budget that is, and its warnings.
 pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Markup {
     let parsed = Config::parse(text).ok();
-    // A daemon from before `memory_needed` sends neither it nor `admission`; the text says both.
-    let budget = check.budget(parsed.as_ref());
+    let budget = check.budget();
     // Without a total to hold to MemoryMax, as when the caps overflow, there is no budget to show.
     let blocks = parsed
         .as_ref()

@@ -39,8 +39,8 @@ use axum::http::{Request, StatusCode, header};
 use http_body_util::{BodyExt, Full};
 use hyper_util::rt::TokioIo;
 use runnerd_core::api::{
-    Admission, AdmissionPolicy, Basis, ConfigCheck, CpuAdmission, Event, EventEnvelope, HostSample,
-    JobPeak, JobState, Sample, SeedMemory, ShellMemory, Step, Waiting,
+    Admission, AdmissionPolicy, Basis, CpuAdmission, Event, EventEnvelope, HostSample, JobPeak,
+    JobState, Sample, SeedMemory, ShellMemory, Step, Waiting,
 };
 
 use crate::views::{repository_id, slot_id};
@@ -2221,60 +2221,6 @@ async fn under_measured_caps_past_memory_max_are_no_overflow_when_one_runner_and
         assert!(result.contains(expected), "lacks {expected:?}: {result}");
     }
     for unexpected in ["Over by", "max-mark", "Memory caps"] {
-        assert!(
-            !result.contains(unexpected),
-            "shows {unexpected:?}: {result}"
-        );
-    }
-}
-
-#[test]
-fn from_a_daemon_before_memory_needed_the_card_reads_the_rule_from_the_text() {
-    // 8 × 4G of caps and a 512M mirror under measured, on a 10G slice: one runner and the mirror take 4.5G. A daemon
-    // from before sends neither `admission` nor `memory_needed`.
-    let text = r#"
-[host]
-slice = "ci.slice"
-isolation = "sysbox"
-admission = "measured"
-
-[caches]
-mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
-pnpm = { max_size = "5G" }
-maven = { max_size = "5G" }
-
-[profiles.app]
-image_stage = "app"
-cpus = 1
-memory = "4G"
-slots = 8
-
-[[repositories]]
-name = "owner/app"
-profile = "app"
-labels = ["self-hosted", "app"]
-"#;
-    let legacy: ConfigCheck = serde_json::from_value(serde_json::json!({
-        "valid": true,
-        "message": "valid, memory caps sum to 32.5G, over the 10G MemoryMax",
-        "warnings": [],
-        "memory_caps": 65u64 << 29,
-        "memory_max": 10u64 << 30,
-    }))
-    .unwrap();
-    let result =
-        crate::views::config::result(&legacy, text, &crate::views::config::Outcome::Checked)
-            .into_string();
-    for expected in [
-        "Fits the budget",
-        "Largest runner + mirror",
-        "4.5G",
-        "Left",
-        "32.5G",
-    ] {
-        assert!(result.contains(expected), "lacks {expected:?}: {result}");
-    }
-    for unexpected in ["Over by", "max-mark"] {
         assert!(
             !result.contains(unexpected),
             "shows {unexpected:?}: {result}"

@@ -1,8 +1,8 @@
 //! The job history: a SQLite database of jobs, their runners, steps, samples and logs, the events clients resume
-//! from, cache sizes, the paused repositories and where the notifier got to. Owns the schema and its migrations, the one writer and the event
-//! broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads and pruning run
-//! on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about scheduling
-//! and stores no secret: no token, no JIT config, no runner `_diag` log.
+//! from, cache sizes, the paused repositories and where the notifier got to. Owns the schema, the one writer and
+//! the event broadcast. Writes are messages to a writer thread, so the engine never waits on the disk; reads and
+//! pruning run on Tokio's blocking pool, pruning on its own connection, a batch at a time. It decides nothing about
+//! scheduling and stores no secret: no token, no JIT config, no runner `_diag` log.
 
 use std::collections::BTreeMap;
 use std::os::unix::fs::{DirBuilderExt, OpenOptionsExt};
@@ -27,24 +27,12 @@ mod prune;
 mod read;
 mod write;
 
-/// The schema's migrations, in order; the database's `user_version` is how many ran.
-const MIGRATIONS: &[&str] = &[
-    include_str!("store/migrations/0001_history.sql"),
-    include_str!("store/migrations/0002_runner_caps.sql"),
-    include_str!("store/migrations/0003_paused.sql"),
-    include_str!("store/migrations/0004_prune.sql"),
-    include_str!("store/migrations/0005_announced_profiles.sql"),
-    include_str!("store/migrations/0006_records.sql"),
-    include_str!("store/migrations/0007_admission.sql"),
-    include_str!("store/migrations/0008_memory_without_page_cache.sql"),
-    include_str!("store/migrations/0009_auto_sizing.sql"),
-    include_str!("store/migrations/0010_auto_sizing_cpus.sql"),
-    include_str!("store/migrations/0011_notify.sql"),
-    include_str!("store/migrations/0012_build_cache.sql"),
-    include_str!("store/migrations/0013_host_memory.sql"),
-    include_str!("store/migrations/0014_local_ooms.sql"),
-    include_str!("store/migrations/0015_repositories.sql"),
-];
+/// The schema a new database is created with, at [`VERSION`].
+const SCHEMA: &str = include_str!("store/schema.sql");
+
+/// The schema version this build reads and writes, the database's `user_version`. A change to the schema adds a
+/// migration from it.
+const VERSION: u32 = 15;
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
 /// disk holds back that job's log, not the daemon's memory.
@@ -72,6 +60,17 @@ pub enum StoreError {
         /// The database's version.
         found: u32,
         /// The newest version this build knows.
+        supported: u32,
+    },
+    /// A runnerd before 0.0.19 wrote the database.
+    #[error(
+        "the job history database is version {found}, from a runnerd before 0.0.19; this runnerd reads version \
+         {supported} only: move the database aside"
+    )]
+    Older {
+        /// The database's version.
+        found: u32,
+        /// The version this build reads.
         supported: u32,
     },
     /// The directory or file cannot be created.
@@ -367,8 +366,8 @@ pub struct Store {
 }
 
 impl Store {
-    /// Opens the database at `path`, creating it and its directory (mode 0700) if missing, and migrates it to the
-    /// latest version. Refuses a database a newer runnerd wrote.
+    /// Opens the database at `path`, creating it and its directory (mode 0700) if missing, with the schema when it
+    /// is new. Refuses a database at another version.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             std::fs::DirBuilder::new()
@@ -384,7 +383,7 @@ impl Store {
             .open(path)?;
         let mut db = Connection::open(path)?;
         configure(&db)?;
-        migrate(&mut db)?;
+        create(&mut db)?;
         let reader = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -909,7 +908,7 @@ impl Store {
     }
 }
 
-/// What sizing reads from the database at `path`, opened read-only and not migrated, as `runnerd doctor` reads it
+/// What sizing reads from the database at `path`, opened read-only and left as it is, as `runnerd doctor` reads it
 /// while no daemon runs; `None` when there is no database yet. In a directory it may write, SQLite keeps the
 /// `-wal` and `-shm` files a read of a WAL database needs next to it; in one it may not, it reads the file as it is,
 /// or refuses when the `-wal` holds changes the file does not have yet.
@@ -953,46 +952,31 @@ pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, Sto
     .map(Some)
 }
 
-/// What sizing reads from a database of any version this build knows, without migrating it.
+/// What sizing reads from the database, without creating its schema.
 fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError> {
-    let found: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let supported = u32::try_from(MIGRATIONS.len()).unwrap_or(u32::MAX);
-    if found > supported {
-        return Err(StoreError::Newer { found, supported });
-    }
-    if found == 0 {
+    if version(db)? == 0 {
         return Ok(sizing::History::default());
     }
-    // Columns sizing reads that later versions added: before them, a temporary view gives each runner none.
-    let mut added = match found {
-        1 => {
-            "NULL AS memory_cap, NULL AS cpu_cap, NULL AS admission, NULL AS oom_kills, NULL AS ooms, \
-             NULL AS memory_measure, "
-        }
-        2..=6 => "NULL AS admission, NULL AS oom_kills, NULL AS ooms, NULL AS memory_measure, ",
-        7 => "NULL AS ooms, NULL AS memory_measure, ",
-        _ => "",
-    }
-    .to_owned();
-    if found < 14 {
-        added.push_str("NULL AS local_ooms");
-    }
-    let added = added.trim_end_matches(", ");
-    if found < 13 {
-        db.execute_batch("CREATE TEMP VIEW jobs AS SELECT *, 0 AS host_waited FROM main.jobs")?;
-    }
-    if !added.is_empty() {
-        db.execute_batch(&format!(
-            "CREATE TEMP VIEW runners AS SELECT *, {added} FROM main.runners"
-        ))?;
-    }
     let mut history = read::sizing(db, since)?;
-    // What a revert reads, from a history that has it all; an older one shows no revert.
-    if found >= 14 {
-        history.memory_set = read::auto_sizing(db)?.memory;
-        history.changes = read::sizing_changes(db, since.saturating_sub(sizing::memory::HISTORY))?;
-    }
+    history.memory_set = read::auto_sizing(db)?.memory;
+    history.changes = read::sizing_changes(db, since.saturating_sub(sizing::memory::HISTORY))?;
     Ok(history)
+}
+
+/// The database's schema version: 0 for a new one, else [`VERSION`]; any other is refused.
+fn version(db: &Connection) -> Result<u32, StoreError> {
+    let found: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
+    match found {
+        0 | VERSION => Ok(found),
+        found if found > VERSION => Err(StoreError::Newer {
+            found,
+            supported: VERSION,
+        }),
+        found => Err(StoreError::Older {
+            found,
+            supported: VERSION,
+        }),
+    }
 }
 
 /// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error.
@@ -1003,17 +987,12 @@ fn configure(db: &Connection) -> rusqlite::Result<()> {
     db.busy_timeout(Duration::from_secs(5))
 }
 
-/// Runs the migrations the database lacks, each in its own transaction with its new version.
-fn migrate(db: &mut Connection) -> Result<(), StoreError> {
-    let found: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
-    let supported = u32::try_from(MIGRATIONS.len()).unwrap_or(u32::MAX);
-    if found > supported {
-        return Err(StoreError::Newer { found, supported });
-    }
-    for (version, migration) in (1..).zip(MIGRATIONS).skip(found as usize) {
+/// Creates the schema in a new database, in one transaction with its version.
+fn create(db: &mut Connection) -> Result<(), StoreError> {
+    if version(db)? == 0 {
         let transaction = db.transaction()?;
-        transaction.execute_batch(migration)?;
-        transaction.pragma_update(None, "user_version", version)?;
+        transaction.execute_batch(SCHEMA)?;
+        transaction.pragma_update(None, "user_version", VERSION)?;
         transaction.commit()?;
     }
     Ok(())

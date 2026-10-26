@@ -1495,7 +1495,7 @@ fn router(fake: Fake) -> Router {
                 let text = fake.fixtures.lock().unwrap().config.clone();
                 Json(ConfigFile {
                     path: "/home/forge/.config/runnerd/runnerd.toml".to_owned(),
-                    revision: Some(runnerd_core::config::revision(&text)),
+                    revision: runnerd_core::config::revision(&text),
                     text,
                 })
             })

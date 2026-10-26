@@ -1425,7 +1425,10 @@ fn repositories(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let width = usize::from(area.width).saturating_sub(1);
     let spans = |repository: &RepositoryStatus, profile: Option<&str>, name_width: usize| {
         let mut spans = vec![
-            Span::styled("■ ", theme.profile(app.profile_index(&repository.profile))),
+            Span::styled(
+                "■ ",
+                theme.profile(app.profile_index(repository.first_profile())),
+            ),
             Span::styled(
                 fit(&repository.name, name_width).trim_end().to_owned(),
                 bold(),

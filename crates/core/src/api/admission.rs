@@ -99,8 +99,7 @@ pub struct Admission {
     pub free: Option<u64>,
     /// The slice's memory then, less its inactive page cache (`HostSample::memory`); `None` without a recent sample.
     pub slice: Option<u64>,
-    /// What it reserved of the CPU budget, under `[host] cpu_overcommit`. Absent without one, and from a daemon
-    /// before CPU admission.
+    /// What it reserved of the CPU budget, under `[host] cpu_overcommit`. Absent without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuAdmission>,
 }

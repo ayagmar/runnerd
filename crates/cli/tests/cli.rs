@@ -21,8 +21,8 @@ use axum::response::{IntoResponse, Response};
 use axum::routing::{delete, get, post};
 use runnerd_core::api::{
     Advice, Budget, Busy, Check, CheckStatus, ConfigCheck, ConfigFile, Doctor, ErrorResponse,
-    Event, EventEnvelope, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary, LogSummary,
-    Pairing, Pairings, Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record,
+    Event, EventEnvelope, Insights, Job, JobMetrics, JobRunner, JobSizing, JobState, JobSummary,
+    LogSummary, Pairing, Pairings, Paused, Peaks, ProfileSizing, ProfileStatus, QueuedJob, Record,
     RecordLimits, Records, RemovedRecords, RepositoryStatus, Resize, RunnerStatus, RunningJob,
     Sizing, SizingChange, SlotStatus, Spread, Starts, Status, Timeline, Waiting,
 };
@@ -289,7 +289,7 @@ async fn get_config() -> axum::Json<ConfigFile> {
     axum::Json(ConfigFile {
         path: "/home/u/.config/runnerd/runnerd.toml".to_owned(),
         text: CONFIG.to_owned(),
-        revision: Some("c0ffee".to_owned()),
+        revision: "c0ffee".to_owned(),
     })
 }
 
@@ -512,6 +512,17 @@ fn serve(socket: &Path) -> Shared {
         .route("/v1/config", get(get_config).put(replace_config))
         .route("/v1/sizing", get(get_sizing))
         .route("/v1/doctor", get(get_doctor))
+        .route("/v1/insights", get(get_insights))
+        // A history read that fails, as when the database is locked past its timeout.
+        .route(
+            "/v1/savings",
+            get(async || {
+                refuse(
+                    StatusCode::INTERNAL_SERVER_ERROR,
+                    "cannot read the job history",
+                )
+            }),
+        )
         .route("/v1/events", get(events))
         .route("/v1/records", get(get_records))
         .route("/v1/records", delete(remove_records))
@@ -559,6 +570,16 @@ fn refuse(status: StatusCode, message: &str) -> Response {
         }),
     )
         .into_response()
+}
+
+/// Two weeks in which nothing stands out.
+async fn get_insights() -> axum::Json<Insights> {
+    axum::Json(Insights {
+        since: 1_792_000_000 - 14 * 86_400,
+        until: 1_792_000_000,
+        insights: Vec::new(),
+        waits: Vec::new(),
+    })
 }
 
 async fn get_records() -> axum::Json<Records> {
@@ -1213,6 +1234,20 @@ fn sizing_shows_what_auto_sizing_changed_and_undoes_it_back_to_what_it_replaced(
             .replace("memory = \"7G\"", "memory = \"9G\"")
             .replace("cpus = 8", "cpus = 6")],
         "memory and the cpus it changed are back to what it replaced"
+    );
+}
+
+#[test]
+fn insights_show_without_the_savings_when_the_daemon_cannot_read_them() {
+    let dir = TempDir::new();
+    let socket = dir.0.join("runnerd.sock");
+    serve(&socket);
+    let output = runnerctl(&socket, &["insights"]);
+    assert!(output.status.success(), "{}", stderr(&output));
+    assert!(
+        stdout(&output).contains("nothing stands out"),
+        "{}",
+        stdout(&output)
     );
 }
 

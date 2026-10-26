@@ -372,9 +372,9 @@ pub(crate) struct App {
     pub(crate) latest: usize,
     /// The jobs started and finished in the last 24 hours, once read.
     pub(crate) activity: Option<Activity>,
-    /// What the history says; `None` until read, or from a daemon before insights.
+    /// What the history says; `None` until read.
     pub(crate) insights: Option<Insights>,
-    /// What the jobs' minutes would have cost on GitHub's runners; `None` until read, or from a daemon before it.
+    /// What the jobs' minutes would have cost on GitHub's runners; `None` until read.
     pub(crate) savings: Option<Savings>,
     /// The host sample time from which the insights are read again.
     insights_due: u64,

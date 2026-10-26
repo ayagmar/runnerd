@@ -128,7 +128,7 @@ impl ConfigCheck {
                 config.validate(self.memory_max.map(ByteSize)),
                 Err(ConfigError::OverBudget { .. } | ConfigError::ProfileOverBudget { .. })
             ),
-            None => self.budget(None).is_some_and(|budget| budget.over()),
+            None => self.budget().is_some_and(|budget| budget.over()),
         };
         if over {
             Verdict::DoesNotFit
@@ -137,22 +137,11 @@ impl ConfigCheck {
         }
     }
 
-    /// What its admission rule holds to `MemoryMax`, when known: from the check, or from a daemon before it said,
-    /// from `parsed`, the config it checked. `None` when neither knows, as when the caps overflow.
-    pub fn budget(&self, parsed: Option<&Config>) -> Option<CheckBudget> {
-        let (admission, needed) = match (self.memory_needed, parsed) {
-            (Some(needed), _) => (self.admission, needed),
-            (None, Some(config)) => (
-                config.host.admission.policy(),
-                config.memory_needed().ok()?.0,
-            ),
-            (None, None) if self.admission == AdmissionPolicy::Caps => {
-                (self.admission, self.memory_caps?)
-            }
-            (None, None) => return None,
-        };
-        Some(CheckBudget {
-            admission,
+    /// What its admission rule holds to `MemoryMax`; `None` when the check could not say, as when the config does
+    /// not parse or its caps overflow.
+    pub fn budget(&self) -> Option<CheckBudget> {
+        self.memory_needed.map(|needed| CheckBudget {
+            admission: self.admission,
             needed,
             memory_max: self.memory_max,
             memory_caps: self.memory_caps,

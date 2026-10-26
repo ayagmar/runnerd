@@ -690,7 +690,7 @@ async fn insights(
         if json {
             return print_json(&insights);
         }
-        // A daemon before the savings route has none to show.
+        // The insights stand on their own: savings the history could not read are left out.
         if let Ok(savings) = client.get::<Savings>("/v1/savings").await {
             output::text(&format!("{}\n", human::savings(&savings)));
         }
@@ -838,10 +838,7 @@ pub(crate) async fn write_resize(
     let file: ConfigFile = client.get("/v1/config").await?;
     let text = resize_profile(&file.text, profile, resize)
         .map_err(|error| Error::Local(error.to_string()))?;
-    let path = match &file.revision {
-        Some(revision) => format!("/v1/config?revision={revision}"),
-        None => "/v1/config".to_owned(),
-    };
+    let path = format!("/v1/config?revision={}", file.revision);
     let reply = client
         .request(Method::PUT, &path, Some(Body::toml(text)))
         .await?;

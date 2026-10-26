@@ -137,7 +137,6 @@ pub struct Status {
     /// carries the list: `job.queued` announces a job, `job.started` and `job.finished` its leaving the queue.
     /// A repository whose last listing failed, as while GitHub rate-limits runnerd, or that is no longer polled
     /// because runnerd is shutting down, shows no jobs here, while the history keeps its jobs queued.
-    #[serde(default)]
     pub queued: Vec<QueuedJob>,
 }
 
@@ -153,30 +152,25 @@ pub struct Budget {
     /// mirror.
     pub memory_in_use: u64,
     /// What a new runner must fit in beside them.
-    #[serde(default)]
     pub admission: AdmissionPolicy,
     /// Under measured admission, whether the slice is at the high-water mark, so no runner starts.
-    #[serde(default)]
     pub held: bool,
     /// The mirror's part of `memory_in_use`: its cap while it is enabled or still running, else 0.
-    #[serde(default)]
     pub mirror_memory: u64,
     /// The seed containers' part of `memory_in_use`, one per profile that reseeds, by profile name.
-    #[serde(default)]
     pub seed_memory: Vec<SeedMemory>,
     /// The shells' part of `memory_in_use`, one per shell open in a record, by job.
-    #[serde(default)]
     pub shell_memory: Vec<ShellMemory>,
     /// What the host's memory leaves runners beside its other programs, from a recent reading of it; absent
-    /// without one, and from a daemon before it read the host.
+    /// without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub host: Option<HostBudget>,
-    /// The CPU budget, under `[host] cpu_overcommit`. Absent without one, and from a daemon before CPU admission.
+    /// The CPU budget, under `[host] cpu_overcommit`. Absent without one.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub cpu: Option<CpuBudget>,
     /// The CPUs the slice may use, in millicores: its `AllowedCPUs` or the host's, less under a lower `CPUQuota`,
     /// whether or not a CPU budget admits runners. The runners' CPU limits are quotas that may add up past it.
-    /// Absent when it could not be read, and from a daemon before it said.
+    /// Absent when it could not be read.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub slice_cpus: Option<u64>,
 }
@@ -309,12 +303,10 @@ pub struct RunnerStatus {
     /// Seconds since the Unix epoch.
     pub started_at: u64,
     /// What it takes of the budget: its cap under caps; under measured admission the larger of its predicted peak
-    /// and its last sampled memory. 0 from a daemon before measured admission.
-    #[serde(default)]
+    /// and its last sampled memory.
     pub reserved: u64,
     /// A warm runner: idle, and no queued job of its repository waits for it; it takes the next one GitHub hands
-    /// out. False from a daemon before warm runners.
-    #[serde(default)]
+    /// out.
     pub warm: bool,
 }
 
@@ -323,15 +315,13 @@ pub struct RunnerStatus {
 pub struct RepositoryStatus {
     /// `owner/name` on GitHub.
     pub name: String,
-    /// Its first pool's profile, which clients before pools show.
-    #[serde(default)]
+    /// Its first pool's profile, which 0.0.19's TUI and dashboard colour it by. Read `pools`; it goes when the wire
+    /// check moves past 0.0.19 (ADR 0073).
     pub profile: String,
-    /// Its first pool's labels, which clients before pools show.
-    #[serde(default)]
+    /// Its first pool's labels, for 0.0.19's clients as `profile` is.
     pub labels: Vec<String>,
     /// Its pools in config order, one per `[[repositories]]` entry: a job runs in the one whose labels match it
-    /// (ADR 0058). Empty from a daemon before pools; `listed_pools` reads either.
-    #[serde(default)]
+    /// (ADR 0058).
     pub pools: Vec<PoolStatus>,
     /// Paused repositories get no new runners; their running jobs finish.
     pub paused: bool,
@@ -357,8 +347,7 @@ pub struct QueuedJob {
     pub id: u64,
     /// The repository whose runners can take it, `owner/name`.
     pub repository: String,
-    /// The profile of its repository's pool whose labels match it; `None` when no pool's do, and from a daemon
-    /// before pools.
+    /// The profile of its repository's pool whose labels match it; `None` when no pool's do.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub profile: Option<String>,
     /// The workflow run it belongs to.
@@ -375,8 +364,8 @@ pub struct QueuedJob {
     pub url: Option<String>,
     /// When GitHub queued it, in seconds since the Unix epoch; 0 if GitHub did not say.
     pub queued_at: u64,
-    /// Why no runner has it yet, as the last plan saw it. `None` before the daemon has planned with it, while it
-    /// shuts down, and from a daemon before it said.
+    /// Why no runner has it yet, as the last plan saw it. `None` before the daemon has planned with it, and while
+    /// it shuts down.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub waiting: Option<Waiting>,
 }
@@ -417,21 +406,14 @@ impl QueuedJob {
 }
 
 impl RepositoryStatus {
-    /// Its pools, or from a daemon before pools its one profile and labels.
-    pub fn listed_pools(&self) -> Vec<PoolStatus> {
-        if !self.pools.is_empty() {
-            return self.pools.clone();
-        }
-        vec![PoolStatus {
-            profile: self.profile.clone(),
-            labels: self.labels.clone(),
-            queued_jobs: self.queued_jobs,
-        }]
+    /// The profile of its first pool, which every client colours it by.
+    pub fn first_profile(&self) -> &str {
+        self.pools.first().map_or("", |pool| pool.profile.as_str())
     }
 
     /// Its pools' profiles, as every client lists them on one line: `jvm` or `jvm + light`.
     pub fn profiles(&self) -> String {
-        self.listed_pools()
+        self.pools
             .iter()
             .map(|pool| pool.profile.as_str())
             .collect::<Vec<_>>()
@@ -440,19 +422,18 @@ impl RepositoryStatus {
 
     /// The profile of its pool whose labels match a job asking for `labels`, as the daemon picks it.
     pub fn pool_for(&self, labels: &[String]) -> Option<String> {
-        self.listed_pools()
-            .into_iter()
+        self.pools
+            .iter()
             .find(|pool| crate::config::labels_match(labels, &pool.labels))
-            .map(|pool| pool.profile)
+            .map(|pool| pool.profile.clone())
     }
 }
 
 /// What failed, that holds a repository's runners back for a while.
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "kebab-case")]
 pub enum HoldCause {
     /// Its runners ended without taking a job.
-    #[default]
     NoJob,
     /// Its runners ended without a job after waiting for one, twice in a row.
     IdleExits,
@@ -473,8 +454,7 @@ pub enum Waiting {
     Backoff {
         /// When runners may start again.
         until: u64,
-        /// What failed; `NoJob` from a daemon before it said.
-        #[serde(default)]
+        /// What failed.
         cause: HoldCause,
     },
     /// A runner started for it and waits for GitHub to hand it the job: a runner takes any job its labels match,

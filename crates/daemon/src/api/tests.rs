@@ -991,7 +991,7 @@ async fn a_save_made_from_a_revision_is_refused_once_the_file_was_edited_on_disk
         .client
         .put(format!(
             "http://runnerd/v1/config?revision={}",
-            read.revision.unwrap()
+            read.revision
         ))
         .body(EXAMPLE.replacen("slots = 2", "slots = 1", 1))
         .send()
@@ -1014,7 +1014,7 @@ async fn a_config_made_from_a_revision_replaced_since_is_refused() {
         }
     };
     let first = read(&daemon).await;
-    let first_revision = first.revision.clone().unwrap();
+    let first_revision = first.revision.clone();
     let put = |text: String, revision: &str| {
         daemon
             .client
@@ -1664,7 +1664,7 @@ async fn the_config_api_never_shows_a_notify_secret_and_saving_what_it_shows_kee
         .client
         .put(format!(
             "http://runnerd/v1/config?revision={}",
-            shown.revision.unwrap()
+            shown.revision
         ))
         .body(edited)
         .send()

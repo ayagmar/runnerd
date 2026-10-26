@@ -388,7 +388,7 @@ fn failed_job() -> api::Job {
     let summary: api::JobSummary = serde_json::from_value(serde_json::json!({
         "id": 42, "repository": "o/app", "run_id": 7, "run_attempt": 1, "workflow": "CI", "name": "test",
         "branch": "main", "url": null, "labels": [], "state": "completed", "conclusion": "failure",
-        "runner": null, "timeline": {"queued_at": 1}, "metrics": {"mirror_bytes": 0},
+        "runner": null, "timeline": {"queued_at": 1}, "metrics": {"mirror_bytes": 0, "build_cache": api::BuildCacheCounts::default()},
         "log": {"lines": 0, "bytes": 0, "truncated": false}
     }))
     .unwrap();

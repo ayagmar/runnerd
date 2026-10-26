@@ -148,7 +148,7 @@ async fn snapshot(client: &Client) -> Result<(Events, App), Error> {
     for id in live.running.keys() {
         series.push(client.get(&format!("/v1/jobs/{id}/samples")).await?);
     }
-    // A daemon before the activity API leaves the health figures out rather than the whole screen.
+    // An activity read that fails leaves the health figures out rather than the whole screen.
     let activity = activity(client).await.ok();
     Ok((events, App::new(live, activity, host.samples, series)))
 }
@@ -474,8 +474,8 @@ async fn read_activity(client: Client, send: UnboundedSender<Msg>, generation: u
     }
 }
 
-/// Reads the insights and what the jobs' minutes would have cost, and sends them; a daemon before either has
-/// none to show.
+/// Reads the insights and what the jobs' minutes would have cost, and sends them; a read that fails sends nothing,
+/// and the last one read stays shown.
 async fn read_insights(client: Client, send: UnboundedSender<Msg>) {
     if let Ok(insights) = client
         .get_query::<Insights>("/v1/insights", &InsightsQuery::default())

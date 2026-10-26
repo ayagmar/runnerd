@@ -47,7 +47,6 @@ pub struct Records {
     /// The limits.
     pub limits: RecordLimits,
     /// The jobs whose record a shell is open in.
-    #[serde(default)]
     pub shells: Vec<u64>,
 }
 
