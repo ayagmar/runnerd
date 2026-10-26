@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.0.18";
+const PREVIOUS: &str = "v0.0.19";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -265,9 +265,9 @@ documents! {
     "event-query": EventQuery => full(samples::event_query(), None),
     "remove-records-query": RemoveRecordsQuery => full(samples::remove_records_query(), None),
     "shell-query": ShellQuery => full(samples::shell_query(), None),
+    "savings": Savings => full(samples::savings(), None),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
-    "savings": Savings => full(samples::savings(), None),
 }
 
 /// The previous release's samples, one file per document.
