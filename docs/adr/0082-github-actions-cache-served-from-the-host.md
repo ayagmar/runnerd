@@ -56,14 +56,16 @@ and the runner image is runnerd's own.
 - **How a job reaches it.** When the runner's socket directory has the `actions` marker the daemon writes, the
   image's `build-cache.sh`, as root before the runner starts, adds an `iptables` rule that drops port 41772 arriving
   on `eth0`, then forwards that port on every address of the container to the runner's socket, and exports
-  `RUNNERD_ACTIONS_CACHE_PORT`. The image moves each of the runner's bundled node binaries to `node.real` beside a
-  `sh` wrapper (`image/node.sh`) that, while that variable is set and the preload is there, runs it with
+  `RUNNERD_ACTIONS_CACHE_PORT`. The image moves each of the runner's bundled glibc node binaries to `node.real` beside
+  a `bash` wrapper (`image/node.sh`; `sh` would drop the action's inputs, `INPUT_FETCH-DEPTH` and the like, as dash
+  passes on no variable with a hyphen in its name) that, while that variable is set and the preload is there, runs it with
   `--require=/usr/local/lib/runnerd-actions-cache.cjs`, else as it is. The preload, loaded by each node action the
   runner starts, replaces `ACTIONS_RESULTS_URL` with `http://<the container's address>:41772/` when it is GitHub's
   `https://results-receiver.actions.githubusercontent.com/`, before the action's own code runs. The job's
   environment carries no `NODE_OPTIONS`, so its own containers get nothing, and a workflow's own `NODE_OPTIONS`
   applies besides the `--require`. A `container:` job's container mounts the runner's externals but has neither the
-  variable nor the preload, so node runs there as it is; the runner already needs `sh` in it. A runner that
+  variable nor the preload, so node runs there as it is. The `_alpine` builds, which only an Alpine `container:` job runs and which
+  has no `bash`, stay unwrapped; a glibc job container without `bash` cannot start the wrapped node. A runner that
   updates itself replaces its externals and so the wrapper: its jobs use GitHub's cache. The address is the
   container's own so that BuildKit in a container of the slot's engine, whose traffic arrives on that engine's
   bridge, reaches it too. Other runners and the host arrive on `eth0`, which drops
