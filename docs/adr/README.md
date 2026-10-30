@@ -80,7 +80,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0072](0072-job-minutes-priced-at-github-hosted-rates.md) | What this machine's job minutes would have cost on GitHub-hosted runners (amended by 0074) |
 | [0073](0073-no-compatibility-before-0-0-19.md) | No compatibility before 0.0.19: the history starts at schema 15 |
 | [0074](0074-the-cost-line-names-only-what-it-is-before.md) | The cost line names only what it is before |
-| [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md) | `cpus` come down only under `caps` admission, and only under a cap no run's bursts met |
+| [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md) | `cpus` come down only under `caps` admission and a cap no run's bursts met; under `measured` the bursts raise them |
 | [0076](0076-a-slot-is-free-once-docker-removed-its-container.md) | A slot is free once Docker removed its container, each start is admitted again as it starts, and a broken log capture starts again |
 | [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md) | Credentials in the cache layer, closed slots' layers, and what the build cache counts |
 | [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets |

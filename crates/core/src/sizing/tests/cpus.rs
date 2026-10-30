@@ -559,11 +559,19 @@ fn cpus_the_bursts_meet_are_never_lowered_on_the_averages_they_hold_down() {
             );
         }
         let measured = look_at(&measured_at(cpus), &ran, Some(32_000), NOW, &day_ago);
-        assert_eq!(
-            measured.changes,
-            Vec::new(),
-            "under measured admission {cpus} CPUs stay"
-        );
+        let raised: Vec<u32> = measured
+            .changes
+            .iter()
+            .filter_map(|change| change.to.cpus)
+            .collect();
+        if cpus <= 24 {
+            assert!(
+                raised.len() == 1 && raised[0] > cpus,
+                "under measured admission the bursts at {cpus} raise it: {raised:?}"
+            );
+        } else {
+            assert_eq!(raised, Vec::<u32>::new(), "under measured {cpus} CPUs stay");
+        }
     }
     // The gate's own lowering, look after look: down to its peak, and no further.
     let mut text = CONFIG.replacen("cpus = 8", "cpus = 31", 1);
@@ -584,6 +592,38 @@ fn cpus_the_bursts_meet_are_never_lowered_on_the_averages_they_hold_down() {
         24,
         "31 → 24, the gate's peak"
     );
+}
+
+#[test]
+fn under_measured_admission_a_cap_the_bursts_meet_goes_back_up_until_they_fit() {
+    // The owner's host: measured admission, jvm cut to 9 CPUs by the old lowering, the Android gate peaking at the
+    // cap and averaging 3.3 of it, far under the 70% a raise on averages takes. Under measured admission the cap
+    // bounds no slot, so runs at it raise it a step a look, to the first cap over the gate's 23.5-CPU bursts. Under
+    // caps nothing moves: neither the bursts nor the averages raise it there, and they hold the lowering.
+    let caps = CONFIG.replacen("cpus = 8", "cpus = 9", 1);
+    let measured = caps.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nadmission = \"measured\"",
+    );
+    for (start, end) in [(measured, 28), (caps, 9)] {
+        let mut text = start;
+        let mut jobs = Vec::new();
+        let mut last = BTreeMap::new();
+        let mut seen = vec![9];
+        for look in 0..8 {
+            let now = NOW + look * 2 * HOUR;
+            let config = on(&text, "max_step = 50");
+            jobs.extend(gate(config.profiles["jvm"].cpus, now - HOUR));
+            let looked = look_at(&config, &history(jobs.clone()), Some(32_000), now, &last);
+            for change in &looked.changes {
+                text = resize_profile(&text, &change.profile, change.to).unwrap();
+                last.insert(change.profile.clone(), change.at);
+            }
+            seen.push(on(&text, "max_step = 50").profiles["jvm"].cpus);
+        }
+        assert_eq!(*seen.last().unwrap(), end, "{seen:?}");
+        assert!(seen.is_sorted(), "never down: {seen:?}");
+    }
 }
 
 #[test]
@@ -932,25 +972,32 @@ mod invariants {
         jobs
     }
 
-    /// The highest CPU peak of the runs `evidence` reads.
-    fn peak(world: &World, profile: &str, cap: u64) -> u64 {
+    /// The CPU peaks of the runs `evidence` reads, by job.
+    fn peaks(world: &World, profile: &str, cap: u64) -> BTreeMap<String, Vec<u64>> {
         let since = world
             .fresh
             .get(profile)
             .copied()
             .unwrap_or(0)
             .max(world.now - 30 * DAY);
-        world
-            .history()
-            .jobs
-            .iter()
-            .filter(|job| {
-                job.profile == profile
-                    && job.cpu_cap == Some(cap)
-                    && job.succeeded
-                    && job.queued_at >= since
-            })
-            .map(|job| job.cpu_peak)
+        let mut jobs: BTreeMap<String, Vec<u64>> = BTreeMap::new();
+        for job in world.history().jobs.iter().filter(|job| {
+            job.profile == profile
+                && job.cpu_cap == Some(cap)
+                && job.succeeded
+                && job.queued_at >= since
+        }) {
+            jobs.entry(job.name.clone()).or_default().push(job.cpu_peak);
+        }
+        jobs
+    }
+
+    /// The highest CPU peak of the runs `evidence` reads.
+    fn peak(world: &World, profile: &str, cap: u64) -> u64 {
+        peaks(world, profile, cap)
+            .values()
+            .flatten()
+            .copied()
             .max()
             .unwrap_or(0)
     }
@@ -962,6 +1009,25 @@ mod invariants {
             .values()
             .map(|profile| u64::from(profile.cpus) * 1000 * u64::from(profile.slots))
             .sum()
+    }
+
+    /// Whether the evidence allows a raise of `cpus`: 3 runs of a job averaging 70% of the cap at the median, or under
+    /// measured admission, 3 runs of a job whose bursts met the cap.
+    fn raisable(
+        world: &World,
+        config: &Config,
+        profile: &str,
+        cap: u64,
+        jobs: &BTreeMap<&'static str, Vec<u64>>,
+    ) -> bool {
+        let bound = jobs
+            .values()
+            .any(|averages| averages.len() >= 3 && spread(averages.clone()).p50 * 100 >= cap * 70);
+        let met = config.host.admission == Admission::Measured
+            && peaks(world, profile, cap)
+                .values()
+                .any(|peaks| peaks.iter().filter(|peak| **peak * 100 >= cap * 95).count() >= 3);
+        bound || met
     }
 
     /// Checks a look's `cpus` changes against the evidence and the rules; `Err` says what broke.
@@ -992,10 +1058,7 @@ mod invariants {
                 ));
             }
             if to_cpus > current {
-                let bound = jobs.values().any(|averages| {
-                    averages.len() >= 3 && spread(averages.clone()).p50 * 100 >= cap * 70
-                });
-                if !bound {
+                if !raisable(world, &config, profile, cap, &jobs) {
                     return Err(format!(
                         "{profile}: raised without a job at its cap: {jobs:?}"
                     ));

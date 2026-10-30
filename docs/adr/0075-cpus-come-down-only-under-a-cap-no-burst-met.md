@@ -1,4 +1,4 @@
-# 0075. `cpus` come down only under `caps` admission, and only under a cap no run's bursts met
+# 0075. `cpus` come down only under `caps` admission and a cap no run's bursts met; under `measured` the bursts raise them
 
 Status: **Accepted** (2026-10-30). Amends [0068](0068-cpus-follow-run-averages.md), where it states the lowering.
 
@@ -18,8 +18,12 @@ budget was why a job waited twice.
 
 ## Decision
 
-- Under `admission = "measured"`, auto sizing never lowers `cpus`. Raises are unchanged: a job averaging 70% of the
-  cap still gets more.
+- Under `admission = "measured"`, auto sizing never lowers `cpus`, and raises them on bursts as well as averages:
+  3 runs of one job since the last change that peaked at 95% of the cap or more raise it by `max_step`, up to the
+  slice's CPUs, as do 3 averaging 70% of it, as before. There `cpus` take no budget, so the cap's only effect on
+  such a job is to slow its bursts. A profile the old lowering cut climbs back, a step a look, to the first cap its
+  bursts do not meet, and stays: jvm at 9 CPUs goes 9 → 13 → 19 → 28 at the default 50% step, over a gate bursting to
+  23.5. A burst the slice's CPUs hold back is not shown as a refused raise: the slice is the owner's to size.
 - Under `caps`, a lowering reads the same runs as before (successful, at the profile's current `cpus`, since its last
   change and since the daemon got them), and holds the profile when any of them peaked at 95% of the cap or more.
   Such a run met the cap in a burst: it ran as fast as the cap let it, so its average says what the cap allowed,
@@ -29,14 +33,18 @@ budget was why a job waited twice.
   peak among those runs, rounded up to whole CPUs, by at most `max_step` a change. A lowering never goes under a
   burst it saw, so the next runs do not meet the new cap, and the one after reads the same peaks and stops there.
 
-0068 rejected peaks for raising, as a parallel build bursts to whatever cap it gets. That is why a peak at the cap
-holds a lowering here, and why the peak is only a floor: a job whose bursts reach any cap keeps the cap it has.
+0068 rejected peaks for raising, as a parallel build bursts to whatever cap it gets. Under `caps` that still holds:
+there a raise takes CPU budget from other slots, so a peak at the cap holds a lowering and is only its floor, and a
+job whose bursts reach any cap keeps the cap it has. Under `measured` a raise takes nothing from anyone, and a build
+bursting to its cap raises it until the bursts fit, which bounds the climb at the build's own width or the slice.
 
 ## Consequences
 
 - No schema or wire change. The lowering's reason now says the runs' highest peak beside the heaviest average.
-- A profile whose builds burst to their cap is never lowered by auto sizing. Lowering it is a hand edit, and a cap
-  its bursts meet at the lower value stays there.
+- Under `caps`, a profile whose builds burst to their cap is never lowered by auto sizing. Lowering it is a hand edit,
+  and a cap its bursts meet at the lower value stays there. Under `measured` it is raised back.
+- Under `measured`, a build that bursts to whatever it gets (one wider than the slice) raises its profile to the
+  slice's CPUs. That costs nothing there: the kernel shares the slice by weight, and admission reserves averages.
 - A profile well over every burst comes down to its highest burst, no further. At 31 CPUs the Android gate's bursts
   reached 23.5, so under `caps` it would stop at 24, where 0068 went on to 16 and below.
 - Contention can still cost a step: a day in which other programs hold both the average and the bursts of every
