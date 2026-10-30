@@ -144,6 +144,7 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
         .route("/live/jobs/{id}", get(live::job))
         .route("/config", get(config).put(actions::save_config))
         .route("/config/check", post(actions::check_config))
+        .route("/config/doctor", get(config_doctor))
         .route(
             "/v1/repositories/{owner}/{name}/pause",
             post(actions::pause),
@@ -272,6 +273,12 @@ async fn config(State(app): State<App>, Query(query): Query<ConfigQuery>) -> Res
             .await
             .map(|config| views::config::render(&config, &app.proxies)),
     )
+}
+
+/// `GET /config/doctor`: the doctor's region, which the config page asks for once it shows. A daemon that fails or
+/// does not answer in time is a region that says so, since Datastar applies only 200 responses.
+async fn config_doctor(State(app): State<App>) -> Response {
+    Html(views::config::doctor(&app.daemon.get("/v1/doctor").await).into_string()).into_response()
 }
 
 async fn job(State(app): State<App>, UrlPath(id): UrlPath<u64>) -> Response {

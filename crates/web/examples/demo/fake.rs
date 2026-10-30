@@ -75,6 +75,10 @@ pub struct Fixtures {
     pub insights: Option<Insights>,
     /// What `GET /v1/sizing` answers; `None`, the demo's own.
     pub sizing: Option<Sizing>,
+    /// How long `GET /v1/doctor` takes to answer, as the daemon's reads of the host do.
+    pub doctor_delay: std::time::Duration,
+    /// Why `GET /v1/doctor` fails, as the daemon's 500; `None`, it answers.
+    pub doctor_error: Option<String>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -712,6 +716,8 @@ impl Fixtures {
             savings: None,
             insights: None,
             sizing: None,
+            doctor_delay: std::time::Duration::ZERO,
+            doctor_error: None,
         }
     }
 
@@ -1563,7 +1569,15 @@ fn router(fake: Fake) -> Router {
         )
         .route(
             "/v1/doctor",
-            get(|| async {
+            get(|State(fake): State<Fake>| async move {
+                let (delay, error) = {
+                    let fixtures = fake.fixtures.lock().unwrap();
+                    (fixtures.doctor_delay, fixtures.doctor_error.clone())
+                };
+                tokio::time::sleep(delay).await;
+                if let Some(message) = error {
+                    return (StatusCode::INTERNAL_SERVER_ERROR, Json(ErrorResponse { message })).into_response();
+                }
                 Json(Doctor {
                     checks: vec![
                         Check { name: "Docker".to_owned(), status: CheckStatus::Pass, detail: "29.1.3, reachable".to_owned(), fix: None },
@@ -1588,6 +1602,7 @@ fn router(fake: Fake) -> Router {
                         },
                     ],
                 })
+                .into_response()
             }),
         )
         .route("/v1/events", get(events))

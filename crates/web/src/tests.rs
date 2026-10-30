@@ -2320,25 +2320,75 @@ async fn a_config_that_fits_is_saved_and_checking_one_saves_nothing() {
         .await;
     assert!(saved.body.contains("Saved and reloaded"), "{}", saved.body);
     assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, toml);
+    assert!(
+        saved.body.contains(&format!(
+            "@get('/config/doctor?after={}'",
+            runnerd_core::config::revision(&toml)
+        )),
+        "the doctor runs again for the config saved: {}",
+        saved.body
+    );
 }
 
 #[tokio::test]
-async fn the_config_page_shows_the_file_its_budget_and_the_doctor() {
+async fn the_config_page_shows_the_file_and_its_budget_at_once_and_the_doctors_checks_after() {
     let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::from_secs(10);
     let cookie = dashboard.sign_in().await;
+    for path in ["/config", "/config?resize=node", "/config?undo=jvm"] {
+        let page = tokio::time::timeout(Duration::from_secs(5), dashboard.page(&cookie, path))
+            .await
+            .unwrap_or_else(|_| panic!("{path} waits for the doctor"));
+        assert_eq!(page.status, StatusCode::OK);
+        for expected in [
+            "halyard/ledger",
+            "/home/forge/.config/runnerd/runnerd.toml",
+            r#"id="config-result""#,
+            r#"id="doctor""#,
+            "@get('/config/doctor'",
+        ] {
+            assert!(page.body.contains(expected), "{path} lacks {expected:?}");
+        }
+        assert!(
+            !page.body.contains("MemoryHigh=30G"),
+            "{path} has no check before the doctor answers"
+        );
+    }
     let page = dashboard.page(&cookie, "/config").await;
-    assert_eq!(page.status, StatusCode::OK);
-    for expected in [
-        "halyard/ledger",
-        "/home/forge/.config/runnerd/runnerd.toml",
-        "Fits the budget",
-        "jvm ×2 18G, node ×2 14G, mirror 512M",
-        "MemoryHigh=30G",
-    ] {
+    for expected in ["Fits the budget", "jvm ×2 18G, node ×2 14G, mirror 512M"] {
         assert!(
             page.body.contains(expected),
-            "config page lacks {expected:?}"
+            "the budget draws without the doctor: lacks {expected:?}"
         );
+    }
+    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::ZERO;
+    let doctor = dashboard.page(&cookie, "/config/doctor").await;
+    assert_eq!(doctor.status, StatusCode::OK);
+    assert!(
+        doctor.body.contains(r#"id="doctor""#) && doctor.body.contains("MemoryHigh=30G"),
+        "{}",
+        doctor.body
+    );
+}
+
+#[tokio::test]
+async fn a_doctor_that_fails_says_why_in_its_region_and_offers_to_run_again() {
+    let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().doctor_error = Some("cannot read the host".to_owned());
+    let cookie = dashboard.sign_in().await;
+    assert_eq!(
+        dashboard.page(&cookie, "/config").await.status,
+        StatusCode::OK
+    );
+    let doctor = dashboard.page(&cookie, "/config/doctor").await;
+    // Datastar applies only a 200.
+    assert_eq!(doctor.status, StatusCode::OK);
+    for expected in [
+        r#"id="doctor""#,
+        "cannot read the host",
+        "@get('/config/doctor'",
+    ] {
+        assert!(doctor.body.contains(expected), "{}", doctor.body);
     }
 }
 

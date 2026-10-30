@@ -45,6 +45,8 @@ async fn main() {
     measured(&fake);
     downtime(&fake);
     busy_desktop(&fake);
+    // About what the doctor's reads of the host take with a few repositories.
+    fake.fixtures.lock().unwrap().doctor_delay = Duration::from_millis(700);
     fake::serve(&socket, fake.clone());
     let listener = runnerd_web::listen(&addr).await.unwrap().unwrap();
     let sessions = runnerd_web::Sessions::open(dir.join("dashboard-session")).unwrap();
