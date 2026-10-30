@@ -14,6 +14,9 @@ use std::path::Path;
 use std::sync::Arc;
 use std::time::Duration;
 
+use tokio::io::{AsyncReadExt, AsyncWriteExt};
+use tokio::net::UnixStream;
+
 use super::super::{ActionsCache, BuildCache, Scopes, Writes};
 use super::{call, path_of, restore, save, send};
 use crate::sync::lock;
@@ -99,6 +102,36 @@ async fn finalize(dir: &Path, key: &str, size: usize) -> bool {
     )
     .await["ok"]
         == true
+}
+
+/// Starts a PUT of `length` bytes to `path` and sends the first of them, `first`: the connection, the rest unsent, as
+/// a sender's that stalls.
+async fn stalled_put(dir: &Path, path: &str, length: usize, first: &[u8]) -> UnixStream {
+    let mut stream = UnixStream::connect(dir.join(crate::buildcache::SOCKET))
+        .await
+        .unwrap();
+    let head = format!(
+        "PUT {path} HTTP/1.1\r\nHost: 10.0.0.5:41772\r\nContent-Length: {length}\r\nConnection: close\r\n\r\n"
+    );
+    stream.write_all(head.as_bytes()).await.unwrap();
+    stream.write_all(first).await.unwrap();
+    stream
+}
+
+/// Waits, at most 5 s, until `done`, which says what it waits for.
+async fn until(done: impl Fn() -> bool, what: &str) {
+    for _ in 0..500 {
+        if done() {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("never {what}");
+}
+
+/// What the uploads not yet entries take of the uploads' room.
+fn uploading(cache: &BuildCache) -> u64 {
+    lock(&cache.inner.state).uploading
 }
 
 /// How many uploads wait on disk to become entries, for the cache in `dir`.
@@ -338,11 +371,125 @@ async fn a_fork_or_a_job_github_never_names_saves_nothing_and_frees_what_it_sent
     assert_eq!(restore(&main, "deps", &[]).await, None);
     assert_eq!(cache.size().entries, 0);
     assert_eq!(uploads(&dir), 0);
+    assert_eq!(uploading(&cache), 0, "the uploads' room is all free again");
+}
+
+#[tokio::test]
+async fn a_refused_jobs_uploads_give_back_their_room_while_their_senders_stall() {
+    let dir = TestDir::new("actions-refused-stalled");
+    let cache = open(&dir, 64 << 10);
+    let fork = cache.attach("fork", "o/app", ActionsCache::Served).unwrap();
+    let whole = reserve(&fork, "whole").await;
+    let layers = reserve(&fork, "layers").await;
+    let block = format!("{layers}?comp=block&blockid=QkxPQ0sxPT0%3D");
+    // Each upload sends its first KiB, then stalls: an archive, a block and a Gradle entry.
+    let length = 16 << 10;
+    let mut stalled = Vec::new();
+    for path in [whole.as_str(), block.as_str(), "/gradle/0a1b"] {
+        stalled.push(stalled_put(&fork, path, length, &[1; 1 << 10]).await);
+    }
+    until(|| uploads(&dir) == 3, "were the three uploads on disk").await;
+
+    cache.decide("fork", Writes::Refused, reader());
+    until(
+        || uploads(&dir) == 0 && uploading(&cache) == 0,
+        "did the refusal free the stalled uploads",
+    )
+    .await;
+    // The rest of each body is read and dropped, and answered as stored.
+    for mut stream in stalled {
+        stream
+            .write_all(&vec![1; length - (1 << 10)])
+            .await
+            .unwrap();
+        let mut answer = Vec::new();
+        stream.read_to_end(&mut answer).await.unwrap();
+        let status = String::from_utf8_lossy(&answer[9..12]).into_owned();
+        assert!(status == "201" || status == "200", "{status}");
+    }
+    assert_eq!((uploads(&dir), uploading(&cache)), (0, 0));
+    let other = cache
+        .attach("other", "o/other", ActionsCache::Served)
+        .unwrap();
+    cache.decide("other", Writes::Allowed, branch("main"));
+    assert!(save_now(&other, "deps", &[2; 16 << 10]).await);
     assert_eq!(
-        lock(&cache.inner.state).uploading,
-        0,
-        "the uploads' room is all free again"
+        restore(&other, "deps", &[])
+            .await
+            .map(|(_, archive)| archive.len()),
+        Some(16 << 10),
+        "another repository's save finds the room"
     );
+}
+
+#[tokio::test]
+async fn a_runner_removed_while_its_blocks_join_leaves_nothing_behind() {
+    let dir = TestDir::new("actions-join-removed");
+    let cache = open(&dir, 1 << 20);
+    let gone = cache.attach("gone", "o/app", ActionsCache::Served).unwrap();
+    let ended = cache
+        .attach("ended", "o/app", ActionsCache::Served)
+        .unwrap();
+    // `ended` keeps a finalized save for GitHub's decision once its runner is removed.
+    assert!(save_now(&ended, "kept", b"kept").await);
+    cache.inner.join_gate.hold();
+    let mut joins = Vec::new();
+    for socket in [&gone, &ended] {
+        let layers = reserve(socket, "layers").await;
+        assert_eq!(
+            put_block(socket, &layers, "QkxPQ0sxPT0=", b"layer").await,
+            201
+        );
+        let socket = socket.clone();
+        joins.push(tokio::spawn(async move {
+            // The connection is cut when the runner goes.
+            let list = b"<BlockList><Latest>QkxPQ0sxPT0=</Latest></BlockList>";
+            let path = format!("{layers}?comp=blocklist");
+            let mut stream = stalled_put(&socket, &path, list.len(), b"").await;
+            let _ = stream.write_all(list).await;
+            let _ = stream.read_to_end(&mut Vec::new()).await;
+        }));
+    }
+    until(
+        || cache.inner.join_gate.waiting() == 2,
+        "did both joins start",
+    )
+    .await;
+
+    cache.detach("gone");
+    assert!(cache.close("ended"), "its finalized save waits for GitHub");
+    cache.inner.join_gate.release();
+    for join in joins {
+        join.await.unwrap();
+    }
+    until(
+        || uploads(&dir) == 1 && uploading(&cache) == 4 << 10,
+        "did the joins remove what they no longer keep",
+    )
+    .await;
+    cache.detach("ended");
+    assert_eq!((uploads(&dir), uploading(&cache)), (0, 0));
+}
+
+#[tokio::test]
+async fn an_empty_block_list_takes_the_room_any_archive_does() {
+    let dir = TestDir::new("actions-empty-joins");
+    // An undecided job may hold a quarter of it: one archive's least charge.
+    let cache = open(&dir, 16 << 10);
+    let fork = cache.attach("fork", "o/app", ActionsCache::Served).unwrap();
+    for n in 0..3 {
+        let key = format!("empty-{n}");
+        let url = reserve(&fork, &key).await;
+        assert_eq!(put_block_list(&fork, &url, &[]).await, 201);
+        assert!(finalize(&fork, &key, 0).await);
+    }
+    assert_eq!(
+        (uploads(&dir), uploading(&cache)),
+        (1, 4 << 10),
+        "only the first fit in the job's room"
+    );
+    cache.decide("fork", Writes::Refused, reader());
+    assert_eq!((uploads(&dir), uploading(&cache)), (0, 0));
 }
 
 #[tokio::test]

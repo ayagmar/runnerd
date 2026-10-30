@@ -18,6 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::UnixListener;
+use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::warn;
 
@@ -187,6 +188,9 @@ struct Inner {
     results: actions::Results,
     /// Where turbo's requests with a workflow's own token go.
     vercel: turbo::Vercel,
+    /// Holds block lists' joins where a test says.
+    #[cfg(test)]
+    join_gate: Gate,
     // A panic midway leaves at worst an entry counted that is gone, or a file not counted, which `open` counts at
     // the next start.
     state: Mutex<State>,
@@ -262,6 +266,8 @@ struct Runner {
     actions: ActionsCache,
     /// Its GitHub Actions cache scopes, once its writes are decided.
     scopes: Scopes,
+    /// Changes when its writes are decided, for the uploads it is receiving.
+    decided: watch::Sender<()>,
     /// Its GitHub Actions cache saves not yet entries, by the number in their upload URL: being uploaded, or, while
     /// its writes are undecided, finalized and waiting for them. At most `actions::MAX_SAVES` of both.
     saves: HashMap<u64, actions::Save>,
@@ -321,6 +327,8 @@ impl BuildCache {
                 sockets: sockets.to_owned(),
                 results: actions::Results::new(),
                 vercel: turbo::Vercel::new(),
+                #[cfg(test)]
+                join_gate: Gate::default(),
                 state: Mutex::new(state),
             }),
         })
@@ -398,6 +406,7 @@ impl BuildCache {
                 serving,
                 actions,
                 scopes: Scopes::default(),
+                decided: watch::Sender::new(()),
                 saves: HashMap::new(),
                 found: HashMap::new(),
             },
@@ -456,6 +465,9 @@ impl BuildCache {
             }
             // Under the same lock as the decision: no save is finalized between the two.
             let dropped = actions::decided(&self.inner, &mut state, runner);
+            if let Some(open) = state.runners.get(runner) {
+                open.decided.send_replace(());
+            }
             (held, dropped)
         };
         self.inner.remove_uploads(Some(runner), &dropped);
@@ -656,8 +668,8 @@ impl Inner {
         stored
     }
 
-    /// Takes `bytes` more of the uploads' room for `runner`, unless they would take more than `max_size`, or, while
-    /// its writes are undecided, its own more than a quarter of it. `max_size` is the one the upload started with: a
+    /// Takes `bytes` more of the uploads' room for `runner`, unless they would take more than `max_size`, its writes
+    /// are refused, or, while they are undecided, its own would take more than a quarter of it. `max_size` is the one the upload started with: a
     /// lower one a reload set since holds back the uploads that start after it.
     fn reserve(&self, runner: &str, bytes: u64, max_size: u64) -> bool {
         let mut state = lock(&self.state);
@@ -666,7 +678,11 @@ impl Inner {
             return false;
         };
         let fits = total + bytes <= max_size
-            && (open.writes != Writes::Undecided || open.uploading + bytes <= max_size / 4);
+            && match open.writes {
+                Writes::Undecided => open.uploading + bytes <= max_size / 4,
+                Writes::Allowed => true,
+                Writes::Refused => false,
+            };
         if fits {
             open.uploading += bytes;
             state.uploading += bytes;
@@ -809,6 +825,44 @@ fn count_entries(root: &Path, dir: &Path, entries: &mut HashMap<PathBuf, Entry>)
 
 #[cfg(test)]
 mod tests;
+
+/// Where joins wait while a test holds them, to remove a runner midway.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct Gate {
+    /// Whether joins are held, and how many wait.
+    state: Mutex<(bool, usize)>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl Gate {
+    pub(crate) fn hold(&self) {
+        lock(&self.state).0 = true;
+    }
+
+    pub(crate) fn release(&self) {
+        lock(&self.state).0 = false;
+        self.changed.notify_all();
+    }
+
+    pub(crate) fn waiting(&self) -> usize {
+        lock(&self.state).1
+    }
+
+    /// Waits while joins are held.
+    fn pass(&self) {
+        let mut state = lock(&self.state);
+        state.1 += 1;
+        while state.0 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.1 -= 1;
+    }
+}
 
 /// Sends one request to a runner's socket in `dir`, as a tool in its container would through the forwarder, and
 /// returns the response's status and body.

@@ -9,7 +9,7 @@
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Empty, Full, Limited, StreamBody};
@@ -20,7 +20,7 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::debug;
 
-use super::serve::{Body, Receiving, drain, receive, status};
+use super::serve::{Body, Purpose, Receiving, drain, receive, status};
 use super::{ActionsCache, Inner, Runner, State, Upload, Writes, charge, valid_segment};
 use crate::sync::lock;
 
@@ -137,7 +137,7 @@ impl Results {
 }
 
 pub(super) async fn handle(
-    inner: &Inner,
+    inner: &Arc<Inner>,
     runner: &str,
     request: Request<Incoming>,
 ) -> Response<Body> {
@@ -568,7 +568,7 @@ pub(super) fn unfinished(saves: &mut HashMap<u64, Save>) -> HashMap<u64, Save> {
 /// The archive of save `id`: sent whole (Azure's Put Blob), in blocks (Put Block), or joined from them (Put Block
 /// List). What a save no longer open, or past a limit, sends is read and dropped, and answered as stored.
 async fn upload(
-    inner: &Inner,
+    inner: &Arc<Inner>,
     runner: &str,
     id: u64,
     request: Request<Incoming>,
@@ -602,7 +602,7 @@ async fn upload(
     match (comp.as_deref(), block) {
         (Some("blocklist"), _) => join(inner, runner, id, max_size, body).await,
         (Some("block"), Some(block)) if !block.is_empty() && block.len() <= 128 => {
-            let Some(received) = take(inner, runner, max_size, body).await else {
+            let Some(received) = take(inner, runner, id, max_size, body).await else {
                 return status(StatusCode::INTERNAL_SERVER_ERROR);
             };
             keep(inner, runner, id, received, Part::Block(block));
@@ -610,7 +610,7 @@ async fn upload(
         }
         (Some("block"), _) => status(StatusCode::BAD_REQUEST),
         _ => {
-            let Some(received) = take(inner, runner, max_size, body).await else {
+            let Some(received) = take(inner, runner, id, max_size, body).await else {
                 return status(StatusCode::INTERNAL_SERVER_ERROR);
             };
             keep(inner, runner, id, received, Part::Archive);
@@ -619,14 +619,16 @@ async fn upload(
     }
 }
 
-/// Receives a body into an upload file: `None` when writing it failed, `Some(None)` when it passed a limit.
+/// Receives a body of save `id`'s into an upload file: `None` when writing it failed, `Some(None)` when it passed a
+/// limit or the save was dropped meanwhile, as when its job was refused.
 async fn take(
     inner: &Inner,
     runner: &str,
+    id: u64,
     max_size: u64,
     body: Incoming,
 ) -> Option<Option<Upload>> {
-    let mut receiving = Receiving::new(inner, runner, max_size);
+    let mut receiving = Receiving::new(inner, runner, max_size, Purpose::Save(id));
     match receive(&mut receiving, body).await {
         Ok(true) => Some(Some(receiving.into_upload(PathBuf::new()))),
         Ok(false) => Some(None),
@@ -693,7 +695,7 @@ fn keep(inner: &Inner, runner: &str, id: u64, received: Option<Upload>, part: Pa
 
 /// Put Block List: joins save `id`'s blocks in the list's order into its archive; blocks the list leaves out go.
 async fn join(
-    inner: &Inner,
+    inner: &Arc<Inner>,
     runner: &str,
     id: u64,
     max_size: u64,
@@ -705,6 +707,7 @@ async fn join(
     let Some(order) = block_ids(&String::from_utf8_lossy(&list)) else {
         return status(StatusCode::BAD_REQUEST);
     };
+    // No await from here until the join owns the blocks: an aborted request would lose them.
     let blocks = {
         let mut state = lock(&inner.state);
         let Some(save) = state
@@ -740,39 +743,86 @@ async fn join(
         state.next_upload += 1;
         inner.uploads.join(state.next_upload.to_string())
     };
-    let sources: Vec<PathBuf> = parts.iter().map(|part| part.file.clone()).collect();
-    let target = file.clone();
-    let joined = tokio::task::spawn_blocking(move || -> io::Result<u64> {
-        let mut out = std::fs::File::create(&target)?;
-        let mut bytes = 0;
-        for source in sources {
-            bytes += io::copy(&mut std::fs::File::open(source)?, &mut out)?;
-        }
-        out.sync_data()?;
-        Ok(bytes)
-    })
-    .await;
-    let room: u64 = parts.iter().map(|part| part.room).sum();
-    // The blocks' files go; their room stays with the archive, which needs no more than they took together.
-    for part in &parts {
-        let _ = std::fs::remove_file(&part.file);
-    }
-    let Ok(Ok(bytes)) = joined else {
-        let _ = std::fs::remove_file(&file);
-        inner.release(Some(runner), room);
-        keep(inner, runner, id, None, Part::Archive);
-        return status(StatusCode::INTERNAL_SERVER_ERROR);
-    };
-    let needed = charge(bytes);
-    inner.release(Some(runner), room.saturating_sub(needed));
-    let archive = Upload {
+    // The join owns the blocks, its file and their room to its end, with or without this request: a runner removed
+    // meanwhile aborts the request, and the join still removes what it no longer keeps.
+    let (inner, runner) = (inner.clone(), runner.to_owned());
+    let joining = Joining {
+        id,
+        max_size,
+        parts,
         file,
-        entry: PathBuf::new(),
-        bytes,
-        room: room.min(needed),
     };
-    keep(inner, runner, id, Some(archive), Part::Archive);
-    blob_created()
+    match tokio::task::spawn_blocking(move || joining.run(&inner, &runner)).await {
+        Ok(true) => blob_created(),
+        _ => status(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Save `id`'s blocks being joined into `file`.
+struct Joining {
+    id: u64,
+    max_size: u64,
+    parts: Vec<Upload>,
+    file: PathBuf,
+}
+
+impl Joining {
+    /// Joins the blocks into the save's archive; their files go. False when writing failed, which drops the save.
+    /// The archive takes the room its bytes count for (`charge`): what the blocks took, and more when they took less,
+    /// as an empty list's archive does.
+    fn run(self, inner: &Inner, runner: &str) -> bool {
+        #[cfg(test)]
+        inner.join_gate.pass();
+        let Joining {
+            id,
+            max_size,
+            parts,
+            file,
+        } = self;
+        let joined = (|| -> io::Result<u64> {
+            let mut out = std::fs::File::create(&file)?;
+            let mut bytes = 0;
+            for part in &parts {
+                bytes += io::copy(&mut std::fs::File::open(&part.file)?, &mut out)?;
+            }
+            out.sync_data()?;
+            Ok(bytes)
+        })();
+        let room: u64 = parts.iter().map(|part| part.room).sum();
+        for part in &parts {
+            let _ = std::fs::remove_file(&part.file);
+        }
+        let needed = joined.as_ref().map_or(0, |bytes| charge(*bytes));
+        let kept = match joined {
+            Ok(bytes) if room >= needed => {
+                inner.release(Some(runner), room - needed);
+                Some(bytes)
+            }
+            Ok(bytes) if inner.reserve(runner, needed - room, max_size) => Some(bytes),
+            _ => None,
+        };
+        let Some(bytes) = kept else {
+            let _ = std::fs::remove_file(&file);
+            inner.release(Some(runner), room);
+            keep(inner, runner, id, None, Part::Archive);
+            return joined.is_ok();
+        };
+        let archive = Upload {
+            file,
+            entry: PathBuf::new(),
+            bytes,
+            room: needed,
+        };
+        keep(inner, runner, id, Some(archive), Part::Archive);
+        true
+    }
+}
+
+/// Whether save `id` of `saves` still takes what its job sends: open, neither dropped nor finalized.
+pub(super) fn takes_uploads(saves: &HashMap<u64, Save>, id: u64) -> bool {
+    saves
+        .get(&id)
+        .is_some_and(|save| !save.dropped && !save.finalized)
 }
 
 /// The block IDs of an Azure block list, in order: `<Latest>`, `<Committed>` and `<Uncommitted>` alike.
