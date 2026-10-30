@@ -1155,6 +1155,7 @@ fn host_at(store: &Store, slice: u64, available: u64, stalled: u32) {
                 memory: 6 * G,
             },
         ],
+        ceiling: None,
     });
 }
 
@@ -1310,6 +1311,110 @@ async fn under_caps_a_runner_starts_only_if_its_cap_fits_what_the_host_leaves() 
     );
 }
 
+/// A VM's memory read now, as Hyper-V leaves it while idle: 2.12G of which 1.48G is available, the slice holding
+/// nothing, its tasks stalled `stalled` hundredths of a percent of the last 10 s.
+fn idle_vm_at(store: &Store, stalled: u32) {
+    store.host_memory(api::HostMemory {
+        at: time::now_ms() / 1000,
+        total: 2 * G + 120 * M,
+        available: G + 490 * M,
+        slice: 0,
+        some: Some(api::Pressure::default()),
+        full: Some(api::Pressure {
+            avg10: stalled,
+            avg60: 0,
+        }),
+        holders: Vec::new(),
+        ceiling: None,
+    });
+}
+
+/// An engine under caps with a 20G slice, its config's `[host]` extended by `host`, two jobs queued.
+async fn vm_engine(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    host: &str,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    let config = CONFIG.replace(
+        "isolation = \"sysbox\"",
+        &format!("isolation = \"sysbox\"\n{host}"),
+    );
+    let (mut engine, handle) = engine_with(github, docker, dir, &config);
+    engine.memory_max = Some(20 * G);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    (engine, handle)
+}
+
+#[tokio::test]
+async fn an_idle_vm_without_a_memory_ceiling_starts_nothing() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = vm_engine(&github, &docker, &dir, "").await;
+    idle_vm_at(&handle.store, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        0,
+        "1.48G is under the 2G margin"
+    );
+    engine.publish();
+    assert_eq!(
+        waits(&handle)[0],
+        Some(api::Waiting::HostMemory {
+            needs: 4 * G,
+            free: 0
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_vm_that_can_grow_to_its_memory_ceiling_starts_runners_in_what_it_can_grow_by() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = vm_engine(&github, &docker, &dir, "memory_ceiling = \"24G\"").await;
+    idle_vm_at(&handle.store, 0);
+    engine.tick(Shutdown::No).await;
+    // 1.48G available and 21.88G to grow by, less the 2G margin of 24G, fits both 4G caps.
+    assert_eq!(registered(&github.calls()).len(), 2);
+    engine.publish();
+    let line = handle.status.borrow().budget.host_line().unwrap();
+    assert!(
+        line.starts_with("host: 1.48G of 2.12G available, growing to 24G; leaves the slice 21.36G"),
+        "{line}"
+    );
+}
+
+#[tokio::test]
+async fn a_vm_that_stalls_short_of_memory_starts_nothing_whatever_its_memory_ceiling() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = vm_engine(&github, &docker, &dir, "memory_ceiling = \"24G\"").await;
+    // The hypervisor does not give what the ceiling promises: every runnable task waits for memory 6% of the time.
+    idle_vm_at(&handle.store, 600);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 0, "nothing starts");
+    engine.publish();
+    let status = handle.status.borrow();
+    assert!(
+        status.budget.host.as_ref().is_some_and(|host| host.stalled),
+        "the budget says the host stalls"
+    );
+    let job = &status.queued[0];
+    let reason = job.waiting.as_ref().unwrap().reason(job, &status, 0);
+    assert!(reason.contains("stall"), "{reason}");
+}
+
 #[tokio::test]
 async fn a_runner_whose_room_the_host_lost_since_the_plan_does_not_start_in_the_same_tick() {
     let (github, docker, dir) = (
@@ -1440,6 +1545,7 @@ async fn without_a_recent_reading_of_the_host_only_the_slice_bounds_starts() {
         some: None,
         full: None,
         holders: Vec::new(),
+        ceiling: None,
     });
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4);

@@ -69,6 +69,11 @@ pub struct Host {
     /// admitted.
     #[serde(default)]
     pub cpu_overcommit: Option<f64>,
+    /// Set, the most memory the host can grow to, for a VM whose hypervisor adds memory as the guest asks for it:
+    /// admission counts what it can still grow by past `MemTotal` as available, and keeps the margin of this
+    /// (ADR 0084). Absent, or not above `MemTotal`, the host is the memory it has now.
+    #[serde(default)]
+    pub memory_ceiling: Option<ByteSize>,
 }
 
 impl Host {
@@ -994,6 +999,19 @@ pub enum ConfigError {
         /// What is wrong, such as `url does not start with https:// or http://`.
         why: &'static str,
     },
+    /// `[host] memory_ceiling` is under one runner of a profile and the mirror, so that profile could never start.
+    #[error(
+        "host.memory_ceiling is {ceiling}, under the {needs} one runner of {profile} and the mirror take; set it \
+         to the most memory the host can grow to, such as the VM's maximum"
+    )]
+    CeilingUnderProfile {
+        /// The profile.
+        profile: String,
+        /// Its `memory` and the mirror's.
+        needs: ByteSize,
+        /// The ceiling set.
+        ceiling: ByteSize,
+    },
     /// The caps add up past `u64::MAX` bytes.
     #[error("slots × memory over all profiles plus the mirror is too large to add up")]
     BudgetOverflow,
@@ -1155,6 +1173,29 @@ impl Config {
         }
     }
 
+    /// Refuses a `[host] memory_ceiling` under one runner of the largest profile beside the mirror: no host of that
+    /// size starts one, so it is a typo, such as `24M` for `24G`. Whether the host's `MemTotal` is already past it,
+    /// and what the margin leaves, `runnerd doctor` says, as the config check does not read the host.
+    fn check_memory_ceiling(&self) -> Result<(), ConfigError> {
+        let Some(ceiling) = self.host.memory_ceiling else {
+            return Ok(());
+        };
+        let mirror = self.mirror_memory();
+        let largest = self
+            .profiles
+            .iter()
+            .map(|(name, profile)| (name, profile.memory.0.saturating_add(mirror)))
+            .max_by_key(|(_, needs)| *needs);
+        match largest {
+            Some((profile, needs)) if needs > ceiling.0 => Err(ConfigError::CeilingUnderProfile {
+                profile: profile.clone(),
+                needs: ByteSize(needs),
+                ceiling,
+            }),
+            _ => Ok(()),
+        }
+    }
+
     /// Refuses a profile outside the bounds auto sizing keeps it in, or whose bounds cross.
     fn check_sizing_bounds(&self) -> Result<(), ConfigError> {
         for (name, p) in &self.profiles {
@@ -1284,6 +1325,10 @@ impl Config {
                 self.host.poll_interval.is_zero(),
                 "host.poll_interval".to_owned(),
             ),
+            (
+                self.host.memory_ceiling == Some(ByteSize(0)),
+                "host.memory_ceiling".to_owned(),
+            ),
             (self.records.max_count == 0, "records.max_count".to_owned()),
             (self.sizing.min_jobs == 0, "sizing.min_jobs".to_owned()),
             (self.sizing.interval.is_zero(), "sizing.interval".to_owned()),
@@ -1306,6 +1351,7 @@ impl Config {
         self.check_sizing_bounds()?;
         self.caches.build.validate()?;
         self.host.check_cpu_overcommit()?;
+        self.check_memory_ceiling()?;
         self.web.validate()?;
         self.notify.validate()?;
         for repository in &self.repositories {

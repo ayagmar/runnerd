@@ -288,12 +288,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// The host's latest memory reading, if it is from the last few sample intervals.
+    /// The host's latest memory reading, if it is from the last few sample intervals, with the config's
+    /// `[host] memory_ceiling` (ADR 0084), so a reload that changes it applies at the next plan.
     pub(super) fn host_memory(&self) -> Option<api::HostMemory> {
         let fresh = (3 * SAMPLE_INTERVAL).as_secs();
         self.store
             .latest_host_memory()
             .filter(|memory| memory.at + fresh >= time::now_ms() / 1000)
+            .map(|memory| api::HostMemory {
+                ceiling: self.config.host.memory_ceiling.map(|ceiling| ceiling.0),
+                ..memory
+            })
     }
 
     /// What the host's memory leaves runners beside what runs now, from a reading of the last few sample intervals.

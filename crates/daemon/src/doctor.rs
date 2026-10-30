@@ -855,10 +855,17 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
 /// margin, beside what the slice's runners hold now and the mirror's cap, which the engine reserves before the mirror
 /// starts: while the host stalls short of memory, or while it has less to spare than the smallest profile's runner
 /// may reserve. A running mirror counts twice, by what it holds. Admission keeps half a margin more after a wait and
-/// while a stall lasts, so it can still hold jobs where this passes.
+/// while a stall lasts, so it can still hold jobs where this passes. With `[host] memory_ceiling` it counts what the
+/// host can still grow by, as admission does (ADR 0084), and warns when the ceiling is under `MemTotal`, where it
+/// counts for nothing, beside any other warning; a ceiling equal to `MemTotal` is silent.
 fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Check {
     let Some(memory) = memory else {
         return skip("host memory", "/proc/meminfo has no MemAvailable");
+    };
+    let ceiling = config.and_then(|config| config.host.memory_ceiling);
+    let memory = &api::HostMemory {
+        ceiling: ceiling.map(|ceiling| ceiling.0),
+        ..memory.clone()
     };
     let stalled = |pressure: Option<api::Pressure>| {
         pressure.map_or_else(
@@ -882,7 +889,7 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
         "{}, {} to spare for runners past a {} margin{}; every task waited for memory {}",
         memory.available_line(),
         ByteSize(spare),
-        ByteSize(host::margin(memory.total, false)),
+        ByteSize(host::margin(memory.grown(), false)),
         if mirror > 0 {
             format!(" and the mirror's {}", ByteSize(mirror))
         } else {
@@ -896,26 +903,52 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
             .iter()
             .min_by_key(|(_, profile)| profile.memory)
     });
-    let why = if stalls {
-        "the host stalls short of memory, so runnerd starts no runner until the stall passes"
-            .to_owned()
-    } else if let Some((name, profile)) = smallest.filter(|(_, profile)| spare < profile.memory.0) {
+    // At MemTotal the ceiling says the host is at its most, which is no mistake; only under it is it one.
+    let unused = ceiling.filter(|ceiling| ceiling.0 < memory.total).map(|ceiling| {
         format!(
-            "a {name} runner may reserve up to {}, more than the host has to spare, so runners wait for the host's \
-             memory",
-            profile.memory
+            "[host] memory_ceiling = \"{ceiling}\" is under the host's {}, so admission goes by MemTotal and the \
+             ceiling counts for nothing",
+            ByteSize(memory.total)
+        )
+    });
+    let why = if stalls {
+        Some(
+            "the host stalls short of memory, so runnerd starts no runner until the stall passes"
+                .to_owned(),
         )
     } else {
-        return pass("host memory", detail);
+        smallest
+            .filter(|(_, profile)| spare < profile.memory.0)
+            .map(|(name, profile)| {
+                format!(
+                    "a {name} runner may reserve up to {}, more than the host has to spare, so runners wait for \
+                     the host's memory",
+                    profile.memory
+                )
+            })
+    };
+    let ceiling_fix = "set [host] memory_ceiling to the most memory the host can grow to, or remove it on a host \
+                       whose memory is fixed";
+    let (detail, fix) = match (why, unused) {
+        (None, None) => return pass("host memory", detail),
+        (None, Some(unused)) => (format!("{detail}; {unused}"), ceiling_fix.to_owned()),
+        (Some(why), unused) => {
+            let short = "close what uses the host's memory beside the runners; runnerd waits for it by itself";
+            let detail = format!("{detail}; {}: {why}", memory.outside_line());
+            match unused {
+                Some(unused) => (
+                    format!("{detail}; {unused}"),
+                    format!("{short}; {ceiling_fix}"),
+                ),
+                None => (detail, short.to_owned()),
+            }
+        }
     };
     Check {
         name: "host memory".to_owned(),
         status: Status::Warn,
-        detail: format!("{detail}; {}: {why}", memory.outside_line()),
-        fix: Some(
-            "close what uses the host's memory beside the runners; runnerd waits for it by itself"
-                .to_owned(),
-        ),
+        detail,
+        fix: Some(fix),
     }
 }
 

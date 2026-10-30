@@ -672,6 +672,7 @@ fn the_hosts_memory_and_how_long_its_tasks_stalled_for_it_are_read_from_proc() {
                 avg60: 105
             }),
             holders: Vec::new(),
+            ceiling: None,
         })
     );
     std::fs::write(paths.proc.join("meminfo"), "MemTotal: 1 kB\n").unwrap();

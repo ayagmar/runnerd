@@ -21,6 +21,7 @@ fn host_memory(total: u64, available: u64) -> HostMemory {
         some: None,
         full: None,
         holders: Vec::new(),
+        ceiling: None,
     }
 }
 
@@ -193,6 +194,44 @@ fn the_first_job_of_a_starter_config_is_admitted_on_a_small_host() {
         assert!(checked.valid, "{name}: {}", checked.message);
     }
     assert!(waiting.is_empty(), "every first job starts: {waiting:?}");
+}
+
+/// The idle Hyper-V VM of #159: 2.12G with 1.48G available.
+fn idle_vm(ceiling: Option<u64>) -> Machine {
+    Machine {
+        memory: HostMemory {
+            ceiling,
+            ..host_memory((2 << 30) + (120 << 20), (1 << 30) + (490 << 20))
+        },
+        cpus: 8,
+        slice_memory_max: None,
+    }
+}
+
+#[test]
+fn init_refuses_an_idle_elastic_vm_it_reads_as_it_is_now() {
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    let error = init(&request, &idle_vm(None)).unwrap_err();
+    assert!(
+        error.contains("this host has 1.48G of 2.12G available")
+            && error.contains("a runner needs at least 2G"),
+        "{error}"
+    );
+    assert!(!request.config.exists(), "no config is written");
+}
+
+#[test]
+fn a_reading_with_a_ceiling_sizes_by_first_runner_as_admission_counts_it() {
+    let machine = idle_vm(Some(24 * GIB));
+    let sizing = size(&machine).unwrap();
+    assert_eq!(sizing.budget, ByteSize(18 * GIB), "three quarters of 24G");
+    assert_eq!((sizing.slots, sizing.memory), (2, ByteSize(8 * GIB)));
+    assert!(
+        sizing.memory.0 + super::STARTUP_HEADROOM
+            <= host::first_runner(&machine.memory, super::MIRROR_MEMORY.0),
+        "the first runner fits what admission leaves it with the ceiling"
+    );
 }
 
 #[test]

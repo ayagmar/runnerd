@@ -60,7 +60,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch (amended by 0077, 0082) |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache |
 | [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk |
-| [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache (amended by 0063) |
+| [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache (amended by 0063, 0084) |
 | [0056](0056-adopted-runners-keep-their-reservations.md) | A runner a restart adopts keeps what it reserved |
 | [0057](0057-name-what-holds-the-hosts-memory.md) | Name the programs that hold the host's memory, by name only |
 | [0058](0058-a-repository-served-by-several-profiles.md) | A repository served by several profiles, each with its own labels |
@@ -89,3 +89,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0081](0081-waits-leave-out-the-time-no-runnerd-ran.md) | Waits leave out the time no runnerd ran, and the history's schema changes in steps from 15 |
 | [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, on by default |
 | [0083](0083-turborepo-and-nx-from-the-build-cache.md) | Turborepo's remote cache served from the build cache, Nx's on request |
+| [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md) | A host whose memory grows to a ceiling counts what it can still grow by |

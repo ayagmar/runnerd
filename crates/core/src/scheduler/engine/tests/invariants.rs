@@ -1526,6 +1526,7 @@ fn sample(
             avg60: 0,
         }),
         holders: Vec::new(),
+        ceiling: None,
     });
     HostReading {
         at: now / 1000,

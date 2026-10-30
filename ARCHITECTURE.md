@@ -143,7 +143,9 @@ queued → slot → container → removed
    [ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)): what each
    runner reserves is its cap, or under `admission = "measured"` its predicted peak (`engine/admission`,
    [ADR 0033](docs/adr/0033-measured-admission.md)), within what the host's memory leaves the slice
-   ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)), and under `cpu_overcommit` within the CPU
+   ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md); with `[host] memory_ceiling` counting what an
+   elastic VM can still grow by, [ADR 0084](docs/adr/0084-a-host-whose-memory-grows-to-a-ceiling.md)), and under
+   `cpu_overcommit` within the CPU
    budget too ([ADR 0038](docs/adr/0038-cpu-admission.md)). Among the free slots a job takes the one that ran the
    same job last, else one that ran its repository, else the lowest; the engine keeps each slot's last job
    (`Engine::ran`, rebuilt from the history at start, dropped by a reseed that replaced the snapshot) and never

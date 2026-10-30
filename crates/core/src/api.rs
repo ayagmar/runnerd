@@ -183,7 +183,8 @@ pub struct HostBudget {
     /// The reading it comes from.
     pub memory: HostMemory,
     /// What the slice may hold now: what its runners hold without page cache plus the host's `MemAvailable`, less
-    /// a margin kept free for the host's page cache.
+    /// a margin kept free for the host's page cache; with a ceiling, plus what the host can still grow by
+    /// (`HostMemory::growable`, ADR 0084).
     pub limit: u64,
     /// What that leaves new runners beside what the running ones reserve, in bytes.
     pub spare: u64,

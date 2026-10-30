@@ -96,6 +96,7 @@ fn ready_host(os_release: &str) -> Host {
             some: Some(api::Pressure::default()),
             full: Some(api::Pressure::default()),
             holders: Vec::new(),
+            ceiling: None,
         }),
         config_file: Some(ConfigFile {
             path: "/home/dana/.config/runnerd/runnerd.toml".into(),
@@ -305,6 +306,116 @@ fn a_host_with_less_to_spare_than_the_smallest_runner_warns_that_runners_wait() 
     );
     let memory = host_memory_check(12 << 30, 0);
     assert_eq!(memory.status, Status::Pass, "7.5G to spare fits node's 7G");
+}
+
+/// The `host memory` check of an idle VM of 2.12G with 1.48G available and no stall, under the example's config with
+/// `[host] memory_ceiling` set to `ceiling` when given.
+fn vm_memory_check(ceiling: Option<&str>) -> Check {
+    let mut config = config("sysbox");
+    config.host.memory_ceiling = ceiling.map(|ceiling| ceiling.parse().unwrap());
+    let mut host = ready_host(ARCH);
+    host.memory = host.memory.map(|memory| api::HostMemory {
+        total: (2 << 30) + (120 << 20),
+        available: (1 << 30) + (490 << 20),
+        ..memory
+    });
+    checks(&host, Some(&config))
+        .into_iter()
+        .find(|check| check.name == "host memory")
+        .unwrap()
+}
+
+#[test]
+fn an_idle_vm_without_a_memory_ceiling_warns_that_runners_wait() {
+    let memory = vm_memory_check(None);
+    assert_eq!(memory.status, Status::Warn, "{memory}");
+    assert!(
+        memory
+            .detail
+            .starts_with("1.48G of 2.12G available, 0B to spare"),
+        "{memory}"
+    );
+}
+
+#[test]
+fn an_idle_vm_with_a_memory_ceiling_counts_what_it_can_grow_by_as_admission_does() {
+    let memory = vm_memory_check(Some("24G"));
+    assert_eq!(memory.status, Status::Pass, "{memory}");
+    // 1.48G available and 21.88G to grow by, less the 2G margin of 24G and the mirror's 512M.
+    assert!(
+        memory.detail.starts_with(
+            "1.48G of 2.12G available, growing to 24G, 20.86G to spare for runners past a 2G margin"
+        ),
+        "{memory}"
+    );
+}
+
+/// The `host memory` check of the 64G host of `host_memory_check` with `available` of it and a ceiling of `ceiling`.
+fn ceiling_check(available: u64, ceiling: u64) -> Check {
+    let mut config = config("sysbox");
+    config.host.memory_ceiling = Some(ByteSize(ceiling));
+    let mut host = ready_host(ARCH);
+    host.memory = host.memory.map(|memory| api::HostMemory {
+        available,
+        ..memory
+    });
+    checks(&host, Some(&config))
+        .into_iter()
+        .find(|check| check.name == "host memory")
+        .unwrap()
+}
+
+#[test]
+fn a_memory_ceiling_under_mem_total_warns_that_it_has_no_effect() {
+    let checked = ceiling_check(30 << 30, 32 << 30);
+    assert_eq!(checked.status, Status::Warn, "{checked}");
+    assert!(
+        checked
+            .detail
+            .contains("memory_ceiling = \"32G\" is under the host's 64G"),
+        "{checked}"
+    );
+    assert!(
+        checked
+            .detail
+            .starts_with("30G of 64G available, 25.5G to spare"),
+        "admission goes by MemTotal: {checked}"
+    );
+    assert!(
+        checked
+            .fix
+            .as_deref()
+            .is_some_and(|fix| fix.contains("memory_ceiling")),
+        "{checked}"
+    );
+}
+
+#[test]
+fn a_memory_ceiling_equal_to_mem_total_is_silent() {
+    let checked = ceiling_check(30 << 30, 64 << 30);
+    assert_eq!(checked.status, Status::Pass, "{checked}");
+    assert!(!checked.detail.contains("memory_ceiling"), "{checked}");
+}
+
+#[test]
+fn a_memory_ceiling_under_mem_total_shows_beside_a_short_host() {
+    // 10G available leaves 5.5G past the margin and the mirror, under node's 7G, and the ceiling is a mistake too.
+    let checked = ceiling_check(10 << 30, 32 << 30);
+    assert_eq!(checked.status, Status::Warn, "{checked}");
+    assert!(
+        checked
+            .detail
+            .contains("a node runner may reserve up to 7G")
+            && checked
+                .detail
+                .contains("memory_ceiling = \"32G\" is under the host's 64G"),
+        "both warnings show: {checked}"
+    );
+    let fix = checked.fix.as_deref().unwrap_or_default();
+    assert!(
+        fix.contains("close what uses the host's memory") && fix.contains("memory_ceiling"),
+        "{fix}"
+    );
 }
 
 /// Asserts that every line of `check`'s fix after the first, which says what to do, is shell a user can paste:

@@ -400,6 +400,7 @@ fn busy_desktop(fake: &fake::Fake) {
                     memory: 5939 * MIB,
                 },
             ],
+            ceiling: None,
         },
         limit,
         spare: limit.saturating_sub(budget.memory_in_use),

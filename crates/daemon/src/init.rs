@@ -84,10 +84,11 @@ pub(crate) struct Sizing {
 
 /// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs. A slot is no
 /// larger than what admission leaves the first runner beside the mirror on this host now (`host::first_runner`), less
-/// `STARTUP_HEADROOM`, so the first job can start once runnerd runs.
+/// `STARTUP_HEADROOM`, so the first job can start once runnerd runs. A reading with a ceiling is the memory the host
+/// can grow to, as admission counts it (ADR 0084).
 pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
     // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
-    let host = machine.memory.total / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
+    let host = machine.memory.grown() / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
     let budget = ByteSize(
         machine
             .slice_memory_max
@@ -106,7 +107,7 @@ pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
                  starts with it, which leaves {} for a runner, and a runner needs at least {least}. Close what uses \
                  the host's memory, or run runnerd on a host with more",
                 machine.memory.available_line(),
-                ByteSize(host::margin(machine.memory.total, false)),
+                ByteSize(host::margin(machine.memory.grown(), false)),
                 ByteSize(STARTUP_HEADROOM),
                 ByteSize(first),
             )

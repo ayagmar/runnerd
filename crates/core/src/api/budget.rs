@@ -119,13 +119,18 @@ impl Budget {
 
 impl HostMemory {
     /// What the host has available of its memory, as the budget's host clause and doctor say it: `31G of 64G
-    /// available`.
+    /// available`, and while it can still grow to its ceiling (`HostMemory::growable`), `1.5G of 2.1G available,
+    /// growing to 24G`.
     pub fn available_line(&self) -> String {
-        format!(
+        let line = format!(
             "{} of {} available",
             ByteSize(self.available),
             ByteSize(self.total)
-        )
+        );
+        match self.growable() {
+            0 => line,
+            _ => format!("{line}, growing to {}", ByteSize(self.grown())),
+        }
     }
 }
 
