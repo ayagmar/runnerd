@@ -178,8 +178,10 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                     div {
                         dt { "CPU p99" }
                         dd {
-                            @if peaks.cpu_runs > 0 { (format::cores_used(peaks.cpu.p99)) " of " (profile.cpus) }
-                            @else { "no run at " (profile.cpus) " yet" }
+                            @match peaks.cpu_p99() {
+                                Some(p99) => { (format::cores_used(p99)) " of " (profile.cpus) }
+                                None => { (peaks.cpu_runs_line(profile.cpus)) }
+                            }
                         }
                     }
                 }
@@ -223,7 +225,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                                     td.number { (format::bytes(job.peaks.memory.p95)) }
                                     td.number { (format::bytes(job.peaks.memory.p99)) }
                                     td.number { (format::bytes(job.peaks.memory.max)) }
-                                    td.number { @if job.peaks.cpu_runs > 0 { (format::cores_used(job.peaks.cpu.p99)) } @else { "–" } }
+                                    td.number { (job.peaks.cpu_p99().map_or_else(|| "–".to_owned(), format::cores_used)) }
                                     td.number { (format::duration(job.wait.p95)) }
                                     td.number { (needs(job)) }
                                 }

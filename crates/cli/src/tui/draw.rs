@@ -2024,7 +2024,7 @@ fn sizing_profiles(
             }));
         }
         cells.extend([
-            Cell::from(cpu_p99(peaks)),
+            Cell::from(cpu_cell(peaks)),
             Cell::from(format!("{}%", profile.busy)),
             Cell::from(duration(profile.wait.p95)),
         ]);
@@ -2054,12 +2054,8 @@ fn sizing_profiles(
 }
 
 /// The CPU p99 of the runs at the profile's `cpus` now, `–` without one.
-fn cpu_p99(peaks: &api::Peaks) -> String {
-    if peaks.cpu_runs > 0 {
-        cores_used(peaks.cpu.p99)
-    } else {
-        "–".to_owned()
-    }
+fn cpu_cell(peaks: &api::Peaks) -> String {
+    peaks.cpu_p99().map_or_else(|| "–".to_owned(), cores_used)
 }
 
 /// The selected profile's jobs, a row each.
@@ -2095,7 +2091,7 @@ fn sizing_jobs(
         }
         cells.extend([
             Cell::from(bytes(job.peaks.memory.max)),
-            Cell::from(cpu_p99(&job.peaks)),
+            Cell::from(cpu_cell(&job.peaks)),
             Cell::from(duration(job.wait.p95)),
             Cell::from(needs),
         ]);

@@ -215,6 +215,22 @@ impl JobSizing {
     }
 }
 
+impl Peaks {
+    /// The CPU p99 of the runs at the profile's `cpus` now; `None` without one, where it would read 0.
+    pub fn cpu_p99(&self) -> Option<u64> {
+        (self.cpu_runs > 0).then_some(self.cpu.p99)
+    }
+
+    /// Which runs the CPU percentiles are over, for a profile at `cpus`, as every client says it: `of the 4 at 8
+    /// CPUs`, or without one `no run at 8 CPUs yet`.
+    pub fn cpu_runs_line(&self, cpus: u32) -> String {
+        match self.cpu_runs {
+            0 => format!("no run at {cpus} CPUs yet"),
+            runs => format!("of the {runs} at {cpus} CPUs"),
+        }
+    }
+}
+
 impl Starts {
     /// Every job counted: warm and cold starts.
     pub fn total(&self) -> u32 {

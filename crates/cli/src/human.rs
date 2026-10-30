@@ -649,19 +649,18 @@ fn sizing_peaks(profile: &api::ProfileSizing, paint: Paint) -> String {
         bytes(peaks.memory.max),
         peaks.jobs,
     );
-    let _ = if peaks.cpu_runs > 0 {
+    let runs = peaks.cpu_runs_line(profile.cpus);
+    let _ = if peaks.cpu_p99().is_some() {
         writeln!(
             out,
-            "  cpu    p50 {} p95 {} p99 {} max {} of the {} at {} CPUs",
+            "  cpu    p50 {} p95 {} p99 {} max {} {runs}",
             cores_used(peaks.cpu.p50),
             cores_used(peaks.cpu.p95),
             cores_used(peaks.cpu.p99),
             cores_used(peaks.cpu.max),
-            peaks.cpu_runs,
-            profile.cpus,
         )
     } else {
-        writeln!(out, "  cpu    none of them at {} CPUs yet", profile.cpus)
+        writeln!(out, "  cpu    {runs}")
     };
     out
 }
