@@ -538,11 +538,12 @@ impl Sizing {
 }
 
 /// The advice line of a profile whose jobs need `memory` and get no raise, with `need` how that comes from its
-/// peaks: `[host] memory_ceiling` holds it where it is (`ProfileSizing::at_ceiling`), or the slice is too small.
+/// peaks, or the revert that asks for it: `[host] memory_ceiling` holds it where it is (`ProfileSizing::at_ceiling`),
+/// or the slice is too small.
 fn too_small_line(profile: &ProfileSizing, memory: u64, need: String) -> String {
+    let why = profile.revert.as_ref().map_or(need, SizingRevert::why);
     match profile.ceiling {
         Some(hold) if profile.at_ceiling() => {
-            let why = profile.revert.as_ref().map_or(need, SizingRevert::why);
             format!(
                 "keep {}, {}: its jobs need {} ({why}); raise [host] memory_ceiling if the host can grow further",
                 ByteSize(profile.memory),
@@ -560,7 +561,7 @@ fn too_small_line(profile: &ProfileSizing, memory: u64, need: String) -> String 
                 })
                 .unwrap_or_default();
             format!(
-                "needs {} ({need}), more than the slice holds for one slot: raise the slice's MemoryMax first{then}",
+                "needs {} ({why}), more than the slice holds for one slot: raise the slice's MemoryMax first{then}",
                 ByteSize(memory)
             )
         }

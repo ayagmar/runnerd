@@ -17,6 +17,8 @@ struct Daemon {
     history: History,
     cpus_set: Vec<CpusSet>,
     now: u64,
+    /// The slice's `MemoryMax`.
+    memory_max: u64,
 }
 
 impl Daemon {
@@ -27,6 +29,7 @@ impl Daemon {
             history: History::default(),
             cpus_set: Vec::new(),
             now,
+            memory_max: 64 * G,
         };
         daemon.announce();
         daemon
@@ -90,7 +93,7 @@ impl Daemon {
             &self.config(),
             &self.history,
             Context {
-                memory_max: Some(64 * G),
+                memory_max: Some(self.memory_max),
                 cpus: Some(32_000),
                 window: window(now),
                 last: &last,

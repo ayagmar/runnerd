@@ -601,22 +601,7 @@ impl Sized {
             return Advice::TooFew { jobs: peaks.jobs };
         }
         if needs.raise > self.cap {
-            let need = needs.raise;
-            // A raise the config check would refuse is no raise: it would be proposed again at every look.
-            let memory = self.ceiling.map_or(need, |most| need.min(most));
-            if memory <= self.cap {
-                return Advice::SliceTooSmall { memory: need };
-            }
-            let fit = |room: u64| u32::try_from(room / memory).unwrap_or(u32::MAX);
-            let slots = match (self.admission, self.room) {
-                (Admission::Caps, Some(room)) => fit(room).min(self.slots),
-                (Admission::Measured, Some(room)) if room < memory => 0,
-                (_, _) => self.slots,
-            };
-            if slots == 0 {
-                return Advice::SliceTooSmall { memory: need };
-            }
-            return Advice::Raise { memory, slots };
+            return self.raise(needs.raise, self.slots);
         }
         let need = needs.floor.max(GRANULE);
         // A job on its cap may have been held back or killed by it: no lowering until it ran clear of it again.
@@ -639,16 +624,30 @@ impl Sized {
     }
 
     /// The raise that takes back a lowering that went too far, to `to`: as far as `[host] memory_ceiling` allows,
-    /// which a reload may have lowered since; while it allows nothing past the cap, no raise.
+    /// which a reload may have lowered since, with as many of `to`'s slots as the slice holds now.
     fn reverted(&self, to: api::Resize) -> Advice {
-        let memory = self.ceiling.map_or(to.memory, |most| to.memory.min(most));
+        self.raise(to.memory, to.slots)
+    }
+
+    /// A raise toward `need` with at most `slots`: no further than `[host] memory_ceiling` allows, since a raise the
+    /// config check refuses would be proposed again at every look, and with the slots the slice holds at that
+    /// memory as `admission` budgets it. None while the ceiling allows nothing past the cap or the slice holds no
+    /// slot: the jobs need `need`.
+    fn raise(&self, need: u64, slots: u32) -> Advice {
+        let memory = self.ceiling.map_or(need, |most| need.min(most));
         if memory <= self.cap {
-            return Advice::SliceTooSmall { memory: to.memory };
+            return Advice::SliceTooSmall { memory: need };
         }
-        Advice::Raise {
-            memory,
-            slots: to.slots,
+        let fit = |room: u64| u32::try_from(room / memory).unwrap_or(u32::MAX);
+        let slots = match (self.admission, self.room) {
+            (Admission::Caps, Some(room)) => fit(room).min(slots),
+            (Admission::Measured, Some(room)) if room < memory => 0,
+            (_, _) => slots,
+        };
+        if slots == 0 {
+            return Advice::SliceTooSmall { memory: need };
         }
+        Advice::Raise { memory, slots }
     }
 }
 

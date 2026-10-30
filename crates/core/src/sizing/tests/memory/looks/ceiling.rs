@@ -2,21 +2,43 @@
 //! revert goes no further than the ceiling leaves one runner beside the mirror, every config it writes passes the
 //! check, and a look at the bound proposes nothing new until a reload moves the ceiling or the mirror.
 
-use super::super::{LOWERED, clear_at_ten, ledger_test, look, lowered, sizing};
-use super::{Daemon, G, HOUR, NOW, SizingChange, jvm_at, ledger, met, window};
+use super::super::{LOWERED, clear_at_ten, failed, ledger_test, look, lowered, sizing};
+use super::{CpusSet, Daemon, G, HOUR, NOW, SizingChange, jvm_at, ledger, met, window};
 use crate::api::{Advice, Resize, Sizing};
 use crate::config::{ByteSize, Config, resize_profile};
-use crate::sizing::advise;
+use crate::sizing::{History, advise};
 
 impl Daemon {
+    /// Started at `now` with `text` and `history` against a slice of `memory_max`, as after a restart.
+    fn restarted(text: String, history: History, memory_max: u64, now: u64) -> Daemon {
+        let mut daemon = Daemon {
+            text,
+            history,
+            cpus_set: Vec::<CpusSet>::new(),
+            now,
+            memory_max,
+        };
+        daemon.announce();
+        daemon
+    }
+
     /// The advice as `runnerctl sizing` shows it after the last look.
     fn sizing(&self) -> Sizing {
         advise(
             &self.config(),
-            Some(64 * G),
+            Some(self.memory_max),
             &self.history,
             window(self.now),
         )
+    }
+
+    /// A look at `now`, whose config, if it wrote one, the config check passes.
+    fn checked_look(&mut self, now: u64) -> Vec<SizingChange> {
+        let changes = self.look(now);
+        if let Err(error) = check(&self.text, self.memory_max) {
+            panic!("the look at {now} wrote a config the check refuses: {error}");
+        }
+        changes
     }
 }
 
@@ -34,11 +56,11 @@ fn mirror_off(text: &str) -> String {
     text.replacen("mirror = { enabled = true", "mirror = { enabled = false", 1)
 }
 
-/// Whether the config check of the 64G slice the looks run against passes `text`, and why not.
-fn check(text: &str) -> Result<(), String> {
+/// Whether the config check against a slice of `memory_max` passes `text`, and why not.
+fn check(text: &str, memory_max: u64) -> Result<(), String> {
     Config::parse(text)
         .map_err(|error| error.to_string())?
-        .validate(Some(ByteSize(64 * G)))
+        .validate(Some(ByteSize(memory_max)))
         .map(|_| ())
         .map_err(|error| error.to_string())
 }
@@ -60,10 +82,7 @@ fn meeting_the_cap(daemon: &mut Daemon, start: u64, count: u64) -> Vec<SizingCha
         let at = start + i * 2 * HOUR;
         let cap = daemon.cap();
         daemon.history.jobs.push(met(ledger(at, cap, 0)));
-        changes.extend(daemon.look(at + HOUR));
-        if let Err(error) = check(&daemon.text) {
-            panic!("the look at {at} wrote a config the check refuses: {error}");
-        }
+        changes.extend(daemon.checked_look(at + HOUR));
     }
     changes
 }
@@ -174,7 +193,11 @@ fn a_revert_past_a_ceiling_lowered_since_goes_back_as_far_as_the_ceiling_leaves(
         )
     );
     let written = resize_profile(&text, "jvm", changed[0].to).unwrap();
-    assert_eq!(check(&written), Ok(()), "the revert passes the check");
+    assert_eq!(
+        check(&written, 64 * G),
+        Ok(()),
+        "the revert passes the check"
+    );
 }
 
 #[test]
@@ -184,7 +207,11 @@ fn a_revert_the_ceiling_leaves_no_room_for_changes_nothing_and_keeps_its_evidenc
     after.push(met(ledger(NOW - 2 * HOUR, 10 * G, 0)));
     let history = lowered(after);
     let text = host(&jvm_at("10G", 3), "memory_ceiling = \"10.5G\"");
-    assert_eq!(check(&text), Ok(()), "10G and the mirror fill the ceiling");
+    assert_eq!(
+        check(&text, 64 * G),
+        Ok(()),
+        "10G and the mirror fill the ceiling"
+    );
     assert_eq!(look(&text, &history, NOW, Some(NOW / 1000 - 600)), []);
     let sizing = sizing(&text, &history);
     let jvm = sizing.profiles.iter().find(|p| p.name == "jvm").unwrap();
@@ -203,5 +230,150 @@ fn a_revert_the_ceiling_leaves_no_room_for_changes_nothing_and_keeps_its_evidenc
     assert!(
         fix.contains("memory_ceiling") && !fix.contains("MemoryMax"),
         "the fix grows the ceiling, not the slice: {fix}"
+    );
+}
+
+#[test]
+fn a_raise_at_terabyte_scale_writes_the_bound_to_the_byte_and_stays_there() {
+    // 1.006T less the mirror leaves one runner 1029.64G, 1029.5G down to a granule, which `Display` says as 1.01T.
+    let text = host(&jvm_at("1000G", 1), "memory_ceiling = \"1.006T\"");
+    let mut daemon = Daemon::restarted(text, History::default(), 4 << 40, NOW);
+    for i in 0..12 {
+        let at = NOW - 30 * HOUR + i * 2 * HOUR;
+        daemon.history.jobs.push(ledger(at, 1000 * G, 600 * G));
+    }
+    let changes = meeting_the_cap(&mut daemon, NOW, 24);
+    assert_eq!(memory_steps(&changes), [(1000 * G, 1029 * G + G / 2)]);
+    assert!(
+        daemon.text.contains("memory = \"1029.5G\""),
+        "{}",
+        daemon.text
+    );
+}
+
+/// jvm lowered from 14G × 2 to 10G × 3 ten days ago, then the ledger's test, which succeeded at 14G, failed 3 times
+/// in a row at 10G on two branches with no kernel event: a heap sized from the cgroup's limit.
+fn heap_failures() -> History {
+    let mut after = clear_at_ten(LOWERED + HOUR, 10);
+    let at = NOW - 5 * HOUR;
+    for (i, branch) in [(0, "main"), (1, "fix/parser"), (2, "main")] {
+        after.push(failed(ledger(at + i * HOUR, 10 * G, 7 * G), branch, at + i));
+    }
+    lowered(after)
+}
+
+#[test]
+fn a_revert_the_ceiling_held_short_finishes_once_the_ceiling_is_removed_across_a_restart() {
+    let text = host(&jvm_at("10G", 3), "memory_ceiling = \"12.4G\"");
+    let mut daemon = Daemon::restarted(text, heap_failures(), 64 * G, NOW - HOUR);
+    let partial = daemon.checked_look(NOW);
+    assert_eq!(
+        memory_steps(&partial),
+        [(10 * G, 12032 << 20)],
+        "as far as the ceiling leaves"
+    );
+
+    // A restart reads only the file and the history; the revert is still owed, and the ceiling still holds it.
+    let mut daemon = Daemon::restarted(daemon.text, daemon.history, 64 * G, NOW + HOUR);
+    assert_eq!(daemon.checked_look(NOW + 2 * HOUR), []);
+    let sizing = daemon.sizing();
+    let jvm = sizing.profiles.iter().find(|p| p.name == "jvm").unwrap();
+    assert!(
+        jvm.at_ceiling(),
+        "held at the ceiling, not done: {:?}",
+        jvm.advice
+    );
+    assert!(
+        sizing.advice_line(jvm).contains("its jobs need 14G")
+            && sizing
+                .advice_line(jvm)
+                .contains("since auto sizing lowered it from 14G"),
+        "{}",
+        sizing.advice_line(jvm)
+    );
+    let held = (daemon.text.clone(), daemon.history.clone());
+
+    // With no new failure and no run at the cap, a reload without the ceiling finishes the revert at the next look.
+    daemon.text = daemon.text.replace("memory_ceiling = \"12.4G\"\n", "");
+    daemon.announce();
+    let finished = daemon.checked_look(NOW + 3 * HOUR);
+    assert_eq!(memory_steps(&finished), [(12032 << 20, 14 * G)]);
+    assert_eq!(
+        daemon.checked_look(NOW + 4 * HOUR),
+        [],
+        "nothing after it is done"
+    );
+
+    // A hand edit after the partial revert is the owner's: removing the ceiling does not take it back to 14G.
+    let (text, history) = held;
+    let mut daemon = Daemon::restarted(text, history, 64 * G, NOW + 2 * HOUR);
+    daemon.set_by_hand(11 * G);
+    daemon.text = daemon.text.replace("memory_ceiling = \"12.4G\"\n", "");
+    daemon.announce();
+    assert_eq!(memory_steps(&daemon.checked_look(NOW + 3 * HOUR)), []);
+}
+
+#[test]
+fn a_revert_the_slice_cannot_hold_writes_nothing_and_says_the_slice_has_to_grow() {
+    // Measured admission in an 11G slice: 10G beside the 512M mirror fits, the 11.75G the ceiling allows does not.
+    let text = host(
+        &jvm_at("10G", 3),
+        "admission = \"measured\"\nmemory_ceiling = \"12.4G\"",
+    );
+    let mut daemon = Daemon::restarted(text, heap_failures(), 11 * G, NOW);
+    for hour in 0..3 {
+        assert_eq!(daemon.checked_look(NOW + hour * HOUR), [], "look {hour}");
+    }
+    let sizing = daemon.sizing();
+    let jvm = sizing.profiles.iter().find(|p| p.name == "jvm").unwrap();
+    assert_eq!(jvm.advice, Advice::SliceTooSmall { memory: 14 * G });
+    assert!(!jvm.at_ceiling(), "the slice holds it, not the ceiling");
+    assert!(
+        sizing.advice_line(jvm).starts_with(&format!(
+            "needs 14G ({} failed 3 times in a row at 10G since auto sizing lowered it from 14G), more than the \
+             slice holds for one slot: raise the slice's MemoryMax first; [host] memory_ceiling then holds it at \
+             11.75G",
+            ledger_test()
+        )),
+        "{}",
+        sizing.advice_line(jvm)
+    );
+}
+
+#[test]
+fn a_revert_under_caps_takes_back_only_the_slots_the_budget_holds_now() {
+    // After the lowering the owner cut jvm to one slot and gave the room to android: 10G + 2 × 7G + 4G and the
+    // mirror is 28.5G of a 33G slice. 14G × 2, the slots the lowering came from, would be 36.5G with the others.
+    let android =
+        "[profiles.android]\nimage_stage = \"node\"\ncpus = 8\nmemory = \"4G\"\nslots = 1\n\n";
+    let text = jvm_at("10G", 1).replacen("[profiles.jvm]", &format!("{android}[profiles.jvm]"), 1);
+    assert_eq!(check(&text, 33 * G), Ok(()));
+    let mut daemon = Daemon::restarted(text.clone(), heap_failures(), 33 * G, NOW);
+    let reverted = daemon.checked_look(NOW);
+    assert_eq!(
+        reverted.iter().map(|change| change.to).collect::<Vec<_>>(),
+        [Resize {
+            memory: 14 * G,
+            slots: 1,
+            cpus: None
+        }],
+        "back to 14G with the one slot that fits"
+    );
+
+    // When android's jobs waited and its look, before jvm's, takes the next 4G, the revert waits for room.
+    let mut daemon = Daemon::restarted(text, heap_failures(), 33 * G, NOW);
+    for i in 0..3 {
+        let mut waited = super::super::super::job("halyard/app", "build", "android", 2 * G, 600);
+        waited.queued_at += i * HOUR / 4;
+        daemon.history.jobs.push(waited);
+    }
+    let changes = daemon.checked_look(NOW);
+    assert_eq!(
+        changes
+            .iter()
+            .map(|change| (change.profile.as_str(), change.to.memory, change.to.slots))
+            .collect::<Vec<_>>(),
+        [("android", 4 * G, 2)],
+        "jvm's revert waits"
     );
 }

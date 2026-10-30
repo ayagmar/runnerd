@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::api::{
-    Advice, ProfileSizing, Resize, Sizing, SizingChange, SizingRefused, SizingRevert, ago, cores,
-    duration, job_title,
+    Advice, ProfileSizing, Resize, Sizing, SizingChange, SizingRefused, ago, cores, duration,
+    job_title,
 };
 use crate::config::{Admission, ByteSize, Config, Profile, cpu_budget};
 
@@ -118,8 +118,8 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
         };
         let last = context.last.get(&advised.name).copied();
         let since = last.map_or(u64::MAX, |at| now.saturating_sub(at));
-        if let Some(revert) = &advised.revert {
-            match reverted(config, profile, advised, revert, &sizing, &context, now) {
+        if advised.revert.is_some() {
+            match reverted(config, profile, advised, &sizing, &context, &budget) {
                 Revert::Write(change) => {
                     budget.take(&advised.name, profile, change.from, change.to);
                     changes.push(change);
@@ -449,7 +449,8 @@ fn within(profile: &Profile, from: Resize, to: Resize) -> bool {
 enum Revert {
     /// Takes it back with this change.
     Write(SizingChange),
-    /// Waits while more runners run than the slots it gives back hold: nothing else changes the profile meanwhile.
+    /// Waits while more runners run than the slots it gives back hold, or while the changes before it in this look
+    /// leave the slice no slot at its `memory`: nothing else changes the profile meanwhile.
     Wait,
     /// The `memory` it came from is outside the profile's bounds now: the profile is sized as any other.
     Outside,
@@ -462,14 +463,26 @@ fn reverted(
     config: &Config,
     profile: &Profile,
     advised: &ProfileSizing,
-    revert: &SizingRevert,
     sizing: &Sizing,
     context: &Context<'_>,
-    now: u64,
+    budget: &Budget,
 ) -> Revert {
-    let Advice::Raise { memory, slots } = advised.advice else {
+    let (Advice::Raise { memory, slots }, Some(revert)) = (advised.advice, &advised.revert) else {
         return Revert::Outside;
     };
+    // The advice holds the slots the slice holds beside the config's other profiles; under caps, the changes before
+    // it in this look may have taken some of that.
+    let slots = match (config.host.admission, context.memory_max) {
+        (Admission::Caps, Some(memory_max)) => {
+            let share = profile.memory.0.saturating_mul(u64::from(profile.slots));
+            let room = memory_max.saturating_sub(budget.caps.saturating_sub(share));
+            slots.min(u32::try_from(room / memory.max(1)).unwrap_or(u32::MAX))
+        }
+        _ => slots,
+    };
+    if slots == 0 {
+        return Revert::Wait;
+    }
     let running = context.running.get(&advised.name).copied().unwrap_or(0);
     let from = Resize {
         memory: profile.memory.0,
@@ -492,7 +505,7 @@ fn reverted(
         return Revert::Wait;
     }
     Revert::Write(SizingChange {
-        at: now,
+        at: sizing.until,
         profile: advised.name.clone(),
         from,
         to,

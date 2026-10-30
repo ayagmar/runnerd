@@ -248,8 +248,10 @@ fn cause(
 }
 
 /// The revert auto sizing makes now of `profile`, whose `memory` and `slots` are `current`, if any: its latest
-/// recorded change of `memory` lowered it to what it has, the daemon has run that since (`set`), and that went too
-/// far. Changes of only `slots` or `cpus` since do not hide it. Under caps the slots go back to what they were
+/// recorded change of `memory` lowered it to what it has, or raised it partway back toward where a lowering came from
+/// (each raise from where the change before it left `memory`, as when `[host] memory_ceiling` held a revert short,
+/// ADR 0086), the daemon has run that since (`set`), and that lowering went too far. A hand edit between them breaks
+/// the chain. Changes of only `slots` or `cpus` since do not hide it. Under caps the slots go back to what they were
 /// before the lowering, so the memory fits the slice.
 pub(super) fn revert(
     config: &Config,
@@ -257,11 +259,21 @@ pub(super) fn revert(
     profile: &str,
     current: Resize,
 ) -> Option<(SizingRevert, Resize)> {
-    let last = history
+    let mut memory_changes = history
         .changes
         .iter()
-        .rfind(|change| change.profile == profile && change.to.memory != change.from.memory)?;
-    if last.to.memory != current.memory || last.to.memory >= last.from.memory {
+        .filter(|change| change.profile == profile && change.to.memory != change.from.memory)
+        .rev();
+    let last = memory_changes.next()?;
+    let mut lowering = last;
+    while lowering.to.memory > lowering.from.memory {
+        let before = memory_changes.next()?;
+        if before.to.memory != lowering.from.memory {
+            return None;
+        }
+        lowering = before;
+    }
+    if last.to.memory != current.memory || last.to.memory >= lowering.from.memory {
         return None;
     }
     let since = last.at.saturating_mul(1000);
@@ -274,15 +286,15 @@ pub(super) fn revert(
     if events.any(|event| event.memory != current.memory) {
         return None;
     }
-    let (_, revert) = too_far(history, profile).find(|(change, _)| *change == last)?;
+    let (_, revert) = too_far(history, profile).find(|(change, _)| *change == lowering)?;
     let slots = match config.host.admission {
-        Admission::Caps => last.from.slots,
+        Admission::Caps => lowering.from.slots,
         Admission::Measured => current.slots,
     };
     Some((
         revert,
         Resize {
-            memory: last.from.memory,
+            memory: lowering.from.memory,
             slots,
             cpus: None,
         },

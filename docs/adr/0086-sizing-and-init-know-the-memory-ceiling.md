@@ -19,9 +19,21 @@ the owner had to write `memory_ceiling` by hand before anything could start.
 
 - **One bound, read by the check and by sizing.** `Config::runner_ceiling` is the ceiling less the mirror while it
   is enabled: the most `memory` one runner may have. The config check refuses a profile above it. The advice raises
-  `memory` no further than it, rounded down to 256M, since a config file says a size with two decimals and a value
-  between granules would be read back as something else, perhaps over the bound. A revert goes back as far toward
-  the `memory` it came from as the bound allows, still at the next look. The bound sits beside the others, not in
+  `memory` no further than it, rounded down to 256M so the size stays one people read at a glance. A revert goes
+  back as far toward the `memory` it came from as the bound allows, still at the next look.
+- **A size is written to the byte.** `resize_profile` writes `memory` with `ByteSize::exact`: `Display`'s form when
+  that reads back as the same size, else the shortest exact decimal in one of the units. `Display` keeps two
+  decimals of the largest unit, so past 1T a 256M step such as 1029.5G read back as 1.01T, over the bound, and the
+  check refused every look's proposal.
+- **A revert held short is still owed.** The revert reads auto sizing's latest change of `memory` and the raises
+  before it: a chain of raises, each from where the change before it left `memory`, back to a lowering that went too
+  far and short of where it came from, is that revert unfinished. Each look bounds it again by the ceiling, so a
+  reload that raises or removes the ceiling finishes it at the next look, with no new run at the cap, after a restart
+  too, since the chain is read from the history. A hand edit breaks the chain: the `memory` is then the owner's.
+- **A revert fits the slice.** It is sized as any raise: under `caps` with as many of the slots it gives back as
+  `MemoryMax` holds beside the other profiles, and as the changes before it in the same look leave (it waits for
+  the next look otherwise); under `measured`, only when one runner fits beside the mirror. A revert the slice
+  cannot hold writes nothing and reads as a slice that has to grow. The bound sits beside the others, not in
   place of them: under `caps` the slots still have to fit `MemoryMax` beside the other profiles, under `measured` one
   runner beside the mirror, and `max_memory` still applies. It bounds one runner, not all of a profile's slots: the
   ceiling is what the host can grow to, and `MemoryMax` is what bounds the slice.
