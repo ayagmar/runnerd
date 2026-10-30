@@ -101,8 +101,8 @@ pub use sizing::{
 pub use slots::{Health, SlotState};
 pub use stats::StatsSummary;
 pub use storage::{
-    ACTIONS_CACHE, BuildCacheActivity, CacheLimit, RECORDS_NEAR_FULL, RecordState,
-    actions_cache_place, records_near_full,
+    ACTIONS_CACHE, BUILD_CACHE_TOOLS, BuildCacheActivity, CacheLimit, RECORDS_NEAR_FULL,
+    RecordState, actions_cache_place, records_near_full,
 };
 pub use tone::{Tone, Toned};
 #[cfg(feature = "host")]

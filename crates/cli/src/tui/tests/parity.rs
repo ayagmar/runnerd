@@ -209,6 +209,9 @@ fn a_job_states_its_outcome_steps_caps_build_cache_and_failed_runs_as_core_does(
         let took = step.took.as_deref().unwrap_or("–");
         assert!(row.trim_end().ends_with(took), "{took}: {row}");
     }
+    // What held its CPU back stays whole on a common terminal, where the details' line drops what does not fit.
+    let (rows, _) = frame_of(&app, 120, 40);
+    assert!(shows(&rows, &job.cpu_held), "{}", rows.join("\n"));
 }
 
 #[test]

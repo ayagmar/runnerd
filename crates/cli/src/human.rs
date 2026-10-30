@@ -6,9 +6,9 @@
 use std::fmt::Write as _;
 
 use runnerd_core::api::{
-    self, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
-    JobSizing, JobSummary, NotifyTest, QueuedJob, RecordNote, RecordState, Records, Savings,
-    Sizing, SlotState, Status, Step, WaitSpread,
+    self, AutoPlan, BuildCacheCounts, Caches, Digest, Event, EventEnvelope, Insights, Job, JobPage,
+    JobSizing, JobSummary, NotifyTest, ProfilePlan, ProfileSizing, QueuedJob, RecordNote,
+    RecordState, Records, Savings, Sizing, SlotState, Status, Step, WaitSpread,
 };
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
 use runnerd_core::api::{in_cores, job_title};
@@ -516,7 +516,7 @@ fn usage(summary: &JobSummary, now: u64, paint: Paint) -> String {
         usage.row(vec![plain("cpu"), plain(parts.join(", "))]);
     }
     if let Some(held) = summary.cpu_held(now) {
-        usage.row(vec![plain("cpu held"), plain(held)]);
+        usage.row(vec![plain("cpu held back"), plain(held)]);
     }
     if let Some(peak) = metrics.memory_peak {
         let mut parts = vec![format!("{} sampled peak", bytes(peak))];
@@ -579,6 +579,25 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             )
         )
     );
+    // Under auto sizing, its rules and what keeps every look from changing anything.
+    let plan = sizing.auto_plan.as_ref().filter(|_| sizing.auto);
+    if let Some(plan) = plan {
+        let _ = writeln!(
+            out,
+            "{}",
+            paint.paint(Tone::Dim, &format!("auto sizing {}", plan.rules()))
+        );
+        if let Some(blocked) = &plan.blocked {
+            let _ = writeln!(
+                out,
+                "{}",
+                paint.paint(
+                    Tone::Bad,
+                    &format!("no look changes anything now: {blocked}")
+                )
+            );
+        }
+    }
     for profile in &sizing.profiles {
         let peaks = &profile.peaks;
         let _ = writeln!(
@@ -612,14 +631,22 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             "  {}",
             paint.paint(profile.advice.tone().into(), &sizing.advice_line(profile))
         );
-        // A raise of `cpus` its jobs ask for and auto sizing cannot make.
-        if let Some(refusal) = sizing
-            .auto_plan
-            .as_ref()
-            .filter(|_| sizing.auto)
-            .and_then(|plan| plan.refusal(&profile.name))
-        {
-            let _ = writeln!(out, "  {}", paint.paint(api::Tone::Warn.into(), &refusal));
+        if let Some(plan) = plan {
+            // What its next look does, or what holds it; the advice above already says why a change is due.
+            let (what, why) = plan_line(sizing, plan, profile, now);
+            match plan.profile_plan(&profile.name, now) {
+                ProfilePlan::Nothing => {}
+                ProfilePlan::Next { .. } => {
+                    let _ = writeln!(out, "  {what}");
+                }
+                ProfilePlan::Held { .. } | ProfilePlan::LowerHeld { .. } => {
+                    let _ = writeln!(out, "  {what}, {why}");
+                }
+            }
+            // A raise of `cpus` its jobs ask for and auto sizing cannot make.
+            if let Some(refusal) = plan.refusal(&profile.name) {
+                let _ = writeln!(out, "  {}", paint.paint(api::Tone::Warn.into(), &refusal));
+            }
         }
         out.push_str(&sizing_changes(sizing, &profile.name, now, paint));
         // Under auto sizing the daemon applies it.
@@ -641,8 +668,29 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
     out
 }
 
+/// What auto sizing does next with a profile, then why, as the dashboard's sizing page says it: `No change for 22h
+/// 10m`, `changed 1d 2h ago; the interval holds it until then`.
+pub(crate) fn plan_line(
+    sizing: &Sizing,
+    plan: &AutoPlan,
+    profile: &ProfileSizing,
+    now: u64,
+) -> (String, String) {
+    let next = plan.profile_plan(&profile.name, now);
+    let mut what = next.headline(plan);
+    if let Some(until) = next.until() {
+        let _ = write!(what, " for {}", duration(until.saturating_sub(now)));
+    }
+    let reason = next.reason(sizing, profile);
+    let why = match next.changed() {
+        Some(changed) => format!("changed {}; {reason}", ago(changed, now)),
+        None => reason,
+    };
+    (what, why)
+}
+
 /// A profile's memory and CPU peaks, a line each.
-fn sizing_peaks(profile: &api::ProfileSizing, paint: Paint) -> String {
+fn sizing_peaks(profile: &ProfileSizing, paint: Paint) -> String {
     let peaks = &profile.peaks;
     let mut out = String::new();
     let at_cap = if peaks.at_cap > 0 {
@@ -770,8 +818,9 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
     }
     out.push_str(&table.render(paint, ""));
     if let Some(build) = &caches.build {
-        let _ = writeln!(out, "build cache: {}", build.week_line());
-        let _ = writeln!(out, "{}", build.actions_cache_line());
+        let _ = writeln!(out, "build cache for {}", api::BUILD_CACHE_TOOLS);
+        let _ = writeln!(out, "  {}", build.week_line());
+        let _ = writeln!(out, "  {}", build.actions_cache_line());
     }
     out
 }

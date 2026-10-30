@@ -14,10 +14,10 @@ use ratatui::widgets::{
     Block, BorderType, Borders, Cell, Clear, Paragraph, Row, Sparkline, Table, TableState, Wrap,
 };
 use runnerd_core::api::{
-    self, Activity, AutoPlan, BudgetParts, ChartLine, ChartLineKind, ChartLines, HeldKind,
-    HeldPart, Insights, Job, JobSummary, LogSummary, Phase, PhaseKind, ProfileSizing,
-    ProfileStatus, QueuedJob, RecordNote, RecordState, Records, RepositoryStatus, RunComparison,
-    Sample, Sizing, SlotStatus, Status, Step, WaitKind, cpus, in_cores, job_title,
+    self, Activity, BudgetParts, ChartLine, ChartLineKind, ChartLines, HeldKind, HeldPart,
+    Insights, Job, JobSummary, LogSummary, Phase, PhaseKind, ProfileSizing, ProfileStatus,
+    QueuedJob, RecordNote, RecordState, Records, RepositoryStatus, RunComparison, Sample, Sizing,
+    SlotStatus, Status, Step, WaitKind, cpus, in_cores, job_title,
 };
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
@@ -1918,7 +1918,7 @@ fn auto_plan(
         .max()
         .unwrap_or(0);
     for profile in &sizing.profiles {
-        let (what, why) = plan_line(sizing, plan, profile, now);
+        let (what, why) = human::plan_line(sizing, plan, profile, now);
         let room = width.saturating_sub(2 + name_width + 1);
         let what_width = what.width().min(room);
         let mut spans = vec![
@@ -1935,39 +1935,19 @@ fn auto_plan(
         }
         lines.push(Line::from(spans));
         // Beside the change, which can still be to its memory or slots.
+        // A sentence with its figures and its reason, wrapped rather than cut.
         if let Some(refusal) = plan.refusal(&profile.name) {
             let indent = 2 + name_width + 1;
-            lines.push(Line::styled(
-                format!(
-                    "{:indent$}{}",
-                    "",
-                    fit(&refusal, width.saturating_sub(indent))
-                ),
-                theme.tone(Tone::Busy),
-            ));
+            lines.extend(
+                wrap(&refusal, width.saturating_sub(indent))
+                    .into_iter()
+                    .map(|line| {
+                        Line::styled(format!("{:indent$}{line}", ""), theme.tone(Tone::Busy))
+                    }),
+            );
         }
     }
     lines
-}
-
-/// What auto sizing does next with a profile, then why, as the dashboard's sizing page says it.
-fn plan_line(
-    sizing: &Sizing,
-    plan: &AutoPlan,
-    profile: &ProfileSizing,
-    now: u64,
-) -> (String, String) {
-    let next = plan.profile_plan(&profile.name, now);
-    let mut what = next.headline(plan);
-    if let Some(until) = next.until() {
-        let _ = write!(what, " for {}", duration(until.saturating_sub(now)));
-    }
-    let reason = next.reason(sizing, profile);
-    let why = match next.changed() {
-        Some(changed) => format!("changed {}; {reason}", human::ago(changed, now)),
-        None => reason,
-    };
-    (what, why)
 }
 
 /// A row per profile: its memory and slots, its jobs' peaks, how busy and how long waited, the advice.
@@ -2132,12 +2112,16 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
     let fixed = 3 + 2 + runs_height;
     // Until a runner has it there is nothing to chart.
     let charted = summary.runner.is_some() || !open.samples.is_empty();
-    let full_charts = charted && area.height >= fixed + steps_wanted + 7 + 6;
-    let charts_height = match (charted, full_charts) {
-        (false, _) => 0,
-        (true, true) => 7,
-        (true, false) => 2,
-    };
+    // What held its CPU back takes a row of its own under the figures.
+    let cpu_held = summary.cpu_held(now).filter(|_| charted);
+    let held_height = u16::from(cpu_held.is_some());
+    let full_charts = charted && area.height >= fixed + steps_wanted + 7 + held_height + 6;
+    let charts_height = held_height
+        + match (charted, full_charts) {
+            (false, _) => 0,
+            (true, true) => 7,
+            (true, false) => 2,
+        };
     let steps_height = steps_wanted.min(area.height.saturating_sub(fixed + charts_height + 4));
     let [
         head,
@@ -2204,10 +2188,11 @@ fn job(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, now: u64, t
         );
     }
     steps(frame, steps_area, job, now, theme);
+    let cpu_held = cpu_held.as_deref();
     match (charted, full_charts) {
         (false, _) => {}
-        (true, true) => job_charts(frame, charts_area, app, open, theme),
-        (true, false) => job_spark(frame, charts_area, app, open, theme),
+        (true, true) => job_charts(frame, charts_area, app, open, cpu_held, theme),
+        (true, false) => job_spark(frame, charts_area, app, open, cpu_held, theme),
     }
     log(frame, log_area, open, theme);
 }
@@ -2243,9 +2228,6 @@ fn job_details(app: &App, job: &Job, now: u64) -> Vec<(u8, String)> {
     }
     if let Some(ran) = summary.ran(now) {
         details.push((0, format!("ran {}", duration(ran))));
-    }
-    if let Some(held) = summary.cpu_held(now) {
-        details.push((3, held));
     }
     if job
         .record
@@ -2651,9 +2633,19 @@ fn metrics_line(open: &JobView, width: usize, theme: Theme) -> Line<'static> {
     line
 }
 
-fn job_charts(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, theme: Theme) {
-    let [charts, metrics] =
-        Layout::vertical([Constraint::Min(0), Constraint::Length(1)]).areas(area);
+fn job_charts(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    open: &JobView,
+    cpu_held: Option<&str>,
+    theme: Theme,
+) {
+    let [charts, metrics] = Layout::vertical([
+        Constraint::Min(0),
+        Constraint::Length(figures_height(cpu_held)),
+    ])
+    .areas(area);
     let [memory_area, cpu_area] =
         Layout::horizontal([Constraint::Percentage(50), Constraint::Percentage(50)]).areas(charts);
     let lines = chart_lines(app, &open.job);
@@ -2673,15 +2665,49 @@ fn job_charts(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, them
         theme.cpu(),
     )
     .render(frame, cpu_area, theme);
+    figures(frame, metrics, open, cpu_held, theme);
+}
+
+/// The rows `figures` takes.
+fn figures_height(cpu_held: Option<&str>) -> u16 {
+    1 + u16::from(cpu_held.is_some())
+}
+
+/// The job's figures, then what held its CPU back on a row of its own: too long to share the details' line.
+fn figures(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    open: &JobView,
+    cpu_held: Option<&str>,
+    theme: Theme,
+) {
+    let [metrics, held] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
     frame.render_widget(
         metrics_line(open, usize::from(metrics.width), theme),
         metrics,
     );
+    if let Some(cpu_held) = cpu_held {
+        frame.render_widget(
+            Line::styled(fit(cpu_held, usize::from(held.width)), theme.dim()),
+            held,
+        );
+    }
 }
 
 /// Memory and CPU as one line of sparklines, for a terminal too small for charts.
-fn job_spark(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, theme: Theme) {
-    let [sparks, metrics] = Layout::vertical([Constraint::Length(1); 2]).areas(area);
+fn job_spark(
+    frame: &mut Frame<'_>,
+    area: Rect,
+    app: &App,
+    open: &JobView,
+    cpu_held: Option<&str>,
+    theme: Theme,
+) {
+    let [sparks, metrics] = Layout::vertical([
+        Constraint::Length(1),
+        Constraint::Length(figures_height(cpu_held)),
+    ])
+    .areas(area);
     let lines = chart_lines(app, &open.job);
     let (memory_cap, cpu_cap) = (highest(&lines.memory), highest(&lines.cpu));
     let width = usize::from(area.width / 2).saturating_sub(16);
@@ -2712,10 +2738,7 @@ fn job_spark(frame: &mut Frame<'_>, area: Rect, app: &App, open: &JobView, theme
         ]),
         sparks,
     );
-    frame.render_widget(
-        metrics_line(open, usize::from(metrics.width), theme),
-        metrics,
-    );
+    figures(frame, metrics, open, cpu_held, theme);
 }
 
 fn log(frame: &mut Frame<'_>, area: Rect, open: &JobView, theme: Theme) {
