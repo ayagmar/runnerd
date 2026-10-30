@@ -223,6 +223,9 @@ pub(crate) fn timeline(view: &JobView, parts: &Parts) -> Markup {
                                 (format::duration(phase.seconds(now))) @if ongoing { "…" }
                             }
                         }))
+                        @if phase.kind == PhaseKind::Waiting {
+                            @if let Some(note) = summary.unseen_note() { span { ", " (note) } }
+                        }
                     }
                 }
             }

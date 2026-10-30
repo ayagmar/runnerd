@@ -1,6 +1,6 @@
--- The job history at schema version 15, which `Store::open` creates in a new database. Times are milliseconds since
--- the Unix epoch. A database at another version is refused (ADR 0073); a change to this schema adds a migration from
--- version 15.
+-- The job history at schema version 16, which `Store::open` creates in a new database. Times are milliseconds since
+-- the Unix epoch. A database from version 15 on is brought here by `store::MIGRATIONS`, an older or newer one is
+-- refused (ADR 0073); a change to this schema adds a step there, its columns appended where `ALTER TABLE` puts them.
 
 -- One row per GitHub job a runner of this daemon may run, from the moment it is seen queued.
 CREATE TABLE jobs (
@@ -37,7 +37,10 @@ CREATE TABLE jobs (
     log_offset INTEGER NOT NULL DEFAULT 0,
     -- How long it waited because the host's memory could not take its runner (ADR 0055), which sizing does not read
     -- as a wait for a slot.
-    host_waited INTEGER NOT NULL DEFAULT 0
+    host_waited INTEGER NOT NULL DEFAULT 0,
+    -- How much of its wait passed while no runnerd ran, as the daemon that started after measured it from its
+    -- history's last sign of life (ADR 0081); waits for a slot leave it out. 0 in rows from before schema 16.
+    unseen INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);

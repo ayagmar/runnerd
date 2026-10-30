@@ -61,6 +61,7 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         memory_peak: Some(G),
         build_cache: None,
         sock_throttled: Some(0),
+        unseen: 0,
     }
 }
 

@@ -432,6 +432,7 @@ pub(crate) fn job_summary() -> JobSummary {
             started_at: Some(1_761_400_020),
             finished_at: Some(1_761_400_600),
             cleaned_at: Some(1_761_400_610),
+            unseen: 15,
         },
         metrics: JobMetrics {
             cpu_time: Some(1_200_000),

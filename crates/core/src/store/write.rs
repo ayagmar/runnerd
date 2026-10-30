@@ -11,8 +11,8 @@ use tokio::sync::{broadcast, mpsc, oneshot};
 
 use super::read::{self, secs};
 use super::{
-    HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, Resolution, RunnerRecord, SampleRecord, Write,
-    logged,
+    Downtime, HOST_SAMPLE_BATCH, LogPosition, MirrorPosition, Resolution, RunnerRecord,
+    SampleRecord, Write, logged,
 };
 use crate::api::{self, Event, EventEnvelope};
 use crate::github::{JobDetails, JobStep, QueuedJob};
@@ -28,11 +28,17 @@ const ANNOUNCE_PROFILE: &str =
 
 pub(super) fn run(
     db: Connection,
+    downtime: Option<Downtime>,
     mut queue: mpsc::UnboundedReceiver<Write>,
     events: &broadcast::Sender<Arc<EventEnvelope>>,
     held: &Mutex<Vec<api::HostSample>>,
 ) {
-    let writer = Writer { db, events, held };
+    let writer = Writer {
+        db,
+        downtime,
+        events,
+        held,
+    };
     while let Some(write) = queue.blocking_recv() {
         writer.apply(write);
     }
@@ -41,6 +47,8 @@ pub(super) fn run(
 
 struct Writer<'store> {
     db: Connection,
+    /// The time before this daemon when no runnerd ran, which a job queued before it first records waited through.
+    downtime: Option<Downtime>,
     events: &'store broadcast::Sender<Arc<EventEnvelope>>,
     /// `Store::held`.
     held: &'store Mutex<Vec<api::HostSample>>,
@@ -415,9 +423,11 @@ impl Writer<'_> {
         } else {
             job.created_at
         };
+        let unseen = self.downtime.map_or(0, |downtime| downtime.of(queued_at));
         let inserted = self.db.execute(
             "INSERT INTO jobs (id, repository, run_id, run_attempt, workflow, name, branch, url, labels, state, \
-             queued_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10) ON CONFLICT (id) DO NOTHING",
+             queued_at, unseen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?11) \
+             ON CONFLICT (id) DO NOTHING",
             params![
                 job.id,
                 repository,
@@ -428,7 +438,8 @@ impl Writer<'_> {
                 job.branch,
                 job.url,
                 labels,
-                queued_at
+                queued_at,
+                unseen
             ],
         )?;
         if inserted == 1
@@ -470,11 +481,28 @@ impl Writer<'_> {
     fn details(&self, details: &JobDetails, announced: &mut Announced) -> rusqlite::Result<()> {
         let completed = details.status == "completed";
         let labels = serde_json::to_string(&details.labels).unwrap_or_else(|_| "[]".to_owned());
+        let started_at = timestamp(details.started_at.as_deref());
+        // A runner that outlived the last daemon may have started it while none ran: what the downtime gave it
+        // after that start was no wait. Once, when GitHub's start first says so.
+        let after_start = match (self.downtime, started_at) {
+            (Some(downtime), Some(started_at)) if started_at < downtime.until => self
+                .db
+                .query_row(
+                    "SELECT queued_at, started_at FROM jobs WHERE id = ?1",
+                    [details.id],
+                    |row| Ok((row.get::<_, u64>(0)?, row.get::<_, Option<u64>>(1)?)),
+                )
+                .optional()?
+                .filter(|(_, known)| known.is_none_or(|known| known >= downtime.until))
+                .map_or(0, |(queued_at, _)| downtime.after(queued_at, started_at)),
+            _ => 0,
+        };
         let updated = self.db.execute(
             "UPDATE jobs SET run_id = ?2, run_attempt = ?3, name = ?4, workflow = ?5, branch = ?6, url = ?7, \
              labels = ?8, queued_at = coalesce(?9, queued_at), started_at = coalesce(?10, started_at), \
              finished_at = CASE WHEN ?11 THEN coalesce(?12, finished_at) ELSE finished_at END, \
-             conclusion = ?13, github_completed = ?11 WHERE id = ?1 AND state = 'running'",
+             conclusion = ?13, github_completed = ?11, unseen = max(unseen - ?14, 0) \
+             WHERE id = ?1 AND state = 'running'",
             params![
                 details.id,
                 details.run_id,
@@ -485,10 +513,11 @@ impl Writer<'_> {
                 details.html_url,
                 labels,
                 timestamp(details.created_at.as_deref()),
-                timestamp(details.started_at.as_deref()),
+                started_at,
                 completed,
                 timestamp(details.completed_at.as_deref()),
                 details.conclusion,
+                after_start,
             ],
         )?;
         if updated != 1 {
@@ -954,6 +983,7 @@ mod tests {
         let held = Mutex::new(Vec::new());
         let writer = Writer {
             db,
+            downtime: None,
             events: &events,
             held: &held,
         };

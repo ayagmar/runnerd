@@ -753,6 +753,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             oom_killed: false,
             reserved: None,
             host_waited: 0,
+            unseen: 0,
             hit_cap: Some(false),
             own_cap: Some(false),
             measure: sizing::Measure::WithoutPageCache,

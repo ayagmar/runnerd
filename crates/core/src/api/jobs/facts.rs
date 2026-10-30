@@ -104,6 +104,18 @@ impl JobSummary {
         Some(end.saturating_sub(self.timeline.queued_at))
     }
 
+    /// What of its wait passed while no runnerd ran, to follow it: `8h 10m of it while runnerd was not running`.
+    /// `None` when none did.
+    pub fn unseen_note(&self) -> Option<String> {
+        let unseen = self.timeline.unseen;
+        (unseen > 0).then(|| {
+            format!(
+                "{} of it while runnerd was not running",
+                crate::api::duration(unseen)
+            )
+        })
+    }
+
     /// Seconds it ran: until it finished, or until `now` while it may still finish. `None` before it started, and
     /// for a final job without a finish time, which no client claims ran for as long as it has been since.
     pub fn ran(&self, now: u64) -> Option<u64> {

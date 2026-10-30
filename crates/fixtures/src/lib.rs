@@ -310,6 +310,7 @@ fn ran(mut summary: JobSummary, started: u64, finished: Option<u64>) -> JobSumma
         started_at: Some(NOW - started),
         finished_at: finished.map(|finished| NOW - finished),
         cleaned_at: finished.map(|finished| NOW - finished + 4),
+        unseen: 0,
     };
     summary
 }
@@ -402,6 +403,8 @@ fn jobs() -> Vec<Job> {
         7180,
         Some(3500),
     );
+    // Queued while runnerd was not running, for 15 s of its 20 s wait.
+    timed_out.timeline.unseen = 15;
     // Caps past the whole budget, and a CPU cap only a tenth rounded up writes.
     timed_out.runner = Some(JobRunner {
         memory_cap: Some(40 * GIB),
@@ -681,6 +684,8 @@ pub struct JobFacts {
     pub build_cache_refused: String,
     /// Its CPU time.
     pub cpu_time: String,
+    /// What of its wait passed while runnerd was not running.
+    pub unseen: String,
     /// Of its latest runs that started and ended, how many failed.
     pub failed: usize,
     /// How many of its latest runs started and ended.
@@ -828,6 +833,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
             .into(),
             build_cache_refused,
             cpu_time: api::cpu_time(job.summary.metrics.cpu_time.expect("its CPU time")),
+            unseen: job.summary.unseen_note().expect("downtime in its wait"),
             failed: compared.failed,
             finished: compared.finished,
         },

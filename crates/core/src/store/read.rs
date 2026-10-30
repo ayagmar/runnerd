@@ -52,7 +52,7 @@ const SUMMARY: &str = "j.id, j.repository, j.run_id, j.run_attempt, j.workflow, 
      j.network_sent, coalesce(r.mirror_bytes, 0), j.log_lines, j.log_bytes, j.log_truncated, \
      r.memory_cap, r.cpu_cap, coalesce(r.build_cache_hits, 0), coalesce(r.build_cache_misses, 0), \
      coalesce(r.build_cache_read_bytes, 0), coalesce(r.build_cache_written_bytes, 0), \
-     coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled \
+     coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen \
      FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
 
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
@@ -89,6 +89,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             started_at: seconds(16)?,
             finished_at: seconds(17)?,
             cleaned_at: seconds(18)?,
+            unseen: secs(row.get(39)?),
         },
         metrics: api::JobMetrics {
             cpu_time: row.get(19)?,
@@ -590,18 +591,34 @@ pub(super) fn host_samples(db: &Connection, since: u64) -> rusqlite::Result<Vec<
         .collect()
 }
 
+/// From when the history holds every final job, in ms.
+fn kept_since(db: &Connection) -> rusqlite::Result<u64> {
+    db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))
+}
+
+/// [`sizing::Wait::counted`] in SQL, in ms, for the job `j` with the history's `jobs_since` as `?1`; 0 for a job that
+/// did not start.
+const COUNTED_WAIT: &str =
+    "max(coalesce(j.started_at, j.queued_at) - max(j.queued_at, ?1) - j.unseen, 0)";
+
 /// What `Store::activity` reads. Jobs another runner ran are left out: their wait is not for runnerd.
 pub(super) fn activity(db: &Connection, since: u64, now: u64) -> rusqlite::Result<api::Activity> {
     let ms = |secs: u64| i64::try_from(secs.saturating_mul(1000)).unwrap_or(i64::MAX);
+    let kept_since = kept_since(db)?;
     let started = db
         .prepare_cached(
-            "SELECT started_at, max(started_at - queued_at, 0) FROM jobs \
+            "SELECT queued_at, started_at, unseen FROM jobs \
              WHERE started_at >= ?1 AND started_at <= ?2 AND state != 'elsewhere' ORDER BY started_at",
         )?
         .query_map(params![ms(since), ms(now)], |row| {
+            let wait = sizing::Wait {
+                queued_at: row.get(0)?,
+                started_at: row.get(1)?,
+                unseen: row.get(2)?,
+            };
             Ok(api::Started {
-                at: secs(row.get(0)?),
-                waited: secs(row.get(1)?),
+                at: secs(wait.started_at),
+                waited: secs(wait.counted(kept_since)),
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
@@ -644,22 +661,22 @@ pub(super) fn stats(
         i64::try_from(until.saturating_mul(1000)).unwrap_or(i64::MAX)
     });
     let rows = db
-        .prepare_cached(
-            "SELECT j.queued_at / ?1 * ?1, j.repository, count(*), \
+        .prepare_cached(&format!(
+            "SELECT j.queued_at / ?2 * ?2, j.repository, count(*), \
              count(*) FILTER (WHERE j.conclusion = 'success'), \
              count(*) FILTER (WHERE j.state = 'lost' OR j.conclusion IN ('failure', 'timed_out')), \
              count(*) FILTER (WHERE j.conclusion = 'cancelled'), \
-             sum(max(coalesce(j.started_at, j.queued_at) - j.queued_at, 0)) / 1000, \
+             sum({COUNTED_WAIT}) / 1000, \
              sum(max(coalesce(j.finished_at, j.started_at, 0) - coalesce(j.started_at, 0), 0)) / 1000, \
              sum(coalesce(j.cpu_time, 0)), max(coalesce(j.memory_peak, 0)), \
              sum(coalesce(j.network_received, 0)), sum(coalesce(r.mirror_bytes, 0)) \
              FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
-             WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?2 AND j.queued_at < ?3 \
-             AND (?4 IS NULL OR j.repository = ?4) \
+             WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?3 AND j.queued_at < ?4 \
+             AND (?5 IS NULL OR j.repository = ?5) \
              GROUP BY 1, 2 ORDER BY 1, 2",
-        )?
+        ))?
         .query_map(
-            params![bucket, since, until, query.repository],
+            params![kept_since(db)?, bucket, since, until, query.repository],
             |row| {
                 Ok(api::StatsRow {
                     start: secs(row.get(0)?),
@@ -715,6 +732,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             run_id: row.get(20)?,
             branch: row.get(21)?,
             failed: row.get(22)?,
+            unseen: row.get(23)?,
         })
     };
     let jobs = db
@@ -724,7 +742,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), \
              j.state = 'completed' AND j.conclusion IS 'success', r.ooms, r.memory_measure IS 'without_page_cache', \
              j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, r.local_ooms, j.run_id, j.branch, \
-             j.state = 'completed' AND j.conclusion IN ('failure', 'timed_out') FROM jobs j \
+             j.state = 'completed' AND j.conclusion IN ('failure', 'timed_out'), j.unseen FROM jobs j \
              JOIN runners r ON r.name = j.runner \
              WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
              AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
@@ -737,7 +755,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0, r.ooms, \
              r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, \
-             r.local_ooms, j.run_id, j.branch, 0 FROM jobs j JOIN runners r ON r.name = j.runner \
+             r.local_ooms, j.run_id, j.branch, 0, j.unseen FROM jobs j JOIN runners r ON r.name = j.runner \
              WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id",
         )?
         .query_map([since], ran)?
@@ -757,7 +775,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
-    let kept_since = db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))?;
+    let kept_since = kept_since(db)?;
     Ok(sizing::History {
         jobs,
         cancelled,
@@ -806,7 +824,7 @@ pub(super) fn pricing(db: &Connection, since: u64) -> rusqlite::Result<api::Pric
             Err(error) => Some(Err(error)),
         })
         .collect::<rusqlite::Result<_>>()?;
-    let kept_since = db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))?;
+    let kept_since = kept_since(db)?;
     Ok(api::PricingHistory {
         runs,
         visibility,
@@ -821,7 +839,7 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
         "SELECT j.id, j.repository, j.workflow, j.name, j.branch, j.url, j.run_id, j.run_attempt, j.state, \
          j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak, \
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
-         r.build_cache_refused, r.build_cache_writer, r.sock_throttled \
+         r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen \
          FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
     )?
@@ -855,10 +873,11 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
                 None => None,
             },
             sock_throttled: row.get(22)?,
+            unseen: row.get(23)?,
         })
     })?
     .collect::<rusqlite::Result<_>>()?;
-    let kept_since = db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))?;
+    let kept_since = kept_since(db)?;
     Ok(crate::insights::History { runs, kept_since })
 }
 

@@ -192,7 +192,7 @@ adopted too and drains as it would after a reload.
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory and how much of its wait passed while no runnerd ran; times in ms |
 
 ## Invariants
 
@@ -255,8 +255,16 @@ adopted too and drains as it would after a reload.
   snapshot also writes a new `/base/.generation`; a slot whose `/state/.generation` differs, as one a lower `slots`
   closed during the reseed, drops its layers' changes before it mounts them
   ([ADR 0077](docs/adr/0077-cache-credentials-closed-slots-and-build-cache-counts.md)).
-- The history's schema is version 15 (`store/schema.sql`) or a migration from it: `Store::open` creates it in a new
-  database and refuses any other version, older or newer ([ADR 0073](docs/adr/0073-no-compatibility-before-0-0-19.md)).
+- The history's schema is `store/schema.sql`, which a new database gets; `Store::open` brings one from version 15 on
+  to it through `store::MIGRATIONS`, a step per version, and refuses an older or newer one
+  ([ADR 0073](docs/adr/0073-no-compatibility-before-0-0-19.md)). A schema change adds a step and the same change to
+  `schema.sql`; a test compares a history brought up from 0.0.22's schema with a new one. A read-only look
+  (`runnerd doctor`, `simulate`) reads an older history through temporary views
+  ([ADR 0081](docs/adr/0081-waits-leave-out-the-time-no-runnerd-ran.md)).
+- A wait for a slot is `sizing::Wait::counted`: from queued, or the history's start, to started, less what of it
+  passed while no runnerd ran (`jobs.unseen`, which `Store::open` measures from the history's last sign of life).
+  Sizing, insights, activity and stats count it; a job's own page shows its whole wait and words the rest; arrivals
+  (`simulate`, warm runners) keep `queued_at` ([ADR 0081](docs/adr/0081-waits-leave-out-the-time-no-runnerd-ran.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
