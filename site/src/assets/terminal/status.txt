@@ -1,11 +1,11 @@
 runnerd 0.0.22  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
 
 PROFILE  SLOT  STATE     REPOSITORY          RUNNER                                      UP
-jvm         1  running   halyard/ledger      runnerd-3f9a-forge-jvm-1-1793378346     8m 40s
-jvm         2  warm      halyard/ledger      runnerd-3f9a-forge-jvm-2-1793378173    11m 33s
-node        1  running   halyard/storefront  runnerd-3f9a-forge-node-1-1793378464    6m 42s
-node        2  starting  halyard/storefront  runnerd-3f9a-forge-node-2-1793378761    1m 45s
-small       1  warm      halyard/storefront  runnerd-3f9a-forge-small-1-1793378513   5m 53s
+jvm         1  running   halyard/ledger      runnerd-3f9a-forge-jvm-1-1793379169     7m 40s
+jvm         2  warm      halyard/ledger      runnerd-3f9a-forge-jvm-2-1793378996    10m 33s
+node        1  running   halyard/storefront  runnerd-3f9a-forge-node-1-1793379287    5m 42s
+node        2  starting  halyard/storefront  runnerd-3f9a-forge-node-2-1793379584       45s
+small       1  warm      halyard/storefront  runnerd-3f9a-forge-small-1-1793379336   4m 53s
 small       2  idle
 
 REPOSITORY          PROFILE  STATE   QUEUED  LABELS
@@ -14,8 +14,8 @@ halyard/storefront  node     active       4  self-hosted,linux,x64,node
                     small                 0  storefront-small
 
 JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FOR
-120055991720  halyard/storefront         CI / lint          6m 23s ago  No profile serves the label storefornt-small
-120055991710  halyard/storefront · node  E2E / visual-diff  2m 14s ago  A runner is starting for it in node 2
-120055991711  halyard/storefront · node  E2E / a11y         2m 08s ago  All 2 node slots are busy
-120055991712  halyard/storefront · node  E2E / lighthouse   1m 55s ago  All 2 node slots are busy
-120055991713  halyard/storefront · node  E2E / unit         1m 42s ago  All 2 node slots are busy
+120055991720  halyard/storefront         CI / lint          5m 23s ago  No profile serves the label storefornt-small
+120055991710  halyard/storefront · node  E2E / visual-diff  1m 14s ago  A runner is starting for it in node 2
+120055991711  halyard/storefront · node  E2E / a11y         1m 08s ago  All 2 node slots are busy
+120055991712  halyard/storefront · node  E2E / lighthouse   55s ago     All 2 node slots are busy
+120055991713  halyard/storefront · node  E2E / unit         42s ago     All 2 node slots are busy

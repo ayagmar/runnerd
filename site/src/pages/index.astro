@@ -79,7 +79,7 @@ const printed = (name: string, ...heads: string[]) => {
 const waits = `$ runnerctl status\n${printed('status', 'JOB ')}`;
 
 // The cache volumes' last two lines.
-const caches = `$ runnerctl caches\n${printed('caches', 'build cache:')}`;
+const caches = `$ runnerctl caches\n${printed('caches', 'build cache for')}`;
 
 const shell = `$ runnerctl shell 120055991489
 runnerd: the record of job 120055991489 of halyard/ledger, CI / build
@@ -231,16 +231,13 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
           <p>
             <code>actions/cache</code>, the <code>cache:</code> input of <code>setup-node</code> and <code>setup-java</code>,
             and Docker's <code>type=gha</code> restore from and save to this machine, with no change to a workflow.
-            Gradle, sccache, Bazel and Turborepo share the same store. A job that gets a new runner starts in the free
-            slot that ran it last, when one is free, so it finds what that run left.
+            A job that gets a new runner starts in the free slot that ran it last, when one is free, so it finds
+            what that run left.
           </p>
-          <p>
-            It is on by default. <code>actions_cache = false</code> under <code>[caches.build]</code> sends jobs back
-            to GitHub's cache.
-          </p>
+          <p>It is on by default.</p>
           <a class="text-link" href={`${base}running/#build-cache`}>The build cache</a>
         </div>
-        <div class="proof"><pre class="terminal wide" tabindex="0" data-ui aria-label="runnerctl caches: the build cache's hits and what serves GitHub's cache"><code>{caches}</code></pre></div>
+        <div class="proof"><pre class="terminal" tabindex="0" data-ui aria-label="runnerctl caches: the build cache's hits and what serves GitHub's cache"><code>{caches}</code></pre></div>
       </section>
 
       <section class="part wrap split" id="records" aria-labelledby="shell-title">

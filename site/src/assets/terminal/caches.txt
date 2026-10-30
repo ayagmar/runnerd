@@ -1,4 +1,4 @@
-measured 16m 33s ago
+measured 15m 33s ago
 VOLUME               HOLDS                      SIZE             LIMIT
 runnerd-jvm-base     jvm snapshot                14G                 -
 runnerd-jvm-slot-1   jvm slot 1 layer          1.76G                 -
@@ -10,5 +10,6 @@ runnerd-pnpm         pnpm store, shared        3.39G  emptied above 5G
 runnerd-maven        Maven repository, shared   4.1G  emptied above 5G
 runnerd-mirror       Docker Hub mirror            7G                 -
 runnerd-build-cache  build cache, shared       6.29G    trimmed to 10G
-build cache: 18412 entries; 81% of 51085 lookups hit in 7 days, 38G served, 5G stored, 1204 uploads refused
-GitHub Actions' cache: served from the build cache on this host, in place of GitHub's
+build cache for Gradle, sccache, Bazel and Turborepo, and Nx where a workflow opts in
+  18412 entries; 81% of 51085 lookups hit in 7 days, 38G served, 5G stored, 1204 uploads refused
+  GitHub Actions' cache: served from the build cache on this host, in place of GitHub's, and counted with it; [caches.build] actions_cache = false turns it off
