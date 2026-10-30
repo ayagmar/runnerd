@@ -135,10 +135,11 @@ pub enum InsightKind {
         held: u32,
         /// The job's last runs at that cap that measured their throttling.
         total: u32,
-        /// The `cpus` auto sizing raised the profile from, when that raise did not make the job faster or less
-        /// throttled, so it raises them no further for it.
+        /// Under `measured` admission with auto sizing, the `cpus` the profile was raised from when that raise did
+        /// not make this job faster or less throttled: its runs ask for no further raise. What auto sizing does
+        /// next for the profile, on the other jobs' runs or on the averages, is `runnerctl sizing`'s to say.
         raised_from: Option<u32>,
-        /// The `cpus` to set by hand; `None` while auto sizing raises them, or after a raise that did not help.
+        /// The `cpus` to set by hand; `None` while auto sizing raises them.
         set: Option<u32>,
     },
     /// A kind from a later release, which this one reads only by its sentence. The daemon never sends it.

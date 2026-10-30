@@ -666,8 +666,9 @@ pub fn insights(at: u64) -> api::Insights {
                 LEDGER,
                 Some("test"),
                 "halyard/ledger: CI / test was held back by jvm's 8 CPUs in 4 of its last 10 runs, its quota \
-                 throttling it in 15% of its run or more. Auto sizing raised jvm from 6 to 8 CPUs and stopped, as \
-                 that did not make it faster or less throttled; runnerctl sizing has the figures.",
+                 throttling it in 15% of its run or more. The raise of jvm from 6 to 8 CPUs did not make it faster \
+                 or less throttled, as when its tools start a worker per CPU, so its runs ask for no further raise; \
+                 runnerctl sizing says what auto sizing does next.",
                 api::InsightKind::CpuHeld {
                     profile: "jvm".to_owned(),
                     cpus: 8,

@@ -556,7 +556,8 @@ fn cold_cache(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
 /// reads a run (`Throttling::held`): successful runs, as sizing reads only those, in the profile and at the cap of its
 /// last such run, the profile's `cpus` today. A run without a throttling figure is unknown, neither held nor free.
 /// Says what the owner can do: under `measured` admission auto sizing raises `cpus` while each raise helps, under
-/// `caps` it does not for throttling, as each CPU takes budget there.
+/// `caps` it does not for throttling, as each CPU takes budget there. A raise that did not help the job is told as
+/// this job's evidence only: auto sizing may still raise the profile for another job, or on the runs' averages.
 fn cpu_held(key: JobKey<'_>, runs: &[&Run], config: &Config) -> Option<Insight> {
     let measured = runs.iter().rev().filter(|run| {
         run.succeeded() && run.profile.is_some() && run.throttling().held().is_some()
@@ -602,8 +603,9 @@ fn cpu_held(key: JobKey<'_>, runs: &[&Run], config: &Config) -> Option<Insight> 
     let set = (!auto).then(|| cpus.saturating_add(cpu_step(config, cpus)));
     let what = match (raised_from, set) {
         (Some(from), _) => format!(
-            "Auto sizing raised {name} from {from} to {cpus} CPUs and stopped, as that did not make it faster or less \
-             throttled; runnerctl sizing has the figures."
+            "The raise of {name} from {from} to {cpus} CPUs did not make it faster or less throttled, as when its \
+             tools start a worker per CPU, so its runs ask for no further raise; runnerctl sizing says what auto \
+             sizing does next."
         ),
         (None, Some(set)) if config.host.admission == Admission::Measured => {
             format!("Auto sizing is off: set {name}'s cpus to {set}, or turn it on.")
