@@ -148,6 +148,36 @@ fn a_ready_host_passes_every_check() {
 }
 
 #[test]
+fn gh_without_an_account_is_not_logged_in_rather_than_a_token_without_scopes() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let output = |stdout: &str, stderr: &str| std::process::Output {
+        status: std::process::ExitStatus::from_raw(0),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    };
+    // What gh 2.102 prints with no account: it succeeds.
+    let none = super::gh_scopes(&output(
+        "",
+        "You are not logged into any GitHub hosts. To log in, run: gh auth login\n",
+    ))
+    .unwrap_err();
+    assert!(
+        none.starts_with("gh is not logged in to github.com"),
+        "{none}"
+    );
+    assert_eq!(
+        super::gh_scopes(&output("active:gist, repo\n", "")).unwrap(),
+        ["gist", "repo"]
+    );
+    assert_eq!(
+        super::gh_scopes(&output("active:\n", "")).unwrap(),
+        Vec::<String>::new(),
+        "an account whose token has no scopes is logged in"
+    );
+}
+
+#[test]
 fn a_public_repository_is_a_warning_that_says_who_can_run_code_here() {
     let config = config("sysbox");
     let mut host = ready_host(ARCH);

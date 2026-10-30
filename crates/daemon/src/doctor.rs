@@ -108,6 +108,7 @@ impl Host {
     /// The host, for `config` read from the file `path`.
     pub(crate) fn read(config: Option<&Config>, path: Option<&Path>) -> Host {
         let docker = read_docker();
+        let gh_scopes = read_gh_scopes();
         Host {
             config_file: path.and_then(|path| {
                 let metadata = std::fs::metadata(path).ok()?;
@@ -125,17 +126,21 @@ impl Host {
             docker,
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
-            gh_scopes: read_gh_scopes(),
             visibility: config.map_or_else(BTreeMap::new, |config| {
                 config
                     .repositories
                     .iter()
                     .map(|repository| {
                         let name = repository.name.clone();
-                        (name.clone(), read_visibility(&name))
+                        let visibility = match &gh_scopes {
+                            Ok(_) => read_visibility(&name),
+                            Err(_) => Err("needs gh logged in to github.com".to_owned()),
+                        };
+                        (name, visibility)
                     })
                     .collect()
             }),
+            gh_scopes,
             sysbox_daemons: SYSBOX_DAEMONS.map(|name| SysboxDaemon {
                 name,
                 state: read_daemon(name),
@@ -347,21 +352,42 @@ fn read_gh_scopes() -> Result<Vec<String>, String> {
             "--json",
             "hosts",
             "--jq",
-            r#".hosts["github.com"][] | select(.active) | .scopes"#,
+            // Prefixed, so an account without scopes prints a line where none logged in prints nothing.
+            r#".hosts["github.com"][]? | select(.active) | "active:" + (.scopes // "")"#,
         ])
         .output()
         .map_err(|error| format!("cannot run gh: {error}"))?;
-    if !output.status.success() {
-        return Err(format!(
-            "gh is not logged in to github.com: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
-        ));
-    }
-    Ok(String::from_utf8_lossy(&output.stdout)
+    gh_scopes(&output)
+}
+
+/// The scopes in what `read_gh_scopes`'s `gh auth status` printed: `Err` when no account is logged in, which `gh`
+/// says on stderr while it succeeds.
+fn gh_scopes(output: &std::process::Output) -> Result<Vec<String>, String> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let scopes = stdout.trim().strip_prefix("active:");
+    let (true, Some(scopes)) = (output.status.success(), scopes) else {
+        let why = first_line(&output.stderr);
+        return Err(if why.is_empty() {
+            "gh is not logged in to github.com".to_owned()
+        } else {
+            format!("gh is not logged in to github.com: {why}")
+        });
+    };
+    Ok(scopes
         .split(',')
         .map(|scope| scope.trim().to_owned())
         .filter(|scope| !scope.is_empty())
         .collect())
+}
+
+/// The first line of a command's error output, where `gh` says what failed; the rest is advice.
+fn first_line(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_owned()
 }
 
 /// What GitHub says of `repository`'s visibility, through `gh`.
@@ -380,7 +406,7 @@ fn read_visibility(repository: &str) -> Result<String, String> {
     if !output.status.success() {
         return Err(format!(
             "gh api repos/{repository} failed: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            first_line(&output.stderr)
         ));
     }
     Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
