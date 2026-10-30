@@ -1103,7 +1103,9 @@ impl Downtime {
     /// their waits, as the ones first seen after do when they are recorded. The open is a sign of life itself, kept
     /// with them: a start that fails after it, and is retried, does not hand out the same downtime again.
     fn before(db: &mut Connection, now: u64) -> Result<Option<Downtime>, StoreError> {
-        let transaction = db.transaction()?;
+        // Immediate: it reads, then writes. A deferred transaction that has read cannot wait for the write lock, and
+        // fails at once while another connection, such as a dropped store's writer finishing, holds it.
+        let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
         let last: Option<u64> = transaction.query_row(
             "SELECT max(at) FROM (SELECT max(at) AS at FROM host_samples UNION ALL SELECT max(at) FROM events \
              UNION ALL SELECT value FROM meta WHERE key = 'opened_at')",

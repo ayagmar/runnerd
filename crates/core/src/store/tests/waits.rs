@@ -285,3 +285,24 @@ async fn an_open_whose_start_then_fails_does_not_hand_out_the_same_downtime_agai
         (8 * HOUR - 10 * SECOND + 3 * SECOND) / SECOND
     );
 }
+
+#[tokio::test]
+async fn an_open_waits_for_a_writer_that_still_holds_the_history() {
+    let dir = TestDir::new("store-busy");
+    let path = dir.0.join("runnerd.db");
+    drop(Store::open(&path).unwrap());
+    // As the writer of a store just dropped, finishing its last writes.
+    let writer = Connection::open(&path).unwrap();
+    writer
+        .execute_batch(
+            "BEGIN IMMEDIATE; INSERT INTO host_samples (at, cpu, memory) VALUES (1000, 0, 0)",
+        )
+        .unwrap();
+    let release = std::thread::spawn(move || {
+        std::thread::sleep(std::time::Duration::from_millis(300));
+        writer.execute_batch("COMMIT").unwrap();
+    });
+    let opened = Store::open(&path);
+    release.join().unwrap();
+    assert!(opened.is_ok(), "the open waits: {:?}", opened.err());
+}
