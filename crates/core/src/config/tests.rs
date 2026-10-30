@@ -1070,9 +1070,10 @@ fn a_profile_is_priced_at_the_github_runner_it_names() {
 
 #[test]
 fn a_resized_profile_is_found_where_its_sizes_were_written_not_in_a_comment_or_another_profile() {
-    let text = "# node used memory = \"7G\" before\n\
-                [profiles.jvm]\nimage_stage = \"jvm\"\ncpus = 8\nmemory = \"9G\"\nslots = 2\n\n\
-                [profiles.node]\nimage_stage = \"node\"\ncpus = 8\nmemory = \"7G\" # peaked at 2.1G\nslots = 2\n";
+    let text = &format!(
+        "# node used memory = \"7G\" before\n{MINIMAL}\n\
+         [profiles.node]\nimage_stage = \"node\"\ncpus = 8\nmemory = \"7G\" # peaked at 2.1G\nslots = 2\n"
+    );
     let advice = crate::api::Resize {
         memory: 3328 << 20,
         slots: 4,
@@ -1095,11 +1096,18 @@ fn a_resized_profile_is_found_where_its_sizes_were_written_not_in_a_comment_or_a
         "cpus = 6\nmemory = \"3.25G\" # peaked at 2.1G\nslots = 4"
     );
     assert_eq!(super::resized_at(&resized, "rust", advice), None);
-    let before = crate::api::Resize {
-        memory: 7 << 30,
-        slots: 2,
-        cpus: Some(8),
-    };
+    let before = super::profile_sizes(text, "node").unwrap();
+    assert_eq!(
+        before,
+        crate::api::Resize {
+            memory: 7 << 30,
+            slots: 2,
+            cpus: Some(8),
+        },
+        "node's sizes as the file sets them, not jvm's or the comment's"
+    );
+    assert_eq!(super::profile_sizes(text, "rust"), None);
+    assert_eq!(super::profile_sizes("[profiles.node", "node"), None);
     assert_eq!(
         advice.line_from(Some(&before)),
         "memory 7G → 3.25G, slots 2 → 4"

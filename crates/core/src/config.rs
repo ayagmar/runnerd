@@ -1476,6 +1476,18 @@ pub fn resize_profile(
     Ok(document.to_string())
 }
 
+/// `profile`'s `memory`, `slots` and `cpus` in the config `text`, as a sizing start changes them from; `None` when
+/// `text` is not a config or has no such profile.
+pub fn profile_sizes(text: &str, profile: &str) -> Option<api::Resize> {
+    let config = Config::parse(text).ok()?;
+    let sizes = config.profiles.get(profile)?;
+    Some(api::Resize {
+        memory: sizes.memory.0,
+        slots: sizes.slots,
+        cpus: Some(sizes.cpus),
+    })
+}
+
 /// Where `resize_profile` wrote `resize` in `text`: the bytes from the first of the profile's `memory`, `slots` and,
 /// when `resize` has them, `cpus` settings to the end of the last, so a client can select them. `None` when `text` is
 /// not TOML or the profile sets none of them.

@@ -2598,15 +2598,6 @@ dl.health-figures {
     grid-template-columns: minmax(0, 1fr);
   }
 
-  /* One column: what the editor was opened with, the editor, its verdict, then the rest. */
-  .config-side {
-    display: contents;
-  }
-
-  .config-side > .notice-box {
-    order: -1;
-  }
-
   /* The verdict and the buttons stay within a thumb's reach of the text. */
   .editor textarea {
     min-height: 16rem;

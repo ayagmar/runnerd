@@ -10,7 +10,7 @@ use maud::{Markup, html};
 use qrcode::QrCode;
 use runnerd_core::api::{Check, ConfigCheck, ConfigFile, Doctor, Resize, Sizing, Tone};
 use runnerd_core::client::{Client, ClientError};
-use runnerd_core::config::{Config, resize_profile, resized_at};
+use runnerd_core::config::{Config, profile_sizes, resize_profile, resized_at};
 use serde::Deserialize;
 
 use super::{Page, page};
@@ -130,14 +130,7 @@ fn notice(resized: &Resized, file: &str, text: &str) -> Markup {
         }
         Resized::Not(why) => return html! { div.notice-box { p { (why) } } },
     };
-    let before = Config::parse(file).ok().and_then(|config| {
-        config.profiles.get(profile).map(|before| Resize {
-            memory: before.memory.0,
-            slots: before.slots,
-            cpus: Some(before.cpus),
-        })
-    });
-    let line = resize.line_from(before.as_ref());
+    let line = resize.line_from(profile_sizes(file, profile).as_ref());
     let select = resized_at(text, profile, *resize).and_then(|at| {
         // A textarea counts UTF-16 units, and reads each line break as one `\n`.
         let offset = |byte: usize| {
@@ -159,8 +152,9 @@ fn notice(resized: &Resized, file: &str, text: &str) -> Markup {
                     "Auto sizing's last change to " strong { (profile) } ", undone: " (line) ". Not saved yet."
                 }
             }
+            // Its offsets are of the text the page opened with: an edit moves what they select.
             @if let Some(select) = select {
-                button.button-quiet type="button" data-on:click=(select) { "Show in the editor" }
+                button.button-quiet type="button" data-show="!$_edited" data-on:click=(select) { "Show in the editor" }
             }
         }
     }
@@ -208,12 +202,15 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
             p.muted { code { (view.file.path) } }
         }
         div.config-layout {
-            section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)] {
+            section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)]
+                "data-signals:_edited"="false" {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
+                // Before the editor, so it is read and reached before the text it describes.
+                @if let Some(resized) = &view.resized { (notice(resized, &view.file.text, &view.text)) }
                 label.visually-hidden for="toml" { "runnerd.toml" }
                 // The parser drops a line break right after the tag: this one, so the text's own first line stays.
                 textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"
-                    data-bind:toml="" data-indicator:_checking=""
+                    data-bind:toml="" data-indicator:_checking="" data-on:input="$_edited = true"
                     "data-on:input__debounce.400ms"="@post('/config/check')" { "\n" (view.text) }
                 div.editor-actions {
                     button.button type="button" data-indicator:_saving=""
@@ -228,7 +225,6 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
                 }
             }
             div.config-side {
-                @if let Some(resized) = &view.resized { (notice(resized, &view.file.text, &view.text)) }
                 (result(&view.check, &view.text, &Outcome::Checked))
                 (devices(proxies))
                 (doctor_pending(None))
