@@ -161,11 +161,12 @@ fn insights_open_with_what_the_job_minutes_would_have_cost_as_core_words_it() {
 }
 
 #[test]
-fn sizing_states_what_auto_sizing_does_next_with_each_profile_as_the_tui_does() {
+fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_with_each_profile_as_core_does() {
     let advice = runnerd_fixtures::sizing(NOW);
     let plan = advice.auto_plan.as_ref().unwrap();
     let text = sizing(&advice, NOW, PLAIN);
     assert!(text.contains(&plan.rules()), "{text}");
+    assert!(text.contains(&plan.blocked_line().unwrap()), "{text}");
     for profile in &advice.profiles {
         let (what, _) = plan_line(&advice, plan, profile, NOW);
         assert!(text.contains(&what), "{}: {text}", profile.name);

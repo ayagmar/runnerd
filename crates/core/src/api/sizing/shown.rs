@@ -272,6 +272,14 @@ impl AutoPlan {
             .map(|refused| format!("No CPU raise: {}", refused.reason))
     }
 
+    /// What keeps every look from changing anything, as clients say it over the profiles: `No look changes anything
+    /// now: the file changed on disk since runnerd read it; …`. `None` while the next look may write its changes.
+    pub fn blocked_line(&self) -> Option<String> {
+        self.blocked
+            .as_ref()
+            .map(|blocked| format!("No look changes anything now: {blocked}"))
+    }
+
     /// What it does next with `profile` at `now`: a hold whose time has passed holds nothing, however old the plan.
     pub fn profile_plan(&self, profile: &str, now: u64) -> ProfilePlan<'_> {
         if let Some(change) = self.next.iter().find(|change| change.profile == profile) {

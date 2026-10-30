@@ -248,3 +248,27 @@ fn the_overview_says_what_the_months_job_minutes_would_have_cost_as_core_words_i
         rows.join("\n")
     );
 }
+
+#[test]
+fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    app.update(key(KeyCode::Char('4')));
+    let sizing = runnerd_fixtures::sizing(NOW);
+    let plan = sizing.auto_plan.clone().unwrap();
+    app.update(Msg::Sizing(sizing));
+    let (rows, _) = frame_of(&app, 120, 40);
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let shown = words(&rows.join(" "));
+    // Wrapped, never cut.
+    assert!(
+        shown.contains(&words(&plan.blocked_line().unwrap())),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(
+        shown.contains(&words(&plan.refusal("node").unwrap())),
+        "{}",
+        rows.join("\n")
+    );
+}

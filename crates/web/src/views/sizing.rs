@@ -84,8 +84,8 @@ fn auto_plan(view: &SizingView) -> Markup {
         section.auto-plan aria-labelledby="auto-title" {
             h2 #auto-title { "Auto sizing is on" }
             p { "runnerd " (plan.rules()) "." }
-            @if let Some(blocked) = &plan.blocked {
-                p.warning { "No look changes anything now: " (blocked) "." }
+            @if let Some(blocked) = plan.blocked_line() {
+                p.warning { (blocked) "." }
             }
             ul.plan-list {
                 @for (index, profile) in sizing.profiles.iter().enumerate() {

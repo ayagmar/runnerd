@@ -587,15 +587,8 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             "{}",
             paint.paint(Tone::Dim, &format!("auto sizing {}", plan.rules()))
         );
-        if let Some(blocked) = &plan.blocked {
-            let _ = writeln!(
-                out,
-                "{}",
-                paint.paint(
-                    Tone::Bad,
-                    &format!("no look changes anything now: {blocked}")
-                )
-            );
+        if let Some(blocked) = plan.blocked_line() {
+            let _ = writeln!(out, "{}", paint.paint(Tone::Bad, &blocked));
         }
     }
     for profile in &sizing.profiles {

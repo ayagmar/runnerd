@@ -1904,9 +1904,9 @@ fn auto_plan(
             },
         );
     }
-    if let Some(blocked) = &plan.blocked {
+    if let Some(blocked) = plan.blocked_line() {
         lines.extend(
-            wrap(&format!("No look changes anything now: {blocked}"), width)
+            wrap(&blocked, width)
                 .into_iter()
                 .map(|line| Line::styled(line, theme.tone(Tone::Bad))),
         );

@@ -2151,10 +2151,8 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         Some("runnerd.toml changed on disk since runnerd read it".to_owned());
     app.update(Msg::Sizing(sizing.clone()));
     let shown = screen(&app, 120, 24, false);
-    assert!(
-        shown.contains("No look changes anything now: runnerd.toml changed on disk"),
-        "{shown}"
-    );
+    let blocked = sizing.auto_plan.as_ref().unwrap().blocked_line().unwrap();
+    assert!(shown.contains(&blocked), "{shown}");
     assert!(
         rows_with(&shown, "■ node")[0].contains("Once that is fixed: memory 7G → 5.25G"),
         "{shown}"

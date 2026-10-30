@@ -196,3 +196,14 @@ async fn records_and_the_build_cache_state_their_limits_as_core_does() {
         "the summary stands out exactly when core's tone warns: {element}"
     );
 }
+
+#[tokio::test]
+async fn sizing_states_what_blocks_auto_sizing_as_core_does() {
+    let (dashboard, cookie, _, _) = dashboard().await;
+    let plan = runnerd_fixtures::sizing(runnerd_fixtures::NOW)
+        .auto_plan
+        .unwrap();
+    dashboard.fake.fixtures.lock().unwrap().auto_plan = Some(plan.clone());
+    let shown = text(&dashboard.page(&cookie, "/sizing").await.body);
+    assert!(shown.contains(&plan.blocked_line().unwrap()), "{shown}");
+}
