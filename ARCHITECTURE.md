@@ -237,7 +237,8 @@ adopted too and drains as it would after a reload.
   commit that branch has, or, where `build_cache_writers = "pull-requests"`, a `pull_request` run of the
   repository's own branch whose pull request, push and run people, not bots, made, of a commit that branch has
   ([ADR 0053](docs/adr/0053-build-cache-written-by-own-pull-requests.md)); until then they are held, at most
-  `max_size` of them in all and a quarter of it per job, and otherwise dropped, answered as stored. A runner reads
+  `max_size` of them in all and a quarter of it per job, and otherwise dropped, answered as stored. A removed
+  runner's held uploads wait at most 10 minutes for that, holding no slot, and none survives a restart. A runner reads
   only its repository's entries, through its own socket. The cache is trimmed only while no runner runs, inside the
   tick, which starts none until the trim ends ([ADR 0052](docs/adr/0052-shared-build-cache.md)). Each entry and upload
   counts at least 4 KiB against `max_size`, so the limit also bounds how many there are; a runner holds at most
@@ -248,7 +249,9 @@ adopted too and drains as it would after a reload.
   (`refs/pull/<number>/merge`), never its head branch. It reads that scope's entries, then its pull request's base
   branch's, then the default branch's, and every other job only the default branch's, so no pull request changes
   what a default-branch job restores. A save it may not make, or of a key its scope has, is read, dropped and
-  answered as kept; with the switch off, a runner's lookups miss and its saves are dropped, and other requests still
+  answered as kept. A save made before the decision is answered at once and names no scope until then; it becomes an
+  entry of the scope the decision gives, under one lock with the check that the scope lacks its key
+  ([ADR 0085](docs/adr/0085-actions-cache-saves-wait-for-the-decision-not-the-job.md)); with the switch off, a runner's lookups miss and its saves are dropped, and other requests still
   go to GitHub. The image reaches it on port 41772 of the container's own addresses, which an `iptables` rule
   closes on `eth*`, only through the preload the runner's wrapped node loads into the node actions it starts, never
   through the job's environment, and only when the socket's directory has the `actions` marker

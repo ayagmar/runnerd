@@ -2,13 +2,14 @@
 //! actions and BuildKit's `type=gha` speak, Twirp in JSON with Azure's block blob protocol for the archives, served
 //! from the build cache's entries under `<owner>/<name>/actions`. An entry is scoped to a branch: a job writes only
 //! into its run's branch, and only when the engine said it may write; it reads that branch's entries, then the
-//! default branch's. Every other request of GitHub's results service, such as an artifact's, goes to GitHub as it
-//! came. It must not log a request's headers or body, which carry the job's token.
+//! default branch's. A save made before the engine decided is taken at once and finalized into no scope: it becomes
+//! an entry only once the decision lets it (ADR 0085). Every other request of GitHub's results service, such as an
+//! artifact's, goes to GitHub as it came. It must not log a request's headers or body, which carry the job's token.
 
 use std::collections::HashMap;
 use std::io;
 use std::path::{Path, PathBuf};
-use std::sync::{Mutex, OnceLock};
+use std::sync::{Arc, Mutex, OnceLock};
 use std::time::Duration;
 
 use http_body_util::{BodyExt, Empty, Full, Limited, StreamBody};
@@ -19,8 +20,8 @@ use serde::Deserialize;
 use tokio::io::{AsyncReadExt, AsyncSeekExt};
 use tracing::debug;
 
-use super::serve::{Body, Receiving, drain, receive, status};
-use super::{ActionsCache, Inner, Runner, Upload, Writes, charge, valid_segment};
+use super::serve::{Body, Purpose, Receiving, drain, receive, status};
+use super::{ActionsCache, Inner, Runner, State, Upload, Writes, charge, valid_segment};
 use crate::sync::lock;
 
 /// The paths it answers, under the socket's root: GitHub's Twirp services, and the archives' uploads and downloads,
@@ -46,9 +47,6 @@ const END: &str = "~";
 /// The hex digits of a branch's or a key's name in one path segment: a long key takes several.
 const SEGMENT: usize = 128;
 
-/// How long a save waits for the engine to decide whether its job may write, before it is refused.
-const DECISION_WAIT: Duration = Duration::from_secs(60);
-
 /// The longest key `@actions/cache` sends.
 const MAX_KEY: usize = 512;
 
@@ -62,9 +60,9 @@ const MAX_PASSED: usize = 1 << 20;
 /// How long GitHub's results service may take to answer a request it passes on.
 const PASS_TIMEOUT: Duration = Duration::from_secs(60);
 
-/// The saves one runner may have open at once, the blocks one save may have, and the entries its lookups may find:
-/// past them, saves are refused and lookups miss.
-const MAX_SAVES: usize = 1_000;
+/// The saves one runner may have open at once, finalized ones waiting for its decision included, the blocks one save
+/// may have, and the entries its lookups may find: past them, saves are refused and lookups miss.
+pub(super) const MAX_SAVES: usize = 1_000;
 const MAX_BLOCKS: usize = 50_000;
 const MAX_FOUND: usize = 10_000;
 
@@ -77,11 +75,10 @@ const REQUEST_ID: HeaderName = HeaderName::from_static("x-ms-request-id");
 /// The range Azure's clients ask for: theirs, or the standard one.
 const MS_RANGE: HeaderName = HeaderName::from_static("x-ms-range");
 
-/// A save being uploaded: an entry of the job's own scope, once its archive is in and its job finalizes it.
+/// A save being uploaded: an entry of the job's own scope, once its archive is in, its job finalizes it and the engine
+/// lets the job write. Its scope is never named before that: an undecided job has none.
 #[derive(Debug)]
 pub(super) struct Save {
-    /// The entry's path in the entries' directory, but for its last segment, which says when it was created.
-    dir: PathBuf,
     key: String,
     version: String,
     /// The size limit when it started: its archive, whole or the sum of its blocks, takes at most a quarter of it.
@@ -90,8 +87,10 @@ pub(super) struct Save {
     blocks: HashMap<String, Upload>,
     /// The archive, sent whole or joined from blocks.
     archive: Option<Upload>,
-    /// What it sent passed a limit and was dropped: its finalize answers as stored.
+    /// What it sent passed a limit, or its job may not write, and was dropped: its finalize answers as stored.
     dropped: bool,
+    /// Its job finalized it before its writes were decided: its archive waits for the decision and takes no more.
+    finalized: bool,
 }
 
 impl Save {
@@ -138,7 +137,7 @@ impl Results {
 }
 
 pub(super) async fn handle(
-    inner: &Inner,
+    inner: &Arc<Inner>,
     runner: &str,
     request: Request<Incoming>,
 ) -> Response<Body> {
@@ -160,7 +159,7 @@ pub(super) async fn handle(
         return match method {
             "GetCacheEntryDownloadURL" if served => lookup(inner, runner, &host, &body),
             "GetCacheEntryDownloadURL" => missed(),
-            "CreateCacheEntry" if served => create(inner, runner, &host, &body).await,
+            "CreateCacheEntry" if served => create(inner, runner, &host, &body),
             "CreateCacheEntry" => created(&host, DROPPED),
             "FinalizeCacheEntryUpload" => finalize(inner, runner, &body),
             _ => twirp_error(StatusCode::NOT_FOUND, "bad_route"),
@@ -315,43 +314,42 @@ fn newest<'entries>(
     })
 }
 
-/// `CreateCacheEntry`: an upload URL for a save into the job's own scope. A job that may not write, whose writes
-/// are still undecided after `DECISION_WAIT`, or whose scope has the key or is saving it already, gets one whose
-/// archive is read and dropped, as BuildKit fails a build whose save is refused.
-async fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Response<Body> {
+/// `CreateCacheEntry`: an upload URL for a save into the job's own scope, at once, its writes decided or not. A job
+/// that may not write, or whose scope has the key or is saving it already, gets one whose archive is read and dropped,
+/// as BuildKit fails a build whose save is refused. An undecided job's save meets those checks when it would become
+/// an entry (`publish`).
+fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Response<Body> {
     let Ok(request) = serde_json::from_slice::<CreateRequest>(body) else {
         return twirp_error(StatusCode::BAD_REQUEST, "malformed");
     };
     if !valid_key(&request.key) || !valid_segment(&request.version) {
         return twirp_error(StatusCode::BAD_REQUEST, "invalid_argument");
     }
-    wait_for_decision(inner, runner).await;
     let mut state = lock(&inner.state);
-    let Some(open) = state.runners.get(runner) else {
+    let Some(open) = state.runners.get_mut(runner) else {
         return status(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let own = match (&open.writes, &open.scopes.own) {
-        (Writes::Allowed, Some(own)) if open.saves.len() < MAX_SAVES => Some(own.clone()),
-        _ => None,
-    };
-    let Some(own) = own else {
-        if let Some(open) = state.runners.get_mut(runner) {
-            open.counts.refused += 1;
+    let writable = open.saves.len() < MAX_SAVES
+        && match open.writes {
+            Writes::Undecided => true,
+            Writes::Allowed => open.scopes.own.is_some(),
+            Writes::Refused => false,
+        };
+    if !writable {
+        open.counts.refused += 1;
+        return created(host, DROPPED);
+    }
+    if let Some(to) = destination(open, &request.key, &request.version) {
+        let saving = state.runners.values().any(|other| {
+            other.saves.values().any(|save| {
+                !save.dropped
+                    && destination(other, &save.key, &save.version)
+                        .is_some_and(|theirs| theirs.dir == to.dir)
+            })
+        });
+        if saving || stored_already(&state, &to) {
+            return created(host, DROPPED);
         }
-        return created(host, DROPPED);
-    };
-    let dir = entry_dir(&open.repository, &own, &request.version, &request.key);
-    let scope = scope_dir(&open.repository, &own, &request.version);
-    let taken = state.actions.get(&scope).is_some_and(|paths| {
-        paths
-            .iter()
-            .any(|path| path.parent() == Some(dir.as_path()))
-    }) || state
-        .runners
-        .values()
-        .any(|open| open.saves.values().any(|save| save.dir == dir));
-    if taken {
-        return created(host, DROPPED);
     }
     let max_size = state.max_size;
     state.next_upload += 1;
@@ -360,13 +358,13 @@ async fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Respons
         open.saves.insert(
             id,
             Save {
-                dir,
                 key: request.key,
                 version: request.version,
                 max_size,
                 blocks: HashMap::new(),
                 archive: None,
                 dropped: false,
+                finalized: false,
             },
         );
     }
@@ -384,33 +382,9 @@ fn created(host: &str, id: u64) -> Response<Body> {
     }))
 }
 
-/// Waits until the engine has decided whether `runner`'s job may write, at most `DECISION_WAIT`.
-async fn wait_for_decision(inner: &Inner, runner: &str) {
-    let deadline = tokio::time::Instant::now() + DECISION_WAIT;
-    loop {
-        let decided = match lock(&inner.state).runners.get(runner) {
-            Some(open) if open.writes == Writes::Undecided => open.decided.clone(),
-            _ => return,
-        };
-        let notified = decided.notified();
-        tokio::pin!(notified);
-        notified.as_mut().enable();
-        // Decided between the check and `enable`.
-        if lock(&inner.state)
-            .runners
-            .get(runner)
-            .is_none_or(|open| open.writes != Writes::Undecided)
-        {
-            return;
-        }
-        if tokio::time::timeout_at(deadline, notified).await.is_err() {
-            return;
-        }
-    }
-}
-
-/// `FinalizeCacheEntryUpload`: the save's archive becomes an entry of its scope, created now. Any other, such as
-/// one whose archive was dropped or that was answered with the dropping URL, answers as stored.
+/// `FinalizeCacheEntryUpload`: the save's archive becomes an entry of its scope, created now. While its job's writes
+/// are undecided, it is answered as stored and waits for them (`decided`). Any other, such as one whose archive was
+/// dropped, that was answered with the dropping URL or that was finalized already, answers as stored.
 fn finalize(inner: &Inner, runner: &str, body: &[u8]) -> Response<Body> {
     let Ok(request) = serde_json::from_slice::<FinalizeRequest>(body) else {
         return twirp_error(StatusCode::BAD_REQUEST, "malformed");
@@ -424,56 +398,177 @@ fn finalize(inner: &Inner, runner: &str, body: &[u8]) -> Response<Body> {
         json(&serde_json::json!({ "ok": true, "entry_id": entry_id.to_string(), "message": "" }))
     };
     let not_stored = || json(&serde_json::json!({ "ok": false, "entry_id": "0", "message": "" }));
+    let mut gone = Vec::new();
     let mut state = lock(&inner.state);
-    let created = crate::time::now_ms().max(state.last_created + 1);
     let Some(open) = state.runners.get_mut(runner) else {
         return status(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let id = open
+    let found = open
         .saves
         .iter()
-        .filter(|(_, save)| save.key == request.key && save.version == request.version)
+        .filter(|(_, save)| {
+            save.key == request.key && save.version == request.version && !save.finalized
+        })
         .find(|(_, save)| save.archive.is_some() || save.dropped)
         .map(|(id, _)| *id);
-    let Some(save) = id.and_then(|id| open.saves.remove(&id)) else {
+    let Some((id, mut save)) = found.and_then(|id| Some((id, open.saves.remove(&id)?))) else {
         return stored(0);
     };
-    let Save {
-        dir,
-        blocks,
-        archive,
-        dropped,
-        ..
-    } = save;
-    let leftover: Vec<Upload> = blocks.into_values().collect();
-    let archive = archive.filter(|_| !dropped);
-    let fits = archive
-        .as_ref()
-        .is_some_and(|archive| size.is_none_or(|size| size == archive.bytes));
-    drop(state);
-    inner.remove_uploads(Some(runner), &leftover);
-    match archive {
-        Some(mut archive) if fits => {
-            {
-                let mut state = lock(&inner.state);
-                state.last_created = state.last_created.max(created);
+    gone.extend(save.blocks.drain().map(|(_, upload)| upload));
+    let archive = save.archive.take().filter(|_| !save.dropped);
+    let answer = match archive {
+        Some(archive) if size.is_none_or(|size| size == archive.bytes) => {
+            save.archive = Some(archive);
+            if open.writes == Writes::Undecided {
+                save.finalized = true;
+                open.saves.insert(id, save);
+                stored(0)
+            } else {
+                stored(publish(inner, &mut state, runner, save, &mut gone).unwrap_or(0))
             }
-            archive.entry = dir.join(format!("{END}{created}"));
-            inner.store(runner, archive);
-            stored(created)
         }
         Some(archive) => {
-            inner.remove_uploads(Some(runner), &[archive]);
+            gone.push(archive);
             not_stored()
         }
         None => stored(0),
+    };
+    drop(state);
+    inner.remove_uploads(Some(runner), &gone);
+    answer
+}
+
+/// Where a save of `open`'s of `key` and `version` goes: `None` unless its writes are `Allowed` into a scope of its
+/// own.
+fn destination(open: &Runner, key: &str, version: &str) -> Option<Destination> {
+    let own = open
+        .scopes
+        .own
+        .as_ref()
+        .filter(|_| open.writes == Writes::Allowed)?;
+    Some(Destination {
+        scope: scope_dir(&open.repository, own, version),
+        dir: entry_dir(&open.repository, own, version, key),
+    })
+}
+
+/// Where a save goes: the directory of its scope and version, and its entry's path but for its last segment, which
+/// says when it was created.
+struct Destination {
+    scope: PathBuf,
+    dir: PathBuf,
+}
+
+/// Whether the scope a save goes to has its key already.
+fn stored_already(state: &State, to: &Destination) -> bool {
+    state.actions.get(&to.scope).is_some_and(|paths| {
+        paths
+            .iter()
+            .any(|path| path.parent() == Some(to.dir.as_path()))
+    })
+}
+
+/// Makes the finalized `save` of `runner`'s an entry of its job's own scope, created now, unless its job may not write
+/// into one or the scope has its key. One lock from the check to the index, so of the saves of one key into one
+/// scope, whether their jobs were decided before or after they finalized, at most one becomes an entry. Returns when
+/// it was created; what did not become an entry is put in `gone`, to be removed once the lock is let go.
+fn publish(
+    inner: &Inner,
+    state: &mut State,
+    runner: &str,
+    save: Save,
+    gone: &mut Vec<Upload>,
+) -> Option<u64> {
+    let Save {
+        key,
+        version,
+        blocks,
+        archive,
+        ..
+    } = save;
+    gone.extend(blocks.into_values());
+    let mut archive = archive?;
+    let to = state
+        .runners
+        .get(runner)
+        .and_then(|open| destination(open, &key, &version));
+    let Some(to) = to.filter(|to| !stored_already(state, to)) else {
+        gone.push(archive);
+        return None;
+    };
+    let created = crate::time::now_ms().max(state.last_created + 1);
+    state.last_created = created;
+    archive.entry = to.dir.join(format!("{END}{created}"));
+    inner
+        .store_locked(state, runner, archive)
+        .then_some(created)
+}
+
+/// What `runner`'s saves come to once its writes are decided, under the lock that decided them: the finalized ones
+/// become entries if it may write into a scope of its own. Else every one is dropped and counted as refused, and its
+/// later uploads and finalize are answered as stored. Returns what goes, to be removed once the lock is let go.
+pub(super) fn decided(inner: &Inner, state: &mut State, runner: &str) -> Vec<Upload> {
+    let mut gone = Vec::new();
+    let Some(open) = state.runners.get_mut(runner) else {
+        return gone;
+    };
+    if open.writes == Writes::Allowed && open.scopes.own.is_some() {
+        let mut finalized: Vec<u64> = open
+            .saves
+            .iter()
+            .filter(|(_, save)| save.finalized)
+            .map(|(id, _)| *id)
+            .collect();
+        // In the order they were made, as they would have been stored had the decision come first.
+        finalized.sort_unstable();
+        for id in finalized {
+            if let Some(save) = state
+                .runners
+                .get_mut(runner)
+                .and_then(|open| open.saves.remove(&id))
+            {
+                publish(inner, state, runner, save, &mut gone);
+            }
+        }
+        return gone;
     }
+    let mut refused = 0;
+    open.saves.retain(|_, save| {
+        if save.dropped {
+            return true;
+        }
+        refused += 1;
+        gone.extend(save.blocks.drain().map(|(_, upload)| upload));
+        gone.extend(save.archive.take());
+        save.dropped = true;
+        // A finalized one has nothing left to answer.
+        !save.finalized
+    });
+    open.counts.refused += refused;
+    gone
+}
+
+/// How many of `saves` were finalized and wait for their job's decision.
+pub(super) fn finalized(saves: &HashMap<u64, Save>) -> u64 {
+    saves.values().filter(|save| save.finalized).count() as u64
+}
+
+/// Takes out of `saves` those not finalized.
+pub(super) fn unfinished(saves: &mut HashMap<u64, Save>) -> HashMap<u64, Save> {
+    let ids: Vec<u64> = saves
+        .iter()
+        .filter(|(_, save)| !save.finalized)
+        .map(|(id, _)| *id)
+        .collect();
+    ids.into_iter()
+        .filter_map(|id| Some((id, saves.remove(&id)?)))
+        .collect()
 }
 
 /// The archive of save `id`: sent whole (Azure's Put Blob), in blocks (Put Block), or joined from them (Put Block
 /// List). What a save no longer open, or past a limit, sends is read and dropped, and answered as stored.
 async fn upload(
-    inner: &Inner,
+    inner: &Arc<Inner>,
     runner: &str,
     id: u64,
     request: Request<Incoming>,
@@ -497,7 +592,7 @@ async fn upload(
         .runners
         .get(runner)
         .and_then(|open| open.saves.get(&id))
-        .filter(|save| !save.dropped)
+        .filter(|save| !save.dropped && !save.finalized)
         .map(|save| save.max_size);
     let body = request.into_body();
     let Some(max_size) = max_size else {
@@ -507,7 +602,7 @@ async fn upload(
     match (comp.as_deref(), block) {
         (Some("blocklist"), _) => join(inner, runner, id, max_size, body).await,
         (Some("block"), Some(block)) if !block.is_empty() && block.len() <= 128 => {
-            let Some(received) = take(inner, runner, max_size, body).await else {
+            let Some(received) = take(inner, runner, id, max_size, body).await else {
                 return status(StatusCode::INTERNAL_SERVER_ERROR);
             };
             keep(inner, runner, id, received, Part::Block(block));
@@ -515,7 +610,7 @@ async fn upload(
         }
         (Some("block"), _) => status(StatusCode::BAD_REQUEST),
         _ => {
-            let Some(received) = take(inner, runner, max_size, body).await else {
+            let Some(received) = take(inner, runner, id, max_size, body).await else {
                 return status(StatusCode::INTERNAL_SERVER_ERROR);
             };
             keep(inner, runner, id, received, Part::Archive);
@@ -524,14 +619,16 @@ async fn upload(
     }
 }
 
-/// Receives a body into an upload file: `None` when writing it failed, `Some(None)` when it passed a limit.
+/// Receives a body of save `id`'s into an upload file: `None` when writing it failed, `Some(None)` when it passed a
+/// limit or the save was dropped meanwhile, as when its job was refused.
 async fn take(
     inner: &Inner,
     runner: &str,
+    id: u64,
     max_size: u64,
     body: Incoming,
 ) -> Option<Option<Upload>> {
-    let mut receiving = Receiving::new(inner, runner, max_size);
+    let mut receiving = Receiving::new(inner, runner, max_size, Purpose::Save(id));
     match receive(&mut receiving, body).await {
         Ok(true) => Some(Some(receiving.into_upload(PathBuf::new()))),
         Ok(false) => Some(None),
@@ -558,7 +655,11 @@ fn keep(inner: &Inner, runner: &str, id: u64, received: Option<Upload>, part: Pa
             inner.remove_uploads(None, &received.into_iter().collect::<Vec<_>>());
             return;
         };
-        let Some(save) = open.saves.get_mut(&id).filter(|save| !save.dropped) else {
+        let Some(save) = open
+            .saves
+            .get_mut(&id)
+            .filter(|save| !save.dropped && !save.finalized)
+        else {
             gone.extend(received);
             drop(state);
             inner.remove_uploads(Some(runner), &gone);
@@ -594,7 +695,7 @@ fn keep(inner: &Inner, runner: &str, id: u64, received: Option<Upload>, part: Pa
 
 /// Put Block List: joins save `id`'s blocks in the list's order into its archive; blocks the list leaves out go.
 async fn join(
-    inner: &Inner,
+    inner: &Arc<Inner>,
     runner: &str,
     id: u64,
     max_size: u64,
@@ -606,6 +707,7 @@ async fn join(
     let Some(order) = block_ids(&String::from_utf8_lossy(&list)) else {
         return status(StatusCode::BAD_REQUEST);
     };
+    // No await from here until the join owns the blocks: an aborted request would lose them.
     let blocks = {
         let mut state = lock(&inner.state);
         let Some(save) = state
@@ -641,39 +743,86 @@ async fn join(
         state.next_upload += 1;
         inner.uploads.join(state.next_upload.to_string())
     };
-    let sources: Vec<PathBuf> = parts.iter().map(|part| part.file.clone()).collect();
-    let target = file.clone();
-    let joined = tokio::task::spawn_blocking(move || -> io::Result<u64> {
-        let mut out = std::fs::File::create(&target)?;
-        let mut bytes = 0;
-        for source in sources {
-            bytes += io::copy(&mut std::fs::File::open(source)?, &mut out)?;
-        }
-        out.sync_data()?;
-        Ok(bytes)
-    })
-    .await;
-    let room: u64 = parts.iter().map(|part| part.room).sum();
-    // The blocks' files go; their room stays with the archive, which needs no more than they took together.
-    for part in &parts {
-        let _ = std::fs::remove_file(&part.file);
-    }
-    let Ok(Ok(bytes)) = joined else {
-        let _ = std::fs::remove_file(&file);
-        inner.release(Some(runner), room);
-        keep(inner, runner, id, None, Part::Archive);
-        return status(StatusCode::INTERNAL_SERVER_ERROR);
-    };
-    let needed = charge(bytes);
-    inner.release(Some(runner), room.saturating_sub(needed));
-    let archive = Upload {
+    // The join owns the blocks, its file and their room to its end, with or without this request: a runner removed
+    // meanwhile aborts the request, and the join still removes what it no longer keeps.
+    let (inner, runner) = (inner.clone(), runner.to_owned());
+    let joining = Joining {
+        id,
+        max_size,
+        parts,
         file,
-        entry: PathBuf::new(),
-        bytes,
-        room: room.min(needed),
     };
-    keep(inner, runner, id, Some(archive), Part::Archive);
-    blob_created()
+    match tokio::task::spawn_blocking(move || joining.run(&inner, &runner)).await {
+        Ok(true) => blob_created(),
+        _ => status(StatusCode::INTERNAL_SERVER_ERROR),
+    }
+}
+
+/// Save `id`'s blocks being joined into `file`.
+struct Joining {
+    id: u64,
+    max_size: u64,
+    parts: Vec<Upload>,
+    file: PathBuf,
+}
+
+impl Joining {
+    /// Joins the blocks into the save's archive; their files go. False when writing failed, which drops the save.
+    /// The archive takes the room its bytes count for (`charge`): what the blocks took, and more when they took less,
+    /// as an empty list's archive does.
+    fn run(self, inner: &Inner, runner: &str) -> bool {
+        #[cfg(test)]
+        inner.join_gate.pass();
+        let Joining {
+            id,
+            max_size,
+            parts,
+            file,
+        } = self;
+        let joined = (|| -> io::Result<u64> {
+            let mut out = std::fs::File::create(&file)?;
+            let mut bytes = 0;
+            for part in &parts {
+                bytes += io::copy(&mut std::fs::File::open(&part.file)?, &mut out)?;
+            }
+            out.sync_data()?;
+            Ok(bytes)
+        })();
+        let room: u64 = parts.iter().map(|part| part.room).sum();
+        for part in &parts {
+            let _ = std::fs::remove_file(&part.file);
+        }
+        let needed = joined.as_ref().map_or(0, |bytes| charge(*bytes));
+        let kept = match joined {
+            Ok(bytes) if room >= needed => {
+                inner.release(Some(runner), room - needed);
+                Some(bytes)
+            }
+            Ok(bytes) if inner.reserve(runner, needed - room, max_size) => Some(bytes),
+            _ => None,
+        };
+        let Some(bytes) = kept else {
+            let _ = std::fs::remove_file(&file);
+            inner.release(Some(runner), room);
+            keep(inner, runner, id, None, Part::Archive);
+            return joined.is_ok();
+        };
+        let archive = Upload {
+            file,
+            entry: PathBuf::new(),
+            bytes,
+            room: needed,
+        };
+        keep(inner, runner, id, Some(archive), Part::Archive);
+        true
+    }
+}
+
+/// Whether save `id` of `saves` still takes what its job sends: open, neither dropped nor finalized.
+pub(super) fn takes_uploads(saves: &HashMap<u64, Save>, id: u64) -> bool {
+    saves
+        .get(&id)
+        .is_some_and(|save| !save.dropped && !save.finalized)
 }
 
 /// The block IDs of an Azure block list, in order: `<Latest>`, `<Committed>` and `<Uncommitted>` alike.

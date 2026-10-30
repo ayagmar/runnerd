@@ -17,6 +17,7 @@ use hyper::{Method, Request, Response, StatusCode};
 use hyper_util::rt::TokioIo;
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
+use tokio::sync::watch;
 use tracing::debug;
 
 use super::{Inner, MAX_HELD, Upload, Writes, charge, valid_segment};
@@ -57,7 +58,7 @@ pub(super) async fn connection(inner: Arc<Inner>, runner: String, stream: UnixSt
     }
 }
 
-async fn handle(inner: &Inner, runner: &str, request: Request<Incoming>) -> Response<Body> {
+async fn handle(inner: &Arc<Inner>, runner: &str, request: Request<Incoming>) -> Response<Body> {
     let Some(repository) = lock(&inner.state)
         .runners
         .get(runner)
@@ -167,15 +168,10 @@ async fn read(
 async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> Response<Body> {
     use hyper::body::Body as _;
 
-    let (writes, max_size, upload) = {
-        let mut state = lock(&inner.state);
+    let (writes, max_size) = {
+        let state = lock(&inner.state);
         let writes = state.runners.get(runner).map(|open| open.writes);
-        state.next_upload += 1;
-        (
-            writes,
-            state.max_size,
-            inner.uploads.join(state.next_upload.to_string()),
-        )
+        (writes, state.max_size)
     };
     let refused = || {
         if let Some(open) = lock(&inner.state).runners.get_mut(runner) {
@@ -207,14 +203,7 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
         }
         Some(Writes::Allowed | Writes::Undecided) => {}
     }
-    let mut receiving = Receiving {
-        inner,
-        runner,
-        file: upload,
-        bytes: 0,
-        room: 0,
-        max_size,
-    };
+    let mut receiving = Receiving::new(inner, runner, max_size, Purpose::Build);
     match receive(&mut receiving, body).await {
         Ok(true) => {}
         Ok(false) => return refused(),
@@ -246,6 +235,15 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
     }
 }
 
+/// What an upload is for, which says whether its runner's decision still lets it in.
+#[derive(Debug, Clone, Copy)]
+pub(super) enum Purpose {
+    /// A tool's entry: kept unless the job may not write.
+    Build,
+    /// A block or the archive of GitHub Actions cache save `id`: kept while the save takes uploads.
+    Save(u64),
+}
+
 /// An upload being received. Unless it becomes an `Upload`, its file goes and the uploads' room it took is given
 /// back, also when its connection is cut midway, as when its runner is removed.
 pub(super) struct Receiving<'inner> {
@@ -257,20 +255,28 @@ pub(super) struct Receiving<'inner> {
     room: u64,
     /// The size limit when it started.
     max_size: u64,
+    purpose: Purpose,
+    /// Changes when its runner's writes are decided; `None` when its runner is not open.
+    decided: Option<watch::Receiver<()>>,
 }
 
 impl<'inner> Receiving<'inner> {
-    /// An upload of `runner`'s to a new file of the uploads' directory, under the size limit `max_size` it started
-    /// with.
+    /// An upload of `runner`'s for `purpose` to a new file of the uploads' directory, under the size limit `max_size`
+    /// it started with.
     pub(super) fn new(
         inner: &'inner Inner,
         runner: &'inner str,
         max_size: u64,
+        purpose: Purpose,
     ) -> Receiving<'inner> {
-        let file = {
+        let (file, decided) = {
             let mut state = lock(&inner.state);
             state.next_upload += 1;
-            inner.uploads.join(state.next_upload.to_string())
+            let decided = state
+                .runners
+                .get(runner)
+                .map(|open| open.decided.subscribe());
+            (inner.uploads.join(state.next_upload.to_string()), decided)
         };
         Receiving {
             inner,
@@ -279,7 +285,20 @@ impl<'inner> Receiving<'inner> {
             bytes: 0,
             room: 0,
             max_size,
+            purpose,
+            decided,
         }
+    }
+
+    /// Whether its runner's decision, as far as it is made, still lets it in.
+    fn wanted(&self) -> bool {
+        lock(&self.inner.state)
+            .runners
+            .get(self.runner)
+            .is_some_and(|open| match self.purpose {
+                Purpose::Build => open.writes != Writes::Refused,
+                Purpose::Save(id) => super::actions::takes_uploads(&open.saves, id),
+            })
     }
 
     /// Takes the room `length` more bytes need, unless the upload would pass a quarter of the size limit, as no entry
@@ -295,6 +314,16 @@ impl<'inner> Receiving<'inner> {
         self.bytes = bytes;
         self.room += more;
         true
+    }
+
+    /// Removes its file and gives back its room now, before the rest of its body is read and dropped: a sender that
+    /// stalls holds nothing. Its file must be closed first.
+    fn give_up(&mut self) {
+        let _ = std::fs::remove_file(&self.file);
+        self.inner.release(Some(self.runner), self.room);
+        self.file = PathBuf::new();
+        self.bytes = 0;
+        self.room = 0;
     }
 
     pub(super) fn into_upload(mut self, entry: PathBuf) -> Upload {
@@ -316,27 +345,59 @@ impl Drop for Receiving<'_> {
     }
 }
 
-/// Writes the body to the upload's file; false once it passes a quarter of the size limit or the uploads' room runs
-/// out. An empty body takes room too, before its file is made.
+/// Writes the body to the upload's file; false once it passes a quarter of the size limit, the uploads' room runs out
+/// or its runner's decision no longer lets it in, which it heeds while the body stalls too. An empty body takes room
+/// too, before its file is made.
 pub(super) async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming) -> io::Result<bool> {
-    if !receiving.grow(0) {
+    let mut decided = receiving.decided.take();
+    // After subscribing: a decision made since is seen here or by `decided`.
+    if !receiving.wanted() || !receiving.grow(0) {
+        receiving.give_up();
         drain(body).await;
         return Ok(false);
     }
     let mut out = tokio::fs::File::create(&receiving.file).await?;
-    while let Some(frame) = body.frame().await {
-        let frame = frame.map_err(io::Error::other)?;
-        if let Ok(data) = frame.into_data() {
-            if !receiving.grow(data.len() as u64) {
-                drop(out);
-                drain(body).await;
-                return Ok(false);
+    loop {
+        tokio::select! {
+            frame = body.frame() => {
+                let Some(frame) = frame else {
+                    break;
+                };
+                let frame = frame.map_err(io::Error::other)?;
+                if let Ok(data) = frame.into_data() {
+                    if !receiving.grow(data.len() as u64) {
+                        close(out).await;
+                        receiving.give_up();
+                        drain(body).await;
+                        return Ok(false);
+                    }
+                    out.write_all(&data).await?;
+                }
             }
-            out.write_all(&data).await?;
+            Some(Ok(())) = changed(&mut decided) => {
+                if !receiving.wanted() {
+                    close(out).await;
+                    receiving.give_up();
+                    drain(body).await;
+                    return Ok(false);
+                }
+            }
         }
     }
     out.flush().await?;
     Ok(true)
+}
+
+/// Closes an upload's file once its writes in flight end: removed while open, its blocks stay taken until then.
+async fn close(out: tokio::fs::File) {
+    drop(out.into_std().await);
+}
+
+/// Waits for `decided` to change; `None` at once without one.
+async fn changed(
+    decided: &mut Option<watch::Receiver<()>>,
+) -> Option<Result<(), watch::error::RecvError>> {
+    Some(decided.as_mut()?.changed().await)
 }
 
 pub(super) async fn drain(mut body: Incoming) {

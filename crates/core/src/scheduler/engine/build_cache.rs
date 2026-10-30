@@ -22,6 +22,10 @@ use crate::github::{self, GithubApi, JobDetails};
 /// and the old name stops writing.
 const DEFAULT_BRANCH_FOR: Duration = Duration::from_secs(3600);
 
+/// How long a removed runner's uploads wait for GitHub to say which runner ran its job, asked at each poll: GitHub's
+/// jobs API can name none for minutes after a job started (ADR 0085). Past it they are dropped.
+pub(super) const ENDED_WAIT: Duration = Duration::from_secs(600);
+
 /// A repository's default branch, and when GitHub said it.
 #[derive(Debug, Clone)]
 pub(super) struct DefaultBranch {
@@ -34,6 +38,8 @@ pub(super) struct DefaultBranch {
 pub(super) struct EndedUploads {
     pub(super) repository: String,
     pub(super) job: u64,
+    /// When its runner was removed: its uploads wait `ENDED_WAIT` from then.
+    pub(super) ended_at: SystemTime,
 }
 
 /// A job whose writes are undecided, with what GitHub said of it.
@@ -130,8 +136,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Closes a removed runner's build cache and records what it was served and stored. One that holds uploads
     /// while its `job`'s writes are undecided, as a job that ended before a poll asked GitHub of it, keeps them
-    /// without its socket until `follow_jobs` has asked: they are kept or dropped by GitHub's answer, not dropped
-    /// because the job was short.
+    /// without its socket until `follow_jobs` has had GitHub's decision, for at most `ENDED_WAIT`: they are kept or
+    /// dropped by GitHub's answer, not dropped because the job was short or GitHub slow to name its runner.
     pub(super) fn detach_build_cache(&mut self, occupant: &Occupant, job: Option<u64>) {
         let Some(cache) = &self.build_cache else {
             return;
@@ -144,6 +150,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 EndedUploads {
                     repository: occupant.repository.clone(),
                     job,
+                    ended_at: SystemTime::now(),
                 },
             );
             return;
@@ -153,9 +160,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// The removed runners `follow_jobs` asked GitHub about: their build cache closes, whatever it answered.
+    /// The removed runners `follow_jobs` asked GitHub about whose writes it decided, or that waited `ENDED_WAIT`:
+    /// their build cache closes. The others wait for the next poll, holding no slot.
     pub(super) fn detach_ended(&mut self) {
-        for runner in std::mem::take(&mut self.ended_uploads).into_keys() {
+        let Some(cache) = &self.build_cache else {
+            self.ended_uploads.clear();
+            return;
+        };
+        let done: Vec<String> = self
+            .ended_uploads
+            .iter()
+            .filter(|(runner, ended)| {
+                !cache.undecided(runner)
+                    || !ended
+                        .ended_at
+                        .elapsed()
+                        .is_ok_and(|waited| waited < ENDED_WAIT)
+            })
+            .map(|(runner, _)| runner.clone())
+            .collect();
+        for runner in done {
+            self.ended_uploads.remove(&runner);
             if let Some(counts) = self
                 .build_cache
                 .as_ref()

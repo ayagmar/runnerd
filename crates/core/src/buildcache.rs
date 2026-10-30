@@ -18,7 +18,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::UnixListener;
-use tokio::sync::Notify;
+use tokio::sync::watch;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::warn;
 
@@ -188,6 +188,9 @@ struct Inner {
     results: actions::Results,
     /// Where turbo's requests with a workflow's own token go.
     vercel: turbo::Vercel,
+    /// Holds block lists' joins where a test says.
+    #[cfg(test)]
+    join_gate: Gate,
     // A panic midway leaves at worst an entry counted that is gone, or a file not counted, which `open` counts at
     // the next start.
     state: Mutex<State>,
@@ -263,9 +266,10 @@ struct Runner {
     actions: ActionsCache,
     /// Its GitHub Actions cache scopes, once its writes are decided.
     scopes: Scopes,
-    /// Woken when its writes are decided, for the GitHub Actions cache saves that wait for that.
-    decided: Arc<Notify>,
-    /// Its GitHub Actions cache saves not yet entries, by the number in their upload URL.
+    /// Changes when its writes are decided, for the uploads it is receiving.
+    decided: watch::Sender<()>,
+    /// Its GitHub Actions cache saves not yet entries, by the number in their upload URL: being uploaded, or, while
+    /// its writes are undecided, finalized and waiting for them. At most `actions::MAX_SAVES` of both.
     saves: HashMap<u64, actions::Save>,
     /// The entries its GitHub Actions cache lookups found, by their creation time, the number in their download URL.
     found: HashMap<u64, PathBuf>,
@@ -302,6 +306,11 @@ impl BuildCache {
             max_size,
             bytes,
             charged,
+            // An upload's number, in its URL, is one no earlier run gave, so a job's upload sent again after a restart
+            // reaches no save made since: the count passes the clock only at a million uploads a second.
+            next_upload: std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_or(0, |since| u64::try_from(since.as_micros()).unwrap_or(0)),
             ..State::default()
         };
         for path in entries.keys() {
@@ -318,6 +327,8 @@ impl BuildCache {
                 sockets: sockets.to_owned(),
                 results: actions::Results::new(),
                 vercel: turbo::Vercel::new(),
+                #[cfg(test)]
+                join_gate: Gate::default(),
                 state: Mutex::new(state),
             }),
         })
@@ -395,7 +406,7 @@ impl BuildCache {
                 serving,
                 actions,
                 scopes: Scopes::default(),
-                decided: Arc::new(Notify::new()),
+                decided: watch::Sender::new(()),
                 saves: HashMap::new(),
                 found: HashMap::new(),
             },
@@ -435,7 +446,7 @@ impl BuildCache {
     /// Decides whether `runner`'s job may write, once, with the scopes of its GitHub Actions cache entries: what it
     /// sent meanwhile becomes entries or is dropped.
     pub fn decide(&self, runner: &str, writes: Writes, scopes: Scopes) {
-        let held = {
+        let (held, dropped) = {
             let mut state = lock(&self.inner.state);
             let Some(open) = state.runners.get_mut(runner) else {
                 return;
@@ -444,7 +455,6 @@ impl BuildCache {
                 return;
             }
             open.writes = writes;
-            open.decided.notify_waiters();
             let held = std::mem::take(&mut open.held);
             let repository = open.repository.clone();
             if let Some(default) = &scopes.default {
@@ -453,8 +463,14 @@ impl BuildCache {
             if let Some(open) = state.runners.get_mut(runner) {
                 open.scopes = scopes;
             }
-            held
+            // Under the same lock as the decision: no save is finalized between the two.
+            let dropped = actions::decided(&self.inner, &mut state, runner);
+            if let Some(open) = state.runners.get(runner) {
+                open.decided.send_replace(());
+            }
+            (held, dropped)
         };
+        self.inner.remove_uploads(Some(runner), &dropped);
         match writes {
             Writes::Allowed => {
                 for upload in held {
@@ -470,20 +486,24 @@ impl BuildCache {
         }
     }
 
-    /// Closes the socket of `runner` if its writes are undecided and it holds uploads, and says whether it did: the
-    /// uploads stay until `decide` and `detach`.
+    /// Closes the socket of `runner` if its writes are undecided and it holds uploads or finalized GitHub Actions
+    /// cache saves, and says whether it did: those stay until `decide` and `detach`. Saves its job did not finalize,
+    /// which it no longer can, go now.
     pub fn close(&self, runner: &str) -> bool {
-        let dir = {
-            let state = lock(&self.inner.state);
-            let Some(open) = state.runners.get(runner) else {
+        let (dir, mut unfinished) = {
+            let mut state = lock(&self.inner.state);
+            let Some(open) = state.runners.get_mut(runner) else {
                 return false;
             };
-            if open.writes != Writes::Undecided || open.held.is_empty() {
+            if open.writes != Writes::Undecided
+                || open.held.is_empty() && actions::finalized(&open.saves) == 0
+            {
                 return false;
             }
             open.serving.abort();
-            open.dir.clone()
+            (open.dir.clone(), actions::unfinished(&mut open.saves))
         };
+        self.inner.remove_saves(Some(runner), &mut unfinished);
         if let Err(error) = std::fs::remove_dir_all(&dir)
             && error.kind() != io::ErrorKind::NotFound
         {
@@ -506,9 +526,16 @@ impl BuildCache {
             return None;
         };
         open.serving.abort();
+        // Its finalized saves are left only while its writes are undecided: `decide` stores or drops them.
+        let dropped = open.held.len() as u64 + actions::finalized(&open.saves);
+        if open.writes == Writes::Undecided && dropped > 0 {
+            warn!(
+                "{runner}: dropped {dropped} build cache uploads its job sent: GitHub never said which runner ran the job"
+            );
+        }
         self.inner.remove_uploads(None, &open.held);
         self.inner.remove_saves(None, &mut open.saves);
-        open.counts.refused += open.held.len() as u64;
+        open.counts.refused += dropped;
         open.counts.writer = open.writes == Writes::Allowed;
         if let Err(error) = std::fs::remove_dir_all(&open.dir)
             && error.kind() != io::ErrorKind::NotFound
@@ -598,7 +625,11 @@ impl Inner {
     fn store(&self, runner: &str, upload: Upload) {
         // One lock from the check to the index: two uploads of one entry renamed in one order and indexed in the
         // other would leave the index counting the size of the file replaced.
-        let mut state = lock(&self.state);
+        self.store_locked(&mut lock(&self.state), runner, upload);
+    }
+
+    /// `store`, holding the lock; says whether the upload became an entry.
+    fn store_locked(&self, state: &mut State, runner: &str, upload: Upload) -> bool {
         let replaced = state
             .entries
             .get(&upload.entry)
@@ -611,7 +642,7 @@ impl Inner {
                 .parent()
                 .is_none_or(|parent| std::fs::create_dir_all(parent).is_ok())
             && std::fs::rename(&upload.file, &path).is_ok();
-        Self::give_back(&mut state, Some(runner), upload.room);
+        Self::give_back(state, Some(runner), upload.room);
         if stored {
             let entry = Entry {
                 bytes: upload.bytes,
@@ -634,10 +665,11 @@ impl Inner {
                 open.counts.refused += 1;
             }
         }
+        stored
     }
 
-    /// Takes `bytes` more of the uploads' room for `runner`, unless they would take more than `max_size`, or, while
-    /// its writes are undecided, its own more than a quarter of it. `max_size` is the one the upload started with: a
+    /// Takes `bytes` more of the uploads' room for `runner`, unless they would take more than `max_size`, its writes
+    /// are refused, or, while they are undecided, its own would take more than a quarter of it. `max_size` is the one the upload started with: a
     /// lower one a reload set since holds back the uploads that start after it.
     fn reserve(&self, runner: &str, bytes: u64, max_size: u64) -> bool {
         let mut state = lock(&self.state);
@@ -646,7 +678,11 @@ impl Inner {
             return false;
         };
         let fits = total + bytes <= max_size
-            && (open.writes != Writes::Undecided || open.uploading + bytes <= max_size / 4);
+            && match open.writes {
+                Writes::Undecided => open.uploading + bytes <= max_size / 4,
+                Writes::Allowed => true,
+                Writes::Refused => false,
+            };
         if fits {
             open.uploading += bytes;
             state.uploading += bytes;
@@ -789,6 +825,44 @@ fn count_entries(root: &Path, dir: &Path, entries: &mut HashMap<PathBuf, Entry>)
 
 #[cfg(test)]
 mod tests;
+
+/// Where joins wait while a test holds them, to remove a runner midway.
+#[cfg(test)]
+#[derive(Debug, Default)]
+pub(crate) struct Gate {
+    /// Whether joins are held, and how many wait.
+    state: Mutex<(bool, usize)>,
+    changed: std::sync::Condvar,
+}
+
+#[cfg(test)]
+impl Gate {
+    pub(crate) fn hold(&self) {
+        lock(&self.state).0 = true;
+    }
+
+    pub(crate) fn release(&self) {
+        lock(&self.state).0 = false;
+        self.changed.notify_all();
+    }
+
+    pub(crate) fn waiting(&self) -> usize {
+        lock(&self.state).1
+    }
+
+    /// Waits while joins are held.
+    fn pass(&self) {
+        let mut state = lock(&self.state);
+        state.1 += 1;
+        while state.0 {
+            state = self
+                .changed
+                .wait(state)
+                .unwrap_or_else(std::sync::PoisonError::into_inner);
+        }
+        state.1 -= 1;
+    }
+}
 
 /// Sends one request to a runner's socket in `dir`, as a tool in its container would through the forwarder, and
 /// returns the response's status and body.

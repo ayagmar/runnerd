@@ -1,10 +1,11 @@
 //! The shared build cache on the fakes (ADR 0052): a push to main's entry is a hit for a pull request's job in
 //! another slot, the pull request's uploads stay invisible, each job's record keeps what the cache did for it, a tag
-//! named like the default branch only reads, the cache is trimmed only once no runner runs, and where a repository
-//! lets them (ADR 0053), its own branches' pull requests that people opened write while forks' and bots' read.
+//! named like the default branch only reads, the cache is trimmed only once no runner runs, where a repository
+//! lets them (ADR 0053), its own branches' pull requests that people opened write while forks' and bots' read, and
+//! GitHub Actions cache saves made while GitHub names no runner for their job land once it does (ADR 0085).
 
 use super::*;
-use crate::buildcache::{self, BuildCache};
+use crate::buildcache::{self, BuildCache, actions};
 
 /// An engine on the fakes with a build cache in `dir`, for `config`.
 fn engine_with_cache(
@@ -171,6 +172,51 @@ async fn until_decided(
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("the writes of {runners:?} were never decided");
+}
+
+/// Saves `archive` under `key` through `socket` as `actions/cache` does, answered at once whatever GitHub has said of
+/// the job: its post-step waits for it.
+async fn save_now(socket: &std::path::Path, key: &str, archive: &[u8]) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), actions::save(socket, key, archive))
+        .await
+        .expect("a save is answered at once")
+}
+
+/// How many build cache uploads wait on disk to become entries, for the engine in `dir`.
+fn uploads(dir: &TestDir) -> usize {
+    std::fs::read_dir(dir.0.join("build-cache").join("uploads"))
+        .unwrap()
+        .count()
+}
+
+/// GitHub's jobs API says `job` is queued on no runner, as it can for minutes after the job started.
+fn github_names_no_runner(github: &FakeGithub, job: u64) {
+    if let Some(details) = github.0.lock().unwrap().jobs.get_mut(&job) {
+        details.status = "queued".to_owned();
+        details.runner_name = None;
+    }
+}
+
+/// GitHub's jobs API catches up: `job` is `status` on `runner`.
+fn github_names(github: &FakeGithub, job: u64, runner: &str, status: &str) {
+    if let Some(details) = github.0.lock().unwrap().jobs.get_mut(&job) {
+        details.status = status.to_owned();
+        details.runner_name = Some(runner.to_owned());
+    }
+}
+
+/// The build cache counts of `job`'s record.
+async fn counts_of(handle: &Handle, job: u64) -> api::BuildCacheCounts {
+    handle.store.flush().await;
+    handle
+        .store
+        .job(job)
+        .await
+        .unwrap()
+        .unwrap()
+        .summary
+        .metrics
+        .build_cache
 }
 
 /// Stops every runner container, as when their jobs end, and lets the engine remove them.
@@ -790,6 +836,7 @@ async fn forks_bots_and_repositories_that_did_not_opt_in_only_read() {
             200,
             "{case}"
         );
+        assert!(save_now(&pull_socket, "deps", b"poison").await, "{case}");
         until_decided(&mut engine, &cache, &[&pull, &main]).await;
         assert_eq!(
             buildcache::request(&main_socket, "GET", "/gradle/ffff", b"")
@@ -798,6 +845,12 @@ async fn forks_bots_and_repositories_that_did_not_opt_in_only_read() {
             404,
             "{case} stored nothing"
         );
+        assert_eq!(
+            actions::restore(&main_socket, "deps", &[]).await,
+            None,
+            "{case} saved nothing"
+        );
+        assert_eq!(uploads(&dir), 0, "{case} left nothing on disk");
     }
 }
 
@@ -979,4 +1032,107 @@ async fn a_default_branch_renamed_while_runnerd_runs_writes_within_the_hour() {
         (200, 404),
         "main writes, master no longer does"
     );
+}
+
+#[tokio::test]
+async fn an_actions_cache_save_made_while_github_names_no_runner_lands_once_it_does() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-lag");
+    let (mut engine, handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let pushes = [trigger("push", "main"), trigger("push", "main")];
+    let [(first, first_socket), (second, second_socket)] =
+        two_jobs(&github, &docker, &mut engine, pushes).await;
+    github_names_no_runner(&github, 1);
+    github_names_no_runner(&github, 2);
+    // Each job's post-step saves while GitHub still names no runner for it.
+    engine.tick(Shutdown::No).await;
+    assert!(save_now(&first_socket, "deps", b"deps").await);
+    assert!(save_now(&second_socket, "tools", b"tools").await);
+    // A reload that lowers the limit and turns the actions cache off leaves the running jobs as they started.
+    let reloaded = CONFIG.replace(
+        "maven = { max_size = \"5G\" }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { actions_cache = false, max_size = \"1M\" }\n",
+    );
+    engine.reload(Config::parse(&reloaded).unwrap(), None, None);
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(
+        cache.undecided(&first) && cache.undecided(&second),
+        "both wait for GitHub"
+    );
+    assert_eq!(cache.size().entries, 0, "nothing is an entry before then");
+
+    // GitHub names the first job's runner while it runs.
+    github_names(&github, 1, &first, "in_progress");
+    until_decided(&mut engine, &cache, &[&first]).await;
+    assert_eq!(
+        actions::restore(&second_socket, "deps", &[]).await,
+        Some(("deps".to_owned(), b"deps".to_vec()))
+    );
+    // The second job ends before GitHub names its runner: its save waits without the runner.
+    for container in &mut docker.0.lock().unwrap().containers {
+        container.running = container.name != second;
+    }
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert!(cache.undecided(&second), "it still waits for GitHub");
+    assert!(!second_socket.exists(), "its socket went with its runner");
+    github_names(&github, 2, &second, "completed");
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        actions::restore(&first_socket, "tools", &[]).await,
+        Some(("tools".to_owned(), b"tools".to_vec()))
+    );
+    let counts = counts_of(&handle, 2).await;
+    assert!(
+        counts.writer,
+        "the second job wrote once GitHub named its runner"
+    );
+    assert_eq!((counts.written_bytes, counts.refused), (5, 0));
+    assert_eq!(uploads(&dir), 0);
+}
+
+#[tokio::test]
+async fn an_ended_jobs_actions_cache_saves_go_when_github_never_names_its_runner() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-never");
+    let (mut engine, handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let pushes = [trigger("push", "main"), trigger("push", "main")];
+    let [(first, first_socket), (second, second_socket)] =
+        two_jobs(&github, &docker, &mut engine, pushes).await;
+    // GitHub names no runner for the first job, and fails every read of the second.
+    github_names_no_runner(&github, 1);
+    github.0.lock().unwrap().jobs.remove(&2);
+    engine.tick(Shutdown::No).await;
+    assert!(save_now(&first_socket, "deps", b"deps").await);
+    assert!(save_now(&second_socket, "tools", b"tools").await);
+    jobs_end(&docker, &mut engine).await;
+    for _ in 0..3 {
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(uploads(&dir), 2, "the saves wait for GitHub");
+
+    for ended in engine.ended_uploads.values_mut() {
+        ended.ended_at -= super::super::build_cache::ENDED_WAIT;
+    }
+    engine.tick(Shutdown::No).await;
+    assert!(
+        engine.ended_uploads.is_empty(),
+        "no runner waits any longer"
+    );
+    assert!(
+        !cache.undecided(&first) && !cache.undecided(&second),
+        "both runners' caches closed"
+    );
+    assert_eq!(cache.size().entries, 0);
+    assert_eq!(uploads(&dir), 0, "their saves left nothing on disk");
+    for job in [1, 2] {
+        let counts = counts_of(&handle, job).await;
+        assert!(!counts.writer, "job {job} never wrote");
+        assert_eq!((counts.written_bytes, counts.refused), (0, 1), "job {job}");
+    }
 }

@@ -87,7 +87,8 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0079](0079-cpu-weights-and-throttling-as-evidence.md) | Runners share the slice's CPUs by their `cpus`, and throttling, not peaks, says the cap held a run back |
 | [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md) | A job starts in the free slot that ran it last, else one that ran its repository |
 | [0081](0081-waits-leave-out-the-time-no-runnerd-ran.md) | Waits leave out the time no runnerd ran, and the history's schema changes in steps from 15 |
-| [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, on by default |
+| [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, on by default (amended by 0085) |
 | [0083](0083-turborepo-and-nx-from-the-build-cache.md) | Turborepo's remote cache served from the build cache, Nx's on request |
 | [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md) | A host whose memory grows to a ceiling counts what it can still grow by |
+| [0085](0085-actions-cache-saves-wait-for-the-decision-not-the-job.md) | GitHub Actions cache saves wait for the decision, not the job |
 | [0087](0087-an-insight-for-jobs-their-cpu-cap-holds-back.md) | An insight for jobs their CPU cap holds back |
