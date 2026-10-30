@@ -320,7 +320,7 @@ pub fn plan(
     let mut started = Started::new(&taken, left);
     // The job that waited long enough for CPU that no younger one takes CPU before it.
     let mut first_for_cpu = None;
-    for (job, repository) in jobs {
+    for (position, &(job, repository)) in jobs.iter().enumerate() {
         let Some(missing) = wanted.get_mut(&pool_key(repository)) else {
             continue;
         };
@@ -341,7 +341,7 @@ pub fn plan(
         }
         let memory = repository.runner_memory.unwrap_or(profile.memory);
         let cpu = repository.runner_cpu.unwrap_or(profile.cpus);
-        let free_index = free_slot(taken, profile, repository, job);
+        let free_index = free_slot(taken, profile, repository, job, &jobs[position + 1..]);
         let fits = free_index.is_some() && left.fits(memory, cpu);
         let room = if fits || profile.preparing.is_some() {
             None
@@ -403,34 +403,41 @@ pub fn plan(
 /// The free slot the queued job `job` of `repository` starts in: the one that ran the same job last (repository,
 /// workflow and name), else one that ran a job of the same repository, else the lowest. Warm caches are the slot's
 /// own layer (ADR 0007), so the same job there finds them. Only free slots count: a start never waits for the one it
-/// would prefer.
+/// would prefer. Short of an exact match, a slot that a younger job of the `later` ones in the profile matches
+/// exactly is left to it while another is free.
 fn free_slot(
     taken: &[bool],
     profile: &Profile,
     repository: &Repository,
     job: u64,
+    later: &[(u64, &Repository)],
 ) -> Option<usize> {
-    let queued = repository.queued.iter().find(|queued| queued.id == job);
-    let free = || {
-        taken
-            .iter()
-            .enumerate()
-            .filter(|(_, taken)| !**taken)
-            .map(|(index, _)| index)
-    };
     let ran = |index: usize| profile.ran.get(index).and_then(Option::as_ref);
-    free()
-        .find(|index| {
-            queued.zip(ran(*index)).is_some_and(|(queued, key)| {
-                key.repository == repository.name
-                    && key.workflow == queued.workflow
-                    && key.name == queued.name
-            })
+    let ran_it = |index: usize, repository: &Repository, job: u64| {
+        let queued = repository.queued.iter().find(|queued| queued.id == job);
+        queued.zip(ran(index)).is_some_and(|(queued, key)| {
+            key.repository == repository.name
+                && key.workflow == queued.workflow
+                && key.name == queued.name
         })
-        .or_else(|| {
-            free().find(|index| ran(*index).is_some_and(|key| key.repository == repository.name))
+    };
+    taken
+        .iter()
+        .enumerate()
+        .filter(|(_, taken)| !**taken)
+        .map(|(index, _)| index)
+        .min_by_key(|&index| {
+            let wanted_later = later.iter().any(|&(id, other)| {
+                other.profile == repository.profile && ran_it(index, other, id)
+            });
+            let same_repository = ran(index).is_some_and(|key| key.repository == repository.name);
+            (
+                !ran_it(index, repository, job),
+                wanted_later,
+                !same_repository,
+                index,
+            )
         })
-        .or_else(|| free().next())
 }
 
 /// The hold of `repository`'s next job for CPU.

@@ -662,6 +662,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let profiles = &self.config.profiles;
         self.slots
             .retain(|name, slots| !slots.is_empty() || profiles.contains_key(name));
+        // The volumes of the slots dropped go at the next check of the caches.
+        let slots = &self.slots;
+        self.ran.retain(|slot, _| {
+            slots
+                .get(&slot.profile)
+                .is_some_and(|slots| slot.index < slots.len())
+        });
         let (slots, reseeds) = (&self.slots, &self.reseeds);
         self.retired
             .retain(|name, _| slots.contains_key(name) || reseeds.contains_key(name));

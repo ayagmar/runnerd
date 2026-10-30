@@ -14,14 +14,17 @@ before the shared build cache, and calls which one a job gets luck: the plan gav
 - **Which slot.** For each queued job, `plan` starts it in the free slot whose last job was the same job
   (repository, workflow and job name, as admission tells jobs apart), else a free slot whose last job was of the same
   repository, else the lowest free slot, as before. Only slots free at that moment count: a job never waits for the
-  slot it prefers. Jobs are still served oldest first, so an older job may take the slot a younger one matched; it
-  then takes the next best.
+  slot it prefers. Jobs are still served oldest first. An older job that matches no slot exactly leaves a free slot
+  that a younger job of the profile matches exactly to that job while another slot is free; if none is, it takes it.
 - **Where "last job" comes from.** The engine keeps the key of the job each slot's runner ran when the slot is vacated.
   A runner that ran a job nobody named leaves its slot unknown; one that ran none leaves it as it was. After a
-  restart the keys are read from the history: the newest named job whose runner was in each slot. No schema change.
+  restart the keys are read from the history: the newest named job whose runner was in each slot, unless it ended
+  before the profile's last reseed that replaced the snapshot or failed (the `cache.reseeded` events). No schema
+  change.
 - **When it ends.** A reseed that replaced the snapshot dropped every slot's own layer, so the slots of its profile
   forget their jobs; one that left the layers (`not seeded`) does not. A reseed that failed forgets them too, since
-  it may have dropped some.
+  it may have dropped some. A slot's volume removed by `runnerctl caches clean`, or with a closed slot, forgets its
+  job.
 - **Warm runners.** A warm runner is bound to its slot before its job is known, and GitHub gives it any queued job
   its labels match. Warm runners are unchanged: the plan picks their slots as before, and a job a warm runner takes
   runs wherever that runner is. Neither does a runner registered for one job get that job: affinity is a preference

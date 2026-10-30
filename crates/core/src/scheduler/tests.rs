@@ -1154,3 +1154,23 @@ fn a_job_never_waits_for_the_slot_it_prefers() {
     let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
     assert_eq!(starts(&decisions), [(1, "o/a"), (0, "o/a")]);
 }
+
+#[test]
+fn a_job_with_no_warm_slot_leaves_a_younger_jobs_warm_slot_to_it() {
+    // Slot 1 last ran o/y's build; slot 3 is unknown. o/x's older job has no history, o/y's build is younger.
+    let repositories = [
+        repository("o/x", "app", vec![named(1, "ci", "lint")]),
+        repository("o/y", "app", vec![named(2, "ci", "build")]),
+    ];
+    let profiles = remembering(
+        vec![Slot::Free, Slot::Free, Slot::Free],
+        vec![Some(ran("o/y", "ci", "build")), None, None],
+    );
+    let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(1, "o/x"), (0, "o/y")]);
+
+    // With one slot free there is nothing to leave: the older job starts there rather than wait.
+    let profiles = remembering(vec![Slot::Free], vec![Some(ran("o/y", "ci", "build"))]);
+    let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(0, "o/x")]);
+}

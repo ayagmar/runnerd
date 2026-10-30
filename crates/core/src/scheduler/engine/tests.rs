@@ -4938,15 +4938,22 @@ async fn a_restart_rebuilds_which_slot_ran_which_job_from_the_history() {
     assert_eq!(runner_in(&handle, 2).as_deref(), Some("o/r"));
 }
 
+/// What happens to the daemon after a reseed.
+#[derive(Clone, Copy)]
+enum Then {
+    KeepRunning,
+    Restart,
+}
+
 /// Reseeds `app` after `build` ran in slot 2, with the seed container printing `output`, then queues `build` again
 /// and says which slot starts it.
-async fn slot_after_a_reseed_printing(output: &str) -> usize {
+async fn slot_after_a_reseed_printing(output: &str, then: Then) -> usize {
     let (github, docker, dir) = (
         FakeGithub::default(),
         FakeDocker::default(),
         TestDir::new("engine"),
     );
-    let (mut engine, handle) = after_build_ran_in_slot_2(&github, &docker, &dir).await;
+    let (mut engine, mut handle) = after_build_ran_in_slot_2(&github, &docker, &dir).await;
     {
         let mut state = docker.0.lock().unwrap();
         state.runner_log = Some(output.to_owned());
@@ -4964,6 +4971,12 @@ async fn slot_after_a_reseed_printing(output: &str) -> usize {
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
+    handle.store.flush().await;
+    if let Then::Restart = then {
+        drop(engine);
+        (engine, handle) = engine_in(&github, &docker, &dir);
+        engine.recover().await.unwrap();
+    }
     github.0.lock().unwrap().queued = vec![job(3)];
     engine.tick(Shutdown::No).await;
     engine.publish();
@@ -4977,9 +4990,27 @@ async fn slot_after_a_reseed_printing(output: &str) -> usize {
 #[tokio::test]
 async fn a_reseed_that_dropped_the_slots_layers_ends_their_preference_but_one_that_left_them_does_not()
  {
-    assert_eq!(
-        slot_after_a_reseed_printing("not seeded: slot 1 changed 0 bytes").await,
-        2
+    for then in [Then::KeepRunning, Then::Restart] {
+        assert_eq!(
+            slot_after_a_reseed_printing("not seeded: slot 1 changed 0 bytes", then).await,
+            2
+        );
+        assert_eq!(slot_after_a_reseed_printing("seeded", then).await, 1);
+    }
+}
+
+#[tokio::test]
+async fn a_slot_whose_volume_was_cleaned_no_longer_attracts_its_job() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
     );
-    assert_eq!(slot_after_a_reseed_printing("seeded").await, 1);
+    let (mut engine, handle) = after_build_ran_in_slot_2(&github, &docker, &dir).await;
+    engine.clean_cache("runnerd-app-slot-2").await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 2), None);
+    assert_eq!(runner_in(&handle, 1).as_deref(), Some("o/r"));
 }

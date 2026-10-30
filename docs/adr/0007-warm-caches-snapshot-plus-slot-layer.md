@@ -8,7 +8,8 @@ by [0054](0054-slot-docker-stores-share-the-disk.md): the slots' Docker stores s
 otherwise used. Amended by [0066](0066-a-reseed-that-did-not-finish.md): a reseed that did not finish starts the
 profile over from the image, and containers use neither its snapshot nor their slot's changes until then. Amended
 by [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md): whiteouts in `/base/<layer>.hidden`, between the
-snapshot and the image, hide what a job deleted of the image.
+snapshot and the image, hide what a job deleted of the image. Amended by
+[0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md): a queued job starts in the free slot that ran it last.
 
 ## Context
 

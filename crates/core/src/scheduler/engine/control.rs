@@ -807,6 +807,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .await
             .map_err(|error| ControlError::Failed(format!("cannot remove {name}: {error}")))?;
         info!("removed {name}");
+        // Its layer no longer holds what a job cached.
+        if let api::CacheKind::Slot { profile, slot } = &volume.kind {
+            self.ran.remove(&SlotRef {
+                profile: profile.clone(),
+                index: slot.saturating_sub(1),
+            });
+        }
         // Measured again once idle.
         self.trim_due = true;
         Ok(())
