@@ -1,5 +1,5 @@
-//! The GitHub client against a fake GitHub on a loopback port: queued jobs, conditional requests, rate limits,
-//! token refresh, runner registration and deletion, who started a run and opened a pull request, and that the token
+//! The GitHub client against a fake GitHub on a loopback port: queued jobs, listings over several pages,
+//! conditional requests and how much of them is kept, rate limits, token refresh, runner registration and deletion, who started a run and opened a pull request, and that the token
 //! never shows in `Debug` output or errors.
 
 use std::sync::{Arc, Mutex};
@@ -9,7 +9,8 @@ use axum::Router;
 use axum::http::{HeaderMap, HeaderValue, Method, StatusCode, Uri};
 use axum::response::{IntoResponse, Response};
 
-use super::{Deleted, Error, Github, GithubApi, QueuedJob, Token};
+use super::{Conditional, Deleted, Error, Github, GithubApi, QueuedJob, Token};
+use crate::sync::lock;
 
 const TOKEN: &str = "ghp_sentinelTokenValue0123456789";
 
@@ -125,6 +126,262 @@ async fn an_unchanged_answer_is_served_from_the_last_response() {
         seen.lock().unwrap()[1]
             .headers
             .contains_key("if-none-match")
+    );
+}
+
+/// `body`, with a `Link` to a next page if `next`, tagged by its URI: a request conditional on that tag gets a 304.
+fn page(request: &Seen, body: &str, next: bool) -> Response {
+    let etag = format!("\"{}\"", request.uri);
+    if request
+        .headers
+        .get("if-none-match")
+        .is_some_and(|sent| sent.as_bytes() == etag.as_bytes())
+    {
+        return StatusCode::NOT_MODIFIED.into_response();
+    }
+    let mut response = ([("etag", etag)], json(body)).into_response();
+    if next {
+        // GitHub links pages by repository ID; the client builds its own next address.
+        let link = r#"<https://api.github.com/repositories/1/elsewhere?page=2>; rel="next", <https://api.github.com/repositories/1/elsewhere?page=9>; rel="last""#;
+        response
+            .headers_mut()
+            .insert("link", HeaderValue::from_static(link));
+    }
+    response
+}
+
+fn uris(seen: &Mutex<Vec<Seen>>) -> Vec<String> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .map(|request| request.uri.clone())
+        .collect()
+}
+
+#[tokio::test]
+async fn a_queued_job_on_a_later_page_of_runs_and_jobs_is_found() {
+    let (url, seen) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runs?status=queued&per_page=100" => {
+            page(request, r#"{"workflow_runs":[{"id":10}]}"#, true)
+        }
+        // Run 10 moved down a page while the first was read.
+        "/repos/o/r/actions/runs?status=queued&per_page=100&page=2" => {
+            page(request, r#"{"workflow_runs":[{"id":10},{"id":20}]}"#, false)
+        }
+        "/repos/o/r/actions/runs?status=in_progress&per_page=100" => {
+            page(request, r#"{"workflow_runs":[]}"#, false)
+        }
+        "/repos/o/r/actions/runs/10/jobs?filter=latest&per_page=100" => page(
+            request,
+            r#"{"jobs":[{"id":1,"run_id":10,"name":"a","status":"completed","labels":[]}]}"#,
+            false,
+        ),
+        // A matrix whose first page is done; the only job still waiting is on the second.
+        "/repos/o/r/actions/runs/20/jobs?filter=latest&per_page=100" => page(
+            request,
+            r#"{"jobs":[{"id":2,"run_id":20,"name":"m (1)","status":"completed","labels":[]}]}"#,
+            true,
+        ),
+        "/repos/o/r/actions/runs/20/jobs?filter=latest&per_page=100&page=2" => page(
+            request,
+            r#"{"jobs":[{"id":3,"run_id":20,"name":"m (101)","status":"queued","labels":["self-hosted"]}]}"#,
+            false,
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let github = client(&url);
+    let first = github.queued_jobs("o/r").await.unwrap();
+    let sent = seen.lock().unwrap().len();
+    let second = github.queued_jobs("o/r").await.unwrap();
+    for jobs in [&first, &second] {
+        assert_eq!(
+            jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
+            [3],
+            "the queued job on page 2 of run 20, found again from 304s"
+        );
+    }
+    assert_eq!(
+        uris(&seen)
+            .iter()
+            .filter(|uri| uri.contains("/runs/10/jobs"))
+            .count(),
+        2,
+        "run 10 is read once a poll though it showed on two pages"
+    );
+    assert!(
+        seen.lock().unwrap()[sent..]
+            .iter()
+            .all(|request| request.headers.contains_key("if-none-match")),
+        "every page of the second poll is conditional"
+    );
+}
+
+#[tokio::test]
+async fn an_orphan_runner_on_a_later_page_is_listed() {
+    let (url, _) = fake_github(|request| match request.uri.as_str() {
+        "/repos/o/r/actions/runners?per_page=100" => page(
+            request,
+            r#"{"runners":[{"id":1,"name":"runnerd-h-p-1","status":"online","busy":true}]}"#,
+            true,
+        ),
+        "/repos/o/r/actions/runners?per_page=100&page=2" => page(
+            request,
+            r#"{"runners":[{"id":1,"name":"runnerd-h-p-1","status":"online","busy":true},
+                           {"id":2,"name":"runnerd-h-p-2","status":"offline","busy":false}]}"#,
+            false,
+        ),
+        _ => StatusCode::NOT_FOUND.into_response(),
+    })
+    .await;
+    let runners = client(&url).runners("o/r").await.unwrap();
+    assert_eq!(
+        runners.iter().map(|runner| runner.id).collect::<Vec<_>>(),
+        [1, 2]
+    );
+}
+
+#[tokio::test]
+async fn a_listing_that_never_ends_is_read_ten_pages_deep() {
+    let (url, seen) = fake_github(|request| page(request, r#"{"runners":[]}"#, true)).await;
+    client(&url).runners("o/r").await.unwrap();
+    assert_eq!(seen.lock().unwrap().len(), 10);
+}
+
+#[tokio::test]
+async fn a_busy_repository_is_polled_oldest_runs_first_within_the_old_request_count() {
+    // 300 queued runs, newest first as GitHub lists them, each with one queued job.
+    let (url, seen) = fake_github(|request| {
+        let uri = request.uri.as_str();
+        if let Some(rest) = uri.strip_prefix("/repos/o/r/actions/runs?status=queued&per_page=100") {
+            let number: u64 = rest.strip_prefix("&page=").map_or(1, |n| n.parse().unwrap());
+            let runs: Vec<String> = (0..100)
+                .map(|i| format!(r#"{{"id":{}}}"#, 300 - (number - 1) * 100 - i))
+                .collect();
+            return page(
+                request,
+                &format!(r#"{{"workflow_runs":[{}]}}"#, runs.join(",")),
+                number < 3,
+            );
+        }
+        if uri.starts_with("/repos/o/r/actions/runs?status=in_progress") {
+            return page(request, r#"{"workflow_runs":[]}"#, false);
+        }
+        let run: u64 = uri
+            .trim_start_matches("/repos/o/r/actions/runs/")
+            .split('/')
+            .next()
+            .unwrap()
+            .parse()
+            .unwrap();
+        page(
+            request,
+            &format!(r#"{{"jobs":[{{"id":{run},"run_id":{run},"name":"j","status":"queued","labels":[]}}]}}"#),
+            false,
+        )
+    })
+    .await;
+    let jobs = client(&url).queued_jobs("o/r").await.unwrap();
+    assert_eq!(
+        seen.lock().unwrap().len(),
+        202,
+        "as many requests as a poll sent before it followed pages"
+    );
+    // Four listings of runs leave 198 requests for jobs.
+    assert_eq!(
+        jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
+        (1..=198).collect::<Vec<_>>(),
+        "the oldest runs are read, the newest wait"
+    );
+}
+
+/// Serves job `id` as completed when `id` is in `completed`, otherwise in progress with a name `pad` long.
+async fn fake_jobs(
+    completed: std::ops::RangeInclusive<u64>,
+    pad: usize,
+) -> (String, Arc<Mutex<Vec<Seen>>>) {
+    fake_github(move |request| {
+        let id: u64 = request
+            .uri
+            .trim_start_matches("/repos/o/r/actions/jobs/")
+            .parse()
+            .unwrap();
+        let (status, conclusion) = if completed.contains(&id) {
+            ("completed", r#""success""#)
+        } else {
+            ("in_progress", "null")
+        };
+        let name = "n".repeat(pad);
+        page(
+            request,
+            &format!(
+                r#"{{"id":{id},"run_id":1,"name":"{name}","status":"{status}","conclusion":{conclusion}}}"#
+            ),
+            false,
+        )
+    })
+    .await
+}
+
+fn conditional(seen: &Mutex<Vec<Seen>>, uri: &str) -> Vec<bool> {
+    seen.lock()
+        .unwrap()
+        .iter()
+        .filter(|request| request.uri == uri)
+        .map(|request| request.headers.contains_key("if-none-match"))
+        .collect()
+}
+
+#[tokio::test]
+async fn completed_jobs_leave_the_cache_while_an_active_job_stays_conditional() {
+    let (url, seen) = fake_jobs(2..=200, 0).await;
+    let github = client(&url);
+    github.job("o/r", 1).await.unwrap();
+    for id in 2..=200 {
+        assert_eq!(github.job("o/r", id).await.unwrap().status, "completed");
+    }
+    let active = github.job("o/r", 1).await.unwrap();
+    assert_eq!(
+        active.status, "in_progress",
+        "read from the 304's kept answer"
+    );
+    assert_eq!(
+        conditional(&seen, "/repos/o/r/actions/jobs/1"),
+        [false, true]
+    );
+    assert_eq!(
+        lock(&github.etags).entries.len(),
+        1,
+        "only the active job's answer is kept"
+    );
+}
+
+#[tokio::test]
+async fn kept_answers_stay_within_their_byte_limit_and_the_least_recently_used_go() {
+    let (url, seen) = fake_jobs(0..=0, 400).await;
+    let mut github = client(&url);
+    let limit = 2_000;
+    *github.etags.get_mut().unwrap() = Conditional::new(limit);
+    for id in 2..=20 {
+        github.job("o/r", id).await.unwrap();
+        // Job 1 is asked between every other: the most recently used.
+        github.job("o/r", 1).await.unwrap();
+        assert!(
+            lock(&github.etags).bytes <= limit,
+            "within {limit} bytes after job {id}"
+        );
+    }
+    github.job("o/r", 2).await.unwrap();
+    assert!(
+        conditional(&seen, "/repos/o/r/actions/jobs/1")[1..]
+            .iter()
+            .all(|sent| *sent),
+        "job 1 stays conditional"
+    );
+    assert_eq!(
+        conditional(&seen, "/repos/o/r/actions/jobs/2"),
+        [false, false],
+        "job 2, unused the longest, was dropped"
     );
 }
 

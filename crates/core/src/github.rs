@@ -1,8 +1,9 @@
 //! The GitHub REST API as the scheduler and the history need it: queued jobs, a job's steps, just-in-time runner
-//! configs, repository runners and cancelling a run. Owns the token, conditional requests and rate-limit backoff. It
-//! must never put the token in a log line, a `Debug` output or an error, and it decides nothing about scheduling.
+//! configs, repository runners and cancelling a run. Owns the token, the pages of a listing, conditional requests and
+//! the answers kept for them, and rate-limit backoff. It must never put the token in a log line, a `Debug` output or
+//! an error, nor send it anywhere but its base URL, and it decides nothing about scheduling.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
 use std::time::{Duration, SystemTime};
@@ -23,6 +24,24 @@ pub const API_URL: &str = "https://api.github.com";
 /// How long one request may take, connecting included. GitHub answers in well under a second; a request that hangs
 /// holds back the tick that made it.
 const REQUEST_TIMEOUT: Duration = Duration::from_secs(10);
+
+/// Items per page of a listing: GitHub's most.
+const PER_PAGE: u32 = 100;
+
+/// The most pages read of one listing: 1,000 runs, jobs of a run or runners, more than one machine serves at once
+/// and four times a matrix's 256 jobs. A listing that names a page past it is cut there, so a `Link` that never ends
+/// costs ten requests, not the rate limit.
+const MAX_PAGES: u32 = 10;
+
+/// The most requests one poll of a repository's queued jobs sends: as many as a poll sent before it followed pages,
+/// two listings of runs and the jobs of 100 runs each. A repository with more active runs than that leaves its
+/// newest unread until older ones end, so following pages never spends the rate limit faster than before.
+const POLL_REQUESTS: u32 = 202;
+
+/// The most bytes of answers kept for conditional requests. A page of 100 runs is about 600 KB, a page of jobs with
+/// their steps about 350 KB, a job's details a few KB: room for what several busy repositories ask every poll. Past
+/// it the least recently used answer goes, and its next request costs the rate limit again.
+const CONDITIONAL_BYTES: usize = 32 * 1024 * 1024;
 
 /// A GitHub token. Its `Debug` output never shows the value.
 #[derive(Clone)]
@@ -331,7 +350,7 @@ pub struct Github {
     /// concurrent 401s read it once.
     token: tokio::sync::Mutex<Option<Token>>,
     // Locked with `sync::lock`: a panic while holding one of these locks leaves plain data behind, still usable.
-    etags: Mutex<HashMap<String, (HeaderValue, Vec<u8>)>>,
+    etags: Mutex<Conditional>,
     blocked_until: Mutex<Option<SystemTime>>,
 }
 
@@ -512,7 +531,7 @@ impl Github {
             base: base.trim_end_matches('/').to_owned(),
             token_source: Arc::from(token_source),
             token: tokio::sync::Mutex::new(None),
-            etags: Mutex::new(HashMap::new()),
+            etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES)),
             blocked_until: Mutex::new(None),
         })
     }
@@ -524,11 +543,18 @@ impl Github {
     }
 
     async fn get<T: DeserializeOwned>(&self, path: &str) -> Result<T, Error> {
-        let response = self.send(Method::GET, path, None).await?;
-        let bytes = if response.status == StatusCode::NOT_MODIFIED {
-            let cached = lock(&self.etags).get(path).map(|(_, body)| body.clone());
+        self.get_page(path).await.map(|page| page.body)
+    }
+
+    /// One answer, conditional on the last one kept for `path`, and whether GitHub's `Link` names a next page.
+    async fn get_page<T: DeserializeOwned>(&self, path: &str) -> Result<Page<T>, Error> {
+        // Taken before the request, so an answer evicted meanwhile still serves a 304.
+        let cached = lock(&self.etags).get(path);
+        let etag = cached.as_ref().map(|cached| &cached.etag);
+        let response = self.send(Method::GET, path, None, etag).await?;
+        let (bytes, next) = if response.status == StatusCode::NOT_MODIFIED {
             match cached {
-                Some(body) => body,
+                Some(cached) => (cached.body, cached.next),
                 None => {
                     return Err(Error::Status {
                         method: Method::GET,
@@ -541,20 +567,62 @@ impl Github {
         } else {
             let etag = response.etag.clone();
             let response = expect_success(Method::GET, path, response)?;
+            let body: Arc<[u8]> = response.bytes.into();
             if let Some(etag) = etag {
-                lock(&self.etags).insert(path.to_owned(), (etag, response.bytes.clone()));
+                lock(&self.etags).insert(
+                    path,
+                    Cached {
+                        etag,
+                        body: body.clone(),
+                        next: response.next,
+                    },
+                );
             }
-            response.bytes
+            (body, response.next)
         };
-        decode(path, &bytes)
+        Ok(Page {
+            body: decode(path, &bytes)?,
+            next,
+        })
     }
 
-    /// Sends a request with the token, once more with a fresh token after a 401. Records the rate limit.
+    /// The pages of the listing at `path`, a query without `page`, for as long as GitHub's `Link` names a next one:
+    /// at most `MAX_PAGES`, each taken from `budget`. Each page is its own conditional request. The next page's
+    /// address is built here, not taken from the `Link`, so the token goes nowhere but `base`. Items move between
+    /// pages while they are read: one may show twice, which callers dedupe by ID, or not at all until the next poll.
+    async fn get_pages<T: DeserializeOwned>(
+        &self,
+        path: &str,
+        budget: &mut u32,
+    ) -> Result<Vec<T>, Error> {
+        let mut pages = Vec::new();
+        for page in 1..=MAX_PAGES {
+            let Some(left) = budget.checked_sub(1) else {
+                break;
+            };
+            *budget = left;
+            let path = if page == 1 {
+                path.to_owned()
+            } else {
+                format!("{path}&page={page}")
+            };
+            let answer: Page<T> = self.get_page(&path).await?;
+            pages.push(answer.body);
+            if !answer.next {
+                break;
+            }
+        }
+        Ok(pages)
+    }
+
+    /// Sends a request with the token, once more with a fresh token after a 401, conditional on `etag` if given.
+    /// Records the rate limit.
     async fn send(
         &self,
         method: Method,
         path: &str,
         body: Option<&serde_json::Value>,
+        etag: Option<&HeaderValue>,
     ) -> Result<Response, Error> {
         if let Some(until) = self.blocked_until() {
             return Err(Error::RateLimited { until });
@@ -572,9 +640,7 @@ impl Github {
                     .header(header::CONTENT_TYPE, "application/json")
                     .body(body.to_string());
             }
-            if method == Method::GET
-                && let Some((etag, _)) = lock(&self.etags).get(path)
-            {
+            if let Some(etag) = etag {
                 request = request.header(header::IF_NONE_MATCH, etag.clone());
             }
             let response = request.send().await.map_err(|source| Error::Http {
@@ -597,6 +663,7 @@ impl Github {
                 }
             }
             let etag = response.headers().get(header::ETAG).cloned();
+            let next = names_next_page(response.headers());
             let bytes = response.bytes().await.map_err(|source| Error::Http {
                 method: method.clone(),
                 path: path.to_owned(),
@@ -605,6 +672,7 @@ impl Github {
             return Ok(Response {
                 status,
                 etag,
+                next,
                 bytes: bytes.to_vec(),
             });
         }
@@ -637,45 +705,66 @@ impl Github {
 
 impl GithubApi for Github {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, Error> {
-        let mut jobs = Vec::new();
-        let mut listed = Vec::new();
+        let mut budget = POLL_REQUESTS;
+        let mut runs = Vec::new();
         for status in ["queued", "in_progress"] {
-            let runs: Runs = self
-                .get(&format!(
-                    "/repos/{repository}/actions/runs?status={status}&per_page=100"
-                ))
+            let pages: Vec<Runs> = self
+                .get_pages(
+                    &format!(
+                        "/repos/{repository}/actions/runs?status={status}&per_page={PER_PAGE}"
+                    ),
+                    &mut budget,
+                )
                 .await?;
-            for run in runs.workflow_runs {
-                let path = jobs_path(repository, run.id);
-                let run_jobs: Jobs = self.get(&path).await?;
-                listed.push(path);
-                jobs.extend(
-                    run_jobs
-                        .jobs
-                        .into_iter()
-                        .filter(|job| job.status == "queued")
-                        .map(|job| QueuedJob {
-                            id: job.id,
-                            run_id: job.run_id,
-                            name: job.name,
-                            labels: job.labels,
-                            created_at: job
-                                .created_at
-                                .as_deref()
-                                .and_then(time::parse_ms)
-                                .unwrap_or(0),
-                            run_attempt: job.run_attempt.unwrap_or(1),
-                            workflow: job.workflow_name,
-                            branch: job.head_branch,
-                            url: job.html_url,
-                        }),
-                );
-            }
+            runs.extend(pages.into_iter().flat_map(|page| page.workflow_runs));
         }
-        // The cached answers of runs that ended: nothing asks for them again.
+        let mut runs: Vec<u64> = runs.into_iter().map(|run| run.id).collect();
+        // Oldest first: should the budget run out, the runs it leaves unread are the newest, whose jobs have waited
+        // least, and they come up as older runs end.
+        runs.sort_unstable();
+        runs.dedup();
+        let mut jobs = Vec::new();
+        for &run in &runs {
+            if budget == 0 {
+                break;
+            }
+            let pages: Vec<Jobs> = self
+                .get_pages(&jobs_path(repository, run), &mut budget)
+                .await?;
+            jobs.extend(
+                pages
+                    .into_iter()
+                    .flat_map(|page| page.jobs)
+                    .filter(|job| job.status == "queued")
+                    .map(|job| QueuedJob {
+                        id: job.id,
+                        run_id: job.run_id,
+                        name: job.name,
+                        labels: job.labels,
+                        created_at: job
+                            .created_at
+                            .as_deref()
+                            .and_then(time::parse_ms)
+                            .unwrap_or(0),
+                        run_attempt: job.run_attempt.unwrap_or(1),
+                        workflow: job.workflow_name,
+                        branch: job.head_branch,
+                        url: job.html_url,
+                    }),
+            );
+        }
+        // The cached pages of runs that ended: nothing asks for them again.
         let runs_prefix = format!("/repos/{repository}/actions/runs/");
-        lock(&self.etags).retain(|path, _| {
-            !(path.starts_with(&runs_prefix) && path.contains("/jobs?")) || listed.contains(path)
+        lock(&self.etags).retain(|path| {
+            match path
+                .strip_prefix(&runs_prefix)
+                .and_then(|rest| rest.split_once("/jobs?"))
+            {
+                Some((run, _)) => run
+                    .parse()
+                    .is_ok_and(|run: u64| runs.binary_search(&run).is_ok()),
+                None => true,
+            }
         });
         jobs.sort_by_key(|job| job.id);
         jobs.dedup_by_key(|job| job.id);
@@ -683,10 +772,19 @@ impl GithubApi for Github {
     }
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, Error> {
-        let runners: Runners = self
-            .get(&format!("/repos/{repository}/actions/runners?per_page=100"))
+        let mut budget = MAX_PAGES;
+        let pages: Vec<Runners> = self
+            .get_pages(
+                &format!("/repos/{repository}/actions/runners?per_page={PER_PAGE}"),
+                &mut budget,
+            )
             .await?;
-        Ok(runners.runners)
+        let mut seen = HashSet::new();
+        Ok(pages
+            .into_iter()
+            .flat_map(|page| page.runners)
+            .filter(|runner| seen.insert(runner.id))
+            .collect())
     }
 
     async fn jit_config(
@@ -703,7 +801,7 @@ impl GithubApi for Github {
             "work_folder": "_work",
         });
         let path = format!("/repos/{repository}/actions/runners/generate-jitconfig");
-        let response = self.send(Method::POST, &path, Some(&body)).await?;
+        let response = self.send(Method::POST, &path, Some(&body), None).await?;
         let response = expect_success(Method::POST, &path, response)?;
         let jit: JitResponse = decode(&path, &response.bytes)?;
         Ok((jit.runner, JitConfig(jit.encoded_jit_config)))
@@ -711,7 +809,7 @@ impl GithubApi for Github {
 
     async fn delete_runner(&self, repository: &str, id: u64) -> Result<Deleted, Error> {
         let path = format!("/repos/{repository}/actions/runners/{id}");
-        let response = self.send(Method::DELETE, &path, None).await?;
+        let response = self.send(Method::DELETE, &path, None, None).await?;
         match response.status {
             StatusCode::NOT_FOUND => Ok(Deleted::NotFound),
             StatusCode::UNPROCESSABLE_ENTITY => Ok(Deleted::Busy),
@@ -720,8 +818,13 @@ impl GithubApi for Github {
     }
 
     async fn job(&self, repository: &str, id: u64) -> Result<JobDetails, Error> {
-        self.get(&format!("/repos/{repository}/actions/jobs/{id}"))
-            .await
+        let path = format!("/repos/{repository}/actions/jobs/{id}");
+        let job: JobDetails = self.get(&path).await?;
+        // A completed job does not change again, and the history stops asking for it.
+        if job.status == "completed" {
+            lock(&self.etags).remove(&path);
+        }
+        Ok(job)
     }
 
     async fn run_trigger(&self, repository: &str, run: u64) -> Result<RunTrigger, Error> {
@@ -802,7 +905,7 @@ impl GithubApi for Github {
 
     async fn cancel_run(&self, repository: &str, run: u64) -> Result<(), Error> {
         let path = format!("/repos/{repository}/actions/runs/{run}/cancel");
-        let response = self.send(Method::POST, &path, None).await?;
+        let response = self.send(Method::POST, &path, None, None).await?;
         // 409: the run completed already.
         if response.status == StatusCode::CONFLICT {
             return Ok(());
@@ -812,13 +915,129 @@ impl GithubApi for Github {
 }
 
 fn jobs_path(repository: &str, run: u64) -> String {
-    format!("/repos/{repository}/actions/runs/{run}/jobs?filter=latest&per_page=100")
+    format!("/repos/{repository}/actions/runs/{run}/jobs?filter=latest&per_page={PER_PAGE}")
 }
 
 struct Response {
     status: StatusCode,
     etag: Option<HeaderValue>,
+    /// Whether its `Link` names a next page.
+    next: bool,
     bytes: Vec<u8>,
+}
+
+/// A decoded answer and whether a next page follows it.
+struct Page<T> {
+    body: T,
+    next: bool,
+}
+
+/// Whether a `Link` header names a next page: `<https://…&page=2>; rel="next", <…>; rel="last"`.
+fn names_next_page(headers: &HeaderMap) -> bool {
+    headers
+        .get_all(header::LINK)
+        .iter()
+        .filter_map(|value| value.to_str().ok())
+        .flat_map(|value| value.split(','))
+        .any(|link| {
+            link.split(';')
+                .skip(1)
+                .any(|param| param.trim() == r#"rel="next""#)
+        })
+}
+
+/// An answer kept for a conditional request on its path.
+#[derive(Clone)]
+struct Cached {
+    etag: HeaderValue,
+    body: Arc<[u8]>,
+    /// Whether its `Link` named a next page: a 304 does not say again.
+    next: bool,
+}
+
+/// The answers kept for conditional requests, by path, within `limit` bytes: past it the least recently used go.
+struct Conditional {
+    entries: HashMap<String, Use>,
+    bytes: usize,
+    limit: usize,
+    /// Counts uses; an entry's `used` is the count at its last one.
+    clock: u64,
+}
+
+struct Use {
+    cached: Cached,
+    used: u64,
+}
+
+impl Conditional {
+    fn new(limit: usize) -> Conditional {
+        Conditional {
+            entries: HashMap::new(),
+            bytes: 0,
+            limit,
+            clock: 0,
+        }
+    }
+
+    fn size(path: &str, cached: &Cached) -> usize {
+        path.len() + cached.body.len()
+    }
+
+    /// The answer kept for `path`, which counts as using it.
+    fn get(&mut self, path: &str) -> Option<Cached> {
+        self.clock += 1;
+        let entry = self.entries.get_mut(path)?;
+        entry.used = self.clock;
+        Some(entry.cached.clone())
+    }
+
+    /// Keeps `cached` for `path`, then drops the least recently used answers until the rest fit. An answer larger
+    /// than the whole limit is not kept.
+    fn insert(&mut self, path: &str, cached: Cached) {
+        self.remove(path);
+        let size = Conditional::size(path, &cached);
+        if size > self.limit {
+            return;
+        }
+        self.clock += 1;
+        self.bytes += size;
+        self.entries.insert(
+            path.to_owned(),
+            Use {
+                cached,
+                used: self.clock,
+            },
+        );
+        while self.bytes > self.limit {
+            let Some(oldest) = self
+                .entries
+                .iter()
+                .min_by_key(|(_, entry)| entry.used)
+                .map(|(path, _)| path.clone())
+            else {
+                break;
+            };
+            self.remove(&oldest);
+        }
+    }
+
+    fn remove(&mut self, path: &str) {
+        if let Some(entry) = self.entries.remove(path) {
+            self.bytes -= Conditional::size(path, &entry.cached);
+        }
+    }
+
+    /// Keeps only the answers whose path `keep` accepts.
+    fn retain(&mut self, mut keep: impl FnMut(&str) -> bool) {
+        let bytes = &mut self.bytes;
+        self.entries.retain(|path, entry| {
+            let kept = keep(path);
+            if !kept {
+                *bytes -= Conditional::size(path, &entry.cached);
+            }
+            kept
+        });
+    }
 }
 
 fn expect_success(method: Method, path: &str, response: Response) -> Result<Response, Error> {
