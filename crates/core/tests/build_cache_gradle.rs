@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use runnerd_core::buildcache::{BuildCache, MOUNT, SOCKET, Writes};
+use runnerd_core::buildcache::{ActionsCache, BuildCache, MOUNT, SOCKET, Scopes, Writes};
 
 const IMAGE: &str = "runnerd-test-build-cache";
 
@@ -133,8 +133,10 @@ async fn a_main_builds_outputs_are_from_cache_in_a_fresh_container() {
     let root = scratch("cache");
     let cache = BuildCache::open(&root.join("entries"), &root.join("sockets"), 1 << 30).unwrap();
 
-    let main = cache.attach("main", "halyard/api").unwrap();
-    cache.decide("main", Writes::Allowed);
+    let main = cache
+        .attach("main", "halyard/api", ActionsCache::Off)
+        .unwrap();
+    cache.decide("main", Writes::Allowed, Scopes::default());
     let output = tokio::task::spawn_blocking({
         let (project, main) = (project.clone(), main.clone());
         move || gradle_build(&project, &main)
@@ -149,8 +151,10 @@ async fn a_main_builds_outputs_are_from_cache_in_a_fresh_container() {
     assert!(stored.written_bytes > 0, "main stored nothing: {stored:?}");
 
     // A pull request in another slot: it reads what main stored.
-    let pull = cache.attach("pull", "halyard/api").unwrap();
-    cache.decide("pull", Writes::Refused);
+    let pull = cache
+        .attach("pull", "halyard/api", ActionsCache::Off)
+        .unwrap();
+    cache.decide("pull", Writes::Refused, Scopes::default());
     let output = tokio::task::spawn_blocking({
         let (project, pull) = (project.clone(), pull.clone());
         move || gradle_build(&project, &pull)

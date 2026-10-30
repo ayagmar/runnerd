@@ -546,6 +546,7 @@ impl Fixtures {
                     refused: 1_204,
                     writer: false,
                 },
+                actions_cache: true,
             }),
         };
         let status = Status {

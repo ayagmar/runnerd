@@ -168,6 +168,7 @@ fn only_a_pull_request_a_person_opened_from_the_runs_branch_lets_it_write() {
         by_user: true,
         head_repository: Some("o/app".to_owned()),
         head_branch: "feature".to_owned(),
+        base_branch: "main".to_owned(),
     };
     assert!(
         opened_by_user(&pull, "o/app", &run),
@@ -225,9 +226,9 @@ fn open(name: &str, max_size: u64) -> Cache {
 #[tokio::test]
 async fn a_main_builds_entry_is_a_hit_for_another_runner_of_its_repository() {
     let Cache { cache, _dir } = open("hit", 1 << 20);
-    let main = cache.attach("main", "o/app").unwrap();
-    let pull = cache.attach("pull", "o/app").unwrap();
-    cache.decide("main", Writes::Allowed);
+    let main = cache.attach("main", "o/app", ActionsCache::Off).unwrap();
+    let pull = cache.attach("pull", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("main", Writes::Allowed, Scopes::default());
     assert_eq!(
         request(&main, "PUT", "/gradle/0a1b", b"outputs").await,
         (200, Vec::new())
@@ -247,9 +248,9 @@ async fn a_main_builds_entry_is_a_hit_for_another_runner_of_its_repository() {
 #[tokio::test]
 async fn an_untrusted_jobs_upload_is_accepted_and_never_seen() {
     let Cache { cache, _dir } = open("untrusted", 1 << 20);
-    let pull = cache.attach("pull", "o/app").unwrap();
-    let main = cache.attach("main", "o/app").unwrap();
-    cache.decide("pull", Writes::Refused);
+    let pull = cache.attach("pull", "o/app", ActionsCache::Off).unwrap();
+    let main = cache.attach("main", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("pull", Writes::Refused, Scopes::default());
     // A tool told its upload failed would stop using the cache, reads included.
     assert_eq!(
         request(&pull, "PUT", "/gradle/0a1b", b"poison").await.0,
@@ -264,9 +265,9 @@ async fn an_untrusted_jobs_upload_is_accepted_and_never_seen() {
 #[tokio::test]
 async fn uploads_before_the_decision_wait_for_it() {
     let Cache { cache, _dir } = open("held", 1 << 20);
-    let early = cache.attach("early", "o/app").unwrap();
-    let pull = cache.attach("pull", "o/app").unwrap();
-    let reader = cache.attach("reader", "o/app").unwrap();
+    let early = cache.attach("early", "o/app", ActionsCache::Off).unwrap();
+    let pull = cache.attach("pull", "o/app", ActionsCache::Off).unwrap();
+    let reader = cache.attach("reader", "o/app", ActionsCache::Off).unwrap();
     assert_eq!(request(&early, "PUT", "/gradle/aa", b"main").await.0, 200);
     assert_eq!(request(&pull, "PUT", "/gradle/bb", b"poison").await.0, 200);
     assert_eq!(
@@ -274,8 +275,8 @@ async fn uploads_before_the_decision_wait_for_it() {
         404,
         "not before GitHub says the job may write"
     );
-    cache.decide("early", Writes::Allowed);
-    cache.decide("pull", Writes::Refused);
+    cache.decide("early", Writes::Allowed, Scopes::default());
+    cache.decide("pull", Writes::Refused, Scopes::default());
     assert_eq!(
         request(&reader, "GET", "/gradle/aa", b"").await,
         (200, b"main".to_vec())
@@ -287,11 +288,11 @@ async fn uploads_before_the_decision_wait_for_it() {
 #[tokio::test]
 async fn a_runner_that_ends_undecided_stores_nothing() {
     let Cache { cache, _dir } = open("ended", 1 << 20);
-    let gone = cache.attach("gone", "o/app").unwrap();
-    let reader = cache.attach("reader", "o/app").unwrap();
+    let gone = cache.attach("gone", "o/app", ActionsCache::Off).unwrap();
+    let reader = cache.attach("reader", "o/app", ActionsCache::Off).unwrap();
     assert_eq!(request(&gone, "PUT", "/gradle/aa", b"main").await.0, 200);
     assert_eq!(cache.detach("gone").unwrap().refused, 1);
-    cache.decide("gone", Writes::Allowed);
+    cache.decide("gone", Writes::Allowed, Scopes::default());
     assert_eq!(request(&reader, "GET", "/gradle/aa", b"").await.0, 404);
     assert_eq!(cache.size().entries, 0);
 }
@@ -299,10 +300,10 @@ async fn a_runner_that_ends_undecided_stores_nothing() {
 #[tokio::test]
 async fn repositories_never_read_each_others_entries() {
     let Cache { cache, _dir } = open("repositories", 1 << 20);
-    let app = cache.attach("app", "o/app").unwrap();
-    let other = cache.attach("other", "o/other").unwrap();
-    cache.decide("app", Writes::Allowed);
-    cache.decide("other", Writes::Allowed);
+    let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
+    let other = cache.attach("other", "o/other", ActionsCache::Off).unwrap();
+    cache.decide("app", Writes::Allowed, Scopes::default());
+    cache.decide("other", Writes::Allowed, Scopes::default());
     assert_eq!(request(&app, "PUT", "/gradle/0a1b", b"app").await.0, 200);
     assert_eq!(request(&other, "GET", "/gradle/0a1b", b"").await.0, 404);
     assert_eq!(
@@ -318,8 +319,8 @@ async fn repositories_never_read_each_others_entries() {
 #[tokio::test]
 async fn each_tool_has_its_own_keys_and_no_path_leaves_them() {
     let Cache { cache, _dir } = open("paths", 1 << 20);
-    let app = cache.attach("app", "o/app").unwrap();
-    cache.decide("app", Writes::Allowed);
+    let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("app", Writes::Allowed, Scopes::default());
     assert_eq!(request(&app, "PUT", "/gradle/abc", b"gradle").await.0, 200);
     assert_eq!(
         request(&app, "PUT", "/sccache/a/b/c/abc", b"rustc").await.0,
@@ -347,8 +348,8 @@ async fn each_tool_has_its_own_keys_and_no_path_leaves_them() {
 #[tokio::test]
 async fn a_trim_drops_the_least_recently_used_entries_first() {
     let Cache { cache, _dir } = open("trim", 1 << 20);
-    let app = cache.attach("app", "o/app").unwrap();
-    cache.decide("app", Writes::Allowed);
+    let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("app", Writes::Allowed, Scopes::default());
     for key in ["old", "used", "new"] {
         assert_eq!(
             request(&app, "PUT", &format!("/gradle/{key}"), &[0; ENTRY])
@@ -382,8 +383,8 @@ async fn a_restart_keeps_the_entries_and_an_adopted_runner_its_socket() {
     let dir = TestDir::new("restart");
     let (entries, sockets) = (dir.0.join("entries"), dir.0.join("sockets"));
     let first = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
-    let mounted = first.attach("app", "o/app").unwrap();
-    first.decide("app", Writes::Allowed);
+    let mounted = first.attach("app", "o/app", ActionsCache::Off).unwrap();
+    first.decide("app", Writes::Allowed, Scopes::default());
     assert_eq!(
         request(&mounted, "PUT", "/gradle/abc", b"kept").await.0,
         200
@@ -399,7 +400,10 @@ async fn a_restart_keeps_the_entries_and_an_adopted_runner_its_socket() {
     );
     second.forget_others(&["app"]);
     // The container still mounts the same directory.
-    assert_eq!(second.attach("app", "o/app").unwrap(), mounted);
+    assert_eq!(
+        second.attach("app", "o/app", ActionsCache::Off).unwrap(),
+        mounted
+    );
     assert_eq!(
         request(&mounted, "GET", "/gradle/abc", b"").await,
         (200, b"kept".to_vec())
@@ -411,7 +415,7 @@ async fn a_restart_keeps_the_entries_and_an_adopted_runner_its_socket() {
 #[tokio::test]
 async fn sockets_are_reachable_by_a_containers_root_and_entries_by_no_one_else() {
     let Cache { cache, _dir } = open("modes", 1 << 20);
-    let dir = cache.attach("app", "o/app").unwrap();
+    let dir = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
     let mode = |path: &Path| std::fs::metadata(path).unwrap().permissions().mode() & 0o777;
     assert_eq!(mode(&dir.join(SOCKET)), 0o666);
     assert_eq!(mode(&dir), 0o755);
@@ -432,7 +436,7 @@ async fn undecided_jobs_uploads_take_at_most_the_size_limit() {
     let mut forks = Vec::new();
     for fork in 0..5 {
         let name = format!("fork-{fork}");
-        let socket = cache.attach(&name, "o/app").unwrap();
+        let socket = cache.attach(&name, "o/app", ActionsCache::Off).unwrap();
         assert_eq!(
             request(&socket, "PUT", "/gradle/a", &[0; ENTRY]).await.0,
             200
@@ -441,10 +445,10 @@ async fn undecided_jobs_uploads_take_at_most_the_size_limit() {
     }
     assert_eq!(waiting(&cache), 4, "the fifth upload was not kept on disk");
     for fork in &forks[..4] {
-        cache.decide(fork, Writes::Refused);
+        cache.decide(fork, Writes::Refused, Scopes::default());
     }
     // The room the held uploads took is free again.
-    let last = cache.attach("fork-4", "o/app").unwrap();
+    let last = cache.attach("fork-4", "o/app", ActionsCache::Off).unwrap();
     assert_eq!(request(&last, "PUT", "/gradle/a", &[0; ENTRY]).await.0, 200);
     assert_eq!(waiting(&cache), 1);
     assert_eq!(cache.detach("fork-4").unwrap().refused, 1);
@@ -453,7 +457,7 @@ async fn undecided_jobs_uploads_take_at_most_the_size_limit() {
 #[tokio::test]
 async fn one_undecided_job_takes_at_most_a_quarter_of_the_uploads_room() {
     let Cache { cache, _dir } = open("held-share", 8 * ENTRY as u64);
-    let fork = cache.attach("fork", "o/app").unwrap();
+    let fork = cache.attach("fork", "o/app", ActionsCache::Off).unwrap();
     for key in 0..8 {
         let path = format!("/gradle/{key}");
         assert_eq!(request(&fork, "PUT", &path, &[0; ENTRY]).await.0, 200);
@@ -461,24 +465,24 @@ async fn one_undecided_job_takes_at_most_a_quarter_of_the_uploads_room() {
     assert_eq!(waiting(&cache), 2, "the fork kept a quarter of the room");
     // Other jobs GitHub has not answered for yet, main's among them, find the rest.
     for other in ["main", "nightly", "release"] {
-        let socket = cache.attach(other, "o/app").unwrap();
+        let socket = cache.attach(other, "o/app", ActionsCache::Off).unwrap();
         for key in ["a", "b"] {
             let path = format!("/gradle/{key}");
             assert_eq!(request(&socket, "PUT", &path, &[0; ENTRY]).await.0, 200);
         }
     }
     assert_eq!(waiting(&cache), 8, "every other job's uploads were kept");
-    cache.decide("main", Writes::Allowed);
+    cache.decide("main", Writes::Allowed, Scopes::default());
     assert_eq!(cache.size().entries, 2);
-    cache.decide("fork", Writes::Refused);
+    cache.decide("fork", Writes::Refused, Scopes::default());
     assert_eq!(cache.detach("fork").unwrap().refused, 8);
 }
 
 #[tokio::test]
 async fn an_entry_over_a_quarter_of_the_limit_or_past_twice_it_is_refused() {
     let Cache { cache, _dir } = open("limits", 4 * ENTRY as u64);
-    let app = cache.attach("app", "o/app").unwrap();
-    cache.decide("app", Writes::Allowed);
+    let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("app", Writes::Allowed, Scopes::default());
     assert_eq!(
         request(&app, "PUT", "/gradle/big", &[0; ENTRY + 1]).await.0,
         200
@@ -504,8 +508,8 @@ async fn an_entry_over_a_quarter_of_the_limit_or_past_twice_it_is_refused() {
 #[tokio::test]
 async fn an_entry_only_ever_sent_again_stays_in_use() {
     let Cache { cache, _dir } = open("sent-again", 1 << 20);
-    let app = cache.attach("app", "o/app").unwrap();
-    cache.decide("app", Writes::Allowed);
+    let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("app", Writes::Allowed, Scopes::default());
     for key in ["blob", "old"] {
         assert_eq!(
             request(&app, "PUT", &format!("/bazel/cas/{key}"), &[0; ENTRY])
@@ -557,6 +561,7 @@ fn a_repository_named_in_other_case_than_githubs_still_writes() {
         by_user: true,
         head_repository: Some("acme/app".to_owned()),
         head_branch: "feature".to_owned(),
+        base_branch: "main".to_owned(),
     };
     assert!(
         opened_by_user(&pull, "Acme/App", &pull_request("acme/app")),
@@ -569,7 +574,7 @@ async fn an_adopted_runner_the_cache_is_off_for_leaves_no_socket_once_removed() 
     let dir = TestDir::new("adopted-off");
     let (entries, sockets) = (dir.0.join("entries"), dir.0.join("sockets"));
     let first = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
-    let mounted = first.attach("app", "o/app").unwrap();
+    let mounted = first.attach("app", "o/app", ActionsCache::Off).unwrap();
     drop(first);
     // After the restart the build cache is off, so the adopted runner is not attached again, only kept.
     let second = BuildCache::open(&entries, &sockets, 1 << 20).unwrap();
@@ -585,8 +590,8 @@ async fn uploads_of_one_key_landing_together_leave_the_size_what_the_entry_holds
     let runners: Vec<_> = (0..8)
         .map(|index| {
             let name = format!("main-{index}");
-            let socket = cache.attach(&name, "o/app").unwrap();
-            cache.decide(&name, Writes::Allowed);
+            let socket = cache.attach(&name, "o/app", ActionsCache::Off).unwrap();
+            cache.decide(&name, Writes::Allowed, Scopes::default());
             socket
         })
         .collect();
@@ -636,15 +641,15 @@ async fn empty_uploads_count_against_the_limit_and_leave_no_directories_once_tri
             assert_eq!(request(socket, "PUT", &path, b"").await.0, 200);
         }
     };
-    let fork = cache.attach("fork", "o/app").unwrap();
+    let fork = cache.attach("fork", "o/app", ActionsCache::Off).unwrap();
     put_empty(&fork, 0..20).await;
     assert_eq!(
         waiting(&cache),
         2,
         "an undecided job holds a quarter of the room, however small its uploads"
     );
-    let main = cache.attach("main", "o/app").unwrap();
-    cache.decide("main", Writes::Allowed);
+    let main = cache.attach("main", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("main", Writes::Allowed, Scopes::default());
     put_empty(&main, 0..40).await;
     assert_eq!(
         cache.size(),

@@ -109,6 +109,22 @@ The job page and `runnerctl job` show each job's hits and what it read and store
 
 To keep a repository out, set `build_cache = false` under it. A workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` in its `env`, and any tool's by configuring a remote cache of its own. `runnerctl caches --clean runnerd-build-cache` empties it while no runner runs a job.
 
+### GitHub Actions' cache
+
+The build cache also serves `actions/cache`, the `cache:` input of `setup-node`, `setup-java`, `setup-python` and `setup-gradle`, and Docker's `cache-from: type=gha` and `cache-to: type=gha`. No workflow changes: the image points each node action at the cache in place of GitHub's, and GitHub's cache is neither read nor written while it is on. Restores and saves stay on the host's disk, within `build.max_size` with the build cache's entries. `build.actions_cache = false` under [`[caches]`](../configuration/#caches) leaves jobs on GitHub's cache; `runnerd doctor`, `runnerctl caches` and the Caches page say which it is.
+
+Entries are scoped to branches and pull requests, as on GitHub, and only [the jobs that may write](#build-cache) save:
+
+- A push, schedule or manual run of the default branch or of `build.branches` saves into its branch, and restores from its branch, then from the default branch.
+- An opted-in pull request saves into the pull request's own scope, never its head branch's, and restores from that, then from its base branch, then from the default branch.
+- Every other job restores from the default branch only. Its saves say they saved, so Docker builds that save to the cache do not fail, and are dropped.
+- A pull request never writes what a default-branch job restores.
+- Restores at the start of a job, before GitHub has said what the job is, read the default branch. The first job of a repository after runnerd starts finds nothing then.
+
+A save of a key its scope already has is skipped, as on GitHub. An entry may take at most a quarter of `build.max_size`, however it is uploaded. Artifacts (`upload-artifact`, `download-artifact`) still go to GitHub: runnerd passes those requests on unchanged.
+
+It reaches the node actions the runner starts, through the runner's own node; a workflow's own `NODE_OPTIONS` still applies, and the containers a job starts get nothing of it. It does not reach `container:` jobs and `docker://` actions: those use GitHub's cache. It starts cold; the first default-branch run of each key saves it. Turning it off takes effect for jobs that start after the change; a job already running when runnerd restarts restores nothing and saves nothing for the rest of it, and its artifacts still upload. While runnerd restarts, a job's artifact uploads and downloads, which go through it, fail; `upload-artifact` and `download-artifact` retry for about 25 seconds, so a longer restart fails the step.
+
 ## Records of failed jobs
 
 With `record_failures` on a profile ([Configuration](../configuration/#records-of-failed-jobs)), a failed job's stopped runner is committed to an image, `runnerd-record:<job>`, before it is removed. `runnerctl shell <job>` starts a container from it and opens bash in the job's workspace, after printing the step that failed and what it ran:

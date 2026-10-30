@@ -436,6 +436,112 @@ async fn branches_the_config_names_write_besides_the_default_branch() {
 }
 
 #[tokio::test]
+async fn a_writing_branch_keeps_its_own_actions_cache_entries_and_reads_mains() {
+    use crate::buildcache::actions::{restore, save};
+
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache");
+    let config = CONFIG.replace(
+        "maven = { max_size = \"5G\" }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { branches = [\"release\"] }\n",
+    );
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, &config);
+    let [(main, main_socket), (release, release_socket)] = two_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        [trigger("push", "main"), trigger("push", "release")],
+    )
+    .await;
+    assert!(
+        main_socket.join(buildcache::ACTIONS_MARKER).is_file(),
+        "it is on by default"
+    );
+    until_decided(&mut engine, &cache, &[&main, &release]).await;
+    assert!(save(&main_socket, "deps", b"main's").await);
+    assert!(save(&release_socket, "deps", b"release's").await);
+    assert!(save(&main_socket, "tools", b"main's tools").await);
+    assert_eq!(
+        restore(&main_socket, "deps", &[]).await,
+        Some(("deps".to_owned(), b"main's".to_vec())),
+        "release's save is in release's scope"
+    );
+    assert_eq!(
+        restore(&release_socket, "deps", &[]).await,
+        Some(("deps".to_owned(), b"release's".to_vec()))
+    );
+    assert_eq!(
+        restore(&release_socket, "tools", &[]).await,
+        Some(("tools".to_owned(), b"main's tools".to_vec())),
+        "a branch falls back to the default branch's entries"
+    );
+}
+
+/// `CONFIG` with GitHub Actions' cache turned off.
+fn actions_cache_off() -> String {
+    CONFIG.replace(
+        "maven = { max_size = \"5G\" }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { actions_cache = false }\n",
+    )
+}
+
+#[tokio::test]
+async fn with_the_actions_cache_off_jobs_keep_githubs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-off");
+    let (mut engine, _handle, cache) =
+        engine_with_cache(&github, &docker, &dir, &actions_cache_off());
+    let [(main, main_socket), (pull, _)] =
+        main_and_pull_request(&github, &docker, &mut engine).await;
+    until_decided(&mut engine, &cache, &[&main, &pull]).await;
+    assert!(
+        !main_socket.join(buildcache::ACTIONS_MARKER).exists(),
+        "without the marker the image starts no forwarder and sets no NODE_OPTIONS"
+    );
+    assert_eq!(
+        buildcache::request(&main_socket, "PUT", "/gradle/0a1b", b"classes")
+            .await
+            .0,
+        200,
+        "the build cache is as before"
+    );
+    assert_eq!(cache.size().entries, 1);
+}
+
+#[tokio::test]
+async fn a_job_started_with_the_actions_cache_keeps_working_after_a_restart_turns_it_off() {
+    use crate::buildcache::actions::{restore, save};
+
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-restart-off");
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let [(main, main_socket), (pull, _)] =
+        main_and_pull_request(&github, &docker, &mut engine).await;
+    until_decided(&mut engine, &cache, &[&main, &pull]).await;
+    assert!(save(&main_socket, "deps", b"main's").await);
+    drop(engine);
+
+    // The daemon restarts with it off and adopts the running job, whose container keeps the preload.
+    let (mut engine, _handle, cache) =
+        engine_with_cache(&github, &docker, &dir, &actions_cache_off());
+    engine.recover().await.unwrap();
+    until_decided(&mut engine, &cache, &[&main]).await;
+    assert!(
+        !main_socket.join(buildcache::ACTIONS_MARKER).exists(),
+        "the slot's next runner uses GitHub's cache"
+    );
+    assert_eq!(restore(&main_socket, "deps", &[]).await, None);
+    assert!(
+        save(&main_socket, "deps-1", b"late").await,
+        "a save is answered as kept, as BuildKit fails a build on a refused one"
+    );
+    assert_eq!(cache.size().entries, 1, "and dropped");
+}
+
+#[tokio::test]
 async fn a_tag_named_like_the_default_branch_only_reads() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
@@ -519,6 +625,7 @@ fn persons_pull_request() -> github::PullRequest {
         by_user: true,
         head_repository: Some("o/r".to_owned()),
         head_branch: "feature".to_owned(),
+        base_branch: "main".to_owned(),
     }
 }
 
@@ -559,6 +666,55 @@ async fn a_persons_pull_request_writes_where_the_repository_lets_it_and_main_hit
     assert_eq!(
         buildcache::request(&main_socket, "GET", "/gradle/0a1b", b"").await,
         (200, b"classes".to_vec())
+    );
+}
+
+#[tokio::test]
+async fn a_pull_request_from_main_saves_into_its_own_actions_cache_scope_not_mains() {
+    use crate::buildcache::actions::{restore, save};
+
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-pull-from-main");
+    let (mut engine, _handle, cache) =
+        engine_with_cache(&github, &docker, &dir, &pull_requests_write());
+    // A person who may push only to `evil` opens a pull request from `main` into it: its run is main's commit
+    // merged with evil's, running evil's workflow.
+    github.0.lock().unwrap().pulls.insert(
+        7,
+        github::PullRequest {
+            head_branch: "main".to_owned(),
+            base_branch: "evil".to_owned(),
+            ..persons_pull_request()
+        },
+    );
+    let from_main = github::RunTrigger {
+        pull_requests: vec![7],
+        ..trigger("pull_request", "main")
+    };
+    let [(pull, pull_socket), (main, main_socket)] = two_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        [from_main, trigger("push", "main")],
+    )
+    .await;
+    until_decided(&mut engine, &cache, &[&pull, &main]).await;
+    assert!(save(&main_socket, "tools", b"main's tools").await);
+    assert!(save(&pull_socket, "deps", b"poison").await);
+    assert_eq!(
+        restore(&main_socket, "deps", &[]).await,
+        None,
+        "the pull request's save is in its own scope"
+    );
+    assert_eq!(
+        restore(&pull_socket, "deps", &[]).await,
+        Some(("deps".to_owned(), b"poison".to_vec()))
+    );
+    assert_eq!(
+        restore(&pull_socket, "tools", &[]).await,
+        Some(("tools".to_owned(), b"main's tools".to_vec())),
+        "it reads the default branch's last"
     );
 }
 

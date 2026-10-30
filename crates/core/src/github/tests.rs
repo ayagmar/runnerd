@@ -874,11 +874,13 @@ async fn a_run_and_its_pull_requests_say_whether_people_or_bots_started_them() {
                 "pull_requests":[]}}"#
         )),
         "/repos/o/r/pulls/7" => json(&format!(
-            r#"{{"number":7,"user":{person},"head":{{"ref":"feature","sha":"a1","repo":{{"full_name":"o/r"}}}}}}"#
+            r#"{{"number":7,"user":{person},"head":{{"ref":"feature","sha":"a1","repo":{{"full_name":"o/r"}}}},
+                "base":{{"ref":"main"}}}}"#
         )),
         // A bot's pull request from a fork that was deleted since.
         "/repos/o/r/pulls/8" => json(&format!(
-            r#"{{"number":8,"user":{bot},"head":{{"ref":"patch-1","sha":"c1","repo":null}}}}"#
+            r#"{{"number":8,"user":{bot},"head":{{"ref":"patch-1","sha":"c1","repo":null}},
+                "base":{{"ref":"main"}}}}"#
         )),
         _ => StatusCode::NOT_FOUND.into_response(),
     })
@@ -907,6 +909,7 @@ async fn a_run_and_its_pull_requests_say_whether_people_or_bots_started_them() {
             by_user: true,
             head_repository: Some("o/r".to_owned()),
             head_branch: "feature".to_owned(),
+            base_branch: "main".to_owned(),
         }
     );
     let fork = github.pull_request("o/r", 8).await.unwrap();

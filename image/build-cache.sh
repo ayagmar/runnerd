@@ -8,6 +8,10 @@
 BUILD_CACHE_SOCKET=/run/runnerd-build-cache/cache.sock
 BUILD_CACHE_PORT=41771
 BUILD_CACHE_GRADLE_INIT=/usr/local/share/runnerd/build-cache.gradle
+# GitHub Actions' cache (docs/adr/0082), when runnerd serves it on this runner's socket.
+ACTIONS_CACHE_MARKER=/run/runnerd-build-cache/actions
+ACTIONS_CACHE_PORT=41772
+ACTIONS_CACHE_PRELOAD=/usr/local/lib/runnerd-actions-cache.cjs
 
 start_build_cache() {
     # GRADLE_USER_HOME is the image's, in the slot's cache layer (Dockerfile).
@@ -31,4 +35,18 @@ start_build_cache() {
     # build never depends on an entry runnerd did not keep.
     printf 'build --remote_cache=%s/bazel\nbuild --remote_download_outputs=all\n' "$RUNNERD_BUILD_CACHE_URL" \
         > /etc/bazel.bazelrc
+    start_actions_cache
+}
+
+# GitHub Actions' cache, for actions/cache, the setup-* actions' caches and BuildKit's type=gha. BuildKit runs in a
+# container of this container's Docker Engine, whose loopback is its own, so the forwarder listens on this
+# container's addresses; the rule drops the port on eth0 and its like, where other containers and the host arrive,
+# and jobs, without root, cannot remove it. The runner's node, wrapped (node.sh), loads the preload that points each
+# node action at it (runnerd-actions-cache.cjs) while RUNNERD_ACTIONS_CACHE_PORT is set. Without the marker or the
+# rule, jobs use GitHub's cache service.
+start_actions_cache() {
+    [ -f "$ACTIONS_CACHE_MARKER" ] && [ -f "$ACTIONS_CACHE_PRELOAD" ] || return 0
+    iptables -I INPUT -i eth+ -p tcp --dport "$ACTIONS_CACHE_PORT" -j DROP 2> /dev/null || return 0
+    socat "TCP4-LISTEN:$ACTIONS_CACHE_PORT,fork,reuseaddr" "UNIX-CONNECT:$BUILD_CACHE_SOCKET" > /dev/null 2>&1 &
+    export RUNNERD_ACTIONS_CACHE_PORT=$ACTIONS_CACHE_PORT
 }

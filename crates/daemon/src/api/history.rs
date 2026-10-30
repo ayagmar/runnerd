@@ -291,11 +291,16 @@ pub(super) async fn caches(_: Authenticated, State(state): State<AppState>) -> R
                     match state.handle.store.build_cache_since(since).await {
                         Ok(week) => {
                             let size = cache.size();
+                            // The config runners start with: one already running keeps what it started with.
+                            let text = state.config.lock().await.text.clone();
+                            let actions_cache = Config::parse(&text)
+                                .is_ok_and(|config| config.caches.build.actions_cache);
                             Some(BuildCacheStats {
                                 bytes: size.bytes,
                                 entries: size.entries,
                                 limit,
                                 week,
+                                actions_cache,
                             })
                         }
                         Err(store_error) => return failed(&store_error),

@@ -566,6 +566,9 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
             .iter()
             .map(|(name, visibility)| visibility_check(name, visibility)),
     );
+    if let Some(config) = config {
+        checks.push(config.caches.build.actions_cache_check());
+    }
     checks.push(Check {
         name: "/dev/kvm".to_owned(),
         status: Status::Info,

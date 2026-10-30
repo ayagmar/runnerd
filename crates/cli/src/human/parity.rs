@@ -144,6 +144,7 @@ fn records_and_caches_state_their_limits_as_core_does() {
     );
     let text = caches(&daemon.caches, NOW, PLAIN);
     assert!(text.contains(&facts.build_cache_week), "{text}");
+    assert!(text.contains(&facts.actions_cache), "{text}");
 }
 
 #[test]

@@ -783,6 +783,10 @@ pub struct BuildCacheStats {
     pub limit: u64,
     /// The runners of the last 7 days, summed.
     pub week: BuildCacheCounts,
+    /// `[caches.build] actions_cache`: whether it also serves GitHub Actions' cache (ADR 0082). `false` from a
+    /// daemon older than it, which never served it.
+    #[serde(default)]
+    pub actions_cache: bool,
 }
 
 /// `GET /v1/caches/history` query parameters.

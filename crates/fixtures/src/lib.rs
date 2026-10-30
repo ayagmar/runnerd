@@ -501,6 +501,7 @@ fn caches() -> Caches {
                 refused: 4,
                 writer: true,
             },
+            actions_cache: true,
         }),
     }
 }
@@ -724,6 +725,8 @@ pub struct Facts {
     pub records_tone: Tone,
     /// The build cache's week.
     pub build_cache_week: String,
+    /// Where jobs' GitHub Actions cache is.
+    pub actions_cache: String,
     /// The month's job minutes priced at GitHub's rates, with their basis.
     pub savings: String,
     /// The last 30 days', which reach the jobs of September.
@@ -743,6 +746,19 @@ fn row(job: &JobSummary) -> JobRow {
     }
 }
 
+/// The build cache's stats of `daemon`.
+#[expect(
+    clippy::expect_used,
+    reason = "test support: fixtures without their own jobs fail the test"
+)]
+fn build_stats(daemon: &Daemon) -> &BuildCacheStats {
+    daemon
+        .caches
+        .build
+        .as_ref()
+        .expect("the build cache's stats")
+}
+
 /// The facts of `daemon`, as core computes them at [`NOW`].
 ///
 /// # Panics
@@ -756,6 +772,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
     let status = &daemon.status;
     let job = daemon.job(TIMED_OUT).expect("the timed-out job");
     let compared = job.compare(&daemon.runs(TIMED_OUT), NOW);
+    let build = build_stats(daemon);
     let build_cache = job
         .summary
         .metrics
@@ -844,12 +861,8 @@ pub fn facts(daemon: &Daemon) -> Facts {
             .expect("the records are near max_total")
             .to_owned(),
         records_tone: daemon.records.summary_tone(),
-        build_cache_week: daemon
-            .caches
-            .build
-            .as_ref()
-            .expect("the build cache's week")
-            .week_line(),
+        build_cache_week: build.week_line(),
+        actions_cache: build.actions_cache_line(),
         savings: daemon.savings.month.headline(),
         savings_30_days: daemon.savings.last_30_days.headline(),
     }
