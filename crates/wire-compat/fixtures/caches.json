@@ -1,6 +1,7 @@
 {
   "full": {
     "build": {
+      "actions_cache": true,
       "bytes": 4294967296,
       "entries": 9000,
       "limit": 21474836480,
