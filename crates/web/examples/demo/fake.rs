@@ -1122,13 +1122,14 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                 }
                 advice => advice,
             };
+            let runs: u64 = jobs.iter().map(|job| job.peaks.jobs).sum();
             ProfileSizing {
                 name: name.clone(),
                 memory: profile.memory.0,
                 cpus: profile.cpus,
                 slots: profile.slots,
                 peaks: Peaks {
-                    jobs: jobs.iter().map(|job| job.peaks.jobs).sum(),
+                    jobs: runs,
                     at_cap: 0,
                     memory,
                     cpu: spread(3100, 6900, 7600, 7900),
@@ -1136,10 +1137,11 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                     on_cap: 0,
                 },
                 wait,
+                // Every run of its jobs started warm or cold, 31 in 40 of them warm.
                 starts: Starts {
-                    warm: 31,
+                    warm: u32::try_from(runs * 31 / 40).unwrap(),
                     warm_p50: 2,
-                    cold: 9,
+                    cold: u32::try_from(runs - runs * 31 / 40).unwrap(),
                     cold_p50: 21,
                 },
                 busy,
@@ -1541,6 +1543,18 @@ fn router(fake: Fake) -> Router {
                             status: CheckStatus::Warn,
                             detail: "runnerd.slice has MemoryMax=33G but no MemoryHigh".to_owned(),
                             fix: Some("systemctl edit runnerd.slice, then add MemoryHigh=30G under [Slice]".to_owned()),
+                        },
+                        Check {
+                            name: "repository".to_owned(),
+                            status: CheckStatus::Warn,
+                            detail: "halyard/docs is public: anyone who opens a pull request on it can run code on this host, and their jobs share runnerd's caches with your trusted jobs".to_owned(),
+                            fix: Some("serve private repositories only; for a public one, have GitHub require approval before it runs workflows from fork pull requests (the repository's Actions settings)".to_owned()),
+                        },
+                        Check {
+                            name: "config file".to_owned(),
+                            status: CheckStatus::Warn,
+                            detail: "/home/forge/.config/runnerd/runnerd.toml has mode 644, so other users can read it, and any notification secret the dashboard saves in it".to_owned(),
+                            fix: Some("chmod 600 '/home/forge/.config/runnerd/runnerd.toml'".to_owned()),
                         },
                     ],
                 })

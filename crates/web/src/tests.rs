@@ -2971,7 +2971,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     let off = dashboard.page(&cookie, "/sizing").await.body;
     assert!(off.contains("Auto sizing is off"), "{off}");
     assert!(
-        off.contains("<dt>Warm starts</dt><dd>31 of 40, p50 2s (others 21s)</dd>"),
+        off.contains("<dt>Warm starts</dt><dd>310 of 400, p50 2s (others 21s)</dd>"),
         "{off}"
     );
     {

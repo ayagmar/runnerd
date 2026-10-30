@@ -185,6 +185,10 @@ async fn records_and_the_build_cache_state_their_limits_as_core_does() {
     let shown = text(&html);
     assert!(shown.contains(&facts.build_cache_week), "{shown}");
     assert!(shown.contains(&facts.actions_cache), "{shown}");
+    assert!(
+        shown.contains(runnerd_core::api::BUILD_CACHE_TOOLS),
+        "the build cache names the tools it serves: {shown}"
+    );
     let summary = format!("{}; {}", facts.records_usage, facts.records_pressure);
     let at = html
         .find(&sentence(&summary))

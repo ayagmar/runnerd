@@ -16,7 +16,7 @@ use std::time::{Duration, SystemTime, UNIX_EPOCH};
 use runnerd_core::api::{
     Admission, AdmissionPolicy, AutoPlan, Basis, CpuAdmission, CpuBudget, Event, EventEnvelope,
     Holder, HostBudget, HostMemory, HostSample, JobPeak, JobState, PoolStatus, ProfileStatus,
-    Resize, RunnerStatus, Sample, SizingChange, SizingHold, SlotStatus, Waiting,
+    Resize, RunnerStatus, Sample, SizingChange, SizingHold, SizingRefused, SlotStatus, Waiting,
 };
 
 mod fake;
@@ -43,6 +43,7 @@ async fn main() {
     auto_sizing(&fake);
     small_pool(&fake);
     measured(&fake);
+    downtime(&fake);
     busy_desktop(&fake);
     fake::serve(&socket, fake.clone());
     let listener = runnerd_web::listen(&addr).await.unwrap().unwrap();
@@ -212,8 +213,30 @@ fn auto_sizing(fake: &fake::Fake) {
             lower_until: fixtures.now + 86_400,
         }],
         blocked: None,
-        refused: Vec::new(),
+        refused: vec![SizingRefused {
+            profile: "jvm".to_owned(),
+            reason: "13 runs of build averaged 7.4 CPUs of its 8 (median): the cap holds them back; 9 CPUs \
+                     do not fit the CPU budget with every profile's warm runners and one more runner at the \
+                     largest cap"
+                .to_owned(),
+        }],
     });
+}
+
+/// The newest finished ledger build waited 9 hours, 8 of them while runnerd was not running to follow it.
+fn downtime(fake: &fake::Fake) {
+    let mut fixtures = fake.fixtures.lock().unwrap();
+    if let Some(job) = fixtures
+        .jobs
+        .iter_mut()
+        .filter(|job| {
+            job.summary.state == JobState::Completed && job.summary.repository == "halyard/ledger"
+        })
+        .max_by_key(|job| job.summary.timeline.queued_at)
+    {
+        job.summary.timeline.queued_at -= 9 * 3600;
+        job.summary.timeline.unseen = 8 * 3600 + 10 * 60;
+    }
 }
 
 /// storefront split in two pools: its node jobs wait for a node slot while a `small` runner, 1G for its light jobs,
