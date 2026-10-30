@@ -362,6 +362,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // A reload may have left fewer slots than runners: free slots count only up to the configured number.
         let mut free = (profile.slots as usize)
             .saturating_sub(slots.iter().filter(|slot| slot.is_some()).count());
+        let slots_len = slots.len();
         let slots = slots
             .iter()
             .map(|slot| match slot {
@@ -392,6 +393,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 None
             },
             slots,
+            ran: (0..slots_len)
+                .map(|index| {
+                    self.ran
+                        .get(&SlotRef {
+                            profile: name.to_owned(),
+                            index,
+                        })
+                        .cloned()
+                })
+                .collect(),
         }
     }
 

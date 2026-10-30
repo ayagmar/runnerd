@@ -372,6 +372,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     (String::new(), Some(error.to_string()))
                 }
             };
+            // A reseed that made a snapshot dropped every slot's layer, so none holds a job's caches; one that failed
+            // may have dropped some.
+            if error.is_some() || cache::seeded(&output) {
+                self.ran.retain(|slot, _| slot.profile != name);
+            }
             self.store.event(api::Event::CacheReseeded {
                 profile: name,
                 output: output.trim().to_owned(),

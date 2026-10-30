@@ -473,6 +473,12 @@ pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<Stri
     finish_reseed(docker, &id).await
 }
 
+/// Whether the output of a reseed (`image/seed.sh`) says it replaced the snapshot, and so dropped every slot's own
+/// layer changes, rather than left them because slot 1 changed too little.
+pub fn seeded(output: &str) -> bool {
+    !output.trim_start().starts_with("not seeded")
+}
+
 /// Waits for a seed container to exit, removes it, and returns its output. Also takes over a seed container an
 /// earlier daemon left running: stopping it between its `rm` and `mv` would lose that snapshot layer.
 pub async fn finish_reseed(docker: &impl DockerApi, container: &str) -> Result<String, Error> {

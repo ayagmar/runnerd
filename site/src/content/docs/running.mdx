@@ -69,7 +69,7 @@ A job that finds no runner waits for the next poll, a registration and a contain
 
 ## Warm caches
 
-A slot is one concurrent job of a profile. Each job gets a new container, but the slot keeps a volume over the profile's read-only snapshot. What a job deletes of the image, or replaces, stays deleted for every slot once it is in the snapshot. The images point every common toolchain's cache into `~/.cache`: rustup and cargo, Go modules and builds, Gradle, Maven, npm, Yarn, Bun, pip, uv, Poetry, pub, Deno and coursier.
+A slot is one concurrent job of a profile. Each job gets a new container, but the slot keeps a volume over the profile's read-only snapshot. A queued job starts in the free slot that ran the same job last (same repository, workflow and job name), else in one that ran a job of its repository, else in the lowest free slot, so a repeated job finds its own caches. It never waits for that slot, and a warm runner takes whichever job GitHub gives it. A reseed that replaces the snapshot drops every slot's own changes, and with them the preference. What a job deletes of the image, or replaces, stays deleted for every slot once it is in the snapshot. The images point every common toolchain's cache into `~/.cache`: rustup and cargo, Go modules and builds, Gradle, Maven, npm, Yarn, Bun, pip, uv, Poetry, pub, Deno and coursier.
 
 <Caches />
 

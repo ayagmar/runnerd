@@ -177,6 +177,17 @@ pub struct OpenJob {
     pub labels: Vec<String>,
 }
 
+/// The job a slot ran last, as the history has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotJob {
+    /// The profile the slot is in.
+    pub profile: String,
+    /// 1-based.
+    pub slot: usize,
+    /// The job, as admission tells jobs apart.
+    pub key: crate::admission::Key,
+}
+
 /// Where a job's log capture continues: the runner's page file and the byte offset in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogPosition {
@@ -880,6 +891,11 @@ impl Store {
     /// The jobs not yet closed, for the engine after a restart.
     pub async fn open_jobs(&self) -> Result<Vec<OpenJob>, StoreError> {
         self.read(read::open_jobs).await
+    }
+
+    /// The newest named job each slot ran, for the engine after a restart.
+    pub async fn slot_jobs(&self) -> Result<Vec<SlotJob>, StoreError> {
+        self.read(read::slot_jobs).await
     }
 
     /// The job a runner took, if the history knows it.

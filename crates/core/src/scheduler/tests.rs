@@ -7,6 +7,7 @@ use super::{
     Budget, CPU_PRIORITY_AFTER, Decision, Hold, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository,
     RunnerSlot, Slot, SlotRef, plan,
 };
+use crate::admission::Key;
 use crate::api::{HoldCause, Waiting};
 use crate::github::QueuedJob;
 
@@ -63,6 +64,7 @@ fn profiles(slots: Vec<Slot>) -> BTreeMap<String, Profile> {
             preparing: None,
             upkeep_due: false,
             count: slots.len(),
+            ran: Vec::new(),
             slots,
         },
     )])
@@ -472,6 +474,7 @@ fn each_job_left_queued_says_why_it_waits() {
             preparing: None,
             upkeep_due: false,
             count: 1,
+            ran: Vec::new(),
             slots: vec![busy],
         },
     );
@@ -483,6 +486,7 @@ fn each_job_left_queued_says_why_it_waits() {
             preparing: Some(Preparing::Reseeding),
             upkeep_due: false,
             count: 1,
+            ran: Vec::new(),
             slots: vec![Slot::Free],
         },
     );
@@ -804,6 +808,7 @@ fn a_queued_job_takes_the_memory_and_cpu_of_warm_runners_of_another_profile() {
             preparing: None,
             upkeep_due: false,
             count: 2,
+            ran: Vec::new(),
             slots: vec![idle_runner("o/w", now()), idle_runner("o/w", now())],
         },
     );
@@ -1058,4 +1063,114 @@ fn only_jobs_for_githubs_own_images_go_unlisted() {
     let unserved: Vec<u64> = waiting.keys().copied().collect();
     // GitHub's own labels are left to it; the rest, `self-hosted` beside an image name too, are the owner's to fix.
     assert_eq!(unserved, [18, 19, 20, 21, 22, 23]);
+}
+
+fn ran(repository: &str, workflow: &str, name: &str) -> Key {
+    Key {
+        repository: repository.to_owned(),
+        workflow: Some(workflow.to_owned()),
+        name: name.to_owned(),
+    }
+}
+
+fn named(id: u64, workflow: &str, name: &str) -> QueuedJob {
+    QueuedJob {
+        name: name.to_owned(),
+        workflow: Some(workflow.to_owned()),
+        ..job(id, &["self-hosted", "app"])
+    }
+}
+
+fn remembering(slots: Vec<Slot>, ran: Vec<Option<Key>>) -> BTreeMap<String, Profile> {
+    let mut profiles = profiles(slots);
+    if let Some(profile) = profiles.get_mut("app") {
+        profile.ran = ran;
+    }
+    profiles
+}
+
+#[test]
+fn a_job_starts_in_the_free_slot_that_ran_the_same_job_last() {
+    let repositories = [repository("o/a", "app", vec![named(1, "ci", "build")])];
+    let profiles = remembering(
+        vec![Slot::Free, Slot::Free, Slot::Free],
+        vec![
+            Some(ran("o/a", "ci", "test")),
+            Some(ran("o/b", "ci", "build")),
+            Some(ran("o/a", "ci", "build")),
+        ],
+    );
+    let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(2, "o/a")]);
+}
+
+#[test]
+fn without_the_same_job_a_job_prefers_a_slot_of_its_repository_and_then_the_lowest() {
+    let profiles = remembering(
+        vec![Slot::Free, Slot::Free, Slot::Free],
+        // Same name and workflow in another repository, then the repository's other workflow, then nothing known.
+        vec![
+            Some(ran("o/b", "ci", "build")),
+            None,
+            Some(ran("o/a", "release", "build")),
+        ],
+    );
+    let in_repository = [repository("o/a", "app", vec![named(1, "ci", "build")])];
+    let decisions = plan(&in_repository, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(2, "o/a")]);
+
+    let elsewhere = [repository("o/c", "app", vec![named(1, "ci", "build")])];
+    let decisions = plan(&elsewhere, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(0, "o/c")]);
+}
+
+#[test]
+fn a_job_never_waits_for_the_slot_it_prefers() {
+    let repositories = [repository(
+        "o/a",
+        "app",
+        vec![named(1, "ci", "build"), named(2, "ci", "build")],
+    )];
+    // The slot that ran the job is busy: the free one starts it. Two copies of the job: one takes the slot that
+    // ran it, the other the next free.
+    let busy = Slot::Runner(RunnerSlot {
+        repository: "o/a".to_owned(),
+        busy: true,
+        started_at: now(),
+        memory: 4 * GIB,
+        cpu: 2000,
+    });
+    let profiles = remembering(
+        vec![Slot::Free, busy, Slot::Free],
+        vec![None, Some(ran("o/a", "ci", "build")), None],
+    );
+    let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(0, "o/a"), (2, "o/a")]);
+
+    let profiles = remembering(
+        vec![Slot::Free, Slot::Free, Slot::Free],
+        vec![None, Some(ran("o/a", "ci", "build")), None],
+    );
+    let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(1, "o/a"), (0, "o/a")]);
+}
+
+#[test]
+fn a_job_with_no_warm_slot_leaves_a_younger_jobs_warm_slot_to_it() {
+    // Slot 1 last ran o/y's build; slot 3 is unknown. o/x's older job has no history, o/y's build is younger.
+    let repositories = [
+        repository("o/x", "app", vec![named(1, "ci", "lint")]),
+        repository("o/y", "app", vec![named(2, "ci", "build")]),
+    ];
+    let profiles = remembering(
+        vec![Slot::Free, Slot::Free, Slot::Free],
+        vec![Some(ran("o/y", "ci", "build")), None, None],
+    );
+    let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(1, "o/x"), (0, "o/y")]);
+
+    // With one slot free there is nothing to leave: the older job starts there rather than wait.
+    let profiles = remembering(vec![Slot::Free], vec![Some(ran("o/y", "ci", "build"))]);
+    let decisions = plan(&repositories, &profiles, budget(None, None), now()).decisions;
+    assert_eq!(starts(&decisions), [(0, "o/x")]);
 }

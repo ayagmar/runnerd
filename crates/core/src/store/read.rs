@@ -8,7 +8,8 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use tracing::warn;
 
-use super::{LogPosition, OpenJob};
+use super::{LogPosition, OpenJob, SlotJob};
+use crate::admission::Key;
 use crate::api::{self, EventEnvelope, JobState};
 use crate::sizing;
 
@@ -954,6 +955,57 @@ pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
         })
     })?
     .collect()
+}
+
+pub(super) fn slot_jobs(db: &Connection) -> rusqlite::Result<Vec<SlotJob>> {
+    // The bare columns of a `max()` aggregate come from the row that has the maximum.
+    let newest: Vec<(SlotJob, u64)> = db
+        .prepare_cached(
+            "SELECT r.profile, r.slot, j.repository, j.workflow, j.name, \
+             coalesce(j.finished_at, j.started_at, j.queued_at), max(j.id) FROM jobs j \
+             JOIN runners r ON r.name = j.runner GROUP BY r.profile, r.slot",
+        )?
+        .query_map([], |row| {
+            Ok((
+                SlotJob {
+                    profile: row.get(0)?,
+                    slot: row.get(1)?,
+                    key: Key {
+                        repository: row.get(2)?,
+                        workflow: row.get(3)?,
+                        name: row.get(4)?,
+                    },
+                },
+                row.get(5)?,
+            ))
+        })?
+        .collect::<rusqlite::Result<_>>()?;
+    // A reseed that made a snapshot dropped every slot's layer of its profile: what ran before it left nothing.
+    let mut reseeded = std::collections::BTreeMap::<String, u64>::new();
+    let bodies: Vec<(u64, String)> = db
+        .prepare_cached("SELECT at, body FROM events WHERE body LIKE '%\"cache.reseeded\"%'")?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    for (at, body) in bodies {
+        if let Ok(api::Event::CacheReseeded {
+            profile,
+            output,
+            error,
+        }) = serde_json::from_str(&body)
+            && (error.is_some() || crate::cache::seeded(&output))
+        {
+            let latest = reseeded.entry(profile).or_default();
+            *latest = (*latest).max(at);
+        }
+    }
+    // A job no listing named leaves its slot unknown.
+    Ok(newest
+        .into_iter()
+        .filter(|(job, at)| {
+            !job.key.name.is_empty() && reseeded.get(&job.profile).is_none_or(|made| at > made)
+        })
+        .map(|(job, _)| job)
+        .collect())
 }
 
 pub(super) fn runner_job(db: &Connection, runner: &str) -> rusqlite::Result<Option<u64>> {
