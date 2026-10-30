@@ -24,6 +24,7 @@
 
 use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Once;
 
 use runnerd_core::buildcache::{ActionsCache, BuildCache, MOUNT, Scopes, Writes};
 
@@ -61,8 +62,14 @@ fn docker(args: &[&str]) -> (bool, String) {
     (output.status.success(), text)
 }
 
-/// Builds the test image: the Node image with the runner image's scripts, `@actions/cache` and a `runner` user.
+/// Builds the test image once per test binary: the tests run in parallel and share its build context.
 fn build_image() {
+    static BUILT: Once = Once::new();
+    BUILT.call_once(build_image_now);
+}
+
+/// Builds the test image: the Node image with the runner image's scripts, `@actions/cache` and a `runner` user.
+fn build_image_now() {
     let context = scratch("image");
     for file in [
         "build-cache.sh",
