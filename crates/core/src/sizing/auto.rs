@@ -470,6 +470,25 @@ fn reverted(
     let (Advice::Raise { memory, slots }, Some(revert)) = (advised.advice, &advised.revert) else {
         return Revert::Outside;
     };
+    let from = Resize {
+        memory: profile.memory.0,
+        slots: profile.slots,
+        cpus: None,
+    };
+    // As far back as `[host] memory_ceiling` allows, when a reload lowered it since. A target outside the profile's
+    // bounds is sized as any other raise, which stops at `max_memory`, before the slots are fitted at a memory it
+    // never writes.
+    let target = advised
+        .ceiling
+        .map_or(revert.to, |hold| revert.to.min(hold.most));
+    let memory_within = Resize {
+        memory,
+        slots: from.slots,
+        cpus: None,
+    };
+    if memory != target || !within(profile, from, memory_within) {
+        return Revert::Outside;
+    }
     // The advice holds the slots the slice holds beside the config's other profiles; under caps, the changes before
     // it in this look may have taken some of that.
     let slots = match (config.host.admission, context.memory_max) {
@@ -484,21 +503,12 @@ fn reverted(
         return Revert::Wait;
     }
     let running = context.running.get(&advised.name).copied().unwrap_or(0);
-    let from = Resize {
-        memory: profile.memory.0,
-        slots: profile.slots,
-        cpus: None,
-    };
     let to = Resize {
         memory,
         slots,
         cpus: None,
     };
-    // As far back as `[host] memory_ceiling` allows, when a reload lowered it since.
-    let target = advised
-        .ceiling
-        .map_or(revert.to, |hold| revert.to.min(hold.most));
-    if memory != target || !within(profile, from, to) {
+    if !within(profile, from, to) {
         return Revert::Outside;
     }
     if config.host.admission == Admission::Caps && running > slots {

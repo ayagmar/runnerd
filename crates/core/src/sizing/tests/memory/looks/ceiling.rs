@@ -380,24 +380,32 @@ fn a_revert_under_caps_takes_back_only_the_slots_the_budget_holds_now() {
 
 #[test]
 fn a_revert_max_memory_holds_under_the_ceiling_goes_to_max_memory_where_the_slice_holds_that() {
-    // Measured admission in an 11.5G slice beside the 512M mirror: 11G fits, the 11.75G the ceiling allows does not,
-    // and max_memory stops the revert at 11G anyway.
-    let text = host(
-        &jvm_at("10G", 3).replacen("slots = 3\n", "slots = 3\nmax_memory = \"11G\"\n", 1),
-        "admission = \"measured\"\nmemory_ceiling = \"12.4G\"",
-    );
-    let mut after = clear_at_ten(LOWERED + HOUR, 10);
-    after.push(met(ledger(NOW - 2 * HOUR, 10 * G, 0)));
-    let mut daemon = Daemon::restarted(text, lowered(after), 11 * G + G / 2, NOW - HOUR);
-    let mut changes = Vec::new();
-    for hour in 0..6 {
-        changes.extend(daemon.checked_look(NOW + hour * HOUR));
+    // The slice holds one 11G jvm runner beside the 512M mirror (and, under caps, node's 14G), not the 11.75G the
+    // ceiling allows, and max_memory stops the revert at 11G anyway, under either admission.
+    for (admission, slots, memory_max) in
+        [("measured", 3, 11 * G + G / 2), ("caps", 1, 25 * G + G / 2)]
+    {
+        let text = host(
+            &jvm_at("10G", slots).replacen(
+                &format!("slots = {slots}\n"),
+                &format!("slots = {slots}\nmax_memory = \"11G\"\n"),
+                1,
+            ),
+            &format!("admission = \"{admission}\"\nmemory_ceiling = \"12.4G\""),
+        );
+        let mut after = clear_at_ten(LOWERED + HOUR, 10);
+        after.push(met(ledger(NOW - 2 * HOUR, 10 * G, 0)));
+        let mut daemon = Daemon::restarted(text, lowered(after), memory_max, NOW - HOUR);
+        let mut changes = Vec::new();
+        for hour in 0..6 {
+            changes.extend(daemon.checked_look(NOW + hour * HOUR));
+        }
+        assert_eq!(
+            memory_steps(&changes),
+            [(10 * G, 11 * G)],
+            "{admission}: to max_memory, once"
+        );
     }
-    assert_eq!(
-        memory_steps(&changes),
-        [(10 * G, 11 * G)],
-        "to max_memory, once"
-    );
 }
 
 #[test]
