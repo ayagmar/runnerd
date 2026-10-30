@@ -8,15 +8,24 @@
 # An image without a layer's path (base has no Android SDK) skips that layer.
 LAYERS=(cache:/home/runner/.cache tools:/home/runner/_work/_tool android:/opt/android-sdk)
 
-# Files in the cache layer where a job may leave a registry token or its own settings: cargo's credentials and
-# config, Gradle's properties (signing keys, publishing credentials). The layer outlives the job, so no container
-# sees one from the slot's changes or the snapshot (mount_layers), and a new snapshot holds none (seed.sh); the
-# image's own copies, if any, stay.
-CACHE_SECRETS=(cargo/credentials cargo/credentials.toml cargo/config cargo/config.toml gradle/gradle.properties)
+# Files and directories in the cache layer where a job may leave a registry token or its own settings: cargo's
+# credentials and config, Gradle's properties (signing keys, publishing credentials) and init scripts (credentials, and
+# code every later build runs), the Maven wrapper's settings (MAVEN_USER_HOME), Hugging Face's tokens (HF_HOME). The
+# layer outlives the job, so no container sees one from the slot's changes or the snapshot (mount_layers), and a new
+# snapshot holds none (seed.sh); the image's own copies, if any, stay.
+CACHE_SECRETS=(cargo/credentials cargo/credentials.toml cargo/config cargo/config.toml gradle/gradle.properties
+    gradle/init.d gradle/init.gradle gradle/init.gradle.kts m2/settings.xml m2/settings-security.xml
+    huggingface/token huggingface/stored_tokens)
 
 # Present while seed.sh changes the profile's snapshot or a slot's layers (docs/adr/0066). One a reseed that did not
 # finish left means the snapshot and the slots' changes may not match: a container leaves out both.
 RESEED_MARKER=/base/.reseeding
+
+# Which snapshot a slot's layers were made against: seed.sh writes a new value to the profile's with each change to
+# the snapshot, and mount_layers keeps the one the slot's layers are on in the slot's. A slot whose value differs, as
+# one a lower `slots` closed while its profile reseeded, starts over from the snapshot. Missing is 0.
+GENERATION=/base/.generation
+SLOT_GENERATION=/state/.generation
 
 # Disk budgets per slot, in GB. A layer whose changes outgrow LAYER_BUDGET_GB starts over from the snapshot when
 # a container starts; after a job and when a container starts, the build cache is trimmed to about half of
@@ -84,12 +93,21 @@ keep_docker_budget() {
 # the snapshot's, from a snapshot seeded before seed.sh dropped them, are then deleted through the mounted layer,
 # which leaves a whiteout in the slot's changes that the next mount drops and makes again. The whiteout would hide
 # the image's own copy too, so that copy is put back over it. While RESEED_MARKER is there, each layer is the image
-# alone with no changes of the slot's, until the profile's next reseed starts it over.
+# alone with no changes of the slot's, until the profile's next reseed starts it over. Layers made against another
+# snapshot than the profile's (GENERATION) start over from it.
 mount_layers() {
-    local layer name path lower image_copies interrupted=
+    local layer name path lower image_copies generation interrupted=
     if [ -e "$RESEED_MARKER" ]; then
         interrupted=1
         echo "runnerd: the profile's last reseed did not finish: this job's caches start from the image" >&2
+    fi
+    generation=$(cat "$GENERATION" 2> /dev/null || echo 0)
+    if [ "$generation" != "$(cat "$SLOT_GENERATION" 2> /dev/null || echo 0)" ]; then
+        # Never the slot's Docker store. A crash before the new value is written only removes them again.
+        for layer in "${LAYERS[@]}"; do
+            rm -rf "/state/${layer%%:*}"
+        done
+        echo "$generation" > "$SLOT_GENERATION"
     fi
     for layer in "${LAYERS[@]}"; do
         name=${layer%%:*} path=${layer#*:}
@@ -123,7 +141,7 @@ drop_cache_secrets() {
         if [ -L "$1/${file%/*}" ]; then
             rm -f "$1/${file%/*}"
         else
-            rm -f "$1/$file"
+            rm -rf "${1:?}/$file"
         fi
     done
 }
@@ -138,7 +156,7 @@ in_snapshot() {
 keep_image_secrets() {
     local file
     for file in "${CACHE_SECRETS[@]}"; do
-        if in_snapshot "$file" && [ -f "$1/$file" ] && [ ! -L "$1/$file" ]; then
+        if in_snapshot "$file" && { [ -f "$1/$file" ] || [ -d "$1/$file" ]; } && [ ! -L "$1/$file" ]; then
             mkdir -p "$2/${file%/*}"
             cp -a "$1/$file" "$2/$file"
         fi
@@ -151,7 +169,7 @@ hide_snapshot_secrets() {
     local file
     for file in "${CACHE_SECRETS[@]}"; do
         in_snapshot "$file" || continue
-        rm -f "$1/$file"
+        rm -rf "${1:?}/$file"
         [ ! -e "$2/$file" ] || cp -a "$2/$file" "$1/$file"
     done
     rm -rf "$2"

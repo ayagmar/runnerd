@@ -497,7 +497,89 @@ pub async fn finish_reseed(docker: &impl DockerApi, container: &str) -> Result<S
 
 #[cfg(test)]
 mod tests {
+    use std::path::Path;
+    use std::process::Command;
+
     use super::docker_budget_gib;
+    use crate::testdir::TestDir;
+
+    /// Runs `script` in bash with `image/layers.sh` sourced and `args` as its arguments; returns what it printed.
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a test helper: a script that does not run fails the test"
+    )]
+    fn with_layers(script: &str, args: &[&Path]) -> String {
+        let layers = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../image/layers.sh");
+        let output = Command::new("bash")
+            .arg("-euc")
+            .arg(format!(". \"$0\"; {script}"))
+            .arg(layers)
+            .args(args)
+            .output()
+            .unwrap();
+        assert!(
+            output.status.success(),
+            "the script exits 0: {}",
+            String::from_utf8_lossy(&output.stderr)
+        );
+        String::from_utf8(output.stdout).unwrap()
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a test: a file it cannot write fails it"
+    )]
+    fn no_credential_a_job_leaves_in_the_cache_layer_reaches_the_slots_next_job() {
+        let listed = with_layers("printf '%s\\n' \"${CACHE_SECRETS[@]}\"", &[]);
+        let secrets: Vec<&str> = listed.lines().collect();
+        for credential in [
+            "cargo/credentials.toml",
+            "gradle/gradle.properties",
+            "gradle/init.d",
+            "m2/settings.xml",
+            "m2/settings-security.xml",
+            "huggingface/token",
+        ] {
+            assert!(
+                secrets.contains(&credential),
+                "{credential} is in CACHE_SECRETS: {secrets:?}"
+            );
+        }
+        let dir = TestDir::new("cache-secrets");
+        let upper = dir.0.join("upper");
+        let write = |path: &str| {
+            let path = upper.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "token").unwrap();
+        };
+        // Each as a file, and as a directory a job made there, as Gradle's init.d is.
+        for secret in &secrets {
+            write(&format!("files/{secret}"));
+            write(&format!("dirs/{secret}/held"));
+        }
+        let kept = [
+            "npm/_cacache/index",
+            "m2/wrapper/dists/maven.zip",
+            "gradle/caches/jars",
+        ];
+        for path in kept {
+            write(&format!("files/{path}"));
+        }
+        with_layers(
+            "drop_cache_secrets \"$1/files\"; drop_cache_secrets \"$1/dirs\"",
+            &[&upper],
+        );
+        for secret in &secrets {
+            for copy in ["files", "dirs"] {
+                let path = upper.join(copy).join(secret);
+                assert!(!path.exists(), "{} is gone", path.display());
+            }
+        }
+        for path in kept {
+            assert!(upper.join("files").join(path).exists(), "{path} stays");
+        }
+    }
 
     #[test]
     fn a_slots_docker_budget_is_its_share_between_1_and_20_gib() {

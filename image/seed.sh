@@ -19,11 +19,14 @@ flush() {
     sync -f /base /workers/*
 }
 
-# Puts RESEED_MARKER on disk before the first change, once.
+# Puts RESEED_MARKER on disk before the first change, once, and gives the snapshot a new GENERATION: the layers of a
+# slot this run does not mount, as one a lower `slots` closed, start over from the new snapshot when it next mounts
+# them. A value is never removed, or an older slot without one would match a snapshot without one.
 changing=
 begin_change() {
     [ -z "$changing" ] || return 0
     : > "$RESEED_MARKER"
+    date +%s%N > "$GENERATION"
     flush
     changing=1
 }
@@ -72,11 +75,11 @@ mount_view() {
     mount -t overlay overlay -o "ro,lowerdir=/workers/1/$1/upper:/base/$1" /mnt/merged
 }
 
-# Whether the cache layer's entry $1 is one of CACHE_SECRETS.
+# Whether the cache layer's entry $1 is one of CACHE_SECRETS, or under one that is a directory.
 is_secret() {
     local file
     for file in "${CACHE_SECRETS[@]}"; do
-        [ "$file" != "$1" ] || return 0
+        [ "$file" != "$1" ] && [ "${1#"$file"/}" = "$1" ] || return 0
     done
     return 1
 }
@@ -107,8 +110,9 @@ make_hidden_dir() {
 }
 
 # Puts a whiteout in /base/$1.hidden.new for each entry of the image's $2 that slot 1's view hides: one a job
-# deleted, or one under a directory it replaced. The image's CACHE_SECRETS get none, as its own copies stay
-# (layers.sh), and a directory or symlink of theirs none either: only what else such a directory held. Nothing under a symlink or a file of the
+# deleted, or one under a directory it replaced. The image's CACHE_SECRETS, and what one that is a directory holds,
+# get none, as its own copies stay (layers.sh), and a directory or symlink above one none either: only what else such
+# a directory held. Nothing under a symlink or a file of the
 # view is looked at, and the layer holds only directories it makes.
 hide_image_entries() {
     local hidden=/base/$1.hidden.new image=$2 entry done_with='' lower=/base/$1 entries
@@ -122,10 +126,10 @@ hide_image_entries() {
         # find lists a directory before what it holds.
         [ -z "$done_with" ] || [ "${entry#"$done_with"/}" = "$entry" ] || continue
         done_with=
-        if [ -e "/mnt/view/$entry" ] || [ -L "/mnt/view/$entry" ]; then
-            { [ -d "/mnt/view/$entry" ] && [ ! -L "/mnt/view/$entry" ]; } || done_with=$entry
-        elif [ "$1" = cache ] && is_secret "$entry"; then
+        if [ "$1" = cache ] && is_secret "$entry"; then
             done_with=$entry
+        elif [ -e "/mnt/view/$entry" ] || [ -L "/mnt/view/$entry" ]; then
+            { [ -d "/mnt/view/$entry" ] && [ ! -L "/mnt/view/$entry" ]; } || done_with=$entry
         elif [ "$1" = cache ] && holds_secret "$entry"; then
             if [ -d "$image/$entry" ] && [ ! -L "$image/$entry" ]; then
                 make_hidden_dir "$hidden" "$image" "$entry"

@@ -51,12 +51,15 @@ RUN gpasswd -d runner sudo \
 # Package caches. Everything under ~/.cache is the slot's layer over the profile's snapshot (entrypoint.sh).
 # The pnpm store and the Maven repository are volumes all slots share, because both tools support concurrent
 # use of one store on one machine: pnpm when its processes share the lock directory under XDG_RUNTIME_DIR, Maven
-# with the resolver's file locks (file-lock needs the file-gav name mapper).
+# with the resolver's file locks (file-lock needs the file-gav name mapper). Podman, Buildah and Skopeo keep registry
+# logins under XDG_RUNTIME_DIR, which every slot of every profile shares: REGISTRY_AUTH_FILE keeps them on the
+# container's own disk, which goes with it.
 ENV GRADLE_USER_HOME=/home/runner/.cache/gradle \
     MAVEN_USER_HOME=/home/runner/.cache/m2 \
     MAVEN_OPTS="-Dmaven.repo.local=/shared/maven -Daether.syncContext.named.factory=file-lock -Daether.syncContext.named.nameMapper=file-gav" \
     pnpm_config_store_dir=/shared/pnpm/store \
     XDG_RUNTIME_DIR=/shared/pnpm/run \
+    REGISTRY_AUTH_FILE=/home/runner/.config/containers/auth.json \
     npm_config_cache=/home/runner/.cache/npm \
     PUB_CACHE=/home/runner/.cache/pub \
     PIPX_HOME=/home/runner/.cache/pipx
