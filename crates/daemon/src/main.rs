@@ -422,7 +422,14 @@ fn open_build_cache(config: &Config, socket: &Path) -> Option<BuildCache> {
         warn!("no build cache: neither XDG_CACHE_HOME nor HOME is set; set caches.build.directory");
         return None;
     };
-    let sockets = socket.with_file_name("runnerd-build-cache");
+    // Absolute, as Docker mounts each runner's directory from it and refuses a relative path.
+    let sockets = match std::path::absolute(socket.with_file_name("runnerd-build-cache")) {
+        Ok(sockets) => sockets,
+        Err(error) => {
+            warn!("no build cache: cannot resolve the socket's directory: {error}");
+            return None;
+        }
+    };
     match BuildCache::open(&directory, &sockets, config.caches.build.max_size.0) {
         Ok(cache) => {
             let size = cache.size();
