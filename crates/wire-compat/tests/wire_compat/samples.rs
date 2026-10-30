@@ -622,6 +622,7 @@ pub(crate) fn caches() -> Caches {
             entries: 9_000,
             limit: 20 << 30,
             week: build_cache_counts(),
+            actions_cache: true,
         }),
     }
 }

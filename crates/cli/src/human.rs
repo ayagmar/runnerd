@@ -768,6 +768,7 @@ pub(crate) fn caches(caches: &Caches, now: u64, paint: Paint) -> String {
     out.push_str(&table.render(paint, ""));
     if let Some(build) = &caches.build {
         let _ = writeln!(out, "build cache: {}", build.week_line());
+        let _ = writeln!(out, "{}", build.actions_cache_line());
     }
     out
 }

@@ -1,5 +1,5 @@
 //! What the disk runnerd keeps means as every client shows it: what each cache volume holds and what its limit does,
-//! what the build cache did for a job and over a week, how full the records are and what became of a job's record,
+//! what the build cache did for a job and over a week, where GitHub Actions' cache is served, how full the records are and what became of a job's record,
 //! and how much of a job's log is stored. Plain derivations of the API's types; clients only lay them out.
 
 use super::{
@@ -136,7 +136,28 @@ impl BuildCacheActivity {
     }
 }
 
+/// What doctor and the Caches page name GitHub Actions' cache.
+pub const ACTIONS_CACHE: &str = "GitHub Actions' cache";
+
+/// Where jobs' GitHub Actions cache is (ADR 0082), with `[caches.build] actions_cache` at `served`.
+pub fn actions_cache_place(served: bool) -> &'static str {
+    if served {
+        "served from the build cache on this host, in place of GitHub's"
+    } else {
+        "GitHub's, as [caches.build] actions_cache = false sets"
+    }
+}
+
 impl BuildCacheStats {
+    /// Where jobs' GitHub Actions cache is: `GitHub Actions' cache: served from the build cache on this host, in
+    /// place of GitHub's`.
+    pub fn actions_cache_line(&self) -> String {
+        format!(
+            "{ACTIONS_CACHE}: {}",
+            actions_cache_place(self.actions_cache)
+        )
+    }
+
     /// Its entries and the last 7 days' jobs: `120 entries; 75% of 400 lookups hit in 7 days, 3G served, 1G
     /// stored, 2 uploads refused`, `120 entries; no lookups in 7 days, 1G stored`, or `120 entries; no lookups in 7
     /// days`.

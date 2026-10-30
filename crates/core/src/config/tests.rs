@@ -186,7 +186,30 @@ fn a_config_without_build_cache_settings_gives_every_repository_one_main_writes(
         "only each repository's default branch writes"
     );
     assert_eq!(build.max_size, size("10G"));
+    assert!(build.actions_cache, "it serves GitHub Actions' cache");
+    assert_eq!(
+        build.actions_cache_check().detail,
+        "served from the build cache on this host, in place of GitHub's"
+    );
     assert!(config.repositories[0].build_cache, "owner/app gets it");
+    for (build, place) in [
+        (
+            "build = { actions_cache = false }",
+            "GitHub's, as [caches.build] actions_cache = false sets",
+        ),
+        (
+            "build = { enabled = false }",
+            "GitHub's, as the build cache is off",
+        ),
+    ] {
+        let text = MINIMAL.replace("[caches]", &format!("[caches]\n{build}"));
+        let config = Config::parse(&text).unwrap();
+        assert_eq!(
+            config.caches.build.actions_cache_check().detail,
+            place,
+            "{build}"
+        );
+    }
     assert_eq!(
         config.repositories[0].build_cache_writers,
         BuildCacheWriters::DefaultBranch,

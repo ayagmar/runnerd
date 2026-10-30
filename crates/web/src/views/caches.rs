@@ -102,6 +102,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                     }
                     @if volume.kind == CacheKind::Build && let Some(build) = &view.caches.build {
                         p.muted { (build.week_line()) }
+                        p.muted { (build.actions_cache_line()) }
                     }
                     @if points.len() > 1 {
                         (TimeChart {

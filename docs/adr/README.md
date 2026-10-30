@@ -86,4 +86,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets |
 | [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md) | A job starts in the free slot that ran it last, else one that ran its repository |
 | [0081](0081-waits-leave-out-the-time-no-runnerd-ran.md) | Waits leave out the time no runnerd ran, and the history's schema changes in steps from 15 |
-| [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, off by default |
+| [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, on by default |

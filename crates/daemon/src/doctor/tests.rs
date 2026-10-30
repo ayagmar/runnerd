@@ -142,8 +142,21 @@ fn a_ready_host_passes_every_check() {
             "gh",
             "repository",
             "repository",
+            "GitHub Actions' cache",
             "/dev/kvm"
         ]
+    );
+    let actions_cache = checks
+        .iter()
+        .find(|check| check.name == api::ACTIONS_CACHE)
+        .unwrap();
+    assert_eq!(
+        (actions_cache.status, actions_cache.detail.as_str()),
+        (
+            Status::Info,
+            "served from the build cache on this host, in place of GitHub's"
+        ),
+        "on by default, and only said"
     );
 }
 

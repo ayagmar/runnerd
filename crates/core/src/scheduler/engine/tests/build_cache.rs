@@ -444,7 +444,7 @@ async fn a_writing_branch_keeps_its_own_actions_cache_entries_and_reads_mains() 
     let dir = TestDir::new("engine-actions-cache");
     let config = CONFIG.replace(
         "maven = { max_size = \"5G\" }\n",
-        "maven = { max_size = \"5G\" }\nbuild = { branches = [\"release\"], actions_cache = true }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { branches = [\"release\"] }\n",
     );
     let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, &config);
     let [(main, main_socket), (release, release_socket)] = two_jobs(
@@ -456,7 +456,7 @@ async fn a_writing_branch_keeps_its_own_actions_cache_entries_and_reads_mains() 
     .await;
     assert!(
         main_socket.join(buildcache::ACTIONS_MARKER).is_file(),
-        "the config turned it on"
+        "it is on by default"
     );
     until_decided(&mut engine, &cache, &[&main, &release]).await;
     assert!(save(&main_socket, "deps", b"main's").await);
@@ -476,6 +476,69 @@ async fn a_writing_branch_keeps_its_own_actions_cache_entries_and_reads_mains() 
         Some(("tools".to_owned(), b"main's tools".to_vec())),
         "a branch falls back to the default branch's entries"
     );
+}
+
+/// `CONFIG` with GitHub Actions' cache turned off.
+fn actions_cache_off() -> String {
+    CONFIG.replace(
+        "maven = { max_size = \"5G\" }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { actions_cache = false }\n",
+    )
+}
+
+#[tokio::test]
+async fn with_the_actions_cache_off_jobs_keep_githubs() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-off");
+    let (mut engine, _handle, cache) =
+        engine_with_cache(&github, &docker, &dir, &actions_cache_off());
+    let [(main, main_socket), (pull, _)] =
+        main_and_pull_request(&github, &docker, &mut engine).await;
+    until_decided(&mut engine, &cache, &[&main, &pull]).await;
+    assert!(
+        !main_socket.join(buildcache::ACTIONS_MARKER).exists(),
+        "without the marker the image starts no forwarder and sets no NODE_OPTIONS"
+    );
+    assert_eq!(
+        buildcache::request(&main_socket, "PUT", "/gradle/0a1b", b"classes")
+            .await
+            .0,
+        200,
+        "the build cache is as before"
+    );
+    assert_eq!(cache.size().entries, 1);
+}
+
+#[tokio::test]
+async fn a_job_started_with_the_actions_cache_keeps_working_after_a_restart_turns_it_off() {
+    use crate::buildcache::actions::{restore, save};
+
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-restart-off");
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, CONFIG);
+    let [(main, main_socket), (pull, _)] =
+        main_and_pull_request(&github, &docker, &mut engine).await;
+    until_decided(&mut engine, &cache, &[&main, &pull]).await;
+    assert!(save(&main_socket, "deps", b"main's").await);
+    drop(engine);
+
+    // The daemon restarts with it off and adopts the running job, whose container keeps the preload.
+    let (mut engine, _handle, cache) =
+        engine_with_cache(&github, &docker, &dir, &actions_cache_off());
+    engine.recover().await.unwrap();
+    until_decided(&mut engine, &cache, &[&main]).await;
+    assert!(
+        !main_socket.join(buildcache::ACTIONS_MARKER).exists(),
+        "the slot's next runner uses GitHub's cache"
+    );
+    assert_eq!(restore(&main_socket, "deps", &[]).await, None);
+    assert!(
+        save(&main_socket, "deps-1", b"late").await,
+        "a save is answered as kept, as BuildKit fails a build on a refused one"
+    );
+    assert_eq!(cache.size().entries, 1, "and dropped");
 }
 
 #[tokio::test]
@@ -613,11 +676,8 @@ async fn a_pull_request_from_main_saves_into_its_own_actions_cache_scope_not_mai
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
     let dir = TestDir::new("engine-actions-cache-pull-from-main");
-    let config = pull_requests_write().replace(
-        "maven = { max_size = \"5G\" }\n",
-        "maven = { max_size = \"5G\" }\nbuild = { actions_cache = true }\n",
-    );
-    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, &config);
+    let (mut engine, _handle, cache) =
+        engine_with_cache(&github, &docker, &dir, &pull_requests_write());
     // A person who may push only to `evil` opens a pull request from `main` into it: its run is main's commit
     // merged with evil's, running evil's workflow.
     github.0.lock().unwrap().pulls.insert(

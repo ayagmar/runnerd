@@ -48,6 +48,7 @@ info  records: the records of failed jobs take 0B of [records] max_total = 20G
 ok    gh: logged in to github.com with the repo scope
 ok    repository: halyard/ledger: private
 ok    repository: halyard/storefront: private
+info  GitHub Actions' cache: served from the build cache on this host, in place of GitHub's
 info  /dev/kvm: present, for a future Kata Containers backend
 
 First run the fixes above for slice; runnerd init runs nothing as root.

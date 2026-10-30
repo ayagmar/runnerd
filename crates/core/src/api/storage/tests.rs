@@ -65,6 +65,7 @@ fn a_week_without_lookups_still_says_what_was_stored_and_refused() {
         entries: 120,
         limit: 5 * G,
         week,
+        actions_cache: true,
     };
     let stored_and_refused = BuildCacheCounts {
         written_bytes: G,

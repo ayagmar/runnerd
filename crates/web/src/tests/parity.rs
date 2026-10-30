@@ -183,6 +183,7 @@ async fn records_and_the_build_cache_state_their_limits_as_core_does() {
     let html = dashboard.page(&cookie, "/caches").await.body;
     let shown = text(&html);
     assert!(shown.contains(&facts.build_cache_week), "{shown}");
+    assert!(shown.contains(&facts.actions_cache), "{shown}");
     let summary = format!("{}; {}", facts.records_usage, facts.records_pressure);
     let at = html
         .find(&sentence(&summary))

@@ -1,4 +1,4 @@
-# 0082. GitHub Actions' cache served from the host, off by default
+# 0082. GitHub Actions' cache served from the host, on by default
 
 Status: **Accepted** (2026-10-30). Amends [0052](0052-shared-build-cache.md).
 
@@ -38,8 +38,16 @@ every node action, and `$GITHUB_ENV` may not set it.
 
 ## Decision
 
-- **Off by default**: `[caches.build] actions_cache = true` turns it on, for the repositories the build cache
-  serves. It rides the build cache's socket and store.
+- **On by default**, for the repositories the build cache serves: `[caches.build] actions_cache = false` turns it
+  off, and so do `build.enabled = false` and a repository's `build_cache = false`. It rides the build cache's socket
+  and store. The costs, which the owner accepts for restores and saves that stay on the host's disk:
+  - GitHub's cache is neither read nor written for those repositories, so the first runs after an install or an
+    upgrade start cold.
+  - Its entries share `build.max_size` with Gradle's, sccache's and Bazel's, so a repository with large
+    `type=gha` layers trims those sooner.
+  - Every node process of a job loads the preload, and the image adds an `iptables` rule and a forwarder.
+  - A pull request that may not write keeps nothing across pushes (Consequences).
+  `runnerd doctor` and the Caches page say whether it is on.
 - **How a job reaches it.** When the runner's socket directory has the `actions` marker the daemon writes, the
   image's `build-cache.sh`, as root before the runner starts, adds an `iptables` rule that drops port 41772 arriving
   on `eth0`, then forwards that port on every address of the container to the runner's socket, and sets
@@ -72,7 +80,7 @@ every node action, and `$GITHUB_ENV` may not set it.
   0052 does for Gradle. So is a key its scope has, or that another job is saving into it, where GitHub answers
   `ok: false`, which BuildKit's client takes as a failure unless its message says "already exists".
 - **Turned off under a running job.** A daemon restart that turns it off adopts running jobs whose containers still
-  have the forwarder and `NODE_OPTIONS`. Their lookups miss, their saves are answered as kept and dropped, and
+  have the forwarder and `NODE_OPTIONS`; runners started after it get no marker, and so neither, as before this. Their lookups miss, their saves are answered as kept and dropped, and
   every other request still goes to GitHub, so their artifacts and Docker builds keep working.
 - **Lookups as GitHub matches.** In each scope in order: the key, then each restore key, exactly, then as a prefix,
   the newest created first.
@@ -90,7 +98,8 @@ every node action, and `$GITHUB_ENV` may not set it.
 
 `npm ci` after a `setup-node` restore, Gradle's dependency cache and `type=gha` layers come from the host's disk.
 A default-branch run that restored from GitHub before this was on finds nothing the first time, saves locally, and
-hits from then on; GitHub's entries are neither read nor written while it is on. Turning it off brings back GitHub's.
+hits from then on; GitHub's entries are neither read nor written while it is on. Turning it off brings back GitHub's
+for the jobs that start after it.
 
 A pull request that may not write saves nothing, where GitHub would keep its own scope; its next push starts from
 the default branch's entries. One that may write restores its own entries, then its base branch's, as on GitHub. Its `actions/cache` step still says it saved.

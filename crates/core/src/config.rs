@@ -160,11 +160,26 @@ pub struct BuildCache {
     /// Where its entries are kept; default `$XDG_CACHE_HOME/runnerd/build-cache`.
     pub directory: Option<PathBuf>,
     /// Whether it also serves GitHub Actions' cache, for `actions/cache`, the `setup-*` actions' caches and
-    /// BuildKit's `type=gha`, in place of GitHub's (ADR 0082). Default false.
+    /// BuildKit's `type=gha`, in place of GitHub's (ADR 0082). Default true.
     pub actions_cache: bool,
 }
 
 impl BuildCache {
+    /// Doctor's word on where jobs' GitHub Actions cache is: for information, it fails nothing.
+    pub fn actions_cache_check(&self) -> api::Check {
+        api::Check {
+            name: api::ACTIONS_CACHE.to_owned(),
+            status: api::CheckStatus::Info,
+            detail: if self.enabled {
+                api::actions_cache_place(self.actions_cache)
+            } else {
+                "GitHub's, as the build cache is off"
+            }
+            .to_owned(),
+            fix: None,
+        }
+    }
+
     fn validate(&self) -> Result<(), ConfigError> {
         if self.enabled && self.max_size.0 == 0 {
             return Err(ConfigError::ZeroLimit {
@@ -182,7 +197,7 @@ impl Default for BuildCache {
             max_size: ByteSize(10 << 30),
             branches: Vec::new(),
             directory: None,
-            actions_cache: false,
+            actions_cache: true,
         }
     }
 }
