@@ -80,10 +80,11 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0072](0072-job-minutes-priced-at-github-hosted-rates.md) | What this machine's job minutes would have cost on GitHub-hosted runners (amended by 0074) |
 | [0073](0073-no-compatibility-before-0-0-19.md) | No compatibility before 0.0.19: the history starts at schema 15 (amended by 0081) |
 | [0074](0074-the-cost-line-names-only-what-it-is-before.md) | The cost line names only what it is before |
-| [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md) | `cpus` come down only under `caps` admission and a cap no run's bursts met; under `measured` the bursts raise them |
+| [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md) | `cpus` come down only under `caps` admission and a cap no run's bursts met; under `measured` the bursts raise them (amended by 0079) |
 | [0076](0076-a-slot-is-free-once-docker-removed-its-container.md) | A slot is free once Docker removed its container, each start is admitted again as it starts, and a broken log capture starts again |
 | [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md) | Credentials in the cache layer, closed slots' layers, and what the build cache counts |
 | [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets |
+| [0079](0079-cpu-weights-and-throttling-as-evidence.md) | Runners share the slice's CPUs by their `cpus`, and throttling, not peaks, says the cap held a run back |
 | [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md) | A job starts in the free slot that ran it last, else one that ran its repository |
 | [0081](0081-waits-leave-out-the-time-no-runnerd-ran.md) | Waits leave out the time no runnerd ran, and the history's schema changes in steps from 15 |
 | [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, on by default |

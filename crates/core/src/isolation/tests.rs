@@ -55,5 +55,10 @@ fn every_backend_keeps_the_slice_and_the_profile_limits() {
             "no swap beyond memory"
         );
         assert_eq!(host_config.nano_cpus, Some(8_000_000_000));
+        assert_eq!(
+            host_config.cpu_shares,
+            Some(8 * 1024),
+            "weighted by its cpus"
+        );
     }
 }

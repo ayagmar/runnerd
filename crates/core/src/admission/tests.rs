@@ -71,6 +71,8 @@ fn run(repository: &str, name: &str, profile: &str, queued: u64, minutes: u64, p
         reserved: None,
         host_waited: 0,
         unseen: 0,
+        cpu_periods: None,
+        cpu_throttled: None,
         hit_cap: Some(false),
         own_cap: Some(false),
         measure: Measure::WithoutPageCache,

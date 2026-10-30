@@ -8,11 +8,13 @@
 //! `inactive_file`, so it counts page cache read twice. The slice's memory for the high-water mark is that
 //! conservative number, `memory.current` less `inactive_file`, as it always was: it stops starts before the slice
 //! is short of memory, not after. Whether a cgroup met its limit comes from `memory.events`, never from how close
-//! a sample came to it. A container whose files vanish ends its series; that is not an error. Beside the slice, it
-//! reads the host's memory: `MemTotal` and `MemAvailable` from `/proc/meminfo` and the stall shares of
-//! `/proc/pressure/memory`; and, every `HOLDERS_INTERVAL`, which programs outside the slice hold the most of it, by
-//! the name and memory lines of each `/proc/<pid>/status` whose `/proc/<pid>/cgroup` is not in the slice. Only a
-//! program's name leaves this module, never its command line, arguments, environment or paths.
+//! a sample came to it. What held a container's CPU back comes from the periods its quota throttled it in and from
+//! its `cpu.pressure`, each missing where the kernel keeps none, never read as 0. A container whose files vanish
+//! ends its series; that is not an error. Beside the slice, it reads the host's memory: `MemTotal` and
+//! `MemAvailable` from `/proc/meminfo` and the stall shares of `/proc/pressure/memory`; and, every
+//! `HOLDERS_INTERVAL`, which programs outside the slice hold the most of it, by the name and memory lines of each
+//! `/proc/<pid>/status` whose `/proc/<pid>/cgroup` is not in the slice. Only a program's name leaves this module,
+//! never its command line, arguments, environment or paths.
 
 use std::collections::HashMap;
 use std::io;
@@ -128,6 +130,24 @@ fn invalid(path: &Path) -> io::Error {
     )
 }
 
+/// What held a cgroup's CPU back so far, from `cpu.stat` and `cpu.pressure`; `None` for a counter the kernel does
+/// not keep or that doesn't parse, which says nothing either way: `nr_periods` and `nr_throttled` exist only where
+/// the cpu controller is on for the cgroup, `cpu.pressure` only with pressure stall information.
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub struct CpuHeld {
+    /// Enforcement periods of its CPU quota (100 ms under Docker's `--cpus`) in which it had work (`nr_periods`).
+    /// The kernel stops counting while it is idle, so these are its busy time. 0 without a quota.
+    pub periods: Option<u64>,
+    /// Of those, the periods in which it used its quota up and was held until the next (`nr_throttled`). Not
+    /// `throttled_usec`, which adds up the time of each CPU's run queue held, so it passes the wall time of a job
+    /// spread over several CPUs and says nothing a reader can set against the run (`unthrottle_cfs_rq` in the
+    /// kernel's `fair.c`).
+    pub throttled: Option<u64>,
+    /// Microseconds in which at least one of its tasks could run and waited for a CPU (`cpu.pressure` `some`
+    /// `total`): its quota's holds, and the other programs and runners it shares the CPUs with.
+    pub stalled: Option<u64>,
+}
+
 /// Reads a cgroup's CPU and memory counters.
 pub fn read_usage(cgroup: &Path) -> io::Result<Usage> {
     let current_path = cgroup.join("memory.current");
@@ -149,6 +169,27 @@ pub fn read_usage(cgroup: &Path) -> io::Result<Usage> {
         memory: current.saturating_sub(active_file + inactive_file),
         memory_with_active_file: current.saturating_sub(inactive_file),
     })
+}
+
+/// A cgroup's `cpu.stat` periods and `cpu.pressure`; a file's counters `None` when it can't be read.
+pub fn read_cpu_held(cgroup: &Path) -> CpuHeld {
+    let stat = read(&cgroup.join("cpu.stat")).unwrap_or_default();
+    let stalled = read(&cgroup.join("cpu.pressure"))
+        .ok()
+        .and_then(|pressure| {
+            pressure
+                .lines()
+                .find_map(|line| line.strip_prefix("some "))?
+                .split_whitespace()
+                .find_map(|field| field.strip_prefix("total="))?
+                .parse()
+                .ok()
+        });
+    CpuHeld {
+        periods: field(&stat, "nr_periods"),
+        throttled: field(&stat, "nr_throttled"),
+        stalled,
+    }
 }
 
 /// What a cgroup holds that `MemAvailable` does not count as available: its memory without page cache less its
@@ -416,6 +457,7 @@ impl Sampler {
                 network_received: received,
                 network_sent: sent,
                 events: read_events(&cgroup),
+                cpu_held: read_cpu_held(&cgroup),
             });
         }
         self.previous = seen;

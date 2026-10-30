@@ -353,6 +353,18 @@ pub struct JobMetrics {
     /// memory, and its downloads slowed. `None` when the kernel does not count it, or in records from before.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sock_throttled: Option<u64>,
+    /// The periods of its CPU quota, 100 ms each, in which it had work: its busy time (`cpu.stat` `nr_periods`).
+    /// `None` where the kernel keeps no CPU quota's figures, or in records from before.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_periods: Option<u64>,
+    /// Of `cpu_periods`, those in which it used up its quota and was held until the next (`nr_throttled`): its CPU
+    /// cap held it back.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_throttled: Option<u64>,
+    /// Milliseconds in which a task of it could run and waited for a CPU (`cpu.pressure` `some`): held by its cap,
+    /// or by the other runners and programs on the host's CPUs. `None` without pressure stall information.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub cpu_stalled: Option<u64>,
 }
 
 /// What the shared build cache served one runner and took from it (ADR 0052), counted by the cache itself.

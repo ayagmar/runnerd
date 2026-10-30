@@ -67,6 +67,8 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         reserved: None,
         host_waited: 0,
         unseen: 0,
+        cpu_periods: None,
+        cpu_throttled: None,
         hit_cap: None,
         own_cap: None,
         measure: Measure::WithoutPageCache,

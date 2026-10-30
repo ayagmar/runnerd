@@ -282,6 +282,10 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
                 writer: true,
             },
             sock_throttled: Some(0),
+            // Busy for most of its run, its bursts held at the cap in some of it.
+            cpu_periods: Some(count * 18),
+            cpu_throttled: Some(count * 18 * (spec.slot % 3) as u64 / 20),
+            cpu_stalled: Some(count * 2000 * ((spec.slot % 3) as u64 + 1) / 8),
         },
         log: LogSummary {
             lines: lines.len() as u64,

@@ -413,6 +413,10 @@ fn jobs() -> Vec<Job> {
     });
     timed_out.metrics.memory_peak = Some(5 * GIB + 300 * MIB);
     timed_out.metrics.cpu_time = Some(4600);
+    // Its 1h 01m 20s run: throttled in 3,600 of its 20,000 busy periods, and waiting for a CPU 1,104 s.
+    timed_out.metrics.cpu_periods = Some(20_000);
+    timed_out.metrics.cpu_throttled = Some(3_600);
+    timed_out.metrics.cpu_stalled = Some(1_104_000);
     timed_out.metrics.build_cache = BuildCacheCounts {
         hits: 0,
         misses: 0,
@@ -685,6 +689,8 @@ pub struct JobFacts {
     pub build_cache_refused: String,
     /// Its CPU time.
     pub cpu_time: String,
+    /// What held its CPU back: its cap's throttling and its waits for a CPU.
+    pub cpu_held: String,
     /// What of its wait passed while runnerd was not running.
     pub unseen: String,
     /// Of its latest runs that started and ended, how many failed.
@@ -805,26 +811,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
                 })
             })
             .collect(),
-        slots: status
-            .profiles
-            .iter()
-            .flat_map(|profile| {
-                profile
-                    .slots
-                    .iter()
-                    .filter(|slot| slot.runner.is_some())
-                    .map(move |slot| {
-                        let state = Status::slot_state(profile, slot);
-                        SlotFact {
-                            profile: profile.name.clone(),
-                            slot: slot.slot,
-                            word: state.word(),
-                            line: state.line(),
-                            tone: state.tone(),
-                        }
-                    })
-            })
-            .collect(),
+        slots: slot_facts(status),
         job: JobFacts {
             row: row(&job.summary),
             steps: job
@@ -850,6 +837,10 @@ pub fn facts(daemon: &Daemon) -> Facts {
             .into(),
             build_cache_refused,
             cpu_time: api::cpu_time(job.summary.metrics.cpu_time.expect("its CPU time")),
+            cpu_held: job
+                .summary
+                .cpu_held(NOW)
+                .expect("its CPU throttled and waiting"),
             unseen: job.summary.unseen_note(NOW).expect("downtime in its wait"),
             failed: compared.failed,
             finished: compared.finished,
@@ -866,6 +857,30 @@ pub fn facts(daemon: &Daemon) -> Facts {
         savings: daemon.savings.month.headline(),
         savings_30_days: daemon.savings.last_30_days.headline(),
     }
+}
+
+/// Each slot with a runner, as `Facts::slots` lists them.
+fn slot_facts(status: &Status) -> Vec<SlotFact> {
+    status
+        .profiles
+        .iter()
+        .flat_map(|profile| {
+            profile
+                .slots
+                .iter()
+                .filter(|slot| slot.runner.is_some())
+                .map(move |slot| {
+                    let state = Status::slot_state(profile, slot);
+                    SlotFact {
+                        profile: profile.name.clone(),
+                        slot: slot.slot,
+                        word: state.word(),
+                        line: state.line(),
+                        tone: state.tone(),
+                    }
+                })
+        })
+        .collect()
 }
 
 #[cfg(test)]

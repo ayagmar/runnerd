@@ -1,5 +1,5 @@
 //! Starts a runner container on the local Docker Engine and runs a container inside it, and checks where its runner's
-//! JIT config shows. Needs the isolation backend installed and the runner image built
+//! JIT config shows and that its CPU weight and throttling are what runnerd sets and reads. Needs the isolation backend installed and the runner image built
 //! (`docker build --target jvm -t runnerd-runner:jvm image`):
 //!
 //! ```sh
@@ -23,6 +23,7 @@ use futures_util::StreamExt;
 use runnerd_core::config::{ByteSize, Isolation};
 use runnerd_core::docker::{Docker, DockerApi, JIT_CONFIG_PATH, JitConfig, RunnerSpec};
 use runnerd_core::isolation::backend;
+use runnerd_core::observe::metrics::{Paths, read_cpu_held};
 
 const JIT_CONFIG: &str = "smoke-test-jit-config";
 
@@ -126,6 +127,48 @@ async fn no_process_shows_the_jit_config_in_its_arguments_and_jobs_do_not_inheri
             return Err(format!("the listener's child has the environment:\n{inherited}"));
         }
         Ok(())
+    })
+    .await
+    .unwrap();
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, the isolation backend and the runner image"]
+async fn a_runner_is_weighted_by_its_cpus_and_its_throttling_is_read() {
+    with_runner("cpu", Some(engine_only()), JIT_CONFIG, async |api, name| {
+        let id = api
+            .inspect_container(name, None)
+            .await
+            .map_err(|e| e.to_string())?
+            .id
+            .ok_or("no container ID")?;
+        let cgroup = Paths::default().container("system.slice", &id);
+        // Docker writes 2 CPUs' 2048 shares as cgroup v2's weight: 1 + (2048 - 2) * 9999 / 262142.
+        let weight =
+            std::fs::read_to_string(cgroup.join("cpu.weight")).map_err(|e| e.to_string())?;
+        if weight.trim() != "79" {
+            return Err(format!("cpu.weight is {weight:?}, not 79"));
+        }
+        // Four busy processes in a container capped at 2 CPUs use up its quota in every period.
+        let busy = [
+            "sh",
+            "-c",
+            "for i in 1 2 3 4; do timeout 3 sh -c 'while :; do :; done' & done; wait",
+        ];
+        let before = read_cpu_held(&cgroup);
+        exec(api, name, &busy).await?;
+        let after = read_cpu_held(&cgroup);
+        println!("{name}: {before:?} → {after:?}");
+        let delta = |before: Option<u64>, after: Option<u64>| after?.checked_sub(before?);
+        match (
+            delta(before.periods, after.periods),
+            delta(before.throttled, after.throttled),
+        ) {
+            (Some(periods), Some(throttled)) if periods > 0 && throttled * 2 >= periods => Ok(()),
+            _ => Err(format!(
+                "expected throttling in half its periods or more: {before:?} → {after:?}"
+            )),
+        }
     })
     .await
     .unwrap();

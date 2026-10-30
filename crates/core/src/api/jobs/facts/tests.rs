@@ -355,3 +355,53 @@ fn a_job_whose_name_is_not_known_yet_is_named_by_its_id() {
     unnamed.workflow = None;
     assert_eq!(unnamed.title().to_string(), "job 7");
 }
+
+#[test]
+fn what_held_a_jobs_cpu_back_is_told_only_from_figures_the_kernel_kept() {
+    let held = |periods, throttled, stalled| {
+        JobSummary {
+            metrics: JobMetrics {
+                cpu_periods: periods,
+                cpu_throttled: throttled,
+                cpu_stalled: stalled,
+                ..JobMetrics::default()
+            },
+            ..timed(
+                JobState::Completed,
+                Timeline {
+                    queued_at: 100,
+                    started_at: Some(100),
+                    finished_at: Some(617),
+                    ..Timeline::default()
+                },
+            )
+        }
+        .cpu_held(700)
+    };
+    // The Android gate at 9 CPUs: held in about a fifth of its busy periods, and waiting longer than that, as the
+    // host's other work adds to the cap's holds.
+    assert_eq!(
+        held(Some(4_000), Some(720), Some(160_000)).as_deref(),
+        Some("held at its CPU cap in 18% of its busy time, waited for a CPU 30% of its run")
+    );
+    assert_eq!(
+        held(Some(4_000), Some(0), Some(0)).as_deref(),
+        Some("never held at its CPU cap, never waited for a CPU")
+    );
+    assert_eq!(
+        held(Some(4_000), Some(3), None).as_deref(),
+        Some("held at its CPU cap in under 1% of its busy time"),
+        "a hold that is not 0 never reads as 0%"
+    );
+    // No quota's figures, as without the cpu controller: unknown, not never.
+    assert_eq!(
+        held(None, None, Some(51_700)).as_deref(),
+        Some("waited for a CPU 10% of its run")
+    );
+    assert_eq!(
+        held(Some(0), Some(0), None),
+        None,
+        "no busy period, no share"
+    );
+    assert_eq!(held(None, None, None), None);
+}

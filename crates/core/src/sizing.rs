@@ -76,6 +76,11 @@ pub struct Ran {
     pub host_waited: u64,
     /// How much of its wait passed while no runnerd ran, in ms.
     pub unseen: u64,
+    /// The periods of its CPU quota it had work in (`api::JobMetrics::cpu_periods`); `None` where the kernel kept no
+    /// figure, as in runs from before schema 17.
+    pub cpu_periods: Option<u64>,
+    /// Of those, the periods its quota throttled it in (`api::JobMetrics::cpu_throttled`).
+    pub cpu_throttled: Option<u64>,
 }
 
 /// A job's wait for a runner as sizing, insights and the history's figures count it: from when GitHub queued it, or

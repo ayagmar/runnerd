@@ -167,7 +167,8 @@ queued → slot → container → removed
 5. While a job runs the engine records it in the store: the job's ID from the runner's `_diag` Worker log
    (`observe::capture`, run in the container with `docker exec`, started again if it fails or breaks off while the
    container runs, or else from the runner GitHub names), its steps from `GithubApi::job`, its log from the
-   runner's `_diag/pages`, CPU, memory and `memory.events` from the container's cgroup every 2 s (`observe::metrics`,
+   runner's `_diag/pages`, CPU, memory, `memory.events`, the periods its CPU quota throttled it in and its
+   `cpu.pressure` from the container's cgroup every 2 s (`observe::metrics`,
    which reads the host's `/proc/meminfo` and `/proc/pressure/memory` beside them, and every 30 s the name and
    memory of each process outside the slice, never its command line
    ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), and the
@@ -304,8 +305,11 @@ adopted too and drains as it would after a reload.
   `sizing::auto::changes` picks through the same check and commit (`api::control::replace`): `memory`, `slots` and
   `cpus`, one change per profile at a time, a raise at most once per `[sizing] raise_interval` and a lowering once
   per `interval` ([ADR 0049](docs/adr/0049-auto-sizing-without-hand-tuning.md)), never lowering a profile while a
-  job is on its cap, never lowering `cpus` under `measured` admission (where bursts at the cap raise them) or on runs whose bursts met the CPU cap
-  ([ADR 0075](docs/adr/0075-cpus-come-down-only-under-a-cap-no-burst-met.md)), taking back at the next look a lowering a run met or a job failed at
+  job is on its cap, never lowering `cpus` under `measured` admission (where runs the cap held back raise them) or on
+  runs the cap held back: throttled in 15% of their run, or without that figure bursting to the cap; a measured raise
+  goes on only while the one before made the job's runs faster or less throttled
+  ([ADR 0075](docs/adr/0075-cpus-come-down-only-under-a-cap-no-burst-met.md),
+  [ADR 0079](docs/adr/0079-cpu-weights-and-throttling-as-evidence.md)), taking back at the next look a lowering a run met or a job failed at
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)), never leaving a profile's bounds,
   and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
   before the commit). Each change is recorded as pending in the history, synced to disk, before its file is written,
@@ -343,6 +347,10 @@ adopted too and drains as it would after a reload.
   the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no
   runner is stopped for CPU, and a job held 2 minutes for CPU stops younger starts until it fits
   ([ADR 0038](docs/adr/0038-cpu-admission.md)).
+- Every runner container and record shell has CPU shares of 1024 a CPU of its `cpus` (`docker::cpu_shares`), so a
+  full slice's CPUs go to its runners by `cpus`, and the mirror keeps Docker's default weight; `cpus` stays each
+  container's quota, with no ceiling above it
+  ([ADR 0079](docs/adr/0079-cpu-weights-and-throttling-as-evidence.md)).
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.
 - After a restart, the memory caps of adopted runners, seed containers and the mirror come from Docker, not the

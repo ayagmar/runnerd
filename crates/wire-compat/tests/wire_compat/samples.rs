@@ -445,6 +445,9 @@ pub(crate) fn job_summary() -> JobSummary {
             mirror_bytes: 150 << 20,
             build_cache: build_cache_counts(),
             sock_throttled: Some(2),
+            cpu_periods: Some(5_800),
+            cpu_throttled: Some(900),
+            cpu_stalled: Some(140_000),
         },
         log: LogSummary {
             lines: 1_200,
@@ -511,12 +514,15 @@ pub(crate) fn job() -> Job {
     }
 }
 
-/// A job with nothing that serializing skips: no record or admission, metrics without throttling.
+/// A job with nothing that serializing skips: no record or admission, metrics without throttling or CPU holds.
 pub(crate) fn job_empty() -> Job {
     let mut job = job();
     job.record = None;
     job.admission = None;
     job.summary.metrics.sock_throttled = None;
+    job.summary.metrics.cpu_periods = None;
+    job.summary.metrics.cpu_throttled = None;
+    job.summary.metrics.cpu_stalled = None;
     job
 }
 

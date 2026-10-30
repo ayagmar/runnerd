@@ -1,4 +1,4 @@
--- The job history at schema version 16, which `Store::open` creates in a new database. Times are milliseconds since
+-- The job history at schema version 17, which `Store::open` creates in a new database. Times are milliseconds since
 -- the Unix epoch. A database from version 15 on is brought here by `store::MIGRATIONS`, an older or newer one is
 -- refused (ADR 0073); a change to this schema adds a step there, its columns appended where `ALTER TABLE` puts them.
 
@@ -40,7 +40,13 @@ CREATE TABLE jobs (
     host_waited INTEGER NOT NULL DEFAULT 0,
     -- How much of its wait passed while no runnerd ran, as the daemon that started after measured it from its
     -- history's last sign of life (ADR 0081); waits for a slot leave it out. 0 in rows from before schema 16.
-    unseen INTEGER NOT NULL DEFAULT 0
+    unseen INTEGER NOT NULL DEFAULT 0,
+    -- What held its CPU back, kept once the record is final as the totals above are (ADR 0079): the periods of its
+    -- CPU quota in which it had work and those it was throttled in, and the milliseconds a task of it waited for a
+    -- CPU (`cpu.pressure`). NULL where the kernel kept none, and in rows from before schema 17.
+    cpu_periods INTEGER,
+    cpu_throttled INTEGER,
+    cpu_stalled INTEGER
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);
@@ -97,7 +103,9 @@ CREATE TABLE steps (
 ) WITHOUT ROWID;
 
 -- cpu: millicores over the interval before the sample; cpu_usage: the container's CPU time so far, in
--- microseconds; network: bytes since the container started.
+-- microseconds; network: bytes since the container started; cpu_periods, cpu_throttled: `cpu.stat`'s `nr_periods`
+-- and `nr_throttled` so far, cpu_stalled: `cpu.pressure`'s `some` `total` so far, in microseconds, each NULL where
+-- the kernel keeps none.
 CREATE TABLE samples (
     runner TEXT NOT NULL,
     at INTEGER NOT NULL,
@@ -106,6 +114,9 @@ CREATE TABLE samples (
     memory INTEGER NOT NULL,
     network_received INTEGER NOT NULL,
     network_sent INTEGER NOT NULL,
+    cpu_periods INTEGER,
+    cpu_throttled INTEGER,
+    cpu_stalled INTEGER,
     PRIMARY KEY (runner, at)
 ) WITHOUT ROWID;
 
