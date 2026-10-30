@@ -1,7 +1,8 @@
 //! The engine's invariants over generated sequences of events, on the fakes: jobs queued with every kind of labels,
-//! taken, finished, cancelled and lost; runners that fail to start, wait or exit idle; Docker calls that fail once;
-//! samples of the slice and the host, short of memory or stalling; reseeds asked for; reloads and restarts; time
-//! passing. After each
+//! taken, finished, cancelled and lost; runners that fail to start, before or after Docker made their container,
+//! wait or exit idle; Docker calls that fail once; log captures that fail or break off; samples of the slice and the
+//! host, short of memory or stalling, also between two starts of one tick; reseeds asked for; reloads and restarts;
+//! time passing. After each
 //! tick the named checks below must hold, and once the sequence drains no runner may be left.
 //!
 //! The sequences come from a seeded generator, so a failure replays: it prints its seed and the shortest sequence
@@ -264,6 +265,16 @@ enum Step {
     Lose(usize),
     /// The next runner fails to start in Docker.
     StartFails,
+    /// The next runner fails to start after Docker made and started its container, which GitHub may give a job
+    /// meanwhile; the start's removal of it may fail too, which leaves it running.
+    StartFailsLate {
+        takes_job: bool,
+        cleanup_fails: bool,
+    },
+    /// The next log capture fails to start, or prints what it has and breaks off.
+    CaptureFails {
+        mid_stream: bool,
+    },
     /// An idle runner exits at once, without a job.
     ExitsAtOnce(usize),
     /// An idle runner exits without a job after waiting `IDLE_TIMEOUT`.
@@ -277,6 +288,12 @@ enum Step {
     /// The sampler reads the slice and the host: busy runners use `percent` of their caps, the host has
     /// `available` gigabytes available, and its tasks stall or not.
     Sample {
+        percent: u64,
+        available: u64,
+        stalled: bool,
+    },
+    /// As `Sample`, while the next runner starts: after the plan, and before the tick's later starts.
+    SampleDuringStart {
         percent: u64,
         available: u64,
         stalled: bool,
@@ -340,6 +357,18 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
                 light: rng.below(2) == 0,
             },
             74 => Step::StartedInspectFails,
+            75..=76 => Step::StartFailsLate {
+                takes_job: rng.below(2) == 0,
+                cleanup_fails: rng.below(2) == 0,
+            },
+            77..=78 => Step::SampleDuringStart {
+                percent: [10, 50, 90, 120][rng.index() % 4],
+                available: [3, 8, 20, 50][rng.index() % 4],
+                stalled: rng.below(5) == 0,
+            },
+            79..=80 => Step::CaptureFails {
+                mid_stream: rng.below(2) == 0,
+            },
             _ => Step::Tick,
         })
         .collect()
@@ -382,6 +411,8 @@ struct JobModel {
     phase: Phase,
     /// The profile and repository of the runner that took it.
     taken_by: Option<(String, String)>,
+    /// The container it ended in, with how many of its log captures had failed by then.
+    ended_in: Option<(String, u32)>,
 }
 
 /// A reading of the host the harness gave the sampler.
@@ -427,6 +458,10 @@ struct Case {
     calls_seen: usize,
     /// The last reading of the host this daemon's store has, which a restart loses.
     host: Option<HostReading>,
+    /// The reading a `SampleDuringStart` took, until the tick it was taken in checks the starts after it.
+    host_during_start: Arc<Mutex<Option<HostReading>>>,
+    /// Log captures `CaptureFails` failed, by container, as of the start of the last tick.
+    capture_faults: HashMap<String, u32>,
     step: usize,
 }
 
@@ -464,6 +499,8 @@ impl Case {
             still_listed: BTreeSet::new(),
             calls_seen: 0,
             host: None,
+            host_during_start: Arc::default(),
+            capture_faults: HashMap::new(),
             step: 0,
         }
     }
@@ -538,6 +575,10 @@ impl Case {
         self.handle.status.borrow().clone()
     }
 
+    #[allow(
+        clippy::too_many_lines,
+        reason = "one arm per step, which split up would only be listed twice"
+    )]
     async fn apply(&mut self, step: Step) -> Result<(), Violation> {
         match step {
             Step::Queue { second, labels } => {
@@ -562,6 +603,7 @@ impl Case {
                         labels,
                         phase: Phase::Queued,
                         taken_by: None,
+                        ended_in: None,
                     },
                 );
             }
@@ -571,6 +613,12 @@ impl Case {
                 let running = self.running();
                 if let Some((id, container)) = pick_from(&running, pick).cloned() {
                     self.end_job(id, &container, "success");
+                    // As for `Lose`: Docker runs no capture in a container that stopped.
+                    if (self.unobserved(&container) || self.capture_unread(&container))
+                        && let Some(job) = self.jobs.get_mut(&id)
+                    {
+                        job.phase = Phase::Done { ran: None };
+                    }
                     let mut docker = self.docker.0.lock().unwrap();
                     docker
                         .container_logs
@@ -591,6 +639,29 @@ impl Case {
             }
             Step::Lose(pick) => self.lose(pick),
             Step::StartFails => self.docker.0.lock().unwrap().fail_starts += 1,
+            Step::StartFailsLate {
+                takes_job,
+                cleanup_fails,
+            } => {
+                let failure = LateFailure {
+                    takes_job,
+                    cleanup_fails,
+                };
+                self.docker
+                    .0
+                    .lock()
+                    .unwrap()
+                    .late_failures
+                    .push_back(failure);
+            }
+            Step::CaptureFails { mid_stream } => {
+                let mut docker = self.docker.0.lock().unwrap();
+                *if mid_stream {
+                    &mut docker.break_captures
+                } else {
+                    &mut docker.fail_execs
+                } += 1;
+            }
             Step::ExitsAtOnce(pick) => self.exit_idle(pick, Exit::AtOnce),
             Step::ExitsIdle(pick) => self.exit_idle(pick, Exit::AfterIdleTimeout),
             Step::InspectFails(pick) => self.inspect_fails(pick),
@@ -600,7 +671,24 @@ impl Case {
                 percent,
                 available,
                 stalled,
-            } => self.sample(percent, available, stalled),
+            } => {
+                let docker = self.docker.0.lock().unwrap();
+                let reading = sample(
+                    &docker,
+                    &self.handle.store,
+                    &self.took_job,
+                    percent,
+                    available,
+                    stalled,
+                );
+                drop(docker);
+                self.host = Some(reading);
+            }
+            Step::SampleDuringStart {
+                percent,
+                available,
+                stalled,
+            } => self.sample_during_start(percent, available, stalled),
             // Refused for a profile reseeding already, one a reload removed and one a shell holds.
             Step::Reseed { light } => {
                 let _ = self
@@ -633,11 +721,9 @@ impl Case {
             self.end_job(id, &container, "failure");
             // Gone before Docker answered any inspect of it: nothing read its log, so nothing can name
             // the runner that ran the job.
-            let unobserved = self
-                .engine
-                .occupied()
-                .any(|(_, occupant)| occupant.container == container && !occupant.observed);
-            if unobserved && let Some(job) = self.jobs.get_mut(&id) {
+            if (self.unobserved(&container) || self.capture_unread(&container))
+                && let Some(job) = self.jobs.get_mut(&id)
+            {
                 job.phase = Phase::Done { ran: None };
             }
             self.docker
@@ -763,10 +849,12 @@ impl Case {
     /// few seconds of lag, the engine no longer counts the job as taken once its runner exits, and starts a second
     /// runner for it, which waits out `IDLE_TIMEOUT`: one idle runner, rare enough to leave.
     fn end_job(&mut self, id: u64, container: &str, conclusion: &str) {
+        let faults = self.capture_faults_of(container);
         let job = self.jobs.get_mut(&id).unwrap();
         job.phase = Phase::Done {
             ran: job.taken_by.clone(),
         };
+        job.ended_in = Some((container.to_owned(), faults));
         let mut github = self.github.0.lock().unwrap();
         let name = github
             .jobs
@@ -805,60 +893,45 @@ impl Case {
         set_running(&mut docker, &container.id, false);
     }
 
-    fn sample(&mut self, percent: u64, available: u64, stalled: bool) {
-        let now = time::now_ms();
-        let docker = self.docker.0.lock().unwrap();
-        let mut slice = 0;
-        let mut samples = Vec::new();
-        for container in docker
-            .containers
-            .iter()
-            .filter(|container| container.running && container.labels.contains_key("runnerd.job"))
-        {
-            let cap = docker.memory.get(&container.id).copied().unwrap_or(G);
-            let memory = if self.took_job.contains(&container.id) {
-                cap / 100 * percent
-            } else {
-                100 * M
-            };
-            slice += memory;
-            samples.push(SampleRecord {
-                runner: container.name.clone(),
-                at: now,
-                cpu: 0,
-                cpu_usage: 0,
-                memory,
-                network_received: 0,
-                network_sent: 0,
-                events: Events::default(),
-            });
-        }
-        drop(docker);
-        let store = &self.handle.store;
-        store.samples(samples);
-        store.host_sample(api::HostSample {
-            at: now / 1000,
-            cpu: 0,
-            memory: slice,
-        });
-        store.host_memory(api::HostMemory {
-            at: now / 1000,
-            total: HOST_TOTAL,
-            available: available * G,
-            slice,
-            some: Some(api::Pressure::default()),
-            full: Some(api::Pressure {
-                avg10: if stalled { 600 } else { 0 },
-                avg60: 0,
-            }),
-            holders: Vec::new(),
-        });
-        self.host = Some(HostReading {
-            at: now / 1000,
-            slice,
-            available: available * G,
-            stalled,
-        });
+    /// Takes a `sample` while the next runner starts.
+    fn sample_during_start(&mut self, percent: u64, available: u64, stalled: bool) {
+        let (store, took_job, taken) = (
+            self.handle.store.clone(),
+            self.took_job.clone(),
+            self.host_during_start.clone(),
+        );
+        self.docker.0.lock().unwrap().on_start = Some(Box::new(move |docker| {
+            let reading = sample(docker, &store, &took_job, percent, available, stalled);
+            *taken.lock().unwrap() = Some(reading);
+        }));
+    }
+
+    /// Whether the engine has not watched `container` yet, as Docker failed every inspect of it.
+    fn unobserved(&self, container: &str) -> bool {
+        self.engine
+            .occupied()
+            .any(|(_, occupant)| occupant.container == container && !occupant.observed)
+    }
+
+    /// Whether a job running in `container` may end without the engine ever reading its log: its log capture failed
+    /// and no tick has started it again since, or it failed twice, after which the next start waits longer than a
+    /// sequence runs. The history knows such a job only as GitHub names its runner, which it may not while queued.
+    fn capture_unread(&self, container: &str) -> bool {
+        let faults = self.capture_faults_of(container);
+        let retried = self.capture_faults.get(container).copied().unwrap_or(0);
+        faults >= 2 || faults > retried
+    }
+
+    /// How many log captures in `container` failed so far.
+    fn capture_faults_of(&self, container: &str) -> u32 {
+        self.docker
+            .0
+            .lock()
+            .unwrap()
+            .capture_faults
+            .get(container)
+            .copied()
+            .unwrap_or(0)
     }
 
     async fn reload(&mut self, change: Change) -> Result<(), Violation> {
@@ -917,8 +990,9 @@ impl Case {
         let (engine, handle) = Case::engine(&self.github, &self.docker, &self.dir, self.shape);
         self.engine = engine;
         self.handle = handle;
-        // The store keeps the host's reading in memory only.
+        // The store keeps the host's reading in memory only, and a sample still to come goes to the old store.
         self.host = None;
+        self.docker.0.lock().unwrap().on_start = None;
         self.recover().await
     }
 
@@ -958,6 +1032,29 @@ impl Case {
         }
     }
 
+    /// What GitHub knows of the runners whose start failed after Docker made their container: a job one took runs
+    /// on in its container if the start left it, and fails once GitHub notices its runner gone otherwise.
+    fn failed_late(&mut self) {
+        let failed = std::mem::take(&mut self.docker.0.lock().unwrap().late_started);
+        for (container, job) in failed {
+            let Some(id) = job else { continue };
+            let left = self
+                .running_containers()
+                .into_iter()
+                .find(|candidate| candidate.id == container);
+            if let Some(left) = left {
+                let label = |name: &str| left.labels.get(name).cloned().unwrap_or_default();
+                self.took_job.insert(container.clone());
+                let job = self.jobs.get_mut(&id).unwrap();
+                job.phase = Phase::Running { container };
+                job.taken_by = Some((label("runnerd.profile"), label("runnerd.repository")));
+            } else {
+                self.jobs.get_mut(&id).unwrap().taken_by = None;
+                self.end_job(id, &container, "failure");
+            }
+        }
+    }
+
     /// Waits for the next second if a slot whose runner started this second has no running runner now: runner names
     /// have a resolution of a second, and a real runner does not start and end within one, so the next runner in that
     /// slot would take its name, and the history would take the two for one.
@@ -966,7 +1063,7 @@ impl Case {
         let running: BTreeSet<String> = self
             .running_containers()
             .into_iter()
-            .map(|container| container.name)
+            .map(|container| container.id)
             .collect();
         let reused = self
             .docker
@@ -975,7 +1072,7 @@ impl Case {
             .unwrap()
             .started
             .iter()
-            .any(|(name, at)| at / 1000 == now && !running.contains(name));
+            .any(|(id, at)| at / 1000 == now && !running.contains(id));
         if reused {
             tokio::time::sleep(Duration::from_millis(1000 - time::now_ms() % 1000)).await;
         }
@@ -986,7 +1083,9 @@ impl Case {
         self.no_name_twice().await;
         let calls_before = self.docker.0.lock().unwrap().calls.len();
         let seeds_before: BTreeSet<String> = self.engine.reseed_memory.keys().cloned().collect();
+        self.capture_faults = self.docker.0.lock().unwrap().capture_faults.clone();
         self.engine.tick(Shutdown::No).await;
+        self.failed_late();
         let after = self.status();
         let listed = std::mem::take(&mut self.still_listed);
         self.github
@@ -1002,20 +1101,34 @@ impl Case {
             .into_iter()
             .map(|container| container.name)
             .collect();
-        let mut started: BTreeSet<String> = self.docker.0.lock().unwrap().calls[calls_before..]
+        let starts: Vec<String> = self.docker.0.lock().unwrap().calls[calls_before..]
             .iter()
             .filter_map(|call| call.strip_prefix("start "))
             .filter(|name| running.contains(*name))
             .map(str::to_owned)
             .collect();
+        let mut started: BTreeSet<String> = starts.iter().cloned().collect();
         self.no_pool_gets_more_runners_than_its_queued_jobs(&after, &started)?;
-        started.extend(
-            self.engine
-                .reseed_memory
-                .keys()
-                .filter(|profile| !seeds_before.contains(*profile))
-                .map(|profile| format!("{profile}'s seed container")),
-        );
+        let seeds = self
+            .engine
+            .reseed_memory
+            .keys()
+            .filter(|profile| !seeds_before.contains(*profile))
+            .map(|profile| format!("{profile}'s seed container"));
+        // A reading taken while a runner started binds only the starts after it, seeds among them, which go last;
+        // the starts before it went by the reading the plan had.
+        let hooked = self.docker.0.lock().unwrap().hooked_start.take();
+        let during = self.host_during_start.lock().unwrap().take();
+        if let (Some(hooked), Some(reading)) = (hooked, during) {
+            started = starts
+                .iter()
+                .skip_while(|name| **name != hooked)
+                .skip(1)
+                .cloned()
+                .collect();
+            self.host = Some(reading);
+        }
+        started.extend(seeds);
         self.starts_fit_the_budget(&after, &started)?;
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
@@ -1305,6 +1418,13 @@ impl Case {
         let ran: Vec<(u64, (String, String))> = self
             .jobs
             .iter()
+            // A capture that first ran once its container had stopped, as when Docker failed to inspect it before,
+            // reads its log only if Docker lets it.
+            .filter(|(_, job)| {
+                job.ended_in
+                    .as_ref()
+                    .is_none_or(|(container, faults)| self.capture_faults_of(container) == *faults)
+            })
             .filter_map(|(id, job)| match &job.phase {
                 Phase::Done { ran: Some(ran) } => Some((*id, ran.clone())),
                 _ => None,
@@ -1330,6 +1450,68 @@ impl Case {
             }
         }
         Ok(())
+    }
+}
+
+/// The sampler reads the slice and the host: the runners that took a job (`took_job`) use `percent` of their caps,
+/// the others 100M; the host has `available` gigabytes available, and its tasks stall or not.
+fn sample(
+    docker: &DockerState,
+    store: &Store,
+    took_job: &BTreeSet<String>,
+    percent: u64,
+    available: u64,
+    stalled: bool,
+) -> HostReading {
+    let now = time::now_ms();
+    let mut slice = 0;
+    let mut samples = Vec::new();
+    for container in docker
+        .containers
+        .iter()
+        .filter(|container| container.running && container.labels.contains_key("runnerd.job"))
+    {
+        let cap = docker.memory.get(&container.id).copied().unwrap_or(G);
+        let memory = if took_job.contains(&container.id) {
+            cap / 100 * percent
+        } else {
+            100 * M
+        };
+        slice += memory;
+        samples.push(SampleRecord {
+            runner: container.name.clone(),
+            at: now,
+            cpu: 0,
+            cpu_usage: 0,
+            memory,
+            network_received: 0,
+            network_sent: 0,
+            events: Events::default(),
+        });
+    }
+    store.samples(samples);
+    store.host_sample(api::HostSample {
+        at: now / 1000,
+        cpu: 0,
+        memory: slice,
+    });
+    store.host_memory(api::HostMemory {
+        at: now / 1000,
+        total: HOST_TOTAL,
+        available: available * G,
+        slice,
+        some: Some(api::Pressure::default()),
+        full: Some(api::Pressure {
+            avg10: if stalled { 600 } else { 0 },
+            avg60: 0,
+        }),
+        holders: Vec::new(),
+    });
+    HostReading {
+        at: now / 1000,
+        slice,
+        available: available * G,
+        stalled,
     }
 }
 

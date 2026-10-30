@@ -149,7 +149,9 @@ queued → slot → container → removed
    ([ADR 0050](docs/adr/0050-warm-runners.md)).
 3. `Engine::start` prepares the slot's volumes, registers a JIT runner (`GithubApi::jit_config`), opens the runner's
    build cache socket and starts its container (`DockerApi::start`) under the profile's limits and isolation
-   backend.
+   backend. Right before, the start is admitted again against what runs and was sampled since the plan. A start
+   that fails but leaves its container in Docker keeps it in the slot until Docker removes it
+   ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md)).
 4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials and every
    dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`). `Engine::collect_finished` sees the container stopped, removes it and the runner's
    registration, and frees the slot. A runner that took no job holds the repository back for a while. If the job
@@ -157,7 +159,8 @@ queued → slot → container → removed
    (`runnerd-record:<job>`) within `[records]`' limits, then removes it
    ([ADR 0031](docs/adr/0031-records-of-failed-jobs.md)).
 5. While a job runs the engine records it in the store: the job's ID from the runner's `_diag` Worker log
-   (`observe::capture`, run in the container with `docker exec`), its steps from `GithubApi::job`, its log from the
+   (`observe::capture`, run in the container with `docker exec`, started again if it fails or breaks off while the
+   container runs, or else from the runner GitHub names), its steps from `GithubApi::job`, its log from the
    runner's `_diag/pages`, CPU, memory and `memory.events` from the container's cgroup every 2 s (`observe::metrics`,
    which reads the host's `/proc/meminfo` and `/proc/pressure/memory` beside them, and every 30 s the name and
    memory of each process outside the slice, never its command line
@@ -263,6 +266,8 @@ adopted too and drains as it would after a reload.
   started engine announces what differs from them and every slot, so a client resuming after the last run's events
   ends where `/v1/status` is ([ADR 0029](docs/adr/0029-profile-events-and-what-a-restart-announces.md)).
 - The engine does not start a runner for a queued job one of its runners holds, whatever GitHub's queue says.
+- A slot is free only once Docker confirmed its container's removal, also after a start that failed
+  ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md)).
 - A reload never stops a running job: slots a new config removes go once their runners finish, and a profile starts
   no runner while it runs as many as its configured `slots` (`scheduler::Slot::Closed`).
 - A forced pause cancels runs only of jobs this daemon's runners hold, and only of the paused repositories.

@@ -64,6 +64,8 @@ pub(super) struct Admitting {
     pub held: bool,
     /// What the host's memory leaves new runners, from a recent reading.
     pub host: Option<api::HostBudget>,
+    /// The margin `host` keeps, as the plan's starts each go by it.
+    pub remembered: host::Remembered,
     /// Under `[host] cpu_overcommit`, what the plan admits by CPU.
     pub cpu: Option<CpuAdmitting>,
 }
@@ -216,6 +218,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             slice: None,
             held: false,
             host: self.host_budget(),
+            remembered: self.host_remembered(),
             cpu: self.admitting_cpu(repositories),
         };
         if self.config.host.admission != Admission::Measured {
@@ -295,14 +298,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// What the host's memory leaves runners beside what runs now, from a reading of the last few sample intervals.
     pub(super) fn host_budget(&self) -> Option<api::HostBudget> {
+        self.host_budget_by(self.host_remembered())
+    }
+
+    /// What the host's memory leaves runners beside what runs now, from a reading of the last few sample intervals,
+    /// with the margin `remembered` asks for.
+    pub(super) fn host_budget_by(&self, remembered: host::Remembered) -> Option<api::HostBudget> {
         let memory = self.host_memory()?;
-        // The larger margin keeps a start from pushing a busy host back to the edge; with no runner in the slice
-        // there is no such start to follow, so the first runner needs only the margin.
-        let remembered = host::Remembered {
+        Some(host::budget(memory, self.memory_in_use(), remembered))
+    }
+
+    /// What the last plan saw of the host, as the next one goes by it. The larger margin keeps a start from pushing a
+    /// busy host back to the edge; with no runner in the slice there is no such start to follow, so the first
+    /// runners need only the margin.
+    fn host_remembered(&self) -> host::Remembered {
+        host::Remembered {
             short: self.measured.host.short && self.occupied().next().is_some(),
             ..self.measured.host
-        };
-        Some(host::budget(memory, self.memory_in_use(), remembered))
+        }
     }
 
     /// Remembers what this plan saw of the host for the next: whether it stalled, and which jobs `waiting` wait for

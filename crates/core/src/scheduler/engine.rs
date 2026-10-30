@@ -362,7 +362,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// The containers the sampler reads.
     tracked: watch::Sender<Vec<Tracked>>,
     found: (mpsc::UnboundedSender<Found>, mpsc::UnboundedReceiver<Found>),
-    captures: BTreeMap<String, JoinHandle<()>>,
+    captures: BTreeMap<String, JoinHandle<history::Capture>>,
+    /// The runners whose log capture broke off, until they are gone.
+    recaptures: BTreeMap<String, history::Recapture>,
     /// Who held which address, for the mirror's log.
     leases: Leases,
     /// How far the mirror's log was counted.
@@ -498,6 +500,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             tracked: watch::channel(Vec::new()).0,
             found: mpsc::unbounded_channel(),
             captures: BTreeMap::new(),
+            recaptures: BTreeMap::new(),
             leases: Leases::default(),
             mirror_until: MirrorPosition::default(),
             queued_jobs: BTreeMap::new(),

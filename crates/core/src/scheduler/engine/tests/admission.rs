@@ -1309,6 +1309,40 @@ async fn under_caps_a_runner_starts_only_if_its_cap_fits_what_the_host_leaves() 
 }
 
 #[tokio::test]
+async fn a_runner_whose_room_the_host_lost_since_the_plan_does_not_start_in_the_same_tick() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+    engine.memory_max = Some(20 * G);
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=2).map(job).collect();
+    // The plan has room for both 4G caps; while the first runner starts, other programs take the host's memory
+    // down to what it alone fits in.
+    host_at(&handle.store, 0, 20 * G, 0);
+    let store = handle.store.clone();
+    docker.0.lock().unwrap().on_start = Some(Box::new(move |_| {
+        host_at(&store, 0, 8 * G + 100 * M, 0);
+    }));
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "the second start waits for room"
+    );
+    engine.publish();
+    assert_eq!(
+        waits(&handle)[1],
+        Some(api::Waiting::HostMemory {
+            needs: 4 * G,
+            free: 0
+        })
+    );
+}
+
+#[tokio::test]
 async fn nothing_starts_while_the_host_stalls_short_of_memory() {
     let (github, docker, dir) = (
         FakeGithub::default(),

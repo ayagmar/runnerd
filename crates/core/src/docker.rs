@@ -191,6 +191,48 @@ pub struct Container {
     pub labels: HashMap<String, String>,
 }
 
+/// A runner start that failed, with the container it may have left: Docker may have made, or even started, it before
+/// the request failed, as when its answer is lost.
+#[derive(Debug)]
+pub struct StartError {
+    /// The container the start left, by ID, or by name when Docker could not say whether one exists; `None` when
+    /// none does. It may run.
+    pub container: Option<String>,
+    /// Why the start failed.
+    pub error: Error,
+}
+
+impl fmt::Display for StartError {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        self.error.fmt(f)
+    }
+}
+
+impl std::error::Error for StartError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        Some(&self.error)
+    }
+}
+
+/// For callers that go on whether or not a container was left.
+impl From<StartError> for Error {
+    fn from(failed: StartError) -> Error {
+        failed.error
+    }
+}
+
+/// Whether Docker answered a request with a refusal, so it did nothing: a 4xx answer. Any other error may come after
+/// Docker carried the request out.
+fn refused(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::DockerResponseServerError {
+            status_code: 400..=499,
+            ..
+        }
+    )
+}
+
 /// Whether a Docker error says the container, volume or image does not exist.
 pub fn is_not_found(error: &Error) -> bool {
     matches!(
@@ -205,12 +247,13 @@ pub fn is_not_found(error: &Error) -> bool {
 /// The Docker Engine calls the scheduler and the caches make. `Docker` is the real one; the engine's tests use a
 /// fake.
 pub trait DockerApi: Send + Sync {
-    /// Creates and starts a runner container; returns its ID.
+    /// Creates and starts a runner container; returns its ID. A start that fails removes what it made, and says
+    /// which container is left when it cannot.
     fn start(
         &self,
         spec: &RunnerSpec,
         isolation: &dyn Isolation,
-    ) -> impl Future<Output = Result<String, Error>> + Send;
+    ) -> impl Future<Output = Result<String, StartError>> + Send;
     /// A container's state and isolation.
     fn inspect(&self, container: &str) -> impl Future<Output = Result<RunnerState, Error>> + Send;
     /// Removes a runner container, stopping it first if it runs.
@@ -297,6 +340,19 @@ pub struct Docker {
 }
 
 impl Docker {
+    /// Removes the container a failed start `made`, if any; the start's `error` is the one worth reporting. The
+    /// container stays in the answer unless its removal is confirmed.
+    async fn clean_up(&self, made: Option<String>, error: Error) -> StartError {
+        let container = match made {
+            Some(container) => match self.remove(&container).await {
+                Err(failed) if !is_not_found(&failed) => Some(container),
+                _ => None,
+            },
+            None => None,
+        };
+        StartError { container, error }
+    }
+
     /// Connects to the Docker Engine at `DOCKER_HOST`, or its local socket. Only `unix://` hosts are supported.
     pub fn connect() -> Result<Docker, Error> {
         connect_to(std::env::var("DOCKER_HOST").ok().as_deref())
@@ -339,15 +395,36 @@ impl Docker {
 }
 
 impl DockerApi for Docker {
-    async fn start(&self, spec: &RunnerSpec, isolation: &dyn Isolation) -> Result<String, Error> {
+    async fn start(
+        &self,
+        spec: &RunnerSpec,
+        isolation: &dyn Isolation,
+    ) -> Result<String, StartError> {
         let options = CreateContainerOptionsBuilder::new()
             .name(&spec.name)
             .build();
-        let id = self
+        let id = match self
             .api
             .create_container(Some(options), create_body(spec, isolation))
-            .await?
-            .id;
+            .await
+        {
+            Ok(created) => created.id,
+            Err(error) if refused(&error) => {
+                return Err(StartError {
+                    container: None,
+                    error,
+                });
+            }
+            // Docker may have made it and lost the answer: its name, unique to this start, finds it.
+            Err(error) => {
+                let made = match self.api.inspect_container(&spec.name, None).await {
+                    Ok(found) => Some(found.id.unwrap_or_else(|| spec.name.clone())),
+                    Err(missing) if is_not_found(&missing) => None,
+                    Err(_) => Some(spec.name.clone()),
+                };
+                return Err(self.clean_up(made, error).await);
+            }
+        };
         let started = async {
             if let Some(jit_config) = &spec.jit_config {
                 let options = UploadToContainerOptionsBuilder::new().path("/").build();
@@ -361,9 +438,7 @@ impl DockerApi for Docker {
             self.api.start_container(&id, None).await
         };
         if let Err(error) = started.await {
-            // Best effort: the start error is the one worth reporting.
-            let _ = self.remove(&id).await;
-            return Err(error);
+            return Err(self.clean_up(Some(id), error).await);
         }
         Ok(id)
     }

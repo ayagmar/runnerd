@@ -11,7 +11,7 @@ use super::{Engine, Occupant, Purpose, RunningJobs, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
-use crate::github::{Deleted, GithubApi};
+use crate::github::{Deleted, GithubApi, Runner};
 use crate::record;
 use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef};
 
@@ -337,6 +337,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
+    /// After a start in `profile` that failed and left nothing in Docker, deletes its `runner`'s registration and
+    /// closes its build cache, and holds back its pool.
+    async fn abandon(&mut self, profile: &str, repository: &str, runner: &Runner, failure: String) {
+        self.close_build_cache(&runner.name);
+        if let Err(error) = self.github.delete_runner(repository, runner.id).await {
+            warn!("{repository}: cannot delete {}: {error}", runner.name);
+        }
+        self.hold(repository, profile, HoldCause::Start, failure);
+    }
+
     /// Starts the registry mirror, when enabled and down, for a runner about to start.
     async fn start_mirror(&mut self) {
         let mirror = &self.config.caches.mirror;
@@ -410,8 +420,60 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             entrypoint: None,
             jit_config: Some(jit_config),
         };
-        match self.docker.start(&spec, self.isolation).await {
-            Ok(container) => {
+        let (container, failure) = match self.docker.start(&spec, self.isolation).await {
+            Ok(container) => (container, None),
+            Err(failed) => {
+                let failure = format!("cannot start {name}: {}", failed.error);
+                warn!("{repository}: {failure}");
+                self.recheck_image(&spec.image);
+                let Some(container) = failed.container else {
+                    return self
+                        .abandon(&slot.profile, repository, &runner, failure)
+                        .await;
+                };
+                (container, Some(failure))
+            }
+        };
+        let occupant = Occupant {
+            repository: repository.to_owned(),
+            runner_name: name.clone(),
+            runner_id: runner.id,
+            container,
+            busy: false,
+            started_at: now,
+            memory: spec.memory.0,
+            cpus: u64::from(spec.cpus) * 1000,
+            admission: Some(admission),
+            job: None,
+            key: None,
+            labels: Some(labels),
+            image: Some(image),
+            observed: false,
+        };
+        self.place(slot, occupant, purpose, failure).await;
+    }
+
+    /// Puts a runner a start made in its slot and watches it, or after a start that failed, its container that
+    /// Docker kept: it holds the slot, with its registration, until `collect_finished` confirms its removal, which
+    /// keeps a second runner off the slot's volumes. If it runs, the next tick watches it as a runner.
+    async fn place(
+        &mut self,
+        slot: &SlotRef,
+        occupant: Occupant,
+        purpose: Purpose,
+        failure: Option<String>,
+    ) {
+        if let Some(entry) = self
+            .slots
+            .get_mut(&slot.profile)
+            .and_then(|slots| slots.get_mut(slot.index))
+        {
+            *entry = Some(occupant.clone());
+        }
+        let (repository, name, number) =
+            (&occupant.repository, &occupant.runner_name, slot.index + 1);
+        match failure {
+            None => {
                 let warm = match purpose {
                     Purpose::Job => "",
                     Purpose::Warm => " warm, for jobs not queued yet",
@@ -420,39 +482,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     "{repository}: started {name} in {} slot {number}{warm}",
                     slot.profile
                 );
-                let occupant = Occupant {
-                    repository: repository.to_owned(),
-                    runner_name: name,
-                    runner_id: runner.id,
-                    container,
-                    busy: false,
-                    started_at: now,
-                    memory: profile.memory.0,
-                    cpus: u64::from(profile.cpus) * 1000,
-                    admission: Some(admission),
-                    job: None,
-                    key: None,
-                    labels: Some(labels),
-                    image: Some(image),
-                    observed: false,
-                };
-                if let Some(entry) = self
-                    .slots
-                    .get_mut(&slot.profile)
-                    .and_then(|slots| slots.get_mut(slot.index))
-                {
-                    *entry = Some(occupant.clone());
-                }
                 self.observe(slot, &occupant).await;
             }
-            Err(error) => {
-                self.close_build_cache(&name);
-                warn!("{repository}: cannot start {name}: {error}");
-                self.recheck_image(&spec.image);
-                let failure = format!("cannot start {name}: {error}");
-                if let Err(error) = self.github.delete_runner(repository, runner.id).await {
-                    warn!("{repository}: cannot delete {name}: {error}");
-                }
+            Some(failure) => {
+                warn!(
+                    "{repository}: {name} may be left in Docker; {} slot {number} stays its until it is removed",
+                    slot.profile
+                );
                 self.hold(repository, &slot.profile, HoldCause::Start, failure);
             }
         }
