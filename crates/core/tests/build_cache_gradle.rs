@@ -1,6 +1,7 @@
 //! Gradle against the shared build cache, end to end: the runner image's `build-cache.sh` and Gradle init script in a
 //! container of a Gradle image, the cache served by `BuildCache` on this host. What a push to main built in one
-//! container is `FROM-CACHE` in the next, fresh one; a cache that does not answer fails no build. Needs Docker with
+//! container is `FROM-CACHE` in the next, fresh one; a cache that does not answer fails no build; turbo is pointed at
+//! the cache only where the runner has a socket. Needs Docker with
 //! sysbox and the network (it builds `runnerd-test-build-cache` from the Gradle image and Ubuntu's socat):
 //!
 //! ```sh
@@ -100,6 +101,7 @@ fn gradle_build(project: &Path, socket_dir: &Path) -> String {
         _ => "sysbox-runc",
     };
     let script = ". /usr/local/lib/runnerd-build-cache.sh && start_build_cache \
+        && echo \"TURBO_API=${TURBO_API-unset}\" \
         && cp -r /project /work && chown -R runner /work \
         && setpriv --reuid=runner --regid=runner --init-groups env HOME=/home/runner \
            gradle --no-daemon --console=plain -p /work compileJava";
@@ -147,6 +149,10 @@ async fn a_main_builds_outputs_are_from_cache_in_a_fresh_container() {
         !output.contains("FROM-CACHE"),
         "the first build has nothing to take"
     );
+    assert!(
+        output.contains("TURBO_API=http://127.0.0.1:41771/turbo"),
+        "turbo is pointed at the cache:\n{output}"
+    );
     let stored = cache.detach("main").unwrap();
     assert!(stored.written_bytes > 0, "main stored nothing: {stored:?}");
 
@@ -185,6 +191,17 @@ async fn a_main_builds_outputs_are_from_cache_in_a_fresh_container() {
     .unwrap();
     assert!(output.contains("BUILD SUCCESSFUL"), "{output}");
     assert!(!output.contains("FROM-CACHE"), "{output}");
+
+    // No socket, as with the cache off for the repository: no tool is pointed at it.
+    let off = root.join("off");
+    std::fs::create_dir_all(&off).unwrap();
+    let output = tokio::task::spawn_blocking({
+        let project = project.clone();
+        move || gradle_build(&project, &off)
+    })
+    .await
+    .unwrap();
+    assert!(output.contains("TURBO_API=unset"), "{output}");
 
     std::fs::remove_dir_all(&project).unwrap();
     std::fs::remove_dir_all(&root).unwrap();
