@@ -3108,10 +3108,11 @@ async fn the_insights_page_counts_and_shows_each_insight_and_the_week_s_waits() 
     let page = dashboard.page(&cookie, "/insights").await;
     assert_eq!(page.status, StatusCode::OK, "{}", page.body);
     for expected in [
-        ">4 insights<",
+        ">5 insights<",
         "Last 24 hours: 57 jobs finished, 3 failed, 1 new insight.",
         "halyard/ledger: CI / test on main takes 6m 10s now, up from 4m 40s.",
         "failed and then passed on a re-run in 2 of its 31 runs",
+        "held back by jvm",
         r#"aria-current="page">Insights"#,
         "p95 the week before",
     ] {

@@ -911,6 +911,23 @@ fn insights(fixtures: &Fixtures) -> Insights {
                 vec![link("halyard/ledger", 5 * 3600, 1)],
             ),
             insight(
+                "cpu-held:halyard/ledger/CI/build",
+                Severity::Warning,
+                "halyard/ledger",
+                Some("build"),
+                "halyard/ledger: CI / build was held back by jvm's 8 CPUs in 4 of its last 10 runs, its quota \
+                 throttling it in 15% of its run or more. Auto sizing is off: set jvm's cpus to 10, or turn it on.",
+                InsightKind::CpuHeld {
+                    profile: "jvm".to_owned(),
+                    cpus: 8,
+                    held: 4,
+                    total: 10,
+                    raised_from: None,
+                    set: Some(10),
+                },
+                vec![link("halyard/ledger", 7 * 3600, 1)],
+            ),
+            insight(
                 "flaky:halyard/storefront/CI/e2e",
                 Severity::Warning,
                 "halyard/storefront",
