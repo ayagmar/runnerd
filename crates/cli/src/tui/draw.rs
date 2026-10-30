@@ -1977,7 +1977,7 @@ fn sizing_profiles(
     if wide {
         columns.push(("P50 WARM/COLD", 13));
     }
-    columns.push(("ADVICE", 11));
+    columns.push(("ADVICE", 13));
     let rows = sizing.profiles.iter().map(|profile| {
         let peaks = &profile.peaks;
         let mut cells = vec![

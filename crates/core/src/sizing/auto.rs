@@ -404,8 +404,8 @@ impl Fresh {
 }
 
 /// Why `memory` changes, as the advice line says it of the `memory` and `slots` this change writes, not the
-/// advice's own: a step of `max_step`, or `max_memory`, stops short of the advice's memory, and the slots that fit
-/// follow. A change short of the advice says what it goes toward.
+/// advice's own: a step of `max_step` stops short of a lowering's memory, and the slots that fit follow. A change
+/// short of the advice says what it goes toward.
 fn memory_reason(
     sizing: &Sizing,
     advised: &ProfileSizing,
@@ -419,16 +419,10 @@ fn memory_reason(
             Advice::Raise { .. } => Advice::Raise { memory, slots },
             other => other,
         },
-        // A revert `max_memory` stops short of is a raise as far as it allows.
-        revert: advised.revert.clone().filter(|revert| revert.to == memory),
         ..advised.clone()
     };
     let line = sizing.memory_line(&made);
     match advised.advice.change() {
-        Some(advice) if advice.memory != memory && memory > advised.memory => format!(
-            "{line}; as far as its max_memory allows, short of {}",
-            ByteSize(advice.memory)
-        ),
         Some(advice) if advice.memory != memory => format!(
             "{line}; a step toward {}, at most {max_step}% a change",
             ByteSize(advice.memory)
@@ -437,12 +431,10 @@ fn memory_reason(
     }
 }
 
-/// Whether `to` keeps the profile within its bounds: `memory` within `min_memory` and `max_memory`, and `slots` at
-/// most `max_slots` when they grow.
+/// Whether `to` keeps the profile's `slots` at most `max_slots` when they grow. Its `memory` is the advice's, which
+/// keeps to `min_memory` and `max_memory` already.
 fn within(profile: &Profile, from: Resize, to: Resize) -> bool {
-    profile.min_memory.is_none_or(|min| to.memory >= min.0)
-        && profile.max_memory.is_none_or(|max| to.memory <= max.0)
-        && (to.slots <= from.slots || profile.max_slots.is_none_or(|max| to.slots <= max))
+    to.slots <= from.slots || profile.max_slots.is_none_or(|max| to.slots <= max)
 }
 
 /// What a look does with a lowering that went too far.
@@ -452,13 +444,13 @@ enum Revert {
     /// Waits while more runners run than the slots it gives back hold, or while the changes before it in this look
     /// leave the slice no slot at its `memory`: nothing else changes the profile meanwhile.
     Wait,
-    /// The `memory` it came from is outside the profile's bounds now: the profile is sized as any other.
+    /// Its slots are past `max_slots` now, or it gets no raise: the profile is sized as any other.
     Outside,
 }
 
 /// The change that takes back a lowering that went too far (`ProfileSizing::revert`): straight to the `memory`
-/// it came from, or as far toward it as `[host] memory_ceiling` allows, and, under caps, the slots it had, without
-/// waiting for `raise_interval` or keeping to `max_step`, as an undo would.
+/// it came from, or as far toward it as `[host] memory_ceiling` and `max_memory` allow, and, under caps, the slots it
+/// had, without waiting for `raise_interval` or keeping to `max_step`, as an undo would.
 fn reverted(
     config: &Config,
     profile: &Profile,
@@ -467,7 +459,7 @@ fn reverted(
     context: &Context<'_>,
     budget: &Budget,
 ) -> Revert {
-    let (Advice::Raise { memory, slots }, Some(revert)) = (advised.advice, &advised.revert) else {
+    let Advice::Raise { memory, slots } = advised.advice else {
         return Revert::Outside;
     };
     let from = Resize {
@@ -475,20 +467,6 @@ fn reverted(
         slots: profile.slots,
         cpus: None,
     };
-    // As far back as `[host] memory_ceiling` allows, when a reload lowered it since. A target outside the profile's
-    // bounds is sized as any other raise, which stops at `max_memory`, before the slots are fitted at a memory it
-    // never writes.
-    let target = advised
-        .ceiling
-        .map_or(revert.to, |hold| revert.to.min(hold.most));
-    let memory_within = Resize {
-        memory,
-        slots: from.slots,
-        cpus: None,
-    };
-    if memory != target || !within(profile, from, memory_within) {
-        return Revert::Outside;
-    }
     // The advice holds the slots the slice holds beside the config's other profiles; under caps, the changes before
     // it in this look may have taken some of that.
     let slots = match (config.host.admission, context.memory_max) {
@@ -524,9 +502,10 @@ fn reverted(
     })
 }
 
-/// The profile's next `memory` within its bounds: a lowering at most `max_step` percent away, in steps of `GRANULE`,
-/// and only while `lowering` allows it; a raise straight to the advice's, since only a run that met the cap raises
-/// it (ADR 0070), and a kill is direct evidence. The advice lowers nothing while a job is on its cap.
+/// The profile's next `memory`: a lowering at most `max_step` percent away, in steps of `GRANULE`, and only while
+/// `lowering` allows it; a raise straight to the advice's, since only a run that met the cap raises it (ADR 0070),
+/// and a kill is direct evidence. The advice keeps to `min_memory` and `max_memory`, and lowers nothing while a job
+/// is on its cap.
 fn memory(config: &Config, profile: &Profile, advice: Advice, lowering: Lowering) -> u64 {
     let current = profile.memory.0;
     let step = current.saturating_mul(u64::from(config.sizing.max_step)) / 100;
@@ -536,13 +515,9 @@ fn memory(config: &Config, profile: &Profile, advice: Advice, lowering: Lowering
                 .saturating_sub(step)
                 .div_ceil(GRANULE)
                 .saturating_mul(GRANULE);
-            let bound = profile.min_memory.map_or(0, |min| min.0);
-            memory.max(floor).max(bound).min(current)
+            memory.max(floor).min(current)
         }
-        Advice::Raise { memory, .. } => {
-            let bound = profile.max_memory.map_or(u64::MAX, |max| max.0);
-            memory.min(bound).max(current)
-        }
+        Advice::Raise { memory, .. } => memory,
         _ => current,
     }
 }

@@ -271,7 +271,7 @@ fn changes(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
 /// it advises, or with too few jobs, what it would size for (`Sizing::need`).
 fn scale(sizing: &Sizing, profile: &ProfileSizing) -> Markup {
     let memory = &profile.peaks.memory;
-    let need = sizing.need(&profile.peaks, profile.advice);
+    let need = sizing.need(profile);
     let reason = need.reason;
     let need = need.memory;
     let whole = profile.memory.max(need).max(memory.max).max(1);

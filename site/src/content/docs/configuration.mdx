@@ -242,7 +242,7 @@ A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T
 | `cpus`, `memory` | | each runner's CPU and memory limits; `memory` is its container's hard limit, `cpus` its CPU quota and, when the slice's CPUs are all in use, its share of them ([Sharing the CPUs](../admission/#sharing-the-cpus)) |
 | `slots` | | the most runners of the profile at once |
 | `record_failures` | `false` | keep each failed job's runner as a [record](#records-of-failed-jobs), to open a shell in |
-| `min_memory`, `max_memory` | unset | the bounds [auto sizing](../admission/#auto-sizing) keeps `memory` in; unset, as low as its jobs need and as high as `MemoryMax` holds |
+| `min_memory`, `max_memory` | unset | the bounds [sizing advice](../admission/#auto-sizing) and auto sizing keep `memory` in; unset, as low as its jobs need and as high as `MemoryMax` holds |
 | `max_slots` | unset | the most `slots` auto sizing raises the profile to; unset, as many as `MemoryMax` holds |
 | `priced_as` | `actions_linux` | the GitHub-hosted runner its jobs are [priced at](../insights/#what-the-minutes-would-have-cost), by GitHub's billing name: `actions_linux_slim`, `actions_linux`, `actions_linux_arm`, `linux_2_core_advanced`, `linux_4_core` to `linux_96_core`, `linux_2_core_arm` to `linux_64_core_arm`. `actions_linux_arm` on an arm64 host |
 

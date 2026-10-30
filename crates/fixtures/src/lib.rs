@@ -552,8 +552,9 @@ pub fn auto_plan(at: u64) -> api::AutoPlan {
 
 /// `GET /v1/sizing` at `at` (s) under auto sizing, with [`auto_plan`]: jvm keeps its 9G, and a change 2 hours before
 /// holds it from any other for 1 more hour; node's next look would lower its memory, and cannot raise its `cpus`;
-/// android's jobs need 17G, but `[host] memory_ceiling` holds it at its 14G; and the config file changed on disk, so
-/// no look changes anything until runnerd runs with it.
+/// android's jobs need 17G, but `[host] memory_ceiling` holds it at its 14G; gradle's need 13.25G, but its
+/// `max_memory` holds it at its 11G; and the config file changed on disk, so no look changes anything until runnerd
+/// runs with it.
 pub fn sizing(at: u64) -> api::Sizing {
     let spread = |p50, p95, p99, max| api::Spread { p50, p95, p99, max };
     let profile = |name: &str, memory: u64, peak: u64, advice| api::ProfileSizing {
@@ -575,7 +576,7 @@ pub fn sizing(at: u64) -> api::Sizing {
         wants_slots: true,
         advice,
         revert: None,
-        ceiling: None,
+        hold: None,
         jobs: Vec::new(),
     };
     let mut plan = auto_plan(at);
@@ -615,17 +616,34 @@ pub fn sizing(at: u64) -> api::Sizing {
                 },
             ),
             api::ProfileSizing {
-                ceiling: Some(api::CeilingHold {
+                hold: Some(api::MemoryHold {
                     need: 17 * GIB,
-                    ceiling: 14 * GIB + 512 * MIB,
-                    mirror: 512 * MIB,
-                    most: 14 * GIB,
+                    bound: 14 * GIB,
+                    by: api::MemoryBound::Ceiling {
+                        ceiling: 14 * GIB + 512 * MIB,
+                        mirror: 512 * MIB,
+                    },
                 }),
                 ..profile(
                     "android",
                     14 * GIB,
                     14 * GIB,
                     api::Advice::SliceTooSmall { memory: 17 * GIB },
+                )
+            },
+            api::ProfileSizing {
+                hold: Some(api::MemoryHold {
+                    need: 13568 * MIB,
+                    bound: 11 * GIB,
+                    by: api::MemoryBound::MaxMemory,
+                }),
+                ..profile(
+                    "gradle",
+                    11 * GIB,
+                    11 * GIB,
+                    api::Advice::SliceTooSmall {
+                        memory: 13568 * MIB,
+                    },
                 )
             },
         ],

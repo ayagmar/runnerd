@@ -3,8 +3,8 @@
 //! check of it. Plain derivations of [`Sizing`]; the daemon's advice uses [`need`] for its arithmetic.
 
 use super::{
-    Advice, AutoPlan, JobSizing, PAGE_CACHE_ROOM, Peaks, ProfileSizing, Sizing, SizingChange,
-    SizingHold, Starts,
+    Advice, AutoPlan, JobSizing, MemoryBound, MemoryHold, PAGE_CACHE_ROOM, Peaks, ProfileSizing,
+    Sizing, SizingChange, SizingHold, Starts,
 };
 use crate::api::{Check, CheckStatus, Tone, Toned};
 use crate::config::ByteSize;
@@ -43,9 +43,12 @@ pub struct Need {
 }
 
 impl Sizing {
-    /// What `peaks` need: the advice's memory, or with too few jobs for advice, what it would size for.
-    pub fn need(&self, peaks: &Peaks, advice: Advice) -> Need {
-        let memory = match advice {
+    /// What `profile`'s jobs need: the advice's memory, or what a bound of the config holds it away from
+    /// (`ProfileSizing::hold`), or with too few jobs for advice, what it would size for.
+    pub fn need(&self, profile: &ProfileSizing) -> Need {
+        let peaks = &profile.peaks;
+        let memory = match profile.advice {
+            _ if let Some(hold) = profile.hold => hold.need,
             Advice::Keep { memory }
             | Advice::Lower { memory, .. }
             | Advice::Raise { memory, .. }
@@ -156,16 +159,22 @@ impl Sizing {
                 changes
                     .iter()
                     .map(|profile| match profile.advice {
-                        Advice::SliceTooSmall { .. } if profile.at_ceiling() => format!(
-                            "raise [host] memory_ceiling if the host can grow further, then: runnerctl sizing \
-                             apply {}",
-                            profile.name
-                        ),
-                        Advice::SliceTooSmall { .. } => format!(
-                            "raise MemoryMax in the slice's unit file, sudo systemctl daemon-reload, then: \
-                             runnerctl sizing apply {}",
-                            profile.name
-                        ),
+                        Advice::SliceTooSmall { .. } => match profile.held().map(|hold| hold.by) {
+                            Some(MemoryBound::Ceiling { .. }) => format!(
+                                "raise [host] memory_ceiling if the host can grow further, then: runnerctl \
+                                 sizing apply {}",
+                                profile.name
+                            ),
+                            Some(MemoryBound::MaxMemory | MemoryBound::MinMemory) => format!(
+                                "raise max_memory in [profiles.{0}], then: runnerctl sizing apply {0}",
+                                profile.name
+                            ),
+                            None => format!(
+                                "raise MemoryMax in the slice's unit file, sudo systemctl daemon-reload, then: \
+                                 runnerctl sizing apply {}",
+                                profile.name
+                            ),
+                        },
                         _ => format!("runnerctl sizing apply {}", profile.name),
                     })
                     .collect::<Vec<_>>()
@@ -201,20 +210,23 @@ impl Advice {
 }
 
 impl ProfileSizing {
-    /// Whether `[host] memory_ceiling` keeps its `memory` where it is although its jobs need more: no raise is
-    /// possible until the ceiling grows.
-    pub fn at_ceiling(&self) -> bool {
-        matches!(self.advice, Advice::SliceTooSmall { .. })
-            && self.ceiling.is_some_and(|hold| self.memory >= hold.most)
+    /// What keeps its `memory` where it is although its jobs need more, `[host] memory_ceiling` or `max_memory`: no
+    /// raise is possible until that grows. `None` while a raise is possible or the slice is what has to grow.
+    pub fn held(&self) -> Option<MemoryHold> {
+        self.hold.filter(|hold| {
+            matches!(self.advice, Advice::SliceTooSmall { .. })
+                && hold.by != MemoryBound::MinMemory
+                && self.memory >= hold.bound
+        })
     }
 
-    /// Its advice in a word or two, for a table cell: `Advice::word`, or `at ceiling` while `[host] memory_ceiling`
+    /// Its advice in a word or two, for a table cell: `Advice::word`, or `at ceiling` or `at max_memory` while that
     /// holds its `memory` where it is.
     pub fn advice_word(&self) -> String {
-        if self.at_ceiling() {
-            "at ceiling".to_owned()
-        } else {
-            self.advice.word()
+        match self.held().map(|hold| hold.by) {
+            Some(MemoryBound::Ceiling { .. }) => "at ceiling".to_owned(),
+            Some(MemoryBound::MaxMemory | MemoryBound::MinMemory) => "at max_memory".to_owned(),
+            None => self.advice.word(),
         }
     }
 }

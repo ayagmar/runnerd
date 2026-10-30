@@ -73,6 +73,8 @@ pub struct Fixtures {
     pub savings: Option<runnerd_core::api::Savings>,
     /// What `GET /v1/insights` answers; `None`, the demo's own.
     pub insights: Option<Insights>,
+    /// What `GET /v1/sizing` answers; `None`, the demo's own.
+    pub sizing: Option<Sizing>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -709,6 +711,7 @@ impl Fixtures {
             auto_plan: None,
             savings: None,
             insights: None,
+            sizing: None,
         }
     }
 
@@ -1052,6 +1055,9 @@ fn digest(fixtures: &Fixtures) -> Digest {
 /// peak at 2.1G of 7G and wait for a slot, so 3.25G caps, with 1G of page cache room, fit 4 in its 2 × 7G. The
 /// end-to-end job has too few runs.
 fn sizing(fixtures: &Fixtures) -> Sizing {
+    if let Some(sizing) = &fixtures.sizing {
+        return sizing.clone();
+    }
     let config = runnerd_core::config::Config::parse(&fixtures.config).unwrap();
     let spread = |p50, p95, p99, max| Spread { p50, p95, p99, max };
     let gib = |tenths: u64| tenths * GIB / 10;
@@ -1172,7 +1178,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                 advice,
                 jobs,
                 revert: None,
-                ceiling: None,
+                hold: None,
             }
         })
         .collect();

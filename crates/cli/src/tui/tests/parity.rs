@@ -279,6 +279,10 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
         .unwrap();
     assert_eq!(android.advice_word(), "at ceiling");
     assert!(shown.contains("at ceiling"), "{}", rows.join("\n"));
+    // And one its `max_memory` holds.
+    let gradle = sizing.profiles.iter().find(|p| p.name == "gradle").unwrap();
+    assert_eq!(gradle.advice_word(), "at max_memory");
+    assert!(shown.contains("at max_memory"), "{}", rows.join("\n"));
 }
 
 #[test]

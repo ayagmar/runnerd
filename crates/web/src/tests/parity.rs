@@ -213,6 +213,34 @@ async fn sizing_states_what_blocks_auto_sizing_as_core_does() {
 }
 
 #[tokio::test]
+async fn sizing_states_each_profile_s_advice_and_need_as_core_does() {
+    let (dashboard, cookie, _, _) = dashboard().await;
+    let sizing = runnerd_fixtures::sizing(runnerd_fixtures::NOW);
+    dashboard.fake.fixtures.lock().unwrap().sizing = Some(sizing.clone());
+    let page = dashboard.page(&cookie, "/sizing").await.body;
+    let shown = text(&page);
+    for profile in &sizing.profiles {
+        assert!(
+            shown.contains(&sizing.advice_line(profile)),
+            "{}: {shown}",
+            profile.name
+        );
+        // A profile a bound holds shows what its jobs need, not the bound.
+        let need = runnerd_core::config::ByteSize(sizing.need(profile).memory);
+        assert!(
+            shown.contains(&format!("needs {need}")),
+            "{}: {shown}",
+            profile.name
+        );
+        assert!(
+            !page.contains(&format!("/config?resize={}", profile.name)),
+            "{} has nothing to apply under auto sizing",
+            profile.name
+        );
+    }
+}
+
+#[tokio::test]
 async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
     let (dashboard, cookie, _, _) = dashboard().await;
     let insights = runnerd_fixtures::insights(runnerd_fixtures::NOW);

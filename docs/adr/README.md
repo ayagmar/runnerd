@@ -44,7 +44,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time |
 | [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |
 | [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |
-| [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default |
+| [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default (amended by 0049, 0088) |
 | [0040](0040-unused-runner-images-removed.md) | Published runner images no profile runs are removed |
 | [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits (amended: a snapshot over its limit is due for a reseed; amended by 0065) |
 | [0042](0042-dashboard-behind-a-proxy-and-installable.md) | The dashboard behind a proxy the owner runs, and installable as an app (amended by 0043) |
@@ -91,5 +91,6 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0083](0083-turborepo-and-nx-from-the-build-cache.md) | Turborepo's remote cache served from the build cache, Nx's on request |
 | [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md) | A host whose memory grows to a ceiling counts what it can still grow by (amended by 0086) |
 | [0085](0085-actions-cache-saves-wait-for-the-decision-not-the-job.md) | GitHub Actions cache saves wait for the decision, not the job |
-| [0086](0086-sizing-and-init-know-the-memory-ceiling.md) | Auto sizing and `runnerd init` know the memory ceiling |
+| [0086](0086-sizing-and-init-know-the-memory-ceiling.md) | Auto sizing and `runnerd init` know the memory ceiling (amended by 0088) |
 | [0087](0087-an-insight-for-jobs-their-cpu-cap-holds-back.md) | An insight for jobs their CPU cap holds back |
+| [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md) | Sizing advice keeps to a profile's memory bounds |

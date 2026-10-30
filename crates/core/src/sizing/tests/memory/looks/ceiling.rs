@@ -10,7 +10,7 @@ use crate::sizing::{History, advise};
 
 impl Daemon {
     /// Started at `now` with `text` and `history` against a slice of `memory_max`, as after a restart.
-    fn restarted(text: String, history: History, memory_max: u64, now: u64) -> Daemon {
+    pub(super) fn restarted(text: String, history: History, memory_max: u64, now: u64) -> Daemon {
         let mut daemon = Daemon {
             text,
             history,
@@ -23,7 +23,7 @@ impl Daemon {
     }
 
     /// The advice as `runnerctl sizing` shows it after the last look.
-    fn sizing(&self) -> Sizing {
+    pub(super) fn sizing(&self) -> Sizing {
         advise(
             &self.config(),
             Some(self.memory_max),
@@ -33,7 +33,7 @@ impl Daemon {
     }
 
     /// A look at `now`, whose config, if it wrote one, the config check passes.
-    fn checked_look(&mut self, now: u64) -> Vec<SizingChange> {
+    pub(super) fn checked_look(&mut self, now: u64) -> Vec<SizingChange> {
         let changes = self.look(now);
         if let Err(error) = check(&self.text, self.memory_max) {
             panic!("the look at {now} wrote a config the check refuses: {error}");
@@ -43,7 +43,7 @@ impl Daemon {
 }
 
 /// `text` with `line` added under `[host]`.
-fn host(text: &str, line: &str) -> String {
+pub(super) fn host(text: &str, line: &str) -> String {
     text.replacen(
         "isolation = \"sysbox\"\n",
         &format!("isolation = \"sysbox\"\n{line}\n"),
@@ -57,7 +57,7 @@ fn mirror_off(text: &str) -> String {
 }
 
 /// Whether the config check against a slice of `memory_max` passes `text`, and why not.
-fn check(text: &str, memory_max: u64) -> Result<(), String> {
+pub(super) fn check(text: &str, memory_max: u64) -> Result<(), String> {
     Config::parse(text)
         .map_err(|error| error.to_string())?
         .validate(Some(ByteSize(memory_max)))
@@ -66,7 +66,7 @@ fn check(text: &str, memory_max: u64) -> Result<(), String> {
 }
 
 /// jvm's memory changes among `changes`, as (from, to).
-fn memory_steps(changes: &[SizingChange]) -> Vec<(u64, u64)> {
+pub(super) fn memory_steps(changes: &[SizingChange]) -> Vec<(u64, u64)> {
     changes
         .iter()
         .filter(|change| change.profile == "jvm" && change.to.memory != change.from.memory)
@@ -134,7 +134,7 @@ fn a_raise_stops_at_what_the_memory_ceiling_leaves_one_runner_and_later_looks_ra
             );
             let sizing = daemon.sizing();
             let jvm = sizing.profiles.iter().find(|p| p.name == "jvm").unwrap();
-            assert!(jvm.at_ceiling(), "{case}: jvm is held at the ceiling");
+            assert!(jvm.held().is_some(), "{case}: jvm is held at the ceiling");
             assert_eq!(jvm.advice_word(), "at ceiling", "{case}");
             assert!(
                 sizing.advice_line(jvm).starts_with(&format!(
@@ -279,7 +279,7 @@ fn a_revert_the_ceiling_held_short_finishes_once_the_ceiling_is_removed_across_a
     let sizing = daemon.sizing();
     let jvm = sizing.profiles.iter().find(|p| p.name == "jvm").unwrap();
     assert!(
-        jvm.at_ceiling(),
+        jvm.held().is_some(),
         "held at the ceiling, not done: {:?}",
         jvm.advice
     );
@@ -327,7 +327,7 @@ fn a_revert_the_slice_cannot_hold_writes_nothing_and_says_the_slice_has_to_grow(
     let sizing = daemon.sizing();
     let jvm = sizing.profiles.iter().find(|p| p.name == "jvm").unwrap();
     assert_eq!(jvm.advice, Advice::SliceTooSmall { memory: 14 * G });
-    assert!(!jvm.at_ceiling(), "the slice holds it, not the ceiling");
+    assert!(jvm.held().is_none(), "the slice holds it, not the ceiling");
     assert!(
         sizing.advice_line(jvm).starts_with(&format!(
             "needs 14G ({} failed 3 times in a row at 10G since auto sizing lowered it from 14G), more than the \
