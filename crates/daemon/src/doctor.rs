@@ -105,54 +105,53 @@ pub(crate) struct Slice {
 }
 
 impl Host {
-    /// The host, for `config` read from the file `path`.
+    /// The host, for `config` read from the file `path`. `gh` takes about half a second a call, one call per
+    /// repository, so `gh`, each repository and Docker are read at once: the doctor takes as long as its slowest read,
+    /// not their sum.
     pub(crate) fn read(config: Option<&Config>, path: Option<&Path>) -> Host {
-        let docker = read_docker();
-        let gh_scopes = read_gh_scopes();
-        Host {
-            config_file: path.and_then(|path| {
+        std::thread::scope(|scope| {
+            let gh_scopes = scope.spawn(read_gh_scopes);
+            let visibility: Vec<_> = config
+                .map(|config| config.repositories.as_slice())
+                .unwrap_or_default()
+                .iter()
+                .map(|repository| {
+                    let name = repository.name.as_str();
+                    (name, scope.spawn(move || read_visibility(name)))
+                })
+                .collect();
+            let docker = scope.spawn(|| {
+                let docker = read_docker();
+                let images = match (config, &docker) {
+                    (Some(config), Ok(_)) => read_images(config),
+                    _ => BTreeMap::new(),
+                };
+                let records = (config.is_some() && docker.is_ok()).then(read_records);
+                DockerReads {
+                    docker,
+                    images,
+                    records,
+                }
+            });
+            let config_file = path.and_then(|path| {
                 let metadata = std::fs::metadata(path).ok()?;
                 Some(ConfigFile {
                     path: path.to_owned(),
                     mode: metadata.permissions().mode() & 0o7777,
                 })
-            }),
-            images: match (config, &docker) {
-                (Some(config), Ok(_)) => read_images(config),
-                _ => BTreeMap::new(),
-            },
-            records: (config.is_some() && docker.is_ok()).then(read_records),
-            sizing: None,
-            docker,
-            os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
-            slice: config.map(|config| read_slice(&config.host.slice)),
-            visibility: config.map_or_else(BTreeMap::new, |config| {
-                config
-                    .repositories
-                    .iter()
-                    .map(|repository| {
-                        let name = repository.name.clone();
-                        let visibility = match &gh_scopes {
-                            Ok(_) => read_visibility(&name),
-                            Err(_) => Err("needs gh logged in to github.com".to_owned()),
-                        };
-                        (name, visibility)
-                    })
-                    .collect()
-            }),
-            gh_scopes,
-            sysbox_daemons: SYSBOX_DAEMONS.map(|name| SysboxDaemon {
+            });
+            let slice = config.map(|config| read_slice(&config.host.slice));
+            let sysbox_daemons = SYSBOX_DAEMONS.map(|name| SysboxDaemon {
                 name,
                 state: read_daemon(name),
-            }),
-            sysbox_unit: Command::new("systemctl")
+            });
+            let sysbox_unit = Command::new("systemctl")
                 .args(["show", "sysbox.service", "--property=LoadState", "--value"])
                 .output()
                 .is_ok_and(|output| {
                     output.status.success() && output.stdout.trim_ascii() == b"loaded"
-                }),
-            kvm: Path::new("/dev/kvm").exists(),
-            memory: {
+                });
+            let memory = {
                 let paths = Paths::default();
                 let slice = config.map(|config| config.host.slice.as_str());
                 let unavailable =
@@ -162,9 +161,56 @@ impl Host {
                         .map_or_else(Vec::new, |slice| metrics::read_holders(&paths, slice)),
                     ..memory
                 })
-            },
-        }
+            };
+            let gh_scopes = joined(gh_scopes);
+            let visibility = visibility
+                .into_iter()
+                .map(|(name, read)| {
+                    let read = joined(read);
+                    // Without gh logged in, what it said of a repository is only that.
+                    let visibility = match &gh_scopes {
+                        Ok(_) => read,
+                        Err(_) => Err("needs gh logged in to github.com".to_owned()),
+                    };
+                    (name.to_owned(), visibility)
+                })
+                .collect();
+            let DockerReads {
+                docker,
+                images,
+                records,
+            } = joined(docker);
+            Host {
+                docker,
+                images,
+                records,
+                sizing: None,
+                os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
+                slice,
+                gh_scopes,
+                visibility,
+                sysbox_daemons,
+                sysbox_unit,
+                kvm: Path::new("/dev/kvm").exists(),
+                memory,
+                config_file,
+            }
+        })
     }
+}
+
+/// What `Host::read` reads from Docker, which it reads on a thread of its own.
+struct DockerReads {
+    docker: Result<DockerFacts, String>,
+    images: BTreeMap<String, Result<ImageFound, String>>,
+    records: Option<Result<u64, String>>,
+}
+
+/// What the thread of `handle` returned; its panic, if it panicked, goes on in this thread.
+fn joined<T>(handle: std::thread::ScopedJoinHandle<'_, T>) -> T {
+    handle
+        .join()
+        .unwrap_or_else(|panic| std::panic::resume_unwind(panic))
 }
 
 /// Whether `name` runs as its systemd unit or, as a source build starts it, as a bare process.
@@ -280,14 +326,16 @@ fn read_images(config: &Config) -> BTreeMap<String, Result<ImageFound, String>> 
             .build()
             .map_err(|error| error.to_string())?;
         let docker = Docker::connect().map_err(|error| error.to_string())?;
-        Ok(runtime.block_on(async {
-            let mut found = BTreeMap::new();
-            for (reference, image) in &images {
-                let result = read(&docker, reference, image).await;
-                found.insert(reference.clone(), result.map_err(|error| error.to_string()));
-            }
-            found
-        }))
+        // At once: an image Docker lacks costs a round trip to its registry.
+        Ok(runtime
+            .block_on(futures_util::future::join_all(images.iter().map(
+                async |(reference, image)| {
+                    let result = read(&docker, reference, image).await;
+                    (reference.clone(), result.map_err(|error| error.to_string()))
+                },
+            )))
+            .into_iter()
+            .collect())
     };
     read_all().unwrap_or_else(|error| {
         images

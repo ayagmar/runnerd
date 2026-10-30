@@ -384,20 +384,26 @@ fn write_atomically(path: &Path, text: &str, sync_dir: SyncDir) -> io::Result<Op
 }
 
 pub(super) async fn doctor(_: Authenticated, State(state): State<AppState>) -> Response {
-    let sizing = super::history::sizing_now(&state, Window::new(None, super::history::now())).await;
     let (text, path) = {
         let file = state.config.lock().await;
         (file.text.clone(), file.path.clone())
     };
-    let checked = tokio::task::spawn_blocking(move || {
+    // The host and the job history at once: each takes a while.
+    let host = tokio::task::spawn_blocking(move || {
         let config = Config::parse(&text).ok();
-        let mut host = crate::doctor::Host::read(config.as_ref(), Some(&path));
-        host.sizing = Some(sizing);
-        crate::doctor::checks(&host, config.as_ref())
-    })
-    .await;
-    match checked {
-        Ok(checks) => Json(Doctor { checks }).into_response(),
+        let host = crate::doctor::Host::read(config.as_ref(), Some(&path));
+        (config, host)
+    });
+    let sizing = super::history::sizing_now(&state, Window::new(None, super::history::now()));
+    let (read, sizing) = tokio::join!(host, sizing);
+    match read {
+        Ok((config, mut host)) => {
+            host.sizing = Some(sizing);
+            Json(Doctor {
+                checks: crate::doctor::checks(&host, config.as_ref()),
+            })
+            .into_response()
+        }
         Err(join_error) => failed(&join_error),
     }
 }
