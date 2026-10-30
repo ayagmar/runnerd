@@ -494,7 +494,9 @@ async fn serve(
         paused,
         sessions,
     } = open_history(&config)?;
-    let socket = socket_or_default(socket)?;
+    // Absolute, because the build cache's sockets sit beside it and Docker mounts only absolute paths.
+    let socket = std::path::absolute(socket_or_default(socket)?)
+        .map_err(|error| fail(&format_args!("cannot resolve the socket's path: {error}")))?;
     let listener = api::bind(&socket).await.map_err(|error| fail(&error))?;
     let web_listener = runnerd_web::listen(web)
         .await
