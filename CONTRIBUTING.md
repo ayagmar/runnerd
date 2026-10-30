@@ -104,7 +104,6 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    follow.
 2. Update every place that names the version. `git grep -nF <old version> -- ':!Cargo.lock' ':!site/pnpm-lock.yaml'`
    finds them; today they are:
-   - `README.md`: the installer's `--version` example;
    - `examples/runnerd.toml`: each profile's `image` tag (the doctor tests compare it with the crate version);
    - `crates/core/src/config.rs`: the `image` key's doc comment;
    - the site: `install.md`, `configuration.mdx`, `clients.mdx`, `src/pages/index.astro` and the TUI frames in
