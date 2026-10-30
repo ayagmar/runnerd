@@ -3,7 +3,9 @@
 Status: **Accepted** (2026-10-24). Amends [0033](0033-measured-admission.md),
 [0032](0032-sizing-advice-from-sampled-peaks.md) and [0039](0039-auto-sizing.md). Amended by
 [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md): a stopped warm runner's room pays the host's
-deficit first, and a seed container fits the budget as a runner does.
+deficit first, and a seed container fits the budget as a runner does. Amended by
+[0084](0084-a-host-whose-memory-grows-to-a-ceiling.md): with `[host] memory_ceiling`, what the host can still grow
+by counts as available and the margin is the ceiling's.
 
 ## Context
 

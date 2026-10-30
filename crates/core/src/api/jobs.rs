@@ -539,9 +539,25 @@ pub struct HostMemory {
     /// Read less often than the rest. Empty when none is that large.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub holders: Vec<Holder>,
+    /// `[host] memory_ceiling`: the most memory the host can grow to, in bytes, for a VM whose hypervisor adds
+    /// memory as the guest asks for it (ADR 0084). From the config, not from `/proc`; absent unless it is set.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<u64>,
 }
 
 impl HostMemory {
+    /// The host's memory as admission counts it, in bytes: `MemTotal`, or the ceiling when that is more (ADR 0084).
+    pub fn grown(&self) -> u64 {
+        self.ceiling
+            .map_or(self.total, |ceiling| ceiling.max(self.total))
+    }
+
+    /// What the host can still grow by before it reaches its ceiling, in bytes: 0 without one, or once `MemTotal`
+    /// reached it.
+    pub fn growable(&self) -> u64 {
+        self.grown().saturating_sub(self.total)
+    }
+
     /// What the host holds outside the slice's runners, in bytes: its other programs, tmpfs and the kernel, without
     /// page cache it can drop.
     pub fn outside(&self) -> u64 {

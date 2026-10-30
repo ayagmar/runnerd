@@ -884,6 +884,7 @@ fn the_bar_shows_no_free_cell_when_core_says_nothing_is_free() {
             some: None,
             full: None,
             holders: Vec::new(),
+            ceiling: None,
         },
         limit: 4 << 30,
         spare: 4 << 30,

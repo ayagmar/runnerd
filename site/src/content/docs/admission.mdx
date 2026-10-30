@@ -29,6 +29,17 @@ The slice's `MemoryMax` is fixed, but the rest of the host is not: a desktop, lo
 
 Without a reading from the last few seconds, only `MemoryMax` bounds starts.
 
+### A host whose memory grows
+
+A VM whose hypervisor hands out memory as the guest asks for it, such as Hyper-V with Dynamic Memory or a balloon driver, shrinks while it is idle. Its `MemTotal` and `MemAvailable` then say only what it has now, and a queued job, which allocates nothing, waits for memory the VM would get as soon as a runner asked for it. `memory_ceiling` under [`[host]`](../configuration/#host) says how far the host can grow:
+
+```toml
+[host]
+memory_ceiling = "24G"
+```
+
+The slice may then hold what its runners hold plus `MemAvailable` plus what the host can still grow by, `memory_ceiling` less `MemTotal`, less the margin of the ceiling: on a VM at 2.12G with 1.48G available that can grow to 24G, 21.36G. The host's line says so, `host: 1.48G of 2.12G available, growing to 24G; leaves the slice 21.36G`, and so does `runnerd doctor`. The stall rule does not count the ceiling: when the hypervisor does not give what it promises, every task waits for memory and nothing more starts. Set the ceiling to the VM's maximum, or lower when other VMs compete for the hypervisor's RAM: a ceiling it cannot give brings back the stalls this bound prevents. At or under `MemTotal` the ceiling has no effect; `runnerd doctor` warns when it is under.
+
 ## Sizing
 
 `runnerctl sizing`, the dashboard's Sizing page and the TUI turn each job's recent sampled memory and CPU peaks ([what memory counts](#what-a-jobs-memory-is)) into advice for each profile's `memory` and `slots`. A job's recent runs are its last 60 successful ones in the 30 days (3 × 20, or 3 × `min_jobs` when that is more), with any that failed among them, so a job that got lighter stops holding its cap up after 60 runs, not a month:

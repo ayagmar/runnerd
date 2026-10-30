@@ -264,6 +264,7 @@ pub fn read_host_memory(paths: &Paths, slice: u64, at: u64) -> Option<api::HostM
         some: line("some"),
         full: line("full"),
         holders: Vec::new(),
+        ceiling: None,
     })
 }
 

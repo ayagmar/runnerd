@@ -135,6 +135,7 @@ fn host(limit: u64, stalled: bool) -> HostBudget {
             some: None,
             full: None,
             holders: vec![],
+            ceiling: None,
         },
         limit,
         spare: limit.saturating_sub(8 * G),

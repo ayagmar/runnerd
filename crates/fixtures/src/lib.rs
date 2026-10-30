@@ -164,6 +164,7 @@ fn host() -> HostBudget {
             some: None,
             full: None,
             holders: Vec::new(),
+            ceiling: None,
         },
         limit: 22 * GIB + 512 * MIB,
         spare: 512 * MIB,

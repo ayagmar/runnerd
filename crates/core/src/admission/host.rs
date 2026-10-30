@@ -1,8 +1,10 @@
 //! What the host's memory leaves runners beside its other programs (ADR 0055): the slice's runners may hold what
 //! they hold now without page cache plus the host's `MemAvailable`, less a margin kept for the host's page cache, so
 //! reclaim stays cheap; and nothing starts while the host, short of memory, stalls for it. Each bound has
-//! hysteresis, so a host at the edge does not start and hold runners by turns. Pure: the engine passes in the
-//! reading and what it remembers of the last plan.
+//! hysteresis, so a host at the edge does not start and hold runners by turns. A host whose memory can grow to a
+//! ceiling, `[host] memory_ceiling` (ADR 0084), counts what it can still grow by as available and keeps the margin of
+//! its ceiling; the stall rule reads the memory the host has now. Pure: the engine passes in the reading, with the ceiling,
+//! and what it remembers of the last plan.
 
 use crate::api::{HostBudget, HostMemory};
 
@@ -42,7 +44,9 @@ pub fn margin(total: u64, short: bool) -> u64 {
 
 /// Whether `memory`'s stall shares say the host stalls for memory, given whether it did at the last plan. A stall
 /// counts only while `MemAvailable` is under twice the margin: the shares are the whole host's, and a runner
-/// reclaiming at its own cap raises them with memory to spare, which starts elsewhere do not make worse.
+/// reclaiming at its own cap raises them with memory to spare, which starts elsewhere do not make worse. A ceiling
+/// changes nothing here (ADR 0084): what the host could still grow by is not available, and a stall while it is
+/// short says the hypervisor is not giving it.
 pub fn stalls(memory: &HostMemory, before: bool) -> bool {
     let full = memory.full.map_or(0, |full| full.avg10);
     let stalling = full >= STALL_ENTER || (before && full >= STALL_LEAVE);
@@ -50,12 +54,15 @@ pub fn stalls(memory: &HostMemory, before: bool) -> bool {
 }
 
 /// What `memory` lets the slice's runners hold in all: what the slice holds now without page cache plus
-/// `MemAvailable`, less the margin, larger while the host is `short`.
+/// `MemAvailable` and what the host can still grow by (`HostMemory::growable`), less the margin of the host's memory
+/// at its ceiling, larger while the host is `short`. Without a ceiling above `MemTotal`, the slice and
+/// `MemAvailable` less the margin of `MemTotal`.
 pub fn limit(memory: &HostMemory, short: bool) -> u64 {
     memory
         .slice
         .saturating_add(memory.available)
-        .saturating_sub(margin(memory.total, short))
+        .saturating_add(memory.growable())
+        .saturating_sub(margin(memory.grown(), short))
 }
 
 /// What `memory` leaves runners beside the `reserved` memory of what runs in the slice, given what the last plan
@@ -89,3 +96,6 @@ pub fn left(limit: u64, reserved: u64, stalled: bool) -> i64 {
 pub fn first_runner(memory: &HostMemory, reserved: u64) -> u64 {
     u64::try_from(left(limit(memory, false), reserved, false)).unwrap_or(0)
 }
+
+#[cfg(test)]
+mod tests;

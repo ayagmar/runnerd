@@ -675,6 +675,73 @@ fn cpu_admission_is_off_unless_an_overcommit_above_0_is_set() {
 }
 
 #[test]
+fn a_memory_ceiling_is_unset_unless_given_and_takes_a_size() {
+    assert_eq!(Config::parse(MINIMAL).unwrap().host.memory_ceiling, None);
+    let config = Config::parse(&MINIMAL.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nmemory_ceiling = \"24G\"",
+    ))
+    .unwrap();
+    assert_eq!(config.host.memory_ceiling, Some(size("24G")));
+    assert!(config.validate(Some(size("10G"))).is_ok());
+    let error = Config::parse(&MINIMAL.replace(
+        "isolation = \"sysbox\"",
+        "isolation = \"sysbox\"\nmemory_ceiling = 24",
+    ))
+    .unwrap_err()
+    .to_string();
+    assert!(error.contains("memory_ceiling"), "{error}");
+}
+
+#[test]
+fn a_memory_ceiling_of_0_or_under_the_largest_runner_is_refused() {
+    let with = |ceiling: &str| {
+        Config::parse(&MINIMAL.replace(
+            "isolation = \"sysbox\"",
+            &format!("isolation = \"sysbox\"\nmemory_ceiling = \"{ceiling}\""),
+        ))
+        .unwrap()
+        .validate(Some(size("10G")))
+    };
+    let zero = with("0G").unwrap_err().to_string();
+    assert!(zero.contains("host.memory_ceiling is 0"), "{zero}");
+    // The app profile's runner takes 4G, and the mirror is off.
+    let typo = with("4M").unwrap_err().to_string();
+    assert!(
+        typo.contains("host.memory_ceiling is 4M, under the 4G one runner of app"),
+        "{typo}"
+    );
+    assert!(with("4G").is_ok(), "a ceiling that fits one runner passes");
+}
+
+#[test]
+fn a_memory_ceiling_counts_the_mirror_only_while_it_is_enabled() {
+    let with = |mirror: &str| {
+        Config::parse(
+            &MINIMAL
+                .replace(
+                    "isolation = \"sysbox\"",
+                    "isolation = \"sysbox\"\nmemory_ceiling = \"4G\"",
+                )
+                .replace("enabled = false, memory = \"512M\"", mirror),
+        )
+        .unwrap()
+        .validate(Some(size("10G")))
+    };
+    assert!(
+        with("enabled = false, memory = \"512M\"").is_ok(),
+        "a disabled mirror takes nothing beside the 4G runner"
+    );
+    let error = with("enabled = true, memory = \"512M\"")
+        .unwrap_err()
+        .to_string();
+    assert!(
+        error.contains("under the 4.5G one runner of app and the mirror take"),
+        "{error}"
+    );
+}
+
+#[test]
 fn a_slices_cpus_are_its_cpu_set_or_the_hosts_less_under_a_lower_quota() {
     let show = |effective: &str, allowed: &str, quota: &str| {
         format!("EffectiveCPUs={effective}\nAllowedCPUs={allowed}\nCPUQuotaPerSecUSec={quota}\n")

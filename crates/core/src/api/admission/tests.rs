@@ -76,6 +76,7 @@ fn a_host_reading_names_its_holders_and_leaves_them_out_when_none_is_that_large(
         some: None,
         full: None,
         holders: Vec::new(),
+        ceiling: None,
     };
     assert_eq!(
         serde_json::to_string(&none).unwrap(),
