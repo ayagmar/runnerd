@@ -136,6 +136,11 @@ impl BuildCacheActivity {
     }
 }
 
+/// The tools whose caches the build cache serves, as clients name them over its counts (ADR 0052, 0083). The image
+/// points each at it but Nx, which fails its run when the cache does not answer.
+pub const BUILD_CACHE_TOOLS: &str =
+    "Gradle, sccache, Bazel and Turborepo, and Nx where a workflow opts in";
+
 /// What doctor and the Caches page name GitHub Actions' cache.
 pub const ACTIONS_CACHE: &str = "GitHub Actions' cache";
 
@@ -149,13 +154,19 @@ pub fn actions_cache_place(served: bool) -> &'static str {
 }
 
 impl BuildCacheStats {
-    /// Where jobs' GitHub Actions cache is: `GitHub Actions' cache: served from the build cache on this host, in
-    /// place of GitHub's`.
+    /// Where jobs' GitHub Actions cache is, and while it is here, where its hits are counted and how to turn it off:
+    /// `GitHub Actions' cache: served from the build cache on this host, in place of GitHub's, and counted with it;
+    /// [caches.build] actions_cache = false turns it off`.
     pub fn actions_cache_line(&self) -> String {
-        format!(
-            "{ACTIONS_CACHE}: {}",
-            actions_cache_place(self.actions_cache)
-        )
+        let place = actions_cache_place(self.actions_cache);
+        if self.actions_cache {
+            format!(
+                "{ACTIONS_CACHE}: {place}, and counted with it; [caches.build] actions_cache = false turns it \
+                 off"
+            )
+        } else {
+            format!("{ACTIONS_CACHE}: {place}")
+        }
     }
 
     /// Its entries and the last 7 days' jobs: `120 entries; 75% of 400 lookups hit in 7 days, 3G served, 1G

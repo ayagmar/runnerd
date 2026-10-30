@@ -209,6 +209,9 @@ fn a_job_states_its_outcome_steps_caps_build_cache_and_failed_runs_as_core_does(
         let took = step.took.as_deref().unwrap_or("–");
         assert!(row.trim_end().ends_with(took), "{took}: {row}");
     }
+    // What held its CPU back stays whole on a common terminal, where the details' line drops what does not fit.
+    let (rows, _) = frame_of(&app, 120, 40);
+    assert!(shows(&rows, &job.cpu_held), "{}", rows.join("\n"));
 }
 
 #[test]
@@ -242,6 +245,30 @@ fn the_overview_says_what_the_months_job_minutes_would_have_cost_as_core_words_i
     assert!(
         !rows.iter().any(|row| row.contains('$')),
         "too short a terminal leaves the figure out rather than cut it:\n{}",
+        rows.join("\n")
+    );
+}
+
+#[test]
+fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    app.update(key(KeyCode::Char('4')));
+    let sizing = runnerd_fixtures::sizing(NOW);
+    let plan = sizing.auto_plan.clone().unwrap();
+    app.update(Msg::Sizing(sizing));
+    let (rows, _) = frame_of(&app, 120, 40);
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
+    let shown = words(&rows.join(" "));
+    // Wrapped, never cut.
+    assert!(
+        shown.contains(&words(&plan.blocked_line().unwrap())),
+        "{}",
+        rows.join("\n")
+    );
+    assert!(
+        shown.contains(&words(&plan.refusal("node").unwrap())),
+        "{}",
         rows.join("\n")
     );
 }

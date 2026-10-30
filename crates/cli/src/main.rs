@@ -49,7 +49,8 @@ struct Cli {
     reason = "clap prints these comments as --help, where backticks would show"
 )]
 enum Command {
-    /// Show the memory budget, every slot and what runs in it, and the repositories with their queues.
+    /// Show the memory and CPU budgets, every slot and what runs in it, the repositories, and why each queued job
+    /// waits.
     Status,
     /// List jobs, newest first.
     Jobs {
@@ -75,7 +76,8 @@ enum Command {
         #[arg(long)]
         limit: Option<u32>,
     },
-    /// Show one job: its timeline, steps with their durations, CPU, memory and network.
+    /// Show one job: its timeline and wait, steps with their durations, and its CPU and what held it back, memory,
+    /// network and build cache.
     Job { id: u64 },
     /// Print a job's log.
     Logs {
@@ -94,7 +96,8 @@ enum Command {
     /// Full-screen dashboard: a line on CI's health (what runs, what waits and for how long), the budget, slots with
     /// their memory and CPU, the queue with why each job waits, history, and each job's steps and log.
     ///
-    /// Keys: 1 overview, 2 history, tab and j/k to move, enter to open a job, p/r to pause or resume, ? for all.
+    /// Keys: 1 overview, 2 history, 3 records, 4 sizing, tab and j/k to move, enter to open a job, p/r to pause or
+    /// resume, ? for all.
     #[cfg(feature = "tui")]
     Tui,
     /// Give a repository, or every one, no new runners, also after a restart. Refused while it runs a job, unless
@@ -141,7 +144,8 @@ enum Command {
         command: Option<RecordsCommand>,
     },
     /// Show what each profile's jobs use: percentiles of their sampled memory and CPU peaks, how long they waited
-    /// and how busy the slots were, and what to set each profile's memory and slots to.
+    /// and how busy the slots were, what to set each profile's memory and slots to, and what auto sizing does
+    /// next.
     Sizing {
         /// Only jobs queued in the last 30m, 12h, 7d, 2w, … [default: 30d].
         #[arg(long, value_parser = parse_age)]
@@ -150,8 +154,8 @@ enum Command {
         command: Option<SizingCommand>,
     },
     /// Show what the history says: what the job minutes would have cost on GitHub's runners, jobs that got slower and
-    /// stayed so, jobs that fail and pass on a re-run, jobs near their memory cap, and how long each repository's jobs
-    /// wait this week against the last. One line per insight.
+    /// stayed so, fail and pass on a re-run, run near their memory cap or miss the build cache, downloads slowed for
+    /// want of memory, and how long each repository's jobs wait this week against the last. One line per insight.
     Insights {
         /// Days of history to read [default: 14, at most 90].
         #[arg(long)]
@@ -165,7 +169,8 @@ enum Command {
         #[command(subcommand)]
         command: NotifyCommand,
     },
-    /// Show the cache volumes, their sizes and limits.
+    /// Show the cache volumes, their sizes and limits, the build cache's hits, and whether it serves GitHub Actions'
+    /// cache.
     Caches {
         /// Empty this volume (a slot layer or a shared cache) instead; refused while a runner uses it.
         #[arg(long, value_name = "VOLUME")]
@@ -650,7 +655,6 @@ async fn reseed(
     }
 }
 
-/// `runnerctl sizing`: shows the advice, or writes one profile's into the config.
 /// `runnerctl caches`: the cache volumes, or with `clean` empties one.
 async fn caches(client: &Client, json: bool, clean: Option<String>) -> Result<ExitCode, Error> {
     if let Some(volume) = clean {
@@ -715,6 +719,7 @@ async fn notify(client: &Client, json: bool, command: NotifyCommand) -> Result<E
     ))
 }
 
+/// `runnerctl sizing`: shows the advice, or writes one profile's into the config.
 async fn sizing(
     client: &Client,
     json: bool,

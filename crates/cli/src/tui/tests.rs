@@ -2151,10 +2151,8 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         Some("runnerd.toml changed on disk since runnerd read it".to_owned());
     app.update(Msg::Sizing(sizing.clone()));
     let shown = screen(&app, 120, 24, false);
-    assert!(
-        shown.contains("No look changes anything now: runnerd.toml changed on disk"),
-        "{shown}"
-    );
+    let blocked = sizing.auto_plan.as_ref().unwrap().blocked_line().unwrap();
+    assert!(shown.contains(&blocked), "{shown}");
     assert!(
         rows_with(&shown, "■ node")[0].contains("Once that is fixed: memory 7G → 5.25G"),
         "{shown}"
@@ -2170,9 +2168,10 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         rows_with(&shown, "■ node")[0].contains("Next look, within 5 minutes: memory 7G → 5.25G"),
         "{shown}"
     );
+    let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     assert!(
-        shown.contains(&refusal[..60]),
-        "the refusal shows beside it: {shown}"
+        words(&shown).contains(&words(&refusal)),
+        "the refusal shows beside it, wrapped, never cut: {shown}"
     );
     let printed = crate::human::sizing(&sizing, NOW, crate::human::Paint { colour: false });
     assert!(printed.contains(&refusal), "{printed}");

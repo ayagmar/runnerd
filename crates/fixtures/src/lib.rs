@@ -7,7 +7,8 @@
 //! and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records near
 //! `max_total`; a build cache that refused uploads and had no lookups; and jobs priced at GitHub's rates on two
 //! runners, with a 61-second and a 0-second job, and jobs of a public repository, of Dependabot, of a repository
-//! GitHub has not answered for, lost, without an end and run elsewhere.
+//! GitHub has not answered for, lost, without an end and run elsewhere; and auto sizing's plan, with a change next,
+//! a profile a change holds and a `cpus` raise it cannot make.
 //!
 //! Test support only: client tests depend on it, a client never does, so no client depends on another to share it.
 //! It computes nothing itself; every fact is core's.
@@ -539,10 +540,80 @@ pub fn auto_plan(at: u64) -> api::AutoPlan {
         refused: vec![api::SizingRefused {
             profile: "node".to_owned(),
             reason: format!(
-                "3 runs of {STOREFRONT} CI / test averaged 7.6 of its 8 CPUs (median): the cap holds them back; 9 \
-                 CPUs for each of its 2 slots do not fit the CPU budget beside the other profiles'"
+                "3 runs of {STOREFRONT} CI / test were held back by its 8 CPUs, throttled in 15% of their run or \
+                 more: under measured admission they bound no slot, so the cap only slows them; 9 CPUs do not fit \
+                 the CPU budget with every profile's warm runners and one more runner at the largest cap"
             ),
         }],
+    }
+}
+
+/// `GET /v1/sizing` at `at` (s) under auto sizing, with [`auto_plan`]: jvm keeps its 9G, and a change 2 hours before
+/// holds it from any other for 1 more hour; node's next look would lower its memory, and cannot raise its `cpus`; and
+/// the config file changed on disk, so no look changes anything until runnerd runs with it.
+pub fn sizing(at: u64) -> api::Sizing {
+    let spread = |p50, p95, p99, max| api::Spread { p50, p95, p99, max };
+    let profile = |name: &str, memory: u64, peak: u64, advice| api::ProfileSizing {
+        name: name.to_owned(),
+        memory,
+        cpus: 8,
+        slots: 2,
+        peaks: api::Peaks {
+            jobs: 40,
+            at_cap: 0,
+            on_cap: 0,
+            memory: spread(peak / 2, peak, peak, peak),
+            cpu: spread(2000, 6000, 7600, 7600),
+            cpu_runs: 40,
+        },
+        wait: spread(20, 300, 400, 400),
+        starts: api::Starts::default(),
+        busy: 70,
+        wants_slots: true,
+        advice,
+        revert: None,
+        jobs: Vec::new(),
+    };
+    let mut plan = auto_plan(at);
+    plan.blocked = Some(
+        "the file changed on disk since runnerd read it; nothing is changed until runnerd runs with it (restart it, \
+         or make the edit in the dashboard's editor)"
+            .to_owned(),
+    );
+    plan.held.push(api::SizingHold {
+        profile: "jvm".to_owned(),
+        changed: at - 7200,
+        until: at + 3600,
+        lower_until: at + 3600,
+    });
+    api::Sizing {
+        since: at - 30 * 86_400,
+        until: at,
+        margin: 15,
+        sample_interval: 2,
+        min_jobs: 10,
+        memory_max: Some(33 * GIB),
+        admission: AdmissionPolicy::Measured,
+        profiles: vec![
+            profile(
+                "jvm",
+                9 * GIB,
+                7800 * MIB,
+                api::Advice::Keep { memory: 9 * GIB },
+            ),
+            profile(
+                "node",
+                7 * GIB,
+                2150 * MIB,
+                api::Advice::Lower {
+                    memory: 3328 * MIB,
+                    slots: 4,
+                },
+            ),
+        ],
+        auto: true,
+        changes: Vec::new(),
+        auto_plan: Some(plan),
     }
 }
 

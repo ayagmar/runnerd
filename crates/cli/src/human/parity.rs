@@ -8,10 +8,12 @@
     reason = "tests fail by panicking"
 )]
 
-use runnerd_core::api::JobPage;
+use runnerd_core::api::{self, JobPage};
 use runnerd_fixtures::{Facts, NOW, TIMED_OUT, daemon, facts};
 
-use super::{Paint, Tone, caches, job, jobs, outcome_tone, records, savings, status};
+use super::{
+    Paint, Tone, caches, job, jobs, outcome_tone, plan_line, records, savings, sizing, status,
+};
 
 const PLAIN: Paint = Paint { colour: false };
 const COLOUR: Paint = Paint { colour: true };
@@ -146,6 +148,7 @@ fn records_and_caches_state_their_limits_as_core_does() {
     let text = caches(&daemon.caches, NOW, PLAIN);
     assert!(text.contains(&facts.build_cache_week), "{text}");
     assert!(text.contains(&facts.actions_cache), "{text}");
+    assert!(text.contains(api::BUILD_CACHE_TOOLS), "{text}");
 }
 
 #[test]
@@ -155,4 +158,23 @@ fn insights_open_with_what_the_job_minutes_would_have_cost_as_core_words_it() {
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], facts.savings);
     assert!(lines.contains(&facts.savings_30_days.as_str()), "{text}");
+}
+
+#[test]
+fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_with_each_profile_as_core_does() {
+    let advice = runnerd_fixtures::sizing(NOW);
+    let plan = advice.auto_plan.as_ref().unwrap();
+    let text = sizing(&advice, NOW, PLAIN);
+    assert!(text.contains(&plan.rules()), "{text}");
+    assert!(text.contains(&plan.blocked_line().unwrap()), "{text}");
+    for profile in &advice.profiles {
+        let (what, _) = plan_line(&advice, plan, profile, NOW);
+        assert!(text.contains(&what), "{}: {text}", profile.name);
+    }
+    // Held, with when the change that holds it was made and what it holds.
+    assert!(
+        text.contains("changed 2h 00m ago; the interval holds it until then"),
+        "{text}"
+    );
+    assert!(text.contains(&plan.refusal("node").unwrap()), "{text}");
 }
