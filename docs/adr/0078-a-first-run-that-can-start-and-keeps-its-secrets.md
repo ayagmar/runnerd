@@ -22,7 +22,10 @@ the cookie is checked only when a request starts.
 ## Decision
 
 - `init` sizes a slot to no more than `admission::host::first_runner`: what the host's `MemAvailable` leaves the first
-  runner past the margin, beside the mirror's cap, as the engine admits it into an empty slice. The slice's budget
+  runner past the margin, beside the mirror's cap, as the engine admits it into an empty slice, less 512M for what
+  starts after `init` (the daemon, containerd unpacking the image, the mirror's shim). Without that headroom an 8G
+  host got a runner with 61M to spare, which those take. `doctor` checks profiles with the same function, beside what
+  the slice holds and the mirror's cap. The slice's budget
   stays three quarters of the host, or its `MemoryMax`, so later slots wait for the host's memory as any other start
   does. A host that leaves less than 2G for a runner, such as a 4G VM, gets no config and the reason.
 - `init` writes the config 0600 in directories it makes 0700. Every save of the config through the API drops the
@@ -39,4 +42,6 @@ the cookie is checked only when a request starts.
 - A starter config on a busy desktop gets a smaller runner than before when little memory is free at `init` time;
   auto sizing raises it as jobs need.
 - A config made readable by others on purpose becomes 0600 at its next save.
-- `doctor` runs one `gh api` request per repository.
+- `doctor` runs one `gh api` request per repository, one after another, and nothing bounds a `gh` that hangs.
+  `GET /v1/doctor` runs them too, so the dashboard's config page, which shows the checks, waits for them each time
+  it opens. If that grows slow, the daemon can read the visibilities concurrently or keep them.

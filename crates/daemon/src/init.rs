@@ -27,6 +27,9 @@ const SLOT_MEMORY: u64 = 8 * GIB;
 const MIN_SLOT_MEMORY: u64 = 2 * GIB;
 /// Slot memory is a multiple of this.
 const MEMORY_STEP: u64 = 512 << 20;
+/// What init leaves of the host's available memory for what starts after it: the daemon, containerd unpacking the
+/// runner image, the mirror's shim. Without it a runner sized to the exact room waits once they run.
+const STARTUP_HEADROOM: u64 = MEMORY_STEP;
 /// No more slots than one per this many CPUs.
 const CPUS_PER_SLOT: u32 = 4;
 /// The image stage the starter profile runs; every other stage builds on it.
@@ -80,8 +83,8 @@ pub(crate) struct Sizing {
 }
 
 /// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs. A slot is no
-/// larger than what admission leaves the first runner beside the mirror on this host now (`host::first_runner`), so
-/// the first job can start.
+/// larger than what admission leaves the first runner beside the mirror on this host now (`host::first_runner`), less
+/// `STARTUP_HEADROOM`, so the first job can start once runnerd runs.
 pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
     // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
     let host = machine.memory.total / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
@@ -92,17 +95,19 @@ pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
     );
     let room = budget.0.saturating_sub(MIRROR_MEMORY.0);
     // The engine reserves for the mirror before it starts.
-    let first = host::first_runner(&machine.memory, MIRROR_MEMORY.0);
+    let first =
+        host::first_runner(&machine.memory, MIRROR_MEMORY.0).saturating_sub(STARTUP_HEADROOM);
     let memory = SLOT_MEMORY.min(room).min(first) / MEMORY_STEP * MEMORY_STEP;
     if memory < MIN_SLOT_MEMORY {
         let least = ByteSize(MIN_SLOT_MEMORY);
         return Err(if first < room {
             format!(
-                "this host has {}; runnerd keeps {} of it free and {MIRROR_MEMORY} for the mirror, which leaves {} \
-                 for a runner, and a runner needs at least {least}. Close what uses the host's memory, or run \
-                 runnerd on a host with more",
+                "this host has {}; runnerd keeps {} of it free, {MIRROR_MEMORY} for the mirror and {} for what \
+                 starts with it, which leaves {} for a runner, and a runner needs at least {least}. Close what uses \
+                 the host's memory, or run runnerd on a host with more",
                 machine.memory.available_line(),
                 ByteSize(host::margin(machine.memory.total, false)),
+                ByteSize(STARTUP_HEADROOM),
                 ByteSize(first),
             )
         } else {
@@ -409,8 +414,8 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          \n\
          # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of the host's\n\
          # memory, or the slice's MemoryMax if that is smaller. One runner and the mirror also fit what the host\n\
-         # had available when init ran, less the margin runnerd keeps free. runnerd pulls the image before the\n\
-         # first runner.\n\
+         # had available when init ran, less the margin runnerd keeps free and {headroom} for what starts with\n\
+         # runnerd. runnerd pulls the image before the first runner.\n\
          [profiles.default]\n\
          image = \"{image}\"\n\
          cpus = {cpus}\n\
@@ -418,6 +423,7 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          slots = {slots}\n\
          {repositories}",
         image = starter_image(),
+        headroom = ByteSize(STARTUP_HEADROOM),
         host_cpus = machine.cpus,
         slice = request.slice,
     )

@@ -111,8 +111,9 @@ fn every_sizing_fits_its_budget_three_quarters_of_the_host_and_what_admission_le
                 };
                 let room = sizing.budget.0 - super::MIRROR_MEMORY.0;
                 assert!(
-                    sizing.memory.0 <= host::first_runner(&machine.memory, super::MIRROR_MEMORY.0),
-                    "{memory_gib}G: the first runner fits the host: {sizing:?}"
+                    sizing.memory.0 + super::STARTUP_HEADROOM
+                        <= host::first_runner(&machine.memory, super::MIRROR_MEMORY.0),
+                    "{memory_gib}G: the first runner fits the host with room for what starts after init: {sizing:?}"
                 );
                 assert!(
                     sizing.budget.0 <= machine.memory.total / 4 * 3,
@@ -138,10 +139,11 @@ fn a_slice_larger_than_the_host_does_not_size_past_the_host() {
     assert_eq!(sizing.slots, 1);
 }
 
-/// A first job waits for the host's memory forever when init sized its runner past what admission leaves it: no
-/// job finishes, so auto sizing has nothing to lower it from.
+/// A first job waits for the host's memory forever when init sized its runner past what admission leaves it once
+/// runnerd runs: no job finishes, so auto sizing has nothing to lower it from.
 #[test]
 fn the_first_job_of_a_starter_config_is_admitted_on_a_small_host() {
+    let mut waiting = Vec::new();
     // `MemTotal` and `MemAvailable` of Ubuntu 24.04 VMs with Docker running and nothing else, in kB.
     for (name, total, available) in [
         ("4G", 4_005_036, 3_412_108),
@@ -162,6 +164,7 @@ fn the_first_job_of_a_starter_config_is_admitted_on_a_small_host() {
                 assert_eq!(name, "4G", "{name}: {error}");
                 assert!(
                     error.contains("this host has 3.25G of 3.82G available")
+                        && error.contains("512M for what starts with it")
                         && error.contains("a runner needs at least 2G"),
                     "{error}"
                 );
@@ -171,22 +174,25 @@ fn the_first_job_of_a_starter_config_is_admitted_on_a_small_host() {
         };
         let config = Config::load(&request.config).unwrap();
         let runner = config.profiles["default"].memory.0;
-        // As the engine admits the first runner into an empty slice: the host's budget beside the mirror's cap.
+        // As the engine admits the first runner into an empty slice, the host's budget beside the mirror's cap, once
+        // the daemon, containerd with the unpacked image and the mirror's shim hold some of what init saw.
+        let started = HostMemory {
+            available: machine.memory.available - (256 << 20),
+            ..machine.memory.clone()
+        };
         let reserved = config.caches.mirror.memory.0;
-        let budget = host::budget(
-            machine.memory.clone(),
-            reserved,
-            host::Remembered::default(),
-        );
-        assert!(
-            runner <= budget.spare,
-            "{name}: a {} runner fits the {} the host leaves it",
-            ByteSize(runner),
-            ByteSize(budget.spare)
-        );
+        let budget = host::budget(started, reserved, host::Remembered::default());
+        if runner > budget.spare {
+            waiting.push(format!(
+                "{name}: a {} runner waits, the host leaves it {}",
+                ByteSize(runner),
+                ByteSize(budget.spare)
+            ));
+        }
         let checked = config.check_against(Some(sizing.budget));
         assert!(checked.valid, "{name}: {}", checked.message);
     }
+    assert!(waiting.is_empty(), "every first job starts: {waiting:?}");
 }
 
 #[test]
@@ -200,10 +206,13 @@ fn a_host_too_small_for_one_runner_gets_no_config() {
 
 #[test]
 fn the_config_is_readable_by_its_user_only_under_a_default_umask() {
-    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
+    // Process-wide: put back as it was, for the tests running beside this one.
+    let umask = rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
     let dir = Dir::new();
     let request = request(&dir.0, Overwrite::Refuse);
-    init(&request, &machine(64, 16, None)).unwrap();
+    let written = init(&request, &machine(64, 16, None));
+    rustix::process::umask(umask);
+    written.unwrap();
     let mode = |path: &Path| {
         std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).unwrap().permissions())
             & 0o777
