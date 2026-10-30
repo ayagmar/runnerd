@@ -297,7 +297,7 @@ fn doctor(path: Option<&Path>) -> ExitCode {
         Ok(config) => config,
         Err(error) => return fail(&error),
     };
-    let mut host = doctor::Host::read(config.as_ref());
+    let mut host = doctor::Host::read(config.as_ref(), path);
     if let Some(config) = &config
         && let Some(database) = config.history.database.clone().or_else(default_database)
     {

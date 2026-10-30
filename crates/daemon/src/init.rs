@@ -1,10 +1,12 @@
 //! `runnerd init`: writes a starter `runnerd.toml` sized for this host and a systemd user unit that serves it, then
 //! prints the doctor's checks and the steps left as commands. It overwrites neither file without `--force` and runs
-//! nothing as root: the steps that need root are printed for the user to run.
+//! nothing as root: the steps that need root are printed for the user to run. The config, which the dashboard may
+//! later fill with notification secrets, is readable by its user only, in a directory init makes the same way.
 
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
+use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
@@ -206,8 +208,8 @@ pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, Strin
             if existing.len() == 1 { "it" } else { "them" }
         ));
     }
-    let mut config = Staged::write(&request.config, &config)?;
-    let mut unit = Staged::write(&request.unit, &unit)?;
+    let mut config = Staged::write(&request.config, &config, Access::Private)?;
+    let mut unit = Staged::write(&request.unit, &unit, Access::Shared)?;
     config.publish(request.overwrite)?;
     if let Err(error) = unit.publish(request.overwrite) {
         return Err(match config.undo() {
@@ -240,6 +242,15 @@ fn unique<T>(
     Err(std::io::ErrorKind::AlreadyExists.into())
 }
 
+/// Who may read a file `Staged` writes, and the directories it makes for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Its user only: 0600, in directories of 0700.
+    Private,
+    /// Whatever the umask lets through.
+    Shared,
+}
+
 /// A file written in full next to its destination, so a failure before `publish` leaves the destination as it was.
 /// Removes its temp file, and the backup of what it replaced, on drop.
 struct Staged<'path> {
@@ -250,14 +261,31 @@ struct Staged<'path> {
 }
 
 impl Staged<'_> {
-    fn write<'path>(path: &'path Path, text: &str) -> Result<Staged<'path>, String> {
+    fn write<'path>(
+        path: &'path Path,
+        text: &str,
+        access: Access,
+    ) -> Result<Staged<'path>, String> {
         let fail = |error: std::io::Error| format!("cannot write {}: {error}", path.display());
         let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
             return Err(fail(std::io::ErrorKind::InvalidInput.into()));
         };
-        std::fs::create_dir_all(dir).map_err(fail)?;
+        let (dir_mode, file_mode) = match access {
+            Access::Private => (0o700, 0o600),
+            Access::Shared => (0o777, 0o666),
+        };
+        DirBuilder::new()
+            .recursive(true)
+            .mode(dir_mode)
+            .create(dir)
+            .map_err(fail)?;
+        // Published by a link or a rename, the file keeps the mode it is made with.
         let (temp, mut file) = unique(dir, &name.to_string_lossy(), |temp| {
-            OpenOptions::new().write(true).create_new(true).open(temp)
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(file_mode)
+                .open(temp)
         })
         .map_err(fail)?;
         // Only now is the temp file ours to remove.
@@ -462,7 +490,7 @@ pub(crate) fn run(request: &Request) -> ExitCode {
         Ok(config) => config,
         Err(error) => return output::fail(&error),
     };
-    let host = doctor::Host::read(Some(&config));
+    let host = doctor::Host::read(Some(&config), Some(&request.config));
     let mut checks = doctor::checks(&host, Some(&config));
     if let Some(Ok(slice)) = &host.slice {
         for check in &mut checks {

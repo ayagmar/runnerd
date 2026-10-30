@@ -9,8 +9,8 @@ use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::sizing;
 
 use super::{
-    Check, DaemonState, DockerFacts, Host, ImageFound, SYSBOX_DAEMONS, Slice, Status, SysboxDaemon,
-    checks, process_runs,
+    Check, ConfigFile, DaemonState, DockerFacts, Host, ImageFound, SYSBOX_DAEMONS, Slice, Status,
+    SysboxDaemon, checks, process_runs,
 };
 use crate::testdir::Dir;
 
@@ -91,6 +91,10 @@ fn ready_host(os_release: &str) -> Host {
             full: Some(api::Pressure::default()),
             holders: Vec::new(),
         }),
+        config_file: Some(ConfigFile {
+            path: "/home/dana/.config/runnerd/runnerd.toml".into(),
+            mode: 0o600,
+        }),
     }
 }
 
@@ -124,6 +128,7 @@ fn a_ready_host_passes_every_check() {
             "sysbox",
             "slice",
             "config",
+            "config file",
             "host memory",
             "image",
             "image",
@@ -131,6 +136,27 @@ fn a_ready_host_passes_every_check() {
             "gh",
             "/dev/kvm"
         ]
+    );
+}
+
+#[test]
+fn a_config_other_users_can_read_is_a_warning_with_its_chmod() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.config_file = Some(ConfigFile {
+        path: "/home/dana/.config/runnerd/runnerd.toml".into(),
+        mode: 0o644,
+    });
+    let checks = checks(&host, Some(&config));
+    let check = checks
+        .iter()
+        .find(|check| check.name == "config file")
+        .unwrap();
+    assert_eq!(check.status, Status::Warn, "{}", check.detail);
+    assert!(check.detail.contains("mode 644"), "{}", check.detail);
+    assert_eq!(
+        check.fix.as_deref(),
+        Some("chmod 600 '/home/dana/.config/runnerd/runnerd.toml'")
     );
 }
 

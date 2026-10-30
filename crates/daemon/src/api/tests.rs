@@ -1565,7 +1565,7 @@ async fn a_config_in_place_whose_directory_cannot_be_flushed_is_run_and_shown_wi
 }
 
 #[tokio::test]
-async fn a_valid_config_replaces_the_file_it_links_to_with_its_permissions_and_is_reloaded() {
+async fn a_valid_config_replaces_the_file_it_links_to_readable_by_its_user_only_and_is_reloaded() {
     let dir = Dir::new();
     let mut daemon = start(&dir.0, None).await;
     let new = EXAMPLE.replacen("slots = 2", "slots = 1", 1);
@@ -1585,10 +1585,11 @@ async fn a_valid_config_replaces_the_file_it_links_to_with_its_permissions_and_i
             .is_symlink()
     );
     assert_eq!(std::fs::read_to_string(&daemon.config).unwrap(), new);
+    // It was 0640: a saved config may hold notification secrets.
     let mode = std::fs::metadata(&daemon.config).unwrap().permissions();
     assert_eq!(
         std::os::unix::fs::PermissionsExt::mode(&mode) & 0o777,
-        0o640
+        0o600
     );
     let reloaded = daemon.reloads.recv().await.unwrap();
     assert_eq!(reloaded.profiles["jvm"].slots, 1);

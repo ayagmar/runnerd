@@ -309,4 +309,4 @@ Each `[[notify.targets]]`:
 | `headers` | `{}` | sent with each post, such as `{ Authorization = "Bearer tk_…" }`; their values are secrets too |
 | `events` | `["failed", "lost", "runner", "insights"]` | what it is sent; add `"digest"` for the daily digest |
 
-The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show `url` and header values as `"<secret>"`. Leave them so and saving keeps the values in the file; write a new value over one to change it. A target renamed in the editor has nothing to keep, so write its values again. Comments are shown as written.
+The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show `url` and header values as `"<secret>"`. Leave them so and saving keeps the values in the file; write a new value over one to change it. A target renamed in the editor has nothing to keep, so write its values again. Comments are shown as written. Since the file can hold these secrets, `runnerd init` writes it readable by you only (mode 0600, in a directory of mode 0700), every save from the dashboard or `PUT /v1/config` leaves it so, and `runnerd doctor` warns when other users can read it.

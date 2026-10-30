@@ -334,12 +334,13 @@ pub(crate) fn sync_dir(dir: &Path) -> io::Result<()> {
 }
 
 /// Replaces the file `path` points to, through a symlink if it is one, with `text`: a temporary file in the same
-/// directory with the same permissions, renamed over it, so a reader sees the old file or the new one. `Err` leaves
+/// directory with the same permissions for its user and none for anyone else, as it may hold notification
+/// secrets, renamed over it, so a reader sees the old file or the new one. `Err` leaves
 /// the old file; once renamed, the new file is in place, and `Ok` carries the error if flushing the rename to disk
 /// with `sync_dir` failed, which a crash could undo.
 fn write_atomically(path: &Path, text: &str, sync_dir: SyncDir) -> io::Result<Option<io::Error>> {
     let target = std::fs::canonicalize(path)?;
-    let mode = std::fs::metadata(&target)?.permissions().mode();
+    let mode = std::fs::metadata(&target)?.permissions().mode() & 0o700;
     let dir = target.parent().unwrap_or(Path::new("/"));
     let name = target
         .file_name()
@@ -367,10 +368,13 @@ fn write_atomically(path: &Path, text: &str, sync_dir: SyncDir) -> io::Result<Op
 
 pub(super) async fn doctor(_: Authenticated, State(state): State<AppState>) -> Response {
     let sizing = super::history::sizing_now(&state, Window::new(None, super::history::now())).await;
-    let text = state.config.lock().await.text.clone();
+    let (text, path) = {
+        let file = state.config.lock().await;
+        (file.text.clone(), file.path.clone())
+    };
     let checked = tokio::task::spawn_blocking(move || {
         let config = Config::parse(&text).ok();
-        let mut host = crate::doctor::Host::read(config.as_ref());
+        let mut host = crate::doctor::Host::read(config.as_ref(), Some(&path));
         host.sizing = Some(sizing);
         crate::doctor::checks(&host, config.as_ref())
     })

@@ -199,6 +199,25 @@ fn a_host_too_small_for_one_runner_gets_no_config() {
 }
 
 #[test]
+fn the_config_is_readable_by_its_user_only_under_a_default_umask() {
+    rustix::process::umask(rustix::fs::Mode::from_raw_mode(0o022));
+    let dir = Dir::new();
+    let request = request(&dir.0, Overwrite::Refuse);
+    init(&request, &machine(64, 16, None)).unwrap();
+    let mode = |path: &Path| {
+        std::os::unix::fs::PermissionsExt::mode(&std::fs::metadata(path).unwrap().permissions())
+            & 0o777
+    };
+    assert_eq!(mode(&request.config), 0o600, "the config");
+    assert_eq!(
+        mode(request.config.parent().unwrap()),
+        0o700,
+        "its directory"
+    );
+    assert_eq!(mode(&request.unit), 0o644, "the unit is not secret");
+}
+
+#[test]
 fn init_refuses_to_replace_a_file_without_force() {
     let dir = Dir::new();
     let request = request(&dir.0, Overwrite::Refuse);

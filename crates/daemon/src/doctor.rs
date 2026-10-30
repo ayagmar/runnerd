@@ -2,7 +2,8 @@
 //! nothing; the user runs the fixes. The checks are `api::Check`s, so `GET /v1/doctor` serves the same ones.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use runnerd_core::admission::host;
@@ -37,6 +38,15 @@ pub(crate) struct Host {
     pub kvm: bool,
     /// The host's memory and how long its tasks stalled for it; `None` when `/proc/meminfo` does not say.
     pub memory: Option<api::HostMemory>,
+    /// The config's file; `None` without one, or when it cannot be read.
+    pub config_file: Option<ConfigFile>,
+}
+
+/// The file a config was read from, and who may read it.
+pub(crate) struct ConfigFile {
+    pub path: PathBuf,
+    /// Its permission bits, of the file a symbolic link points to.
+    pub mode: u32,
 }
 
 /// The daemons sysbox-runc needs; `sysbox.service` starts both, a source build's `scr/sysbox` too.
@@ -92,9 +102,17 @@ pub(crate) struct Slice {
 }
 
 impl Host {
-    pub(crate) fn read(config: Option<&Config>) -> Host {
+    /// The host, for `config` read from the file `path`.
+    pub(crate) fn read(config: Option<&Config>, path: Option<&Path>) -> Host {
         let docker = read_docker();
         Host {
+            config_file: path.and_then(|path| {
+                let metadata = std::fs::metadata(path).ok()?;
+                Some(ConfigFile {
+                    path: path.to_owned(),
+                    mode: metadata.permissions().mode() & 0o7777,
+                })
+            }),
             images: match (config, &docker) {
                 (Some(config), Ok(_)) => read_images(config),
                 _ => BTreeMap::new(),
@@ -454,6 +472,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     checks.extend(slice_checks(host, config));
+    checks.extend(host.config_file.as_ref().map(config_file_check));
     checks.push(memory_check(host.memory.as_ref(), config));
     checks.extend(image_checks(host, config, docker));
     if let (Some(config), Some(records)) = (config, &host.records) {
@@ -541,6 +560,29 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     };
     let config_check = config.check_against(slice.memory_max).doctor_check();
     vec![slice_check, config_check]
+}
+
+/// Warns when users other than its owner may read or write the config: the dashboard saves notification secrets in
+/// it, such as a webhook's URL, and a save leaves it readable by its user only.
+fn config_file_check(file: &ConfigFile) -> Check {
+    let path = file.path.display();
+    let shared = file.mode & 0o077;
+    if shared == 0 {
+        return pass("config file", format!("{path}: only you can read it"));
+    }
+    Check {
+        name: "config file".to_owned(),
+        status: Status::Warn,
+        detail: format!(
+            "{path} has mode {:o}, so other users can read it, and any notification secret the dashboard saves \
+             in it",
+            file.mode
+        ),
+        fix: Some(format!(
+            "chmod 600 '{}'",
+            path.to_string().replace('\'', "'\\''")
+        )),
+    }
 }
 
 /// One check per distinct image of the config's profiles.
