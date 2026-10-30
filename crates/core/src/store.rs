@@ -30,9 +30,21 @@ mod write;
 /// The schema a new database is created with, at [`VERSION`].
 const SCHEMA: &str = include_str!("store/schema.sql");
 
-/// The schema version this build reads and writes, the database's `user_version`. A change to the schema adds a
-/// migration from it.
-const VERSION: u32 = 15;
+/// The oldest schema version a database is brought up from: 0.0.19's (ADR 0073).
+const OLDEST: u32 = 15;
+
+/// The steps from [`OLDEST`] on, in order, each with the version it brings a database to. A change to the schema
+/// adds one here and makes the same change to `schema.sql`, which a new database gets instead.
+const MIGRATIONS: &[(u32, &str)] = &[(
+    16,
+    "ALTER TABLE jobs ADD COLUMN unseen INTEGER NOT NULL DEFAULT 0;",
+)];
+
+/// The schema version this build reads and writes, the database's `user_version`: its last migration's.
+const VERSION: u32 = match MIGRATIONS.last() {
+    Some((version, _)) => *version,
+    None => OLDEST,
+};
 
 /// Bytes of log lines sent and not yet stored, at most: a job's capture waits beyond it, so a noisy job or a slow
 /// disk holds back that job's log, not the daemon's memory.
@@ -64,14 +76,14 @@ pub enum StoreError {
     },
     /// A runnerd before 0.0.19 wrote the database.
     #[error(
-        "the job history database is version {found}, from a runnerd before 0.0.19; this runnerd reads version \
-         {supported} only: move the database aside"
+        "the job history database is version {found}, from a runnerd before 0.0.19; this runnerd reads versions \
+         from {oldest} on: move the database aside"
     )]
     Older {
         /// The database's version.
         found: u32,
-        /// The version this build reads.
-        supported: u32,
+        /// The oldest version this build reads.
+        oldest: u32,
     },
     /// The directory or file cannot be created.
     #[error("{0}")]
@@ -378,8 +390,15 @@ pub struct Store {
 
 impl Store {
     /// Opens the database at `path`, creating it and its directory (mode 0700) if missing, with the schema when it
-    /// is new. Refuses a database at another version.
+    /// is new, and brings it to the schema this build reads. Refuses a database from before 0.0.19 or from a newer
+    /// runnerd. The time since the history's last sign of life is taken as time no runnerd ran: the jobs queued in
+    /// it leave it out of their waits.
     pub fn open(path: &Path) -> Result<Store, StoreError> {
+        Store::open_at(path, crate::time::now_ms())
+    }
+
+    /// [`Store::open`] at `now` (ms).
+    fn open_at(path: &Path, now: u64) -> Result<Store, StoreError> {
         if let Some(dir) = path.parent().filter(|dir| !dir.as_os_str().is_empty()) {
             std::fs::DirBuilder::new()
                 .recursive(true)
@@ -394,7 +413,8 @@ impl Store {
             .open(path)?;
         let mut db = Connection::open(path)?;
         configure(&db)?;
-        create(&mut db)?;
+        prepare(&mut db)?;
+        let downtime = Downtime::before(&mut db, now)?;
         let reader = Connection::open_with_flags(
             path,
             OpenFlags::SQLITE_OPEN_READ_ONLY | OpenFlags::SQLITE_OPEN_NO_MUTEX,
@@ -409,7 +429,7 @@ impl Store {
         let thread_held = held.clone();
         std::thread::Builder::new()
             .name("runnerd-store".to_owned())
-            .spawn(move || write::run(db, receiver, &thread_events, &thread_held))?;
+            .spawn(move || write::run(db, downtime, receiver, &thread_events, &thread_held))?;
         Ok(Store {
             writes,
             reader: Arc::new(Mutex::new(reader)),
@@ -969,10 +989,12 @@ pub fn sizing_at(path: &Path, since: u64) -> Result<Option<sizing::History>, Sto
     .map(Some)
 }
 
-/// What sizing reads from the database, without creating its schema.
+/// What sizing reads from the database, without creating its schema; an older one reads as [`VERSION`].
 fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError> {
-    if version(db)? == 0 {
-        return Ok(sizing::History::default());
+    match version(db)? {
+        0 => return Ok(sizing::History::default()),
+        VERSION => {}
+        _ => read_as_current(db)?,
     }
     let mut history = read::sizing(db, since)?;
     history.memory_set = read::auto_sizing(db)?.memory;
@@ -980,20 +1002,62 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
     Ok(history)
 }
 
-/// The database's schema version: 0 for a new one, else [`VERSION`]; any other is refused.
+/// The database's schema version: 0 for a new one, else from [`OLDEST`] to [`VERSION`]; any other is refused.
 fn version(db: &Connection) -> Result<u32, StoreError> {
     let found: u32 = db.pragma_query_value(None, "user_version", |row| row.get(0))?;
     match found {
-        0 | VERSION => Ok(found),
+        0 | OLDEST..=VERSION => Ok(found),
         found if found > VERSION => Err(StoreError::Newer {
             found,
             supported: VERSION,
         }),
         found => Err(StoreError::Older {
             found,
-            supported: VERSION,
+            oldest: OLDEST,
         }),
     }
+}
+
+/// Lets a read-only look at a database from before [`VERSION`], which it cannot migrate, read it as this build
+/// does: a table it lacks becomes an empty temporary one, and a table that lacks columns a temporary view of it
+/// that adds them, each with its default. Temporary objects come first in name lookups.
+fn read_as_current(db: &Connection) -> Result<(), StoreError> {
+    let current = Connection::open_in_memory()?;
+    current.execute_batch(SCHEMA)?;
+    let tables: Vec<(String, String)> = current
+        .prepare(
+            "SELECT name, sql FROM sqlite_master WHERE type = 'table' AND name NOT LIKE 'sqlite_%'",
+        )?
+        .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+        .collect::<rusqlite::Result<_>>()?;
+    let columns =
+        |db: &Connection, table: &str| -> rusqlite::Result<Vec<(String, Option<String>)>> {
+            db.prepare("SELECT name, dflt_value FROM pragma_table_info(?1, 'main')")?
+                .query_map([table], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect()
+        };
+    for (table, sql) in tables {
+        let found: Vec<String> = columns(db, &table)?
+            .into_iter()
+            .map(|(name, _)| name)
+            .collect();
+        if found.is_empty() {
+            db.execute_batch(&sql.replacen("CREATE TABLE", "CREATE TEMP TABLE", 1))?;
+            continue;
+        }
+        let added: Vec<String> = columns(&current, &table)?
+            .into_iter()
+            .filter(|(name, _)| !found.contains(name))
+            .map(|(name, default)| format!("{} AS {name}", default.as_deref().unwrap_or("NULL")))
+            .collect();
+        if !added.is_empty() {
+            db.execute_batch(&format!(
+                "CREATE TEMP VIEW {table} AS SELECT *, {} FROM main.{table}",
+                added.join(", ")
+            ))?;
+        }
+    }
+    Ok(())
 }
 
 /// WAL, so the API reads while the writer writes; a busy timeout instead of an immediate error.
@@ -1004,15 +1068,84 @@ fn configure(db: &Connection) -> rusqlite::Result<()> {
     db.busy_timeout(Duration::from_secs(5))
 }
 
-/// Creates the schema in a new database, in one transaction with its version.
-fn create(db: &mut Connection) -> Result<(), StoreError> {
-    if version(db)? == 0 {
+/// Creates the schema in a new database, in one transaction with its version, or runs the migrations an older one
+/// lacks, each in its own transaction with the version it brings it to.
+fn prepare(db: &mut Connection) -> Result<(), StoreError> {
+    let found = version(db)?;
+    if found == 0 {
         let transaction = db.transaction()?;
         transaction.execute_batch(SCHEMA)?;
         transaction.pragma_update(None, "user_version", VERSION)?;
         transaction.commit()?;
+        return Ok(());
+    }
+    for (version, migration) in MIGRATIONS.iter().filter(|(version, _)| *version > found) {
+        let transaction = db.transaction()?;
+        transaction.execute_batch(migration)?;
+        transaction.pragma_update(None, "user_version", version)?;
+        transaction.commit()?;
     }
     Ok(())
+}
+
+/// The time before this daemon when no runnerd ran, in ms: from the history's last sign of life, its newest host
+/// sample, event or open, to this daemon's start. Host samples are stored a minute's worth at a time, so a crash
+/// may count up to a minute more. Without a sign of life, as in a new history, there is none: the history's start
+/// clips the waits of jobs queued before it (`history_kept`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Downtime {
+    from: u64,
+    until: u64,
+}
+
+impl Downtime {
+    /// The downtime before a daemon that starts at `now`; the jobs still queued in the history leave it out of
+    /// their waits, as the ones first seen after do when they are recorded. The open is a sign of life itself, kept
+    /// with them: a start that fails after it, and is retried, does not hand out the same downtime again.
+    fn before(db: &mut Connection, now: u64) -> Result<Option<Downtime>, StoreError> {
+        // Immediate: it reads, then writes. A deferred transaction that has read cannot wait for the write lock, and
+        // fails at once while another connection, such as a dropped store's writer finishing, holds it.
+        let transaction = db.transaction_with_behavior(rusqlite::TransactionBehavior::Immediate)?;
+        let last: Option<u64> = transaction.query_row(
+            "SELECT max(at) FROM (SELECT max(at) AS at FROM host_samples UNION ALL SELECT max(at) FROM events \
+             UNION ALL SELECT value FROM meta WHERE key = 'opened_at')",
+            [],
+            |row| row.get(0),
+        )?;
+        let downtime = last
+            .filter(|last| *last < now)
+            .map(|from| Downtime { from, until: now });
+        if let Some(downtime) = downtime {
+            let queued: Vec<(u64, u64)> = transaction
+                .prepare("SELECT id, queued_at FROM jobs WHERE state = 'queued'")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (job, queued_at) in queued {
+                transaction.execute(
+                    "UPDATE jobs SET unseen = unseen + ?2 WHERE id = ?1",
+                    rusqlite::params![job, downtime.of(queued_at)],
+                )?;
+            }
+        }
+        transaction.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('opened_at', ?1)",
+            [now],
+        )?;
+        transaction.commit()?;
+        Ok(downtime)
+    }
+
+    /// How much of it a job queued at `queued_at` (ms) waited through.
+    fn of(self, queued_at: u64) -> u64 {
+        self.until.saturating_sub(queued_at.max(self.from))
+    }
+
+    /// How much of what [`Downtime::of`] gave a job queued at `queued_at` came after it started at `started_at`
+    /// (ms), as for a job a runner that outlived the last daemon took while none ran.
+    fn after(self, queued_at: u64, started_at: u64) -> u64 {
+        self.of(queued_at)
+            .saturating_sub(started_at.saturating_sub(queued_at.max(self.from)))
+    }
 }
 
 /// Logs a failed write; the writer goes on with the next one.

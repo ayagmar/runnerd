@@ -136,7 +136,8 @@ pub struct ProfileSizing {
     pub slots: u32,
     /// Its jobs' peaks.
     pub peaks: Peaks,
-    /// Seconds from queued to started.
+    /// Seconds from queued to started, leaving out the time before the history's start and the time no runnerd
+    /// ran (ADR 0081).
     pub wait: Spread,
     /// Its jobs by whether a warm runner took them, and how long each kind waited.
     pub starts: Starts,
@@ -206,7 +207,8 @@ pub struct JobSizing {
     pub name: String,
     /// Its runs' peaks.
     pub peaks: Peaks,
-    /// Seconds from queued to started.
+    /// Seconds from queued to started, leaving out the time before the history's start and the time no runnerd
+    /// ran (ADR 0081).
     pub wait: Spread,
     /// What its profile's `memory` would be for this job alone, and the `slots` that would fit in the memory the
     /// profile's slots take now.

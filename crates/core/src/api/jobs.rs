@@ -312,6 +312,10 @@ pub struct Timeline {
     pub finished_at: Option<u64>,
     /// The container and the runner's registration were removed.
     pub cleaned_at: Option<u64>,
+    /// Seconds of its wait that passed while no runnerd ran, as the daemon that started after measured them. Waits
+    /// for a slot, as sizing, insights and the history's figures count them, leave them out; its own wait does not.
+    #[serde(default)]
+    pub unseen: u64,
 }
 
 impl Timeline {
@@ -658,7 +662,7 @@ impl Activity {
 pub struct Started {
     /// When it started.
     pub at: u64,
-    /// Seconds it waited.
+    /// Seconds it waited, leaving out the time before the history's start and the time no runnerd ran (ADR 0081).
     pub waited: u64,
 }
 
@@ -701,7 +705,8 @@ pub struct StatsRow {
     pub failed: u64,
     /// Of those, concluded `cancelled`.
     pub cancelled: u64,
-    /// Seconds from queued to started, summed.
+    /// Seconds from queued to started, summed, leaving out the time before the history's start and the time no runnerd
+    /// ran (ADR 0081).
     pub queue_seconds: u64,
     /// Seconds from started to finished, summed.
     pub run_seconds: u64,

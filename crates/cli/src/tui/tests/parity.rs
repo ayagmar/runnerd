@@ -193,6 +193,7 @@ fn a_job_states_its_outcome_steps_caps_build_cache_and_failed_runs_as_core_does(
     for figure in [
         &job.limits,
         &job.cpu_time,
+        &job.unseen,
         &job.build_cache_refused,
         &format!("{} of {} failed", job.failed, job.finished),
     ] {

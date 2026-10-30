@@ -562,6 +562,11 @@ async fn the_dashboard_says_which_origin_runnerctl_web_opens_as_the_daemon_start
 async fn activity_counts_the_jobs_started_and_ended_in_the_last_24_hours() {
     let dir = Dir::new();
     let daemon = start_serving(&dir.0, None, false, sync_dir, memory_max, &auto_sizing()).await;
+    // The history holds them from before they were queued: a wait counts from no earlier than its start.
+    rusqlite::Connection::open(dir.0.join("history.db"))
+        .unwrap()
+        .execute("UPDATE history_kept SET jobs_since = 0", [])
+        .unwrap();
     // Ten jobs that waited 20 s, started 40 s ago and were lost 20 s ago.
     finished_jobs(&daemon.store, "node", 7 << 30, 2 << 30).await;
     let response = daemon

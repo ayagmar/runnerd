@@ -17,6 +17,8 @@ use crate::observe::metrics::Events;
 use crate::sizing::Measure;
 use crate::testdir::TestDir;
 
+mod waits;
+
 fn queued(id: u64) -> QueuedJob {
     QueuedJob {
         id,
@@ -46,6 +48,14 @@ async fn a_fresh_database_is_created_at_the_schema_version() {
         store.job(1).await.unwrap().is_some(),
         "job 1 stays in the history"
     );
+}
+
+/// Makes the history hold every job from `at` (ms) on, as `history_kept` says.
+fn keep_since(path: &std::path::Path, at: u64) {
+    Connection::open(path)
+        .unwrap()
+        .execute("UPDATE history_kept SET jobs_since = ?1", [at])
+        .unwrap();
 }
 
 /// The database's `user_version`.
@@ -292,7 +302,10 @@ fn completed_in_window(
 #[tokio::test]
 async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_it_was_queued() {
     let dir = TestDir::new("store");
-    let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    // The history holds every job from 1970 on, as these are.
+    keep_since(&path, 0);
     let day = 24 * 3600;
     let since = 10 * day;
     let ms = |secs: u64| secs * 1000;

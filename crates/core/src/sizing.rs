@@ -74,6 +74,31 @@ pub struct Ran {
     /// How long of its wait it waited because the host's memory could not take its runner, in ms: no more slots
     /// would have started it sooner.
     pub host_waited: u64,
+    /// How much of its wait passed while no runnerd ran, in ms.
+    pub unseen: u64,
+}
+
+/// A job's wait for a runner as sizing, insights and the history's figures count it: from when GitHub queued it, or
+/// from when the history holds every job if that came later (`history_kept`), as for a job queued before runnerd
+/// first ran, to when it started, less what of it passed while no runnerd ran (ADR 0081). A job's own page shows its
+/// whole wait, as GitHub's does; arrivals, as `simulate` and warm runners model them, go by `queued_at`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Wait {
+    /// When GitHub queued it, in ms.
+    pub queued_at: u64,
+    /// When it started, in ms.
+    pub started_at: u64,
+    /// How much of it passed while no runnerd ran, in ms.
+    pub unseen: u64,
+}
+
+impl Wait {
+    /// In ms, 0 at least, with the history holding every job since `kept_since` (ms).
+    pub fn counted(self, kept_since: u64) -> u64 {
+        self.started_at
+            .saturating_sub(self.queued_at.max(kept_since))
+            .saturating_sub(self.unseen)
+    }
 }
 
 /// What a run's sampled memory counts.
@@ -114,6 +139,15 @@ impl Capped {
 }
 
 impl Ran {
+    /// Its wait, once it started.
+    pub fn wait(&self) -> Option<Wait> {
+        Some(Wait {
+            queued_at: self.queued_at,
+            started_at: self.started_at?,
+            unseen: self.unseen,
+        })
+    }
+
     /// What it says about its container's `cap`. A kill that only a descendant's own limit explains, the counters
     /// showing a limit hit below the container and none at it, is a service container the job capped itself: clear.
     /// A kill no sample saw an `oom` before, its last sample within `AT_CAP` percent of the cap, met it in the last
@@ -512,17 +546,13 @@ impl Sized {
     }
 }
 
-/// Seconds from queued, or from `kept_since` (ms) if that came later, to started of the jobs that started, less what
-/// they waited for the host's memory.
+/// The [waits](Wait) of the jobs that started, in seconds, less what they waited for the host's memory.
 fn waits(jobs: &[&Ran], kept_since: u64) -> Spread {
     spread(
         jobs.iter()
             .filter_map(|job| {
-                job.started_at.map(|at| {
-                    at.saturating_sub(job.queued_at.max(kept_since))
-                        .saturating_sub(job.host_waited)
-                        / 1000
-                })
+                job.wait()
+                    .map(|wait| wait.counted(kept_since).saturating_sub(job.host_waited) / 1000)
             })
             .collect(),
     )

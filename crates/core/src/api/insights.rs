@@ -167,7 +167,8 @@ pub struct RepositoryWaits {
     pub before: WeekWaits,
 }
 
-/// The waits of the jobs that started in a week, from queued to started.
+/// The waits of the jobs that started in a week, from queued to started, leaving out the time before the history's
+/// start and the time no runnerd ran (ADR 0081).
 #[derive(Debug, Clone, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct WeekWaits {
     /// Every job.
@@ -221,7 +222,8 @@ pub struct LongWait {
     pub workflow: Option<String>,
     /// The job's name.
     pub name: String,
-    /// Seconds from queued to started.
+    /// Seconds from queued to started, leaving out the time before the history's start and the time no runnerd
+    /// ran (ADR 0081).
     pub waited: u64,
     /// The job's page on GitHub.
     pub url: Option<String>,

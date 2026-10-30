@@ -84,6 +84,8 @@ pub struct Run {
     pub build_cache: Option<api::BuildCacheCounts>,
     /// Times the kernel throttled its container's sockets for memory pressure, when counted.
     pub sock_throttled: Option<u64>,
+    /// How much of its wait passed while no runnerd ran.
+    pub unseen: u64,
 }
 
 impl Run {
@@ -111,14 +113,14 @@ impl Run {
         Some(self.finished_at?.saturating_sub(self.started_at?) / SECOND)
     }
 
-    /// Seconds from queued, or from `kept_since` (ms) if that came later, as for a job queued before runnerd first
-    /// ran, to started.
+    /// Its [wait](crate::sizing::Wait) in seconds, once it started.
     fn waited(&self, kept_since: u64) -> Option<u64> {
-        Some(
-            self.started_at?
-                .saturating_sub(self.queued_at.max(kept_since))
-                / SECOND,
-        )
+        let wait = crate::sizing::Wait {
+            queued_at: self.queued_at,
+            started_at: self.started_at?,
+            unseen: self.unseen,
+        };
+        Some(wait.counted(kept_since) / SECOND)
     }
 
     fn link(&self) -> RunLink {
