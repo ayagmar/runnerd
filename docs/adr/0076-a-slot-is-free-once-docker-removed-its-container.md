@@ -36,7 +36,9 @@ Three ways the engine lost track of a runner when a Docker call failed:
 ## Consequences
 
 - A container a failed start left holds its slot, and its memory stays counted, until Docker removes it; the
-  status shows it as the slot's runner. Its repository's pool is held back as after any failed start.
+  status shows it as the slot's runner. Its repository's pool is held back as after any failed start. If that hold
+  ran out before Docker removed the container, its removal holds the pool back again, as a runner that ended without
+  a job does, so the next hold of a streak comes one step sooner.
 - A start whose own container's removal succeeded after the start failed has no container left, even if its
   runner had taken a job in between: that job fails as one whose runner vanished.
 - A tick can start fewer runners than its plan when something changed while it started them; the queued jobs say

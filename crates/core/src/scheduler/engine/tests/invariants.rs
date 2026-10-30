@@ -413,6 +413,11 @@ struct JobModel {
     taken_by: Option<(String, String)>,
     /// The container it ended in, with how many of its log captures had failed by then.
     ended_in: Option<(String, u32)>,
+    /// A tick saw it queued, so the engine follows it.
+    listed: bool,
+    /// A tick saw it running once it was listed and no longer queued: GitHub's details then name its runner,
+    /// whatever its log capture said.
+    named_by_github: bool,
 }
 
 /// A reading of the host the harness gave the sampler.
@@ -604,6 +609,8 @@ impl Case {
                         phase: Phase::Queued,
                         taken_by: None,
                         ended_in: None,
+                        listed: false,
+                        named_by_github: false,
                     },
                 );
             }
@@ -614,7 +621,7 @@ impl Case {
                 if let Some((id, container)) = pick_from(&running, pick).cloned() {
                     self.end_job(id, &container, "success");
                     // As for `Lose`: Docker runs no capture in a container that stopped.
-                    if (self.unobserved(&container) || self.capture_unread(&container))
+                    if (self.unobserved(&container) || self.capture_unread(id, &container))
                         && let Some(job) = self.jobs.get_mut(&id)
                     {
                         job.phase = Phase::Done { ran: None };
@@ -721,7 +728,7 @@ impl Case {
             self.end_job(id, &container, "failure");
             // Gone before Docker answered any inspect of it: nothing read its log, so nothing can name
             // the runner that ran the job.
-            if (self.unobserved(&container) || self.capture_unread(&container))
+            if (self.unobserved(&container) || self.capture_unread(id, &container))
                 && let Some(job) = self.jobs.get_mut(&id)
             {
                 job.phase = Phase::Done { ran: None };
@@ -913,13 +920,13 @@ impl Case {
             .any(|(_, occupant)| occupant.container == container && !occupant.observed)
     }
 
-    /// Whether a job running in `container` may end without the engine ever reading its log: its log capture failed
-    /// and no tick has started it again since, or it failed twice, after which the next start waits longer than a
-    /// sequence runs. The history knows such a job only as GitHub names its runner, which it may not while queued.
-    fn capture_unread(&self, container: &str) -> bool {
+    /// Whether job `id`, running in `container`, may end without the engine ever reading its log: its log capture
+    /// failed and no tick has started it again since, or it failed twice, after which the next start waits longer
+    /// than a sequence runs. Not once GitHub named its runner to the engine (`named_by_github`).
+    fn capture_unread(&self, id: u64, container: &str) -> bool {
         let faults = self.capture_faults_of(container);
         let retried = self.capture_faults.get(container).copied().unwrap_or(0);
-        faults >= 2 || faults > retried
+        !self.jobs[&id].named_by_github && (faults >= 2 || faults > retried)
     }
 
     /// How many log captures in `container` failed so far.
@@ -1084,6 +1091,17 @@ impl Case {
         let calls_before = self.docker.0.lock().unwrap().calls.len();
         let seeds_before: BTreeSet<String> = self.engine.reseed_memory.keys().cloned().collect();
         self.capture_faults = self.docker.0.lock().unwrap().capture_faults.clone();
+        for (id, job) in &mut self.jobs {
+            match job.phase {
+                Phase::Queued if self.shape.serves(job.repository, &job.labels).is_some() => {
+                    job.listed = true;
+                }
+                Phase::Running { .. } if job.listed && !self.still_listed.contains(id) => {
+                    job.named_by_github = true;
+                }
+                _ => {}
+            }
+        }
         self.engine.tick(Shutdown::No).await;
         self.failed_late();
         let after = self.status();
