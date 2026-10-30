@@ -60,14 +60,26 @@ const packs = [
   return { ...pack, free: max - reserved, atOnce, p95: cell(pack.policy, 'WAIT P95'), longest: cell(pack.policy, 'WAIT MAX') };
 });
 
-// runnerctl status against the dashboard's demo daemon (crates/web/examples/demo): storefront's queue, and why each
-// job waits.
-const waits = `$ runnerctl status
-WORKFLOW / NAME    QUEUED      WAITS FOR
-CI / lint          5m 23s ago  No profile serves the label storefornt-small
-E2E / visual-diff  1m 14s ago  A runner is starting for it in node 2
-E2E / a11y         1m 8s ago   All 2 node slots are busy
-E2E / lighthouse   55s ago     All 2 node slots are busy`;
+// What runnerctl printed against the dashboard's demo daemon (crates/web/examples/demo), kept whole in
+// assets/terminal; each block below cuts out the lines it shows and changes none.
+const printed = (name: string, ...heads: string[]) => {
+  const files = import.meta.glob<string>('../assets/terminal/*.txt', { eager: true, query: '?raw', import: 'default' });
+  const text = files[`../assets/terminal/${name}.txt`];
+  if (text === undefined) throw new Error(`no capture ${name}`);
+  const lines = text.trimEnd().split('\n');
+  const from = (head: string) => {
+    const at = lines.findIndex((line) => line.startsWith(head));
+    if (at < 0) throw new Error(`no "${head}" in ${name}`);
+    return at;
+  };
+  return lines.slice(from(heads[0]!), heads[1] === undefined ? undefined : from(heads[1])).join('\n').trimEnd();
+};
+
+// The queue of `runnerctl status`: storefront's jobs, and why each waits.
+const waits = `$ runnerctl status\n${printed('status', 'JOB ')}`;
+
+// The cache volumes' last two lines.
+const caches = `$ runnerctl caches\n${printed('caches', 'build cache for')}`;
 
 const shell = `$ runnerctl shell 120055991489
 runnerd: the record of job 120055991489 of halyard/ledger, CI / build
@@ -149,7 +161,7 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
           <Shot
             name="overview"
             eager
-            alt="The runnerd dashboard: 2 of 6 slots running, 5 jobs waiting with why each waits, the memory budget as blocks per slot, the slots with their jobs' memory and CPU, and the latest jobs."
+            alt="The runnerd dashboard: 2 of 6 slots running, 5 jobs waiting with why each waits, the memory and CPU reserved, the memory budget as blocks per slot, the slots with their jobs' memory and CPU, and the latest jobs."
             sizes="(min-width: 1100px) 60vw, calc(100vw - 2rem)"
           />
         </div>
@@ -161,6 +173,10 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
           <p>
             Each runner reserves what its job really peaks at, measured over its last 20 runs, instead of a fixed cap. A
             job that runs out of memory gets its full cap back.
+          </p>
+          <p>
+            Runners share the CPUs by their <code>cpus</code>. A job's page says how often its cap held it back. Under
+            measured admission, a job its cap holds back in 3 runs raises <code>cpus</code>.
           </p>
           <a class="text-link" href={`${base}admission/`}>How admission works</a>
         </div>
@@ -197,15 +213,31 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
         </div>
       </section>
 
-      <section class="part wrap split" id="waits" aria-labelledby="waits-title">
+      <section class="part wrap split stacked" id="waits" aria-labelledby="waits-title">
         <div class="part-text">
           <h2 id="waits-title">Every wait says why</h2>
           <p>
             A queued job names what holds it: busy slots, a runner still starting, a label nothing serves. A typo in <code>runs-on</code> shows up
-            before you go looking for it.
+            before you go looking for it. Time runnerd was not running is left out of the waits that sizing and
+            insights count, so a night with the machine off does not read as a slow week.
           </p>
         </div>
         <div class="proof"><pre class="terminal wide" tabindex="0" data-ui aria-label="runnerctl status: the queue"><code>{waits}</code></pre></div>
+      </section>
+
+      <section class="part wrap split stacked" id="cache" aria-labelledby="cache-title">
+        <div class="part-text">
+          <h2 id="cache-title">GitHub's cache, on your own&nbsp;disk</h2>
+          <p>
+            <code>actions/cache</code>, the <code>cache:</code> input of <code>setup-node</code> and <code>setup-java</code>,
+            and Docker's <code>type=gha</code> restore from and save to this machine, with no change to a workflow.
+            A job that gets a new runner starts in the free slot that ran it last, when one is free, so it finds
+            what that run left.
+          </p>
+          <p>It is on by default.</p>
+          <a class="text-link" href={`${base}running/#build-cache`}>The build cache</a>
+        </div>
+        <div class="proof"><pre class="terminal" tabindex="0" data-ui aria-label="runnerctl caches: the build cache's hits and what serves GitHub's cache"><code>{caches}</code></pre></div>
       </section>
 
       <section class="part wrap split" id="records" aria-labelledby="shell-title">
@@ -273,8 +305,8 @@ const runsOn = 'runs-on: [self-hosted, linux, x64]';
             <div>
               <h3>Point it at your repositories and start it</h3>
               <p>
-                <code>init</code> sizes the slots to your machine, writes the config and the service, and prints any
-                root commands to run before you start it.
+                <code>init</code> sizes the slots so the first job can start, writes a config only you can read and the
+                service, warns about a public repository, and prints any root commands to run before you start it.
               </p>
             </div>
             <div class="command">
