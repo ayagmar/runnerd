@@ -9,8 +9,10 @@ use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use runnerd_core::api::{Check, CheckStatus};
+use runnerd_core::admission::host;
+use runnerd_core::api::{Check, CheckStatus, HostMemory};
 use runnerd_core::config::{ByteSize, Config, PUBLISHED_RUNNER, slice_memory_max};
+use runnerd_core::observe::metrics::{self, Paths};
 
 use crate::{doctor, output};
 
@@ -38,8 +40,8 @@ fn starter_image() -> String {
 
 /// What the starter profile is sized from.
 pub(crate) struct Machine {
-    /// The host's memory.
-    pub memory: ByteSize,
+    /// The host's memory now, as admission reads it.
+    pub memory: HostMemory,
     /// The CPUs this process may use.
     pub cpus: u32,
     /// The slice's `MemoryMax`; `None` when it has none yet.
@@ -48,18 +50,14 @@ pub(crate) struct Machine {
 
 impl Machine {
     pub(crate) fn read(slice: &str) -> Result<Machine, String> {
-        let meminfo = std::fs::read_to_string("/proc/meminfo")
-            .map_err(|error| format!("cannot read /proc/meminfo: {error}"))?;
-        let memory = meminfo
-            .lines()
-            .find_map(|line| line.strip_prefix("MemTotal:"))
-            .and_then(|value| value.trim().strip_suffix("kB"))
-            .and_then(|kib| kib.trim().parse::<u64>().ok())
-            .ok_or("/proc/meminfo has no MemTotal")?;
+        let paths = Paths::default();
+        let held = metrics::read_unavailable(&paths.slice(slice));
+        let memory = metrics::read_host_memory(&paths, held, 0)
+            .ok_or("/proc/meminfo has no MemTotal or MemAvailable")?;
         let cpus = std::thread::available_parallelism()
             .map_err(|error| format!("cannot count CPUs: {error}"))?;
         Ok(Machine {
-            memory: ByteSize(memory << 10),
+            memory,
             cpus: u32::try_from(cpus.get()).unwrap_or(u32::MAX),
             slice_memory_max: slice_memory_max(slice).map_err(|error| error.to_string())?,
         })
@@ -79,24 +77,39 @@ pub(crate) struct Sizing {
     pub memory: ByteSize,
 }
 
-/// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs.
+/// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs. A slot is no
+/// larger than what admission leaves the first runner beside the mirror on this host now (`host::first_runner`), so
+/// the first job can start.
 pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
     // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
-    let host = machine.memory.0 / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
+    let host = machine.memory.total / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
     let budget = ByteSize(
         machine
             .slice_memory_max
             .map_or(host, |memory_max| memory_max.0.min(host)),
     );
     let room = budget.0.saturating_sub(MIRROR_MEMORY.0);
-    let memory = SLOT_MEMORY.min(room / MEMORY_STEP * MEMORY_STEP);
+    // The engine reserves for the mirror before it starts.
+    let first = host::first_runner(&machine.memory, MIRROR_MEMORY.0);
+    let memory = SLOT_MEMORY.min(room).min(first) / MEMORY_STEP * MEMORY_STEP;
     if memory < MIN_SLOT_MEMORY {
-        return Err(format!(
-            "a budget of {budget} leaves {} for runners after the mirror's {MIRROR_MEMORY}; a runner needs at \
-             least {}",
-            ByteSize(room),
-            ByteSize(MIN_SLOT_MEMORY)
-        ));
+        let least = ByteSize(MIN_SLOT_MEMORY);
+        return Err(if first < room {
+            format!(
+                "this host has {}; runnerd keeps {} of it free and {MIRROR_MEMORY} for the mirror, which leaves {} \
+                 for a runner, and a runner needs at least {least}. Close what uses the host's memory, or run \
+                 runnerd on a host with more",
+                machine.memory.available_line(),
+                ByteSize(host::margin(machine.memory.total, false)),
+                ByteSize(first),
+            )
+        } else {
+            format!(
+                "a budget of {budget} leaves {} for runners after the mirror's {MIRROR_MEMORY}; a runner needs at \
+                 least {least}",
+                ByteSize(room),
+            )
+        });
     }
     let by_memory = u32::try_from(room / memory).unwrap_or(u32::MAX);
     let slots = by_memory.min((machine.cpus / CPUS_PER_SLOT).max(1));
@@ -328,6 +341,7 @@ fn runs_on(labels: &[&str]) -> String {
 }
 
 fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String {
+    let host_memory = ByteSize(machine.memory.total);
     let Sizing {
         budget,
         slots,
@@ -366,7 +380,9 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          auto = true\n\
          \n\
          # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of the host's\n\
-         # memory, or the slice's MemoryMax if that is smaller. runnerd pulls the image before the first runner.\n\
+         # memory, or the slice's MemoryMax if that is smaller. One runner and the mirror also fit what the host\n\
+         # had available when init ran, less the margin runnerd keeps free. runnerd pulls the image before the\n\
+         # first runner.\n\
          [profiles.default]\n\
          image = \"{image}\"\n\
          cpus = {cpus}\n\
@@ -374,7 +390,6 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          slots = {slots}\n\
          {repositories}",
         image = starter_image(),
-        host_memory = machine.memory,
         host_cpus = machine.cpus,
         slice = request.slice,
     )

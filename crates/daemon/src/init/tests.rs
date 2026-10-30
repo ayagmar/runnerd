@@ -2,6 +2,8 @@
 
 use std::path::Path;
 
+use runnerd_core::admission::host;
+use runnerd_core::api::HostMemory;
 use runnerd_core::config::{ByteSize, Config, Image};
 
 use super::{Machine, Overwrite, Request, init, labels, runs_on, size};
@@ -9,9 +11,24 @@ use crate::testdir::Dir;
 
 const GIB: u64 = 1 << 30;
 
+/// A host with `total` bytes of memory, `available` of them free, and nothing in the slice.
+fn host_memory(total: u64, available: u64) -> HostMemory {
+    HostMemory {
+        at: 0,
+        total,
+        available,
+        slice: 0,
+        some: None,
+        full: None,
+        holders: Vec::new(),
+    }
+}
+
+/// A host of `memory_gib` with an eighth of it in use, as an idle server with Docker.
 fn machine(memory_gib: u64, cpus: u32, slice_memory_max: Option<ByteSize>) -> Machine {
+    let total = memory_gib * GIB;
     Machine {
-        memory: ByteSize(memory_gib * GIB),
+        memory: host_memory(total, total / 8 * 7),
         cpus,
         slice_memory_max,
     }
@@ -79,21 +96,26 @@ fn the_starter_config_fits_the_memory_max_of_an_existing_slice() {
 }
 
 #[test]
-fn every_sizing_fits_its_budget_and_three_quarters_of_the_host() {
+fn every_sizing_fits_its_budget_three_quarters_of_the_host_and_what_admission_leaves_its_first_runner()
+ {
     for memory_gib in 1..=256 {
         for cpus in [1, 2, 3, 4, 6, 8, 12, 16, 24, 32, 64, 128] {
             for slice_gib in [None, Some(4), Some(33), Some(1024)] {
                 let machine = machine(memory_gib, cpus, slice_gib.map(|gib| ByteSize(gib * GIB)));
                 let Ok(sizing) = size(&machine) else {
                     assert!(
-                        memory_gib < 4,
+                        memory_gib < 6,
                         "a {memory_gib}G host in a {slice_gib:?}G slice gets a config"
                     );
                     continue;
                 };
                 let room = sizing.budget.0 - super::MIRROR_MEMORY.0;
                 assert!(
-                    sizing.budget.0 <= machine.memory.0 / 4 * 3,
+                    sizing.memory.0 <= host::first_runner(&machine.memory, super::MIRROR_MEMORY.0),
+                    "{memory_gib}G: the first runner fits the host: {sizing:?}"
+                );
+                assert!(
+                    sizing.budget.0 <= machine.memory.total / 4 * 3,
                     "{memory_gib}G, slice {slice_gib:?}G: {sizing:?}"
                 );
                 assert!(
@@ -111,21 +133,60 @@ fn every_sizing_fits_its_budget_and_three_quarters_of_the_host() {
 
 #[test]
 fn a_slice_larger_than_the_host_does_not_size_past_the_host() {
-    let sizing = size(&machine(4, 32, Some(ByteSize(64 * GIB)))).unwrap();
-    assert_eq!(sizing.budget, ByteSize(3 * GIB), "three quarters of 4G");
+    let sizing = size(&machine(8, 32, Some(ByteSize(64 * GIB)))).unwrap();
+    assert_eq!(sizing.budget, ByteSize(6 * GIB), "three quarters of 8G");
     assert_eq!(sizing.slots, 1);
 }
 
+/// A first job waits for the host's memory forever when init sized its runner past what admission leaves it: no
+/// job finishes, so auto sizing has nothing to lower it from.
 #[test]
-fn a_nominal_4g_vm_gets_a_runner() {
-    let machine = Machine {
-        memory: ByteSize(3_900_000 << 10),
-        cpus: 2,
-        slice_memory_max: None,
-    };
-    let sizing = size(&machine).unwrap();
-    assert_eq!(sizing.memory, ByteSize(2 * GIB));
-    assert_eq!(sizing.budget, ByteSize(5 << 29), "2.5G");
+fn the_first_job_of_a_starter_config_is_admitted_on_a_small_host() {
+    // `MemTotal` and `MemAvailable` of Ubuntu 24.04 VMs with Docker running and nothing else, in kB.
+    for (name, total, available) in [
+        ("4G", 4_005_036, 3_412_108),
+        ("6G", 6_034_412, 5_390_220),
+        ("8G", 8_131_800, 7_402_516),
+        ("16G", 16_370_412, 15_520_188),
+    ] {
+        let dir = Dir::new();
+        let request = request(&dir.0, Overwrite::Refuse);
+        let machine = Machine {
+            memory: host_memory(total << 10, available << 10),
+            cpus: 4,
+            slice_memory_max: None,
+        };
+        let sizing = match init(&request, &machine) {
+            Ok(sizing) => sizing,
+            Err(error) => {
+                assert_eq!(name, "4G", "{name}: {error}");
+                assert!(
+                    error.contains("this host has 3.25G of 3.82G available")
+                        && error.contains("a runner needs at least 2G"),
+                    "{error}"
+                );
+                assert!(!request.config.exists(), "{name}: no config is written");
+                continue;
+            }
+        };
+        let config = Config::load(&request.config).unwrap();
+        let runner = config.profiles["default"].memory.0;
+        // As the engine admits the first runner into an empty slice: the host's budget beside the mirror's cap.
+        let reserved = config.caches.mirror.memory.0;
+        let budget = host::budget(
+            machine.memory.clone(),
+            reserved,
+            host::Remembered::default(),
+        );
+        assert!(
+            runner <= budget.spare,
+            "{name}: a {} runner fits the {} the host leaves it",
+            ByteSize(runner),
+            ByteSize(budget.spare)
+        );
+        let checked = config.check_against(Some(sizing.budget));
+        assert!(checked.valid, "{name}: {}", checked.message);
+    }
 }
 
 #[test]

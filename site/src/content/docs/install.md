@@ -81,7 +81,7 @@ jobs:
 | `--config PATH` | write the config elsewhere |
 | `--force` | replace files that exist; without it `init` writes neither |
 
-`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory, or the slice's `MemoryMax` if smaller. [Configuration](../configuration/) says what to change.
+`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory, or the slice's `MemoryMax` if smaller. A slot is also no larger than what the host has available now, less the mirror's 512M and the margin runnerd keeps free for the host (at least 2G, [the host's memory](../admission/#the-hosts-memory)), so the first job can start. On a host that leaves less than 2G for a runner, such as a 4G VM, `init` writes nothing and says why. [Configuration](../configuration/) says what to change.
 
 ## Pick a directory or release
 
