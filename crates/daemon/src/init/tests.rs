@@ -43,6 +43,7 @@ fn request(dir: &Path, overwrite: Overwrite) -> Request {
         config: dir.join("runnerd/runnerd.toml"),
         unit: dir.join("systemd/user/runnerd.service"),
         overwrite,
+        memory_ceiling: None,
     }
 }
 
@@ -232,6 +233,29 @@ fn a_reading_with_a_ceiling_sizes_by_first_runner_as_admission_counts_it() {
             <= host::first_runner(&machine.memory, super::MIRROR_MEMORY.0),
         "the first runner fits what admission leaves it with the ceiling"
     );
+}
+
+#[test]
+fn init_with_a_memory_ceiling_sizes_an_idle_elastic_vm_for_its_ceiling_and_keeps_it() {
+    let dir = Dir::new();
+    let request = Request {
+        memory_ceiling: Some(ByteSize(24 * GIB)),
+        ..request(&dir.0, Overwrite::Refuse)
+    };
+    let sizing = init(&request, &idle_vm(Some(24 * GIB))).unwrap();
+    assert_eq!((sizing.slots, sizing.memory), (2, ByteSize(8 * GIB)));
+    let text = std::fs::read_to_string(&request.config).unwrap();
+    let config = Config::load(&request.config).unwrap();
+    assert_eq!(
+        config.host.memory_ceiling,
+        Some(ByteSize(24 * GIB)),
+        "{text}"
+    );
+    assert!(
+        text.starts_with("# Written by `runnerd init` for a host with 2.12G that can grow to 24G"),
+        "{text}"
+    );
+    assert!(check(&text, None).valid, "{text}");
 }
 
 #[test]

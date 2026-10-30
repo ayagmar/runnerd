@@ -56,6 +56,11 @@ enum Command {
         /// Replace the config and the unit if they exist.
         #[arg(long)]
         force: bool,
+        /// The most memory this host can grow to, MemTotal at a VM's Dynamic Memory maximum (24G): sizes the starter
+        /// profile as admission will, counting what the host can still grow by, and writes it to the config as the
+        /// host's memory_ceiling.
+        #[arg(long)]
+        memory_ceiling: Option<ByteSize>,
     },
     /// Validate a config file against the slice's memory budget.
     CheckConfig {
@@ -129,7 +134,8 @@ fn main() -> ExitCode {
             slice,
             config,
             force,
-        }) => init(repositories, slice, config, force),
+            memory_ceiling,
+        }) => init(repositories, slice, config, force, memory_ceiling),
         Some(Command::CheckConfig { path, memory_max }) => {
             config_or_default(path).map(|path| check_config(&path, memory_max))
         }
@@ -175,6 +181,7 @@ fn init(
     slice: String,
     config: Option<PathBuf>,
     force: bool,
+    memory_ceiling: Option<ByteSize>,
 ) -> Result<ExitCode, ExitCode> {
     let config = config_or_default(config)?;
     let config = std::path::absolute(&config).map_err(|error| {
@@ -198,6 +205,7 @@ fn init(
         } else {
             init::Overwrite::Refuse
         },
+        memory_ceiling,
     }))
 }
 

@@ -1,6 +1,7 @@
 # 0084. A host whose memory grows to a ceiling counts what it can still grow by
 
-Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-hosts-memory.md).
+Status: **Accepted** (2026-10-30), amended 2026-10-30 (see the end). Amends
+[0055](0055-admission-follows-the-hosts-memory.md).
 
 ## Context
 
@@ -74,3 +75,12 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
   raise past the ceiling less the mirror fails the config check and is proposed again at each look, logged once.
 - `HostMemory.ceiling` is a new optional field, absent unless set; an older client ignores it and shows the host's
   line without `growing to`.
+
+## Amendment (2026-10-30): `runnerd init --memory-ceiling`
+
+Init read the host as it is now, so on the idle VM of #159 it found 1.48G of 2.12G available, no room for a runner
+past the 2G margin, and wrote no config. `runnerd init --memory-ceiling 24G` puts the ceiling on its reading, sizes
+the starter profile by `admission::host::first_runner` on that reading as the decision above says, and writes
+`memory_ceiling` under `[host]` in the starter config, so the daemon admits as init sized. The config's first line
+says the host it was sized for, `2.12G that can grow to 24G`. The value to give is the key's: `MemTotal` at the VM's
+maximum. Init does not compare it to `MemTotal`; `runnerd doctor`, which it prints, warns when it is under.

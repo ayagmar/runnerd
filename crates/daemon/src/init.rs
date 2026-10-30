@@ -54,10 +54,15 @@ pub(crate) struct Machine {
 }
 
 impl Machine {
-    pub(crate) fn read(slice: &str) -> Result<Machine, String> {
+    /// This host, with the `ceiling` its memory can grow to when one is given (ADR 0084).
+    pub(crate) fn read(slice: &str, ceiling: Option<ByteSize>) -> Result<Machine, String> {
         let paths = Paths::default();
         let held = metrics::read_unavailable(&paths.slice(slice));
         let memory = metrics::read_host_memory(&paths, held, 0)
+            .map(|memory| HostMemory {
+                ceiling: ceiling.map(|ceiling| ceiling.0),
+                ..memory
+            })
             .ok_or("/proc/meminfo has no MemTotal or MemAvailable")?;
         let cpus = std::thread::available_parallelism()
             .map_err(|error| format!("cannot count CPUs: {error}"))?;
@@ -84,10 +89,11 @@ pub(crate) struct Sizing {
 
 /// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs. A slot is no
 /// larger than what admission leaves the first runner beside the mirror on this host now (`host::first_runner`), less
-/// `STARTUP_HEADROOM`, so the first job can start once runnerd runs. A reading with a ceiling is the memory the host
-/// can grow to, as admission counts it (ADR 0084).
+/// `STARTUP_HEADROOM`, so the first job can start once runnerd runs. With a ceiling on the reading, the host is
+/// the memory it can grow to, as admission counts it (ADR 0084).
 pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
-    // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
+    // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare. A host that
+    // can grow to a ceiling is sized for the ceiling, as admission counts it.
     let host = machine.memory.grown() / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
     let budget = ByteSize(
         machine
@@ -146,6 +152,8 @@ pub(crate) struct Request {
     pub config: PathBuf,
     pub unit: PathBuf,
     pub overwrite: Overwrite,
+    /// `--memory-ceiling`: the most memory the host can grow to, which the starter config's `[host]` keeps.
+    pub memory_ceiling: Option<ByteSize>,
 }
 
 /// Writes the config and the unit for `request`, sized for `machine`. With `Overwrite::Refuse`, writes neither when
@@ -375,7 +383,14 @@ fn runs_on(labels: &[&str]) -> String {
 }
 
 fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String {
-    let host_memory = ByteSize(machine.memory.total);
+    let host_memory = match machine.memory.growable() {
+        0 => ByteSize(machine.memory.total).to_string(),
+        _ => format!(
+            "{} that can grow to {}",
+            ByteSize(machine.memory.total),
+            ByteSize(machine.memory.grown())
+        ),
+    };
     let Sizing {
         budget,
         slots,
@@ -402,6 +417,7 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          [host]\n\
          slice = \"{slice}\"\n\
          isolation = \"sysbox\"\n\
+         {ceiling}\
          \n\
          [caches]\n\
          mirror = {{ enabled = true, memory = \"{MIRROR_MEMORY}\", cpus = 1, ttl = \"168h\" }}\n\
@@ -427,6 +443,12 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
         headroom = ByteSize(STARTUP_HEADROOM),
         host_cpus = machine.cpus,
         slice = request.slice,
+        ceiling = request.memory_ceiling.map_or_else(String::new, |ceiling| {
+            format!(
+                "# The most memory this host can grow to: admission counts what it can still grow by.\n\
+                 memory_ceiling = \"{ceiling}\"\n"
+            )
+        }),
     )
 }
 
@@ -469,7 +491,7 @@ fn exec_arg(path: &Path) -> Result<String, String> {
 
 /// Runs `runnerd init`: writes the files, then prints the doctor's checks and the steps left.
 pub(crate) fn run(request: &Request) -> ExitCode {
-    let machine = match Machine::read(&request.slice) {
+    let machine = match Machine::read(&request.slice, request.memory_ceiling) {
         Ok(machine) => machine,
         Err(error) => return output::fail(&error),
     };

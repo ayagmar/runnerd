@@ -70,6 +70,8 @@ WARN  repository: halyard/docs-site is public: anyone who opens a pull request o
       fix: serve private repositories only; for a public one, have GitHub require approval before it runs workflows from fork pull requests (the repository's Actions settings)
 ```
 
+On a VM whose memory grows on demand, such as Hyper-V with Dynamic Memory, `init` sees only what the VM has now and may find no room for a runner. Give it `MemTotal` as the VM reports it at its maximum, `runnerd init --memory-ceiling 24G halyard/ledger`, and it sizes the profile for that and writes [`memory_ceiling`](../admission/#a-host-whose-memory-grows) into the config.
+
 Run the root commands your `init` printed, then:
 
 ```sh
