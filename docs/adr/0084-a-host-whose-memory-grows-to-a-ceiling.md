@@ -49,8 +49,9 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
   what the grown limit leaves, not 0B.
 - **`runnerd init` and `runnerd doctor` read the host by the same rule**, `admission::host::first_runner` on a
   reading that carries the ceiling: init sizes a reading with a ceiling for the host as it can grow, three quarters
-  of the ceiling and no more than what admission then leaves its first runner. Until init can be given a ceiling
-  (a later `--memory-ceiling`), it reads the host as it is now. The doctor applies the config's
+  of the ceiling and no more than what admission then leaves its first runner. Init takes the ceiling as
+  `--memory-ceiling` ([0086](0086-sizing-and-init-know-the-memory-ceiling.md)); without it, it reads the host as it
+  is now. The doctor applies the config's
   ceiling and says it is in use (`…, growing to 24G, 20.86G to spare for runners past a 2G margin…`). Beside any
   other warning, it warns when the ceiling is strictly under `MemTotal`, where it has no effect.
 - **The config check** refuses a ceiling of 0, and one under the memory of the largest profile's runner beside the

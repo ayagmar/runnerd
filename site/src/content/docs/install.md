@@ -63,6 +63,14 @@ Send a workflow job here with:
 A job runs here only when every label in its runs-on is in its repository's labels in runnerd.toml; other jobs, such as runs-on: ubuntu-latest, stay on GitHub's runners.
 ```
 
+On a VM whose hypervisor adds memory as the guest asks for it, such as Hyper-V with Dynamic Memory, an idle guest has too little memory for init to size a runner. Give init the most memory the VM can grow to, as `MemTotal` reads at its maximum:
+
+```sh
+runnerd init --memory-ceiling 24G halyard/ledger halyard/storefront
+```
+
+init writes it as `memory_ceiling` under `[host]` and sizes the first runner for the host as it can grow, still within the slice's `MemoryMax` and what admission leaves it ([A host whose memory grows](../admission/#a-host-whose-memory-grows)). The ceiling is the hypervisor's promise: a VM that does not get it stalls, and a job can run out of memory. init refuses a ceiling of 0, and one under a runner and the mirror, as `runnerd check-config` would.
+
 A repository that is public gets a warning instead of an `ok`, with the fix:
 
 ```text
