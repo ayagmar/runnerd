@@ -120,7 +120,7 @@ It talks to the socket (`--socket` picks another), prints aligned text, coloured
 
 ```console wrap=false
 $ runnerctl status
-runnerd 0.0.22  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
+runnerd 0.0.23  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
 
 PROFILE  SLOT  STATE     REPOSITORY          RUNNER                                      UP
 jvm         1  running   halyard/ledger      runnerd-3f9a-forge-jvm-1-1793379165     7m 16s
@@ -259,7 +259,7 @@ older jobs: --before 120055991489
 One frame of `runnerctl watch`:
 
 ```console wrap=false
-runnerd 0.0.22  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G  runnerd.slice uses 6.32 cores, 10.62G
+runnerd 0.0.23  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G  runnerd.slice uses 6.32 cores, 10.62G
 
 SLOT     JOB                                                      STEP                                         RAN   CPU    MEM
 jvm 1    halyard/ledger CI / build                                Integration tests (Testcontainers) (7/9)  7m 21s  4.92  4.33G
