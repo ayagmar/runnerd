@@ -228,8 +228,11 @@ pub struct Peaks {
     pub on_cap: u64,
     /// Memory without page cache, in bytes.
     pub memory: Spread,
-    /// CPU, in millicores.
+    /// CPU, in millicores, of the runs at the profile's `cpus` now: a run at a larger cap may have peaked past them.
     pub cpu: Spread,
+    /// How many runs `cpu` is over: those of `jobs` at the profile's `cpus` now.
+    #[serde(default)]
+    pub cpu_runs: u64,
 }
 
 #[expect(

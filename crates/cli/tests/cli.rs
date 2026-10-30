@@ -320,6 +320,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
         at_cap: 0,
         memory: spread(1500 << 20, 2 << 30, 2150 << 20, 2200 << 20),
         cpu: spread(3000, 6000, 7500, 8000),
+        cpu_runs: 100,
         on_cap: 0,
     };
     let advice = Advice::Lower {
@@ -1163,8 +1164,14 @@ fn sizing_shows_the_advice_and_applies_it_only_when_told_to() {
     let shown = runnerctl(&socket, &["sizing"]);
     assert!(shown.status.success(), "{}", stderr(&shown));
     let text = stdout(&shown);
+    // The jobs the waits are over, not the runs the peaks are; CPU peaks of the runs at the profile's CPUs.
     assert!(
-        text.contains("node  7G × 2, 8 CPUs; 100 jobs, slots busy 80%"),
+        text.contains("node  7G × 2, 8 CPUs; 40 jobs, slots busy 80%"),
+        "{text}"
+    );
+    assert!(text.contains("max 2.15G of 100 recent runs\n"), "{text}");
+    assert!(
+        text.contains("cpu    p50 3 p95 6 p99 7.5 max 8 of the 100 at 8 CPUs"),
         "{text}"
     );
     assert!(

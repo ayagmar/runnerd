@@ -23,6 +23,7 @@ fn profile(name: &str, max: u64, advice: Advice) -> ProfileSizing {
                 max,
             },
             cpu: Spread::default(),
+            cpu_runs: 0,
             on_cap: 0,
         },
         wait: Spread::default(),

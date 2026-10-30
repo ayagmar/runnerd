@@ -264,6 +264,50 @@ fn percentiles_are_nearest_rank_over_the_jobs_peaks() {
 }
 
 #[test]
+fn cpu_peaks_are_of_the_runs_at_the_profiles_cpus_now() {
+    // node's tests ran at 31 CPUs and burst to 26; since node went to 8 they burst to 8.2. Peaks at 26 under an
+    // 8-CPU profile read as a bug: the CPU percentiles take only the runs at 8, and say how many those are.
+    let mut jobs: Vec<Ran> = (0..6)
+        .map(|_| Ran {
+            cpu_cap: Some(31_000),
+            cpu_peak: 26_000,
+            ..job("halyard/storefront", "test", "node", G, 5)
+        })
+        .collect();
+    jobs.extend((0..4).map(|_| Ran {
+        cpu_peak: 8200,
+        ..job("halyard/storefront", "test", "node", G, 5)
+    }));
+    let advised = sizing(&history_of(jobs));
+    let node = profile(&advised, "node");
+    assert_eq!((node.peaks.jobs, node.peaks.cpu_runs), (10, 4));
+    assert_eq!((node.peaks.cpu.p50, node.peaks.cpu.max), (8200, 8200));
+    assert_eq!(node.jobs[0].peaks.cpu_runs, 4, "each job's too");
+    let all_older = sizing(&history_of(
+        (0..6)
+            .map(|_| Ran {
+                cpu_cap: Some(31_000),
+                cpu_peak: 26_000,
+                ..job("halyard/storefront", "test", "node", G, 5)
+            })
+            .collect(),
+    ));
+    let node = profile(&all_older, "node");
+    assert_eq!(
+        (node.peaks.cpu_runs, node.peaks.cpu.max),
+        (0, 0),
+        "none at 8 yet"
+    );
+}
+
+fn history_of(jobs: Vec<Ran>) -> History {
+    History {
+        jobs,
+        ..History::default()
+    }
+}
+
+#[test]
 fn jobs_a_warm_runner_took_are_told_apart_with_their_waits() {
     // Three taken by a runner up before they were queued, two whose runner started for them.
     let warm = |wait| Ran {

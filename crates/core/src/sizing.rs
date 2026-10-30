@@ -253,6 +253,7 @@ pub fn advise(
             let took = memory::took(&history.memory_set, name, cap, window.now);
             let sized = Sized {
                 cap,
+                cpus: u64::from(profile.cpus) * 1000,
                 slots: profile.slots,
                 share,
                 admission: config.host.admission,
@@ -278,6 +279,7 @@ pub fn advise(
             let peaks = memory::peaks(
                 recent.jobs_of(name).flat_map(|(_, runs)| runs.window()),
                 memory.on_cap,
+                sized.cpus,
             );
             let current = api::Resize {
                 memory: cap,
@@ -379,7 +381,7 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
         .map(|(key, runs)| {
             let held = memory::on_cap(runs, now);
             on_cap += u64::from(held);
-            let peaks = memory::peaks(runs.window(), u64::from(held));
+            let peaks = memory::peaks(runs.window(), u64::from(held), sized.cpus);
             let needs = Needs {
                 raise: raises.need(Some(key)),
                 floor: memory::floor(runs, raises.margin),
@@ -440,6 +442,8 @@ fn busy(history: &History, profile: &str, slots: u32, since: u64, now: u64) -> u
 /// A profile's limits and the rules advice follows.
 struct Sized {
     cap: u64,
+    /// Its `cpus`, in millicores: CPU peaks are read only of runs at them.
+    cpus: u64,
     slots: u32,
     /// What its slots take of the budget now: `memory × slots`.
     share: u64,
