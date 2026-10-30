@@ -24,10 +24,17 @@ use crate::sync::lock;
 
 pub(super) type Body = UnsyncBoxBody<Bytes, io::Error>;
 
-/// The tools whose requests it answers, each under its own path: `/<tool>/<key>`. Each reads with `GET`, a 404
-/// being a miss, and writes with `PUT`; Bazel's keys are `ac/<sha256>` and `cas/<sha256>`, sccache's
-/// `<a>/<b>/<c>/<key>`.
-const TOOLS: [&str; 3] = ["gradle", "sccache", "bazel"];
+/// The tools whose requests it answers, each with the path of its API before its keys: `/<tool>/<api><key>`. Each
+/// reads with `GET`, a 404 being a miss, and writes with `PUT`; Bazel's keys are `ac/<sha256>` and `cas/<sha256>`,
+/// sccache's `<a>/<b>/<c>/<key>`, Turborepo's and Nx's a task's hash. An entry's path leaves out the API's:
+/// `<tool>/<key>`.
+const TOOLS: [(&str, &str); 5] = [
+    ("gradle", ""),
+    ("sccache", ""),
+    ("bazel", ""),
+    (super::turbo::TOOL, "v8/artifacts/"),
+    ("nx", "v1/cache/"),
+];
 
 /// Path segments a key may have at most: sccache's take four.
 const MAX_SEGMENTS: usize = 8;
@@ -62,12 +69,21 @@ async fn handle(inner: &Inner, runner: &str, request: Request<Incoming>) -> Resp
     if path.starts_with(super::actions::TWIRP) || path.starts_with(super::actions::BLOBS) {
         return super::actions::handle(inner, runner, request).await;
     }
-    let Some((tool, rest)) = path.split_once('/') else {
+    if (path == super::turbo::TOOL || path.starts_with("turbo/")) && super::turbo::foreign(&request)
+    {
+        return super::turbo::pass(inner, request).await;
+    }
+    if let Some(endpoint) = path.strip_prefix(super::turbo::API)
+        && super::turbo::ENDPOINTS.contains(&endpoint)
+    {
+        return super::turbo::handle(inner, &repository, endpoint, request).await;
+    }
+    let Some((tool, rest)) = path.split_once('/').and_then(|(name, rest)| {
+        let (tool, api) = TOOLS.iter().find(|(tool, _)| *tool == name)?;
+        Some((*tool, rest.strip_prefix(api)?))
+    }) else {
         return status(StatusCode::NOT_FOUND);
     };
-    if !TOOLS.contains(&tool) {
-        return status(StatusCode::NOT_FOUND);
-    }
     let segments: Vec<&str> = rest.split('/').collect();
     if segments.len() > MAX_SEGMENTS || !segments.iter().all(|segment| valid_segment(segment)) {
         return status(StatusCode::NOT_FOUND);

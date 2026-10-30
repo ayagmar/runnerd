@@ -35,6 +35,12 @@ start_build_cache() {
     # build never depends on an entry runnerd did not keep.
     printf 'build --remote_cache=%s/bazel\nbuild --remote_download_outputs=all\n' "$RUNNERD_BUILD_CACHE_URL" \
         > /etc/bazel.bazelrc
+    # Turborepo's remote cache, for every turbo run (docs/adr/0083). A workflow's own TURBO_API, TURBO_TOKEN and
+    # TURBO_TEAM each take precedence; a turbo.json's remoteCache does not, as turbo reads its environment first. The
+    # socket is who the job is: the token and team only turn turbo's remote cache on, and runnerd passes a request
+    # with a workflow's own token to Vercel's API. Nx is not pointed at the cache: its run fails when the cache does
+    # not answer, as while runnerd restarts; a workflow may opt in.
+    export TURBO_API="$RUNNERD_BUILD_CACHE_URL/turbo" TURBO_TOKEN=runnerd TURBO_TEAM=runnerd
     start_actions_cache
 }
 

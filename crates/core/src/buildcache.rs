@@ -1,13 +1,15 @@
-//! The build cache every runner shares (ADR 0052, 0053): the entries of Gradle's HTTP build cache, and of the other
-//! tools the runner image points at it, kept per repository in a directory of the daemon's and served to each runner
-//! on a Unix socket of its own, which the runner image forwards to `127.0.0.1`. Owns the entries, the size limit, the
-//! sockets, and what each runner was served and stored. Which socket a request came in on is who sent it; no job can
-//! claim another's. It never decides whether a job may write: the engine tells it (`Writes`), from what GitHub says
-//! of the job. It never logs a request's headers, which may carry a tool's token. Where the config turns it on, the
-//! same socket serves GitHub Actions' cache (`actions`, ADR 0082) from the same entries' directory and limits.
+//! The build cache every runner shares (ADR 0052, 0053, 0083): the entries of Gradle's HTTP build cache, and of the
+//! other tools the runner image points at it, Turborepo's and Nx's among them, kept per repository in a directory of
+//! the daemon's and served to each runner on a Unix socket of its own, which the runner image forwards to
+//! `127.0.0.1`. Owns the entries, the size limit, the sockets, and what each runner was served and stored. Which
+//! socket a request came in on is who sent it; no job can claim another's. It never decides whether a job may write:
+//! the engine tells it (`Writes`), from what GitHub says of the job. It never logs a request's headers, which may
+//! carry a tool's token. Where the config turns it on, the same socket serves GitHub Actions' cache (`actions`, ADR
+//! 0082) from the same entries' directory and limits.
 
 pub(crate) mod actions;
 mod serve;
+mod turbo;
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;
@@ -184,6 +186,8 @@ struct Inner {
     sockets: PathBuf,
     /// Where requests for GitHub's results service it does not answer go.
     results: actions::Results,
+    /// Where turbo's requests with a workflow's own token go.
+    vercel: turbo::Vercel,
     // A panic midway leaves at worst an entry counted that is gone, or a file not counted, which `open` counts at
     // the next start.
     state: Mutex<State>,
@@ -313,6 +317,7 @@ impl BuildCache {
                 uploads,
                 sockets: sockets.to_owned(),
                 results: actions::Results::new(),
+                vercel: turbo::Vercel::new(),
                 state: Mutex::new(state),
             }),
         })
@@ -327,6 +332,12 @@ impl BuildCache {
     #[cfg(test)]
     pub(crate) fn set_results_origin(&self, origin: &str) {
         self.inner.results.set_origin(origin);
+    }
+
+    /// Sends turbo's requests with a workflow's own token to `origin` instead of Vercel's API.
+    #[cfg(test)]
+    pub(crate) fn set_vercel_origin(&self, origin: &str) {
+        self.inner.vercel.set_origin(origin);
     }
 
     /// Sets the size `trim` brings it under.
