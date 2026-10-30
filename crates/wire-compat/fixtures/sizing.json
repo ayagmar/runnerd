@@ -29,6 +29,15 @@
         },
         "busy": 1,
         "cpus": 4,
+        "hold": {
+          "bound": 8589934592,
+          "by": {
+            "ceiling": 9663676416,
+            "kind": "ceiling",
+            "mirror": 536870912
+          },
+          "need": 10737418240
+        },
         "jobs": [
           {
             "advice": {
@@ -318,6 +327,15 @@
         },
         "busy": 1,
         "cpus": 4,
+        "hold": {
+          "bound": 8589934592,
+          "by": {
+            "ceiling": 9663676416,
+            "kind": "ceiling",
+            "mirror": 536870912
+          },
+          "need": 10737418240
+        },
         "jobs": [
           {
             "advice": {

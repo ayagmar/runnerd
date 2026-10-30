@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.0.23";
+const PREVIOUS: &str = "v0.0.24";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -49,25 +49,7 @@ struct Accepted {
     adr: &'static str,
 }
 
-// v0.0.23's `InsightKind` has no fallback, so it reads no list that holds the new `cpu-held` kind; kinds after it
-// read as `Unknown`.
-const ACCEPTED: &[Accepted] = &[
-    Accepted {
-        reader: Reader::Previous,
-        item: "digest/full",
-        adr: "0087",
-    },
-    Accepted {
-        reader: Reader::Previous,
-        item: "insights/full",
-        adr: "0087",
-    },
-    Accepted {
-        reader: Reader::Previous,
-        item: "notification/full",
-        adr: "0087",
-    },
-];
+const ACCEPTED: &[Accepted] = &[];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;
@@ -284,9 +266,9 @@ documents! {
     "remove-records-query": RemoveRecordsQuery => full(samples::remove_records_query(), None),
     "shell-query": ShellQuery => full(samples::shell_query(), None),
     "savings": Savings => full(samples::savings(), None),
+    "memory-bound": MemoryBound => variants(samples::memory_bound()),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
-    "memory-bound": MemoryBound => variants(samples::memory_bound()),
 }
 
 /// The previous release's samples, one file per document.

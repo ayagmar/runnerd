@@ -140,6 +140,31 @@
         "sentence": "build got slower",
         "severity": "warning",
         "workflow": "ci"
+      },
+      {
+        "cpus": 9,
+        "held": 3,
+        "job": "build",
+        "key": "tidewater/halyard:ci:build",
+        "kind": "cpu-held",
+        "profile": "halyard",
+        "raised_from": 6,
+        "repository": "tidewater/halyard",
+        "runs": [
+          {
+            "at": 1761400000,
+            "branch": "main",
+            "job": 42,
+            "run_attempt": 1,
+            "run_id": 900,
+            "url": "https://github.com/tidewater/halyard/actions/runs/900"
+          }
+        ],
+        "sentence": "build got slower",
+        "set": 14,
+        "severity": "warning",
+        "total": 10,
+        "workflow": "ci"
       }
     ],
     "savings": {

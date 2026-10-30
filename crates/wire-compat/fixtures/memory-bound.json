@@ -1,0 +1,13 @@
+{
+  "ceiling": {
+    "ceiling": 9663676416,
+    "kind": "ceiling",
+    "mirror": 536870912
+  },
+  "max-memory": {
+    "kind": "max-memory"
+  },
+  "min-memory": {
+    "kind": "min-memory"
+  }
+}
