@@ -8,11 +8,11 @@
 [![Docs](https://img.shields.io/badge/docs-ayagmar.github.io%2Frunnerd-1f6b3a)](https://ayagmar.github.io/runnerd/)
 
 runnerd runs ephemeral GitHub Actions runners on one Linux host. Each job gets a fresh container; the
-repositories you configure share slots inside a memory and CPU budget.
+repositories you configure share slots inside a memory budget.
 
-- It records every job's memory and CPU peaks and sets each profile's memory, slots and
-  CPUs from them (`runnerd init` turns this on), so you don't tune it by hand.
-- Slots share one build cache that the default branch writes, and runners stay warm between jobs.
+- It records every job's memory and CPU use and sizes each profile from it: memory from peaks, CPUs from
+  averages, slots from how long jobs waited (`runnerd init` turns this on), so you don't tune it by hand.
+- Slots share one build cache that the default branch writes, and a fresh runner can wait ready for the next job.
 - Every queued job shows why it waits; `runnerctl insights` reports slow and flaky jobs and what
   the minutes would have cost on GitHub-hosted runners.
 - A failed job's runner can be kept, so you can open a shell in it.
