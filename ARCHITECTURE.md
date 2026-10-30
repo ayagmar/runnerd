@@ -116,7 +116,8 @@ session check ([`crates/web/src/auth.rs`](crates/web/src/auth.rs)) admits a requ
 a write only with the dashboard's own `Origin` or one of `[web] origins`, the proxies the owner runs in front of it
 ([ADR 0042](docs/adr/0042-dashboard-behind-a-proxy-and-installable.md)); the daemon then sees the dashboard as its
 own user. A browser signed in stays signed in across restarts: the session secret is a file the daemon keeps,
-and `POST /v1/dashboard/sign-out` on the socket replaces it with every code made before;
+and `POST /v1/dashboard/sign-out` on the socket replaces it with every code made before, and ends the live pages
+signed in with the old one ([ADR 0078](docs/adr/0078-a-first-run-that-can-start-and-keeps-its-secrets.md));
 `POST /v1/dashboard/pairings` makes 5-minute links bound to one of `[web] origins` for `runnerctl web --qr`
 ([ADR 0043](docs/adr/0043-phones-paired-by-qr-code-and-sessions-that-last.md)). `GET /v1/dashboard` serves `[web] open`
 as the daemon read it at start, the origin `runnerctl web` opens
@@ -175,7 +176,7 @@ adopted too and drains as it would after a reload.
 
 | What | Where |
 |---|---|
-| Config | `runnerd.toml`, default `$XDG_CONFIG_HOME/runnerd/runnerd.toml` ([`crates/core/src/config.rs`](crates/core/src/config.rs)) |
+| Config | `runnerd.toml`, default `$XDG_CONFIG_HOME/runnerd/runnerd.toml` ([`crates/core/src/config.rs`](crates/core/src/config.rs)); 0600, as `init` writes it and every save leaves it, since it holds `[notify]` secrets ([ADR 0078](docs/adr/0078-a-first-run-that-can-start-and-keeps-its-secrets.md)) |
 | Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart, except paused repositories, which the job history keeps |
 | Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
 | Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
