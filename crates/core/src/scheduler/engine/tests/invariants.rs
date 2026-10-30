@@ -978,7 +978,7 @@ impl Case {
             })
             .await;
         let applied = answer.await;
-        if applied != Ok(Ok(None)) {
+        if applied != Ok(Ok(Vec::new())) {
             return violation(
                 self,
                 "a_reload_applies",

@@ -118,7 +118,7 @@ async fn fake_engine(
                 if answer.is_ok() {
                     let _ = reloads.send(*config);
                 }
-                let _ = reply.send(answer.map_err(ControlError::Failed));
+                let _ = reply.send(answer.map(Vec::from_iter).map_err(ControlError::Failed));
             }
             Command::RemoveRecords { selection, reply } => {
                 let _ = reply.send(match selection {

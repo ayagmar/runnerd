@@ -2496,7 +2496,7 @@ async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runn
             reply,
         })
         .await;
-    assert_eq!(answer.await.unwrap(), Ok(None));
+    assert_eq!(answer.await.unwrap(), Ok(Vec::new()));
     assert_eq!(engine.config.profiles["app"].slots, 1);
 }
 
@@ -3321,8 +3321,63 @@ async fn a_config_in_another_slice_is_refused_before_its_file_is_written() {
             reply,
         })
         .await;
-    assert_eq!(answer.await.unwrap(), Ok(None));
+    assert_eq!(answer.await.unwrap(), Ok(Vec::new()));
     assert_eq!(engine.config.repositories[0].name, "o/x");
+}
+
+#[tokio::test]
+async fn a_config_that_undoes_a_memory_raise_of_the_last_day_runs_and_says_so() {
+    // Auto sizing raised app 3G → 4G an hour ago, after its jobs met the 3G cap; a config saved from a text read
+    // before that puts it back at 3G.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    let resize = |memory| api::Resize {
+        memory,
+        slots: 2,
+        cpus: None,
+    };
+    let id = handle
+        .store
+        .sizing_intent(api::SizingChange {
+            at: crate::time::now_ms() / 1000 - 3600,
+            profile: "app".to_owned(),
+            from: resize(3 << 30),
+            to: resize(4 << 30),
+            reason: "1 of 5 jobs ran out of memory at their cap".to_owned(),
+            uncertain: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        handle
+            .store
+            .sizing_resolved(id, crate::store::Resolution::Done)
+            .await
+    );
+    let stale = Config::parse(&CONFIG.replace("memory = \"4G\"", "memory = \"3G\"")).unwrap();
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(stale),
+            memory_max: None,
+            cpus: None,
+            commit: Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
+            running: RunningSlots::Drain,
+            reply,
+        })
+        .await;
+    assert_eq!(
+        answer.await.unwrap(),
+        Ok(vec![
+            "syncing the directory failed".to_owned(),
+            "app's memory goes to 3G, under the 4G auto sizing raised it to 1h 00m ago because its jobs needed more \
+             than 3G: they may run out of memory again"
+                .to_owned()
+        ])
+    );
+    assert_eq!(engine.config.profiles["app"].memory.0, 3 << 30, "it runs");
 }
 
 /// How many times the engine polled GitHub's queue.
@@ -3408,7 +3463,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
         .await;
     assert_eq!(
         committed,
-        Ok(Some("syncing the directory failed".to_owned()))
+        Ok(vec!["syncing the directory failed".to_owned()])
     );
     // Answered once it runs with the config: the status shows `o/x` already.
     assert_eq!(handle.status.borrow().repositories[0].name, "o/x");

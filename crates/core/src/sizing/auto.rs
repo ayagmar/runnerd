@@ -12,7 +12,7 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::api::{
-    Advice, ProfileSizing, Resize, Sizing, SizingChange, SizingRefused, SizingRevert, cores,
+    Advice, ProfileSizing, Resize, Sizing, SizingChange, SizingRefused, SizingRevert, ago, cores,
     job_title,
 };
 use crate::config::{Admission, ByteSize, Config, Profile, cpu_budget};
@@ -192,6 +192,46 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
         });
     }
     Look { changes, refused }
+}
+
+/// How far back a config that lowers `memory` is compared with auto sizing's raises, in seconds: a day.
+pub const UNDONE_RAISES: u64 = 24 * 3600;
+
+/// What a new config undoes of auto sizing's `memory` raises: a line for each profile whose `memory` it lowers under
+/// what one of `changes` raised it to in the `UNDONE_RAISES` before `now` (seconds), as a config saved from a text read
+/// before the raise does. A raise comes only after the jobs needed more than the cap (ADR 0070), so they may run out
+/// of memory again. The config is not refused: the owner may mean it.
+pub fn undone_raises(
+    running: &Config,
+    new: &Config,
+    changes: &[SizingChange],
+    now: u64,
+) -> Vec<String> {
+    new.profiles
+        .iter()
+        .filter_map(|(name, profile)| {
+            let memory = profile.memory.0;
+            let before = running.profiles.get(name)?.memory.0;
+            let raise = changes
+                .iter()
+                .filter(|change| {
+                    change.profile == *name
+                        && change.to.memory > change.from.memory
+                        && now.saturating_sub(change.at) < UNDONE_RAISES
+                })
+                .max_by_key(|change| change.at)?;
+            (memory < before && memory < raise.to.memory).then(|| {
+                format!(
+                    "{name}'s memory goes to {}, under the {} auto sizing raised it to {} because its jobs needed \
+                     more than {}: they may run out of memory again",
+                    ByteSize(memory),
+                    ByteSize(raise.to.memory),
+                    ago(raise.at, now),
+                    ByteSize(raise.from.memory)
+                )
+            })
+        })
+        .collect()
 }
 
 /// Whether a change may lower `memory` or `cpus`: only `interval` after the profile's last change.
