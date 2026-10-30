@@ -27,6 +27,8 @@ tracing-subscriber.workspace = true
 [dev-dependencies]
 # To make the job history fail a write, as a full disk would.
 rusqlite.workspace = true
+# To create files under the default umask.
+rustix = { workspace = true, features = ["fs", "process"] }
 
 # cargo binstall downloads the release archive dist builds (named for the crate; the binary sits in a directory of the
 # same name) instead of compiling. Releases cover Linux x86_64 and aarch64 on musl.

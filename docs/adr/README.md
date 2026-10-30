@@ -80,3 +80,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0072](0072-job-minutes-priced-at-github-hosted-rates.md) | What this machine's job minutes would have cost on GitHub-hosted runners (amended by 0074) |
 | [0073](0073-no-compatibility-before-0-0-19.md) | No compatibility before 0.0.19: the history starts at schema 15 |
 | [0074](0074-the-cost-line-names-only-what-it-is-before.md) | The cost line names only what it is before |
+| [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets |

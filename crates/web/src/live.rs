@@ -5,7 +5,7 @@
 //! connecting, the stream skips the regions the page already has, which the page names by digest in its `shown`
 //! signal; after each update the stream sets that signal to what the page shows now, and the time, which live
 //! charts follow. The stream ends when the page closes, its job finishes, the daemon answers with an error (shown as
-//! a notice), or the dashboard stops. When the daemon's events end or have a gap, it fails instead, so the page
+//! a notice), every device is signed out (also a notice), or the dashboard stops. When the daemon's events end or have a gap, it fails instead, so the page
 //! connects again and reads the daemon afresh.
 
 use std::collections::{HashMap, HashSet};
@@ -15,6 +15,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use axum::Extension;
 use axum::extract::{Path, Query, State};
 use axum::response::sse::{Event as SseEvent, KeepAlive, Sse};
 use datastar::consts::Namespace;
@@ -28,6 +29,7 @@ use tokio::sync::{mpsc, watch};
 use tracing::debug;
 
 use crate::App;
+use crate::auth::SignedIn;
 use crate::views::job::{self, JobView};
 use crate::views::{self, Part, Parts, Tone, digest, overview};
 
@@ -72,14 +74,26 @@ fn respond(
     Sse::new(events).keep_alive(KeepAlive::default())
 }
 
-/// Runs a page's stream and says how it ended, for `respond`.
+/// Runs a page's stream for `session` and says how it ended, for `respond`. Signing every device out ends it with
+/// a notice, as a retry would be refused.
 async fn run_page(
     patches: Patches,
     done: Arc<AtomicBool>,
     what: &str,
+    session: SignedIn,
     run: impl Future<Output = Result<End, ClientError>>,
 ) {
-    match run.await {
+    let ended = tokio::select! {
+        ended = run => ended,
+        () = session.signed_out() => {
+            debug!("{what} stream ended: every device was signed out");
+            let notice = views::notice("This browser was signed out", Tone::Failed).into_string();
+            let _ = patches.send(PatchElements::new(notice).write_as_axum_sse_event()).await;
+            done.store(true, Ordering::Release);
+            return;
+        }
+    };
+    match ended {
         Ok(End::Done) => done.store(true, Ordering::Release),
         Ok(End::Lost) => debug!("{what} stream lost the daemon's events"),
         // A retry would most likely fail the same way and replace the notice, so the stream ends with it shown.
@@ -306,6 +320,7 @@ async fn next_event(
 /// `GET /live/overview`.
 pub(crate) async fn overview(
     State(app): State<App>,
+    Extension(session): Extension<SignedIn>,
     Query(signals): Query<Signals>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
     let (patches, receiver) = mpsc::channel(16);
@@ -313,7 +328,7 @@ pub(crate) async fn overview(
     let ended = done.clone();
     tokio::spawn(async move {
         let run = run_overview(&app, &patches, signals.shown());
-        run_page(patches.clone(), ended, "overview", run).await;
+        run_page(patches.clone(), ended, "overview", session, run).await;
     });
     respond(receiver, done)
 }
@@ -408,6 +423,7 @@ async fn run_overview(
 /// `GET /live/jobs/{id}`.
 pub(crate) async fn job(
     State(app): State<App>,
+    Extension(session): Extension<SignedIn>,
     Path(id): Path<u64>,
     Query(signals): Query<Signals>,
 ) -> Sse<impl Stream<Item = Result<SseEvent, io::Error>>> {
@@ -416,7 +432,7 @@ pub(crate) async fn job(
     let ended = done.clone();
     tokio::spawn(async move {
         let run = run_job(&app, &patches, id, signals.shown());
-        run_page(patches.clone(), ended, "job", run).await;
+        run_page(patches.clone(), ended, "job", session, run).await;
     });
     respond(receiver, done)
 }

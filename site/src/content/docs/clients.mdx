@@ -18,7 +18,7 @@ runnerctl web
 xdg-open "$(head -n 1 "$XDG_RUNTIME_DIR/runnerd.web")"
 ```
 
-A browser stays signed in for 30 days after its last visit, across restarts of runnerd and of the browser. The session secret is in `dashboard-session` beside the job history (`~/.local/state/runnerd/`), readable by you only. The directory must be one other users cannot write. To sign every browser out, this one included, and end every link and QR code made before:
+A browser stays signed in for 30 days after its last visit, across restarts of runnerd and of the browser. The session secret is in `dashboard-session` beside the job history (`~/.local/state/runnerd/`), readable by you only. The directory must be one other users cannot write. To sign every browser out, this one included, stop the pages they have open from updating, and end every link and QR code made before:
 
 ```sh
 runnerctl web --sign-out-all

@@ -2,7 +2,8 @@
 //! nothing; the user runs the fixes. The checks are `api::Check`s, so `GET /v1/doctor` serves the same ones.
 
 use std::collections::BTreeMap;
-use std::path::Path;
+use std::os::unix::fs::PermissionsExt as _;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 use runnerd_core::admission::host;
@@ -30,6 +31,9 @@ pub(crate) struct Host {
     pub slice: Option<Result<Slice, String>>,
     /// The scopes of `gh`'s token for github.com.
     pub gh_scopes: Result<Vec<String>, String>,
+    /// Each configured repository's visibility as GitHub names it (`public`, `private`, `internal`), by name; empty
+    /// without a config.
+    pub visibility: BTreeMap<String, Result<String, String>>,
     /// How each of `SYSBOX_DAEMONS` runs: Docker keeps the runtime registered without them.
     pub sysbox_daemons: [SysboxDaemon; 2],
     /// Whether systemd has `sysbox.service`, which Sysbox's packages install and a source build does not.
@@ -37,6 +41,15 @@ pub(crate) struct Host {
     pub kvm: bool,
     /// The host's memory and how long its tasks stalled for it; `None` when `/proc/meminfo` does not say.
     pub memory: Option<api::HostMemory>,
+    /// The config's file; `None` without one, or when it cannot be read.
+    pub config_file: Option<ConfigFile>,
+}
+
+/// The file a config was read from, and who may read it.
+pub(crate) struct ConfigFile {
+    pub path: PathBuf,
+    /// Its permission bits, of the file a symbolic link points to.
+    pub mode: u32,
 }
 
 /// The daemons sysbox-runc needs; `sysbox.service` starts both, a source build's `scr/sysbox` too.
@@ -92,9 +105,18 @@ pub(crate) struct Slice {
 }
 
 impl Host {
-    pub(crate) fn read(config: Option<&Config>) -> Host {
+    /// The host, for `config` read from the file `path`.
+    pub(crate) fn read(config: Option<&Config>, path: Option<&Path>) -> Host {
         let docker = read_docker();
+        let gh_scopes = read_gh_scopes();
         Host {
+            config_file: path.and_then(|path| {
+                let metadata = std::fs::metadata(path).ok()?;
+                Some(ConfigFile {
+                    path: path.to_owned(),
+                    mode: metadata.permissions().mode() & 0o7777,
+                })
+            }),
             images: match (config, &docker) {
                 (Some(config), Ok(_)) => read_images(config),
                 _ => BTreeMap::new(),
@@ -104,7 +126,21 @@ impl Host {
             docker,
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
-            gh_scopes: read_gh_scopes(),
+            visibility: config.map_or_else(BTreeMap::new, |config| {
+                config
+                    .repositories
+                    .iter()
+                    .map(|repository| {
+                        let name = repository.name.clone();
+                        let visibility = match &gh_scopes {
+                            Ok(_) => read_visibility(&name),
+                            Err(_) => Err("needs gh logged in to github.com".to_owned()),
+                        };
+                        (name, visibility)
+                    })
+                    .collect()
+            }),
+            gh_scopes,
             sysbox_daemons: SYSBOX_DAEMONS.map(|name| SysboxDaemon {
                 name,
                 state: read_daemon(name),
@@ -316,21 +352,64 @@ fn read_gh_scopes() -> Result<Vec<String>, String> {
             "--json",
             "hosts",
             "--jq",
-            r#".hosts["github.com"][] | select(.active) | .scopes"#,
+            // Prefixed, so an account without scopes prints a line where none logged in prints nothing.
+            r#".hosts["github.com"][]? | select(.active) | "active:" + (.scopes // "")"#,
+        ])
+        .output()
+        .map_err(|error| format!("cannot run gh: {error}"))?;
+    gh_scopes(&output)
+}
+
+/// The scopes in what `read_gh_scopes`'s `gh auth status` printed: `Err` when no account is logged in, which `gh`
+/// says on stderr while it succeeds.
+fn gh_scopes(output: &std::process::Output) -> Result<Vec<String>, String> {
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let scopes = stdout.trim().strip_prefix("active:");
+    let (true, Some(scopes)) = (output.status.success(), scopes) else {
+        let why = first_line(&output.stderr);
+        return Err(if why.is_empty() {
+            "gh is not logged in to github.com".to_owned()
+        } else {
+            format!("gh is not logged in to github.com: {why}")
+        });
+    };
+    Ok(scopes
+        .split(',')
+        .map(|scope| scope.trim().to_owned())
+        .filter(|scope| !scope.is_empty())
+        .collect())
+}
+
+/// The first line of a command's error output, where `gh` says what failed; the rest is advice.
+fn first_line(stderr: &[u8]) -> String {
+    String::from_utf8_lossy(stderr)
+        .lines()
+        .map(str::trim)
+        .find(|line| !line.is_empty())
+        .unwrap_or_default()
+        .to_owned()
+}
+
+/// What GitHub says of `repository`'s visibility, through `gh`.
+fn read_visibility(repository: &str) -> Result<String, String> {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "--hostname",
+            "github.com",
+            &format!("repos/{repository}"),
+            "--jq",
+            ".visibility",
         ])
         .output()
         .map_err(|error| format!("cannot run gh: {error}"))?;
     if !output.status.success() {
         return Err(format!(
-            "gh is not logged in to github.com: {}",
-            String::from_utf8_lossy(&output.stderr).trim()
+            "gh api repos/{repository} failed: {}",
+            first_line(&output.stderr)
         ));
     }
-    Ok(String::from_utf8_lossy(&output.stdout)
-        .split(',')
-        .map(|scope| scope.trim().to_owned())
-        .filter(|scope| !scope.is_empty())
-        .collect())
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
 }
 
 /// Every check, in the order a new user fixes them.
@@ -454,6 +533,7 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
         ),
     });
     checks.extend(slice_checks(host, config));
+    checks.extend(host.config_file.as_ref().map(config_file_check));
     checks.push(memory_check(host.memory.as_ref(), config));
     checks.extend(image_checks(host, config, docker));
     if let (Some(config), Some(records)) = (config, &host.records) {
@@ -481,6 +561,11 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
              gh auth login --hostname github.com --scopes repo",
         ),
     });
+    checks.extend(
+        host.visibility
+            .iter()
+            .map(|(name, visibility)| visibility_check(name, visibility)),
+    );
     checks.push(Check {
         name: "/dev/kvm".to_owned(),
         status: Status::Info,
@@ -541,6 +626,52 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     };
     let config_check = config.check_against(slice.memory_max).doctor_check();
     vec![slice_check, config_check]
+}
+
+/// Warns about a public repository: whoever opens a pull request on it may get a job run here, if the repository's
+/// settings let fork pull requests run workflows, and that job shares the caches with trusted ones. A warning, not a
+/// refusal: GitHub can require approval for such runs.
+fn visibility_check(name: &str, visibility: &Result<String, String>) -> Check {
+    match visibility.as_deref() {
+        Err(error) => skip("repository", &format!("{name}: cannot read its visibility: {error}")),
+        Ok("public") => Check {
+            name: "repository".to_owned(),
+            status: Status::Warn,
+            detail: format!(
+                "{name} is public: anyone who opens a pull request on it can run code on this host, and their \
+                 jobs share runnerd's caches with your trusted jobs"
+            ),
+            fix: Some(
+                "serve private repositories only; for a public one, have GitHub require approval before it runs \
+                 workflows from fork pull requests (the repository's Actions settings)"
+                    .to_owned(),
+            ),
+        },
+        Ok(visibility) => pass("repository", format!("{name}: {visibility}")),
+    }
+}
+
+/// Warns when users other than its owner may read or write the config: the dashboard saves notification secrets in
+/// it, such as a webhook's URL, and a save leaves it readable by its user only.
+fn config_file_check(file: &ConfigFile) -> Check {
+    let path = file.path.display();
+    let shared = file.mode & 0o077;
+    if shared == 0 {
+        return pass("config file", format!("{path}: only you can read it"));
+    }
+    Check {
+        name: "config file".to_owned(),
+        status: Status::Warn,
+        detail: format!(
+            "{path} has mode {:o}, so other users can read it, and any notification secret the dashboard saves \
+             in it",
+            file.mode
+        ),
+        fix: Some(format!(
+            "chmod 600 '{}'",
+            path.to_string().replace('\'', "'\\''")
+        )),
+    }
 }
 
 /// One check per distinct image of the config's profiles.
@@ -717,10 +848,11 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
     }
 }
 
-/// Warns when admission would hold runners back for the host's memory, by `host::budget` with what the slice's
-/// runners hold now and the plain margin: while the host stalls short of memory, or while it has less to spare than
-/// the smallest profile's runner may reserve. Admission keeps half a margin more after a wait and while a stall
-/// lasts, so it can still hold jobs where this passes.
+/// Warns when admission would hold runners back for the host's memory, by `host::first_runner` with the plain
+/// margin, beside what the slice's runners hold now and the mirror's cap, which the engine reserves before the mirror
+/// starts: while the host stalls short of memory, or while it has less to spare than the smallest profile's runner
+/// may reserve. A running mirror counts twice, by what it holds. Admission keeps half a margin more after a wait and
+/// while a stall lasts, so it can still hold jobs where this passes.
 fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Check {
     let Some(memory) = memory else {
         return skip("host memory", "/proc/meminfo has no MemAvailable");
@@ -737,12 +869,22 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
             },
         )
     };
-    let budget = host::budget(memory.clone(), memory.slice, host::Remembered::default());
+    let mirror = config
+        .map(|config| &config.caches.mirror)
+        .filter(|mirror| mirror.enabled)
+        .map_or(0, |mirror| mirror.memory.0);
+    let spare = host::first_runner(memory, memory.slice.saturating_add(mirror));
+    let stalls = host::stalls(memory, false);
     let detail = format!(
-        "{}, {} to spare for runners past a {} margin; every task waited for memory {}",
+        "{}, {} to spare for runners past a {} margin{}; every task waited for memory {}",
         memory.available_line(),
-        ByteSize(budget.spare),
+        ByteSize(spare),
         ByteSize(host::margin(memory.total, false)),
+        if mirror > 0 {
+            format!(" and the mirror's {}", ByteSize(mirror))
+        } else {
+            String::new()
+        },
         stalled(memory.full)
     );
     let smallest = config.and_then(|config| {
@@ -751,12 +893,10 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
             .iter()
             .min_by_key(|(_, profile)| profile.memory)
     });
-    let why = if budget.stalled {
+    let why = if stalls {
         "the host stalls short of memory, so runnerd starts no runner until the stall passes"
             .to_owned()
-    } else if let Some((name, profile)) =
-        smallest.filter(|(_, profile)| budget.spare < profile.memory.0)
-    {
+    } else if let Some((name, profile)) = smallest.filter(|(_, profile)| spare < profile.memory.0) {
         format!(
             "a {name} runner may reserve up to {}, more than the host has to spare, so runners wait for the host's \
              memory",

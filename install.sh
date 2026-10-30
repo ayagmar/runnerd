@@ -105,7 +105,8 @@ echo
 echo "Next steps:"
 case ":$PATH:" in
   *":$bindir:"*) ;;
-  *) echo "- add $bindir to your PATH" ;;
+  *) echo "- add $bindir to your PATH; for this shell:"
+     echo "  export PATH=\"$bindir:\$PATH\"" ;;
 esac
 echo "- write a config and a systemd user unit for the repositories to serve, then follow what it prints:"
 echo "  runnerd init <owner/repo>..."

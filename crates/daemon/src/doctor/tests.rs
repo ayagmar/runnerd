@@ -9,8 +9,8 @@ use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::sizing;
 
 use super::{
-    Check, DaemonState, DockerFacts, Host, ImageFound, SYSBOX_DAEMONS, Slice, Status, SysboxDaemon,
-    checks, process_runs,
+    Check, ConfigFile, DaemonState, DockerFacts, Host, ImageFound, SYSBOX_DAEMONS, Slice, Status,
+    SysboxDaemon, checks, process_runs,
 };
 use crate::testdir::Dir;
 
@@ -79,6 +79,12 @@ fn ready_host(os_release: &str) -> Host {
             "repo".to_owned(),
             "workflow".to_owned(),
         ]),
+        visibility: [
+            ("halyard/ledger", "private"),
+            ("halyard/storefront", "internal"),
+        ]
+        .map(|(name, visibility)| (name.to_owned(), Ok(visibility.to_owned())))
+        .into(),
         sysbox_daemons: daemons(|_| DaemonState::Unit),
         sysbox_unit: true,
         kvm: true,
@@ -90,6 +96,10 @@ fn ready_host(os_release: &str) -> Host {
             some: Some(api::Pressure::default()),
             full: Some(api::Pressure::default()),
             holders: Vec::new(),
+        }),
+        config_file: Some(ConfigFile {
+            path: "/home/dana/.config/runnerd/runnerd.toml".into(),
+            mode: 0o600,
         }),
     }
 }
@@ -124,13 +134,99 @@ fn a_ready_host_passes_every_check() {
             "sysbox",
             "slice",
             "config",
+            "config file",
             "host memory",
             "image",
             "image",
             "records",
             "gh",
+            "repository",
+            "repository",
             "/dev/kvm"
         ]
+    );
+}
+
+#[test]
+fn gh_without_an_account_is_not_logged_in_rather_than_a_token_without_scopes() {
+    use std::os::unix::process::ExitStatusExt as _;
+
+    let output = |stdout: &str, stderr: &str| std::process::Output {
+        status: std::process::ExitStatus::from_raw(0),
+        stdout: stdout.as_bytes().to_vec(),
+        stderr: stderr.as_bytes().to_vec(),
+    };
+    // What gh 2.102 prints with no account: it succeeds.
+    let none = super::gh_scopes(&output(
+        "",
+        "You are not logged into any GitHub hosts. To log in, run: gh auth login\n",
+    ))
+    .unwrap_err();
+    assert!(
+        none.starts_with("gh is not logged in to github.com"),
+        "{none}"
+    );
+    assert_eq!(
+        super::gh_scopes(&output("active:gist, repo\n", "")).unwrap(),
+        ["gist", "repo"]
+    );
+    assert_eq!(
+        super::gh_scopes(&output("active:\n", "")).unwrap(),
+        Vec::<String>::new(),
+        "an account whose token has no scopes is logged in"
+    );
+}
+
+#[test]
+fn a_public_repository_is_a_warning_that_says_who_can_run_code_here() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.visibility
+        .insert("halyard/ledger".to_owned(), Ok("public".to_owned()));
+    host.visibility.insert(
+        "halyard/storefront".to_owned(),
+        Err("gh api repos/halyard/storefront failed: HTTP 404".to_owned()),
+    );
+    let checks = checks(&host, Some(&config));
+    let repositories: Vec<&Check> = checks
+        .iter()
+        .filter(|check| check.name == "repository")
+        .collect();
+    let [ledger, storefront] = repositories[..] else {
+        panic!("one check per repository: {repositories:?}");
+    };
+    assert_eq!(ledger.status, Status::Warn, "{}", ledger.detail);
+    assert!(
+        ledger.detail.contains("halyard/ledger is public")
+            && ledger.detail.contains("anyone who opens a pull request"),
+        "{}",
+        ledger.detail
+    );
+    assert_eq!(storefront.status, Status::Skip, "{}", storefront.detail);
+    assert!(
+        api::Doctor::all_passed(&checks),
+        "a public repository warns but does not fail doctor"
+    );
+}
+
+#[test]
+fn a_config_other_users_can_read_is_a_warning_with_its_chmod() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.config_file = Some(ConfigFile {
+        path: "/home/dana/.config/runnerd/runnerd.toml".into(),
+        mode: 0o644,
+    });
+    let checks = checks(&host, Some(&config));
+    let check = checks
+        .iter()
+        .find(|check| check.name == "config file")
+        .unwrap();
+    assert_eq!(check.status, Status::Warn, "{}", check.detail);
+    assert!(check.detail.contains("mode 644"), "{}", check.detail);
+    assert_eq!(
+        check.fix.as_deref(),
+        Some("chmod 600 '/home/dana/.config/runnerd/runnerd.toml'")
     );
 }
 
@@ -176,19 +272,26 @@ fn a_stall_with_memory_to_spare_passes_as_admission_starts_runners_through_it() 
 
 #[test]
 fn a_host_with_less_to_spare_than_the_smallest_runner_warns_that_runners_wait() {
-    // 10G available less the 4G margin leaves 6G, under node's 7G.
+    // 10G available less the 4G margin and the mirror's 512M leaves 5.5G, under node's 7G.
     let memory = host_memory_check(10 << 30, 0);
     assert_eq!(memory.status, Status::Warn, "{memory}");
     assert!(
-        memory.detail.contains("6G to spare") && memory.detail.contains("a node runner"),
+        memory.detail.contains("5.5G to spare") && memory.detail.contains("a node runner"),
         "{memory}"
     );
     assert!(
         memory.detail.contains("most qemu-system-x86 6G"),
         "the warning names what holds the host's memory: {memory}"
     );
+    // As the engine reserves the mirror's cap before it starts: 7.25G past the margin, 6.75G beside the mirror.
+    let memory = host_memory_check((11 << 30) + (1 << 28), 0);
+    assert_eq!(
+        memory.status,
+        Status::Warn,
+        "the mirror leaves node's 7G waiting: {memory}"
+    );
     let memory = host_memory_check(12 << 30, 0);
-    assert_eq!(memory.status, Status::Pass, "8G to spare fits node's 7G");
+    assert_eq!(memory.status, Status::Pass, "7.5G to spare fits node's 7G");
 }
 
 /// Asserts that every line of `check`'s fix after the first, which says what to do, is shell a user can paste:

@@ -6,7 +6,8 @@
 //! a file only its user can read, so a browser stays signed in across restarts; the one-time login links of the
 //! running dashboard, one per address in `login_file`, each replaced once used; and pairing codes, which sign one
 //! device in on the one origin they were made for, within `PAIRING_LIFETIME`. Signing every browser out replaces
-//! the secret and every code at once. This module never logs any of them.
+//! the secret and every code at once, and ends the live pages signed in with the old secret. This module never logs
+//! any of them.
 
 use std::fmt::{self, Write as _};
 use std::io::{self, Read as _, Write as _};
@@ -23,6 +24,7 @@ use axum::response::{IntoResponse, Redirect, Response};
 use runnerd_core::config::Origin;
 use rustix::fs::{Mode, OFlags};
 use serde::Deserialize;
+use tokio::sync::watch;
 use tracing::warn;
 
 use crate::views::{self, SignedOut};
@@ -257,6 +259,8 @@ impl std::error::Error for PairError {}
 pub struct Sessions {
     file: PathBuf,
     credentials: Mutex<Credentials>,
+    /// Sent each time every device is signed out, so open live pages end.
+    signed_out: watch::Sender<()>,
 }
 
 impl fmt::Debug for Sessions {
@@ -291,11 +295,12 @@ impl Sessions {
                 links: None,
                 pairings: Vec::new(),
             }),
+            signed_out: watch::Sender::new(()),
         }))
     }
 
     /// Replaces the secret, so every browser signed in is signed out, and every login link and pairing code made
-    /// before, so none signs one in again; the login file gets new links.
+    /// before, so none signs one in again; the login file gets new links. Live pages open since end.
     pub fn sign_out_all(&self) -> io::Result<()> {
         let mut credentials = lock(&self.credentials);
         let next = random_token()?;
@@ -305,6 +310,8 @@ impl Sessions {
         if let Some(links) = &mut credentials.links {
             links.renew();
         }
+        drop(credentials);
+        self.signed_out.send_replace(());
         Ok(())
     }
 
@@ -323,7 +330,7 @@ impl Sessions {
         now: Instant,
     ) -> Result<String, PairError> {
         let mut credentials = lock(&self.credentials);
-        if !same(&session.0, &credentials.secret) {
+        if !same(&session.secret, &credentials.secret) {
             return Err(PairError::SignedOut);
         }
         Self::mint(&mut credentials, origin, now)
@@ -428,7 +435,23 @@ impl Sessions {
 
 /// The secret a request's session cookie was checked against, which the session check hands its handler.
 #[derive(Clone)]
-pub(crate) struct SignedIn(String);
+pub(crate) struct SignedIn {
+    secret: String,
+    sessions: Arc<Sessions>,
+}
+
+impl SignedIn {
+    /// Completes once every device is signed out after the request was checked, so a live page ends.
+    pub(crate) async fn signed_out(&self) {
+        // Subscribed before checking, so a sign-out in between is seen by one or the other.
+        let mut changes = self.sessions.signed_out.subscribe();
+        while self.sessions.authenticate(&self.secret).is_some() {
+            if changes.changed().await.is_err() {
+                return;
+            }
+        }
+    }
+}
 
 /// The checks of a running dashboard: its cookie's name and the origins its pages may write from.
 #[derive(Debug)]
@@ -624,7 +647,10 @@ pub(crate) async fn require_session(
     }
     let cookie = auth.cookie(request.headers(), &secret);
     let mut request = request;
-    request.extensions_mut().insert(SignedIn(secret));
+    request.extensions_mut().insert(SignedIn {
+        secret,
+        sessions: auth.sessions.clone(),
+    });
     let mut response = next.run(request).await;
     if let Some(cookie) = cookie {
         response.headers_mut().append(header::SET_COOKIE, cookie);

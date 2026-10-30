@@ -1458,6 +1458,7 @@ dependencies = [
  "runnerd-core",
  "runnerd-web",
  "rusqlite",
+ "rustix",
  "serde_json",
  "tokio",
  "tracing",

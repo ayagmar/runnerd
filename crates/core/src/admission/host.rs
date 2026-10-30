@@ -81,3 +81,11 @@ pub fn left(limit: u64, reserved: u64, stalled: bool) -> i64 {
     let bytes = |bytes: u64| i64::try_from(bytes).unwrap_or(i64::MAX);
     bytes(limit).saturating_sub(bytes(reserved))
 }
+
+/// What `memory` leaves a new runner beside the `reserved` memory of what runs or is reserved for before it starts,
+/// such as the mirror: `budget`'s `spare` with no wait or stall remembered and none now. Beside only the mirror's
+/// cap, the room of the first runner into an empty slice, which `runnerd init` sizes a starter runner within and
+/// `runnerd doctor` checks profiles against.
+pub fn first_runner(memory: &HostMemory, reserved: u64) -> u64 {
+    u64::try_from(left(limit(memory, false), reserved, false)).unwrap_or(0)
+}

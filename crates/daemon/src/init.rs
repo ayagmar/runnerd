@@ -1,16 +1,20 @@
 //! `runnerd init`: writes a starter `runnerd.toml` sized for this host and a systemd user unit that serves it, then
 //! prints the doctor's checks and the steps left as commands. It overwrites neither file without `--force` and runs
-//! nothing as root: the steps that need root are printed for the user to run.
+//! nothing as root: the steps that need root are printed for the user to run. The config, which the dashboard may
+//! later fill with notification secrets, is readable by its user only, in a directory init makes the same way.
 
 use std::fmt::Write as _;
-use std::fs::OpenOptions;
+use std::fs::{DirBuilder, OpenOptions};
 use std::io::Write as _;
+use std::os::unix::fs::{DirBuilderExt as _, OpenOptionsExt as _};
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 use std::time::{SystemTime, UNIX_EPOCH};
 
-use runnerd_core::api::{Check, CheckStatus};
+use runnerd_core::admission::host;
+use runnerd_core::api::{Check, CheckStatus, HostMemory};
 use runnerd_core::config::{ByteSize, Config, PUBLISHED_RUNNER, slice_memory_max};
+use runnerd_core::observe::metrics::{self, Paths};
 
 use crate::{doctor, output};
 
@@ -23,6 +27,9 @@ const SLOT_MEMORY: u64 = 8 * GIB;
 const MIN_SLOT_MEMORY: u64 = 2 * GIB;
 /// Slot memory is a multiple of this.
 const MEMORY_STEP: u64 = 512 << 20;
+/// What init leaves of the host's available memory for what starts after it: the daemon, containerd unpacking the
+/// runner image, the mirror's shim. Without it a runner sized to the exact room waits once they run.
+const STARTUP_HEADROOM: u64 = MEMORY_STEP;
 /// No more slots than one per this many CPUs.
 const CPUS_PER_SLOT: u32 = 4;
 /// The image stage the starter profile runs; every other stage builds on it.
@@ -38,8 +45,8 @@ fn starter_image() -> String {
 
 /// What the starter profile is sized from.
 pub(crate) struct Machine {
-    /// The host's memory.
-    pub memory: ByteSize,
+    /// The host's memory now, as admission reads it.
+    pub memory: HostMemory,
     /// The CPUs this process may use.
     pub cpus: u32,
     /// The slice's `MemoryMax`; `None` when it has none yet.
@@ -48,18 +55,14 @@ pub(crate) struct Machine {
 
 impl Machine {
     pub(crate) fn read(slice: &str) -> Result<Machine, String> {
-        let meminfo = std::fs::read_to_string("/proc/meminfo")
-            .map_err(|error| format!("cannot read /proc/meminfo: {error}"))?;
-        let memory = meminfo
-            .lines()
-            .find_map(|line| line.strip_prefix("MemTotal:"))
-            .and_then(|value| value.trim().strip_suffix("kB"))
-            .and_then(|kib| kib.trim().parse::<u64>().ok())
-            .ok_or("/proc/meminfo has no MemTotal")?;
+        let paths = Paths::default();
+        let held = metrics::read_unavailable(&paths.slice(slice));
+        let memory = metrics::read_host_memory(&paths, held, 0)
+            .ok_or("/proc/meminfo has no MemTotal or MemAvailable")?;
         let cpus = std::thread::available_parallelism()
             .map_err(|error| format!("cannot count CPUs: {error}"))?;
         Ok(Machine {
-            memory: ByteSize(memory << 10),
+            memory,
             cpus: u32::try_from(cpus.get()).unwrap_or(u32::MAX),
             slice_memory_max: slice_memory_max(slice).map_err(|error| error.to_string())?,
         })
@@ -79,24 +82,41 @@ pub(crate) struct Sizing {
     pub memory: ByteSize,
 }
 
-/// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs.
+/// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs. A slot is no
+/// larger than what admission leaves the first runner beside the mirror on this host now (`host::first_runner`), less
+/// `STARTUP_HEADROOM`, so the first job can start once runnerd runs.
 pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
     // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
-    let host = machine.memory.0 / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
+    let host = machine.memory.total / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
     let budget = ByteSize(
         machine
             .slice_memory_max
             .map_or(host, |memory_max| memory_max.0.min(host)),
     );
     let room = budget.0.saturating_sub(MIRROR_MEMORY.0);
-    let memory = SLOT_MEMORY.min(room / MEMORY_STEP * MEMORY_STEP);
+    // The engine reserves for the mirror before it starts.
+    let first =
+        host::first_runner(&machine.memory, MIRROR_MEMORY.0).saturating_sub(STARTUP_HEADROOM);
+    let memory = SLOT_MEMORY.min(room).min(first) / MEMORY_STEP * MEMORY_STEP;
     if memory < MIN_SLOT_MEMORY {
-        return Err(format!(
-            "a budget of {budget} leaves {} for runners after the mirror's {MIRROR_MEMORY}; a runner needs at \
-             least {}",
-            ByteSize(room),
-            ByteSize(MIN_SLOT_MEMORY)
-        ));
+        let least = ByteSize(MIN_SLOT_MEMORY);
+        return Err(if first < room {
+            format!(
+                "this host has {}; runnerd keeps {} of it free, {MIRROR_MEMORY} for the mirror and {} for what \
+                 starts with it, which leaves {} for a runner, and a runner needs at least {least}. Close what uses \
+                 the host's memory, or run runnerd on a host with more",
+                machine.memory.available_line(),
+                ByteSize(host::margin(machine.memory.total, false)),
+                ByteSize(STARTUP_HEADROOM),
+                ByteSize(first),
+            )
+        } else {
+            format!(
+                "a budget of {budget} leaves {} for runners after the mirror's {MIRROR_MEMORY}; a runner needs at \
+                 least {least}",
+                ByteSize(room),
+            )
+        });
     }
     let by_memory = u32::try_from(room / memory).unwrap_or(u32::MAX);
     let slots = by_memory.min((machine.cpus / CPUS_PER_SLOT).max(1));
@@ -193,8 +213,8 @@ pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, Strin
             if existing.len() == 1 { "it" } else { "them" }
         ));
     }
-    let mut config = Staged::write(&request.config, &config)?;
-    let mut unit = Staged::write(&request.unit, &unit)?;
+    let mut config = Staged::write(&request.config, &config, Access::Private)?;
+    let mut unit = Staged::write(&request.unit, &unit, Access::Shared)?;
     config.publish(request.overwrite)?;
     if let Err(error) = unit.publish(request.overwrite) {
         return Err(match config.undo() {
@@ -227,6 +247,15 @@ fn unique<T>(
     Err(std::io::ErrorKind::AlreadyExists.into())
 }
 
+/// Who may read a file `Staged` writes, and the directories it makes for it.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum Access {
+    /// Its user only: 0600, in directories of 0700.
+    Private,
+    /// Whatever the umask lets through.
+    Shared,
+}
+
 /// A file written in full next to its destination, so a failure before `publish` leaves the destination as it was.
 /// Removes its temp file, and the backup of what it replaced, on drop.
 struct Staged<'path> {
@@ -237,14 +266,31 @@ struct Staged<'path> {
 }
 
 impl Staged<'_> {
-    fn write<'path>(path: &'path Path, text: &str) -> Result<Staged<'path>, String> {
+    fn write<'path>(
+        path: &'path Path,
+        text: &str,
+        access: Access,
+    ) -> Result<Staged<'path>, String> {
         let fail = |error: std::io::Error| format!("cannot write {}: {error}", path.display());
         let (Some(dir), Some(name)) = (path.parent(), path.file_name()) else {
             return Err(fail(std::io::ErrorKind::InvalidInput.into()));
         };
-        std::fs::create_dir_all(dir).map_err(fail)?;
+        let (dir_mode, file_mode) = match access {
+            Access::Private => (0o700, 0o600),
+            Access::Shared => (0o777, 0o666),
+        };
+        DirBuilder::new()
+            .recursive(true)
+            .mode(dir_mode)
+            .create(dir)
+            .map_err(fail)?;
+        // Published by a link or a rename, the file keeps the mode it is made with.
         let (temp, mut file) = unique(dir, &name.to_string_lossy(), |temp| {
-            OpenOptions::new().write(true).create_new(true).open(temp)
+            OpenOptions::new()
+                .write(true)
+                .create_new(true)
+                .mode(file_mode)
+                .open(temp)
         })
         .map_err(fail)?;
         // Only now is the temp file ours to remove.
@@ -328,6 +374,7 @@ fn runs_on(labels: &[&str]) -> String {
 }
 
 fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String {
+    let host_memory = ByteSize(machine.memory.total);
     let Sizing {
         budget,
         slots,
@@ -366,7 +413,9 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          auto = true\n\
          \n\
          # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of the host's\n\
-         # memory, or the slice's MemoryMax if that is smaller. runnerd pulls the image before the first runner.\n\
+         # memory, or the slice's MemoryMax if that is smaller. One runner and the mirror also fit what the host\n\
+         # had available when init ran, less the margin runnerd keeps free and {headroom} for what starts with\n\
+         # runnerd. runnerd pulls the image before the first runner.\n\
          [profiles.default]\n\
          image = \"{image}\"\n\
          cpus = {cpus}\n\
@@ -374,7 +423,7 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          slots = {slots}\n\
          {repositories}",
         image = starter_image(),
-        host_memory = machine.memory,
+        headroom = ByteSize(STARTUP_HEADROOM),
         host_cpus = machine.cpus,
         slice = request.slice,
     )
@@ -447,7 +496,7 @@ pub(crate) fn run(request: &Request) -> ExitCode {
         Ok(config) => config,
         Err(error) => return output::fail(&error),
     };
-    let host = doctor::Host::read(Some(&config));
+    let host = doctor::Host::read(Some(&config), Some(&request.config));
     let mut checks = doctor::checks(&host, Some(&config));
     if let Some(Ok(slice)) = &host.slice {
         for check in &mut checks {

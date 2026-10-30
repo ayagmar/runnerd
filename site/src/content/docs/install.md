@@ -10,7 +10,7 @@ description: Install runnerd, write a starter config and a user unit with runner
 - A systemd slice whose `MemoryMax` is the budget for all runners. `runnerd init` prints one sized for the host.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 
-`runnerd doctor` checks each of these, the slice the config names and that the config fits in it, and prints the fix for what is missing. It reads `~/.config/runnerd/runnerd.toml` when it exists; `runnerd doctor <file>` checks another.
+`runnerd doctor` checks each of these, the slice the config names and that the config fits in it, and prints the fix for what is missing. It also warns when other users can read the config, and for each public repository the config serves. It reads `~/.config/runnerd/runnerd.toml` when it exists; `runnerd doctor <file>` checks another.
 
 The binaries are built for x86_64 and aarch64. The runner images are linux/amd64 only, so on aarch64 runners do not start yet.
 
@@ -42,9 +42,12 @@ FAIL  slice: runnerd.slice has no unit file with a MemoryMax, so nothing holds r
            EOF
            sudo systemctl daemon-reload
 ok    config: valid, with warnings: the slice runnerd.slice has no MemoryMax, so nothing holds runners to their 40.5G of caps; install a unit file for it
+ok    config file: ~/.config/runnerd/runnerd.toml: only you can read it
 ok    image: ghcr.io/ayagmar/runnerd-runner:base-0.0.21: not pulled yet; runnerd pulls it before the first runner
 info  records: the records of failed jobs take 0B of [records] max_total = 20G
 ok    gh: logged in to github.com with the repo scope
+ok    repository: halyard/ledger: private
+ok    repository: halyard/storefront: private
 info  /dev/kvm: present, for a future Kata Containers backend
 
 First run the fixes above for slice; runnerd init runs nothing as root.
@@ -81,7 +84,7 @@ jobs:
 | `--config PATH` | write the config elsewhere |
 | `--force` | replace files that exist; without it `init` writes neither |
 
-`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory, or the slice's `MemoryMax` if smaller. [Configuration](../configuration/) says what to change.
+`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory, or the slice's `MemoryMax` if smaller. A slot is also no larger than what the host has available now, less the mirror's 512M, the margin runnerd keeps free for the host (at least 2G, [the host's memory](../admission/#the-hosts-memory)) and 512M for what starts with runnerd, so the first job can start. On a host that leaves less than 2G for a runner, such as a 4G VM, `init` writes nothing and says why. [Configuration](../configuration/) says what to change.
 
 ## Pick a directory or release
 
