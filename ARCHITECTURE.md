@@ -138,7 +138,10 @@ queued → slot → container → removed
    runner reserves is its cap, or under `admission = "measured"` its predicted peak (`engine/admission`,
    [ADR 0033](docs/adr/0033-measured-admission.md)), within what the host's memory leaves the slice
    ([ADR 0055](docs/adr/0055-admission-follows-the-hosts-memory.md)), and under `cpu_overcommit` within the CPU
-   budget too ([ADR 0038](docs/adr/0038-cpu-admission.md)). A profile whose
+   budget too ([ADR 0038](docs/adr/0038-cpu-admission.md)). Among the free slots a job takes the one that ran the
+   same job last, else one that ran its repository, else the lowest; the engine keeps each slot's last job
+   (`Engine::ran`, rebuilt from the history at start, dropped by a reseed that replaced the snapshot) and never
+   waits for the preferred slot ([ADR 0080](docs/adr/0080-a-job-starts-in-the-slot-that-ran-it-last.md)). A profile whose
    `image` Docker lacks starts nothing until the engine pulled it in the background
    ([ADR 0025](docs/adr/0025-published-runner-images-named-by-reference.md)). For each job it leaves queued it says
    why, which the status passes on ([ADR 0044](docs/adr/0044-queued-jobs-say-why-they-wait.md)). A job that does

@@ -5,6 +5,7 @@
 use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
+use crate::admission::Key;
 use crate::api::Waiting;
 use crate::github::QueuedJob;
 
@@ -109,6 +110,9 @@ pub struct Profile {
     pub count: usize,
     /// Index 0 is slot 1.
     pub slots: Vec<Slot>,
+    /// The job each slot ran last, which left its caches in the slot's layer (ADR 0080), by slot index; `None`, or
+    /// no entry, where none is known.
+    pub ran: Vec<Option<Key>>,
 }
 
 /// Why none of a profile's slots starts for now.
@@ -277,8 +281,8 @@ pub fn matches(job: &QueuedJob, labels: &[String]) -> bool {
 /// `repositories` holds each repository's pools; a job is served by the pool whose labels match it, and one no pool
 /// of its repository matches waits for a pool (`Waiting::NoPool`) unless it is for GitHub's own runners. Each pool
 /// gets a runner per matching queued job, less its runners still waiting for a job. Jobs are
-/// served oldest first across repositories, each in the lowest free slot of its repository's profile, while what
-/// the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `budget.memory` and
+/// served oldest first across repositories, each in a free slot of its repository's profile (`free_slot`: the one
+/// that ran the same job last, else one that ran its repository, else the lowest), while what the runner takes (`Repository::runner_memory`, by default the slot's memory) fits `budget.memory` and
 /// `budget.host`, and its CPU
 /// (`Repository::runner_cpu`, by default the slot's `cpus`) fits `budget.cpu` (`None`: no budget). A job that does
 /// not fit takes the room of warm runners of other repositories, which stop. A repository whose job had a slot and
@@ -337,7 +341,7 @@ pub fn plan(
         }
         let memory = repository.runner_memory.unwrap_or(profile.memory);
         let cpu = repository.runner_cpu.unwrap_or(profile.cpus);
-        let free_index = taken.iter().position(|taken| !taken);
+        let free_index = free_slot(taken, profile, repository, job);
         let fits = free_index.is_some() && left.fits(memory, cpu);
         let room = if fits || profile.preparing.is_some() {
             None
@@ -394,6 +398,39 @@ pub fn plan(
         start_warm(&warm_wanted, profiles, &mut taken, left, &mut decided);
     }
     decided
+}
+
+/// The free slot the queued job `job` of `repository` starts in: the one that ran the same job last (repository,
+/// workflow and name), else one that ran a job of the same repository, else the lowest. Warm caches are the slot's
+/// own layer (ADR 0007), so the same job there finds them. Only free slots count: a start never waits for the one it
+/// would prefer.
+fn free_slot(
+    taken: &[bool],
+    profile: &Profile,
+    repository: &Repository,
+    job: u64,
+) -> Option<usize> {
+    let queued = repository.queued.iter().find(|queued| queued.id == job);
+    let free = || {
+        taken
+            .iter()
+            .enumerate()
+            .filter(|(_, taken)| !**taken)
+            .map(|(index, _)| index)
+    };
+    let ran = |index: usize| profile.ran.get(index).and_then(Option::as_ref);
+    free()
+        .find(|index| {
+            queued.zip(ran(*index)).is_some_and(|(queued, key)| {
+                key.repository == repository.name
+                    && key.workflow == queued.workflow
+                    && key.name == queued.name
+            })
+        })
+        .or_else(|| {
+            free().find(|index| ran(*index).is_some_and(|key| key.repository == repository.name))
+        })
+        .or_else(|| free().next())
 }
 
 /// The hold of `repository`'s next job for CPU.

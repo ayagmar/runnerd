@@ -350,6 +350,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             Err(error) => warn!("cannot read the job history: {error}"),
         }
+        // The slots' layers outlive the daemon, and so does what ran last in each.
+        match self.store.slot_jobs().await {
+            Ok(jobs) => {
+                for job in jobs {
+                    if let Some(index) = job.slot.checked_sub(1) {
+                        self.ran
+                            .entry(SlotRef {
+                                profile: job.profile,
+                                index,
+                            })
+                            .or_insert(job.key);
+                    }
+                }
+            }
+            Err(error) => warn!("cannot read the job history: {error}"),
+        }
         match self.store.mirror_log_until().await {
             Ok(until) => self.mirror_until = until,
             Err(error) => warn!("cannot read the job history: {error}"),

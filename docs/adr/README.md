@@ -12,7 +12,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md) | GPUI desktop app pinned to a Zed commit (superseded by 0034) |
 | [0005](0005-isolation-backends-sysbox-by-default.md) | Isolation backends: sysbox by default, privileged DinD only when asked |
 | [0006](0006-ephemeral-jit-runners.md) | Ephemeral JIT runners, one per job |
-| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041, 0052, 0054, 0066, 0067 and 0077) |
+| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041, 0052, 0054, 0066, 0067, 0077 and 0080) |
 | [0008](0008-auth-with-the-gh-token.md) | Authenticate with the `gh` CLI's token |
 | [0009](0009-newest-stable-and-locked-dependencies.md) | Every dependency newest stable and locked (in part superseded by 0025) |
 | [0010](0010-mit-license-public-repository.md) | MIT license, public repository |
@@ -84,3 +84,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0076](0076-a-slot-is-free-once-docker-removed-its-container.md) | A slot is free once Docker removed its container, each start is admitted again as it starts, and a broken log capture starts again |
 | [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md) | Credentials in the cache layer, closed slots' layers, and what the build cache counts |
 | [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets |
+| [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md) | A job starts in the free slot that ran it last, else one that ran its repository |

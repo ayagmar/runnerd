@@ -333,6 +333,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// When each profile's last reseed finished: a check of the caches that started before then measured the old
     /// snapshot.
     reseeded_at: BTreeMap<String, SystemTime>,
+    /// The job each slot ran last, which left its caches in the slot's layer: what `plan` matches queued jobs to
+    /// (ADR 0080). A slot is absent once its last job is not known, or a reseed dropped its layer.
+    ran: BTreeMap<SlotRef, Key>,
     /// What the slots' Docker Engines may keep together, from the last check of the caches (`cache::docker_disk`);
     /// `None` until one measured Docker's disk, when each image keeps its own default.
     docker_disk: Option<u64>,
@@ -481,6 +484,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             reseed_due: BTreeSet::new(),
             oversized: BTreeSet::new(),
             reseeded_at: BTreeMap::new(),
+            ran: BTreeMap::new(),
             docker_disk: None,
             disk: None,
             // So the caches are measured once at start.

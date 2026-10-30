@@ -4884,3 +4884,102 @@ async fn a_repository_read_that_never_answers_holds_up_no_runner() {
         "the queued job gets its runner"
     );
 }
+
+/// An engine whose slot 2 ran job `build` and whose slot 1 ran nothing, both ended.
+async fn after_build_ran_in_slot_2(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    running_job(github, docker, "o/r", 2, 2);
+    let (mut engine, handle) = engine_in(github, docker, dir);
+    engine.recover().await.unwrap();
+    until_state(&handle, 2, JobState::Running).await;
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().containers[0].running = false;
+    github.0.lock().unwrap().runners.clear();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 2), None);
+    handle.store.flush().await;
+    (engine, handle)
+}
+
+#[tokio::test]
+async fn a_job_starts_in_the_slot_that_ran_the_same_job_before() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = after_build_ran_in_slot_2(&github, &docker, &dir).await;
+    // The same job is queued again, and the lowest free slot is 1.
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None);
+    assert_eq!(runner_in(&handle, 2).as_deref(), Some("o/r"));
+}
+
+#[tokio::test]
+async fn a_restart_rebuilds_which_slot_ran_which_job_from_the_history() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    drop(after_build_ran_in_slot_2(&github, &docker, &dir).await);
+    github.0.lock().unwrap().queued = vec![job(3)];
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    assert_eq!(runner_in(&handle, 1), None);
+    assert_eq!(runner_in(&handle, 2).as_deref(), Some("o/r"));
+}
+
+/// Reseeds `app` after `build` ran in slot 2, with the seed container printing `output`, then queues `build` again
+/// and says which slot starts it.
+async fn slot_after_a_reseed_printing(output: &str) -> usize {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = after_build_ran_in_slot_2(&github, &docker, &dir).await;
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.runner_log = Some(output.to_owned());
+        state.seed_exit = Some(0);
+    }
+    engine.request_reseed("app").unwrap();
+    for _ in 0..200 {
+        engine.tick(Shutdown::No).await;
+        engine.publish();
+        let seeded = docker
+            .calls()
+            .contains(&format!("start {}", Names::new("runnerd").seed("app")));
+        if seeded && !handle.status.borrow().profiles[0].reseeding {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    github.0.lock().unwrap().queued = vec![job(3)];
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    if runner_in(&handle, 2).is_some() {
+        2
+    } else {
+        1
+    }
+}
+
+#[tokio::test]
+async fn a_reseed_that_dropped_the_slots_layers_ends_their_preference_but_one_that_left_them_does_not()
+ {
+    assert_eq!(
+        slot_after_a_reseed_printing("not seeded: slot 1 changed 0 bytes").await,
+        2
+    );
+    assert_eq!(slot_after_a_reseed_printing("seeded").await, 1);
+}

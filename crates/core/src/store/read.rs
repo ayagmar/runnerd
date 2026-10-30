@@ -8,7 +8,8 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use tracing::warn;
 
-use super::{LogPosition, OpenJob};
+use super::{LogPosition, OpenJob, SlotJob};
+use crate::admission::Key;
 use crate::api::{self, EventEnvelope, JobState};
 use crate::sizing;
 
@@ -954,6 +955,32 @@ pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
         })
     })?
     .collect()
+}
+
+pub(super) fn slot_jobs(db: &Connection) -> rusqlite::Result<Vec<SlotJob>> {
+    // The bare columns of a `max()` aggregate come from the row that has the maximum.
+    let newest = db
+        .prepare_cached(
+            "SELECT r.profile, r.slot, j.repository, j.workflow, j.name, max(j.id) FROM jobs j \
+             JOIN runners r ON r.name = j.runner GROUP BY r.profile, r.slot",
+        )?
+        .query_map([], |row| {
+            Ok(SlotJob {
+                profile: row.get(0)?,
+                slot: row.get(1)?,
+                key: Key {
+                    repository: row.get(2)?,
+                    workflow: row.get(3)?,
+                    name: row.get(4)?,
+                },
+            })
+        })?
+        .collect::<rusqlite::Result<Vec<_>>>()?;
+    // A job no listing named leaves its slot unknown.
+    Ok(newest
+        .into_iter()
+        .filter(|job| !job.key.name.is_empty())
+        .collect())
 }
 
 pub(super) fn runner_job(db: &Connection, runner: &str) -> rusqlite::Result<Option<u64>> {

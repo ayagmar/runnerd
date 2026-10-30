@@ -204,12 +204,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// slot 1 and would reach the snapshot on any later reseed, like those of a job cancelled or out of memory. A
     /// warm runner that leaves slot 1 without a job changed nothing there.
     fn vacate(&mut self, slot: &SlotRef, ran: bool) {
-        if let Some(entry) = self
+        let left = self
             .slots
             .get_mut(&slot.profile)
             .and_then(|slots| slots.get_mut(slot.index))
-        {
-            *entry = None;
+            .and_then(Option::take);
+        // Its layer holds what that job cached. A runner that ran a job nobody named leaves the layer to a job
+        // unknown, and one that ran none leaves it as it was.
+        match left.and_then(|occupant| occupant.key) {
+            Some(key) => {
+                self.ran.insert(slot.clone(), key);
+            }
+            None if ran => {
+                self.ran.remove(slot);
+            }
+            None => {}
         }
         if slot.index == 0 && ran {
             self.reseed_due.insert(slot.profile.clone());
