@@ -2209,10 +2209,19 @@ dl.health-figures {
 }
 
 .notice-box {
-  margin-bottom: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
   padding: 0.75rem 1rem;
   background: var(--running-bg);
   color: var(--running-ink);
+}
+
+.notice-box p {
+  flex: 1 1 16rem;
+  margin: 0;
+  text-wrap: pretty;
 }
 
 /* The config editor: the file on the left, what it asks of the budget on the right. */
@@ -2280,13 +2289,16 @@ dl.health-figures {
   color: var(--failure-ink);
 }
 
-/* While the daemon checks or saves newer text, the verdict on the text before steps back. */
+/* While the daemon checks or saves newer text, the verdict on the text before steps back. A check runs after every
+   pause in typing and usually answers within milliseconds: the dimming waits 150 ms, so a quick answer never
+   flickers the verdict, and comes back at once. */
 .check-result {
-  transition: opacity 150ms ease-out;
+  transition: opacity 120ms ease-out;
 }
 
 .check-result[aria-busy='true'] {
   opacity: 0.55;
+  transition-delay: 150ms;
 }
 
 .bar-small {
@@ -2383,6 +2395,11 @@ dl.health-figures {
   background: var(--surface);
   font-size: 0.9375rem;
   color: var(--ink);
+}
+
+.check-list p,
+.check-message {
+  text-wrap: pretty;
 }
 
 .check-list p {
@@ -2588,7 +2605,6 @@ dl.health-figures {
 
   .config-side > .notice-box {
     order: -1;
-    margin: 0;
   }
 
   /* The verdict and the buttons stay within a thumb's reach of the text. */

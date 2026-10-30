@@ -10,7 +10,7 @@ use maud::{Markup, html};
 use qrcode::QrCode;
 use runnerd_core::api::{Check, ConfigCheck, ConfigFile, Doctor, Resize, Sizing, Tone};
 use runnerd_core::client::{Client, ClientError};
-use runnerd_core::config::{ByteSize, Config, resize_profile};
+use runnerd_core::config::{Config, resize_profile, resized_at};
 use serde::Deserialize;
 
 use super::{Page, page};
@@ -121,6 +121,63 @@ impl ConfigView {
     }
 }
 
+/// What the editor was opened with from the sizing page: the change in `profile`'s sizes from `file` to `text`, the
+/// editor's, as core words it, and a button that selects them in the editor; or why it holds no change.
+fn notice(resized: &Resized, file: &str, text: &str) -> Markup {
+    let (profile, resize) = match resized {
+        Resized::Applied { profile, resize } | Resized::Undone { profile, resize } => {
+            (profile, resize)
+        }
+        Resized::Not(why) => return html! { div.notice-box { p { (why) } } },
+    };
+    let before = Config::parse(file).ok().and_then(|config| {
+        config.profiles.get(profile).map(|before| Resize {
+            memory: before.memory.0,
+            slots: before.slots,
+            cpus: Some(before.cpus),
+        })
+    });
+    let line = resize.line_from(before.as_ref());
+    let select = resized_at(text, profile, *resize).and_then(|at| {
+        // A textarea counts UTF-16 units, and reads each line break as one `\n`.
+        let offset = |byte: usize| {
+            Some(
+                text.get(..byte)?
+                    .replace("\r\n", "\n")
+                    .encode_utf16()
+                    .count(),
+            )
+        };
+        Some(select_in_editor(offset(at.start)?, offset(at.end)?))
+    });
+    html! {
+        div.notice-box {
+            p {
+                @if let Resized::Applied { .. } = resized {
+                    "Sizing advice for " strong { (profile) } ": " (line) ". Not saved yet."
+                } @else {
+                    "Auto sizing's last change to " strong { (profile) } ", undone: " (line) ". Not saved yet."
+                }
+            }
+            @if let Some(select) = select {
+                button.button-quiet type="button" data-on:click=(select) { "Show in the editor" }
+            }
+        }
+    }
+}
+
+/// Selects `start..end`, in UTF-16 units, in the editor and scrolls it there, which setting a selection does not. A
+/// hidden textarea as wide as the editor, holding the text before the selection, measures how far down it starts,
+/// wrapped lines included.
+fn select_in_editor(start: usize, end: usize) -> String {
+    format!(
+        "const t = document.getElementById('toml'); const m = document.createElement('textarea'); \
+         m.style.cssText = 'position: absolute; visibility: hidden; height: 0; min-height: 0; width: ' + t.offsetWidth + 'px'; \
+         t.after(m); m.value = t.value.slice(0, {start}); const top = m.scrollHeight; m.remove(); \
+         t.focus(); t.setSelectionRange({start}, {end}); t.scrollTop = top - t.clientHeight / 3"
+    )
+}
+
 /// What a save did, for the result region.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum Outcome {
@@ -154,9 +211,10 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
             section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)] {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
                 label.visually-hidden for="toml" { "runnerd.toml" }
+                // The parser drops a line break right after the tag: this one, so the text's own first line stays.
                 textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"
                     data-bind:toml="" data-indicator:_checking=""
-                    "data-on:input__debounce.400ms"="@post('/config/check')" { (view.text) }
+                    "data-on:input__debounce.400ms"="@post('/config/check')" { "\n" (view.text) }
                 div.editor-actions {
                     button.button type="button" data-indicator:_saving=""
                         data-attr:aria-busy="$_saving && 'true'" data-attr:disabled="$_saving"
@@ -170,24 +228,7 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
                 }
             }
             div.config-side {
-                @match &view.resized {
-                    Some(Resized::Applied { profile, resize }) => {
-                        p.notice-box {
-                            "The editor holds the sizing advice for " strong { (profile) } ": "
-                            code { "memory = \"" (ByteSize(resize.memory)) "\"" } " and " code { "slots = " (resize.slots) }
-                            ". Nothing is written until you save it."
-                        }
-                    }
-                    Some(Resized::Undone { profile, resize }) => {
-                        p.notice-box {
-                            "The editor holds " strong { (profile) } "'s values from before auto sizing last changed them: "
-                            code { "memory = \"" (ByteSize(resize.memory)) "\"" } " and " code { "slots = " (resize.slots) }
-                            ". Nothing is written until you save it."
-                        }
-                    }
-                    Some(Resized::Not(why)) => { p.notice-box { (why) } }
-                    None => {}
-                }
+                @if let Some(resized) = &view.resized { (notice(resized, &view.file.text, &view.text)) }
                 (result(&view.check, &view.text, &Outcome::Checked))
                 (devices(proxies))
                 (doctor_pending(None))

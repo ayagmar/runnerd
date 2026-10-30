@@ -2410,6 +2410,13 @@ async fn an_auto_sizing_change_is_listed_and_undoing_it_opens_what_it_replaced_i
         editor.body.contains("memory = &quot;10G&quot;\nslots = 2"),
         "the editor holds jvm's memory from before the change"
     );
+    assert!(
+        editor.body.contains(
+            "Auto sizing's last change to <strong>jvm</strong>, undone: memory 9G → 10G, slots 2."
+        ),
+        "the notice says what the editor changed"
+    );
+    assert_eq!(selected(&editor.body), "memory = \"10G\"\nslots = 2");
     assert_eq!(
         dashboard.fake.fixtures.lock().unwrap().config,
         before,
@@ -2499,6 +2506,28 @@ async fn an_editor_opened_before_the_config_changed_cannot_save_over_the_change(
     );
 }
 
+/// What "Show in the editor" on a config page selects in its editor, as a browser counts: the textarea's text, less
+/// the line break the parser drops after its tag, by UTF-16 units.
+fn selected(page: &str) -> String {
+    let start = page.find("<textarea").unwrap();
+    let open = start + page[start..].find('>').unwrap() + 1;
+    let close = open + page[open..].find("</textarea>").unwrap();
+    let text = page[open..close]
+        .strip_prefix('\n')
+        .unwrap()
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    let call = page.split("setSelectionRange(").nth(1).unwrap();
+    let offsets: Vec<usize> = call[..call.find(')').unwrap()]
+        .split(", ")
+        .map(|offset| offset.parse().unwrap())
+        .collect();
+    let units: Vec<u16> = text.encode_utf16().collect();
+    String::from_utf16(&units[offsets[0]..offsets[1]]).unwrap()
+}
+
 #[tokio::test]
 async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved() {
     let dashboard = Dashboard::start().await;
@@ -2534,12 +2563,14 @@ async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved
     assert_ne!(advised, before);
     for expected in [
         "memory = &quot;3.25G&quot;\nslots = 4",
-        "Nothing is written until you save it.",
+        "Sizing advice for <strong>node</strong>: memory 7G → 3.25G, slots 2 → 4. Not saved yet.",
         // 2 × 9G + 4 × 3.25G + 512M.
         "31.5G",
     ] {
         assert!(editor.body.contains(expected), "editor lacks {expected:?}");
     }
+    // The example's comments hold `×`, two bytes and one UTF-16 unit: the offsets are a browser's.
+    assert_eq!(selected(&editor.body), "memory = \"3.25G\"\nslots = 4");
     assert_eq!(
         dashboard.fake.fixtures.lock().unwrap().config,
         before,

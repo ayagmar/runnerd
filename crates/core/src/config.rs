@@ -1476,6 +1476,31 @@ pub fn resize_profile(
     Ok(document.to_string())
 }
 
+/// Where `resize_profile` wrote `resize` in `text`: the bytes from the first of the profile's `memory`, `slots` and,
+/// when `resize` has them, `cpus` settings to the end of the last, so a client can select them. `None` when `text` is
+/// not TOML or the profile sets none of them.
+pub fn resized_at(
+    text: &str,
+    profile: &str,
+    resize: api::Resize,
+) -> Option<std::ops::Range<usize>> {
+    let document = toml_edit::Document::parse(text).ok()?;
+    let table = document
+        .as_table()
+        .get("profiles")?
+        .get(profile)?
+        .as_table_like()?;
+    let cpus = resize.cpus.map(|_| "cpus");
+    ["memory", "slots"]
+        .into_iter()
+        .chain(cpus)
+        .filter_map(|key| {
+            let (key, item) = table.get_key_value(key)?;
+            Some(key.span()?.start..item.span()?.end)
+        })
+        .reduce(|first, next| first.start.min(next.start)..first.end.max(next.end))
+}
+
 /// What `GET /v1/config` shows in place of a notification target's URL and header values (ADR 0051).
 pub const SECRET_SHOWN: &str = "<secret>";
 
