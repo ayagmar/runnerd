@@ -394,15 +394,15 @@ fn qr_svg(text: &str) -> Markup {
 }
 
 /// The doctor's region before its checks arrive: it asks for them as soon as it shows. After a save, `saved` is the
-/// revision saved, so the address differs from any the page asked before: Datastar asks again even while the request
-/// for the config before is out, and cancels that one.
+/// revision saved and goes in a header: the attribute differs from the page's, so Datastar asks again, and the address
+/// stays the same, since Datastar cancels a request still out only for a new one with the same method and address.
 pub(crate) fn doctor_pending(saved: Option<&str>) -> Markup {
-    let url = match saved.filter(|revision| quoted(revision).is_some()) {
-        Some(revision) => format!("/config/doctor?after={revision}"),
-        None => "/config/doctor".to_owned(),
-    };
+    let after = saved
+        .filter(|revision| quoted(revision).is_some())
+        .map(|revision| format!("headers: {{'Runnerd-After': '{revision}'}}, "));
     html! {
-        section #doctor .doctor aria-labelledby="doctor-title" aria-busy="true" data-init=(doctor_get(&url)) {
+        section #doctor .doctor aria-labelledby="doctor-title" aria-busy="true"
+            data-init=(doctor_get(after.as_deref().unwrap_or_default())) {
             h2 #doctor-title { "Doctor" }
             ul.check-list.pending aria-hidden="true" {
                 @for _ in 0..4 { li {} }
@@ -411,10 +411,10 @@ pub(crate) fn doctor_pending(saved: Option<&str>) -> Markup {
     }
 }
 
-/// A Datastar request for the doctor's region at `url`, with no signals: a GET sends them in its address, and the
-/// editor's text, which may hold a secret just typed, has no place in a proxy's access log.
-fn doctor_get(url: &str) -> String {
-    format!("@get('{url}', {{filterSignals: {{include: /^$/}}}})")
+/// A Datastar request for the doctor's region, with `options` before the filter and no signals: a GET sends them in
+/// its address, and the editor's text, which may hold a secret just typed, has no place in a proxy's access log.
+fn doctor_get(options: &str) -> String {
+    format!("@get('/config/doctor', {{{options}filterSignals: {{include: /^$/}}}})")
 }
 
 /// The doctor's checks for the config the daemon runs with, or why there are none; in place of `doctor_pending`.
@@ -451,7 +451,7 @@ pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>) -> Markup {
                     p.check-message { (error) }
                     button.button-quiet type="button" data-indicator:_doctoring=""
                         data-attr:aria-busy="$_doctoring && 'true'"
-                        data-on:click=(doctor_get("/config/doctor")) { "Run the doctor again" }
+                        data-on:click=(doctor_get("")) { "Run the doctor again" }
                 }
             }
         }

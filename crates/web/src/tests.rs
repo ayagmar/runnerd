@@ -2320,14 +2320,50 @@ async fn a_config_that_fits_is_saved_and_checking_one_saves_nothing() {
         .await;
     assert!(saved.body.contains("Saved and reloaded"), "{}", saved.body);
     assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, toml);
-    assert!(
-        saved.body.contains(&format!(
-            "@get('/config/doctor?after={}'",
-            runnerd_core::config::revision(&toml)
-        )),
-        "the doctor runs again for the config saved: {}",
+    // Datastar cancels a request still out only for a new one with the same method and address: the doctor's
+    // answer for the config before the save must not land after the one for the config saved.
+    let page = dashboard.page(&cookie, "/config").await.body;
+    assert_eq!(
+        doctor_request(&saved.body).address,
+        doctor_request(&page).address,
+        "{}",
         saved.body
     );
+    assert_ne!(
+        doctor_request(&saved.body).init,
+        doctor_request(&page).init,
+        "the doctor's region asks again after a save"
+    );
+    assert!(
+        doctor_request(&saved.body)
+            .init
+            .contains(&runnerd_core::config::revision(&toml)),
+        "it asks for the config saved: {}",
+        saved.body
+    );
+}
+
+/// How a page or a patch's pending doctor region asks for its checks.
+struct DoctorRequest<'html> {
+    /// Its `data-init`.
+    init: &'html str,
+    /// The address it gets.
+    address: &'html str,
+}
+
+fn doctor_request(html: &str) -> DoctorRequest<'_> {
+    let section = &html[html.find(r#"id="doctor""#).unwrap()..];
+    let init = section.split(r#"data-init=""#).nth(1).unwrap();
+    let init = &init[..init.find('"').unwrap()];
+    let address = init
+        .split("@get(&#39;")
+        .nth(1)
+        .or_else(|| init.split("@get('").nth(1))
+        .unwrap();
+    DoctorRequest {
+        init,
+        address: &address[..address.find(['\'', '&']).unwrap()],
+    }
 }
 
 #[tokio::test]
