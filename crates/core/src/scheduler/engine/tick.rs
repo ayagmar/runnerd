@@ -506,7 +506,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     },
                 }
             }
-            if !left {
+            if left || !self.draining.contains(&repository) {
+                self.drained_once.remove(&repository);
+            } else if !self.drained_once.insert(repository.clone()) {
+                self.drained_once.remove(&repository);
                 self.draining.remove(&repository);
             }
         }

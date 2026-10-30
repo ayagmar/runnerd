@@ -128,7 +128,9 @@ queued → slot → container → removed
 
 1. Every `poll_interval` the engine asks GitHub for runners first, then queued jobs (`Engine::tick`; the order
    avoids starting a second runner for a job its runner just took), every repository at once, a few requests at a
-   time.
+   time. Each listing is read page by page, up to 10 pages; one repository's queued-jobs poll reads the jobs of at
+   most 200 runs, queued runs before those in progress and the oldest first in each. A repository a reload removed
+   is polled until two listings in a row show none of this machine's runners.
 2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget, in the profile of
    the repository's pool whose labels match the job (each `[[repositories]]` entry is a pool;
    [ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)): what each
