@@ -29,10 +29,12 @@ the owner had to write `memory_ceiling` by hand before anything could start.
   before it: a chain of raises, each from where the change before it left `memory`, back to a lowering that went too
   far and short of where it came from, is that revert unfinished. Each look bounds it again by the ceiling, so a
   reload that raises or removes the ceiling finishes it at the next look, with no new run at the cap, after a restart
-  too, since the chain is read from the history. A hand edit breaks the chain: the `memory` is then the owner's.
+  too, since the chain is read from the history. The daemon must have run each link's `memory` and no other until
+  the next: a hand edit anywhere along it, even one set back to the same `memory`, breaks the chain for good.
 - **A revert fits the slice.** It is sized as any raise: under `caps` with as many of the slots it gives back as
   `MemoryMax` holds beside the other profiles, and as the changes before it in the same look leave (it waits for
-  the next look otherwise); under `measured`, only when one runner fits beside the mirror. A revert the slice
+  the next look otherwise); under `measured`, only when one runner fits beside the mirror. The slice is checked at
+  what auto sizing would write, so a `max_memory` under the ceiling's bound is what has to fit. A revert the slice
   cannot hold writes nothing and reads as a slice that has to grow. The bound sits beside the others, not in
   place of them: under `caps` the slots still have to fit `MemoryMax` beside the other profiles, under `measured` one
   runner beside the mirror, and `max_memory` still applies. It bounds one runner, not all of a profile's slots: the

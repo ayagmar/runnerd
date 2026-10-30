@@ -369,6 +369,7 @@ pub fn advise(
                 wants_slots: wait.p95 >= WAITED || busy >= BUSY,
                 min_jobs: rules.min_jobs,
                 ceiling: most,
+                max_memory: profile.max_memory.map(|max| max.0),
             };
             let raises = Raises {
                 history,
@@ -515,6 +516,7 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
             // A job's advice says what it needs; only its profile's is bounded by what can be written.
             let unbounded = Sized {
                 ceiling: None,
+                max_memory: None,
                 ..*sized
             };
             api::JobSizing {
@@ -582,6 +584,8 @@ struct Sized {
     /// The most `memory` a raise goes to under `[host] memory_ceiling` (`Config::runner_ceiling`), down to a
     /// granule; `None` without a ceiling.
     ceiling: Option<u64>,
+    /// Its `max_memory`: auto sizing raises no further, so the slice need hold no more.
+    max_memory: Option<u64>,
 }
 
 /// What a set of jobs' runs say its `memory` needs (`memory`, ADR 0070).
@@ -631,17 +635,19 @@ impl Sized {
 
     /// A raise toward `need` with at most `slots`: no further than `[host] memory_ceiling` allows, since a raise the
     /// config check refuses would be proposed again at every look, and with the slots the slice holds at that
-    /// memory as `admission` budgets it. None while the ceiling allows nothing past the cap or the slice holds no
-    /// slot: the jobs need `need`.
+    /// memory, or at `max_memory` when that is less, as `admission` budgets it. None while the ceiling allows
+    /// nothing past the cap or the slice holds no slot: the jobs need `need`.
     fn raise(&self, need: u64, slots: u32) -> Advice {
         let memory = self.ceiling.map_or(need, |most| need.min(most));
         if memory <= self.cap {
             return Advice::SliceTooSmall { memory: need };
         }
-        let fit = |room: u64| u32::try_from(room / memory).unwrap_or(u32::MAX);
+        // The slice holds what auto sizing writes, which `max_memory` may hold under this.
+        let written = self.max_memory.map_or(memory, |max| memory.min(max)).max(1);
+        let fit = |room: u64| u32::try_from(room / written).unwrap_or(u32::MAX);
         let slots = match (self.admission, self.room) {
             (Admission::Caps, Some(room)) => fit(room).min(slots),
-            (Admission::Measured, Some(room)) if room < memory => 0,
+            (Admission::Measured, Some(room)) if room < written => 0,
             (_, _) => slots,
         };
         if slots == 0 {

@@ -377,3 +377,59 @@ fn a_revert_under_caps_takes_back_only_the_slots_the_budget_holds_now() {
         "jvm's revert waits"
     );
 }
+
+#[test]
+fn a_revert_max_memory_holds_under_the_ceiling_goes_to_max_memory_where_the_slice_holds_that() {
+    // Measured admission in an 11.5G slice beside the 512M mirror: 11G fits, the 11.75G the ceiling allows does not,
+    // and max_memory stops the revert at 11G anyway.
+    let text = host(
+        &jvm_at("10G", 3).replacen("slots = 3\n", "slots = 3\nmax_memory = \"11G\"\n", 1),
+        "admission = \"measured\"\nmemory_ceiling = \"12.4G\"",
+    );
+    let mut after = clear_at_ten(LOWERED + HOUR, 10);
+    after.push(met(ledger(NOW - 2 * HOUR, 10 * G, 0)));
+    let mut daemon = Daemon::restarted(text, lowered(after), 11 * G + G / 2, NOW - HOUR);
+    let mut changes = Vec::new();
+    for hour in 0..6 {
+        changes.extend(daemon.checked_look(NOW + hour * HOUR));
+    }
+    assert_eq!(
+        memory_steps(&changes),
+        [(10 * G, 11 * G)],
+        "to max_memory, once"
+    );
+}
+
+#[test]
+fn a_revert_the_owner_set_back_by_hand_stays_cancelled_after_a_later_raise() {
+    let mut daemon = Daemon::restarted(
+        jvm_at("10G", 3),
+        lowered(clear_at_ten(LOWERED + HOUR, 10)),
+        64 * G,
+        NOW - 4 * HOUR,
+    );
+    // The owner tries 9G, then goes back to 10G by hand.
+    daemon.now = NOW - 3 * HOUR;
+    daemon.set_by_hand(9 * G);
+    daemon.now = NOW - 2 * HOUR;
+    daemon.set_by_hand(10 * G);
+    // A run meets 10G: the lowering went too far, but the owner's 10G is raised as any hand-set cap is.
+    daemon.history.jobs.push(met(ledger(NOW - HOUR, 10 * G, 0)));
+    let raised = daemon.checked_look(NOW);
+    assert_eq!(
+        memory_steps(&raised),
+        [(10 * G, 11776 << 20)],
+        "to what the job needs"
+    );
+    assert_eq!(
+        daemon.checked_look(NOW + 5 * 60 * 1000),
+        [],
+        "no revert to 14G next look"
+    );
+    let mut daemon = Daemon::restarted(daemon.text, daemon.history, 64 * G, NOW + 10 * 60 * 1000);
+    assert_eq!(
+        daemon.checked_look(NOW + 15 * 60 * 1000),
+        [],
+        "nor after a restart"
+    );
+}
