@@ -79,6 +79,12 @@ fn ready_host(os_release: &str) -> Host {
             "repo".to_owned(),
             "workflow".to_owned(),
         ]),
+        visibility: [
+            ("halyard/ledger", "private"),
+            ("halyard/storefront", "internal"),
+        ]
+        .map(|(name, visibility)| (name.to_owned(), Ok(visibility.to_owned())))
+        .into(),
         sysbox_daemons: daemons(|_| DaemonState::Unit),
         sysbox_unit: true,
         kvm: true,
@@ -134,8 +140,42 @@ fn a_ready_host_passes_every_check() {
             "image",
             "records",
             "gh",
+            "repository",
+            "repository",
             "/dev/kvm"
         ]
+    );
+}
+
+#[test]
+fn a_public_repository_is_a_warning_that_says_who_can_run_code_here() {
+    let config = config("sysbox");
+    let mut host = ready_host(ARCH);
+    host.visibility
+        .insert("halyard/ledger".to_owned(), Ok("public".to_owned()));
+    host.visibility.insert(
+        "halyard/storefront".to_owned(),
+        Err("gh api repos/halyard/storefront failed: HTTP 404".to_owned()),
+    );
+    let checks = checks(&host, Some(&config));
+    let repositories: Vec<&Check> = checks
+        .iter()
+        .filter(|check| check.name == "repository")
+        .collect();
+    let [ledger, storefront] = repositories[..] else {
+        panic!("one check per repository: {repositories:?}");
+    };
+    assert_eq!(ledger.status, Status::Warn, "{}", ledger.detail);
+    assert!(
+        ledger.detail.contains("halyard/ledger is public")
+            && ledger.detail.contains("anyone who opens a pull request"),
+        "{}",
+        ledger.detail
+    );
+    assert_eq!(storefront.status, Status::Skip, "{}", storefront.detail);
+    assert!(
+        api::Doctor::all_passed(&checks),
+        "a public repository warns but does not fail doctor"
     );
 }
 

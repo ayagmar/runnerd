@@ -31,6 +31,9 @@ pub(crate) struct Host {
     pub slice: Option<Result<Slice, String>>,
     /// The scopes of `gh`'s token for github.com.
     pub gh_scopes: Result<Vec<String>, String>,
+    /// Each configured repository's visibility as GitHub names it (`public`, `private`, `internal`), by name; empty
+    /// without a config.
+    pub visibility: BTreeMap<String, Result<String, String>>,
     /// How each of `SYSBOX_DAEMONS` runs: Docker keeps the runtime registered without them.
     pub sysbox_daemons: [SysboxDaemon; 2],
     /// Whether systemd has `sysbox.service`, which Sysbox's packages install and a source build does not.
@@ -123,6 +126,16 @@ impl Host {
             os_release: std::fs::read_to_string("/etc/os-release").unwrap_or_default(),
             slice: config.map(|config| read_slice(&config.host.slice)),
             gh_scopes: read_gh_scopes(),
+            visibility: config.map_or_else(BTreeMap::new, |config| {
+                config
+                    .repositories
+                    .iter()
+                    .map(|repository| {
+                        let name = repository.name.clone();
+                        (name.clone(), read_visibility(&name))
+                    })
+                    .collect()
+            }),
             sysbox_daemons: SYSBOX_DAEMONS.map(|name| SysboxDaemon {
                 name,
                 state: read_daemon(name),
@@ -351,6 +364,28 @@ fn read_gh_scopes() -> Result<Vec<String>, String> {
         .collect())
 }
 
+/// What GitHub says of `repository`'s visibility, through `gh`.
+fn read_visibility(repository: &str) -> Result<String, String> {
+    let output = Command::new("gh")
+        .args([
+            "api",
+            "--hostname",
+            "github.com",
+            &format!("repos/{repository}"),
+            "--jq",
+            ".visibility",
+        ])
+        .output()
+        .map_err(|error| format!("cannot run gh: {error}"))?;
+    if !output.status.success() {
+        return Err(format!(
+            "gh api repos/{repository} failed: {}",
+            String::from_utf8_lossy(&output.stderr).trim()
+        ));
+    }
+    Ok(String::from_utf8_lossy(&output.stdout).trim().to_owned())
+}
+
 /// Every check, in the order a new user fixes them.
 #[allow(
     clippy::too_many_lines,
@@ -500,6 +535,11 @@ pub(crate) fn checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
              gh auth login --hostname github.com --scopes repo",
         ),
     });
+    checks.extend(
+        host.visibility
+            .iter()
+            .map(|(name, visibility)| visibility_check(name, visibility)),
+    );
     checks.push(Check {
         name: "/dev/kvm".to_owned(),
         status: Status::Info,
@@ -560,6 +600,29 @@ fn slice_checks(host: &Host, config: Option<&Config>) -> Vec<Check> {
     };
     let config_check = config.check_against(slice.memory_max).doctor_check();
     vec![slice_check, config_check]
+}
+
+/// Warns about a public repository: whoever opens a pull request on it may get a job run here, if the repository's
+/// settings let fork pull requests run workflows, and that job shares the caches with trusted ones. A warning, not a
+/// refusal: GitHub can require approval for such runs.
+fn visibility_check(name: &str, visibility: &Result<String, String>) -> Check {
+    match visibility.as_deref() {
+        Err(error) => skip("repository", &format!("{name}: cannot read its visibility: {error}")),
+        Ok("public") => Check {
+            name: "repository".to_owned(),
+            status: Status::Warn,
+            detail: format!(
+                "{name} is public: anyone who opens a pull request on it can run code on this host, and their \
+                 jobs share runnerd's caches with your trusted jobs"
+            ),
+            fix: Some(
+                "serve private repositories only; for a public one, have GitHub require approval before it runs \
+                 workflows from fork pull requests (the repository's Actions settings)"
+                    .to_owned(),
+            ),
+        },
+        Ok(visibility) => pass("repository", format!("{name}: {visibility}")),
+    }
 }
 
 /// Warns when users other than its owner may read or write the config: the dashboard saves notification secrets in

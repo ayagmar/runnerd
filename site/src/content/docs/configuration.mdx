@@ -195,7 +195,7 @@ $ runnerd check-config runnerd.toml
 error: isolation "unsafe-dind" runs runner containers privileged, so a job can take over the host; set allow_unsafe = true under [host] to use it anyway
 ```
 
-Never serve public repositories from self-hosted runners: anyone who can open a pull request could run code on your machine.
+Never serve public repositories from self-hosted runners: anyone who can open a pull request could run code on your machine, and their jobs share runnerd's caches with your trusted jobs. `runnerd init` and `runnerd doctor` ask GitHub for each repository's visibility and warn for a public one.
 
 ## Every key
 
