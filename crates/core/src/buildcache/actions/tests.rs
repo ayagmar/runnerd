@@ -1,18 +1,22 @@
 //! GitHub Actions' cache through runners' sockets, as `actions/cache` and BuildKit reach it: a save is a restore in
 //! another runner, by key or prefix, after a restart too; each branch's and pull request's entries are their own, so
-//! no pull request changes what `main` restores; saves a job may not make are answered and dropped; a save waits for
-//! its job's decision; block uploads, ranges and limits; and every other results service request goes to GitHub as
-//! it came, with the cache turned off too.
+//! no pull request changes what `main` restores; saves a job may not make are answered and dropped; a save made
+//! before its job's decision is answered at once and becomes an entry only once the job may write, at most one per key
+//! and scope, and never across a restart; block uploads, ranges and limits; and every other results service request
+//! goes to GitHub as it came, with the cache turned off too.
 
 #![allow(
     clippy::unwrap_used,
     reason = "tests: a cache that cannot open fails the test"
 )]
 
+use std::path::Path;
 use std::sync::Arc;
+use std::time::Duration;
 
 use super::super::{ActionsCache, BuildCache, Scopes, Writes};
 use super::{call, path_of, restore, save, send};
+use crate::sync::lock;
 use crate::testdir::TestDir;
 
 fn open(dir: &TestDir, max_size: u64) -> BuildCache {
@@ -26,6 +30,82 @@ fn branch(branch: &str) -> Scopes {
         base: None,
         default: Some("refs/heads/main".to_owned()),
     }
+}
+
+/// The scopes of a job that may not write, in a repository whose default branch is `main`.
+fn reader() -> Scopes {
+    Scopes {
+        default: Some("refs/heads/main".to_owned()),
+        ..Scopes::default()
+    }
+}
+
+/// Saves as `save` does, answered at once whatever GitHub has said of the job: a job's post-step waits for it.
+async fn save_now(dir: &Path, key: &str, archive: &[u8]) -> bool {
+    tokio::time::timeout(Duration::from_secs(5), save(dir, key, archive))
+        .await
+        .expect("a save is answered at once")
+}
+
+/// Reserves a save of `key`, as BuildKit does before it sends blocks, and returns its upload URL's path.
+async fn reserve(dir: &Path, key: &str) -> String {
+    let reserved = call(
+        dir,
+        "CreateCacheEntry",
+        &serde_json::json!({ "key": key, "version": super::VERSION }),
+    )
+    .await;
+    assert_eq!(reserved["ok"], true);
+    path_of(&reserved["signed_upload_url"])
+}
+
+/// Sends `block` as block `id` of the save whose upload URL is `url`, and its answer's status.
+async fn put_block(dir: &Path, url: &str, id: &str, block: &[u8]) -> u16 {
+    send(
+        dir,
+        "PUT",
+        &format!("{url}?comp=block&blockid={}", id.replace('=', "%3D")),
+        &[],
+        block,
+    )
+    .await
+    .status
+}
+
+/// Joins the blocks `ids` of the save whose upload URL is `url`, and its answer's status.
+async fn put_block_list(dir: &Path, url: &str, ids: &[&str]) -> u16 {
+    let mut list = String::from("<BlockList>");
+    for id in ids {
+        list.extend(["<Latest>", id, "</Latest>"]);
+    }
+    list.push_str("</BlockList>");
+    send(
+        dir,
+        "PUT",
+        &format!("{url}?comp=blocklist"),
+        &[],
+        list.as_bytes(),
+    )
+    .await
+    .status
+}
+
+/// Finalizes the save of `key` of `size` bytes, as `@actions/cache` does: whether it was answered as kept.
+async fn finalize(dir: &Path, key: &str, size: usize) -> bool {
+    call(
+        dir,
+        "FinalizeCacheEntryUpload",
+        &serde_json::json!({ "key": key, "version": super::VERSION, "size_bytes": size.to_string() }),
+    )
+    .await["ok"]
+        == true
+}
+
+/// How many uploads wait on disk to become entries, for the cache in `dir`.
+fn uploads(dir: &TestDir) -> usize {
+    std::fs::read_dir(dir.0.join("entries").join(super::super::UPLOADS))
+        .unwrap()
+        .count()
 }
 
 /// The scopes of a run of pull request `number` into `base`.
@@ -151,7 +231,7 @@ async fn no_pull_request_changes_what_main_restores() {
 }
 
 #[tokio::test]
-async fn an_undecided_jobs_save_waits_for_its_decision_and_its_lookups_read_the_default_branch() {
+async fn an_undecided_jobs_saves_are_answered_at_once_and_become_entries_once_it_may_write() {
     let dir = TestDir::new("actions-undecided");
     let cache = open(&dir, 1 << 20);
     let first = cache
@@ -162,24 +242,190 @@ async fn an_undecided_jobs_save_waits_for_its_decision_and_its_lookups_read_the_
     cache.detach("first");
 
     let next = cache.attach("next", "o/app", ActionsCache::Served).unwrap();
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
     // Restores come first in a job, before GitHub has said what it is.
     assert_eq!(
         restore(&next, "gradle-0a1b", &[]).await,
         Some(("gradle-0a1b".to_owned(), b"wrapper".to_vec())),
         "an undecided job reads the default branch the last decision named"
     );
-    let saving = tokio::spawn({
-        let next = next.clone();
-        async move { save(&next, "gradle-ffff", b"dependencies").await }
-    });
-    tokio::time::sleep(std::time::Duration::from_millis(50)).await;
-    assert!(!saving.is_finished(), "the save waits for the decision");
-    cache.decide("next", Writes::Allowed, branch("main"));
-    assert!(saving.await.unwrap());
-    assert_eq!(
-        restore(&next, "gradle-ffff", &[]).await,
-        Some(("gradle-ffff".to_owned(), b"dependencies".to_vec()))
+    // GitHub's jobs API names no runner for the job yet when its post-step saves, whole and in blocks.
+    assert!(save_now(&next, "deps", b"dependencies").await);
+    assert!(
+        finalize(&next, "deps", 12).await,
+        "finalized again, it answers as kept"
     );
+    let layers = reserve(&next, "layers").await;
+    assert_eq!(
+        put_block(&next, &layers, "QkxPQ0sxPT0=", b"layer").await,
+        201
+    );
+    assert_eq!(
+        restore(&main, "deps", &[]).await,
+        None,
+        "nothing is read before GitHub says the job may write"
+    );
+
+    cache.decide("next", Writes::Allowed, branch("main"));
+    assert_eq!(put_block_list(&next, &layers, &["QkxPQ0sxPT0="]).await, 201);
+    assert!(finalize(&next, "layers", 5).await);
+    assert_eq!(
+        restore(&main, "deps", &[]).await,
+        Some(("deps".to_owned(), b"dependencies".to_vec()))
+    );
+    assert_eq!(
+        restore(&main, "layers", &[]).await,
+        Some(("layers".to_owned(), b"layer".to_vec()))
+    );
+    assert_eq!(cache.size().entries, 3, "each save became one entry");
+    assert_eq!(uploads(&dir), 0);
+    assert_eq!(cache.detach("next").unwrap().written_bytes, 17);
+}
+
+#[tokio::test]
+async fn a_fork_or_a_job_github_never_names_saves_nothing_and_frees_what_it_sent() {
+    let dir = TestDir::new("actions-refused-staged");
+    let cache = open(&dir, 64 << 10);
+    let fork = cache.attach("fork", "o/app", ActionsCache::Served).unwrap();
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+    // Before GitHub says what the fork's job is: a finalized save, one past the quarter of the limit an undecided
+    // job may hold, and one still being sent.
+    assert!(save_now(&fork, "deps", &[1; 12 << 10]).await);
+    assert!(
+        save_now(&fork, "more", &[2; 8 << 10]).await,
+        "past its room, answered as kept"
+    );
+    let layers = reserve(&fork, "layers").await;
+    assert_eq!(
+        put_block(&fork, &layers, "QkxPQ0sxPT0=", b"poison").await,
+        201
+    );
+    assert_eq!(uploads(&dir), 2, "the finalized archive and the block");
+
+    cache.decide("fork", Writes::Refused, reader());
+    assert_eq!(uploads(&dir), 0, "a refusal frees what it sent at once");
+    // The rest of the save it was sending answers as Azure and GitHub would, and is dropped.
+    assert_eq!(
+        put_block(&fork, &layers, "QkxPQ0syPT0=", b"poison").await,
+        201
+    );
+    assert_eq!(
+        put_block_list(&fork, &layers, &["QkxPQ0sxPT0=", "QkxPQ0syPT0="]).await,
+        201
+    );
+    assert!(finalize(&fork, "layers", 12).await);
+    for key in ["deps", "more", "layers"] {
+        assert_eq!(restore(&main, key, &[]).await, None, "{key}");
+    }
+    assert_eq!(cache.detach("fork").unwrap().refused, 3);
+
+    // A job GitHub never named a runner for: its runner ends with a save finalized and one it cannot finish.
+    let slow = cache.attach("slow", "o/app", ActionsCache::Served).unwrap();
+    assert!(save_now(&slow, "deps", b"late").await);
+    let half = reserve(&slow, "half").await;
+    assert_eq!(put_block(&slow, &half, "QkxPQ0sxPT0=", b"half").await, 201);
+    assert!(
+        cache.close("slow"),
+        "its finalized save waits for GitHub without its socket"
+    );
+    assert_eq!(uploads(&dir), 1, "the save it can no longer finish is gone");
+    let counts = cache.detach("slow").unwrap();
+    assert_eq!((counts.refused, counts.written_bytes), (1, 0));
+    assert!(!counts.writer, "it never wrote");
+    cache.decide("slow", Writes::Allowed, branch("main"));
+    assert_eq!(restore(&main, "deps", &[]).await, None);
+    assert_eq!(cache.size().entries, 0);
+    assert_eq!(uploads(&dir), 0);
+    assert_eq!(
+        lock(&cache.inner.state).uploading,
+        0,
+        "the uploads' room is all free again"
+    );
+}
+
+#[tokio::test]
+async fn of_saves_of_one_key_into_one_scope_at_most_one_becomes_an_entry() {
+    let dir = TestDir::new("actions-one-per-key");
+    let cache = open(&dir, 1 << 20);
+    let [first, second, decided] = ["first", "second", "decided"]
+        .map(|runner| cache.attach(runner, "o/app", ActionsCache::Served).unwrap());
+    cache.decide("decided", Writes::Allowed, branch("main"));
+    // Two jobs of main save the same key before GitHub names their runners; a third, decided, saves a key the first
+    // is waiting to save.
+    assert!(save_now(&first, "deps", b"first's").await);
+    assert!(save_now(&second, "deps", b"second's").await);
+    assert!(save_now(&first, "lint", b"first's lint").await);
+    assert!(save_now(&decided, "lint", b"decided's lint").await);
+    cache.decide("first", Writes::Allowed, branch("main"));
+    cache.decide("second", Writes::Allowed, branch("main"));
+    assert_eq!(
+        restore(&decided, "deps", &[]).await,
+        Some(("deps".to_owned(), b"first's".to_vec())),
+        "the first decided keeps the key"
+    );
+    assert_eq!(
+        restore(&decided, "lint", &[]).await,
+        Some(("lint".to_owned(), b"decided's lint".to_vec())),
+        "the save already an entry keeps the key"
+    );
+    assert_eq!(cache.size().entries, 2);
+    assert_eq!(uploads(&dir), 0, "the saves that lost are gone");
+
+    // The same key in another branch, a pull request and another repository is each one's own.
+    let others = [
+        ("release", "o/app", branch("release")),
+        ("pull", "o/app", pull_request(7, "main")),
+        ("other", "o/other", branch("main")),
+    ];
+    for (runner, repository, scopes) in others {
+        let socket = cache
+            .attach(runner, repository, ActionsCache::Served)
+            .unwrap();
+        assert!(save_now(&socket, "deps", runner.as_bytes()).await);
+        cache.decide(runner, Writes::Allowed, scopes);
+        assert_eq!(
+            restore(&socket, "deps", &[]).await,
+            Some(("deps".to_owned(), runner.as_bytes().to_vec())),
+            "{runner}"
+        );
+    }
+    assert_eq!(cache.size().entries, 5);
+}
+
+#[tokio::test]
+async fn a_restart_drops_saves_waiting_for_a_decision_and_their_upload_urls_reach_nothing_after() {
+    let dir = TestDir::new("actions-restart-staged");
+    let cache = open(&dir, 1 << 20);
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    let stale = reserve(&main, "deps").await;
+    assert!(save_now(&main, "tools", b"tools").await);
+    drop(cache);
+
+    let cache = open(&dir, 1 << 20);
+    assert_eq!(uploads(&dir), 0, "what waited for a decision is gone");
+    // The running job is adopted, and GitHub decides it afresh.
+    let main = cache.attach("main", "o/app", ActionsCache::Served).unwrap();
+    cache.decide("main", Writes::Allowed, branch("main"));
+    let fresh = reserve(&main, "other").await;
+    assert_ne!(stale, fresh, "an upload URL is never given twice");
+    // The job's upload client sends again to the URL it had before the restart.
+    let resent = send(
+        &main,
+        "PUT",
+        &stale,
+        &[("x-ms-blob-type", "BlockBlob")],
+        b"stale",
+    )
+    .await;
+    assert_eq!(resent.status, 201);
+    assert!(finalize(&main, "deps", 5).await);
+    assert!(finalize(&main, "other", 5).await);
+    for key in ["tools", "deps", "other"] {
+        assert_eq!(restore(&main, key, &[]).await, None, "{key}");
+    }
+    assert_eq!(cache.size().entries, 0);
 }
 
 #[tokio::test]

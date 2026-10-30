@@ -391,7 +391,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// Each repository's default branch, once a job of it needed it: the branch whose builds write to the build
     /// cache when `[caches.build] branches` names none.
     default_branches: BTreeMap<String, build_cache::DefaultBranch>,
-    /// Removed runners' build cache uploads held until `follow_jobs` asks GitHub of their jobs, by runner.
+    /// Removed runners' build cache uploads held until GitHub decides whether their jobs may write, at most
+    /// `build_cache::ENDED_WAIT`, by runner.
     ended_uploads: BTreeMap<String, build_cache::EndedUploads>,
     /// When each repository's visibility is next asked of GitHub, which the asking task updates; the store keeps
     /// the answers.
