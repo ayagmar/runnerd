@@ -272,19 +272,26 @@ fn a_stall_with_memory_to_spare_passes_as_admission_starts_runners_through_it() 
 
 #[test]
 fn a_host_with_less_to_spare_than_the_smallest_runner_warns_that_runners_wait() {
-    // 10G available less the 4G margin leaves 6G, under node's 7G.
+    // 10G available less the 4G margin and the mirror's 512M leaves 5.5G, under node's 7G.
     let memory = host_memory_check(10 << 30, 0);
     assert_eq!(memory.status, Status::Warn, "{memory}");
     assert!(
-        memory.detail.contains("6G to spare") && memory.detail.contains("a node runner"),
+        memory.detail.contains("5.5G to spare") && memory.detail.contains("a node runner"),
         "{memory}"
     );
     assert!(
         memory.detail.contains("most qemu-system-x86 6G"),
         "the warning names what holds the host's memory: {memory}"
     );
+    // As the engine reserves the mirror's cap before it starts: 7.25G past the margin, 6.75G beside the mirror.
+    let memory = host_memory_check((11 << 30) + (1 << 28), 0);
+    assert_eq!(
+        memory.status,
+        Status::Warn,
+        "the mirror leaves node's 7G waiting: {memory}"
+    );
     let memory = host_memory_check(12 << 30, 0);
-    assert_eq!(memory.status, Status::Pass, "8G to spare fits node's 7G");
+    assert_eq!(memory.status, Status::Pass, "7.5G to spare fits node's 7G");
 }
 
 /// Asserts that every line of `check`'s fix after the first, which says what to do, is shell a user can paste:

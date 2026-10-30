@@ -848,10 +848,11 @@ fn records_check(records: &Result<u64, String>, config: &Config) -> Check {
     }
 }
 
-/// Warns when admission would hold runners back for the host's memory, by `host::budget` with what the slice's
-/// runners hold now and the plain margin: while the host stalls short of memory, or while it has less to spare than
-/// the smallest profile's runner may reserve. Admission keeps half a margin more after a wait and while a stall
-/// lasts, so it can still hold jobs where this passes.
+/// Warns when admission would hold runners back for the host's memory, by `host::first_runner` with the plain
+/// margin, beside what the slice's runners hold now and the mirror's cap, which the engine reserves before the mirror
+/// starts: while the host stalls short of memory, or while it has less to spare than the smallest profile's runner
+/// may reserve. A running mirror counts twice, by what it holds. Admission keeps half a margin more after a wait and
+/// while a stall lasts, so it can still hold jobs where this passes.
 fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Check {
     let Some(memory) = memory else {
         return skip("host memory", "/proc/meminfo has no MemAvailable");
@@ -868,12 +869,22 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
             },
         )
     };
-    let budget = host::budget(memory.clone(), memory.slice, host::Remembered::default());
+    let mirror = config
+        .map(|config| &config.caches.mirror)
+        .filter(|mirror| mirror.enabled)
+        .map_or(0, |mirror| mirror.memory.0);
+    let spare = host::first_runner(memory, memory.slice.saturating_add(mirror));
+    let stalls = host::stalls(memory, false);
     let detail = format!(
-        "{}, {} to spare for runners past a {} margin; every task waited for memory {}",
+        "{}, {} to spare for runners past a {} margin{}; every task waited for memory {}",
         memory.available_line(),
-        ByteSize(budget.spare),
+        ByteSize(spare),
         ByteSize(host::margin(memory.total, false)),
+        if mirror > 0 {
+            format!(" and the mirror's {}", ByteSize(mirror))
+        } else {
+            String::new()
+        },
         stalled(memory.full)
     );
     let smallest = config.and_then(|config| {
@@ -882,12 +893,10 @@ fn memory_check(memory: Option<&api::HostMemory>, config: Option<&Config>) -> Ch
             .iter()
             .min_by_key(|(_, profile)| profile.memory)
     });
-    let why = if budget.stalled {
+    let why = if stalls {
         "the host stalls short of memory, so runnerd starts no runner until the stall passes"
             .to_owned()
-    } else if let Some((name, profile)) =
-        smallest.filter(|(_, profile)| budget.spare < profile.memory.0)
-    {
+    } else if let Some((name, profile)) = smallest.filter(|(_, profile)| spare < profile.memory.0) {
         format!(
             "a {name} runner may reserve up to {}, more than the host has to spare, so runners wait for the host's \
              memory",
