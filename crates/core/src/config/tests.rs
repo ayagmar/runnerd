@@ -683,7 +683,10 @@ fn a_memory_ceiling_is_unset_unless_given_and_takes_a_size() {
     ))
     .unwrap();
     assert_eq!(config.host.memory_ceiling, Some(size("24G")));
-    assert!(config.validate(Some(size("10G"))).is_ok());
+    assert!(
+        config.validate(Some(size("10G"))).is_ok(),
+        "a 24G ceiling passes under a 10G slice"
+    );
     let error = Config::parse(&MINIMAL.replace(
         "isolation = \"sysbox\"",
         "isolation = \"sysbox\"\nmemory_ceiling = 24",

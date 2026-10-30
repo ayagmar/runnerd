@@ -7,8 +7,9 @@ Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-host
 ADR 0055 bounds new runners by what the slice's runners hold plus `MemAvailable`, less a margin of the larger of 2G
 and a sixteenth of `MemTotal`. On a host whose memory is fixed, `MemTotal` and `MemAvailable` say what it has. On a
 VM whose hypervisor hands memory out as the guest asks for it, they say only what it has handed over so far: Hyper-V
-Dynamic Memory and virtio-balloon with free page reporting or an auto-ballooning host both shrink an idle guest and
-grow it again when something inside it allocates.
+Dynamic Memory shrinks an idle guest's `MemTotal` and grows it again when something inside it allocates. A balloon
+that leaves `MemTotal` at the maximum and shows ballooned pages as used, such as virtio-balloon with free page
+reporting or deflate-on-OOM, is not this case, and the key below does nothing there.
 
 On the owner's Ubuntu 24.04 VM under Hyper-V, with Dynamic Memory from 2G to 24G and one `node` profile of 8G
 (#159), the idle VM had 2.12G with 1.48G available, so the host had nothing to spare past its 2G margin and a
@@ -30,8 +31,10 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
   as available: the slice may hold what its runners hold plus `MemAvailable` plus that, less the margin of the
   ceiling, the larger of 2G and a sixteenth of `memory_ceiling` (`admission::host::limit`). The margin is the host's
   memory as configured, since that is the host the runners will run on once it grew. At or under `MemTotal`, the
-  ceiling has no effect: the host already has at least that. Equal is silent, as a VM at its maximum is; under it,
-  `runnerd doctor` warns, since that ceiling is a mistake.
+  ceiling has no effect: the host already has at least that. `MemTotal` leaves out what the kernel reserves, about
+  2% (its page tables for the memory, the kernel itself), so a VM grown to a 24G maximum reports about 23.5G: the
+  ceiling to set is `MemTotal` read at the VM's maximum, or the maximum less 2%, or admission keeps counting growth
+  that never comes. Under `MemTotal`, `runnerd doctor` warns, since that ceiling is a mistake.
 - **The stall rule stays as it is.** Nothing starts while `full` pressure over the last 10 s reaches 5% with
   `MemAvailable` under twice the margin of `MemTotal`, until it falls under 1%. Neither figure counts the ceiling:
   what the host could grow by is not available yet, and a host that stalls while it should be growing is one whose
@@ -44,7 +47,8 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
   what the grown limit leaves, not 0B.
 - **`runnerd init` and `runnerd doctor` read the host by the same rule**, `admission::host::first_runner` on a
   reading that carries the ceiling: init sizes a reading with a ceiling for the host as it can grow, three quarters
-  of the ceiling and no more than what admission then leaves its first runner. The doctor applies the config's
+  of the ceiling and no more than what admission then leaves its first runner. Until init can be given a ceiling
+  (a later `--memory-ceiling`), it reads the host as it is now. The doctor applies the config's
   ceiling and says it is in use (`…, growing to 24G, 20.86G to spare for runners past a 2G margin…`). Beside any
   other warning, it warns when the ceiling is strictly under `MemTotal`, where it has no effect.
 - **The config check** refuses a ceiling of 0, and one under the memory of the largest profile's runner beside the
@@ -59,11 +63,14 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
 - An idle VM with a ceiling starts its first job: the job's allocations grow the VM, as the throwaway allocation did.
   The hypervisor's minimum can go back to what the host needs idle.
 - A ceiling higher than the hypervisor delivers brings back what ADR 0055 prevents: starts the host has no room for,
-  reclaim, and throttled sockets, until the stall rule stops further starts. Running jobs are still never stopped. A
+  reclaim, and throttled sockets, until the stall rule stops further starts; the starts of one plan all go ahead, and
+  the guest's OOM killer can kill a job among them. runnerd still never stops a running job. A
   ceiling should be the VM's maximum, and lower when other VMs on the same hypervisor compete for its RAM.
 - Growing takes the hypervisor a moment, while a runner starts against memory not there yet. The stall rule holds
   further starts while it lasts.
 - With a ceiling, the margin is larger than a sixteenth of the host as it is now: 6G on a 16G VM that can grow to
   96G. That is what the margin will need once it grew.
+- Auto sizing bounds a memory raise by `MemoryMax`, not by the ceiling. Where the ceiling is under `MemoryMax`, a
+  raise past the ceiling less the mirror fails the config check and is proposed again at each look, logged once.
 - `HostMemory.ceiling` is a new optional field, absent unless set; an older client ignores it and shows the host's
   line without `growing to`.
