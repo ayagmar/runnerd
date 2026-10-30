@@ -1303,7 +1303,7 @@ async fn insights_read_finished_jobs_with_when_their_runner_started() {
     store.lost(1, 1_000_300);
     store.flush().await;
 
-    let runs = store.insights(0).await.unwrap();
+    let runs = store.insights(0).await.unwrap().runs;
 
     assert_eq!(runs.len(), 1, "the queued job is not finished: {runs:#?}");
     assert_eq!(runs[0].state, JobState::Lost);

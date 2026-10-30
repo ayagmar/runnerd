@@ -1,6 +1,7 @@
 //! Insights from the job history (ADR 0051): jobs that got slower and stayed so, jobs that fail and pass on a re-run,
 //! jobs whose memory nears their profile's cap, jobs that find almost nothing in the build cache, repositories whose
-//! downloads memory pressure throttled, and how long each repository's jobs wait, this week against the last; and the daily digest. Pure: the daemon reads the history, the
+//! downloads memory pressure throttled, and how long each repository's jobs wait, this week against the last when the
+//! history holds all of last week; and the daily digest. Pure: the daemon reads the history, the
 //! config and the clock and passes them in. It sends nothing and changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
@@ -126,6 +127,16 @@ impl Run {
     }
 }
 
+/// What insights read from the job history.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct History {
+    /// The jobs it closed in the days read.
+    pub runs: Vec<Run>,
+    /// From when it holds every job that ended, in ms (`history_kept`): before that, pruning or the daemon's first
+    /// start left only some, so no week before it is compared.
+    pub kept_since: u64,
+}
+
 /// A job as insights tell jobs apart: repository, workflow and name.
 type JobKey<'run> = (&'run str, Option<&'run str>, &'run str);
 
@@ -133,9 +144,10 @@ fn key_of(run: &Run) -> JobKey<'_> {
     (&run.repository, run.workflow.as_deref(), &run.name)
 }
 
-/// The insights of the `days` before `now` (ms), and the waits of the 14 days before it. `runs` may hold more:
-/// only those finished by `now` count.
-pub fn insights(runs: &[Run], config: &Config, days: u32, now: u64) -> Insights {
+/// The insights of the `days` before `now` (ms), and the waits of the 14 days before it. `history` may hold more:
+/// only the runs finished by `now` count.
+pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insights {
+    let runs = &history.runs;
     let since = now.saturating_sub(u64::from(days) * DAY);
     let window: Vec<&Run> = runs
         .iter()
@@ -159,7 +171,7 @@ pub fn insights(runs: &[Run], config: &Config, days: u32, now: u64) -> Insights 
         found.extend(cold_cache(*key, runs));
     }
     found.extend(throttled(&window));
-    let waits = waits(runs, now);
+    let waits = waits(history, now);
     found.extend(waits.iter().filter_map(waits_insight));
     found.sort_by(|a, b| {
         (a.severity, &a.repository, &a.workflow, &a.job, &a.key).cmp(&(
@@ -180,7 +192,8 @@ pub fn insights(runs: &[Run], config: &Config, days: u32, now: u64) -> Insights 
 
 /// The 24 hours before `now` (ms): what finished and failed, the insights that hold at `now` and did not 24 hours
 /// before, and the longest waits.
-pub fn digest(runs: &[Run], config: &Config, now: u64) -> Digest {
+pub fn digest(history: &History, config: &Config, now: u64) -> Digest {
+    let runs = &history.runs;
     let since = now.saturating_sub(DAY);
     let finished: Vec<&Run> = runs
         .iter()
@@ -189,12 +202,12 @@ pub fn digest(runs: &[Run], config: &Config, now: u64) -> Digest {
                 && run.finished_at.is_some_and(|at| at > since && at <= now)
         })
         .collect();
-    let before: BTreeSet<String> = insights(runs, config, api::INSIGHT_DAYS, since)
+    let before: BTreeSet<String> = insights(history, config, api::INSIGHT_DAYS, since)
         .insights
         .into_iter()
         .map(|insight| insight.key)
         .collect();
-    let new = insights(runs, config, api::INSIGHT_DAYS, now)
+    let new = insights(history, config, api::INSIGHT_DAYS, now)
         .insights
         .into_iter()
         .filter(|insight| !before.contains(&insight.key))
@@ -550,16 +563,19 @@ fn throttled(window: &[&Run]) -> Vec<Insight> {
         .collect()
 }
 
-/// Each repository's waits in the 7 days before `now` (ms) and the 7 before those.
-fn waits(runs: &[Run], now: u64) -> Vec<RepositoryWaits> {
+/// Each repository's waits in the 7 days before `now` (ms) and the 7 before those. The week before stays empty when
+/// it starts before the history holds every job: it would hold a sliver of it, such as the daemon's first minutes
+/// and the jobs queued before it ran. This week is what the history has of it either way.
+fn waits(history: &History, now: u64) -> Vec<RepositoryWaits> {
+    let before_kept = now.saturating_sub(2 * WEEK) < history.kept_since;
     let mut weeks: BTreeMap<&str, [Vec<&Run>; 2]> = BTreeMap::new();
-    for run in runs {
+    for run in &history.runs {
         let Some(started) = run.started_at.filter(|at| *at <= now) else {
             continue;
         };
         let week = match now - started {
             back if back < WEEK => 0,
-            back if back < 2 * WEEK => 1,
+            back if back < 2 * WEEK && !before_kept => 1,
             _ => continue,
         };
         weeks.entry(&run.repository).or_default()[week].push(run);

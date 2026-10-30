@@ -351,7 +351,7 @@ async fn a_digest_delivered_after_midnight_counts_for_the_day_it_was_made() {
     };
     // Made at 23:50 UTC yesterday; the endpoint answers only today.
     target.digest = Some(runnerd_core::insights::digest(
-        &[],
+        &runnerd_core::insights::History::default(),
         &config,
         (midnight - 10 * 60) * 1000,
     ));

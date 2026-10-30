@@ -17,7 +17,7 @@ use runnerd_core::api::{
     LogQuery, Savings, Sizing, SizingQuery, StatsQuery, reads_since,
 };
 use runnerd_core::config::Config;
-use runnerd_core::insights::{self, Run};
+use runnerd_core::insights::{self, History};
 use runnerd_core::observe::metrics::SAMPLE_INTERVAL;
 use runnerd_core::sizing::memory::HISTORY;
 use runnerd_core::sizing::{Window, advise};
@@ -254,7 +254,7 @@ pub(super) async fn insight_runs(
     state: &AppState,
     days: u32,
     now: u64,
-) -> Result<(Vec<Run>, Config), String> {
+) -> Result<(History, Config), String> {
     let runs = insight_runs_of(&state.handle.store, days, now)
         .await
         .map_err(|store_error| store_error.to_string())?;
@@ -268,7 +268,7 @@ pub(super) async fn insight_runs_of(
     store: &Store,
     days: u32,
     now: u64,
-) -> Result<Vec<Run>, StoreError> {
+) -> Result<History, StoreError> {
     const DAY: u64 = 24 * 3600 * 1000;
     let back = u64::from(days.max(14)) + 1;
     store.insights(now.saturating_sub(back * DAY)).await

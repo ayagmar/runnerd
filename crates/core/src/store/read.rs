@@ -811,9 +811,10 @@ pub(super) fn pricing(db: &Connection, since: u64) -> rusqlite::Result<api::Pric
     })
 }
 
-/// The jobs completed or lost that were queued at or after `since` (ms), with their runners, as insights read them.
-pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<Vec<crate::insights::Run>> {
-    db.prepare_cached(
+/// The jobs completed or lost that were queued at or after `since` (ms), with their runners, as insights read them,
+/// and from when the history holds every job.
+pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::insights::History> {
+    let runs = db.prepare_cached(
         "SELECT j.id, j.repository, j.workflow, j.name, j.branch, j.url, j.run_id, j.run_attempt, j.state, \
          j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak, \
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
@@ -853,7 +854,9 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<Vec<crat
             sock_throttled: row.get(22)?,
         })
     })?
-    .collect()
+    .collect::<rusqlite::Result<_>>()?;
+    let kept_since = db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))?;
+    Ok(crate::insights::History { runs, kept_since })
 }
 
 pub(super) fn warm(

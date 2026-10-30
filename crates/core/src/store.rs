@@ -838,8 +838,9 @@ impl Store {
         self.read(move |db| read::pricing(db, since)).await
     }
 
-    /// The jobs completed or lost that were queued at or after `since` (ms), as insights read them.
-    pub async fn insights(&self, since: u64) -> Result<Vec<crate::insights::Run>, StoreError> {
+    /// The jobs completed or lost that were queued at or after `since` (ms), as insights read them, and from when the
+    /// history holds every job.
+    pub async fn insights(&self, since: u64) -> Result<crate::insights::History, StoreError> {
         self.read(move |db| read::insights(db, since)).await
     }
 

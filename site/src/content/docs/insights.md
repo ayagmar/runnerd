@@ -14,7 +14,7 @@ runnerd reads its [job history](../running/#job-history) for what changed in you
 | Near its cap | the 95th percentile of a job's memory peaks over its last 10 runs in the profile it last ran in is 85% or more of that profile's `memory`. It says whether [auto sizing](../admission/#auto-sizing) raises the profile, cannot, or is off. A notice when auto sizing raises it or only one run came that close; a warning otherwise. |
 | Cold cache | a job's last 5 runs that could write to the [build cache](../running/#build-cache) and looked up 10 entries or more, at least 3 such runs, found 10% or less of what they looked up: the runs before them stored what they built, so their cache keys differ from run to run, such as from a timestamp or an absolute path among a task's inputs. A notice. |
 | Memory pressure | the kernel throttled the downloads of 2 or more of a repository's jobs in the window because their memory was under pressure (`sock_throttled`): the host was short of memory, or a job sat at its cap. A warning. runnerd already [holds starts back](../admission/#the-hosts-memory) while the host is short; this says it still happened. |
-| Waits | a repository's 95th-percentile wait this week is half again and a minute more than the week before. A notice, not a warning. |
+| Waits | a repository's 95th-percentile wait this week is half again and a minute more than the week before. A notice, not a warning. A week before the history starts, or before what pruning kept, is left empty and compared with nothing. |
 
 A job is its repository, workflow and job name. Warnings are what notifications send; notices only show. A slower job stops being reported once its slower runs are most of the runs before the last five, which with a few runs a day is about a week.
 
