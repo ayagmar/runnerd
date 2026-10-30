@@ -1,5 +1,5 @@
 //! Insights as clients read them: what got slower, what is flaky, what nears its memory cap, what memory pressure
-//! throttled and how long jobs wait, computed from the job history (ADR 0051); the daily digest; and what the
+//! throttled, what its CPU cap held back and how long jobs wait, computed from the job history (ADR 0051); the daily digest; and what the
 //! daemon's notifications carry. Times are seconds since the Unix epoch, durations seconds, sizes bytes.
 
 use serde::{Deserialize, Serialize};
@@ -125,6 +125,25 @@ pub enum InsightKind {
         /// The 95th percentile of waits this week, in seconds.
         now: u64,
     },
+    /// A job's CPU cap held back its runs: their quota throttled them in 15% of their run or more (ADR 0079).
+    CpuHeld {
+        /// The profile its runs ran in.
+        profile: String,
+        /// The profile's `cpus`, the cap those runs had.
+        cpus: u32,
+        /// Runs the cap held back.
+        held: u32,
+        /// The job's last runs at that cap that measured their throttling.
+        total: u32,
+        /// The `cpus` auto sizing raised the profile from, when that raise did not make the job faster or less
+        /// throttled, so it raises them no further for it.
+        raised_from: Option<u32>,
+        /// The `cpus` to set by hand; `None` while auto sizing raises them, or after a raise that did not help.
+        set: Option<u32>,
+    },
+    /// A kind from a later release, which this one reads only by its sentence. The daemon never sends it.
+    #[serde(other)]
+    Unknown,
 }
 
 /// What auto sizing does about a job near its cap.

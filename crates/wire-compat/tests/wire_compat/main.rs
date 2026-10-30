@@ -49,7 +49,25 @@ struct Accepted {
     adr: &'static str,
 }
 
-const ACCEPTED: &[Accepted] = &[];
+// v0.0.23's `InsightKind` has no fallback, so it reads no list that holds the new `cpu-held` kind; kinds after it
+// read as `Unknown`.
+const ACCEPTED: &[Accepted] = &[
+    Accepted {
+        reader: Reader::Previous,
+        item: "digest/full",
+        adr: "0087",
+    },
+    Accepted {
+        reader: Reader::Previous,
+        item: "insights/full",
+        adr: "0087",
+    },
+    Accepted {
+        reader: Reader::Previous,
+        item: "notification/full",
+        adr: "0087",
+    },
+];
 
 /// A document's items as JSON, by label.
 type Items = BTreeMap<String, Value>;

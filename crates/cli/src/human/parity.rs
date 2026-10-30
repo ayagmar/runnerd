@@ -12,7 +12,8 @@ use runnerd_core::api::{self, JobPage};
 use runnerd_fixtures::{Facts, NOW, TIMED_OUT, daemon, facts};
 
 use super::{
-    Paint, Tone, caches, job, jobs, outcome_tone, plan_line, records, savings, sizing, status,
+    Paint, Tone, caches, insights, job, jobs, outcome_tone, plan_line, records, savings, sizing,
+    status,
 };
 
 const PLAIN: Paint = Paint { colour: false };
@@ -158,6 +159,24 @@ fn insights_open_with_what_the_job_minutes_would_have_cost_as_core_words_it() {
     let lines: Vec<&str> = text.lines().collect();
     assert_eq!(lines[0], facts.savings);
     assert!(lines.contains(&facts.savings_30_days.as_str()), "{text}");
+}
+
+#[test]
+fn insights_state_each_insight_s_severity_kind_and_sentence_as_core_does() {
+    let shown = runnerd_fixtures::insights(NOW);
+    let text = insights(&shown, PLAIN);
+    for insight in &shown.insights {
+        let line = text
+            .lines()
+            .find(|line| line.ends_with(&insight.sentence))
+            .unwrap_or_else(|| panic!("no line says {:?}:\n{text}", insight.sentence));
+        let words: Vec<&str> = line.split_whitespace().take(2).collect();
+        assert_eq!(
+            words,
+            [insight.severity.label(), insight.kind.word()],
+            "{line}"
+        );
+    }
 }
 
 #[test]

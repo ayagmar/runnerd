@@ -928,6 +928,14 @@ fn insight_kind() -> Vec<InsightKind> {
             before: 30,
             now: 300,
         },
+        InsightKind::CpuHeld {
+            profile: "halyard".to_owned(),
+            cpus: 9,
+            held: 3,
+            total: 10,
+            raised_from: Some(6),
+            set: Some(14),
+        },
     ];
     for kind in &every {
         match kind {
@@ -936,7 +944,10 @@ fn insight_kind() -> Vec<InsightKind> {
             | InsightKind::NearCap { .. }
             | InsightKind::ColdCache { .. }
             | InsightKind::Throttled { .. }
-            | InsightKind::Waits { .. } => {}
+            | InsightKind::Waits { .. }
+            | InsightKind::CpuHeld { .. }
+            // A reader's fallback for a kind from a later release: the daemon never writes it, so no sample.
+            | InsightKind::Unknown => {}
         }
     }
     every

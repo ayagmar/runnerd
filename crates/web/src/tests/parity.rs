@@ -211,3 +211,26 @@ async fn sizing_states_what_blocks_auto_sizing_as_core_does() {
     let shown = text(&dashboard.page(&cookie, "/sizing").await.body);
     assert!(shown.contains(&plan.blocked_line().unwrap()), "{shown}");
 }
+
+#[tokio::test]
+async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
+    let (dashboard, cookie, _, _) = dashboard().await;
+    let insights = runnerd_fixtures::insights(runnerd_fixtures::NOW);
+    dashboard.fake.fixtures.lock().unwrap().insights = Some(insights.clone());
+    let page = dashboard.page(&cookie, "/insights").await.body;
+    for insight in &insights.insights {
+        let at = page
+            .find(&insight.sentence)
+            .unwrap_or_else(|| panic!("no card says {:?}: {page}", insight.sentence));
+        let card = &page[page[..at].rfind("<li").unwrap()..at];
+        assert!(card.contains(insight.kind.label()), "{card}");
+        assert!(
+            card.contains(&format!(
+                "{} {}",
+                insight.severity.label(),
+                insight.kind.word()
+            )),
+            "classed by its severity and kind: {card}"
+        );
+    }
+}

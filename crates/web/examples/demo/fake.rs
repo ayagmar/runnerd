@@ -71,6 +71,8 @@ pub struct Fixtures {
     pub auto_plan: Option<runnerd_core::api::AutoPlan>,
     /// What `GET /v1/savings` answers; `None` prices the jobs at GitHub's 2-core rate, every repository private.
     pub savings: Option<runnerd_core::api::Savings>,
+    /// What `GET /v1/insights` answers; `None`, the demo's own.
+    pub insights: Option<Insights>,
 }
 
 /// A small deterministic noise source, so fixtures look measured and stay the same.
@@ -706,6 +708,7 @@ impl Fixtures {
             unrecorded: false,
             auto_plan: None,
             savings: None,
+            insights: None,
         }
     }
 
@@ -835,6 +838,9 @@ fn find_job(fake: &Fake, id: u64) -> Option<Job> {
 /// What the history says: ledger's tests got slower on main, storefront's end-to-end job is flaky, ledger's
 /// integration tests near jvm's 9G, and storefront's jobs wait longer than the week before.
 fn insights(fixtures: &Fixtures) -> Insights {
+    if let Some(insights) = &fixtures.insights {
+        return insights.clone();
+    }
     let now = fixtures.now;
     let link = |repository: &str, back: u64, attempt| {
         let job = fixtures

@@ -272,3 +272,17 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
         rows.join("\n")
     );
 }
+
+#[test]
+fn the_health_line_counts_the_warning_insights_as_core_does() {
+    let mut app = app(&daemon());
+    let insights = runnerd_fixtures::insights(NOW);
+    let warnings = insights.warning_count();
+    app.update(Msg::Insights(Box::new(insights)));
+    let (rows, _) = frame(&app);
+    assert!(
+        shows(&rows, &format!("{warnings} insights: runnerctl insights")),
+        "{}",
+        rows.join("\n")
+    );
+}
