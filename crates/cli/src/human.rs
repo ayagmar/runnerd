@@ -578,7 +578,7 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             bytes(profile.memory),
             profile.slots,
             profile.cpus,
-            peaks.jobs,
+            profile.starts.total(),
             profile.busy,
             duration(profile.wait.p50),
             duration(profile.wait.p95),
@@ -595,27 +595,7 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             );
         }
         if peaks.jobs > 0 {
-            let at_cap = if peaks.at_cap > 0 {
-                paint.paint(Tone::Bad, &format!(", {} at the cap", peaks.at_cap))
-            } else {
-                String::new()
-            };
-            let _ = writeln!(
-                out,
-                "  memory p50 {} p95 {} p99 {} max {}{at_cap}",
-                bytes(peaks.memory.p50),
-                bytes(peaks.memory.p95),
-                bytes(peaks.memory.p99),
-                bytes(peaks.memory.max),
-            );
-            let _ = writeln!(
-                out,
-                "  cpu    p50 {} p95 {} p99 {} max {}",
-                cores_used(peaks.cpu.p50),
-                cores_used(peaks.cpu.p95),
-                cores_used(peaks.cpu.p99),
-                cores_used(peaks.cpu.max),
-            );
+            out.push_str(&sizing_peaks(profile, paint));
         }
         let _ = writeln!(
             out,
@@ -648,6 +628,40 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
             out.push_str(&sizing_jobs(&profile.jobs, paint));
         }
     }
+    out
+}
+
+/// A profile's memory and CPU peaks, a line each.
+fn sizing_peaks(profile: &api::ProfileSizing, paint: Paint) -> String {
+    let peaks = &profile.peaks;
+    let mut out = String::new();
+    let at_cap = if peaks.at_cap > 0 {
+        paint.paint(Tone::Bad, &format!(", {} at the cap", peaks.at_cap))
+    } else {
+        String::new()
+    };
+    let _ = writeln!(
+        out,
+        "  memory p50 {} p95 {} p99 {} max {} of {} recent runs{at_cap}",
+        bytes(peaks.memory.p50),
+        bytes(peaks.memory.p95),
+        bytes(peaks.memory.p99),
+        bytes(peaks.memory.max),
+        peaks.jobs,
+    );
+    let runs = peaks.cpu_runs_line(profile.cpus);
+    let _ = if peaks.cpu_p99().is_some() {
+        writeln!(
+            out,
+            "  cpu    p50 {} p95 {} p99 {} max {} {runs}",
+            cores_used(peaks.cpu.p50),
+            cores_used(peaks.cpu.p95),
+            cores_used(peaks.cpu.p99),
+            cores_used(peaks.cpu.max),
+        )
+    } else {
+        writeln!(out, "  cpu    {runs}")
+    };
     out
 }
 

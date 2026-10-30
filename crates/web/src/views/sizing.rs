@@ -33,7 +33,11 @@ impl SizingView {
 /// The whole page.
 pub(crate) fn render(view: &SizingView) -> Markup {
     let sizing = &view.sizing;
-    let jobs: u64 = sizing.profiles.iter().map(|p| p.peaks.jobs).sum();
+    let jobs: u64 = sizing
+        .profiles
+        .iter()
+        .map(|p| u64::from(p.starts.total()))
+        .sum();
     let main = html! {
         div.page-head {
             h1.visually-hidden { "Sizing" }
@@ -158,7 +162,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                 h2 #(id) { span.swatch aria-hidden="true" {} (profile.name) }
                 dl.facts {
                     div { dt { "Memory" } dd { (format::bytes(profile.memory)) " × " (profile.slots) } }
-                    div { dt { "Jobs" } dd { (peaks.jobs) } }
+                    div { dt { "Jobs" } dd { (profile.starts.total()) } }
                     div { dt { "Slots busy" } dd { (profile.busy) "%" } }
                     div { dt { "Waited p50 / p95" } dd { (format::duration(profile.wait.p50)) " / " (format::duration(profile.wait.p95)) } }
                     @if profile.starts.warm > 0 {
@@ -171,7 +175,15 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                             }
                         }
                     }
-                    div { dt { "CPU p99" } dd { (format::cores_used(peaks.cpu.p99)) " of " (profile.cpus) } }
+                    div {
+                        dt { "CPU p99" }
+                        dd {
+                            @match peaks.cpu_p99() {
+                                Some(p99) => { (format::cores_used(p99)) " of " (profile.cpus) }
+                                None => { (peaks.cpu_runs_line(profile.cpus)) }
+                            }
+                        }
+                    }
                 }
             }
             @if peaks.jobs > 0 { (scale(sizing, profile)) }
@@ -213,7 +225,7 @@ fn profile_section(sizing: &Sizing, profile: &ProfileSizing, index: usize) -> Ma
                                     td.number { (format::bytes(job.peaks.memory.p95)) }
                                     td.number { (format::bytes(job.peaks.memory.p99)) }
                                     td.number { (format::bytes(job.peaks.memory.max)) }
-                                    td.number { (format::cores_used(job.peaks.cpu.p99)) }
+                                    td.number { (job.peaks.cpu_p99().map_or_else(|| "–".to_owned(), format::cores_used)) }
                                     td.number { (format::duration(job.wait.p95)) }
                                     td.number { (needs(job)) }
                                 }

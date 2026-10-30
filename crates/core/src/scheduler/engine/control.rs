@@ -21,8 +21,10 @@ use crate::docker::{DockerApi, Tty, TtySize};
 use crate::github::GithubApi;
 use crate::isolation;
 use crate::scheduler::SlotRef;
+use crate::sizing::auto;
 use crate::store::Store;
 use crate::sync::lock;
+use crate::time;
 
 /// How long the runner of a run a forced pause cancelled gets to report its job cancelled and exit, before it is
 /// removed: GitHub completes a cancelled run only once its runner reports it, which took 40s in a test.
@@ -55,6 +57,28 @@ pub enum RunningSlots {
     Drain,
     /// The config is refused while a runner is in a slot it does not have: what auto sizing asks for.
     Keep,
+}
+
+/// Who writes a new config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Author {
+    /// The owner, through `PUT /v1/config`: a save that lowers `memory` under a raise of auto sizing's in the last
+    /// day is answered with a warning (`auto::undone_raises`).
+    Owner,
+    /// Auto sizing, whose own lowering is never a warning about its raise.
+    AutoSizing,
+}
+
+/// `Err` when `new` moves runnerd to another slice than `running` names: the sampler and the running containers stay
+/// in the slice runnerd started in, so the slice changes only at a restart.
+pub fn same_slice(running: &Config, new: &Config) -> Result<(), ControlError> {
+    if new.host.slice == running.host.slice {
+        return Ok(());
+    }
+    Err(ControlError::Invalid(format!(
+        "restart runnerd to change the slice: it runs in {}, and host.slice is {} in the new config",
+        running.host.slice, new.host.slice
+    )))
 }
 
 /// The repositories a pause or a resume applies to.
@@ -142,8 +166,11 @@ pub enum Command {
         commit: Commit,
         /// Whether it may leave runners in slots it does not have.
         running: RunningSlots,
-        /// Answered once the engine runs with it: with a warning from the commit, or why it did not commit.
-        reply: oneshot::Sender<Result<Option<String>, ControlError>>,
+        /// Who writes it.
+        author: Author,
+        /// Answered once the engine runs with it: with the commit's warning and what it undoes of auto sizing's
+        /// raises, or why it did not commit.
+        reply: oneshot::Sender<Result<Vec<String>, ControlError>>,
     },
     /// Remove records of failed jobs.
     RemoveRecords {
@@ -403,7 +430,10 @@ impl Control {
     /// Runs `commit` to write a validated config, and if it commits, runs with the config from then on, before the
     /// next tick. If it does not, nothing changes and the answer is `Failed`. Running jobs keep running: under
     /// `RunningSlots::Drain` removed profiles and slots go as their runners finish; under `Keep` a config without a
-    /// slot a runner is in is refused (`Conflict`) before `commit` runs.
+    /// slot a runner is in is refused (`Conflict`) before `commit` runs. A config with another `host.slice` is refused
+    /// (`Invalid`) before `commit` runs: the slice takes effect when runnerd starts. The answer warns of what may not
+    /// survive a crash and, for `Author::Owner`, of each profile whose `memory` it lowers under a raise of auto
+    /// sizing's in the last day (`auto::undone_raises`), which are logged too.
     pub async fn replace_config(
         &self,
         config: Config,
@@ -411,13 +441,15 @@ impl Control {
         cpus: Option<u64>,
         commit: Commit,
         running: RunningSlots,
-    ) -> Result<Option<String>, ControlError> {
+        author: Author,
+    ) -> Result<Vec<String>, ControlError> {
         self.send(|reply| Command::ReplaceConfig {
             config: Box::new(config),
             memory_max,
             cpus,
             commit,
             running,
+            author,
             reply,
         })
         .await?
@@ -474,18 +506,30 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 cpus,
                 commit,
                 running,
+                author,
                 reply,
             } => {
+                if let Err(refused) = same_slice(&self.config, &config) {
+                    let _ = reply.send(Err(refused));
+                    return;
+                }
                 if running == RunningSlots::Keep
                     && let Some(occupied) = self.occupied_past(&config)
                 {
                     let _ = reply.send(Err(ControlError::Conflict(occupied)));
                     return;
                 }
+                let undone = match author {
+                    Author::Owner => self.undone_raises(&config).await,
+                    Author::AutoSizing => Vec::new(),
+                };
                 let answer = match commit.run().await {
                     Ok(warning) => {
+                        for line in &undone {
+                            warn!("config replaced: {line}");
+                        }
                         self.reload(*config, memory_max, cpus);
-                        Ok(warning)
+                        Ok(warning.into_iter().chain(undone).collect())
                     }
                     Err(message) => Err(ControlError::Failed(message)),
                 };
@@ -766,6 +810,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // Measured again once idle.
         self.trim_due = true;
         Ok(())
+    }
+
+    /// What `config` undoes of auto sizing's `memory` raises in the last day; none when they cannot be read, which is
+    /// logged: the config runs either way.
+    async fn undone_raises(&self, config: &Config) -> Vec<String> {
+        let now = time::now_ms() / 1000;
+        let since = now.saturating_sub(auto::UNDONE_RAISES).saturating_mul(1000);
+        match self.store.sizing_changes(since).await {
+            Ok(changes) => auto::undone_raises(&self.config, config, &changes, now),
+            Err(store_error) => {
+                warn!(
+                    "cannot read auto sizing's changes to compare a new config with: {store_error}"
+                );
+                Vec::new()
+            }
+        }
     }
 
     /// The first slot with a runner in it that `config` does not have, for people to read.

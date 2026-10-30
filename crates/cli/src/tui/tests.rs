@@ -569,6 +569,7 @@ fn sizing() -> Sizing {
             at_cap: 0,
             memory: spread(peak / 2, peak, peak, peak),
             cpu: spread(2000, 6000, 7000, 7000),
+            cpu_runs: 40,
             on_cap: 0,
         };
         ProfileSizing {

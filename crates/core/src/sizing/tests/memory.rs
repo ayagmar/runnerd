@@ -649,3 +649,89 @@ fn a_kill_in_the_last_sample_interval_near_the_cap_met_it_and_one_far_under_it_d
 }
 
 mod looks;
+
+#[test]
+fn a_config_that_lowers_memory_under_a_raise_of_the_last_day_says_so() {
+    // Auto sizing raised jvm 8G → 10G after its jobs met the 8G cap; an hour later a config saved from a text read
+    // before the raise puts it back at 8G.
+    let raised = SizingChange {
+        at: NOW / 1000 - 3600,
+        profile: "jvm".to_owned(),
+        from: Resize {
+            memory: 8 * G,
+            slots: 2,
+            cpus: None,
+        },
+        to: Resize {
+            memory: 10 * G,
+            slots: 2,
+            cpus: None,
+        },
+        reason: String::new(),
+        uncertain: false,
+    };
+    let running = Config::parse(&jvm_at("10G", 2)).unwrap();
+    let undone = |memory: &str, changes: &[SizingChange], now: u64| {
+        crate::sizing::auto::undone_raises(
+            &running,
+            &Config::parse(&jvm_at(memory, 2)).unwrap(),
+            changes,
+            now / 1000,
+        )
+    };
+    assert_eq!(
+        undone("8G", std::slice::from_ref(&raised), NOW),
+        [
+            "jvm's memory goes to 8G, under the 10G auto sizing raised it to 1h 00m ago because its jobs needed more \
+          than 8G: they may run out of memory again"
+        ]
+    );
+    assert_eq!(
+        undone("9G", std::slice::from_ref(&raised), NOW).len(),
+        1,
+        "under the raise, even above where it came from"
+    );
+    for (memory, changes, now, why) in [
+        ("10G", vec![raised.clone()], NOW, "the raise kept"),
+        ("12G", vec![raised.clone()], NOW, "raised further"),
+        (
+            "8G",
+            vec![raised.clone()],
+            NOW + DAY,
+            "a raise over a day old",
+        ),
+        ("8G", Vec::new(), NOW, "no raise"),
+        (
+            "8G",
+            vec![SizingChange {
+                from: raised.to,
+                to: raised.from,
+                ..raised.clone()
+            }],
+            NOW,
+            "a lowering of auto sizing's",
+        ),
+        (
+            "8G",
+            vec![SizingChange {
+                profile: "node".to_owned(),
+                ..raised.clone()
+            }],
+            NOW,
+            "another profile's raise",
+        ),
+    ] {
+        assert_eq!(undone(memory, &changes, now), Vec::<String>::new(), "{why}");
+    }
+    // Already lowered by an earlier save: this one, keeping it, undoes nothing more.
+    let lowered = Config::parse(&jvm_at("8G", 2)).unwrap();
+    assert_eq!(
+        crate::sizing::auto::undone_raises(
+            &lowered,
+            &lowered,
+            std::slice::from_ref(&raised),
+            NOW / 1000
+        ),
+        Vec::<String>::new()
+    );
+}

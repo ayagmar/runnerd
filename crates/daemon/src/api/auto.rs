@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
 use runnerd_core::config::{Config, resize_profile};
-use runnerd_core::scheduler::engine::RunningSlots;
+use runnerd_core::scheduler::engine::{Author, RunningSlots};
 use runnerd_core::sizing::auto::{Context, changes, next_look};
 use runnerd_core::sizing::memory::CHANGES_READ;
 use runnerd_core::sizing::{CpusSet, History, Window};
@@ -315,7 +315,15 @@ async fn write(
         return false;
     };
     let on_disk = Some(file.text.clone());
-    let written = replace(state, file, text, RunningSlots::Keep, on_disk).await;
+    let written = replace(
+        state,
+        file,
+        text,
+        RunningSlots::Keep,
+        Author::AutoSizing,
+        on_disk,
+    )
+    .await;
     let resolution = match &written {
         Ok(_) => Resolution::Done,
         Err(_) => Resolution::Failed,

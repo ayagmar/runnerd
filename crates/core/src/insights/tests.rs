@@ -1,6 +1,6 @@
 //! Insights from synthetic histories of fictional repositories: one `halyard/api` job run a few times a day.
 
-use super::{Run, digest, insights};
+use super::{History, Run, digest, insights};
 use crate::api::{self, AutoNote, InsightKind, JobState, Severity};
 use crate::config::Config;
 
@@ -64,6 +64,14 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
     }
 }
 
+/// `runs` in a history that holds every job however old.
+fn whole(runs: &[Run]) -> History {
+    History {
+        runs: runs.to_vec(),
+        kept_since: 0,
+    }
+}
+
 /// Runs oldest first, one every 6 hours, ending an hour ago, taking the given seconds.
 fn history(durations: &[u64]) -> Vec<Run> {
     let count = durations.len() as u64;
@@ -81,7 +89,7 @@ fn a_job_that_got_slower_and_stayed_slower_is_slower_since_its_first_slow_run() 
     durations.extend([360; 6]);
     let runs = history(&durations);
 
-    let found = insights(&runs, &config(), 14, NOW).insights;
+    let found = insights(&whole(&runs), &config(), 14, NOW).insights;
 
     assert_eq!(found.len(), 1, "{found:#?}");
     let slower = &found[0];
@@ -110,7 +118,7 @@ fn a_one_off_slow_run_is_not_a_regression() {
     durations[10] = 900;
 
     assert!(
-        insights(&history(&durations), &config(), 14, NOW)
+        insights(&whole(&history(&durations)), &config(), 14, NOW)
             .insights
             .is_empty(),
         "one slow run among fast ones says nothing"
@@ -123,7 +131,7 @@ fn a_job_fast_again_in_its_last_two_runs_is_not_slower() {
     durations.extend([360, 360, 360, 240, 240]);
 
     assert!(
-        insights(&history(&durations), &config(), 14, NOW)
+        insights(&whole(&history(&durations)), &config(), 14, NOW)
             .insights
             .is_empty(),
         "the slow stretch ended"
@@ -138,7 +146,7 @@ fn a_job_that_flips_between_cache_hits_and_misses_is_not_slower() {
     ];
 
     assert!(
-        insights(&history(&durations), &config(), 14, NOW)
+        insights(&whole(&history(&durations)), &config(), 14, NOW)
             .insights
             .is_empty(),
         "a recent run as fast as before says the job did not get slower"
@@ -152,7 +160,7 @@ fn a_small_slowdown_is_not_a_regression() {
     durations.extend([144; 6]);
 
     assert!(
-        insights(&history(&durations), &config(), 14, NOW)
+        insights(&whole(&history(&durations)), &config(), 14, NOW)
             .insights
             .is_empty(),
         "under 30 seconds is noise"
@@ -169,7 +177,9 @@ fn slower_runs_on_a_branch_with_few_runs_do_not_count() {
     }
 
     assert!(
-        insights(&runs, &config(), 14, NOW).insights.is_empty(),
+        insights(&whole(&runs), &config(), 14, NOW)
+            .insights
+            .is_empty(),
         "only the busiest branch is compared"
     );
 }
@@ -185,7 +195,9 @@ fn main_is_compared_even_when_pull_requests_run_more() {
     }
 
     assert!(
-        insights(&runs, &config(), 14, NOW).insights.is_empty(),
+        insights(&whole(&runs), &config(), 14, NOW)
+            .insights
+            .is_empty(),
         "main runs as fast as it did"
     );
 }
@@ -208,7 +220,7 @@ fn a_job_that_failed_and_passed_on_a_re_run_is_flaky() {
         attempt(3, 1, "success"),
     ];
 
-    let found = insights(&runs, &config(), 14, NOW).insights;
+    let found = insights(&whole(&runs), &config(), 14, NOW).insights;
 
     assert_eq!(found.len(), 1, "{found:#?}");
     assert_eq!(found[0].key, "flaky:halyard/api/CI/test");
@@ -234,7 +246,7 @@ fn a_job_flaky_twice_is_a_warning() {
         attempt(2, 2, "success"),
     ];
 
-    let found = insights(&runs, &config(), 14, NOW).insights;
+    let found = insights(&whole(&runs), &config(), 14, NOW).insights;
 
     assert_eq!(found[0].kind, InsightKind::Flaky { flaky: 2, total: 2 });
     assert_eq!(found[0].severity, Severity::Warning);
@@ -245,7 +257,9 @@ fn a_job_that_failed_again_on_a_re_run_is_not_flaky() {
     let runs = vec![attempt(2, 1, "failure"), attempt(2, 2, "failure")];
 
     assert!(
-        insights(&runs, &config(), 14, NOW).insights.is_empty(),
+        insights(&whole(&runs), &config(), 14, NOW)
+            .insights
+            .is_empty(),
         "failing twice is broken, not flaky"
     );
 }
@@ -258,7 +272,9 @@ fn a_lost_job_that_passed_on_a_re_run_is_not_flaky() {
     let runs = vec![lost, attempt(2, 2, "success")];
 
     assert!(
-        insights(&runs, &config(), 14, NOW).insights.is_empty(),
+        insights(&whole(&runs), &config(), 14, NOW)
+            .insights
+            .is_empty(),
         "a vanished runner is the host's fault"
     );
 }
@@ -283,7 +299,7 @@ fn cached(branch: &str, hits: u64, writer: bool) -> Vec<Run> {
 
 #[test]
 fn main_runs_that_find_nothing_their_predecessors_stored_have_a_cold_cache() {
-    let found = insights(&cached("main", 1, true), &config(), 14, NOW).insights;
+    let found = insights(&whole(&cached("main", 1, true)), &config(), 14, NOW).insights;
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(
         found[0].kind,
@@ -303,7 +319,7 @@ fn main_runs_that_find_nothing_their_predecessors_stored_have_a_cold_cache() {
 #[test]
 fn a_warm_cache_or_runs_that_only_read_are_no_insight() {
     for runs in [cached("main", 30, true), cached("feature", 0, false)] {
-        let found = insights(&runs, &config(), 14, NOW).insights;
+        let found = insights(&whole(&runs), &config(), 14, NOW).insights;
         assert!(found.is_empty(), "{found:?}");
     }
 }
@@ -319,7 +335,7 @@ fn throttled_at(throttled: &[usize]) -> Vec<Run> {
 
 #[test]
 fn downloads_memory_pressure_throttled_in_several_runs_are_a_warning() {
-    let found = insights(&throttled_at(&[3, 8]), &config(), 14, NOW).insights;
+    let found = insights(&whole(&throttled_at(&[3, 8])), &config(), 14, NOW).insights;
     assert_eq!(found.len(), 1, "{found:?}");
     assert_eq!(found[0].severity, Severity::Warning);
     assert_eq!(
@@ -335,7 +351,7 @@ fn downloads_memory_pressure_throttled_in_several_runs_are_a_warning() {
 
 #[test]
 fn one_throttled_run_is_no_insight() {
-    let found = insights(&throttled_at(&[5]), &config(), 14, NOW).insights;
+    let found = insights(&whole(&throttled_at(&[5])), &config(), 14, NOW).insights;
     assert!(found.is_empty(), "{found:?}");
 }
 
@@ -352,7 +368,7 @@ fn memory_near_the_cap_is_flagged_with_what_auto_sizing_does() {
     // 3.6G of a 4G cap: 90%.
     let runs = peaking(&[30, 31, 33, 35, 36, 36]);
 
-    let found = insights(&runs, &config(), 14, NOW).insights;
+    let found = insights(&whole(&runs), &config(), 14, NOW).insights;
 
     assert_eq!(found.len(), 1, "{found:#?}");
     let InsightKind::NearCap {
@@ -379,7 +395,7 @@ fn memory_near_the_cap_is_flagged_with_what_auto_sizing_does() {
     );
 
     let auto = Config::parse(&format!("{CONFIG}\n[sizing]\nauto = true\n")).unwrap();
-    let found = insights(&runs, &auto, 14, NOW).insights;
+    let found = insights(&whole(&runs), &auto, 14, NOW).insights;
     assert!(
         matches!(
             found[0].kind,
@@ -400,7 +416,13 @@ fn memory_near_the_cap_is_flagged_with_what_auto_sizing_does() {
 #[test]
 fn one_spike_near_the_cap_is_a_notice() {
     // With six runs the 95th percentile is the highest: 3.6G of 4G once.
-    let found = insights(&peaking(&[30, 30, 31, 30, 30, 36]), &config(), 14, NOW).insights;
+    let found = insights(
+        &whole(&peaking(&[30, 30, 31, 30, 30, 36])),
+        &config(),
+        14,
+        NOW,
+    )
+    .insights;
 
     assert!(
         matches!(found[0].kind, InsightKind::NearCap { .. }),
@@ -412,9 +434,14 @@ fn one_spike_near_the_cap_is_a_notice() {
 #[test]
 fn memory_well_under_the_cap_says_nothing() {
     assert!(
-        insights(&peaking(&[20, 21, 22, 20, 24, 25]), &config(), 14, NOW)
-            .insights
-            .is_empty(),
+        insights(
+            &whole(&peaking(&[20, 21, 22, 20, 24, 25])),
+            &config(),
+            14,
+            NOW
+        )
+        .insights
+        .is_empty(),
         "62% of the cap is fine"
     );
 }
@@ -430,7 +457,9 @@ fn a_job_served_in_two_profiles_is_near_the_cap_by_its_last_profiles_runs_alone(
     runs.last_mut().unwrap().profile = Some("light".to_owned());
 
     assert!(
-        insights(&runs, &config, 14, NOW).insights.is_empty(),
+        insights(&whole(&runs), &config, 14, NOW)
+            .insights
+            .is_empty(),
         "nothing is near a cap"
     );
 }
@@ -455,7 +484,7 @@ fn waits_are_split_warm_and_cold_and_longer_ones_are_a_notice() {
     runs.extend((10..16).map(|n| waited(n, 10, 300, false)));
     runs.extend((20..24).map(|n| waited(n, 10, 2, true)));
 
-    let found = insights(&runs, &config(), 14, NOW);
+    let found = insights(&whole(&runs), &config(), 14, NOW);
 
     let api = &found.waits[0];
     assert_eq!(api.repository, "halyard/api");
@@ -482,7 +511,7 @@ fn a_week_of_fewer_than_20_jobs_tells_its_longest_wait_and_one_of_more_its_1_in_
     let sentence = |now: u64| {
         let mut runs: Vec<Run> = (0..6).map(|n| waited(n, 200, 20, false)).collect();
         runs.extend((10..10 + now).map(|n| waited(n, 10, 300, false)));
-        insights(&runs, &config(), 14, NOW)
+        insights(&whole(&runs), &config(), 14, NOW)
             .insights
             .into_iter()
             .find(|insight| insight.key == "waits:halyard/api")
@@ -497,6 +526,76 @@ fn a_week_of_fewer_than_20_jobs_tells_its_longest_wait_and_one_of_more_its_1_in_
         sentence(20),
         "halyard/api: 1 job in 20 waits 5m or more for a runner this week, up from 20s the week before."
     );
+}
+
+#[test]
+fn a_week_before_the_history_holds_every_job_is_not_compared() {
+    // The history starts 8 days ago: the week before holds only the daemon's first hour, six jobs that waited 20
+    // seconds. Against that sliver, this week's 5-minute waits would read "up from 20s the week before".
+    let mut runs: Vec<Run> = (0..6).map(|n| waited(n, 8 * 24 - 1, 20, false)).collect();
+    runs.extend((10..16).map(|n| waited(n, 10, 300, false)));
+    let young = History {
+        runs,
+        kept_since: NOW - 8 * 24 * HOUR,
+    };
+    let found = insights(&young, &config(), 14, NOW);
+    let api = &found.waits[0];
+    assert_eq!((api.before.all.jobs, api.before.all.p95), (0, None));
+    assert_eq!(
+        api.now.all.p95,
+        Some(300),
+        "this week is what the history has"
+    );
+    assert!(
+        found
+            .insights
+            .iter()
+            .all(|insight| !insight.key.starts_with("waits:")),
+        "no waits insight: {:?}",
+        found.insights
+    );
+    assert!(
+        digest(&young, &config(), NOW)
+            .new
+            .iter()
+            .all(|insight| !insight.key.starts_with("waits:")),
+        "nor in the digest"
+    );
+    let kept = History {
+        kept_since: NOW - 14 * 24 * HOUR,
+        ..young
+    };
+    assert!(
+        insights(&kept, &config(), 14, NOW)
+            .insights
+            .iter()
+            .any(|insight| insight.key == "waits:halyard/api"),
+        "a history that holds the whole week before compares it"
+    );
+}
+
+#[test]
+fn a_job_queued_before_runnerd_first_ran_waits_from_when_it_did() {
+    // runnerd first ran 10 hours ago; six jobs had queued three hours before, and its first runners took them a
+    // minute after it started. They waited a minute for runnerd, not four hours.
+    let first = NOW - 10 * HOUR;
+    let runs: Vec<Run> = (0..6)
+        .map(|n| {
+            let mut run = waited(n, 9, 60, false);
+            run.started_at = Some(first + 60_000);
+            run.finished_at = Some(first + 120_000);
+            run.queued_at = first - 3 * HOUR;
+            run
+        })
+        .collect();
+    let history = History {
+        runs,
+        kept_since: first,
+    };
+    let found = insights(&history, &config(), 14, NOW);
+    assert_eq!(found.waits[0].now.all.p95, Some(60));
+    let day = digest(&history, &config(), NOW);
+    assert_eq!(day.waits[0].waited, 60, "the digest's longest wait too");
 }
 
 #[test]
@@ -520,7 +619,7 @@ fn the_digest_counts_the_day_and_lists_only_new_insights() {
     slow.push(failed);
     runs.extend(slow);
 
-    let day = digest(&runs, &config(), NOW);
+    let day = digest(&whole(&runs), &config(), NOW);
 
     assert_eq!((day.finished, day.failed), (6, 1));
     let new: Vec<&str> = day.new.iter().map(|insight| insight.key.as_str()).collect();
@@ -548,7 +647,7 @@ fn every_kind_of_insight_reads_back_as_the_daemon_sends_it() {
     }
     runs.extend(others);
 
-    let found = insights(&runs, &config(), 14, NOW);
+    let found = insights(&whole(&runs), &config(), 14, NOW);
     let kinds: Vec<&str> = found
         .insights
         .iter()

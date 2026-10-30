@@ -503,8 +503,8 @@ async fn begin(
     Some(set.into_iter().collect())
 }
 
-fn warnings(runs: &[insights::Run], config: &Config, now: u64) -> Vec<Insight> {
-    insights::insights(runs, config, runnerd_core::api::INSIGHT_DAYS, now)
+fn warnings(history: &insights::History, config: &Config, now: u64) -> Vec<Insight> {
+    insights::insights(history, config, runnerd_core::api::INSIGHT_DAYS, now)
         .insights
         .into_iter()
         .filter(|insight| insight.severity == Severity::Warning)

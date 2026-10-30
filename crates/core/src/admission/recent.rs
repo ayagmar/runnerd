@@ -38,6 +38,8 @@ pub struct Counted {
     pub peak: u64,
     /// Its CPU peak, millicores.
     pub cpu_peak: u64,
+    /// Its container's CPU cap, millicores, when recorded.
+    pub cpu_cap: Option<u64>,
     /// The cap its container had.
     pub cap: u64,
     /// What it says about that cap.
@@ -239,6 +241,7 @@ impl Recent {
                     run.memory_peak
                 },
                 cpu_peak: run.cpu_peak,
+                cpu_cap: run.cpu_cap,
                 cap,
                 capped,
                 succeeded: ending == Ending::Finished && run.succeeded,

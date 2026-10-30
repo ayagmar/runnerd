@@ -118,7 +118,7 @@ async fn fake_engine(
                 if answer.is_ok() {
                     let _ = reloads.send(*config);
                 }
-                let _ = reply.send(answer.map_err(ControlError::Failed));
+                let _ = reply.send(answer.map(Vec::from_iter).map_err(ControlError::Failed));
             }
             Command::RemoveRecords { selection, reply } => {
                 let _ = reply.send(match selection {
@@ -2156,6 +2156,42 @@ async fn a_shell_whose_client_goes_away_is_removed() {
     assert!(answer.starts_with("HTTP/1.1 101"), "{answer}");
     drop(stream);
     assert_eq!(closed_shell(&mut daemon).await, "shell-10");
+}
+
+#[tokio::test]
+async fn a_config_in_another_slice_is_refused_for_that_before_its_cpus_are_read() {
+    let dir = Dir::new();
+    // This daemon's slice cannot report its CPUs (`unreadable_cpus`), as a slice not made yet cannot.
+    let mut daemon = start(&dir.0, None).await;
+    let before = std::fs::read(&daemon.config).unwrap();
+    let moved = EXAMPLE
+        .replacen("slice = \"runnerd.slice\"", "slice = \"build.slice\"", 1)
+        .replacen(
+            "isolation = \"sysbox\"",
+            "isolation = \"sysbox\"\ncpu_overcommit = 1.0",
+            1,
+        );
+    let response = daemon
+        .client
+        .put("http://runnerd/v1/config")
+        .body(moved)
+        .send()
+        .await
+        .unwrap();
+    assert_eq!(response.status(), StatusCode::UNPROCESSABLE_ENTITY);
+    let text = String::from_utf8(body(response).await).unwrap();
+    assert!(
+        text.contains(
+            "restart runnerd to change the slice: it runs in runnerd.slice, and host.slice is build.slice in the new \
+             config"
+        ),
+        "{text}"
+    );
+    assert_eq!(std::fs::read(&daemon.config).unwrap(), before);
+    assert!(
+        daemon.reloads.try_recv().is_err(),
+        "the engine never sees it"
+    );
 }
 
 #[tokio::test]

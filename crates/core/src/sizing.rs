@@ -194,6 +194,9 @@ pub struct History {
     pub changes: Vec<api::SizingChange>,
     /// Each profile's `memory` as the daemon ran it, oldest first: since when a raise reads runs at it.
     pub memory_set: Vec<MemorySet>,
+    /// From when, in ms, the history holds every job (`history_kept`): a wait before it, as of a job queued before
+    /// runnerd first ran, counts from then.
+    pub kept_since: u64,
 }
 
 /// What `advise` sizes against besides the history.
@@ -247,12 +250,13 @@ pub fn advise(
                 .collect();
             let share = profile.memory.0.saturating_mul(u64::from(profile.slots));
             let busy = busy(history, name, profile.slots, since, window.now);
-            let wait = waits(&jobs);
-            let starts = starts(&jobs);
+            let wait = waits(&jobs, history.kept_since);
+            let starts = starts(&jobs, history.kept_since);
             let cap = profile.memory.0;
             let took = memory::took(&history.memory_set, name, cap, window.now);
             let sized = Sized {
                 cap,
+                cpus: u64::from(profile.cpus) * 1000,
                 slots: profile.slots,
                 share,
                 admission: config.host.admission,
@@ -278,6 +282,7 @@ pub fn advise(
             let peaks = memory::peaks(
                 recent.jobs_of(name).flat_map(|(_, runs)| runs.window()),
                 memory.on_cap,
+                sized.cpus,
             );
             let current = api::Resize {
                 memory: cap,
@@ -379,7 +384,7 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
         .map(|(key, runs)| {
             let held = memory::on_cap(runs, now);
             on_cap += u64::from(held);
-            let peaks = memory::peaks(runs.window(), u64::from(held));
+            let peaks = memory::peaks(runs.window(), u64::from(held), sized.cpus);
             let needs = Needs {
                 raise: raises.need(Some(key)),
                 floor: memory::floor(runs, raises.margin),
@@ -390,7 +395,7 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
                 .copied()
                 .filter(|job| Key::of(job) == *key)
                 .collect();
-            let wait = waits(&runs_of);
+            let wait = waits(&runs_of, raises.history.kept_since);
             api::JobSizing {
                 repository: key.repository.clone(),
                 workflow: key.workflow.clone(),
@@ -440,6 +445,8 @@ fn busy(history: &History, profile: &str, slots: u32, since: u64, now: u64) -> u
 /// A profile's limits and the rules advice follows.
 struct Sized {
     cap: u64,
+    /// Its `cpus`, in millicores: CPU peaks are read only of runs at them.
+    cpus: u64,
     slots: u32,
     /// What its slots take of the budget now: `memory × slots`.
     share: u64,
@@ -505,13 +512,14 @@ impl Sized {
     }
 }
 
-/// Seconds from queued to started of the jobs that started, less what they waited for the host's memory.
-fn waits(jobs: &[&Ran]) -> Spread {
+/// Seconds from queued, or from `kept_since` (ms) if that came later, to started of the jobs that started, less what
+/// they waited for the host's memory.
+fn waits(jobs: &[&Ran], kept_since: u64) -> Spread {
     spread(
         jobs.iter()
             .filter_map(|job| {
                 job.started_at.map(|at| {
-                    at.saturating_sub(job.queued_at)
+                    at.saturating_sub(job.queued_at.max(kept_since))
                         .saturating_sub(job.host_waited)
                         / 1000
                 })
@@ -521,7 +529,7 @@ fn waits(jobs: &[&Ran]) -> Spread {
 }
 
 /// The jobs that started on a warm runner and the others, and their median waits.
-fn starts(jobs: &[&Ran]) -> api::Starts {
+fn starts(jobs: &[&Ran], kept_since: u64) -> api::Starts {
     let (warm, cold): (Vec<&Ran>, Vec<&Ran>) = jobs
         .iter()
         .filter(|job| job.started_at.is_some())
@@ -529,9 +537,9 @@ fn starts(jobs: &[&Ran]) -> api::Starts {
     let count = |jobs: &[&Ran]| u32::try_from(jobs.len()).unwrap_or(u32::MAX);
     api::Starts {
         warm: count(&warm),
-        warm_p50: waits(&warm).p50,
+        warm_p50: waits(&warm, kept_since).p50,
         cold: count(&cold),
-        cold_p50: waits(&cold).p50,
+        cold_p50: waits(&cold, kept_since).p50,
     }
 }
 

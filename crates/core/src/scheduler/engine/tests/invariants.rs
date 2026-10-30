@@ -974,11 +974,12 @@ impl Case {
                 cpus: Some(SLICE_CPUS),
                 commit: Commit::new(|| Ok(None)),
                 running: RunningSlots::Drain,
+                author: Author::Owner,
                 reply,
             })
             .await;
         let applied = answer.await;
-        if applied != Ok(Ok(None)) {
+        if applied != Ok(Ok(Vec::new())) {
             return violation(
                 self,
                 "a_reload_applies",

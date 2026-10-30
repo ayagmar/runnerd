@@ -729,6 +729,7 @@ fn peaks() -> Peaks {
         on_cap: 1,
         memory: spread(),
         cpu: spread(),
+        cpu_runs: 20,
     }
 }
 

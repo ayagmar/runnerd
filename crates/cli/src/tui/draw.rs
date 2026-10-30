@@ -1979,7 +1979,8 @@ fn sizing_profiles(
     theme: Theme,
 ) {
     let wide = profiles_area.width >= 100;
-    let mut columns = vec![("PROFILE", 0), ("MEMORY", 10), ("JOBS", 5)];
+    // The percentiles' runs: each job's recent ones, fewer than the jobs the waits are over.
+    let mut columns = vec![("PROFILE", 0), ("MEMORY", 10), ("RUNS", 5)];
     // Narrow, the largest peak advice is sized for stays and the percentiles go.
     if wide {
         columns.push(("P50", 6));
@@ -2023,7 +2024,7 @@ fn sizing_profiles(
             }));
         }
         cells.extend([
-            Cell::from(cores_used(peaks.cpu.p99)),
+            Cell::from(cpu_cell(peaks)),
             Cell::from(format!("{}%", profile.busy)),
             Cell::from(duration(profile.wait.p95)),
         ]);
@@ -2050,6 +2051,11 @@ fn sizing_profiles(
         .row_highlight_style(selected());
     let mut state = TableState::default().with_selected(Some(app.sized));
     frame.render_stateful_widget(table, profiles_area, &mut state);
+}
+
+/// The CPU p99 of the runs at the profile's `cpus` now, `–` without one.
+fn cpu_cell(peaks: &api::Peaks) -> String {
+    peaks.cpu_p99().map_or_else(|| "–".to_owned(), cores_used)
 }
 
 /// The selected profile's jobs, a row each.
@@ -2085,7 +2091,7 @@ fn sizing_jobs(
         }
         cells.extend([
             Cell::from(bytes(job.peaks.memory.max)),
-            Cell::from(cores_used(job.peaks.cpu.p99)),
+            Cell::from(cpu_cell(&job.peaks)),
             Cell::from(duration(job.wait.p95)),
             Cell::from(needs),
         ]);

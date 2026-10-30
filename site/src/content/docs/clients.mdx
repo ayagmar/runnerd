@@ -172,10 +172,10 @@ JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FO
 $ runnerctl sizing
 from 30d 0h of history; peaks are sampled every 2 s, so a shorter spike goes unseen: advice sizes for the largest + 15%, at least 1G for page cache, rounded up to 256M, once a profile ran 10 jobs; auto sizing applies it
 
-jvm  9G × 2, 8 CPUs; 400 jobs, slots busy 41%, waited p50 8s p95 35s
-  warm runners took 31 of 40 jobs: waited p50 2s, the others 21s
-  memory p50 5.2G p95 7.4G p99 7.7G max 7.8G
-  cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9
+jvm  9G × 2, 8 CPUs; 460 jobs, slots busy 41%, waited p50 8s p95 35s
+  warm runners took 31 of 460 jobs: waited p50 2s, the others 21s
+  memory p50 5.2G p95 7.4G p99 7.7G max 7.8G of 400 recent runs
+  cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9 of the 400 at 8 CPUs
   keep 9G: its largest peak + 15% is 9G
   auto sizing 2d 0h ago: memory 10G → 9G, slots 2
   runnerctl sizing undo jvm
@@ -184,10 +184,10 @@ jvm  9G × 2, 8 CPUs; 400 jobs, slots busy 41%, waited p50 8s p95 35s
   halyard/ledger  CI / build               212  3.1G  4.2G  4.5G  4.6G      7.6       30s  5.75G
   halyard/ledger  CI / integration tests   188  5.2G  7.4G  7.7G  7.8G      7.6       35s  9G
 
-node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
-  warm runners took 31 of 40 jobs: waited p50 2s, the others 21s
-  memory p50 1.4G p95 1.9G p99 2G max 2.1G
-  cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9
+node  7G × 2, 8 CPUs; 260 jobs, slots busy 78%, waited p50 12s p95 4m 20s
+  warm runners took 31 of 260 jobs: waited p50 2s, the others 21s
+  memory p50 1.4G p95 1.9G p99 2G max 2.1G of 242 recent runs
+  cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9 of the 242 at 8 CPUs
   lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G
 
   REPOSITORY          JOB         RUNS   P50   P95  P99   MAX  CPU P99  WAIT P95  NEEDS
@@ -195,7 +195,7 @@ node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
   halyard/storefront  CI / e2e       6  1.8G    2G   2G    2G      7.6    4m 40s  max 2G
 ```
 
-With [auto sizing](../admission/#auto-sizing) on, as here, the first line ends with `auto sizing applies it`, and each change it made shows under its profile with the command that undoes it. Without it, the first line ends at `10 jobs` and a profile the advice would change ends with `runnerctl sizing apply node`, which shows `memory = "7G" -> "3.25G"` and `slots = 2 -> 4` under `[profiles.node]` and asks before it writes. Without a terminal to ask on it needs `--yes`. The rest of the file, comments included, stays as written.
+The first line of a profile counts the jobs its waits are over. Its peaks are over each job's recent runs, fewer than that, and its CPU peaks only over those at the profile's `cpus` now, since a run at a larger cap can peak past them; until one has run at them, the line says `no run at 8 CPUs yet`. With [auto sizing](../admission/#auto-sizing) on, as here, the first line ends with `auto sizing applies it`, and each change it made shows under its profile with the command that undoes it. Without it, the first line ends at `10 jobs` and a profile the advice would change ends with `runnerctl sizing apply node`, which shows `memory = "7G" -> "3.25G"` and `slots = 2 -> 4` under `[profiles.node]` and asks before it writes. Without a terminal to ask on it needs `--yes`. The rest of the file, comments included, stays as written.
 
 ### Jobs and watch
 

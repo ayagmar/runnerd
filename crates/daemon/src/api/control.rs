@@ -13,7 +13,9 @@ use axum::http::StatusCode;
 use axum::response::{IntoResponse, Response};
 use runnerd_core::api::{Busy, ConfigCheck, ConfigFile, Doctor, PauseQuery, ReplaceQuery};
 use runnerd_core::config::{Config, keep_secrets, mask_secrets, revision};
-use runnerd_core::scheduler::engine::{Commit, ControlError, RunningJobs, RunningSlots, Target};
+use runnerd_core::scheduler::engine::{
+    Author, Commit, ControlError, RunningJobs, RunningSlots, Target, same_slice,
+};
 use runnerd_core::sizing::Window;
 use tracing::info;
 
@@ -209,7 +211,16 @@ pub(super) async fn replace_config(
             Some(file.text.clone())
         }
     };
-    match replace(&state, &mut file, text, RunningSlots::Drain, on_disk).await {
+    match replace(
+        &state,
+        &mut file,
+        text,
+        RunningSlots::Drain,
+        Author::Owner,
+        on_disk,
+    )
+    .await
+    {
         Ok(checked) => {
             info!("{} replaced by {principal:?}", file.path.display());
             Json(checked).into_response()
@@ -243,12 +254,13 @@ impl std::fmt::Display for Refusal {
 
 /// Validates `text` against the slice's budget; the engine writes it in place of `file` and runs with it, between
 /// its ticks, as `running` allows. With `on_disk`, the file is written only if it still holds that text then. What
-/// `PUT /v1/config` and auto sizing do; the caller holds `file`'s lock.
+/// `PUT /v1/config` and auto sizing do, as `author`; the caller holds `file`'s lock.
 pub(super) async fn replace(
     state: &AppState,
     file: &mut ConfigText,
     text: String,
     running: RunningSlots,
+    author: Author,
     on_disk: Option<String>,
 ) -> Result<ConfigCheck, Refusal> {
     let (config, mut checked) = check(state.memory_max, text.clone())
@@ -257,6 +269,11 @@ pub(super) async fn replace(
     let Some(config) = config else {
         return Err(Refusal::Invalid(Box::new(checked)));
     };
+    let current = Config::parse(&file.text).ok();
+    // Before the new slice's CPUs are read: a slice not made yet would fail that with the wrong reason.
+    if let Some(current) = &current {
+        same_slice(current, &config).map_err(Refusal::Control)?;
+    }
     // Only a CPU budget needs the slice's CPUs: without one, a slice systemd cannot describe still runs, and the
     // CPUs read only scale the dashboard's CPU chart.
     let (read, slice) = (state.cpus, config.host.slice.clone());
@@ -278,7 +295,7 @@ pub(super) async fn replace(
         read.await.ok().and_then(Result::ok)
     };
     let database = |config: &Config| config.history.database.clone();
-    if Config::parse(&file.text).ok().as_ref().map(database) != Some(database(&config)) {
+    if current.as_ref().map(database) != Some(database(&config)) {
         checked
             .warnings
             .push("history.database takes effect when runnerd restarts".to_owned());
@@ -304,7 +321,7 @@ pub(super) async fn replace(
     let warning = state
         .handle
         .control
-        .replace_config(config, checked.memory_max, cpus, commit, running)
+        .replace_config(config, checked.memory_max, cpus, commit, running, author)
         .await
         .map_err(Refusal::Control)?;
     checked.warnings.extend(warning);

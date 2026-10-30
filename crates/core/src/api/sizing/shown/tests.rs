@@ -23,6 +23,7 @@ fn profile(name: &str, max: u64, advice: Advice) -> ProfileSizing {
                 max,
             },
             cpu: Spread::default(),
+            cpu_runs: 0,
             on_cap: 0,
         },
         wait: Spread::default(),
@@ -168,4 +169,16 @@ fn doctor_warns_only_when_a_profile_needs_more_than_its_cap() {
     let check = sizing(vec![lower, raise.clone()]).doctor_check();
     assert_eq!(check.status, CheckStatus::Warn, "{check:?}");
     assert_eq!(raise.advice.tone(), Tone::Bad, "red in every client");
+}
+
+#[test]
+fn cpu_peaks_say_which_runs_they_are_over_and_none_reads_as_none_not_zero() {
+    // A profile cut to 9 CPUs: its recent runs ran at 31, none yet at 9. Every client shows no CPU p99 and says so.
+    let mut peaks = profile("jvm", G, Advice::Keep { memory: G }).peaks;
+    assert_eq!(peaks.cpu_p99(), None);
+    assert_eq!(peaks.cpu_runs_line(9), "no run at 9 CPUs yet");
+    peaks.cpu_runs = 4;
+    peaks.cpu.p99 = 9160;
+    assert_eq!(peaks.cpu_p99(), Some(9160));
+    assert_eq!(peaks.cpu_runs_line(9), "of the 4 at 9 CPUs");
 }

@@ -11,8 +11,8 @@ use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
 use super::{
-    Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, RunningSlots, Setup,
-    Shutdown, Target,
+    Author, Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, RunningSlots,
+    Setup, Shutdown, Target,
 };
 use crate::api::{self, JobState};
 use crate::cache::Names;
@@ -1866,7 +1866,14 @@ async fn a_listing_finishes_while_a_long_command_runs() {
             Ok(None)
         });
         control
-            .replace_config(other_repository(), None, None, commit, RunningSlots::Drain)
+            .replace_config(
+                other_repository(),
+                None,
+                None,
+                commit,
+                RunningSlots::Drain,
+                Author::Owner,
+            )
             .await
     });
     writes.await.unwrap();
@@ -2474,6 +2481,7 @@ async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runn
             cpus: None,
             commit,
             running: RunningSlots::Keep,
+            author: Author::Owner,
             reply,
         })
         .await;
@@ -2493,10 +2501,11 @@ async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runn
             cpus: None,
             commit: Commit::new(|| Ok(None)),
             running: RunningSlots::Drain,
+            author: Author::Owner,
             reply,
         })
         .await;
-    assert_eq!(answer.await.unwrap(), Ok(None));
+    assert_eq!(answer.await.unwrap(), Ok(Vec::new()));
     assert_eq!(engine.config.profiles["app"].slots, 1);
 }
 
@@ -3253,6 +3262,7 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
             cpus: None,
             commit: failing_commit(),
             running: RunningSlots::Drain,
+            author: Author::Owner,
             reply,
         })
         .await;
@@ -3262,6 +3272,148 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
     ));
     assert!(handle.control.is_paused("o/r"));
     assert_eq!(engine.config.repositories[0].name, "o/r");
+}
+
+#[tokio::test]
+async fn a_config_in_another_slice_is_refused_before_its_file_is_written() {
+    // The sampler watches the slice the daemon started in: a live change would leave it measuring the old one.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    let moved = Config::parse(
+        &CONFIG
+            .replace("slice = \"ci.slice\"", "slice = \"build.slice\"")
+            .replace("name = \"o/r\"", "name = \"o/x\""),
+    )
+    .unwrap();
+    let written = Arc::new(AtomicBool::new(false));
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let commit = {
+        let written = written.clone();
+        Commit::new(move || {
+            written.store(true, Ordering::SeqCst);
+            Ok(None)
+        })
+    };
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(moved),
+            memory_max: None,
+            cpus: None,
+            commit,
+            running: RunningSlots::Drain,
+            author: Author::Owner,
+            reply,
+        })
+        .await;
+    match answer.await.unwrap() {
+        Err(ControlError::Invalid(message)) => assert_eq!(
+            message,
+            "restart runnerd to change the slice: it runs in ci.slice, and host.slice is build.slice in the new config"
+        ),
+        other => panic!("not refused: {other:?}"),
+    }
+    assert!(!written.load(Ordering::SeqCst), "the file is not written");
+    assert_eq!(engine.config.host.slice, "ci.slice");
+    assert_eq!(
+        engine.config.repositories[0].name, "o/r",
+        "nothing else changes"
+    );
+    // The same config in the slice it runs in goes through.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(other_repository()),
+            memory_max: None,
+            cpus: None,
+            commit: Commit::new(|| Ok(None)),
+            running: RunningSlots::Drain,
+            author: Author::Owner,
+            reply,
+        })
+        .await;
+    assert_eq!(answer.await.unwrap(), Ok(Vec::new()));
+    assert_eq!(engine.config.repositories[0].name, "o/x");
+}
+
+#[tokio::test]
+async fn a_config_that_undoes_a_memory_raise_of_the_last_day_runs_and_says_so() {
+    // Auto sizing raised app 3G → 4G an hour ago, after its jobs met the 3G cap; a config saved from a text read
+    // before that puts it back at 3G.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    let resize = |memory| api::Resize {
+        memory,
+        slots: 2,
+        cpus: None,
+    };
+    let id = handle
+        .store
+        .sizing_intent(api::SizingChange {
+            at: crate::time::now_ms() / 1000 - 3600,
+            profile: "app".to_owned(),
+            from: resize(3 << 30),
+            to: resize(4 << 30),
+            reason: "1 of 5 jobs ran out of memory at their cap".to_owned(),
+            uncertain: false,
+        })
+        .await
+        .unwrap();
+    assert!(
+        handle
+            .store
+            .sizing_resolved(id, crate::store::Resolution::Done)
+            .await
+    );
+    let stale = Config::parse(&CONFIG.replace("memory = \"4G\"", "memory = \"3G\"")).unwrap();
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(stale),
+            memory_max: None,
+            cpus: None,
+            commit: Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
+            running: RunningSlots::Drain,
+            author: Author::Owner,
+            reply,
+        })
+        .await;
+    assert_eq!(
+        answer.await.unwrap(),
+        Ok(vec![
+            "syncing the directory failed".to_owned(),
+            "app's memory goes to 3G, under the 4G auto sizing raised it to 1h 00m ago because its jobs needed more \
+             than 3G: they may run out of memory again"
+                .to_owned()
+        ])
+    );
+    assert_eq!(engine.config.profiles["app"].memory.0, 3 << 30, "it runs");
+    // Back at 4G, then auto sizing's own lowering to 3G: it says nothing about its own raise.
+    for (config, author) in [
+        (CONFIG.to_owned(), Author::Owner),
+        (
+            CONFIG.replace("memory = \"4G\"", "memory = \"3G\""),
+            Author::AutoSizing,
+        ),
+    ] {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        engine
+            .command(Command::ReplaceConfig {
+                config: Box::new(Config::parse(&config).unwrap()),
+                memory_max: None,
+                cpus: None,
+                commit: Commit::new(|| Ok(None)),
+                running: RunningSlots::Keep,
+                author,
+                reply,
+            })
+            .await;
+        assert_eq!(answer.await.unwrap(), Ok(Vec::new()), "{author:?}");
+    }
+    assert_eq!(engine.config.profiles["app"].memory.0, 3 << 30);
 }
 
 /// How many times the engine polled GitHub's queue.
@@ -3311,6 +3463,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
             None,
             failing_commit(),
             RunningSlots::Drain,
+            Author::Owner,
         )
         .await;
     assert!(matches!(refused, Err(ControlError::Failed(_))));
@@ -3343,11 +3496,12 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
             None,
             Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
             RunningSlots::Drain,
+            Author::Owner,
         )
         .await;
     assert_eq!(
         committed,
-        Ok(Some("syncing the directory failed".to_owned()))
+        Ok(vec!["syncing the directory failed".to_owned()])
     );
     // Answered once it runs with the config: the status shows `o/x` already.
     assert_eq!(handle.status.borrow().repositories[0].name, "o/x");

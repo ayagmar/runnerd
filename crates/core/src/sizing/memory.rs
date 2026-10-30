@@ -49,15 +49,26 @@ fn cap_of(config: &Config, run: &Ran) -> u64 {
         .unwrap_or(u64::MAX)
 }
 
-/// The peaks of the runs in some windows; `on_cap` how many of their jobs are on a hold at the cap.
-pub(super) fn peaks<'run>(runs: impl Iterator<Item = &'run Counted>, on_cap: u64) -> Peaks {
+/// The peaks of the runs in some windows; `on_cap` how many of their jobs are on a hold at the cap. CPU peaks only of
+/// the runs at `cpus`, the profile's now, in millicores: one at a larger cap may peak past it.
+pub(super) fn peaks<'run>(
+    runs: impl Iterator<Item = &'run Counted>,
+    on_cap: u64,
+    cpus: u64,
+) -> Peaks {
     let runs: Vec<&Counted> = runs.collect();
+    let cpu: Vec<u64> = runs
+        .iter()
+        .filter(|run| run.cpu_cap == Some(cpus))
+        .map(|run| run.cpu_peak)
+        .collect();
     Peaks {
         jobs: runs.len() as u64,
         at_cap: runs.iter().filter(|run| run.capped.met()).count() as u64,
         on_cap,
         memory: spread(runs.iter().map(|run| run.peak).collect()),
-        cpu: spread(runs.iter().map(|run| run.cpu_peak).collect()),
+        cpu_runs: cpu.len() as u64,
+        cpu: spread(cpu),
     }
 }
 
