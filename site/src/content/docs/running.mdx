@@ -105,7 +105,7 @@ Who writes:
 
 sccache uses the shared cache instead of its disk cache in the slot, not as well as: a pull request's own compilations are not kept, so a second push to it compiles again what the first did. A Rust repository with many pull requests may do better with its own backend, or `build_cache = false`.
 
-Turborepo's variables come from the runner, so they win over a `turbo.json`'s `remoteCache`, and a workflow that sets only `TURBO_TOKEN` and `TURBO_TEAM` for Vercel's remote cache gets runnerd's. Such a workflow keeps its own cache by also setting `TURBO_API`, `https://vercel.com/api` for Vercel's. Turborepo's summary shows no time saved for runnerd's hits, and a repository that signs its artifacts (`remoteCache.signature`) finds none.
+A workflow that sets its own `TURBO_TOKEN` for Vercel's remote cache, as Vercel's GitHub Actions guide does, keeps using it: runnerd passes each request with a token other than its own to Vercel's API as it came, signed artifacts included, and keeps none of it. Turborepo's variables come from the runner, so they win over a `turbo.json`'s `remoteCache`: a repository whose `turbo.json` names another API also sets `TURBO_API` in its workflow. Turborepo's summary shows no time saved for runnerd's own hits, and a repository that signs its artifacts (`remoteCache.signature`) finds none of runnerd's.
 
 Nx fails the run when its remote cache does not answer, as while runnerd restarts, so the image does not point it at the cache. A workflow opts in with a step before Nx runs:
 

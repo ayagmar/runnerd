@@ -33,18 +33,26 @@ request".
 
 - **Turborepo, on with the build cache.** The image exports `TURBO_API=http://127.0.0.1:41771/turbo`,
   `TURBO_TOKEN=runnerd` and `TURBO_TEAM=runnerd` beside sccache's variables. The socket says who the job is, as for
-  every tool; the token and team only turn turbo's remote cache on, and the server reads neither. Its artifacts are
+  every tool; the token and team only turn turbo's remote cache on, and the server reads the token only to tell
+  runnerd's from a workflow's own. Its artifacts are
   entries under `<owner>/<name>/turbo/<hash>`, with the same size limit, trim, write rules and counts as Gradle's.
   `buildcache::turbo` answers the status (`enabled`, never `readOnly`: an upload a job may not make is answered as
   stored, as every tool's is), the events (accepted, unread), and the lookup of many hashes (a hit or `null` each,
   read from the index, counted neither as a hit nor a miss, as a `HEAD` is not). No duration or tag is kept: a hit
   saves no time in turbo's summary, and a repository that signs its artifacts finds none.
 - **What a repository's own configuration keeps.** A workflow's `TURBO_API`, `TURBO_TOKEN` and `TURBO_TEAM` each
-  take precedence over the runner's, and `TURBO_CACHE: local:rw` keeps turbo off any remote cache. A `turbo.json`'s
-  `remoteCache` does not: turbo reads its environment first. A workflow that sets only `TURBO_TOKEN` and
-  `TURBO_TEAM` for Vercel's cache gets runnerd's until it also sets `TURBO_API: https://vercel.com/api`; the docs
-  say so. Passing such a job's requests on to Vercel would keep it on its own cache with no change, but would need a
-  streaming client the daemon does not have and a new service it talks to.
+  take precedence over the runner's, and `TURBO_CACHE: local:rw` keeps turbo off any remote cache. A workflow that
+  sets only `TURBO_TOKEN` and `TURBO_TEAM` for Vercel's cache, as Vercel's guide for GitHub Actions does, reaches
+  runnerd's socket with its own token: every request under `/turbo` whose bearer token is not `runnerd` goes to
+  `https://vercel.com/api`, with the path after `/turbo`, the query, every header but the connection's (the token
+  among them) and the body as it arrives, and Vercel's answer comes back the same way, redirects included. The
+  origin is fixed, and the path is appended under `/api`, so no request sends the token anywhere else. Nothing of it
+  is logged, counted or kept, and runnerd's write rules do not apply: the repository's own cache decides, as on
+  GitHub's runners. Signed artifacts pass with their tags. reqwest streams both ways without its `stream` feature
+  (`Body::wrap` of the incoming body, `Response::chunk`); it connects within 10 s and waits at most 60 s for each
+  read, with no limit on the whole. A request with runnerd's token, or with none, is answered locally.
+  A `turbo.json`'s `remoteCache` does not keep its API: turbo reads its environment first, so such a repository
+  sets `TURBO_API` in its workflow; the docs say so.
 - **Nx, on request.** The socket serves `/nx/v1/cache/<hash>` the same way, entries under `<owner>/<name>/nx/<hash>`,
   but the image sets no `NX_SELF_HOSTED_REMOTE_CACHE_SERVER`: with it set by default, every Nx run that looks up a
   task while runnerd restarts would fail. A workflow opts in by writing
@@ -55,8 +63,8 @@ request".
 A pull request's turbo tasks get what `main` built in any slot, with no workflow change, and a writing run of
 `main` what the previous one built.
 
-A repository that uses Vercel's remote cache with only `TURBO_TOKEN` and `TURBO_TEAM` moves to runnerd's cache on
-runnerd's runners until its workflow names `TURBO_API`: its builds still hit, but other machines that read Vercel's
-cache no longer get what these runs build. Its token goes to the daemon's socket, which never logs it.
+A repository on Vercel's remote cache keeps it with no change; its requests go through the daemon, which carries
+its token to Vercel and never logs it. While runnerd restarts, or when Vercel does not answer (a 502), those
+requests fail and turbo builds without the cache. The daemon talks to Vercel's API for those jobs.
 
 A repository whose Nx workflow opts in fails its run when runnerd restarts while Nx looks a task up.

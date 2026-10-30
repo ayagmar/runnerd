@@ -64,7 +64,8 @@ flowchart TB
   `buildcache::actions` serves GitHub Actions' cache service on the same socket from the same entries, and passes
   every other request of GitHub's results service to GitHub
   ([ADR 0082](docs/adr/0082-github-actions-cache-served-from-the-host.md)). `buildcache::turbo` answers the rest of
-  Turborepo's remote cache API, whose artifacts, like Nx's, are entries as Gradle's are
+  Turborepo's remote cache API, whose artifacts, like Nx's, are entries as Gradle's are, and passes a request with a
+  workflow's own token to Vercel's API
   ([ADR 0083](docs/adr/0083-turborepo-and-nx-from-the-build-cache.md)).
 
 `runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing, `api/notify` sends `[notify]`'s

@@ -186,6 +186,8 @@ struct Inner {
     sockets: PathBuf,
     /// Where requests for GitHub's results service it does not answer go.
     results: actions::Results,
+    /// Where turbo's requests with a workflow's own token go.
+    vercel: turbo::Vercel,
     // A panic midway leaves at worst an entry counted that is gone, or a file not counted, which `open` counts at
     // the next start.
     state: Mutex<State>,
@@ -315,6 +317,7 @@ impl BuildCache {
                 uploads,
                 sockets: sockets.to_owned(),
                 results: actions::Results::new(),
+                vercel: turbo::Vercel::new(),
                 state: Mutex::new(state),
             }),
         })
@@ -329,6 +332,12 @@ impl BuildCache {
     #[cfg(test)]
     pub(crate) fn set_results_origin(&self, origin: &str) {
         self.inner.results.set_origin(origin);
+    }
+
+    /// Sends turbo's requests with a workflow's own token to `origin` instead of Vercel's API.
+    #[cfg(test)]
+    pub(crate) fn set_vercel_origin(&self, origin: &str) {
+        self.inner.vercel.set_origin(origin);
     }
 
     /// Sets the size `trim` brings it under.

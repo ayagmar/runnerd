@@ -484,6 +484,170 @@ async fn turbos_artifacts_keep_to_the_limits_and_outlive_a_restart() {
     );
 }
 
+/// A request Vercel's API received.
+#[derive(Debug, PartialEq, Eq)]
+struct Passed {
+    method: String,
+    /// Its path and query.
+    path: String,
+    authorization: String,
+    length: Option<String>,
+    body: Vec<u8>,
+}
+
+type Received = Arc<Mutex<Vec<Passed>>>;
+
+/// A stand-in for Vercel's API under `/api`, which records each request and answers as Vercel answers a hit.
+async fn vercel() -> (String, Received) {
+    let received = Received::default();
+    let app = axum::Router::new().fallback({
+        let received = received.clone();
+        move |request: axum::extract::Request| async move {
+            let (parts, body) = request.into_parts();
+            let header = |name: &str| {
+                parts
+                    .headers
+                    .get(name)
+                    .map(|value| value.to_str().unwrap().to_owned())
+            };
+            let body = axum::body::to_bytes(body, usize::MAX).await.unwrap();
+            received.lock().unwrap().push(Passed {
+                method: parts.method.to_string(),
+                path: parts.uri.to_string(),
+                authorization: header("authorization").unwrap_or_default(),
+                length: header("content-length"),
+                body: body.to_vec(),
+            });
+            (
+                [
+                    ("x-artifact-tag", "signed"),
+                    ("x-artifact-duration", "1200"),
+                ],
+                "from vercel",
+            )
+        }
+    });
+    let listener = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    let origin = format!("http://{}/api", listener.local_addr().unwrap());
+    tokio::spawn(async move { axum::serve(listener, app).await.unwrap() });
+    (origin, received)
+}
+
+#[tokio::test(flavor = "multi_thread")]
+async fn a_workflows_own_turbo_token_reaches_vercel_as_it_came_and_runnerds_stays_local() {
+    use actions::send;
+
+    let (origin, received) = vercel().await;
+    let Cache { cache, _dir } = open("turbo-vercel", 1 << 20);
+    cache.set_vercel_origin(&origin);
+    let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("app", Writes::Allowed, Scopes::default());
+    let own = [("Authorization", "Bearer vercel-token")];
+    let runnerds = [("Authorization", "Bearer runnerd")];
+
+    let hit = send(&app, "GET", "/turbo/v8/artifacts/aa11?slug=acme", &own, b"").await;
+    assert_eq!(
+        (hit.status, hit.body.as_slice()),
+        (200, &b"from vercel"[..])
+    );
+    assert_eq!(
+        hit.header("x-artifact-tag"),
+        Some("signed"),
+        "a signed artifact stays signed"
+    );
+    assert_eq!(hit.header("x-artifact-duration"), Some("1200"));
+    let put = send(
+        &app,
+        "PUT",
+        "/turbo/v8/artifacts/aa11?slug=acme",
+        &own,
+        b"dist",
+    )
+    .await;
+    assert_eq!(put.status, 200);
+    let hashes = br#"{"hashes":["aa11"]}"#;
+    assert_eq!(
+        send(&app, "POST", "/turbo/v8/artifacts?slug=acme", &own, hashes)
+            .await
+            .status,
+        200
+    );
+    assert_eq!(
+        send(&app, "GET", "/turbo/v8/artifacts/status", &own, b"")
+            .await
+            .body,
+        b"from vercel"
+    );
+    // No path takes the token to another origin.
+    send(
+        &app,
+        "GET",
+        "/turbo//evil.example/v8/artifacts/aa11",
+        &own,
+        b"",
+    )
+    .await;
+    assert_eq!(
+        *received.lock().unwrap(),
+        [
+            ("GET", "/api/v8/artifacts/aa11?slug=acme", None, &b""[..]),
+            (
+                "PUT",
+                "/api/v8/artifacts/aa11?slug=acme",
+                Some("4"),
+                b"dist"
+            ),
+            ("POST", "/api/v8/artifacts?slug=acme", Some("19"), hashes),
+            ("GET", "/api/v8/artifacts/status", None, b""),
+            ("GET", "/api//evil.example/v8/artifacts/aa11", None, b""),
+        ]
+        .map(|(method, path, length, body)| Passed {
+            method: method.to_owned(),
+            path: path.to_owned(),
+            authorization: "Bearer vercel-token".to_owned(),
+            length: length.map(str::to_owned),
+            body: body.to_vec(),
+        })
+    );
+    assert_eq!(
+        cache.size().entries,
+        0,
+        "Vercel's artifact is not runnerd's"
+    );
+
+    let path = "/turbo/v8/artifacts/bb22?slug=runnerd";
+    assert_eq!(
+        send(&app, "PUT", path, &runnerds, b"local").await.status,
+        200
+    );
+    assert_eq!(send(&app, "GET", path, &runnerds, b"").await.body, b"local");
+    let status = send(&app, "GET", "/turbo/v8/artifacts/status", &runnerds, b"").await;
+    assert_eq!(status.body, br#"{"status":"enabled"}"#);
+    assert_eq!(
+        received.lock().unwrap().len(),
+        5,
+        "runnerd's token never leaves the host"
+    );
+    let counts = cache.detach("app").unwrap();
+    assert_eq!(
+        (counts.hits, counts.written_bytes),
+        (1, 5),
+        "only runnerd's own count"
+    );
+}
+
+#[tokio::test]
+async fn a_workflows_own_turbo_token_gets_an_error_turbo_builds_past_when_vercel_does_not_answer() {
+    let Cache { cache, _dir } = open("turbo-vercel-down", 1 << 20);
+    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
+    cache.set_vercel_origin(&format!("http://{}/api", listener.local_addr().unwrap()));
+    drop(listener);
+    let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
+    let own = [("Authorization", "Bearer vercel-token")];
+    let answer = actions::send(&app, "GET", "/turbo/v8/artifacts/aa11", &own, b"").await;
+    assert_eq!(answer.status, 502);
+}
+
 #[tokio::test]
 async fn a_trim_drops_the_least_recently_used_entries_first() {
     let Cache { cache, _dir } = open("trim", 1 << 20);

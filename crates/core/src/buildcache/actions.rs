@@ -851,7 +851,7 @@ async fn pass(inner: &Inner, request: Request<Incoming>) -> Response<Body> {
 }
 
 /// The headers passed on either way: all but those of the connection, which each side sets for itself.
-fn passed_headers(headers: &HeaderMap) -> HeaderMap {
+pub(super) fn passed_headers(headers: &HeaderMap) -> HeaderMap {
     const OWN: [&str; 10] = [
         "connection",
         "keep-alive",

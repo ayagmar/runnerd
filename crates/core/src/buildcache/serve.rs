@@ -69,6 +69,10 @@ async fn handle(inner: &Inner, runner: &str, request: Request<Incoming>) -> Resp
     if path.starts_with(super::actions::TWIRP) || path.starts_with(super::actions::BLOBS) {
         return super::actions::handle(inner, runner, request).await;
     }
+    if (path == super::turbo::TOOL || path.starts_with("turbo/")) && super::turbo::foreign(&request)
+    {
+        return super::turbo::pass(inner, request).await;
+    }
     if let Some(endpoint) = path.strip_prefix(super::turbo::API)
         && super::turbo::ENDPOINTS.contains(&endpoint)
     {
