@@ -208,6 +208,9 @@ fn only_a_pull_request_a_person_opened_from_the_runs_branch_lets_it_write() {
     );
 }
 
+/// An entry's bytes that count for what they are: the least any entry counts for (`MIN_CHARGE`).
+const ENTRY: usize = 4 << 10;
+
 struct Cache {
     cache: BuildCache,
     _dir: TestDir,
@@ -348,7 +351,7 @@ async fn a_trim_drops_the_least_recently_used_entries_first() {
     cache.decide("app", Writes::Allowed);
     for key in ["old", "used", "new"] {
         assert_eq!(
-            request(&app, "PUT", &format!("/gradle/{key}"), &[0; 100])
+            request(&app, "PUT", &format!("/gradle/{key}"), &[0; ENTRY])
                 .await
                 .0,
             200
@@ -357,10 +360,10 @@ async fn a_trim_drops_the_least_recently_used_entries_first() {
         tokio::time::sleep(std::time::Duration::from_millis(5)).await;
     }
     assert_eq!(request(&app, "GET", "/gradle/used", b"").await.0, 200);
-    cache.set_max_size(200);
+    cache.set_max_size(2 * ENTRY as u64);
     let trimmed = cache.trim();
-    assert_eq!(trimmed.before.bytes, 300);
-    assert_eq!(trimmed.after.bytes, 200);
+    assert_eq!(trimmed.before.bytes, 3 * ENTRY as u64);
+    assert_eq!(trimmed.after.bytes, 2 * ENTRY as u64);
     assert_eq!(request(&app, "GET", "/gradle/old", b"").await.0, 404);
     assert_eq!(request(&app, "GET", "/gradle/used", b"").await.0, 200);
     assert_eq!(request(&app, "GET", "/gradle/new", b"").await.0, 200);
@@ -425,12 +428,15 @@ fn waiting(cache: &BuildCache) -> usize {
 
 #[tokio::test]
 async fn undecided_jobs_uploads_take_at_most_the_size_limit() {
-    let Cache { cache, _dir } = open("held-limit", 400);
+    let Cache { cache, _dir } = open("held-limit", 4 * ENTRY as u64);
     let mut forks = Vec::new();
     for fork in 0..5 {
         let name = format!("fork-{fork}");
         let socket = cache.attach(&name, "o/app").unwrap();
-        assert_eq!(request(&socket, "PUT", "/gradle/a", &[0; 100]).await.0, 200);
+        assert_eq!(
+            request(&socket, "PUT", "/gradle/a", &[0; ENTRY]).await.0,
+            200
+        );
         forks.push(name);
     }
     assert_eq!(waiting(&cache), 4, "the fifth upload was not kept on disk");
@@ -439,18 +445,18 @@ async fn undecided_jobs_uploads_take_at_most_the_size_limit() {
     }
     // The room the held uploads took is free again.
     let last = cache.attach("fork-4", "o/app").unwrap();
-    assert_eq!(request(&last, "PUT", "/gradle/a", &[0; 100]).await.0, 200);
+    assert_eq!(request(&last, "PUT", "/gradle/a", &[0; ENTRY]).await.0, 200);
     assert_eq!(waiting(&cache), 1);
     assert_eq!(cache.detach("fork-4").unwrap().refused, 1);
 }
 
 #[tokio::test]
 async fn one_undecided_job_takes_at_most_a_quarter_of_the_uploads_room() {
-    let Cache { cache, _dir } = open("held-share", 800);
+    let Cache { cache, _dir } = open("held-share", 8 * ENTRY as u64);
     let fork = cache.attach("fork", "o/app").unwrap();
     for key in 0..8 {
         let path = format!("/gradle/{key}");
-        assert_eq!(request(&fork, "PUT", &path, &[0; 100]).await.0, 200);
+        assert_eq!(request(&fork, "PUT", &path, &[0; ENTRY]).await.0, 200);
     }
     assert_eq!(waiting(&cache), 2, "the fork kept a quarter of the room");
     // Other jobs GitHub has not answered for yet, main's among them, find the rest.
@@ -458,7 +464,7 @@ async fn one_undecided_job_takes_at_most_a_quarter_of_the_uploads_room() {
         let socket = cache.attach(other, "o/app").unwrap();
         for key in ["a", "b"] {
             let path = format!("/gradle/{key}");
-            assert_eq!(request(&socket, "PUT", &path, &[0; 100]).await.0, 200);
+            assert_eq!(request(&socket, "PUT", &path, &[0; ENTRY]).await.0, 200);
         }
     }
     assert_eq!(waiting(&cache), 8, "every other job's uploads were kept");
@@ -470,20 +476,29 @@ async fn one_undecided_job_takes_at_most_a_quarter_of_the_uploads_room() {
 
 #[tokio::test]
 async fn an_entry_over_a_quarter_of_the_limit_or_past_twice_it_is_refused() {
-    let Cache { cache, _dir } = open("limits", 400);
+    let Cache { cache, _dir } = open("limits", 4 * ENTRY as u64);
     let app = cache.attach("app", "o/app").unwrap();
     cache.decide("app", Writes::Allowed);
-    assert_eq!(request(&app, "PUT", "/gradle/big", &[0; 101]).await.0, 200);
+    assert_eq!(
+        request(&app, "PUT", "/gradle/big", &[0; ENTRY + 1]).await.0,
+        200
+    );
     assert_eq!(request(&app, "GET", "/gradle/big", b"").await.0, 404);
     for key in 0..8 {
         let path = format!("/gradle/{key}");
-        assert_eq!(request(&app, "PUT", &path, &[0; 100]).await.0, 200);
+        assert_eq!(request(&app, "PUT", &path, &[0; ENTRY]).await.0, 200);
     }
-    assert_eq!(cache.size().bytes, 800);
-    assert_eq!(request(&app, "PUT", "/gradle/more", &[0; 100]).await.0, 200);
+    assert_eq!(cache.size().bytes, 8 * ENTRY as u64);
+    assert_eq!(
+        request(&app, "PUT", "/gradle/more", &[0; ENTRY]).await.0,
+        200
+    );
     assert_eq!(request(&app, "GET", "/gradle/more", b"").await.0, 404);
     let counts = cache.detach("app").unwrap();
-    assert_eq!((counts.refused, counts.written_bytes), (2, 800));
+    assert_eq!(
+        (counts.refused, counts.written_bytes),
+        (2, 8 * ENTRY as u64)
+    );
 }
 
 #[tokio::test]
@@ -493,7 +508,7 @@ async fn an_entry_only_ever_sent_again_stays_in_use() {
     cache.decide("app", Writes::Allowed);
     for key in ["blob", "old"] {
         assert_eq!(
-            request(&app, "PUT", &format!("/bazel/cas/{key}"), &[0; 100])
+            request(&app, "PUT", &format!("/bazel/cas/{key}"), &[0; ENTRY])
                 .await
                 .0,
             200
@@ -502,10 +517,10 @@ async fn an_entry_only_ever_sent_again_stays_in_use() {
     }
     // Bazel sends the blob again with the next build's outputs, and never reads it.
     assert_eq!(
-        request(&app, "PUT", "/bazel/cas/blob", &[0; 100]).await.0,
+        request(&app, "PUT", "/bazel/cas/blob", &[0; ENTRY]).await.0,
         200
     );
-    cache.set_max_size(100);
+    cache.set_max_size(ENTRY as u64);
     cache.trim();
     assert_eq!(request(&app, "GET", "/bazel/cas/blob", b"").await.0, 200);
     assert_eq!(request(&app, "GET", "/bazel/cas/old", b"").await.0, 404);
@@ -594,4 +609,55 @@ async fn uploads_of_one_key_landing_together_leave_the_size_what_the_entry_holds
             entries: 1
         }
     );
+}
+
+/// The directories under `dir` that hold nothing.
+fn empty_dirs(dir: &Path) -> Vec<PathBuf> {
+    let mut empty = Vec::new();
+    let mut items = std::fs::read_dir(dir).unwrap().peekable();
+    if items.peek().is_none() {
+        empty.push(dir.to_owned());
+    }
+    for item in items {
+        let path = item.unwrap().path();
+        if path.is_dir() {
+            empty.extend(empty_dirs(&path));
+        }
+    }
+    empty
+}
+
+#[tokio::test]
+async fn empty_uploads_count_against_the_limit_and_leave_no_directories_once_trimmed() {
+    let Cache { cache, _dir } = open("empty", 8 * ENTRY as u64);
+    let put_empty = async |socket: &Path, keys: std::ops::Range<usize>| {
+        for key in keys {
+            let path = format!("/sccache/{key}/b/c/k");
+            assert_eq!(request(socket, "PUT", &path, b"").await.0, 200);
+        }
+    };
+    let fork = cache.attach("fork", "o/app").unwrap();
+    put_empty(&fork, 0..20).await;
+    assert_eq!(
+        waiting(&cache),
+        2,
+        "an undecided job holds a quarter of the room, however small its uploads"
+    );
+    let main = cache.attach("main", "o/app").unwrap();
+    cache.decide("main", Writes::Allowed);
+    put_empty(&main, 0..40).await;
+    assert_eq!(
+        cache.size(),
+        Size {
+            bytes: 0,
+            entries: 16
+        },
+        "entries stop at twice the limit"
+    );
+    assert_eq!(cache.detach("main").unwrap().refused, 24);
+    assert_eq!(cache.trim().after.entries, 8);
+    let tool = cache.directory().join("o/app/sccache");
+    assert_eq!(empty_dirs(&tool), Vec::<PathBuf>::new());
+    cache.clear();
+    assert_eq!(empty_dirs(&tool), vec![tool]);
 }

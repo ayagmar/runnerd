@@ -1,7 +1,7 @@
 //! Cache upkeep: reseeds idle profiles, stops the mirror, empties the shared caches and the mirror's storage over
 //! their limit and trims the build cache to its own when no runner runs, and counts what the mirror served each
-//! runner. Reseeds and cache checks
-//! run as background tasks the tick collects; it must not start or stop runners.
+//! runner. Reseeds and cache checks run as background tasks the tick collects; the build cache's trim runs before the
+//! tick goes on, as no runner may start during it. It must not start or stop runners.
 
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
@@ -12,6 +12,7 @@ use tracing::{info, warn};
 use super::{Engine, Occupant, Shutdown};
 use crate::admission::host;
 use crate::api;
+use crate::buildcache::BuildCache;
 use crate::cache::{self, Emptied, Refused, Trimmed};
 use crate::config::ByteSize;
 use crate::docker::{DockerApi, is_not_found};
@@ -114,24 +115,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .filter(|(name, _)| !self.reseeds.contains_key(*name))
                 .map(|(name, profile)| (name.clone(), profile.slots as usize))
                 .collect();
-            let build = self.build_cache.clone();
+            // Here, not in the background task: runners start only in the tick, so none starts while it removes
+            // entries. Commands are answered meanwhile; none starts a runner.
+            let build = match self.build_cache.clone() {
+                Some(build) => self.serving(trim_build_cache(build)).await,
+                None => None,
+            };
             self.trim = Some(tokio::spawn(async move {
                 let mut trimmed =
                     cache::trim_shared(&*docker, &names, &caches, mirror, &slots).await?;
-                if let Some(build) = build {
-                    match tokio::task::spawn_blocking(move || build.trim()).await {
-                        Ok(build) => {
-                            if build.after != build.before {
-                                info!(
-                                    "trimmed the build cache from {} to {}, its least recently used entries first",
-                                    ByteSize(build.before.bytes),
-                                    ByteSize(build.after.bytes)
-                                );
-                            }
-                            trimmed.sizes.insert(names.build_cache(), build.after.bytes);
-                        }
-                        Err(error) => warn!("trimming the build cache stopped: {error}"),
-                    }
+                if let Some(bytes) = build {
+                    trimmed.sizes.insert(names.build_cache(), bytes);
                 }
                 Ok(trimmed)
             }));
@@ -418,6 +412,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Whether a profile's snapshot is being rebuilt, or will be once its slots are free.
     pub(super) fn is_reseeding(&self, profile: &str) -> bool {
         self.reseeds.contains_key(profile) || self.reseed_requested.contains(profile)
+    }
+}
+
+/// Trims the build cache to its limit off the engine's loop; returns its bytes after, or `None` if the trim stopped.
+async fn trim_build_cache(build: BuildCache) -> Option<u64> {
+    match tokio::task::spawn_blocking(move || build.trim()).await {
+        Ok(build) => {
+            if build.after != build.before {
+                info!(
+                    "trimmed the build cache from {} to {}, its least recently used entries first",
+                    ByteSize(build.before.bytes),
+                    ByteSize(build.after.bytes)
+                );
+            }
+            Some(build.after.bytes)
+        }
+        Err(error) => {
+            warn!("trimming the build cache stopped: {error}");
+            None
+        }
     }
 }
 

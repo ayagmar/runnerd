@@ -12,7 +12,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0004](0004-gpui-desktop-app-pinned-to-a-zed-commit.md) | GPUI desktop app pinned to a Zed commit (superseded by 0034) |
 | [0005](0005-isolation-backends-sysbox-by-default.md) | Isolation backends: sysbox by default, privileged DinD only when asked |
 | [0006](0006-ephemeral-jit-runners.md) | Ephemeral JIT runners, one per job |
-| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041, 0052, 0054, 0066 and 0067) |
+| [0007](0007-warm-caches-snapshot-plus-slot-layer.md) | Warm caches: per-profile snapshot plus per-slot layer (amended by 0041, 0052, 0054, 0066, 0067 and 0077) |
 | [0008](0008-auth-with-the-gh-token.md) | Authenticate with the `gh` CLI's token |
 | [0009](0009-newest-stable-and-locked-dependencies.md) | Every dependency newest stable and locked (in part superseded by 0025) |
 | [0010](0010-mit-license-public-repository.md) | MIT license, public repository |
@@ -40,7 +40,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check (amended by 0037, 0039) |
 | [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag (amended by 0036, 0037) |
 | [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit (installable dashboard built in 0042, notifications in 0051) |
-| [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage |
+| [0035](0035-runner-image-stages.md) | A stack-neutral base image, with Android in its own stage (amended by 0077) |
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time |
 | [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |
 | [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |
@@ -57,7 +57,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling (amended by 0068) |
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued |
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends (amended by 0064) |
-| [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch |
+| [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch (amended by 0077) |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache |
 | [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk |
 | [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache (amended by 0063) |
@@ -80,4 +80,5 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0072](0072-job-minutes-priced-at-github-hosted-rates.md) | What this machine's job minutes would have cost on GitHub-hosted runners (amended by 0074) |
 | [0073](0073-no-compatibility-before-0-0-19.md) | No compatibility before 0.0.19: the history starts at schema 15 |
 | [0074](0074-the-cost-line-names-only-what-it-is-before.md) | The cost line names only what it is before |
+| [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md) | Credentials in the cache layer, closed slots' layers, and what the build cache counts |
 | [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets |

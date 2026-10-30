@@ -34,6 +34,22 @@ const ENTRIES: &str = "entries";
 /// Where uploads are written before they become entries, in the build cache's directory; emptied at start.
 const UPLOADS: &str = "uploads";
 
+/// What an entry or upload counts for at least against the size limit, in bytes: its file's inode and directory
+/// entry cost the disk and the index something even when it is empty, so the limit also bounds how many there are.
+const MIN_CHARGE: u64 = 4 << 10;
+
+/// The uploads one runner may hold while its writes are undecided; past them, its uploads are refused.
+const MAX_HELD: usize = 10_000;
+
+/// The connections one runner's socket serves at once; more wait to be accepted. Above the connection pools of the
+/// tools it serves (Bazel opens 100).
+const MAX_CONNECTIONS: usize = 256;
+
+/// What `bytes` of an entry or upload count for against the size limit.
+fn charge(bytes: u64) -> u64 {
+    bytes.max(MIN_CHARGE)
+}
+
 /// Whether a runner's job may write entries.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Writes {
@@ -145,11 +161,14 @@ struct Inner {
 struct State {
     max_size: u64,
     entries: HashMap<PathBuf, Entry>,
+    /// The entries' bytes.
     bytes: u64,
+    /// What the entries count for against `max_size` (`charge`).
+    charged: u64,
     runners: HashMap<String, Runner>,
     next_upload: u64,
-    /// The bytes of the uploads not yet entries, being received or held: at most `max_size`, so jobs whose writes
-    /// are undecided cannot fill the disk.
+    /// What the uploads not yet entries, being received or held, count for (`charge`): at most `max_size`, so jobs
+    /// whose writes are undecided cannot fill the disk.
     uploading: u64,
 }
 
@@ -165,10 +184,10 @@ struct Runner {
     repository: String,
     writes: Writes,
     counts: BuildCacheCounts,
-    /// Uploads waiting for `Writes` to be decided.
+    /// Uploads waiting for `Writes` to be decided, at most `MAX_HELD`.
     held: Vec<Upload>,
-    /// The bytes of its uploads not yet entries, being received or held: at most a quarter of `max_size` while its
-    /// writes are undecided, so one job cannot take the room another's uploads need.
+    /// What its uploads not yet entries, being received or held, count for: at most a quarter of `max_size` while
+    /// its writes are undecided, so one job cannot take the room another's uploads need.
     uploading: u64,
     dir: PathBuf,
     serving: JoinHandle<()>,
@@ -180,6 +199,8 @@ struct Upload {
     file: PathBuf,
     entry: PathBuf,
     bytes: u64,
+    /// The uploads' room it took (`reserve`).
+    room: u64,
 }
 
 impl BuildCache {
@@ -198,6 +219,7 @@ impl BuildCache {
         let mut entries = HashMap::new();
         count_entries(&root, &root, &mut entries)?;
         let bytes = entries.values().map(|entry: &Entry| entry.bytes).sum();
+        let charged = entries.values().map(|entry| charge(entry.bytes)).sum();
         Ok(BuildCache {
             inner: Arc::new(Inner {
                 root,
@@ -207,6 +229,7 @@ impl BuildCache {
                     max_size,
                     entries,
                     bytes,
+                    charged,
                     ..State::default()
                 }),
             }),
@@ -371,8 +394,9 @@ impl BuildCache {
         }
     }
 
-    /// Removes the entries used least recently until the rest fit in the size limit. Blocks on the file system: call
-    /// it off the engine's loop, and only while no runner runs, so no job finds an entry gone midway.
+    /// Removes the entries used least recently until the rest fit in the size limit, each counted at least
+    /// `MIN_CHARGE`, with the directories that leaves empty under a tool's. Blocks on the file system: call it off the
+    /// engine's loop, and only while no runner runs, so no job finds an entry gone midway.
     pub fn trim(&self) -> Trimmed {
         let limit = lock(&self.inner.state).max_size;
         self.trim_to(limit)
@@ -398,24 +422,33 @@ impl BuildCache {
             by_use.sort_by_key(|(path, entry)| (entry.used, path.clone()));
             let mut victims = Vec::new();
             for (path, entry) in by_use {
-                if state.bytes <= limit && (limit > 0 || state.entries.is_empty()) {
+                if state.charged <= limit && (limit > 0 || state.entries.is_empty()) {
                     break;
                 }
                 state.entries.remove(&path);
                 state.bytes -= entry.bytes;
+                state.charged -= charge(entry.bytes);
                 victims.push(path);
             }
             (before, victims)
         };
         for path in victims {
-            if let Err(error) = std::fs::remove_file(self.inner.root.join(&path))
-                && error.kind() != io::ErrorKind::NotFound
-            {
-                warn!(
-                    "cannot remove build cache entry {}: {error}",
-                    path.display()
-                );
+            // Under the lock, and only while the index still lacks it: an upload `store` renamed to the same path
+            // since is an entry again, and stays.
+            let state = lock(&self.inner.state);
+            if state.entries.contains_key(&path) {
+                continue;
             }
+            match std::fs::remove_file(self.inner.root.join(&path)) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => {
+                    warn!(
+                        "cannot remove build cache entry {}: {error}",
+                        path.display()
+                    );
+                }
+                _ => self.inner.remove_empty_parents(&path),
+            }
+            drop(state);
         }
         Trimmed {
             before,
@@ -435,15 +468,16 @@ impl Inner {
         let replaced = state
             .entries
             .get(&upload.entry)
-            .map_or(0, |entry| entry.bytes);
-        let fits = state.bytes - replaced + upload.bytes <= state.max_size.saturating_mul(2);
+            .map_or(0, |entry| charge(entry.bytes));
+        let fits =
+            state.charged - replaced + charge(upload.bytes) <= state.max_size.saturating_mul(2);
         let path = self.root.join(&upload.entry);
         let stored = fits
             && path
                 .parent()
                 .is_none_or(|parent| std::fs::create_dir_all(parent).is_ok())
             && std::fs::rename(&upload.file, &path).is_ok();
-        Self::give_back(&mut state, Some(runner), upload.bytes);
+        Self::give_back(&mut state, Some(runner), upload.room);
         if stored {
             let entry = Entry {
                 bytes: upload.bytes,
@@ -451,8 +485,10 @@ impl Inner {
             };
             if let Some(old) = state.entries.insert(upload.entry, entry) {
                 state.bytes -= old.bytes;
+                state.charged -= charge(old.bytes);
             }
             state.bytes += upload.bytes;
+            state.charged += charge(upload.bytes);
         } else {
             let _ = std::fs::remove_file(&upload.file);
         }
@@ -466,10 +502,11 @@ impl Inner {
     }
 
     /// Takes `bytes` more of the uploads' room for `runner`, unless they would take more than `max_size`, or, while
-    /// its writes are undecided, its own more than a quarter of it.
-    fn reserve(&self, runner: &str, bytes: u64) -> bool {
+    /// its writes are undecided, its own more than a quarter of it. `max_size` is the one the upload started with: a
+    /// lower one a reload set since holds back the uploads that start after it.
+    fn reserve(&self, runner: &str, bytes: u64, max_size: u64) -> bool {
         let mut state = lock(&self.state);
-        let (total, max_size) = (state.uploading, state.max_size);
+        let total = state.uploading;
         let Some(open) = state.runners.get_mut(runner) else {
             return false;
         };
@@ -499,7 +536,19 @@ impl Inner {
     fn remove_uploads(&self, runner: Option<&str>, uploads: &[Upload]) {
         for upload in uploads {
             let _ = std::fs::remove_file(&upload.file);
-            self.release(runner, upload.bytes);
+            self.release(runner, upload.room);
+        }
+    }
+
+    /// Removes the directories above the removed entry `entry` that it leaves empty, up to its tool's
+    /// (`<owner>/<name>/<tool>`). Call it holding the lock, as `store` makes them under it.
+    fn remove_empty_parents(&self, entry: &Path) {
+        let mut dir = entry.parent();
+        while let Some(parent) = dir
+            && parent.components().count() > 3
+            && std::fs::remove_dir(self.root.join(parent)).is_ok()
+        {
+            dir = parent.parent();
         }
     }
 
@@ -517,12 +566,14 @@ impl Inner {
     }
 }
 
-/// Serves `runner`'s connections until it is detached, which aborts this task and with it every connection.
+/// Serves `runner`'s connections, at most `MAX_CONNECTIONS` at once, until it is detached, which aborts this task and
+/// with it every connection.
 async fn accept(inner: Arc<Inner>, runner: String, listener: UnixListener) {
     let mut connections = JoinSet::new();
     loop {
+        let full = connections.len() >= MAX_CONNECTIONS;
         tokio::select! {
-            accepted = listener.accept() => match accepted {
+            accepted = listener.accept(), if !full => match accepted {
                 Ok((stream, _)) => {
                     connections.spawn(serve::connection(inner.clone(), runner.clone(), stream));
                 }

@@ -19,7 +19,7 @@ use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::UnixStream;
 use tracing::debug;
 
-use super::{Inner, Upload, Writes, valid_segment};
+use super::{Inner, MAX_HELD, Upload, Writes, charge, valid_segment};
 use crate::sync::lock;
 
 type Body = UnsyncBoxBody<Bytes, io::Error>;
@@ -148,13 +148,13 @@ async fn read(
 async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> Response<Body> {
     use hyper::body::Body as _;
 
-    let (writes, max_entry, upload) = {
+    let (writes, max_size, upload) = {
         let mut state = lock(&inner.state);
         let writes = state.runners.get(runner).map(|open| open.writes);
         state.next_upload += 1;
         (
             writes,
-            state.max_size / 4,
+            state.max_size,
             inner.uploads.join(state.next_upload.to_string()),
         )
     };
@@ -193,8 +193,10 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
         runner,
         file: upload,
         bytes: 0,
+        room: 0,
+        max_size,
     };
-    match receive(&mut receiving, body, max_entry).await {
+    match receive(&mut receiving, body).await {
         Ok(true) => {}
         Ok(false) => return refused(),
         Err(error) => {
@@ -206,10 +208,11 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
     let writes = {
         let mut state = lock(&inner.state);
         match state.runners.get_mut(runner) {
-            Some(open) if open.writes == Writes::Undecided => {
+            Some(open) if open.writes == Writes::Undecided && open.held.len() < MAX_HELD => {
                 open.held.push(upload);
                 return accepted();
             }
+            Some(open) if open.writes == Writes::Undecided => None,
             Some(open) => Some(open.writes),
             None => None,
         }
@@ -231,15 +234,34 @@ struct Receiving<'inner> {
     runner: &'inner str,
     file: PathBuf,
     bytes: u64,
+    /// The uploads' room it took: what its bytes count for (`charge`).
+    room: u64,
+    /// The size limit when it started.
+    max_size: u64,
 }
 
 impl Receiving<'_> {
+    /// Takes the room `length` more bytes need, unless the upload would pass a quarter of the size limit, as no entry
+    /// may, or the uploads' room runs out.
+    fn grow(&mut self, length: u64) -> bool {
+        let bytes = self.bytes + length;
+        let more = charge(bytes).saturating_sub(self.room);
+        if bytes > self.max_size / 4
+            || more > 0 && !self.inner.reserve(self.runner, more, self.max_size)
+        {
+            return false;
+        }
+        self.bytes = bytes;
+        self.room += more;
+        true
+    }
+
     fn into_upload(mut self, entry: PathBuf) -> Upload {
-        let bytes = std::mem::take(&mut self.bytes);
         Upload {
             file: std::mem::take(&mut self.file),
             entry,
-            bytes,
+            bytes: std::mem::take(&mut self.bytes),
+            room: std::mem::take(&mut self.room),
         }
     }
 }
@@ -248,25 +270,27 @@ impl Drop for Receiving<'_> {
     fn drop(&mut self) {
         if !self.file.as_os_str().is_empty() {
             let _ = std::fs::remove_file(&self.file);
-            self.inner.release(Some(self.runner), self.bytes);
+            self.inner.release(Some(self.runner), self.room);
         }
     }
 }
 
-/// Writes the body to the upload's file; false once it passes `max` bytes or the uploads' room runs out.
-async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming, max: u64) -> io::Result<bool> {
+/// Writes the body to the upload's file; false once it passes a quarter of the size limit or the uploads' room runs
+/// out. An empty body takes room too, before its file is made.
+async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming) -> io::Result<bool> {
+    if !receiving.grow(0) {
+        drain(body).await;
+        return Ok(false);
+    }
     let mut out = tokio::fs::File::create(&receiving.file).await?;
     while let Some(frame) = body.frame().await {
         let frame = frame.map_err(io::Error::other)?;
         if let Ok(data) = frame.into_data() {
-            let length = data.len() as u64;
-            if receiving.bytes + length > max || !receiving.inner.reserve(receiving.runner, length)
-            {
+            if !receiving.grow(data.len() as u64) {
                 drop(out);
                 drain(body).await;
                 return Ok(false);
             }
-            receiving.bytes += length;
             out.write_all(&data).await?;
         }
     }

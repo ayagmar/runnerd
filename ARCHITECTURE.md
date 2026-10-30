@@ -222,8 +222,11 @@ adopted too and drains as it would after a reload.
   repository's own branch whose pull request, push and run people, not bots, made, of a commit that branch has
   ([ADR 0053](docs/adr/0053-build-cache-written-by-own-pull-requests.md)); until then they are held, at most
   `max_size` of them in all and a quarter of it per job, and otherwise dropped, answered as stored. A runner reads
-  only its repository's entries, through its own socket. The cache is trimmed only while no runner runs
-  ([ADR 0052](docs/adr/0052-shared-build-cache.md)).
+  only its repository's entries, through its own socket. The cache is trimmed only while no runner runs, inside the
+  tick, which starts none until the trim ends ([ADR 0052](docs/adr/0052-shared-build-cache.md)). Each entry and upload
+  counts at least 4 KiB against `max_size`, so the limit also bounds how many there are; a runner holds at most
+  10,000 undecided uploads and is served at most 256 connections at once
+  ([ADR 0077](docs/adr/0077-cache-credentials-closed-slots-and-build-cache-counts.md)).
 - A JIT config reaches a container only as a root-only file (`docker::JIT_CONFIG_PATH`), never the create request
   or a log line. The entrypoint hands it to the runner's listener in `ACTIONS_RUNNER_INPUT_JITCONFIG`, never its
   arguments, which every user of the host reads; the listener drops it from the environment its job inherits.
@@ -242,7 +245,10 @@ adopted too and drains as it would after a reload.
   them waiting ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
 - A runner never mounts a slot's changes over a snapshot other than the one they were made against: `seed.sh` keeps
   `/base/.reseeding` from its first change to its last, a runner that finds it uses the image alone, and the next
-  reseed starts the profile over ([ADR 0066](docs/adr/0066-a-reseed-that-did-not-finish.md)).
+  reseed starts the profile over ([ADR 0066](docs/adr/0066-a-reseed-that-did-not-finish.md)). Each change to the
+  snapshot also writes a new `/base/.generation`; a slot whose `/state/.generation` differs, as one a lower `slots`
+  closed during the reseed, drops its layers' changes before it mounts them
+  ([ADR 0077](docs/adr/0077-cache-credentials-closed-slots-and-build-cache-counts.md)).
 - The history's schema is version 15 (`store/schema.sql`) or a migration from it: `Store::open` creates it in a new
   database and refuses any other version, older or newer ([ADR 0073](docs/adr/0073-no-compatibility-before-0-0-19.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
@@ -315,8 +321,12 @@ adopted too and drains as it would after a reload.
   the engine commits no container whose changes still hold one (`record::secrets_left`). Checking and committing a
   container run off the engine's loop.
 - A file in the cache layer that may hold a token (`CACHE_SECRETS` in `image/layers.sh`: cargo's credentials and
-  config, Gradle's `gradle.properties`) never reaches the next job in the slot, a record shell or a new snapshot,
-  including one an older snapshot holds ([ADR 0035](docs/adr/0035-runner-image-stages.md)).
+  config, Gradle's `gradle.properties` and init scripts, the Maven wrapper's settings, Hugging Face's tokens) never
+  reaches the next job in the slot, a record shell or a new snapshot, including one an older snapshot holds
+  ([ADR 0035](docs/adr/0035-runner-image-stages.md),
+  [ADR 0077](docs/adr/0077-cache-credentials-closed-slots-and-build-cache-counts.md)). Anything else a job writes to
+  a slot's layers or to `/shared` reaches later jobs of other repositories: the slot's on its profile, `/shared` on
+  every profile.
 - A slot's Docker Engine keeps its images and build cache on the slot's volume, given to dockerd as `--data-root`
   and never in `daemon.json`, where sysbox would mount a directory of its own over it. The slots' stores together
   stay within a quarter of Docker's disk not otherwise used: the engine gives each runner its share as

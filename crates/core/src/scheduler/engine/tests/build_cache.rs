@@ -300,6 +300,19 @@ async fn a_runner_whose_log_claims_another_runners_job_only_reads() {
     assert_eq!(cache.size().entries, 0, "{liar} stored nothing");
 }
 
+/// Uploads one entry of `bytes` to each of `keys` through `socket`.
+async fn upload(socket: &std::path::Path, keys: &[&str], bytes: usize) {
+    for key in keys {
+        let path = format!("/gradle/{key}");
+        assert_eq!(
+            buildcache::request(socket, "PUT", &path, &vec![0; bytes])
+                .await
+                .0,
+            200
+        );
+    }
+}
+
 #[tokio::test]
 async fn the_build_cache_is_trimmed_only_once_no_runner_runs() {
     let github = FakeGithub::default();
@@ -307,36 +320,69 @@ async fn the_build_cache_is_trimmed_only_once_no_runner_runs() {
     let dir = TestDir::new("engine-build-cache-trim");
     let config = CONFIG.replace(
         "maven = { max_size = \"5G\" }\n",
-        "maven = { max_size = \"5G\" }\nbuild = { max_size = \"1K\" }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { max_size = \"16K\" }\n",
     );
     let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, &config);
     let [(main, main_socket), (pull, _)] =
         main_and_pull_request(&github, &docker, &mut engine).await;
     until_decided(&mut engine, &cache, &[&main, &pull]).await;
-    // Each at most a quarter of the limit, as an entry may be.
-    for key in ["aa", "bb", "cc", "dd", "ee"] {
-        let path = format!("/gradle/{key}");
-        assert_eq!(
-            buildcache::request(&main_socket, "PUT", &path, &[0; 250])
-                .await
-                .0,
-            200
-        );
-    }
-    assert_eq!(cache.size().bytes, 1250);
+    // Each a quarter of the limit, as an entry may be at most.
+    upload(&main_socket, &["aa", "bb", "cc", "dd", "ee"], 4096).await;
+    assert_eq!(cache.size().bytes, 20 << 10);
     for _ in 0..3 {
         engine.tick(Shutdown::No).await;
     }
-    assert_eq!(cache.size().bytes, 1250, "trimmed while jobs run");
+    assert_eq!(cache.size().bytes, 20 << 10, "trimmed while jobs run");
+
+    // The jobs end, and the shared caches' check that starts then takes long to measure Docker's volumes; the reseed
+    // slot 1's job makes due finishes.
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.volume_sizes_held.send_replace(true);
+        state.seed_exit = Some(0);
+    }
     jobs_end(&docker, &mut engine).await;
+    assert_eq!(
+        cache.size().bytes,
+        16 << 10,
+        "trimmed at the first idle tick"
+    );
+    // Jobs start before the check ends, and use the build cache as it is.
+    let [(main, main_socket), (pull, _)] = two_more_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        3,
+        [trigger("push", "main"), trigger("pull_request", "main")],
+    )
+    .await;
+    let started = cache.size();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .volume_sizes_held
+        .send_replace(false);
     for _ in 0..50 {
-        if cache.size().bytes <= 1024 {
-            return;
+        if engine.trim.is_none() {
+            break;
         }
         engine.tick(Shutdown::No).await;
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    panic!("never trimmed: {:?}", cache.size());
+    assert!(engine.trim.is_none(), "the check ended");
+    assert_eq!(cache.size(), started, "the check trimmed while jobs run");
+
+    // What they store is trimmed once they end.
+    until_decided(&mut engine, &cache, &[&main, &pull]).await;
+    upload(&main_socket, &["ff"], 4096).await;
+    assert_eq!(cache.size().bytes, 20 << 10);
+    jobs_end(&docker, &mut engine).await;
+    assert_eq!(
+        cache.size().bytes,
+        16 << 10,
+        "trimmed at the next idle tick"
+    );
 }
 
 #[tokio::test]
@@ -746,10 +792,10 @@ async fn a_default_branch_renamed_while_runnerd_runs_writes_within_the_hour() {
     let pushes = || [trigger("push", "master"), trigger("push", "main")];
     let [(master, _), (main, _)] = two_jobs(&github, &docker, &mut engine, pushes()).await;
     until_decided(&mut engine, &cache, &[&master, &main]).await;
+    // The reseed slot 1's job makes due finishes.
+    docker.0.lock().unwrap().seed_exit = Some(0);
     jobs_end(&docker, &mut engine).await;
 
-    // The reseed slot 1's job made due finishes.
-    docker.0.lock().unwrap().seed_exit = Some(0);
     // The repository renames master to main; an hour on, runnerd asks GitHub again.
     github.0.lock().unwrap().default_branch = Some("main".to_owned());
     for known in engine.default_branches.values_mut() {

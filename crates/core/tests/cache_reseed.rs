@@ -85,8 +85,31 @@ async fn fixture_image(docker: &Docker, api: &bollard::Docker, tag: &str) -> Res
 /// Runs the rest of a command as the runner user, as a job does.
 const AS_RUNNER: &str = "setpriv --reuid=runner --regid=runner --init-groups --";
 
-/// A registry token a job leaves in cargo's home in the cache layer.
-const CREDENTIALS: &str = "/home/runner/.cache/cargo/credentials.toml";
+/// Registry tokens and settings a job leaves in the cache layer: cargo's, the Maven wrapper's, a Gradle init script
+/// and Hugging Face's.
+const CREDENTIALS: [&str; 4] = [
+    "/home/runner/.cache/cargo/credentials.toml",
+    "/home/runner/.cache/m2/settings.xml",
+    "/home/runner/.cache/gradle/init.d/publish.gradle",
+    "/home/runner/.cache/huggingface/token",
+];
+
+/// A job's script that leaves every one of `CREDENTIALS`.
+fn leave_credentials() -> String {
+    let files = CREDENTIALS.join(" ");
+    format!(
+        "{AS_RUNNER} sh -c 'for f in {files}; do mkdir -p \"${{f%/*}}\" && echo token > \"$f\"; done'"
+    )
+}
+
+/// A script that fails if a container sees any of `CREDENTIALS`.
+fn no_credentials() -> String {
+    CREDENTIALS
+        .iter()
+        .map(|file| format!("test ! -e {file}"))
+        .collect::<Vec<_>>()
+        .join(" && ")
+}
 
 /// A registry token an older image's reseed left in the profile's snapshot.
 const OLD_SNAPSHOT_CREDENTIALS: &str = "gradle/gradle.properties";
@@ -174,9 +197,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
             .await
             .map_err(|e| e.to_string())?;
     }
-    let leave_credentials = format!(
-        "{AS_RUNNER} sh -c 'mkdir -p /home/runner/.cache/cargo && echo token > {CREDENTIALS}'"
-    );
+    let leave_credentials = leave_credentials();
     let (code, output) = run_in_slot(
         docker,
         names,
@@ -234,7 +255,8 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
              && test -f /base/cache/runnerd-test \
              && test ! -e /state/cache/upper/runnerd-test \
              && ! touch /base/cache/runnerd-test 2> /dev/null \
-             && test ! -e {CREDENTIALS}"
+             && {}",
+            no_credentials()
         ),
     )
     .await?;
@@ -249,7 +271,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     if code != 0 {
         return Err(format!("the job in slot 1 exited {code}:\n{output}"));
     }
-    let (code, output) = run_in_slot(docker, names, 1, &format!("test ! -e {CREDENTIALS}")).await?;
+    let (code, output) = run_in_slot(docker, names, 1, &no_credentials()).await?;
     if code != 0 {
         return Err(format!(
             "slot 1's next job sees its last job's credentials (exit {code}):\n{output}"
@@ -261,6 +283,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     fitting_snapshot(docker, names, &capped).await?;
     capped_snapshot(docker, names, &capped).await?;
     interrupted_reseed(docker, names, &reseed("1T", "1T")).await?;
+    closed_slot(docker, names, &reseed("0K", "1T")).await?;
     image_entries_hidden(docker, names, &reseed("0K", "1T")).await
 }
 
@@ -311,6 +334,46 @@ async fn image_entries_hidden(
         .await?;
         if code != 0 {
             return Err(format!("the job in slot 1 exited {code}:\n{output}"));
+        }
+    }
+    Ok(())
+}
+
+/// A slot past the profile's `slots`, as a lower `slots` leaves until the caches' check removes its volume, is not
+/// mounted by a reseed, so its changes were made against the snapshot before. When `slots` grows again, it starts over
+/// from the new snapshot instead of hiding it.
+async fn closed_slot(docker: &Docker, names: &Names, reseed: &Reseed<'_>) -> Result<(), String> {
+    cache::prepare(docker, names, PROFILE, 3)
+        .await
+        .map_err(|e| e.to_string())?;
+    for (slot, text) in [(3, "slot-3"), (1, "snapshot")] {
+        let (code, output) = run_in_slot(
+            docker,
+            names,
+            slot,
+            &format!("{AS_RUNNER} sh -c 'echo {text} > /home/runner/.cache/shadow'"),
+        )
+        .await?;
+        if code != 0 {
+            return Err(format!("the job in slot {slot} exited {code}:\n{output}"));
+        }
+    }
+    let output = cache::reseed(docker, reseed)
+        .await
+        .map_err(|e| e.to_string())?;
+    println!("{output}");
+    for _ in 0..2 {
+        let (code, output) = run_in_slot(
+            docker,
+            names,
+            3,
+            "test \"$(cat /home/runner/.cache/shadow)\" = snapshot",
+        )
+        .await?;
+        if code != 0 {
+            return Err(format!(
+                "a slot closed during the reseed kept its changes over the new snapshot (exit {code}):\n{output}"
+            ));
         }
     }
     Ok(())
@@ -587,6 +650,7 @@ async fn a_reseed_shares_slot_1s_cache_with_slot_2_read_only() {
         names.base(PROFILE),
         names.slot(PROFILE, 1),
         names.slot(PROFILE, 2),
+        names.slot(PROFILE, 3),
         names.pnpm(),
         names.maven(),
     ] {
