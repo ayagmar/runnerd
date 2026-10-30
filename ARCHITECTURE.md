@@ -319,7 +319,9 @@ adopted too and drains as it would after a reload.
   goes on only while the one before made the job's runs faster or less throttled
   ([ADR 0075](docs/adr/0075-cpus-come-down-only-under-a-cap-no-burst-met.md),
   [ADR 0079](docs/adr/0079-cpu-weights-and-throttling-as-evidence.md)), taking back at the next look a lowering a run met or a job failed at
-  ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)), never leaving a profile's bounds,
+  ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)), never leaving a profile's bounds, never raising
+  `memory` past what `[host] memory_ceiling` leaves one runner beside the mirror (`Config::runner_ceiling`, which the
+  config check reads too; [ADR 0086](docs/adr/0086-sizing-and-init-know-the-memory-ceiling.md)),
   and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
   before the commit). Each change is recorded as pending in the history, synced to disk, before its file is written,
   then done (with a durable `sizing.changed` event) or failed; a pending one is settled at every look, auto sizing

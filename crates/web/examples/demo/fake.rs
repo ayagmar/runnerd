@@ -1155,6 +1155,7 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                 advice,
                 jobs,
                 revert: None,
+                ceiling: None,
             }
         })
         .collect();

@@ -456,8 +456,8 @@ enum Revert {
 }
 
 /// The change that takes back a lowering that went too far (`ProfileSizing::revert`): straight to the `memory`
-/// it came from and, under caps, the slots it had, without waiting for `raise_interval` or keeping to `max_step`,
-/// as an undo would.
+/// it came from, or as far toward it as `[host] memory_ceiling` allows, and, under caps, the slots it had, without
+/// waiting for `raise_interval` or keeping to `max_step`, as an undo would.
 fn reverted(
     config: &Config,
     profile: &Profile,
@@ -481,7 +481,11 @@ fn reverted(
         slots,
         cpus: None,
     };
-    if memory != revert.to || !within(profile, from, to) {
+    // As far back as `[host] memory_ceiling` allows, when a reload lowered it since.
+    let target = advised
+        .ceiling
+        .map_or(revert.to, |hold| revert.to.min(hold.most));
+    if memory != target || !within(profile, from, to) {
         return Revert::Outside;
     }
     if config.host.admission == Admission::Caps && running > slots {

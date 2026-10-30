@@ -152,8 +152,27 @@ pub struct ProfileSizing {
     /// When the advice is to take back a lowering auto sizing made that went too far: what showed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert: Option<SizingRevert>,
+    /// When `[host] memory_ceiling` holds the advice's `memory` under what its jobs need (ADR 0086).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub ceiling: Option<CeilingHold>,
     /// Each job that ran in it, by repository, workflow and name.
     pub jobs: Vec<JobSizing>,
+}
+
+/// `[host] memory_ceiling` holding a profile's `memory` under what its jobs need: the config check refuses a
+/// profile whose runner does not fit the ceiling beside the mirror, so the advice raises it no further (ADR 0086).
+/// It says only that no raise past `most` is possible, not that the jobs fit.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct CeilingHold {
+    /// What the jobs need, in bytes: the raise they ask for, or the `memory` a revert goes back to.
+    pub need: u64,
+    /// `[host] memory_ceiling`, in bytes.
+    pub ceiling: u64,
+    /// The mirror's memory beside it, 0 while the mirror is off.
+    pub mirror: u64,
+    /// The most `memory` a raise goes to: the ceiling less the mirror, down to a multiple of 256M so that the
+    /// config file says it exactly.
+    pub most: u64,
 }
 
 /// A lowering of a profile's `memory` by auto sizing that went too far, which the advice takes back (ADR 0070).
@@ -296,7 +315,8 @@ pub enum Advice {
         slots: u32,
     },
     /// The jobs need more than the cap, and the slice's `MemoryMax` does not hold one slot of what they need (under
-    /// `measured` admission, one runner beside the mirror): the slice has to grow first.
+    /// `measured` admission, one runner beside the mirror): the slice has to grow first. Also when the cap is at
+    /// what `[host] memory_ceiling` holds (`ProfileSizing::at_ceiling`): the ceiling has to grow first.
     SliceTooSmall {
         /// What the jobs need.
         memory: u64,
@@ -481,17 +501,14 @@ impl Sizing {
                 )
             }
             Advice::Raise { memory, .. } if let Some(revert) = &profile.revert => {
-                let how = match revert.cause {
-                    RevertCause::Met => format!("met the {} cap", size(revert.from)),
-                    RevertCause::Failed { runs } => {
-                        format!("failed {runs} times in a row at {}", size(revert.from))
-                    }
+                let held = match profile.ceiling {
+                    Some(hold) if memory < revert.to => format!(", {}", hold.most_line()),
+                    _ => String::new(),
                 };
                 format!(
-                    "raise memory back to {}: {} {how} since auto sizing lowered it from {}",
+                    "raise memory back to {}{held}: {}",
                     size(memory),
-                    revert.job,
-                    size(revert.to)
+                    revert.why()
                 )
             }
             Advice::Raise { memory, slots } => {
@@ -505,13 +522,81 @@ impl Sizing {
                 } else {
                     String::new()
                 };
-                format!("raise memory to {}: {why}{slots}", size(memory))
+                match profile.ceiling {
+                    Some(hold) => format!(
+                        "raise memory to {}, {}, short of the {} its jobs need: {why}{slots}",
+                        size(memory),
+                        hold.most_line(),
+                        size(hold.need)
+                    ),
+                    None => format!("raise memory to {}: {why}{slots}", size(memory)),
+                }
             }
-            Advice::SliceTooSmall { memory } => format!(
-                "needs {memory_needed} ({need}), more than the slice holds for one slot: raise the slice's \
-                 MemoryMax first",
-                memory_needed = size(memory)
-            ),
+            Advice::SliceTooSmall { memory } => too_small_line(profile, memory, need),
         }
+    }
+}
+
+/// The advice line of a profile whose jobs need `memory` and get no raise, with `need` how that comes from its
+/// peaks: `[host] memory_ceiling` holds it where it is (`ProfileSizing::at_ceiling`), or the slice is too small.
+fn too_small_line(profile: &ProfileSizing, memory: u64, need: String) -> String {
+    match profile.ceiling {
+        Some(hold) if profile.at_ceiling() => {
+            let why = profile.revert.as_ref().map_or(need, SizingRevert::why);
+            format!(
+                "keep {}, {}: its jobs need {} ({why}); raise [host] memory_ceiling if the host can grow further",
+                ByteSize(profile.memory),
+                hold.most_line(),
+                ByteSize(memory)
+            )
+        }
+        hold => {
+            let then = hold
+                .map(|hold| {
+                    format!(
+                        "; [host] memory_ceiling then holds it at {}",
+                        ByteSize(hold.most)
+                    )
+                })
+                .unwrap_or_default();
+            format!(
+                "needs {} ({need}), more than the slice holds for one slot: raise the slice's MemoryMax first{then}",
+                ByteSize(memory)
+            )
+        }
+    }
+}
+
+impl CeilingHold {
+    /// What bounds the raise, as the advice line says it after the `memory` it raises to: `the most the host's 24G
+    /// memory_ceiling leaves one runner beside the mirror's 1G`.
+    pub fn most_line(&self) -> String {
+        let ceiling = ByteSize(self.ceiling);
+        if self.mirror == 0 {
+            format!("the most the host's {ceiling} memory_ceiling leaves one runner")
+        } else {
+            format!(
+                "the most the host's {ceiling} memory_ceiling leaves one runner beside the mirror's {}",
+                ByteSize(self.mirror)
+            )
+        }
+    }
+}
+
+impl SizingRevert {
+    /// What showed the lowering went too far, as the advice line says it: `halyard/ledger CI / test met the 10G cap
+    /// since auto sizing lowered it from 14G`.
+    fn why(&self) -> String {
+        let how = match self.cause {
+            RevertCause::Met => format!("met the {} cap", ByteSize(self.from)),
+            RevertCause::Failed { runs } => {
+                format!("failed {runs} times in a row at {}", ByteSize(self.from))
+            }
+        };
+        format!(
+            "{} {how} since auto sizing lowered it from {}",
+            self.job,
+            ByteSize(self.to)
+        )
     }
 }

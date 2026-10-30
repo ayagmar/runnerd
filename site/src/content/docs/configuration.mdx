@@ -215,7 +215,7 @@ A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T
 | `poll_interval` | `"15s"` | how often runnerd asks GitHub for queued jobs |
 | `admission` | `"caps"` | what a runner reserves before it starts: its profile's `memory`, or with `"measured"` its job's predicted peak ([Measured admission](../admission/#measured-admission)) |
 | `cpu_overcommit` | unset | a factor above 0, at most 16; set, a runner also has to fit the slice's CPUs times it ([CPU admission](../admission/#cpu-admission)) |
-| `memory_ceiling` | unset | a size: the most memory the host can grow to, for a VM whose memory grows on demand, such as `MemTotal` at Hyper-V Dynamic Memory's maximum; admission counts what it can still grow by ([A host whose memory grows](../admission/#a-host-whose-memory-grows)). no effect at or under the host's memory now, and `runnerd doctor` warns when it is under; at least one runner of the largest profile with the mirror |
+| `memory_ceiling` | unset | a size: the most memory the host can grow to, for a VM whose memory grows on demand, such as `MemTotal` at Hyper-V Dynamic Memory's maximum; admission counts what it can still grow by ([A host whose memory grows](../admission/#a-host-whose-memory-grows)), and auto sizing raises no profile past it less the mirror. no effect at or under the host's memory now, and `runnerd doctor` warns when it is under; at least one runner of the largest profile with the mirror |
 
 ### `[caches]`
 

@@ -1,6 +1,8 @@
 # 0084. A host whose memory grows to a ceiling counts what it can still grow by
 
-Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-hosts-memory.md).
+Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-hosts-memory.md). Amended by
+[0086](0086-sizing-and-init-know-the-memory-ceiling.md): auto sizing raises no profile past the ceiling less the
+mirror, and `runnerd init --memory-ceiling` writes the key and sizes for it.
 
 ## Context
 
@@ -70,7 +72,7 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
   further starts while it lasts.
 - With a ceiling, the margin is larger than a sixteenth of the host as it is now: 6G on a 16G VM that can grow to
   96G. That is what the margin will need once it grew.
-- Auto sizing bounds a memory raise by `MemoryMax`, not by the ceiling. Where the ceiling is under `MemoryMax`, a
-  raise past the ceiling less the mirror fails the config check and is proposed again at each look, logged once.
+- Auto sizing bounds a memory raise by the ceiling less the mirror as well as by `MemoryMax`
+  ([0086](0086-sizing-and-init-know-the-memory-ceiling.md)), so it never proposes a raise the config check refuses.
 - `HostMemory.ceiling` is a new optional field, absent unless set; an older client ignores it and shows the host's
   line without `growing to`.

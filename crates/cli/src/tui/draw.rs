@@ -2021,7 +2021,7 @@ fn sizing_profiles(
             }));
         }
         cells.push(Cell::from(Span::styled(
-            profile.advice.word(),
+            profile.advice_word(),
             theme.tone(profile.advice.tone().into()),
         )));
         Row::new(cells)

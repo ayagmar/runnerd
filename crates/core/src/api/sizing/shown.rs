@@ -156,6 +156,11 @@ impl Sizing {
                 changes
                     .iter()
                     .map(|profile| match profile.advice {
+                        Advice::SliceTooSmall { .. } if profile.at_ceiling() => format!(
+                            "raise [host] memory_ceiling if the host can grow further, then: runnerctl sizing \
+                             apply {}",
+                            profile.name
+                        ),
                         Advice::SliceTooSmall { .. } => format!(
                             "raise MemoryMax in the slice's unit file, sudo systemctl daemon-reload, then: \
                              runnerctl sizing apply {}",
@@ -191,6 +196,25 @@ impl Advice {
             Advice::Lower { memory, slots } | Advice::Raise { memory, slots } => {
                 format!("{} × {slots}", ByteSize(memory))
             }
+        }
+    }
+}
+
+impl ProfileSizing {
+    /// Whether `[host] memory_ceiling` keeps its `memory` where it is although its jobs need more: no raise is
+    /// possible until the ceiling grows.
+    pub fn at_ceiling(&self) -> bool {
+        matches!(self.advice, Advice::SliceTooSmall { .. })
+            && self.ceiling.is_some_and(|hold| self.memory >= hold.most)
+    }
+
+    /// Its advice in a word or two, for a table cell: `Advice::word`, or `at ceiling` while `[host] memory_ceiling`
+    /// holds its `memory` where it is.
+    pub fn advice_word(&self) -> String {
+        if self.at_ceiling() {
+            "at ceiling".to_owned()
+        } else {
+            self.advice.word()
         }
     }
 }
