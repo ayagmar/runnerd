@@ -634,7 +634,8 @@ impl Writer<'_> {
         let closed = self.db.execute(
             "UPDATE jobs SET state = ?2, finished_at = coalesce(finished_at, ?3), cpu_time = ?4, \
              cpu_peak = ?5, cpu_average = ?6, memory_peak = ?7, memory_average = ?8, \
-             network_received = ?9, network_sent = ?10 WHERE id = ?1 AND state = 'running'",
+             network_received = ?9, network_sent = ?10, cpu_periods = ?11, cpu_throttled = ?12, \
+             cpu_stalled = ?13 WHERE id = ?1 AND state = 'running'",
             params![
                 job,
                 state,
@@ -646,6 +647,9 @@ impl Writer<'_> {
                 metrics.memory_average,
                 metrics.network_received,
                 metrics.network_sent,
+                metrics.cpu_periods,
+                metrics.cpu_throttled,
+                metrics.cpu_stalled,
             ],
         )?;
         if closed == 1
@@ -735,7 +739,8 @@ impl Writer<'_> {
         for sample in samples {
             self.db.execute(
                 "INSERT OR REPLACE INTO samples (runner, at, cpu, cpu_usage, memory, network_received, \
-                 network_sent) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)",
+                 network_sent, cpu_periods, cpu_throttled, cpu_stalled) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10)",
                 params![
                     sample.runner,
                     sample.at,
@@ -743,7 +748,10 @@ impl Writer<'_> {
                     sample.cpu_usage,
                     sample.memory,
                     sample.network_received,
-                    sample.network_sent
+                    sample.network_sent,
+                    sample.cpu_held.periods,
+                    sample.cpu_held.throttled,
+                    sample.cpu_held.stalled,
                 ],
             )?;
             if let Some(ooms) = sample.events.oom {

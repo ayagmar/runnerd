@@ -2244,6 +2244,9 @@ fn job_details(app: &App, job: &Job, now: u64) -> Vec<(u8, String)> {
     if let Some(ran) = summary.ran(now) {
         details.push((0, format!("ran {}", duration(ran))));
     }
+    if let Some(held) = summary.cpu_held(now) {
+        details.push((3, held));
+    }
     if job
         .record
         .as_ref()

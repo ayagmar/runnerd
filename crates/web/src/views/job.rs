@@ -339,7 +339,6 @@ pub(crate) fn steps(view: &JobView, parts: &Parts) -> Markup {
 /// limits as configured now, with the totals.
 pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
     let summary = &view.job.summary;
-    let metrics = &summary.metrics;
     let samples = &view.samples.samples;
     let start = samples
         .first()
@@ -400,8 +399,6 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
         time,
         gap,
     };
-    let optional =
-        |value: Option<u64>, write: fn(u64) -> String| value.map_or("–".to_owned(), write);
     let bands = step_bands(view);
     html! {
         section #metrics .metrics aria-labelledby="metrics-title" {
@@ -423,21 +420,33 @@ pub(crate) fn metrics(view: &JobView, parts: &Parts) -> Markup {
                     }
                 }
             }
-            dl.totals {
-                // The job's own peak, which history keeps after its samples are deleted; the charts' peak is of the
-                // samples left.
-                div { dt { "Memory peak over the job" } dd { (optional(metrics.memory_peak, format::bytes)) } }
-                div { dt { "Average memory" } dd { (optional(metrics.memory_average, format::bytes)) } }
-                div { dt { "CPU time" } dd { (optional(metrics.cpu_time, format::cpu_time)) } }
-                div { dt { "Average CPU" } dd { (optional(metrics.cpu_average, in_cores)) } }
-                div { dt { "Received" } dd { (optional(metrics.network_received, format::bytes)) } }
-                div { dt { "Sent" } dd { (optional(metrics.network_sent, format::bytes)) } }
-                div { dt { "From the mirror" } dd { (format::bytes(metrics.mirror_bytes)) } }
-                @if let Some(throttled) = metrics.sock_throttled {
-                    div { dt { "Throttled for memory pressure" } dd { (throttled) " times" } }
-                }
-                (build_cache(&metrics.build_cache))
+            (totals(view))
+        }
+    }
+}
+
+/// The job's totals over its whole run, which history keeps after its samples are deleted.
+fn totals(view: &JobView) -> Markup {
+    let metrics = &view.job.summary.metrics;
+    let optional =
+        |value: Option<u64>, write: fn(u64) -> String| value.map_or("–".to_owned(), write);
+    html! {
+        dl.totals {
+            // The job's own peak; the charts' peak is of the samples left.
+            div { dt { "Memory peak over the job" } dd { (optional(metrics.memory_peak, format::bytes)) } }
+            div { dt { "Average memory" } dd { (optional(metrics.memory_average, format::bytes)) } }
+            div { dt { "CPU time" } dd { (optional(metrics.cpu_time, format::cpu_time)) } }
+            div { dt { "Average CPU" } dd { (optional(metrics.cpu_average, in_cores)) } }
+            @if let Some(held) = view.job.summary.cpu_held(view.now) {
+                div { dt { "CPU held back" } dd { (held) } }
             }
+            div { dt { "Received" } dd { (optional(metrics.network_received, format::bytes)) } }
+            div { dt { "Sent" } dd { (optional(metrics.network_sent, format::bytes)) } }
+            div { dt { "From the mirror" } dd { (format::bytes(metrics.mirror_bytes)) } }
+            @if let Some(throttled) = metrics.sock_throttled {
+                div { dt { "Throttled for memory pressure" } dd { (throttled) " times" } }
+            }
+            (build_cache(&metrics.build_cache))
         }
     }
 }

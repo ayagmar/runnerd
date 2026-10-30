@@ -149,6 +149,15 @@ pub struct TtySize {
     pub rows: u16,
 }
 
+/// The CPU shares of a container with `cpus` CPUs: 1024 a CPU, within the 2 to 262144 Docker takes, which it writes as
+/// the container's `cpu.weight`. Every container runnerd starts sits in the slice beside the others, so when the
+/// slice's CPUs are all in use they share them in proportion to their `cpus`, not evenly; a container with work
+/// still gets at most its `cpus` (`nano_cpus`), and programs outside the slice share the host's CPUs with the slice by
+/// its own weight (ADR 0079).
+pub fn cpu_shares(cpus: u32) -> i64 {
+    (i64::from(cpus) * 1024).clamp(2, 262_144)
+}
+
 /// The create-container request for a runner container under an isolation backend.
 pub fn create_body(spec: &RunnerSpec, isolation: &dyn Isolation) -> ContainerCreateBody {
     // Clamped to 8 EiB, the most Docker takes.
@@ -159,6 +168,7 @@ pub fn create_body(spec: &RunnerSpec, isolation: &dyn Isolation) -> ContainerCre
         // Swap equal to memory: the container gets no swap on top of its memory.
         memory_swap: Some(memory),
         nano_cpus: Some(i64::from(spec.cpus) * 1_000_000_000),
+        cpu_shares: Some(cpu_shares(spec.cpus)),
         init: Some(true),
         mounts: Some(spec.mounts.clone()),
         network_mode: spec.network.clone(),

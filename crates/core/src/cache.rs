@@ -11,7 +11,7 @@ use bollard::models::{
 
 use crate::api;
 use crate::config::{self, ByteSize};
-use crate::docker::{DockerApi, Error, RunnerSpec, is_not_found};
+use crate::docker::{DockerApi, Error, RunnerSpec, cpu_shares, is_not_found};
 use crate::isolation::Isolation;
 
 /// The Docker Hub pull-through cache (`registry` 3.1.2, multi-platform index).
@@ -129,6 +129,7 @@ pub fn mirror_body(names: &Names, mirror: &config::Mirror, slice: &str) -> Conta
             memory: Some(memory),
             memory_swap: Some(memory),
             nano_cpus: Some(i64::from(mirror.cpus) * 1_000_000_000),
+            cpu_shares: Some(cpu_shares(mirror.cpus)),
             // When the slice runs out of memory, which measured admission allows, the kernel kills a job's process
             // before the mirror every runner pulls through.
             oom_score_adj: Some(MIRROR_OOM_SCORE_ADJ),

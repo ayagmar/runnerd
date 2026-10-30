@@ -18,7 +18,7 @@ use tracing::warn;
 use crate::api::{self, Event, EventEnvelope};
 use crate::config::History;
 use crate::github::{JobDetails, QueuedJob};
-use crate::observe::metrics::Events;
+use crate::observe::metrics::{CpuHeld, Events};
 use crate::scheduler::warm;
 use crate::sizing;
 use crate::sync::lock;
@@ -35,10 +35,21 @@ const OLDEST: u32 = 15;
 
 /// The steps from [`OLDEST`] on, in order, each with the version it brings a database to. A change to the schema
 /// adds one here and makes the same change to `schema.sql`, which a new database gets instead.
-const MIGRATIONS: &[(u32, &str)] = &[(
-    16,
-    "ALTER TABLE jobs ADD COLUMN unseen INTEGER NOT NULL DEFAULT 0;",
-)];
+const MIGRATIONS: &[(u32, &str)] = &[
+    (
+        16,
+        "ALTER TABLE jobs ADD COLUMN unseen INTEGER NOT NULL DEFAULT 0;",
+    ),
+    (
+        17,
+        "ALTER TABLE jobs ADD COLUMN cpu_periods INTEGER;\n\
+         ALTER TABLE jobs ADD COLUMN cpu_throttled INTEGER;\n\
+         ALTER TABLE jobs ADD COLUMN cpu_stalled INTEGER;\n\
+         ALTER TABLE samples ADD COLUMN cpu_periods INTEGER;\n\
+         ALTER TABLE samples ADD COLUMN cpu_throttled INTEGER;\n\
+         ALTER TABLE samples ADD COLUMN cpu_stalled INTEGER;",
+    ),
+];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
 const VERSION: u32 = match MIGRATIONS.last() {
@@ -143,6 +154,8 @@ pub struct SampleRecord {
     pub network_sent: u64,
     /// The container's `memory.events` so far.
     pub events: Events,
+    /// What held the container's CPU back so far.
+    pub cpu_held: CpuHeld,
 }
 
 /// The last measurement of the cache volumes.

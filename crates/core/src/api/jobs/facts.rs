@@ -118,6 +118,40 @@ impl JobSummary {
         })
     }
 
+    /// What held its CPU back by `now`: `held at its CPU cap in 18% of its busy time, waited for a CPU 31% of its
+    /// run`. The cap's part is left out without a quota's figures or busy periods, the wait's without pressure stall
+    /// information or a run time; `None` when both are. A share that is not 0 never reads as 0%.
+    pub fn cpu_held(&self, now: u64) -> Option<String> {
+        let metrics = &self.metrics;
+        let share = |part: u64, whole: u64| match part.saturating_mul(100) / whole.max(1) {
+            0 => "under 1%".to_owned(),
+            percent => format!("{}%", percent.min(100)),
+        };
+        let cap = metrics
+            .cpu_periods
+            .zip(metrics.cpu_throttled)
+            .filter(|(periods, _)| *periods > 0)
+            .map(|(periods, throttled)| match throttled {
+                0 => "never held at its CPU cap".to_owned(),
+                throttled => format!(
+                    "held at its CPU cap in {} of its busy time",
+                    share(throttled, periods)
+                ),
+            });
+        let waited = metrics
+            .cpu_stalled
+            .zip(self.ran(now).filter(|ran| *ran > 0))
+            .map(|(stalled, ran)| match stalled {
+                0 => "never waited for a CPU".to_owned(),
+                stalled => format!(
+                    "waited for a CPU {} of its run",
+                    share(stalled, ran.saturating_mul(1000))
+                ),
+            });
+        let parts: Vec<String> = cap.into_iter().chain(waited).collect();
+        (!parts.is_empty()).then(|| parts.join(", "))
+    }
+
     /// Seconds it ran: until it finished, or until `now` while it may still finish. `None` before it started, and
     /// for a final job without a finish time, which no client claims ran for as long as it has been since.
     pub fn ran(&self, now: u64) -> Option<u64> {

@@ -1,7 +1,8 @@
 //! Auto sizing's `cpus`: raised for a job its cap holds back over the whole run, not for a build whose bursts reach
-//! any cap; lowered under `caps` admission toward twice the heaviest job's average or the runs' peak, never on runs
-//! that met the cap (ADR 0075); and its invariants over generated sequences of runs,
-//! looks, hand edits, undos and restarts.
+//! any cap under `caps` admission; raised under `measured` for runs the cap held back, throttled where runnerd
+//! measured that, else bursting to it (ADRs 0075 and 0079); lowered under `caps` toward twice the heaviest job's
+//! average or the runs' peak, never on runs the cap held back; and its invariants over generated sequences of runs,
+//! idle and contended, looks, hand edits, undos and restarts.
 
 use std::collections::BTreeMap;
 
@@ -332,7 +333,7 @@ fn an_over_provisioned_profile_steps_down_to_its_target_over_several_intervals_a
             assert!(
                 change
                     .reason
-                    .contains("peaked at 20 CPUs at most, none near the cap, and the heaviest job, halyard/ledger \
+                    .contains("peaked at 20 CPUs at most, none held back by the cap, and the heaviest job, halyard/ledger \
                                CI / android, averaged 7.8 CPUs (p95); the larger of that peak and twice that \
                                average is 20"),
                 "{}",
@@ -624,6 +625,167 @@ fn under_measured_admission_a_cap_the_bursts_meet_goes_back_up_until_they_fit() 
         assert_eq!(*seen.last().unwrap(), end, "{seen:?}");
         assert!(seen.is_sorted(), "never down: {seen:?}");
     }
+}
+
+/// `gate` with what its quota throttled, as runnerd measures from schema 17 on: busy all through, in 100 ms periods,
+/// and throttled in each period of its wide phase that wants more than the cap. At 9 CPUs that phase takes 146 s of
+/// its 517, 28% of its periods.
+fn throttled_gate(cap: u32, at: u64) -> Vec<Ran> {
+    let millicores = u64::from(cap) * 1000;
+    gate(cap, at)
+        .into_iter()
+        .enumerate()
+        .map(|(i, mut run)| {
+            let wide = 23_500 - 100 * i as u64;
+            let used = wide.min(millicores);
+            let phase = 1_313_000 * 1000 / used;
+            let took = 371_000 + phase;
+            run.cpu_periods = Some(took / 100);
+            run.cpu_throttled = Some(if wide > millicores { phase / 100 } else { 0 });
+            run
+        })
+        .collect()
+}
+
+/// Where `cpus` of jvm go over 8 looks 2 hours apart, starting at `start` CPUs under `admission`, each look's runs
+/// made by `runs` at the jvm's `cpus` then.
+fn climb(admission: &str, start: u32, runs: fn(u32, u64) -> Vec<Ran>) -> Vec<u32> {
+    let mut text = CONFIG
+        .replacen("cpus = 8", &format!("cpus = {start}"), 1)
+        .replace(
+            "isolation = \"sysbox\"",
+            &format!("isolation = \"sysbox\"\nadmission = \"{admission}\""),
+        );
+    let mut jobs = Vec::new();
+    let mut last = BTreeMap::new();
+    let mut seen = vec![start];
+    for look in 0..8 {
+        let now = NOW + look * 2 * HOUR;
+        let config = on(&text, "max_step = 50");
+        jobs.extend(runs(config.profiles["jvm"].cpus, now - HOUR));
+        let looked = look_at(&config, &history(jobs.clone()), Some(32_000), now, &last);
+        for change in &looked.changes {
+            text = resize_profile(&text, &change.profile, change.to).unwrap();
+            last.insert(change.profile.clone(), change.at);
+        }
+        seen.push(on(&text, "max_step = 50").profiles["jvm"].cpus);
+    }
+    seen
+}
+
+#[test]
+fn under_measured_admission_a_cap_that_throttles_the_runs_goes_up_until_it_does_not() {
+    // The gate at 9 CPUs, throttled in 28% of its busy time: a step a look to the first cap its quota no longer
+    // throttles it at, as the bursts did before runnerd measured that.
+    let seen = climb("measured", 9, throttled_gate);
+    assert_eq!(seen, [9, 13, 19, 28, 28, 28, 28, 28, 28], "{seen:?}");
+    let raised = look(
+        &measured_at(9),
+        &history(throttled_gate(9, NOW - HOUR)),
+        Some(32_000),
+    );
+    assert!(
+        raised.changes[0]
+            .reason
+            .contains("10 runs of halyard/ledger CI / android were held back by its 9 CPUs, throttled in 10% of their busy time or more:"),
+        "{}",
+        raised.changes[0].reason
+    );
+    // Under caps neither the throttling nor the averages raise it there, and the throttling holds the lowering.
+    assert_eq!(climb("caps", 9, throttled_gate), [9; 9]);
+}
+
+#[test]
+fn a_peak_at_the_cap_raises_nothing_once_the_quota_says_it_did_not_throttle_the_run() {
+    // A contended host: the host's other programs hold the CPUs, so the runs get less than they ask without their
+    // quota throttling them, and a 2-second interval at the cap now and then is no sign of the cap's cost. The
+    // slice, not the profile, is short: more `cpus` would not help.
+    let contended: Vec<Ran> = runs("android", 6, 3_300, 9_000, NOW - HOUR)
+        .into_iter()
+        .map(|run| Ran {
+            cpu_periods: Some(5_000),
+            cpu_throttled: Some(20),
+            ..run
+        })
+        .collect();
+    let looked = look(&measured_at(9), &history(contended.clone()), Some(32_000));
+    assert_eq!(cpus_to(&looked), [], "no raise without throttling");
+    assert_eq!(looked.refused, []);
+    // The same runs before runnerd measured throttling raise it, as their peaks said before.
+    let unmeasured: Vec<Ran> = contended
+        .into_iter()
+        .map(|run| Ran {
+            cpu_periods: None,
+            cpu_throttled: None,
+            ..run
+        })
+        .collect();
+    let looked = look(&measured_at(9), &history(unmeasured), Some(32_000));
+    assert_eq!(cpus_to(&looked), [("jvm", Some(9), Some(11))]);
+}
+
+#[test]
+fn after_the_upgrade_runs_with_and_without_a_throttling_figure_each_say_what_they_can() {
+    let config = measured_at(9);
+    let unmeasured = runs("android", 2, 3_300, 9_000, NOW - HOUR);
+    let throttled = |throttled| {
+        runs("android", 1, 3_300, 9_000, NOW - HOUR)
+            .into_iter()
+            .map(move |run| Ran {
+                cpu_periods: Some(5_000),
+                cpu_throttled: Some(throttled),
+                ..run
+            })
+    };
+    // Two runs from before that met the cap and one since that the quota throttled: three held back.
+    let mut jobs = unmeasured.clone();
+    jobs.extend(throttled(1_500));
+    let looked = look(&config, &history(jobs), Some(32_000));
+    assert_eq!(cpus_to(&looked), [("jvm", Some(9), Some(11))]);
+    assert!(
+        looked.changes[0]
+            .reason
+            .contains("or peaking at the cap where that was not measured"),
+        "{}",
+        looked.changes[0].reason
+    );
+    // Two from before and three since that it never throttled: two held back, too few.
+    let mut jobs = unmeasured;
+    jobs.extend((0..3).flat_map(|_| throttled(0)));
+    assert_eq!(cpus_to(&look(&config, &history(jobs), Some(32_000))), []);
+}
+
+#[test]
+fn under_caps_admission_a_cap_that_throttled_a_run_is_not_lowered_whatever_its_peak() {
+    // 31 CPUs, the gate's bursts peaking at 20 as 2-second samples see them, but within those 2 seconds its quota
+    // throttled it in an eighth of its busy time: its averages say what the cap allowed, not what it needs.
+    let day_ago = BTreeMap::from([("jvm".to_owned(), (NOW - 25 * HOUR) / 1000)]);
+    let at = |throttled| {
+        bursts("android", 10, 3_900, 20_000, 31_000, NOW - HOUR)
+            .into_iter()
+            .map(|run| Ran {
+                cpu_periods: Some(8_000),
+                cpu_throttled: Some(throttled),
+                ..run
+            })
+            .collect::<Vec<_>>()
+    };
+    let held = look_at(
+        &jvm_at(31, ""),
+        &history(at(1_000)),
+        Some(32_000),
+        NOW,
+        &day_ago,
+    );
+    assert_eq!(cpus_to(&held), []);
+    let free = look_at(
+        &jvm_at(31, ""),
+        &history(at(0)),
+        Some(32_000),
+        NOW,
+        &day_ago,
+    );
+    assert_eq!(cpus_to(&free), [("jvm", Some(31), Some(24))]);
 }
 
 /// The owner's host: measured admission with a CPU budget of 1.5 times a 32-CPU slice, jvm cut to 9 CPUs and node to
@@ -1024,15 +1186,31 @@ mod invariants {
             }
         }
 
-        /// Runs of one of `profile`'s jobs at its cap now, some failed, cancelled or unmeasured.
+        /// Runs of one of `profile`'s jobs at its cap now, some failed, cancelled or unmeasured. A run that bursts
+        /// past the cap is throttled in a share of its busy periods; one on a contended host, whose other programs
+        /// hold its CPUs, gets less than it asks without its quota throttling it. Some have no throttling figure,
+        /// as runs from before schema 17 or on a kernel without the cpu controller.
         fn run(&mut self, rng: &mut Rng, profile: &str) {
             let config = self.config();
             let limits = &config.profiles[profile];
             let cap = u64::from(limits.cpus) * 1000;
             let (name, heavy, wide) = rng.pick(&JOBS);
+            let contended = rng.below(4) == 0;
             for _ in 0..=rng.below(5) {
                 let share = heavy.saturating_sub(10) + rng.below(21);
-                let gets = (wide * 1000 - rng.below(1000)).min(cap);
+                let wants = wide * 1000 - rng.below(1000);
+                let mut gets = wants.min(cap);
+                let periods = 9000;
+                let mut throttled = if wants > cap {
+                    // The longer it bursts past the cap, the more of its periods the quota holds.
+                    periods * (wants - cap).min(cap) / cap / 2 + rng.below(periods / 20)
+                } else {
+                    rng.below(periods / 50)
+                };
+                if contended {
+                    gets = gets * (50 + rng.below(40)) / 100;
+                    throttled = 0;
+                }
                 let mut ran = Ran {
                     profile: profile.to_owned(),
                     memory_cap: Some(limits.memory.0),
@@ -1040,12 +1218,17 @@ mod invariants {
                     cpu_cap: Some(cap),
                     cpu_peak: gets,
                     cpu_average: Some((gets * share / 100).max(1)),
+                    cpu_periods: Some(periods),
+                    cpu_throttled: Some(throttled),
                     queued_at: self.now,
                     started_at: Some(self.now + rng.below(300) * 1000),
                     runner_started_at: self.now,
                     finished_at: Some(self.now + HOUR / 4),
                     ..job("halyard/ledger", name, profile, 0, 0)
                 };
+                if rng.below(4) == 0 {
+                    (ran.cpu_periods, ran.cpu_throttled) = (None, None);
+                }
                 match rng.below(20) {
                     0 | 1 => ran.succeeded = false,
                     2 => ran.cpu_average = None,
@@ -1083,6 +1266,35 @@ mod invariants {
             jobs.entry(name)
                 .or_default()
                 .extend(job.cpu_average.filter(|average| *average > 0));
+        }
+        jobs
+    }
+
+    /// Whether the cap held a run back: its quota throttled it in a tenth of its busy periods, or, without that
+    /// figure, its burst met the cap.
+    fn held(job: &Ran, cap: u64) -> bool {
+        match job.cpu_periods.zip(job.cpu_throttled) {
+            Some((periods, throttled)) => throttled > 0 && throttled * 100 >= periods * 10,
+            None => job.cpu_peak * 100 >= cap * 95,
+        }
+    }
+
+    /// How many of the runs `evidence` reads the cap held back, by job.
+    fn holds(world: &World, profile: &str, cap: u64) -> BTreeMap<String, usize> {
+        let since = world
+            .fresh
+            .get(profile)
+            .copied()
+            .unwrap_or(0)
+            .max(world.now - 30 * DAY);
+        let mut jobs: BTreeMap<String, usize> = BTreeMap::new();
+        for job in world.history().jobs.iter().filter(|job| {
+            job.profile == profile
+                && job.cpu_cap == Some(cap)
+                && job.succeeded
+                && job.queued_at >= since
+        }) {
+            *jobs.entry(job.name.clone()).or_default() += usize::from(held(job, cap));
         }
         jobs
     }
@@ -1127,7 +1339,7 @@ mod invariants {
     }
 
     /// Whether the evidence allows a raise of `cpus`: 3 runs of a job averaging 70% of the cap at the median, or under
-    /// measured admission, 3 runs of a job whose bursts met the cap.
+    /// measured admission, 3 runs of a job the cap held back.
     fn raisable(
         world: &World,
         config: &Config,
@@ -1138,11 +1350,9 @@ mod invariants {
         let bound = jobs
             .values()
             .any(|averages| averages.len() >= 3 && spread(averages.clone()).p50 * 100 >= cap * 70);
-        let met = config.host.admission == Admission::Measured
-            && peaks(world, profile, cap)
-                .values()
-                .any(|peaks| peaks.iter().filter(|peak| **peak * 100 >= cap * 95).count() >= 3);
-        bound || met
+        let held = config.host.admission == Admission::Measured
+            && holds(world, profile, cap).values().any(|held| *held >= 3);
+        bound || held
     }
 
     /// Checks a look's `cpus` changes against the evidence and the rules; `Err` says what broke.
@@ -1192,10 +1402,9 @@ mod invariants {
                     return Err(format!("{profile}: lowered under measured admission"));
                 }
                 let peak = peak(world, profile, cap);
-                if peak * 100 >= cap * 95 {
-                    return Err(format!(
-                        "{profile}: lowered on runs that met the cap, peaking at {peak}"
-                    ));
+                let held: usize = holds(world, profile, cap).values().sum();
+                if held > 0 {
+                    return Err(format!("{profile}: lowered on {held} runs held"));
                 }
                 if u64::from(to_cpus) * 1000 < peak {
                     return Err(format!(

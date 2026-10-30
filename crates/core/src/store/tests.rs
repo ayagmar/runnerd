@@ -13,7 +13,7 @@ use super::{
 };
 use crate::api::{Bucket, HostSample, JobQuery, JobState, Started, StatsQuery};
 use crate::github::QueuedJob;
-use crate::observe::metrics::Events;
+use crate::observe::metrics::{CpuHeld, Events};
 use crate::sizing::Measure;
 use crate::testdir::TestDir;
 
@@ -427,6 +427,7 @@ async fn a_host_sample_reads_back_at_once_and_is_kept_from_a_flush_on() {
 
 fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord {
     SampleRecord {
+        cpu_held: CpuHeld::default(),
         events: Events::default(),
         runner: runner.to_owned(),
         at,
@@ -469,6 +470,87 @@ async fn a_job_counts_its_usage_from_the_last_sample_before_it_started() {
     .await;
     assert_eq!(metrics.cpu_time, Some(2500));
     assert_eq!(metrics.network_received, Some(11_000_000));
+}
+
+/// `sample` with what held its container's CPU back so far: `periods` and `throttled` of its quota, `stalled` µs.
+fn held(
+    at: u64,
+    periods: Option<u64>,
+    throttled: Option<u64>,
+    stalled: Option<u64>,
+) -> SampleRecord {
+    SampleRecord {
+        cpu_held: CpuHeld {
+            periods,
+            throttled,
+            stalled,
+        },
+        ..sample("r1", at, 0, 0)
+    }
+}
+
+#[tokio::test]
+async fn what_held_a_jobs_cpu_back_counts_from_its_start_and_only_where_every_sample_says() {
+    let figures = |metrics: crate::api::JobMetrics| {
+        (
+            metrics.cpu_periods,
+            metrics.cpu_throttled,
+            metrics.cpu_stalled,
+        )
+    };
+    // A warm runner: its counters before the job are the idle runner's, which the job did not use.
+    let warm = metrics_of(vec![
+        held(1_000_150, Some(40), Some(5), Some(9_000)),
+        held(1_000_250, Some(1_040), Some(205), Some(409_000)),
+        held(1_000_350, Some(2_040), Some(405), Some(809_000)),
+    ])
+    .await;
+    assert_eq!(figures(warm), (Some(2_000), Some(400), Some(800)));
+    // A sample from before runnerd read them, as the last before the job after the upgrade: what the counter held
+    // then is unknown, so the job's figure is too, never read as 0.
+    let upgraded = metrics_of(vec![
+        held(1_000_150, None, None, None),
+        held(1_000_250, Some(1_040), Some(205), Some(409_000)),
+    ])
+    .await;
+    assert_eq!(figures(upgraded), (None, None, None));
+    // A kernel without the cpu controller keeps no periods, and the sample is still taken with its pressure.
+    let no_quota = metrics_of(vec![
+        held(1_000_250, None, None, Some(20_000)),
+        held(1_000_350, None, None, Some(50_000)),
+    ])
+    .await;
+    assert_eq!(figures(no_quota.clone()), (None, None, Some(50)));
+    assert_eq!(no_quota.memory_peak, Some(1000), "the samples count");
+}
+
+#[tokio::test]
+async fn a_restart_mid_job_keeps_what_held_its_cpu_back() {
+    let dir = TestDir::new("store");
+    let path = dir.0.join("runnerd.db");
+    let store = Store::open(&path).unwrap();
+    store.queued("o/r", &queued(1));
+    store.runner_started(runner("r1", 1_000_100));
+    store.claimed(1, 10, "r1", 1_000_200);
+    store.samples(vec![
+        held(1_000_150, Some(40), Some(5), Some(9_000)),
+        held(1_000_250, Some(1_040), Some(205), Some(409_000)),
+    ]);
+    store.flush().await;
+    drop(store);
+    let store = Store::open(&path).unwrap();
+    store.samples(vec![held(1_000_350, Some(2_040), Some(405), Some(809_000))]);
+    store.lost(1, 1_000_400);
+    store.flush().await;
+    let metrics = store.job(1).await.unwrap().unwrap().summary.metrics;
+    assert_eq!(
+        (
+            metrics.cpu_periods,
+            metrics.cpu_throttled,
+            metrics.cpu_stalled
+        ),
+        (Some(2_000), Some(400), Some(800))
+    );
 }
 
 #[tokio::test]
@@ -966,6 +1048,7 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
+            cpu_held: CpuHeld::default(),
             events: Events {
                 oom: Some(kills),
                 oom_kill: Some(kills),
@@ -1009,6 +1092,7 @@ async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved()
     // Its build hung after the kill, and someone cancelled it.
     store.samples(vec![SampleRecord {
         memory: 2 << 30,
+        cpu_held: CpuHeld::default(),
         events: Events {
             oom: Some(1),
             oom_kill: Some(1),
@@ -1129,6 +1213,7 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
+            cpu_held: CpuHeld::default(),
             events: Events {
                 oom,
                 oom_kill: Some(0),
@@ -1169,6 +1254,7 @@ async fn a_runners_own_limit_failing_reclaim_is_read_apart_from_a_limit_below_it
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
+            cpu_held: CpuHeld::default(),
             events: Events {
                 oom: Some(2),
                 oom_kill: Some(1),
@@ -1328,6 +1414,7 @@ async fn insights_read_finished_jobs_with_when_their_runner_started() {
 #[tokio::test]
 async fn a_job_whose_sockets_memory_pressure_throttled_says_so_in_its_record() {
     let throttled = |count| SampleRecord {
+        cpu_held: CpuHeld::default(),
         events: Events {
             sock_throttled: Some(count),
             ..Events::default()

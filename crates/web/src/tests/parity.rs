@@ -150,6 +150,7 @@ async fn a_job_states_its_outcome_steps_build_cache_and_failed_runs_as_core_does
     for figure in [
         job.cpu_time.clone(),
         job.unseen.clone(),
+        job.cpu_held.clone(),
         format!("Failed {} of {}", job.failed, job.finished),
     ]
     .iter()

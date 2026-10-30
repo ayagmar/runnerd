@@ -52,8 +52,8 @@ const SUMMARY: &str = "j.id, j.repository, j.run_id, j.run_attempt, j.workflow, 
      j.network_sent, coalesce(r.mirror_bytes, 0), j.log_lines, j.log_bytes, j.log_truncated, \
      r.memory_cap, r.cpu_cap, coalesce(r.build_cache_hits, 0), coalesce(r.build_cache_misses, 0), \
      coalesce(r.build_cache_read_bytes, 0), coalesce(r.build_cache_written_bytes, 0), \
-     coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen \
-     FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
+     coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
+     j.cpu_periods, j.cpu_throttled, j.cpu_stalled FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
 
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
     let labels: String = row.get(8)?;
@@ -109,6 +109,9 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
                 writer: row.get(37)?,
             },
             sock_throttled: row.get(38)?,
+            cpu_periods: row.get(40)?,
+            cpu_throttled: row.get(41)?,
+            cpu_stalled: row.get(42)?,
         },
         log: api::LogSummary {
             lines: row.get(27)?,
@@ -177,13 +180,23 @@ fn window_metrics(
 ) -> rusqlite::Result<api::JobMetrics> {
     let before = db
         .query_row(
-            "SELECT at, cpu_usage, network_received, network_sent FROM samples WHERE runner = ?1 AND at < ?2 \
-             ORDER BY at DESC LIMIT 1",
+            "SELECT at, cpu_usage, network_received, network_sent, cpu_periods, cpu_throttled, cpu_stalled \
+             FROM samples WHERE runner = ?1 AND at < ?2 ORDER BY at DESC LIMIT 1",
             params![runner, from],
-            |row| Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?)),
+            |row| {
+                Ok(Baseline {
+                    since: row.get(0)?,
+                    usage: row.get(1)?,
+                    received: row.get(2)?,
+                    sent: row.get(3)?,
+                    periods: row.get(4)?,
+                    throttled: row.get(5)?,
+                    stalled: row.get(6)?,
+                })
+            },
         )
         .optional()?;
-    let baseline: (u64, u64, u64, u64) = if let Some(before) = before {
+    let baseline = if let Some(before) = before {
         before
     } else {
         let started: Option<u64> = db
@@ -193,21 +206,41 @@ fn window_metrics(
                 |row| row.get(0),
             )
             .optional()?;
-        (started.unwrap_or(from), 0, 0, 0)
+        Baseline {
+            since: started.unwrap_or(from),
+            usage: 0,
+            received: 0,
+            sent: 0,
+            periods: Some(0),
+            throttled: Some(0),
+            stalled: Some(0),
+        }
     };
-    let (since, usage_before, received_before, sent_before) = baseline;
     let to = i64::try_from(to).unwrap_or(i64::MAX);
     db.query_row(
         "SELECT max(memory), CAST(avg(memory) AS INTEGER), max(cpu), max(cpu_usage), max(at), \
-         max(network_received), max(network_sent) FROM samples WHERE runner = ?1 AND at >= ?2 AND at <= ?3",
+         max(network_received), max(network_sent), count(*), max(cpu_periods), count(cpu_periods), \
+         max(cpu_throttled), count(cpu_throttled), max(cpu_stalled), count(cpu_stalled) \
+         FROM samples WHERE runner = ?1 AND at >= ?2 AND at <= ?3",
         params![runner, from, to],
         |row| {
             let usage = row
                 .get::<_, Option<u64>>(3)?
-                .map(|usage| usage.saturating_sub(usage_before));
+                .map(|usage| usage.saturating_sub(baseline.usage));
             let wall = row
                 .get::<_, Option<u64>>(4)?
-                .map(|last| last.saturating_sub(since));
+                .map(|last| last.saturating_sub(baseline.since));
+            let samples: u64 = row.get(7)?;
+            // A counter only every sample of the window and its baseline hold: one a sample lacks, as one taken before
+            // runnerd read it, may hold what the container used before the job.
+            let counted = |last: usize, before: Option<u64>| -> rusqlite::Result<Option<u64>> {
+                let found: u64 = row.get(last + 1)?;
+                Ok(row
+                    .get::<_, Option<u64>>(last)?
+                    .zip(before)
+                    .filter(|_| found == samples)
+                    .map(|(last, before)| last.saturating_sub(before)))
+            };
             Ok(api::JobMetrics {
                 memory_peak: row.get(0)?,
                 memory_average: row.get(1)?,
@@ -215,19 +248,35 @@ fn window_metrics(
                 // Microseconds to milliseconds.
                 cpu_time: usage.map(|usage| usage / 1000),
                 // CPU microseconds per wall millisecond are millicores.
-                cpu_average: usage.zip(wall).map(|(usage, wall)| usage.checked_div(wall).unwrap_or(0)),
+                cpu_average: usage
+                    .zip(wall)
+                    .map(|(usage, wall)| usage.checked_div(wall).unwrap_or(0)),
                 network_received: row
                     .get::<_, Option<u64>>(5)?
-                    .map(|received| received.saturating_sub(received_before)),
+                    .map(|received| received.saturating_sub(baseline.received)),
                 network_sent: row
                     .get::<_, Option<u64>>(6)?
-                    .map(|sent| sent.saturating_sub(sent_before)),
+                    .map(|sent| sent.saturating_sub(baseline.sent)),
                 mirror_bytes: 0,
                 build_cache: api::BuildCacheCounts::default(),
                 sock_throttled: None,
+                cpu_periods: counted(8, baseline.periods)?,
+                cpu_throttled: counted(10, baseline.throttled)?,
+                cpu_stalled: counted(12, baseline.stalled)?.map(|stalled| stalled / 1000),
             })
         },
     )
+}
+
+/// A runner's counters before a job's window: its last sample before it, or zero at its container's start.
+struct Baseline {
+    since: u64,
+    usage: u64,
+    received: u64,
+    sent: u64,
+    periods: Option<u64>,
+    throttled: Option<u64>,
+    stalled: Option<u64>,
 }
 
 pub(super) fn steps(db: &Connection, job: u64) -> rusqlite::Result<Vec<api::Step>> {
@@ -733,6 +782,8 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             branch: row.get(21)?,
             failed: row.get(22)?,
             unseen: row.get(23)?,
+            cpu_periods: row.get(24)?,
+            cpu_throttled: row.get(25)?,
         })
     };
     let jobs = db
@@ -742,7 +793,8 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), \
              j.state = 'completed' AND j.conclusion IS 'success', r.ooms, r.memory_measure IS 'without_page_cache', \
              j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, r.local_ooms, j.run_id, j.branch, \
-             j.state = 'completed' AND j.conclusion IN ('failure', 'timed_out'), j.unseen FROM jobs j \
+             j.state = 'completed' AND j.conclusion IN ('failure', 'timed_out'), j.unseen, j.cpu_periods, \
+             j.cpu_throttled FROM jobs j \
              JOIN runners r ON r.name = j.runner \
              WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
              AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
@@ -755,7 +807,8 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0, r.ooms, \
              r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, \
-             r.local_ooms, j.run_id, j.branch, 0, j.unseen FROM jobs j JOIN runners r ON r.name = j.runner \
+             r.local_ooms, j.run_id, j.branch, 0, j.unseen, j.cpu_periods, j.cpu_throttled FROM jobs j \
+             JOIN runners r ON r.name = j.runner \
              WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id",
         )?
         .query_map([since], ran)?

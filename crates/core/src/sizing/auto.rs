@@ -7,9 +7,10 @@
 //! look leave. Reads `cpus` only from runs at the profile's current `cpus` since its last change and since the daemon
 //! got them. Under `caps` admission raises them only on those runs' CPU averages, never on peaks: a parallel build
 //! peaks at whatever cap it gets, and there `cpus` take budget. Under `measured`, where a running job reserves its
-//! average, runs whose bursts met the cap raise them too, within what the CPU budget holds at caps, and nothing
-//! lowers them. Under `caps` lowers them only when none of those runs
-//! met the cap, never under their highest peak (ADR 0075).
+//! average, runs the cap held back raise them too, within what the CPU budget holds at caps, and nothing lowers them.
+//! Under `caps` lowers them only when the cap held none of those runs back, never under their highest peak. A run
+//! the cap held back is one its quota throttled in a tenth of its busy time or more, or, without that figure, one
+//! whose bursts met the cap (ADRs 0075 and 0079).
 
 use std::collections::BTreeMap;
 use std::fmt::Write as _;
@@ -38,10 +39,16 @@ const BOUND: u64 = 70;
 /// the raise back.
 const HEADROOM: u64 = 2;
 
-/// A run whose CPU peak came this close to its cap, in percent, met it in a burst: it ran as fast as the cap let it,
-/// so its average says what the cap allowed. No lowering reads it, and under `measured` admission it raises the cap
-/// (ADR 0075). Peaks are the highest 2-second
-/// interval, so one can pass the cap a little.
+/// A run its CPU quota throttled in this share of its busy periods or more, in percent, was held back by its cap: it
+/// ran as fast as the cap let it, so its average says what the cap allowed. No lowering reads it, and under
+/// `measured` admission it raises the cap (ADR 0079). The Android quality gate lost about 90 s of its 517 at 9 CPUs,
+/// 17% of its run, and its busy periods are fewer than its run's, so its share of them is higher still; a cap a
+/// build touches in a few bursts a minute stays far under it.
+const HELD: u64 = 10;
+
+/// A run without a throttling figure, as one from before schema 17, whose CPU peak came this close to its cap, in
+/// percent, met it in a burst, and counts as held back (ADR 0075). Peaks are the highest 2-second interval, so one
+/// can pass the cap a little.
 const MET: u64 = 95;
 
 /// What auto sizing reads besides the config and the history.
@@ -76,14 +83,14 @@ pub struct Context<'run> {
 ///
 /// `cpus` go up `max_step` percent, at least 1, when one job's runs at them since the profile's last change and since
 /// the daemon got them (`Context::cpus_set`), 3 at least, averaged `BOUND` percent of them at the median, or under
-/// `measured` admission peaked within `MET` percent of them; up to the slice's CPUs, and with a CPU budget only as
-/// far as it holds: every profile's `slots × cpus` under `caps`; under `measured`, what that admission reserves at
-/// caps, every profile's warm runners and one more runner at the largest cap (`Budget::at_caps`). Under `caps` admission they come down, `interval` after the
-/// last change and by `max_step` percent at most, toward `HEADROOM` times the heaviest job's p95 average or the
-/// highest peak of those runs, whichever is larger, rounded up to whole CPUs, at least 1, once `min_jobs` such runs
-/// say so, every job among them has a measured average, and none peaked within `MET` percent of the cap. Under
-/// `measured` they never come down: they bound no slot there. Only successful runs with a measured average count;
-/// see [`next_look`] for the raises it cannot make.
+/// `measured` admission were held back by them (throttled, or without that figure met in a burst); up to the
+/// slice's CPUs, and with a CPU budget only as far as it holds: every profile's `slots × cpus` under `caps`; under
+/// `measured`, what that admission reserves at caps, every profile's warm runners and one more runner at the largest
+/// cap (`Budget::at_caps`). Under `caps` admission they come down, `interval` after the last change and by `max_step`
+/// percent at most, toward `HEADROOM` times the heaviest job's p95 average or the highest peak of those runs,
+/// whichever is larger, rounded up to whole CPUs, at least 1, once `min_jobs` such runs say so, every job among them
+/// has a measured average, and the cap held none of them back. Under `measured` they never come down: they bound no
+/// slot there. Only successful runs with a measured average count; see [`next_look`] for the raises it cannot make.
 pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<SizingChange> {
     next_look(config, history, context).changes
 }
@@ -744,8 +751,63 @@ struct JobCpu {
     averages: Vec<u64>,
     /// The highest of their peaks, millicores.
     peak: u64,
-    /// How many of them peaked within `MET` percent of the cap.
-    met: u64,
+    /// How many of them their quota throttled in `HELD` percent of their busy periods or more.
+    throttled: u64,
+    /// How many of them without a throttling figure peaked within `MET` percent of the cap.
+    peaked: u64,
+}
+
+impl JobCpu {
+    /// How many of them the cap held back: throttled where that was measured, else met in a burst.
+    fn held(&self) -> u64 {
+        self.throttled + self.peaked
+    }
+
+    /// Why `job`'s runs at `current` CPUs raise them under measured admission.
+    fn held_reason(&self, job: JobKey<'_>, current: u32) -> String {
+        let how = if self.peaked == 0 {
+            format!("throttled in {HELD}% of their busy time or more")
+        } else {
+            format!(
+                "throttled in {HELD}% of their busy time or more, or peaking at the cap where that was not measured"
+            )
+        };
+        format!(
+            "{} runs of {} were held back by its {current} CPUs, {how}: under measured admission they bound no slot, \
+             so the cap only slows them",
+            self.held(),
+            job_named(job)
+        )
+    }
+}
+
+/// Whether the cap held a run back. With a throttling figure that alone says so, whatever the run's peak: a 2-second
+/// peak at the cap says nothing of what the cap cost. Without one, as in runs from before schema 17 or on a kernel
+/// that keeps none, its peak says so as it did before (ADR 0075): missing is not read as never throttled.
+enum Hold {
+    Throttled,
+    Peaked,
+    Free,
+}
+
+impl Hold {
+    fn of(job: &super::Ran, cap: u64) -> Hold {
+        let held = match job.cpu_periods.zip(job.cpu_throttled) {
+            Some((periods, throttled)) => {
+                throttled > 0 && throttled.saturating_mul(100) >= periods.saturating_mul(HELD)
+            }
+            None => return Hold::peaked(job, cap),
+        };
+        if held { Hold::Throttled } else { Hold::Free }
+    }
+
+    fn peaked(job: &super::Ran, cap: u64) -> Hold {
+        if job.cpu_peak.saturating_mul(100) >= cap.saturating_mul(MET) {
+            Hold::Peaked
+        } else {
+            Hold::Free
+        }
+    }
 }
 
 /// The runs of the profile a `cpus` change reads, by job: successful runs whose container had `cap`, queued at or
@@ -771,7 +833,11 @@ fn runs_at<'run>(
             read.averages
                 .extend(job.cpu_average.filter(|average| *average > 0));
             read.peak = read.peak.max(job.cpu_peak);
-            read.met += u64::from(job.cpu_peak.saturating_mul(100) >= cap.saturating_mul(MET));
+            match Hold::of(job, cap) {
+                Hold::Throttled => read.throttled += 1,
+                Hold::Peaked => read.peaked += 1,
+                Hold::Free => {}
+            }
         }
     }
     jobs
@@ -848,13 +914,12 @@ fn raised(
 
 /// The profile's next `cpus`, from the CPU averages of its runs at its current `cpus` since `since` (ms), the last
 /// change, and since it got them (`runs_at`). A raise, `max_step` percent, at least 1, when one job's `RAISE_RUNS`
-/// runs or more averaged `BOUND` percent of the cap at the median, or under `measured` admission peaked within `MET`
-/// percent of it (kept, not refused, when there is no room): up to the slice's CPUs, and with a CPU budget only as many
-/// as `raised` fits in it, at the `slots` this change gives; refused, with why,
-/// when that is none. A lowering, under `caps` admission while `lowering` allows it, with `min_jobs` runs, none of a
-/// job without a measured average and none that peaked within `MET` percent of the cap: toward `HEADROOM` times the
-/// heaviest job's p95 average or the highest peak, whichever is larger, rounded up to whole CPUs, at least 1, by at
-/// most `max_step` percent.
+/// runs or more averaged `BOUND` percent of the cap at the median, or under `measured` admission were held back by it
+/// (kept, not refused, when there is no room): up to the slice's CPUs, and with a CPU budget only as many as `raised`
+/// fits in it, at the `slots` this change gives; refused, with why, when that is none. A lowering, under `caps`
+/// admission while `lowering` allows it, with `min_jobs` runs, none of a job without a measured average and none the
+/// cap held back: toward `HEADROOM` times the heaviest job's p95 average or the highest peak, whichever is larger,
+/// rounded up to whole CPUs, at least 1, by at most `max_step` percent.
 #[expect(
     clippy::too_many_arguments,
     reason = "each is one thing a CPU change reads; a struct for them would be read here only"
@@ -907,20 +972,15 @@ fn cpus(
         );
         return raise(held);
     }
-    // Under measured admission `cpus` bound no slot: a cap the bursts meet only slows them, and frees nothing.
-    let met = jobs
+    // Under measured admission `cpus` bound no slot: a cap that holds runs back only slows them, and frees nothing.
+    let held = jobs
         .iter()
-        .filter(|(_, read)| read.met >= RAISE_RUNS)
-        .max_by_key(|(_, read)| read.met);
+        .filter(|(_, read)| read.held() >= RAISE_RUNS)
+        .max_by_key(|(_, read)| read.held());
     if config.host.admission == Admission::Measured
-        && let Some((job, read)) = met
+        && let Some((job, read)) = held
     {
-        let held = format!(
-            "{} runs of {} peaked at its {current} CPUs: under measured admission they bound no slot, so the cap \
-             only slows the bursts",
-            read.met,
-            job_named(*job)
-        );
+        let held = read.held_reason(*job, current);
         // A burst the slice's CPUs hold back is the slice's to give, not the profile's.
         return match raise(held) {
             CpuStep::Refused(_) => CpuStep::Keep,
@@ -930,13 +990,14 @@ fn cpus(
     let runs: usize = jobs.values().map(|read| read.averages.len()).sum();
     let peak = jobs.values().map(|read| read.peak).max().unwrap_or(0);
     // Under measured admission `cpus` bound no slot, so a lowering frees nothing and only slows the bursts. A job
-    // whose runs at the cap have no measured average may be the one that needs it, and one that met the cap ran as
+    // whose runs at the cap have no measured average may be the one that needs it, and one the cap held back ran as
     // fast as the cap let it: its average says what the cap allowed, not what it needs.
     if lowering == Lowering::Held
         || config.host.admission == Admission::Measured
         || (runs as u64) < u64::from(config.sizing.min_jobs)
-        || jobs.values().any(|read| read.averages.is_empty())
-        || peak.saturating_mul(100) >= cap.saturating_mul(MET)
+        || jobs
+            .values()
+            .any(|read| read.averages.is_empty() || read.held() > 0)
     {
         return CpuStep::Keep;
     }
@@ -956,7 +1017,7 @@ fn cpus(
     }
     let to = target.max(current.saturating_sub(step)).max(1);
     let mut reason = format!(
-        "{runs} runs at its {current} CPUs peaked at {} CPUs at most, none near the cap, and the heaviest job, {}, \
+        "{runs} runs at its {current} CPUs peaked at {} CPUs at most, none held back by the cap, and the heaviest job, {}, \
          averaged {} CPUs (p95); the larger of that peak and twice that average is {target}",
         cores(peak),
         job_named(job),

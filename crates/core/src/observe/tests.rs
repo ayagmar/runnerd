@@ -4,7 +4,7 @@
 use std::path::Path;
 
 use super::capture::{Captured, MAX_LINE, Parser};
-use super::metrics::{Events, Paths, Sampler, Tracked, read_holders, read_host_memory};
+use super::metrics::{CpuHeld, Events, Paths, Sampler, Tracked, read_holders, read_host_memory};
 use super::mirror::{self, Leases};
 use crate::api;
 use crate::store::{LOG_BACKLOG, LogPosition, MirrorPosition};
@@ -676,4 +676,40 @@ fn the_hosts_memory_and_how_long_its_tasks_stalled_for_it_are_read_from_proc() {
     );
     std::fs::write(paths.proc.join("meminfo"), "MemTotal: 1 kB\n").unwrap();
     assert_eq!(read_host_memory(&paths, 0, 7), None, "no MemAvailable");
+}
+
+#[test]
+fn what_held_a_containers_cpu_back_is_read_where_the_kernel_keeps_it_and_unknown_where_not() {
+    let dir = TestDir::new("observe");
+    let paths = paths(&dir.0);
+    // Without the cpu controller `cpu.stat` has no periods, and without pressure stall information there is no
+    // `cpu.pressure`: the sample is still taken, its CPU figures unknown.
+    container(&paths, "a", 10, 4_000, 0, 1_000_000);
+    let mut state = Sampler::new(paths.clone(), "ci.slice");
+    let runners = [tracked("runner-a", "a", 10)];
+    let (bare, _) = state.sample(&runners, 1_000);
+    assert_eq!(bare.len(), 1, "the sample is taken");
+    assert_eq!(bare[0].cpu_held, CpuHeld::default());
+    let cgroup = paths.container("ci.slice", "a");
+    std::fs::write(
+        cgroup.join("cpu.stat"),
+        "usage_usec 3000000\nuser_usec 1\nsystem_usec 1\nnr_periods 1040\nnr_throttled 205\n\
+         throttled_usec 9000000\nnr_bursts 0\nburst_usec 0\n",
+    )
+    .unwrap();
+    std::fs::write(
+        cgroup.join("cpu.pressure"),
+        "some avg10=12.50 avg60=8.00 avg300=2.00 total=409000\nfull avg10=0.00 avg60=0.00 avg300=0.00 total=1000\n",
+    )
+    .unwrap();
+    let (held, _) = state.sample(&runners, 3_000);
+    assert_eq!(
+        held[0].cpu_held,
+        CpuHeld {
+            periods: Some(1040),
+            throttled: Some(205),
+            stalled: Some(409_000),
+        }
+    );
+    assert_eq!(held[0].cpu, 1000, "CPU use reads as before");
 }

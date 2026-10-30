@@ -385,7 +385,7 @@ pub(crate) fn job(job: &Job, now: u64, paint: Paint) -> String {
     }
     out.push_str(&timeline(summary, now, paint));
     out.push_str(&steps(&job.steps, now, paint));
-    out.push_str(&usage(summary, paint));
+    out.push_str(&usage(summary, now, paint));
     if let Some(note) = &job.record {
         let _ = writeln!(out, "{}", record_note(summary.id, note, now, paint));
     }
@@ -500,7 +500,7 @@ fn steps(steps: &[Step], now: u64, paint: Paint) -> String {
     out
 }
 
-fn usage(summary: &JobSummary, paint: Paint) -> String {
+fn usage(summary: &JobSummary, now: u64, paint: Paint) -> String {
     let mut out = String::new();
     let metrics = &summary.metrics;
     let _ = writeln!(out, "\n{}", paint.paint(Tone::Bold, "Usage"));
@@ -514,6 +514,9 @@ fn usage(summary: &JobSummary, paint: Paint) -> String {
             parts.push(format!("{} sampled peak", in_cores(peak)));
         }
         usage.row(vec![plain("cpu"), plain(parts.join(", "))]);
+    }
+    if let Some(held) = summary.cpu_held(now) {
+        usage.row(vec![plain("cpu held"), plain(held)]);
     }
     if let Some(peak) = metrics.memory_peak {
         let mut parts = vec![format!("{} sampled peak", bytes(peak))];

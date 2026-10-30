@@ -147,7 +147,7 @@ JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FO
 |---|---|
 | `runnerctl status` | the memory budget, and the CPU budget under [CPU admission](../admission/#cpu-admission), every slot and its runner, the repositories and their queues |
 | `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
-| `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, memory, network and how often memory pressure throttled it, log size |
+| `runnerctl job <id>` | one job: timeline, steps with their durations, CPU, how often its CPU cap held it back and how long it waited for a CPU, memory, network and how often memory pressure throttled it, log size |
 | `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |
 | `runnerctl tui` | a [full-screen dashboard](#runnerctl-tui) in the terminal |
 | `runnerctl watch` | slots, running jobs with their current step and last sample, queued and finished jobs, redrawn as events arrive; one line per event when not on a terminal, one JSON event per line with `--json` |

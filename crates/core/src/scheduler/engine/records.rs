@@ -17,7 +17,7 @@ use super::{Engine, Occupant};
 use crate::admission::HIGH_WATER;
 use crate::api;
 use crate::config::ByteSize;
-use crate::docker::{DockerApi, Tty, TtySize, is_not_found};
+use crate::docker::{DockerApi, Tty, TtySize, cpu_shares, is_not_found};
 use crate::github::GithubApi;
 use crate::record;
 use crate::scheduler::SlotRef;
@@ -700,6 +700,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             memory: Some(limit),
             memory_swap: Some(limit),
             nano_cpus: Some(i64::from(cpus) * 1_000_000_000),
+            cpu_shares: Some(cpu_shares(cpus)),
             init: Some(true),
             mounts: Some(mounts),
             network_mode: Some(self.names.network()),

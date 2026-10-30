@@ -1505,6 +1505,7 @@ fn sample(
             memory,
             network_received: 0,
             network_sent: 0,
+            cpu_held: crate::observe::metrics::CpuHeld::default(),
             events: Events::default(),
         });
     }
