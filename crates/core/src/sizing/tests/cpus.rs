@@ -762,6 +762,48 @@ fn a_raise_that_did_not_help_a_job_whose_pool_follows_the_quota_is_the_last() {
 }
 
 #[test]
+fn a_raise_that_helped_one_held_job_goes_ahead_though_it_did_not_help_a_heavier_one() {
+    // At 13 CPUs, raised from 9: the Gradle build stays throttled and takes as long, but the Android gate got faster.
+    // The build has more held runs, yet the gate's says the raise helped, so the next one goes ahead.
+    let pool = |cap: u64, at: u64| -> Vec<Ran> {
+        bursts("gradle", 6, cap / 2, cap, cap, at)
+            .into_iter()
+            .map(|run| Ran {
+                finished_at: run.started_at.map(|started| started + 10 * 60_000),
+                cpu_periods: Some(6_000),
+                cpu_throttled: Some(2_400),
+                ..run
+            })
+            .collect()
+    };
+    let mut jobs = pool(9_000, NOW - 3 * HOUR);
+    jobs.extend(throttled_gate(9, NOW - 3 * HOUR));
+    jobs.extend(pool(13_000, NOW - HOUR));
+    let gate = throttled_gate(13, NOW - HOUR);
+    jobs.extend(gate.iter().take(4).cloned());
+    let looked = look(&measured_at(13), &history(jobs.clone()), Some(32_000));
+    assert_eq!(cpus_to(&looked), [("jvm", Some(13), Some(16))]);
+    assert!(
+        looked.changes[0]
+            .reason
+            .contains("halyard/ledger CI / android"),
+        "{}",
+        looked.changes[0].reason
+    );
+    // Without the gate's runs at 13, only the build is held, and its raise did not help: refused.
+    jobs.retain(|run| !(run.name == "android" && run.cpu_cap == Some(13_000)));
+    let held = look(&measured_at(13), &history(jobs), Some(32_000));
+    assert_eq!(cpus_to(&held), []);
+    assert!(
+        held.refused[0]
+            .reason
+            .contains("halyard/ledger CI / gradle"),
+        "{}",
+        held.refused[0].reason
+    );
+}
+
+#[test]
 fn a_peak_at_the_cap_raises_nothing_once_the_quota_says_it_did_not_throttle_the_run() {
     // A contended host: the host's other programs hold the CPUs, so the runs get less than they ask without their
     // quota throttling them, and a 2-second interval at the cap now and then is no sign of the cap's cost. The

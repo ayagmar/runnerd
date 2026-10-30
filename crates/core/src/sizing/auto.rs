@@ -944,6 +944,33 @@ fn unhelped(
     }
 }
 
+/// Under measured admission, why the runs the cap held back raise `cpus` at `cap`: the job with the most held runs,
+/// `RAISE_RUNS` at least, among those the raise before helped (`Ok`); or, when it helped none of them, why not, for
+/// the one with the most (`Err`). `None` when no job's runs were held back that often. A job the raise before did not
+/// help says nothing for another raise, but another held job still may.
+fn held_raise(
+    history: &History,
+    profile: &str,
+    jobs: &BTreeMap<JobKey<'_>, JobCpu>,
+    cap: u64,
+    current: u32,
+) -> Option<Result<String, String>> {
+    let (helped, refused): (Vec<_>, Vec<_>) = jobs
+        .iter()
+        .filter(|(_, read)| read.held() >= RAISE_RUNS)
+        .map(|(job, read)| (*job, read, unhelped(history, profile, *job, cap, read)))
+        .partition(|(_, _, why)| why.is_none());
+    if let Some((job, read, _)) = helped.into_iter().max_by_key(|(_, read, _)| read.held()) {
+        return Some(Ok(read.held_reason(job, current)));
+    }
+    let (job, read, why) = refused.into_iter().max_by_key(|(_, read, _)| read.held())?;
+    Some(Err(format!(
+        "{}; {}",
+        read.held_reason(job, current),
+        why.unwrap_or_default()
+    )))
+}
+
 /// `owner/name workflow / job`, as a CPU change's reason names a job.
 fn job_named(job: JobKey<'_>) -> String {
     let (repository, workflow, name) = job;
@@ -1075,22 +1102,18 @@ fn cpus(
         return raise(held);
     }
     // Under measured admission `cpus` bound no slot: a cap that holds runs back only slows them, and frees nothing.
-    let held = jobs
-        .iter()
-        .filter(|(_, read)| read.held() >= RAISE_RUNS)
-        .max_by_key(|(_, read)| read.held());
-    if config.host.admission == Admission::Measured
-        && let Some((job, read)) = held
-    {
-        let held = read.held_reason(*job, current);
-        if let Some(why) = unhelped(history, &advised.name, *job, cap, read) {
-            return CpuStep::Refused(format!("{held}; {why}"));
+    if config.host.admission == Admission::Measured {
+        match held_raise(history, &advised.name, &jobs, cap, current) {
+            // A burst the slice's CPUs hold back is the slice's to give, not the profile's.
+            Some(Ok(held)) => {
+                return match raise(held) {
+                    CpuStep::Refused(_) => CpuStep::Keep,
+                    step => step,
+                };
+            }
+            Some(Err(why)) => return CpuStep::Refused(why),
+            None => {}
         }
-        // A burst the slice's CPUs hold back is the slice's to give, not the profile's.
-        return match raise(held) {
-            CpuStep::Refused(_) => CpuStep::Keep,
-            step => step,
-        };
     }
     let runs: usize = jobs.values().map(|read| read.averages.len()).sum();
     let peak = jobs.values().map(|read| read.peak).max().unwrap_or(0);
