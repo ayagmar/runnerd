@@ -65,7 +65,7 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
 - A ceiling higher than the hypervisor delivers brings back what ADR 0055 prevents: starts the host has no room for,
   reclaim, and throttled sockets, until the stall rule stops further starts; the starts of one plan all go ahead, and
   the guest's OOM killer can kill a job among them. runnerd still never stops a running job. A
-  ceiling should be the VM's maximum, and lower when other VMs on the same hypervisor compete for its RAM.
+  ceiling should be `MemTotal` at the VM's maximum, and lower when other VMs on the same hypervisor compete for its RAM.
 - Growing takes the hypervisor a moment, while a runner starts against memory not there yet. The stall rule holds
   further starts while it lasts.
 - With a ceiling, the margin is larger than a sixteenth of the host as it is now: 6G on a 16G VM that can grow to
