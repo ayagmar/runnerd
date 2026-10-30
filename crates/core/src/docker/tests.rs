@@ -1,5 +1,6 @@
-//! That the JIT config stays out of `Debug` output, the create request and the log, and that only `unix://` Docker
-//! hosts are accepted. No Docker needed.
+//! That the JIT config stays out of `Debug` output, the create request and the log, that only `unix://` Docker
+//! hosts are accepted, and which container a failed start says it left. No Docker needed: a fake Engine answers on a
+//! Unix socket.
 
 use std::collections::BTreeMap;
 
@@ -69,18 +70,63 @@ static CAPTURE: Capture = Capture(std::sync::Mutex::new(String::new()));
 
 #[tokio::test]
 async fn starting_a_runner_never_logs_the_jit_config() {
-    use tokio::io::{AsyncReadExt, AsyncWriteExt};
-
     log::set_logger(&CAPTURE).unwrap();
     log::set_max_level(log::LevelFilter::Trace);
     let socket = std::env::temp_dir().join(format!("runnerd-test-{}.sock", std::process::id()));
-    let _ = std::fs::remove_file(&socket);
-    let listener = tokio::net::UnixListener::bind(&socket).unwrap();
-    // A Docker Engine that accepts every request, one per connection, and keeps what it received.
-    let server = tokio::spawn(async move {
+    // A Docker Engine that accepts every request: create, upload, start.
+    let server = serve(&socket, 3, |request| {
+        if request.starts_with("POST /containers/create") {
+            answer("201 Created", r#"{"Id":"fake","Warnings":[]}"#)
+        } else {
+            answer("204 No Content", "")
+        }
+    });
+
+    let docker = connect_to(Some(&format!("unix://{}", socket.display()))).unwrap();
+    docker.start(&spec(), &Sysbox).await.unwrap();
+    let received = server.await.unwrap();
+
+    assert!(
+        String::from_utf8_lossy(&received).contains(SECRET),
+        "the upload did not carry the config"
+    );
+    let logged = CAPTURE.0.lock().unwrap();
+    assert!(
+        logged.contains("request:"),
+        "bollard logged no request:\n{logged}"
+    );
+    assert!(!logged.contains(SECRET), "{logged}");
+}
+
+/// An HTTP answer with a JSON `body`.
+fn answer(status: &str, body: &str) -> Vec<u8> {
+    format!(
+        "HTTP/1.1 {status}\r\nContent-Type: application/json\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}",
+        body.len()
+    )
+    .into_bytes()
+}
+
+/// Docker's answer while it is busy, or after it timed out.
+fn busy() -> Vec<u8> {
+    answer("500 Internal Server Error", r#"{"message":"busy"}"#)
+}
+
+/// A Docker Engine at `socket` that takes `requests` requests, one per connection, answers each as `respond` says
+/// for its request line, and returns what it received, then removes its socket.
+fn serve(
+    socket: &std::path::Path,
+    requests: usize,
+    respond: impl Fn(&str) -> Vec<u8> + Send + 'static,
+) -> tokio::task::JoinHandle<Vec<u8>> {
+    use tokio::io::{AsyncReadExt, AsyncWriteExt};
+
+    let _ = std::fs::remove_file(socket);
+    let listener = tokio::net::UnixListener::bind(socket).unwrap();
+    let socket = socket.to_owned();
+    tokio::spawn(async move {
         let mut received = Vec::new();
-        // create, upload, start
-        for _ in 0..3 {
+        for _ in 0..requests {
             let (mut stream, _) = listener.accept().await.unwrap();
             let mut request = Vec::new();
             let mut buf = [0; 4096];
@@ -108,30 +154,98 @@ async fn starting_a_runner_never_logs_the_jit_config() {
                     break;
                 }
             }
-            let response: &[u8] = if request.starts_with(b"POST /containers/create") {
-                b"HTTP/1.1 201 Created\r\nContent-Type: application/json\r\nContent-Length: 27\r\nConnection: close\r\n\r\n{\"Id\":\"fake\",\"Warnings\":[]}"
-            } else {
-                b"HTTP/1.1 204 No Content\r\nConnection: close\r\n\r\n"
-            };
-            stream.write_all(response).await.unwrap();
+            let line = String::from_utf8_lossy(&request)
+                .lines()
+                .next()
+                .unwrap_or_default()
+                .to_owned();
+            stream.write_all(&respond(&line)).await.unwrap();
             received.extend_from_slice(&request);
         }
+        std::fs::remove_file(&socket).unwrap();
         received
-    });
+    })
+}
 
-    let docker = connect_to(Some(&format!("unix://{}", socket.display()))).unwrap();
-    docker.start(&spec(), &Sysbox).await.unwrap();
-    let received = server.await.unwrap();
-    std::fs::remove_file(&socket).unwrap();
-
-    assert!(
-        String::from_utf8_lossy(&received).contains(SECRET),
-        "the upload did not carry the config"
-    );
-    let logged = CAPTURE.0.lock().unwrap();
-    assert!(
-        logged.contains("request:"),
-        "bollard logged no request:\n{logged}"
-    );
-    assert!(!logged.contains(SECRET), "{logged}");
+#[tokio::test]
+async fn a_failed_start_names_the_container_it_left_only_while_docker_keeps_it() {
+    // Each case: the requests the start makes, what Docker answers them, and the container the error names.
+    type Respond = fn(&str) -> Vec<u8>;
+    let cases: [(&str, usize, Respond, Option<&str>); 5] = [
+        (
+            "a create whose answer is lost, with a failed removal",
+            3,
+            |request| {
+                if request.starts_with("GET /containers/runnerd-jvm-1/json") {
+                    answer("200 OK", r#"{"Id":"made"}"#)
+                } else {
+                    busy()
+                }
+            },
+            Some("made"),
+        ),
+        (
+            "a create that made nothing",
+            2,
+            |request| {
+                if request.starts_with("POST /containers/create") {
+                    busy()
+                } else {
+                    answer("404 Not Found", r#"{"message":"no such container"}"#)
+                }
+            },
+            None,
+        ),
+        (
+            "a create Docker refused",
+            1,
+            |_| answer("409 Conflict", r#"{"message":"name in use"}"#),
+            None,
+        ),
+        (
+            "a start that failed, with a removal that succeeded",
+            4,
+            |request| {
+                if request.starts_with("POST /containers/create") {
+                    answer("201 Created", r#"{"Id":"fake","Warnings":[]}"#)
+                } else if request.starts_with("POST /containers/fake/start") {
+                    busy()
+                } else {
+                    answer("204 No Content", "")
+                }
+            },
+            None,
+        ),
+        (
+            "a start that failed, with a failed removal",
+            4,
+            |request| {
+                if request.starts_with("POST /containers/create") {
+                    answer("201 Created", r#"{"Id":"fake","Warnings":[]}"#)
+                } else if request.starts_with("PUT ") {
+                    answer("200 OK", "")
+                } else {
+                    busy()
+                }
+            },
+            Some("fake"),
+        ),
+    ];
+    for (index, (case, requests, respond, left)) in cases.into_iter().enumerate() {
+        let socket = std::env::temp_dir().join(format!(
+            "runnerd-test-{}-start-{index}.sock",
+            std::process::id()
+        ));
+        let server = serve(&socket, requests, respond);
+        let docker = connect_to(Some(&format!("unix://{}", socket.display()))).unwrap();
+        let failed = tokio::time::timeout(
+            std::time::Duration::from_secs(10),
+            docker.start(&spec(), &Sysbox),
+        )
+        .await
+        .unwrap_or_else(|_| panic!("{case}: the start made more requests than {requests}"))
+        .expect_err(case);
+        server.await.unwrap();
+        assert_eq!(failed.container.as_deref(), left, "{case}");
+    }
 }

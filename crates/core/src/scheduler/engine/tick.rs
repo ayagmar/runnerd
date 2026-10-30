@@ -13,13 +13,14 @@ use tracing::{info, warn};
 use super::admission::Admitting;
 use super::{Engine, Occupant, Purpose, RunningJobs, Shutdown};
 use crate::admission::host;
-use crate::api::Basis;
+use crate::api::{AdmissionPolicy, Basis};
 use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
-    Budget, Decision, Plan, Pool, Preparing, Profile, Repository, RunnerSlot, Slot, SlotRef, plan,
+    Budget, Decision, Left, Plan, Pool, Preparing, Profile, Repository, RunnerSlot, Slot, SlotRef,
+    plan,
 };
 use crate::time;
 
@@ -68,6 +69,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.collect_recordings().await;
         // Before the finished runners go: one Docker never inspected while it ran is still recorded with its job.
         self.observe_again().await;
+        self.recapture().await;
         self.collect_finished().await;
         self.collect_shells().await;
         self.kill_cancelled().await;
@@ -185,6 +187,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             info!("{repository}: a warm runner it would replace took a job; starting next tick");
             return false;
         }
+        // The plan's budgets are those of its start: the starts before this one are counted since, and so are what
+        // ran meanwhile.
+        if !self.still_fits(admitting, &slot.profile, memory, cpu) {
+            info!(
+                "{repository}: its runner in {} no longer fits what runs now; starting next tick",
+                slot.profile
+            );
+            return false;
+        }
         let pool = Pool {
             repository,
             profile: slot.profile.clone(),
@@ -267,25 +278,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut plan = plan(
             &repositories,
             &profiles,
-            Budget {
-                // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
-                memory: if admitting.held {
-                    Some(0)
-                } else {
-                    self.memory_max
-                        .map(|max| crate::scheduler::left(max, self.memory_in_use()))
-                },
-                cpu: admitting
-                    .cpu
-                    .as_ref()
-                    .and(self.cpu_budget())
-                    .map(|budget| crate::scheduler::left(budget, self.cpu_in_use())),
-                host: admitting
-                    .host
-                    .as_ref()
-                    .map(|host| host::left(host.limit, self.memory_in_use(), host.stalled)),
-                held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
-            },
+            self.plan_budget(&admitting),
             SystemTime::now(),
         );
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now,
@@ -315,6 +308,52 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let stops = self.over_budget(&plan.decisions);
         plan.decisions.extend(stops);
         (plan, admitting)
+    }
+
+    /// The budgets a plan has beside what runs now, as `admitting` admits.
+    fn plan_budget(&self, admitting: &Admitting) -> Budget {
+        Budget {
+            // Signed, as the host's: a warm runner's room pays back what runs past the budget first.
+            memory: if admitting.held {
+                Some(0)
+            } else {
+                self.memory_max
+                    .map(|max| crate::scheduler::left(max, self.memory_in_use()))
+            },
+            cpu: admitting
+                .cpu
+                .as_ref()
+                .and(self.cpu_budget())
+                .map(|budget| crate::scheduler::left(budget, self.cpu_in_use())),
+            host: admitting
+                .host
+                .as_ref()
+                .map(|host| host::left(host.limit, self.memory_in_use(), host.stalled)),
+            held: admitting.held || admitting.host.as_ref().is_some_and(|host| host.stalled),
+        }
+    }
+
+    /// Whether a runner of `memory` and `cpu` that `plan` started in `profile` still fits, by the plan's rule, the
+    /// budgets as they are now: the samples and host readings taken since, and what ran past what the plan counted
+    /// on, such as a runner whose stop failed. Without a recent sample of the slice, measured admission counts it at
+    /// its cap, as the plan would then. The host keeps the margin the plan chose: the runners a plan starts into an
+    /// empty slice all need only the first runner's.
+    fn still_fits(&self, plan: &Admitting, profile: &str, memory: u64, cpu: u64) -> bool {
+        let mut now = self.admitting(&mut [], None);
+        now.host = self.host_budget_by(plan.remembered);
+        let memory = match self.config.profiles.get(profile) {
+            Some(profile) if now.policy == AdmissionPolicy::Measured && now.slice.is_none() => {
+                memory.max(profile.memory.0)
+            }
+            _ => memory,
+        };
+        let budget = self.plan_budget(&now);
+        let left = Left {
+            memory: budget.memory,
+            cpu: budget.cpu,
+            host: budget.host,
+        };
+        !budget.held && left.fits(memory, cpu)
     }
 
     /// A profile as `plan` sees it.

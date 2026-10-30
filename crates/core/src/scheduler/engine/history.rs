@@ -1,7 +1,7 @@
 //! The job history the engine feeds: each runner's record, sampling and mirror lease, its log capture (which finds
-//! the job it took), the queued jobs it may run, steps from GitHub, and closing the jobs of removed runners. It
-//! must not start or remove containers or runners: that is `runners`. Also each repository's visibility, which
-//! pricing at GitHub's rates reads from the store (ADR 0072).
+//! the job it took, and starts again when Docker breaks it off), the queued jobs it may run, steps from GitHub, and
+//! closing the jobs of removed runners. It must not start or remove containers or runners: that is `runners`. Also
+//! each repository's visibility, which pricing at GitHub's rates reads from the store (ADR 0072).
 
 use std::collections::BTreeSet;
 use std::sync::Arc;
@@ -9,12 +9,12 @@ use std::time::{Duration, SystemTime};
 
 use futures_util::StreamExt;
 use tokio::sync::mpsc;
-use tracing::warn;
+use tracing::{info, warn};
 
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Occupant};
 use crate::admission::Key;
-use crate::docker::DockerApi;
+use crate::docker::{DockerApi, is_not_found};
 use crate::github::{self, GithubApi, JobDetails};
 use crate::observe::capture::{self, Captured, Parser};
 use crate::observe::metrics::Tracked;
@@ -58,6 +58,46 @@ impl Closing {
             since_ms: time::now_ms(),
         }
     }
+}
+
+/// Where a capture starts when nothing of its job's log is stored.
+const FIRST_PAGE: LogPosition = LogPosition { page: 1, offset: 0 };
+
+/// How a runner's log capture ended.
+#[derive(Debug)]
+pub(super) enum Capture {
+    /// Nothing is left to capture: the container stopped, or the job's log is stored whole or up to `log_max`.
+    Done,
+    /// Docker failed the exec or broke its output off, though the container may run on: `recapture` starts it
+    /// again. `resume` is where the lines it stored end, if it stored any: the store may not have written them yet.
+    Broken { resume: Option<LogPosition> },
+}
+
+/// A runner's log capture that broke off, as `recapture` keeps it until the runner is gone.
+#[derive(Debug)]
+pub(super) struct Recapture {
+    /// Where the lines its captures stored end, as far as they said.
+    resume: Option<LogPosition>,
+    /// Its captures that broke off so far.
+    breaks: u32,
+    /// When it may start again, on Tokio's clock, which tests can advance.
+    at: tokio::time::Instant,
+}
+
+/// How long a runner's log capture waits to start again after its `breaks`-th break: not at all the first time,
+/// then 5 seconds, doubling up to 5 minutes, so an exec Docker keeps failing is not run every tick.
+fn capture_backoff(breaks: u32) -> Duration {
+    if breaks <= 1 {
+        return Duration::ZERO;
+    }
+    Duration::from_secs(5 << (breaks - 2).min(6)).min(Duration::from_mins(5))
+}
+
+/// The later of two log positions.
+fn later(a: Option<LogPosition>, b: Option<LogPosition>) -> Option<LogPosition> {
+    a.into_iter()
+        .chain(b)
+        .max_by_key(|position| (position.page, position.offset))
 }
 
 /// A runner's log capture found its job.
@@ -133,14 +173,20 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .start(address, &occupant.runner_name, started_at);
         }
         // An adopted runner may have stored part of its log before the restart.
-        let position = match self.store.runner_job(&occupant.runner_name).await {
-            Ok(Some(job)) => self
-                .store
-                .log_position(job)
-                .await
-                .unwrap_or(LogPosition { page: 1, offset: 0 }),
-            _ => LogPosition { page: 1, offset: 0 },
-        };
+        let position = self.stored_position(&occupant.runner_name).await;
+        self.capture(occupant, position);
+    }
+
+    /// Where the stored log of a runner's job ends.
+    async fn stored_position(&self, runner: &str) -> LogPosition {
+        match self.store.runner_job(runner).await {
+            Ok(Some(job)) => self.store.log_position(job).await.unwrap_or(FIRST_PAGE),
+            _ => FIRST_PAGE,
+        }
+    }
+
+    /// Starts a runner's log capture from `position`, in place of any it had.
+    fn capture(&mut self, occupant: &Occupant, position: LogPosition) {
         let task = tokio::spawn(capture_job(
             self.docker.clone(),
             self.store.clone(),
@@ -152,6 +198,63 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         ));
         if let Some(old) = self.captures.insert(occupant.runner_name.clone(), task) {
             old.abort();
+        }
+    }
+
+    /// Starts again the log captures that broke off while their container runs, each after a wait that grows with
+    /// its breaks (`capture_backoff`), from where its job's stored lines end. Without it, a runner whose capture
+    /// broke would lose its job's name, log and record.
+    pub(super) async fn recapture(&mut self) {
+        let ended: Vec<String> = self
+            .captures
+            .iter()
+            .filter(|(_, task)| task.is_finished())
+            .map(|(runner, _)| runner.clone())
+            .collect();
+        let now = tokio::time::Instant::now();
+        for runner in ended {
+            let Some(task) = self.captures.remove(&runner) else {
+                continue;
+            };
+            if let Ok(Capture::Broken { resume }) = task.await {
+                let recapture = self.recaptures.entry(runner).or_insert(Recapture {
+                    resume: None,
+                    breaks: 0,
+                    at: now,
+                });
+                recapture.breaks += 1;
+                recapture.resume = later(recapture.resume, resume);
+                recapture.at = now + capture_backoff(recapture.breaks);
+            }
+        }
+        let due: Vec<(Occupant, Option<LogPosition>)> = self
+            .occupied()
+            .filter_map(|(_, occupant)| {
+                let recapture = self.recaptures.get(&occupant.runner_name)?;
+                (recapture.at <= now && !self.captures.contains_key(&occupant.runner_name))
+                    .then(|| (occupant.clone(), recapture.resume))
+            })
+            .collect();
+        for (occupant, resume) in due {
+            match self.docker.inspect(&occupant.container).await {
+                Ok(state) if state.running => {
+                    let stored = self.stored_position(&occupant.runner_name).await;
+                    let position = later(resume, Some(stored)).unwrap_or(stored);
+                    info!(
+                        "{}: capturing its job and log again from page {} at byte {}",
+                        occupant.runner_name, position.page, position.offset
+                    );
+                    self.capture(&occupant, position);
+                }
+                // Its log ends where the capture broke off; `collect_finished` frees its slot.
+                Ok(_) => {
+                    self.recaptures.remove(&occupant.runner_name);
+                }
+                Err(error) if is_not_found(&error) => {
+                    self.recaptures.remove(&occupant.runner_name);
+                }
+                Err(error) => warn!("cannot inspect {}: {error}", occupant.runner_name),
+            }
         }
     }
 
@@ -180,6 +283,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }) else {
                 continue;
             };
+            // A capture started again reports the job it reported before.
+            if occupant.job == Some(found.job) {
+                continue;
+            }
             occupant.job = Some(found.job);
             // A warm runner takes its job before a listing shows it queued: its run is seen here first. After a
             // restart, `recover` noted it with its jobs' queued times. Its job is its pool's.
@@ -210,6 +317,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
+    }
+
+    /// The runner of this machine GitHub says took a job, if it holds a slot and its log capture found no job.
+    fn unclaimed_runner(&self, details: &JobDetails) -> Option<String> {
+        let name = details.runner_name.as_ref()?;
+        self.occupied()
+            .find(|(_, occupant)| occupant.runner_name == *name && occupant.job.is_none())
+            .map(|(_, occupant)| occupant.runner_name.clone())
     }
 
     /// Tells admission which job a runner runs as GitHub names it, which a runner may have taken before any
@@ -305,6 +420,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map(|(id, repository)| (repository.clone(), *id))
             .collect();
         for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), left)).await {
+            // One of this machine's runners took it, and its log capture has not said so, as when Docker failed it:
+            // the job is that runner's.
+            let unclaimed = match &answer {
+                Ok(details) if details.status != "queued" && details.status != "waiting" => self
+                    .unclaimed_runner(details)
+                    .map(|runner| (runner, details.run_id)),
+                _ => None,
+            };
+            if let Some((runner, run_id)) = unclaimed {
+                self.store.claimed(id, run_id, &runner, time::now_ms());
+                let _ = self.found.0.send(Found {
+                    runner,
+                    job: id,
+                    run_id,
+                });
+                continue;
+            }
             match answer {
                 // Still queued: the listing lags.
                 Ok(details) if details.status == "queued" || details.status == "waiting" => {}
@@ -323,6 +455,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Err(error) => warn!("{repository}: cannot read job {id}: {error}"),
             }
         }
+        // The jobs claimed above, so their details are read with the running ones'.
+        self.take_found();
         let ended = self
             .ended_uploads
             .values()
@@ -439,6 +573,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let now = SystemTime::now();
         self.store
             .runner_removed(&occupant.runner_name, time::ms(now));
+        self.recaptures.remove(&occupant.runner_name);
         self.tracked.send_modify(|tracked| {
             tracked.retain(|container| container.runner != occupant.runner_name);
         });
@@ -458,21 +593,24 @@ async fn capture_job<D: DockerApi>(
     position: LogPosition,
     max_bytes: u64,
     found: mpsc::UnboundedSender<Found>,
-) {
+) -> Capture {
     let mut output = match docker.exec(&container, capture::command(position)).await {
         Ok(output) => output,
         Err(error) => {
             warn!("{runner}: cannot capture its job and log: {error}");
-            return;
+            return Capture::Broken { resume: None };
         }
     };
     let mut parser = Parser::default();
     let mut job = None;
     // Bytes of the job's log stored or sent: past `max_bytes` the store keeps no more, so the capture stops.
     let mut sent = 0;
+    let mut resume = None;
     while let Some(chunk) = output.next().await {
-        // An error: the container stopped.
-        let Ok(chunk) = chunk else { break };
+        // The container stopped, or Docker dropped the exec while it runs: `recapture` tells them apart.
+        let Ok(chunk) = chunk else {
+            return Capture::Broken { resume };
+        };
         for captured in parser.feed(&chunk) {
             match captured {
                 Captured::Job { id, run_id } => {
@@ -487,7 +625,7 @@ async fn capture_job<D: DockerApi>(
                         // After a restart, the part stored before.
                         if let Ok(Some(stored)) = store.job(id).await {
                             if stored.summary.log.truncated {
-                                return;
+                                return Capture::Done;
                             }
                             sent = stored.summary.log.bytes;
                         }
@@ -497,12 +635,14 @@ async fn capture_job<D: DockerApi>(
                     if let Some(job) = job {
                         sent += lines.iter().map(|line| line.len() as u64 + 1).sum::<u64>();
                         store.log(job, lines, position, max_bytes).await;
+                        resume = Some(position);
                         if sent > max_bytes {
-                            return;
+                            return Capture::Done;
                         }
                     }
                 }
             }
         }
     }
+    Capture::Done
 }
