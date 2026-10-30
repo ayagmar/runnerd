@@ -6,7 +6,7 @@
 use std::collections::{HashMap, HashSet};
 use std::fmt;
 use std::sync::{Arc, Mutex};
-use std::time::{Duration, SystemTime};
+use std::time::{Duration, Instant, SystemTime};
 
 use reqwest::header::{self, HeaderMap, HeaderValue};
 use reqwest::{Method, StatusCode};
@@ -33,15 +33,23 @@ const PER_PAGE: u32 = 100;
 /// costs ten requests, not the rate limit.
 const MAX_PAGES: u32 = 10;
 
-/// The most requests one poll of a repository's queued jobs sends: as many as a poll sent before it followed pages,
-/// two listings of runs and the jobs of 100 runs each. A repository with more active runs than that leaves its
-/// newest unread until older ones end, so following pages never spends the rate limit faster than before.
-const POLL_REQUESTS: u32 = 202;
+/// How many requests for runs' jobs one poll of a repository starts: as many runs as a poll read before it followed
+/// pages, 100 queued and 100 in progress. A run whose first page is read is read to its last, so none of its queued
+/// jobs drops out of the listing for want of a page, and the listings of runs, however many pages they grow to, do
+/// not move where a poll stops. A repository with more active runs leaves the rest unread until earlier ones end,
+/// so following pages does not spend the rate limit faster than before.
+const JOB_REQUESTS: usize = 200;
 
 /// The most bytes of answers kept for conditional requests. A page of 100 runs is about 600 KB, a page of jobs with
-/// their steps about 350 KB, a job's details a few KB: room for what several busy repositories ask every poll. Past
-/// it the least recently used answer goes, and its next request costs the rate limit again.
+/// their steps about 350 KB, a job's details a few KB: room for what several busy repositories ask every poll.
 const CONDITIONAL_BYTES: usize = 32 * 1024 * 1024;
+
+/// An answer asked for within this long is not dropped to make room for another. Every poll asks the same paths in
+/// the same order; were the least recently used answer dropped, a poll that asks more than the limit holds would
+/// find each answer dropped just before asking for it again and pay for every request. Kept like this, the answers
+/// that fit stay conditional and only the rest cost the rate limit. It is far longer than a poll interval (15 s by
+/// default); polls further apart than this are rare enough that what they pay matters little.
+const CONDITIONAL_FRESH: Duration = Duration::from_secs(600);
 
 /// A GitHub token. Its `Debug` output never shows the value.
 #[derive(Clone)]
@@ -372,6 +380,13 @@ struct Run {
     id: u64,
 }
 
+/// Which listing of runs a run is in; queued ones order first.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
+enum RunState {
+    Waiting,
+    Started,
+}
+
 #[derive(Deserialize)]
 struct Jobs {
     jobs: Vec<Job>,
@@ -531,7 +546,7 @@ impl Github {
             base: base.trim_end_matches('/').to_owned(),
             token_source: Arc::from(token_source),
             token: tokio::sync::Mutex::new(None),
-            etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES)),
+            etags: Mutex::new(Conditional::new(CONDITIONAL_BYTES, CONDITIONAL_FRESH)),
             blocked_until: Mutex::new(None),
         })
     }
@@ -549,7 +564,7 @@ impl Github {
     /// One answer, conditional on the last one kept for `path`, and whether GitHub's `Link` names a next page.
     async fn get_page<T: DeserializeOwned>(&self, path: &str) -> Result<Page<T>, Error> {
         // Taken before the request, so an answer evicted meanwhile still serves a 304.
-        let cached = lock(&self.etags).get(path);
+        let cached = lock(&self.etags).get(path, Instant::now());
         let etag = cached.as_ref().map(|cached| &cached.etag);
         let response = self.send(Method::GET, path, None, etag).await?;
         let (bytes, next) = if response.status == StatusCode::NOT_MODIFIED {
@@ -576,6 +591,7 @@ impl Github {
                         body: body.clone(),
                         next: response.next,
                     },
+                    Instant::now(),
                 );
             }
             (body, response.next)
@@ -586,21 +602,13 @@ impl Github {
         })
     }
 
-    /// The pages of the listing at `path`, a query without `page`, for as long as GitHub's `Link` names a next one:
-    /// at most `MAX_PAGES`, each taken from `budget`. Each page is its own conditional request. The next page's
-    /// address is built here, not taken from the `Link`, so the token goes nowhere but `base`. Items move between
-    /// pages while they are read: one may show twice, which callers dedupe by ID, or not at all until the next poll.
-    async fn get_pages<T: DeserializeOwned>(
-        &self,
-        path: &str,
-        budget: &mut u32,
-    ) -> Result<Vec<T>, Error> {
+    /// The pages of the listing at `path`, a query without `page`, for as long as GitHub's `Link` names a next one,
+    /// at most `MAX_PAGES`. Each page is its own conditional request. The next page's address is built here, not
+    /// taken from the `Link`, so the token goes nowhere but `base`. Items move between pages while they are read: one
+    /// may show twice, which callers dedupe by ID, or not at all until the next poll.
+    async fn get_pages<T: DeserializeOwned>(&self, path: &str) -> Result<Vec<T>, Error> {
         let mut pages = Vec::new();
         for page in 1..=MAX_PAGES {
-            let Some(left) = budget.checked_sub(1) else {
-                break;
-            };
-            *budget = left;
             let path = if page == 1 {
                 path.to_owned()
             } else {
@@ -705,32 +713,39 @@ impl Github {
 
 impl GithubApi for Github {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, Error> {
-        let mut budget = POLL_REQUESTS;
+        // Each run once, `Started` if GitHub lists it in progress, `Waiting` if queued.
         let mut runs = Vec::new();
-        for status in ["queued", "in_progress"] {
+        for (state, status) in [
+            (RunState::Waiting, "queued"),
+            (RunState::Started, "in_progress"),
+        ] {
             let pages: Vec<Runs> = self
-                .get_pages(
-                    &format!(
-                        "/repos/{repository}/actions/runs?status={status}&per_page={PER_PAGE}"
-                    ),
-                    &mut budget,
-                )
+                .get_pages(&format!(
+                    "/repos/{repository}/actions/runs?status={status}&per_page={PER_PAGE}"
+                ))
                 .await?;
-            runs.extend(pages.into_iter().flat_map(|page| page.workflow_runs));
+            runs.extend(
+                pages
+                    .into_iter()
+                    .flat_map(|page| page.workflow_runs)
+                    .map(|run| (state, run.id)),
+            );
         }
-        let mut runs: Vec<u64> = runs.into_iter().map(|run| run.id).collect();
-        // Oldest first: should the budget run out, the runs it leaves unread are the newest, whose jobs have waited
-        // least, and they come up as older runs end.
+        // A run listed under both, which moved while they were read, counts as queued.
+        runs.sort_unstable_by_key(|&(state, id)| (id, state));
+        runs.dedup_by_key(|&mut (_, id)| id);
+        // Queued runs first, whose jobs all wait, then those in progress, which may run on GitHub's own runners;
+        // oldest first within each. Should the requests run out, the runs left unread are the newest.
         runs.sort_unstable();
-        runs.dedup();
+        let listed: HashSet<u64> = runs.iter().map(|&(_, id)| id).collect();
         let mut jobs = Vec::new();
-        for &run in &runs {
-            if budget == 0 {
+        let mut requests = 0;
+        for &(_, run) in &runs {
+            if requests >= JOB_REQUESTS {
                 break;
             }
-            let pages: Vec<Jobs> = self
-                .get_pages(&jobs_path(repository, run), &mut budget)
-                .await?;
+            let pages: Vec<Jobs> = self.get_pages(&jobs_path(repository, run)).await?;
+            requests += pages.len();
             jobs.extend(
                 pages
                     .into_iter()
@@ -760,9 +775,7 @@ impl GithubApi for Github {
                 .strip_prefix(&runs_prefix)
                 .and_then(|rest| rest.split_once("/jobs?"))
             {
-                Some((run, _)) => run
-                    .parse()
-                    .is_ok_and(|run: u64| runs.binary_search(&run).is_ok()),
+                Some((run, _)) => run.parse().is_ok_and(|run: u64| listed.contains(&run)),
                 None => true,
             }
         });
@@ -772,12 +785,10 @@ impl GithubApi for Github {
     }
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, Error> {
-        let mut budget = MAX_PAGES;
         let pages: Vec<Runners> = self
-            .get_pages(
-                &format!("/repos/{repository}/actions/runners?per_page={PER_PAGE}"),
-                &mut budget,
-            )
+            .get_pages(&format!(
+                "/repos/{repository}/actions/runners?per_page={PER_PAGE}"
+            ))
             .await?;
         let mut seen = HashSet::new();
         Ok(pages
@@ -955,27 +966,27 @@ struct Cached {
     next: bool,
 }
 
-/// The answers kept for conditional requests, by path, within `limit` bytes: past it the least recently used go.
+/// The answers kept for conditional requests, by path, within `limit` bytes. Room is made only from answers unused
+/// for `fresh`, least recently used first; without enough of those, a new answer is not kept.
 struct Conditional {
     entries: HashMap<String, Use>,
     bytes: usize,
     limit: usize,
-    /// Counts uses; an entry's `used` is the count at its last one.
-    clock: u64,
+    fresh: Duration,
 }
 
 struct Use {
     cached: Cached,
-    used: u64,
+    used: Instant,
 }
 
 impl Conditional {
-    fn new(limit: usize) -> Conditional {
+    fn new(limit: usize, fresh: Duration) -> Conditional {
         Conditional {
             entries: HashMap::new(),
             bytes: 0,
             limit,
-            clock: 0,
+            fresh,
         }
     }
 
@@ -983,42 +994,35 @@ impl Conditional {
         path.len() + cached.body.len()
     }
 
-    /// The answer kept for `path`, which counts as using it.
-    fn get(&mut self, path: &str) -> Option<Cached> {
-        self.clock += 1;
+    /// The answer kept for `path`, which counts as using it `now`.
+    fn get(&mut self, path: &str, now: Instant) -> Option<Cached> {
         let entry = self.entries.get_mut(path)?;
-        entry.used = self.clock;
+        entry.used = now;
         Some(entry.cached.clone())
     }
 
-    /// Keeps `cached` for `path`, then drops the least recently used answers until the rest fit. An answer larger
-    /// than the whole limit is not kept.
-    fn insert(&mut self, path: &str, cached: Cached) {
+    /// Keeps `cached` for `path` in place of what was kept for it, if room can be made for it.
+    fn insert(&mut self, path: &str, cached: Cached, now: Instant) {
         self.remove(path);
         let size = Conditional::size(path, &cached);
         if size > self.limit {
             return;
         }
-        self.clock += 1;
-        self.bytes += size;
-        self.entries.insert(
-            path.to_owned(),
-            Use {
-                cached,
-                used: self.clock,
-            },
-        );
-        while self.bytes > self.limit {
-            let Some(oldest) = self
+        while self.bytes + size > self.limit {
+            let stale = self
                 .entries
                 .iter()
+                .filter(|(_, entry)| now.saturating_duration_since(entry.used) >= self.fresh)
                 .min_by_key(|(_, entry)| entry.used)
-                .map(|(path, _)| path.clone())
-            else {
-                break;
+                .map(|(path, _)| path.clone());
+            let Some(stale) = stale else {
+                return;
             };
-            self.remove(&oldest);
+            self.remove(&stale);
         }
+        self.bytes += size;
+        self.entries
+            .insert(path.to_owned(), Use { cached, used: now });
     }
 
     fn remove(&mut self, path: &str) {

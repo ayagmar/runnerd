@@ -248,51 +248,62 @@ async fn a_listing_that_never_ends_is_read_ten_pages_deep() {
     assert_eq!(seen.lock().unwrap().len(), 10);
 }
 
+/// A listing of runs `ids` split into pages of 100, answering for page `number`.
+fn runs_page(request: &Seen, ids: &[u64], number: usize) -> Response {
+    let pages: Vec<&[u64]> = ids.chunks(100).collect();
+    let runs: Vec<String> = pages
+        .get(number - 1)
+        .map_or(&[][..], |page| *page)
+        .iter()
+        .map(|id| format!(r#"{{"id":{id}}}"#))
+        .collect();
+    page(
+        request,
+        &format!(r#"{{"workflow_runs":[{}]}}"#, runs.join(",")),
+        number < pages.len(),
+    )
+}
+
 #[tokio::test]
-async fn a_busy_repository_is_polled_oldest_runs_first_within_the_old_request_count() {
-    // 300 queued runs, newest first as GitHub lists them, each with one queued job.
+async fn a_busy_repository_is_polled_queued_runs_first_then_the_oldest_within_the_old_run_count() {
+    // 250 runs in progress on GitHub's own runners, and 150 newer queued runs, each listed newest first.
     let (url, seen) = fake_github(|request| {
         let uri = request.uri.as_str();
+        let number = |rest: &str| {
+            rest.strip_prefix("&page=")
+                .map_or(1, |number| number.parse().unwrap())
+        };
         if let Some(rest) = uri.strip_prefix("/repos/o/r/actions/runs?status=queued&per_page=100") {
-            let number: u64 = rest.strip_prefix("&page=").map_or(1, |n| n.parse().unwrap());
-            let runs: Vec<String> = (0..100)
-                .map(|i| format!(r#"{{"id":{}}}"#, 300 - (number - 1) * 100 - i))
-                .collect();
-            return page(
-                request,
-                &format!(r#"{{"workflow_runs":[{}]}}"#, runs.join(",")),
-                number < 3,
-            );
+            return runs_page(request, &(301..=450).rev().collect::<Vec<_>>(), number(rest));
         }
-        if uri.starts_with("/repos/o/r/actions/runs?status=in_progress") {
-            return page(request, r#"{"workflow_runs":[]}"#, false);
+        if let Some(rest) =
+            uri.strip_prefix("/repos/o/r/actions/runs?status=in_progress&per_page=100")
+        {
+            return runs_page(request, &(1..=250).rev().collect::<Vec<_>>(), number(rest));
         }
-        let run: u64 = uri
+        let (run, rest) = uri
             .trim_start_matches("/repos/o/r/actions/runs/")
-            .split('/')
-            .next()
-            .unwrap()
-            .parse()
+            .split_once("/jobs?")
             .unwrap();
-        page(
-            request,
-            &format!(r#"{{"jobs":[{{"id":{run},"run_id":{run},"name":"j","status":"queued","labels":[]}}]}}"#),
-            false,
-        )
+        let run: u64 = run.parse().unwrap();
+        let job = |id: u64, status: &str| {
+            format!(r#"{{"jobs":[{{"id":{id},"run_id":{run},"name":"j","status":"{status}","labels":[]}}]}}"#)
+        };
+        // Run 50, the last read, has its queued job on a second page.
+        match (run, rest.ends_with("&page=2")) {
+            (50, false) => page(request, &job(5000, "completed"), true),
+            _ => page(request, &job(run, "queued"), false),
+        }
     })
     .await;
     let jobs = client(&url).queued_jobs("o/r").await.unwrap();
     assert_eq!(
-        seen.lock().unwrap().len(),
-        202,
-        "as many requests as a poll sent before it followed pages"
-    );
-    // Four listings of runs leave 198 requests for jobs.
-    assert_eq!(
         jobs.iter().map(|job| job.id).collect::<Vec<_>>(),
-        (1..=198).collect::<Vec<_>>(),
-        "the oldest runs are read, the newest wait"
+        (1..=50).chain(301..=450).collect::<Vec<_>>(),
+        "every queued run, then the oldest runs in progress up to 200 runs, the last read to its end"
     );
+    // Five pages of runs, 200 runs' jobs, and run 50's second page.
+    assert_eq!(seen.lock().unwrap().len(), 206);
 }
 
 /// Serves job `id` as completed when `id` is in `completed`, otherwise in progress with a name `pad` long.
@@ -361,7 +372,8 @@ async fn kept_answers_stay_within_their_byte_limit_and_the_least_recently_used_g
     let (url, seen) = fake_jobs(0..=0, 400).await;
     let mut github = client(&url);
     let limit = 2_000;
-    *github.etags.get_mut().unwrap() = Conditional::new(limit);
+    // Every answer may go at once: least recently used first.
+    *github.etags.get_mut().unwrap() = Conditional::new(limit, Duration::ZERO);
     for id in 2..=20 {
         github.job("o/r", id).await.unwrap();
         // Job 1 is asked between every other: the most recently used.
@@ -383,6 +395,28 @@ async fn kept_answers_stay_within_their_byte_limit_and_the_least_recently_used_g
         [false, false],
         "job 2, unused the longest, was dropped"
     );
+}
+
+#[tokio::test]
+async fn polls_that_ask_more_than_the_cache_holds_keep_the_answers_that_fit_conditional() {
+    let (url, seen) = fake_jobs(0..=0, 400).await;
+    let mut github = client(&url);
+    let limit = 2_000;
+    *github.etags.get_mut().unwrap() = Conditional::new(limit, Duration::from_secs(600));
+    // Two polls asking the same ten jobs in the same order, five times what the cache holds.
+    for _ in 0..2 {
+        for id in 1..=10 {
+            github.job("o/r", id).await.unwrap();
+        }
+    }
+    assert!(lock(&github.etags).bytes <= limit, "within {limit} bytes");
+    for id in 1..=2 {
+        assert_eq!(
+            conditional(&seen, &format!("/repos/o/r/actions/jobs/{id}")),
+            [false, true],
+            "job {id}, kept from the first poll, is conditional in the second"
+        );
+    }
 }
 
 #[tokio::test]

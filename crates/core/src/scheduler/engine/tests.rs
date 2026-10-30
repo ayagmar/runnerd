@@ -79,6 +79,8 @@ struct GithubState {
     queued_on: HashMap<u64, String>,
     /// How many deletes GitHub refuses next because the runner is busy.
     busy_deletes: u32,
+    /// Repositories whose next runners listing leaves every runner out, as one read across shifting pages can.
+    missed_listings: BTreeSet<String>,
     /// What `GET /actions/jobs/{id}` answers.
     jobs: HashMap<u64, JobDetails>,
     /// What started each workflow run, by run ID.
@@ -225,6 +227,9 @@ impl GithubApi for FakeGithub {
         self.answer().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("runners {repository}"));
+        if state.missed_listings.remove(repository) {
+            return Ok(Vec::new());
+        }
         let runners = state
             .runners
             .iter()
@@ -2903,6 +2908,37 @@ async fn the_runner_of_a_removed_repository_github_held_busy_is_deleted_once_it_
     // Its container is removed; GitHub still holds the registration, which the same tick's poll deletes.
     assert_eq!(removed(&docker.calls()), ["remove container-1"]);
     assert_eq!(github.0.lock().unwrap().runners.len(), 0);
+}
+
+#[tokio::test]
+async fn a_removed_repository_whose_runner_one_listing_missed_is_polled_until_it_is_deleted() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    idle_runner(&github, &docker);
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    engine.reload(
+        Config::parse(&CONFIG.replace("name = \"o/r\"", "name = \"o/x\"")).unwrap(),
+        None,
+        None,
+    );
+    // GitHub holds the runner busy as its container goes, and the listing that tick misses it.
+    {
+        let mut state = github.0.lock().unwrap();
+        state.busy_deletes = 2;
+        state.missed_listings.insert("o/r".to_owned());
+    }
+    engine.tick(Shutdown::No).await;
+    // Its container goes; GitHub still holds the registration, which this tick's listing shows again.
+    docker.0.lock().unwrap().containers[0].running = false;
+    engine.tick(Shutdown::No).await;
+    assert_eq!(removed(&docker.calls()), ["remove container-1"]);
+    assert_eq!(
+        github.0.lock().unwrap().runners.len(),
+        0,
+        "the registration is deleted once a listing shows it again"
+    );
 }
 
 /// A container left running by an earlier daemon, with its memory cap.
