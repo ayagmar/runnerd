@@ -562,6 +562,7 @@ fn persons_pull_request() -> github::PullRequest {
         by_user: true,
         head_repository: Some("o/r".to_owned()),
         head_branch: "feature".to_owned(),
+        base_branch: "main".to_owned(),
     }
 }
 
@@ -602,6 +603,58 @@ async fn a_persons_pull_request_writes_where_the_repository_lets_it_and_main_hit
     assert_eq!(
         buildcache::request(&main_socket, "GET", "/gradle/0a1b", b"").await,
         (200, b"classes".to_vec())
+    );
+}
+
+#[tokio::test]
+async fn a_pull_request_from_main_saves_into_its_own_actions_cache_scope_not_mains() {
+    use crate::buildcache::actions::{restore, save};
+
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache-pull-from-main");
+    let config = pull_requests_write().replace(
+        "maven = { max_size = \"5G\" }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { actions_cache = true }\n",
+    );
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, &config);
+    // A person who may push only to `evil` opens a pull request from `main` into it: its run is main's commit
+    // merged with evil's, running evil's workflow.
+    github.0.lock().unwrap().pulls.insert(
+        7,
+        github::PullRequest {
+            head_branch: "main".to_owned(),
+            base_branch: "evil".to_owned(),
+            ..persons_pull_request()
+        },
+    );
+    let from_main = github::RunTrigger {
+        pull_requests: vec![7],
+        ..trigger("pull_request", "main")
+    };
+    let [(pull, pull_socket), (main, main_socket)] = two_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        [from_main, trigger("push", "main")],
+    )
+    .await;
+    until_decided(&mut engine, &cache, &[&pull, &main]).await;
+    assert!(save(&main_socket, "tools", b"main's tools").await);
+    assert!(save(&pull_socket, "deps", b"poison").await);
+    assert_eq!(
+        restore(&main_socket, "deps", &[]).await,
+        None,
+        "the pull request's save is in its own scope"
+    );
+    assert_eq!(
+        restore(&pull_socket, "deps", &[]).await,
+        Some(("deps".to_owned(), b"poison".to_vec()))
+    );
+    assert_eq!(
+        restore(&pull_socket, "tools", &[]).await,
+        Some(("tools".to_owned(), b"main's tools".to_vec())),
+        "it reads the default branch's last"
     );
 }
 

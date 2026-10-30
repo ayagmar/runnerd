@@ -9,7 +9,7 @@
 pub(crate) mod actions;
 mod serve;
 
-use std::collections::HashMap;
+use std::collections::{BTreeSet, HashMap};
 use std::io;
 use std::os::unix::fs::PermissionsExt;
 use std::path::{Path, PathBuf};
@@ -78,12 +78,17 @@ pub enum ActionsCache {
     Off,
 }
 
-/// The branches GitHub said a runner's job has to do with, which scope its GitHub Actions cache entries (ADR 0082).
+/// The scopes of a runner's GitHub Actions cache entries, as GitHub's: refs, `refs/heads/<branch>` or
+/// `refs/pull/<number>/merge`, from what GitHub said of its job (ADR 0082).
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
-pub struct Branches {
-    /// The branch its run is of: where its entries go and what it reads first, when its writes are `Allowed`.
-    pub run: Option<String>,
-    /// Its repository's default branch, whose entries every job of the repository reads.
+pub struct Scopes {
+    /// Its run's own ref, where its entries go and what it reads first when its writes are `Allowed`: its branch's
+    /// for a branch's run, its pull request's for a pull request's. `None` when it has none, as a run GitHub ties
+    /// to several pull requests.
+    pub own: Option<String>,
+    /// What it reads next when its writes are `Allowed`: the branch its pull request merges into.
+    pub base: Option<String>,
+    /// Its repository's default branch, whose entries every job of the repository reads last.
     pub default: Option<String>,
 }
 
@@ -197,11 +202,38 @@ struct State {
     /// What the uploads not yet entries, being received or held, count for (`charge`): at most `max_size`, so jobs
     /// whose writes are undecided cannot fill the disk.
     uploading: u64,
-    /// Each repository's default branch, as the last decision said: what an undecided job's GitHub Actions cache
-    /// lookups read.
+    /// Each repository's default branch's ref, as the last decision said: what an undecided job's GitHub Actions
+    /// cache lookups read.
     default_branches: HashMap<String, String>,
-    /// When the last GitHub Actions cache entry was created, in ms: each is created later than the one before.
+    /// When the last GitHub Actions cache entry was created, in ms: each is created later than any before, those of
+    /// earlier runs included, so its creation time names it.
     last_created: u64,
+    /// The GitHub Actions cache entries of `entries`, by the directory of their scope and version.
+    actions: HashMap<PathBuf, BTreeSet<PathBuf>>,
+}
+
+impl State {
+    /// Indexes `path` among the GitHub Actions cache entries, if it is one.
+    fn index(&mut self, path: &Path) {
+        if let Some(scope) = actions::scope_of(path) {
+            self.actions
+                .entry(scope)
+                .or_default()
+                .insert(path.to_owned());
+        }
+    }
+
+    /// Takes `path` out of the GitHub Actions cache entries' index.
+    fn unindex(&mut self, path: &Path) {
+        if let Some(scope) = actions::scope_of(path)
+            && let Some(paths) = self.actions.get_mut(&scope)
+        {
+            paths.remove(path);
+            if paths.is_empty() {
+                self.actions.remove(&scope);
+            }
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -225,14 +257,14 @@ struct Runner {
     serving: JoinHandle<()>,
     /// Whether it serves GitHub Actions' cache.
     actions: ActionsCache,
-    /// What GitHub said of its job's branches, once its writes are decided.
-    branches: Branches,
+    /// Its GitHub Actions cache scopes, once its writes are decided.
+    scopes: Scopes,
     /// Woken when its writes are decided, for the GitHub Actions cache saves that wait for that.
     decided: Arc<Notify>,
     /// Its GitHub Actions cache saves not yet entries, by the number in their upload URL.
     saves: HashMap<u64, actions::Save>,
-    /// The entries its GitHub Actions cache lookups found, by the number in their download URL.
-    found: Vec<PathBuf>,
+    /// The entries its GitHub Actions cache lookups found, by their creation time, the number in their download URL.
+    found: HashMap<u64, PathBuf>,
 }
 
 /// An upload written to a file of its own, not an entry yet.
@@ -262,19 +294,26 @@ impl BuildCache {
         count_entries(&root, &root, &mut entries)?;
         let bytes = entries.values().map(|entry: &Entry| entry.bytes).sum();
         let charged = entries.values().map(|entry| charge(entry.bytes)).sum();
+        let mut state = State {
+            max_size,
+            bytes,
+            charged,
+            ..State::default()
+        };
+        for path in entries.keys() {
+            state.index(path);
+            state.last_created = state
+                .last_created
+                .max(actions::created_of(path).unwrap_or(0));
+        }
+        state.entries = entries;
         Ok(BuildCache {
             inner: Arc::new(Inner {
                 root,
                 uploads,
                 sockets: sockets.to_owned(),
                 results: actions::Results::new(),
-                state: Mutex::new(State {
-                    max_size,
-                    entries,
-                    bytes,
-                    charged,
-                    ..State::default()
-                }),
+                state: Mutex::new(state),
             }),
         })
     }
@@ -344,10 +383,10 @@ impl BuildCache {
                 dir: dir.clone(),
                 serving,
                 actions,
-                branches: Branches::default(),
+                scopes: Scopes::default(),
                 decided: Arc::new(Notify::new()),
                 saves: HashMap::new(),
-                found: Vec::new(),
+                found: HashMap::new(),
             },
         );
         if let Some(mut old) = old {
@@ -382,9 +421,9 @@ impl BuildCache {
             .is_some_and(|runner| runner.writes == Writes::Undecided)
     }
 
-    /// Decides whether `runner`'s job may write, once, with the branches its GitHub Actions cache entries are scoped
-    /// to: what it sent meanwhile becomes entries or is dropped.
-    pub fn decide(&self, runner: &str, writes: Writes, branches: Branches) {
+    /// Decides whether `runner`'s job may write, once, with the scopes of its GitHub Actions cache entries: what it
+    /// sent meanwhile becomes entries or is dropped.
+    pub fn decide(&self, runner: &str, writes: Writes, scopes: Scopes) {
         let held = {
             let mut state = lock(&self.inner.state);
             let Some(open) = state.runners.get_mut(runner) else {
@@ -397,11 +436,11 @@ impl BuildCache {
             open.decided.notify_waiters();
             let held = std::mem::take(&mut open.held);
             let repository = open.repository.clone();
-            if let Some(default) = &branches.default {
+            if let Some(default) = &scopes.default {
                 state.default_branches.insert(repository, default.clone());
             }
             if let Some(open) = state.runners.get_mut(runner) {
-                open.branches = branches;
+                open.scopes = scopes;
             }
             held
         };
@@ -509,6 +548,7 @@ impl BuildCache {
                     break;
                 }
                 state.entries.remove(&path);
+                state.unindex(&path);
                 state.bytes -= entry.bytes;
                 state.charged -= charge(entry.bytes);
                 victims.push(path);
@@ -566,6 +606,7 @@ impl Inner {
                 bytes: upload.bytes,
                 used: crate::time::now_ms(),
             };
+            state.index(&upload.entry);
             if let Some(old) = state.entries.insert(upload.entry, entry) {
                 state.bytes -= old.bytes;
                 state.charged -= charge(old.bytes);

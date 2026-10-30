@@ -229,6 +229,8 @@ pub struct PullRequest {
     pub head_repository: Option<String>,
     /// Its head branch.
     pub head_branch: String,
+    /// The branch it is to merge into, of the repository it was opened in.
+    pub base_branch: String,
 }
 
 /// A repository, as `GET /repos/{owner}/{repo}` says.
@@ -467,6 +469,13 @@ impl PullRequestNumber {
 struct PullRequestBody {
     user: Option<Account>,
     head: PullRequestHead,
+    base: PullRequestBaseRef,
+}
+
+#[derive(Deserialize)]
+struct PullRequestBaseRef {
+    #[serde(rename = "ref")]
+    branch: String,
 }
 
 #[derive(Deserialize)]
@@ -869,6 +878,7 @@ impl GithubApi for Github {
             by_user: Account::is_user(pull.user.as_ref()),
             head_repository: pull.head.repo.map(|repo| repo.full_name),
             head_branch: pull.head.branch,
+            base_branch: pull.base.branch,
         })
     }
 

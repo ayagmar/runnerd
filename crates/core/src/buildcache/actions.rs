@@ -77,13 +77,15 @@ const REQUEST_ID: HeaderName = HeaderName::from_static("x-ms-request-id");
 /// The range Azure's clients ask for: theirs, or the standard one.
 const MS_RANGE: HeaderName = HeaderName::from_static("x-ms-range");
 
-/// A save being uploaded: an entry of the job's branch, once its archive is in and its job finalizes it.
+/// A save being uploaded: an entry of the job's own scope, once its archive is in and its job finalizes it.
 #[derive(Debug)]
 pub(super) struct Save {
     /// The entry's path in the entries' directory, but for its last segment, which says when it was created.
     dir: PathBuf,
     key: String,
     version: String,
+    /// The size limit when it started: its archive, whole or the sum of its blocks, takes at most a quarter of it.
+    max_size: u64,
     /// Its blocks so far, by their ID, until a block list joins them.
     blocks: HashMap<String, Upload>,
     /// The archive, sent whole or joined from blocks.
@@ -140,13 +142,12 @@ pub(super) async fn handle(
     runner: &str,
     request: Request<Incoming>,
 ) -> Response<Body> {
+    // A runner adopted after a restart that turned the cache off still has the forwarder and the preload its
+    // container started with: its lookups miss and its saves are dropped, and its artifacts still reach GitHub.
     let served = lock(&inner.state)
         .runners
         .get(runner)
         .is_some_and(|open| open.actions == ActionsCache::Served);
-    if !served {
-        return status(StatusCode::NOT_FOUND);
-    }
     let path = request.uri().path().trim_start_matches('/').to_owned();
     if let Some(method) = path.strip_prefix(CACHE_SERVICE) {
         if request.method() != Method::POST {
@@ -157,8 +158,10 @@ pub(super) async fn handle(
             return twirp_error(StatusCode::BAD_REQUEST, "malformed");
         };
         return match method {
-            "GetCacheEntryDownloadURL" => lookup(inner, runner, &host, &body),
-            "CreateCacheEntry" => create(inner, runner, &host, &body).await,
+            "GetCacheEntryDownloadURL" if served => lookup(inner, runner, &host, &body),
+            "GetCacheEntryDownloadURL" => missed(),
+            "CreateCacheEntry" if served => create(inner, runner, &host, &body).await,
+            "CreateCacheEntry" => created(&host, DROPPED),
             "FinalizeCacheEntryUpload" => finalize(inner, runner, &body),
             _ => twirp_error(StatusCode::NOT_FOUND, "bad_route"),
         };
@@ -217,10 +220,11 @@ fn lookup(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Response<Body
         .filter(|key| valid_key(key))
         .collect();
     let found = if valid_segment(&request.version) {
-        scopes.iter().find_map(|branch| {
-            let scope = scope_dir(&open.repository, branch, &request.version);
+        scopes.iter().find_map(|reference| {
+            let scope = scope_dir(&open.repository, reference, &request.version);
+            let paths = state.actions.get(&scope)?;
             keys.iter()
-                .find_map(|key| newest(state.entries.keys(), &scope, key))
+                .find_map(|key| newest(paths.iter(), &scope, key))
         })
     } else {
         None
@@ -228,50 +232,57 @@ fn lookup(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Response<Body
     let Some(open) = state.runners.get_mut(runner) else {
         return status(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let found = found.and_then(|(path, key)| {
-        let id = match open.found.iter().position(|known| *known == path) {
-            Some(id) => id,
-            None if open.found.len() < MAX_FOUND => {
-                open.found.push(path.clone());
-                open.found.len() - 1
-            }
-            None => return None,
-        };
-        Some((path, key, id))
+    // An entry's number in its download URL is when it was created, which no other entry shares, in this run of the
+    // daemon or an earlier one: a URL from before a restart names nothing this runner found since.
+    let found = found.filter(|found| {
+        open.found.contains_key(&found.created)
+            || open.found.len() < MAX_FOUND
+                && open
+                    .found
+                    .insert(found.created, found.path.clone())
+                    .is_none()
     });
-    let Some((path, key, id)) = found else {
+    let Some(Found { path, key, created }) = found else {
         open.counts.misses += 1;
-        return json(&serde_json::json!({
-            "ok": false,
-            "signed_download_url": "",
-            "matched_key": "",
-        }));
+        return missed();
     };
     open.counts.hits += 1;
     drop(state);
     inner.touch(&path);
     json(&serde_json::json!({
         "ok": true,
-        "signed_download_url": format!("http://{host}/{DOWNLOADS}{id}"),
+        "signed_download_url": format!("http://{host}/{DOWNLOADS}{created}"),
         "matched_key": key,
     }))
 }
 
-/// The branches whose entries a job reads, in order: its run's when it may write, then the default branch, as its
-/// decision said or, while undecided, as the last decision of its repository did.
+fn missed() -> Response<Body> {
+    json(&serde_json::json!({
+        "ok": false,
+        "signed_download_url": "",
+        "matched_key": "",
+    }))
+}
+
+/// The scopes whose entries a job reads, in order: when it may write, its own and its pull request's base branch;
+/// then the default branch, as its decision said or, while undecided, as the last decision of its repository did.
 fn read_scopes(open: &Runner, default_branch: Option<&String>) -> Vec<String> {
     let mut scopes = Vec::new();
-    if open.writes == Writes::Allowed
-        && let Some(run) = &open.branches.run
-    {
-        scopes.push(run.clone());
+    if open.writes == Writes::Allowed {
+        scopes.extend(open.scopes.own.iter().chain(&open.scopes.base).cloned());
     }
-    if let Some(default) = open.branches.default.as_ref().or(default_branch)
-        && !scopes.contains(default)
-    {
+    if let Some(default) = open.scopes.default.as_ref().or(default_branch) {
         scopes.push(default.clone());
     }
+    scopes.dedup();
     scopes
+}
+
+/// An entry a lookup found.
+struct Found {
+    path: PathBuf,
+    key: String,
+    created: u64,
 }
 
 /// Of `entries`, the newest created in `scope` whose key is `key`, else the newest whose key starts with it.
@@ -279,7 +290,7 @@ fn newest<'entries>(
     entries: impl Iterator<Item = &'entries PathBuf>,
     scope: &Path,
     key: &str,
-) -> Option<(PathBuf, String)> {
+) -> Option<Found> {
     let mut exact: Option<(u64, &PathBuf, String)> = None;
     let mut prefixed: Option<(u64, &PathBuf, String)> = None;
     for path in entries {
@@ -297,12 +308,16 @@ fn newest<'entries>(
             *best = Some((created, path, found));
         }
     }
-    exact.or(prefixed).map(|(_, path, key)| (path.clone(), key))
+    exact.or(prefixed).map(|(created, path, key)| Found {
+        path: path.clone(),
+        key,
+        created,
+    })
 }
 
-/// `CreateCacheEntry`: an upload URL for a save into the job's branch. A job that may not write, or whose writes
-/// are still undecided after `DECISION_WAIT`, gets one whose archive is read and dropped, as `actions/cache` and
-/// BuildKit fail a build whose save is refused. A key its branch has already is refused, as GitHub refuses it.
+/// `CreateCacheEntry`: an upload URL for a save into the job's own scope. A job that may not write, whose writes
+/// are still undecided after `DECISION_WAIT`, or whose scope has the key or is saving it already, gets one whose
+/// archive is read and dropped, as BuildKit fails a build whose save is refused.
 async fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Response<Body> {
     let Ok(request) = serde_json::from_slice::<CreateRequest>(body) else {
         return twirp_error(StatusCode::BAD_REQUEST, "malformed");
@@ -315,26 +330,30 @@ async fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Respons
     let Some(open) = state.runners.get(runner) else {
         return status(StatusCode::SERVICE_UNAVAILABLE);
     };
-    let branch = match (&open.writes, &open.branches.run) {
-        (Writes::Allowed, Some(branch)) if open.saves.len() < MAX_SAVES => Some(branch.clone()),
+    let own = match (&open.writes, &open.scopes.own) {
+        (Writes::Allowed, Some(own)) if open.saves.len() < MAX_SAVES => Some(own.clone()),
         _ => None,
     };
-    let Some(branch) = branch else {
+    let Some(own) = own else {
         if let Some(open) = state.runners.get_mut(runner) {
             open.counts.refused += 1;
         }
-        // No save has number 0: what is sent to it is dropped.
-        return created(host, 0);
+        return created(host, DROPPED);
     };
-    let dir = entry_dir(&open.repository, &branch, &request.version, &request.key);
-    let taken = state
-        .entries
-        .keys()
-        .any(|path| path.parent() == Some(dir.as_path()))
-        || open.saves.values().any(|save| save.dir == dir);
+    let dir = entry_dir(&open.repository, &own, &request.version, &request.key);
+    let scope = scope_dir(&open.repository, &own, &request.version);
+    let taken = state.actions.get(&scope).is_some_and(|paths| {
+        paths
+            .iter()
+            .any(|path| path.parent() == Some(dir.as_path()))
+    }) || state
+        .runners
+        .values()
+        .any(|open| open.saves.values().any(|save| save.dir == dir));
     if taken {
-        return json(&serde_json::json!({ "ok": false, "signed_upload_url": "", "message": "" }));
+        return created(host, DROPPED);
     }
+    let max_size = state.max_size;
     state.next_upload += 1;
     let id = state.next_upload;
     if let Some(open) = state.runners.get_mut(runner) {
@@ -344,6 +363,7 @@ async fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Respons
                 dir,
                 key: request.key,
                 version: request.version,
+                max_size,
                 blocks: HashMap::new(),
                 archive: None,
                 dropped: false,
@@ -352,6 +372,9 @@ async fn create(inner: &Inner, runner: &str, host: &str, body: &[u8]) -> Respons
     }
     created(host, id)
 }
+
+/// The number of no save: what is sent to it is read and dropped.
+const DROPPED: u64 = 0;
 
 fn created(host: &str, id: u64) -> Response<Body> {
     json(&serde_json::json!({
@@ -386,8 +409,8 @@ async fn wait_for_decision(inner: &Inner, runner: &str) {
     }
 }
 
-/// `FinalizeCacheEntryUpload`: the save's archive becomes an entry of its branch, created now. One whose archive was
-/// dropped, or a job's that may not write, answers as stored.
+/// `FinalizeCacheEntryUpload`: the save's archive becomes an entry of its scope, created now. Any other, such as
+/// one whose archive was dropped or that was answered with the dropping URL, answers as stored.
 fn finalize(inner: &Inner, runner: &str, body: &[u8]) -> Response<Body> {
     let Ok(request) = serde_json::from_slice::<FinalizeRequest>(body) else {
         return twirp_error(StatusCode::BAD_REQUEST, "malformed");
@@ -413,11 +436,7 @@ fn finalize(inner: &Inner, runner: &str, body: &[u8]) -> Response<Body> {
         .find(|(_, save)| save.archive.is_some() || save.dropped)
         .map(|(id, _)| *id);
     let Some(save) = id.and_then(|id| open.saves.remove(&id)) else {
-        return if open.writes == Writes::Allowed {
-            not_stored()
-        } else {
-            stored(0)
-        };
+        return stored(0);
     };
     let Save {
         dir,
@@ -474,22 +493,19 @@ async fn upload(
             .map(|(_, value)| value.clone())
     };
     let (comp, block) = (field("comp"), field("blockid"));
-    let (open, max_size) = {
-        let state = lock(&inner.state);
-        let open = state
-            .runners
-            .get(runner)
-            .and_then(|open| open.saves.get(&id))
-            .is_some_and(|save| !save.dropped);
-        (open, state.max_size)
-    };
+    let max_size = lock(&inner.state)
+        .runners
+        .get(runner)
+        .and_then(|open| open.saves.get(&id))
+        .filter(|save| !save.dropped)
+        .map(|save| save.max_size);
     let body = request.into_body();
-    if !open {
+    let Some(max_size) = max_size else {
         drain(body).await;
         return blob_created();
-    }
+    };
     match (comp.as_deref(), block) {
-        (Some("blocklist"), _) => join(inner, runner, id, body).await,
+        (Some("blocklist"), _) => join(inner, runner, id, max_size, body).await,
         (Some("block"), Some(block)) if !block.is_empty() && block.len() <= 128 => {
             let Some(received) = take(inner, runner, max_size, body).await else {
                 return status(StatusCode::INTERNAL_SERVER_ERROR);
@@ -548,10 +564,19 @@ fn keep(inner: &Inner, runner: &str, id: u64, received: Option<Upload>, part: Pa
             inner.remove_uploads(Some(runner), &gone);
             return;
         };
+        // The blocks together are the archive: they take at most a quarter of the limit, as a whole archive does.
+        let blocks_fit = |upload: &Upload, block: &str| {
+            let others: u64 = save
+                .blocks
+                .iter()
+                .filter(|(id, _)| id.as_str() != block)
+                .map(|(_, upload)| upload.bytes)
+                .sum();
+            (save.blocks.len() < MAX_BLOCKS || save.blocks.contains_key(block))
+                && others + upload.bytes <= save.max_size / 4
+        };
         match (received, part) {
-            (Some(upload), Part::Block(block))
-                if save.blocks.len() < MAX_BLOCKS || save.blocks.contains_key(&block) =>
-            {
+            (Some(upload), Part::Block(block)) if blocks_fit(&upload, &block) => {
                 gone.extend(save.blocks.insert(block, upload));
             }
             (Some(upload), Part::Archive) => gone.extend(save.archive.replace(upload)),
@@ -568,7 +593,13 @@ fn keep(inner: &Inner, runner: &str, id: u64, received: Option<Upload>, part: Pa
 }
 
 /// Put Block List: joins save `id`'s blocks in the list's order into its archive; blocks the list leaves out go.
-async fn join(inner: &Inner, runner: &str, id: u64, body: Incoming) -> Response<Body> {
+async fn join(
+    inner: &Inner,
+    runner: &str,
+    id: u64,
+    max_size: u64,
+    body: Incoming,
+) -> Response<Body> {
     let Some(list) = read(body, MAX_BLOCK_LIST).await else {
         return status(StatusCode::BAD_REQUEST);
     };
@@ -599,6 +630,12 @@ async fn join(inner: &Inner, runner: &str, id: u64, body: Incoming) -> Response<
         parts.push(upload);
     }
     inner.remove_uploads(Some(runner), &blocks.into_values().collect::<Vec<_>>());
+    // An archive in blocks takes at most a quarter of the limit, as one sent whole does.
+    if parts.iter().map(|part| part.bytes).sum::<u64>() > max_size / 4 {
+        inner.remove_uploads(Some(runner), &parts);
+        keep(inner, runner, id, None, Part::Archive);
+        return blob_created();
+    }
     let file = {
         let mut state = lock(&inner.state);
         state.next_upload += 1;
@@ -661,7 +698,7 @@ fn block_ids(list: &str) -> Option<Vec<String>> {
 async fn download(
     inner: &Inner,
     runner: &str,
-    id: usize,
+    id: u64,
     request: &Request<Incoming>,
 ) -> Response<Body> {
     if request.method() != Method::GET && request.method() != Method::HEAD {
@@ -670,7 +707,7 @@ async fn download(
     let Some(entry) = lock(&inner.state)
         .runners
         .get(runner)
-        .and_then(|open| open.found.get(id).cloned())
+        .and_then(|open| open.found.get(&id).cloned())
     else {
         return status(StatusCode::NOT_FOUND);
     };
@@ -856,19 +893,19 @@ fn valid_key(key: &str) -> bool {
     !key.is_empty() && key.len() <= MAX_KEY && !key.contains(',')
 }
 
-/// Where a branch's entries of a version are: `<owner>/<name>/actions/<branch>/~/<version>`, the branch in hex.
-fn scope_dir(repository: &str, branch: &str, version: &str) -> PathBuf {
+/// Where a scope's entries of a version are: `<owner>/<name>/actions/<scope>/~/<version>`, the scope's ref in hex.
+fn scope_dir(repository: &str, scope: &str, version: &str) -> PathBuf {
     let mut path = PathBuf::from(repository);
     path.push(TOOL);
-    push_hex(&mut path, branch);
+    push_hex(&mut path, scope);
     path.push(END);
     path.push(version);
     path
 }
 
 /// Where an entry of `key` is, but for its last segment, `~<created>`.
-fn entry_dir(repository: &str, branch: &str, version: &str, key: &str) -> PathBuf {
-    let mut path = scope_dir(repository, branch, version);
+fn entry_dir(repository: &str, scope: &str, version: &str, key: &str) -> PathBuf {
+    let mut path = scope_dir(repository, scope, version);
     push_hex(&mut path, key);
     path
 }
@@ -906,6 +943,27 @@ fn parse_entry(path: &Path, scope: &Path) -> Option<(String, u64)> {
         .map(|at| u8::from_str_radix(hex.get(at..at + 2)?, 16).ok())
         .collect::<Option<Vec<u8>>>()?;
     Some((String::from_utf8(bytes).ok()?, created))
+}
+
+/// The directory of the scope and version an entry's `path` is in, if it is a GitHub Actions cache entry's:
+/// `<owner>/<name>/actions/<scope>/~/<version>`.
+pub(super) fn scope_of(path: &Path) -> Option<PathBuf> {
+    let segments: Vec<&std::ffi::OsStr> = path.iter().collect();
+    if *segments.get(2)? != TOOL {
+        return None;
+    }
+    let end = 3 + segments
+        .get(3..)?
+        .iter()
+        .position(|segment| *segment == END)?;
+    // Its version, and at least a key and a creation time after it.
+    (segments.len() > end + 3).then(|| segments[..end + 2].iter().collect())
+}
+
+/// When the GitHub Actions cache entry at `path` was created, if it is one.
+pub(super) fn created_of(path: &Path) -> Option<u64> {
+    scope_of(path)?;
+    path.file_name()?.to_str()?.strip_prefix(END)?.parse().ok()
 }
 
 /// Reads a body of at most `limit` bytes.

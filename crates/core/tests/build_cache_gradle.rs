@@ -19,7 +19,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use runnerd_core::buildcache::{ActionsCache, Branches, BuildCache, MOUNT, SOCKET, Writes};
+use runnerd_core::buildcache::{ActionsCache, BuildCache, MOUNT, SOCKET, Scopes, Writes};
 
 const IMAGE: &str = "runnerd-test-build-cache";
 
@@ -136,7 +136,7 @@ async fn a_main_builds_outputs_are_from_cache_in_a_fresh_container() {
     let main = cache
         .attach("main", "halyard/api", ActionsCache::Off)
         .unwrap();
-    cache.decide("main", Writes::Allowed, Branches::default());
+    cache.decide("main", Writes::Allowed, Scopes::default());
     let output = tokio::task::spawn_blocking({
         let (project, main) = (project.clone(), main.clone());
         move || gradle_build(&project, &main)
@@ -154,7 +154,7 @@ async fn a_main_builds_outputs_are_from_cache_in_a_fresh_container() {
     let pull = cache
         .attach("pull", "halyard/api", ActionsCache::Off)
         .unwrap();
-    cache.decide("pull", Writes::Refused, Branches::default());
+    cache.decide("pull", Writes::Refused, Scopes::default());
     let output = tokio::task::spawn_blocking({
         let (project, pull) = (project.clone(), pull.clone());
         move || gradle_build(&project, &pull)

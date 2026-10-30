@@ -23,7 +23,7 @@
 use std::path::{Path, PathBuf};
 use std::process::Command;
 
-use runnerd_core::buildcache::{ActionsCache, Branches, BuildCache, MOUNT, Writes};
+use runnerd_core::buildcache::{ActionsCache, BuildCache, MOUNT, Scopes, Writes};
 
 const IMAGE: &str = "runnerd-test-actions-cache";
 
@@ -127,10 +127,12 @@ fn node(socket_dir: &Path, script: &str) -> String {
     output
 }
 
-fn main_branch(run: &str) -> Branches {
-    Branches {
-        run: Some(run.to_owned()),
-        default: Some("main".to_owned()),
+/// The scopes of a run of `branch` in a repository whose default branch is `main`.
+fn scopes(branch: &str) -> Scopes {
+    Scopes {
+        own: Some(format!("refs/heads/{branch}")),
+        base: None,
+        default: Some("refs/heads/main".to_owned()),
     }
 }
 
@@ -144,7 +146,7 @@ async fn mains_save_is_a_pull_requests_restore_in_a_fresh_container() {
     let main = cache
         .attach("main", "halyard/web", ActionsCache::Served)
         .unwrap();
-    cache.decide("main", Writes::Allowed, main_branch("main"));
+    cache.decide("main", Writes::Allowed, scopes("main"));
     let output = tokio::task::spawn_blocking(move || {
         node(
             &main,
@@ -165,7 +167,7 @@ async fn mains_save_is_a_pull_requests_restore_in_a_fresh_container() {
     let pull = cache
         .attach("pull", "halyard/web", ActionsCache::Served)
         .unwrap();
-    cache.decide("pull", Writes::Refused, main_branch("feature"));
+    cache.decide("pull", Writes::Refused, scopes("feature"));
     let output = tokio::task::spawn_blocking(move || {
         node(
             &pull,

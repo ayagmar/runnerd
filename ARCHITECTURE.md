@@ -190,7 +190,7 @@ adopted too and drains as it would after a reload.
 | Config | `runnerd.toml`, default `$XDG_CONFIG_HOME/runnerd/runnerd.toml` ([`crates/core/src/config.rs`](crates/core/src/config.rs)); 0600, as `init` writes it and every save leaves it, since it holds `[notify]` secrets ([ADR 0078](docs/adr/0078-a-first-run-that-can-start-and-keeps-its-secrets.md)) |
 | Slot and repository state | in memory, in `Engine`; rebuilt from container labels on restart, except paused repositories, which the job history keeps |
 | Caches | Docker volumes named by `cache::Names`: `runnerd-<profile>-base`, `runnerd-<profile>-slot-<n>`, `runnerd-pnpm`, `runnerd-maven`, `runnerd-mirror` |
-| Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`, GitHub Actions' cache's under `entries/<owner>/<name>/actions/<branch>/~/<version>/<key>/~<created>` with branch and key in hex; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
+| Build cache | files in `[caches.build] directory`, default `$XDG_CACHE_HOME/runnerd/build-cache`, under `entries/<owner>/<name>/<tool>/<key>`, GitHub Actions' cache's under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>` with the scope's ref and the key in hex; each running runner's socket in `runnerd-build-cache/<hash of its name>/cache.sock` beside the API socket; which runners may write, in memory |
 | Runner containers | labelled `runnerd.job`, `runnerd.profile`, `runnerd.slot`, `runnerd.repository`, `runnerd.runner-id` |
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
@@ -236,10 +236,13 @@ adopted too and drains as it would after a reload.
   counts at least 4 KiB against `max_size`, so the limit also bounds how many there are; a runner holds at most
   10,000 undecided uploads and is served at most 256 connections at once
   ([ADR 0077](docs/adr/0077-cache-credentials-closed-slots-and-build-cache-counts.md)).
-- Where `[caches.build] actions_cache` is on, a job's GitHub Actions cache saves become entries only of its run's
-  branch, and only when the build cache lets it write; it reads that branch's entries, then the default branch's,
-  and every other job only the default branch's, so no pull request changes what a default-branch job restores. A
-  save it may not make is read, dropped and answered as kept. The image reaches it on port 41772 of the container's
+- Where `[caches.build] actions_cache` is on, a job's GitHub Actions cache saves become entries only of its own
+  scope, and only when the build cache lets it write: a branch run's branch, a pull request run's pull request
+  (`refs/pull/<number>/merge`), never its head branch. It reads that scope's entries, then its pull request's base
+  branch's, then the default branch's, and every other job only the default branch's, so no pull request changes
+  what a default-branch job restores. A save it may not make, or of a key its scope has, is read, dropped and
+  answered as kept; with the switch off, a runner's lookups miss and its saves are dropped, and other requests still
+  go to GitHub. The image reaches it on port 41772 of the container's
   own addresses, which an `iptables` rule closes on `eth*`, only through the `NODE_OPTIONS` preload, and only when
   the socket's directory has the `actions` marker
   ([ADR 0082](docs/adr/0082-github-actions-cache-served-from-the-host.md)).

@@ -113,16 +113,17 @@ To keep a repository out, set `build_cache = false` under it. A workflow turns o
 
 With `build.actions_cache = true` under [`[caches]`](../configuration/#caches), the build cache also serves `actions/cache`, the `cache:` input of `setup-node`, `setup-java`, `setup-python` and `setup-gradle`, and Docker's `cache-from: type=gha` and `cache-to: type=gha`. No workflow changes: the image points each node action at the cache in place of GitHub's, and GitHub's cache is neither read nor written while it is on. Restores and saves stay on the host's disk, within `build.max_size` with the build cache's entries.
 
-Entries are scoped to branches, as on GitHub, and only [the jobs that may write](#build-cache) save:
+Entries are scoped to branches and pull requests, as on GitHub, and only [the jobs that may write](#build-cache) save:
 
-- A push, schedule or manual run of the default branch or of `build.branches` saves into its branch, and so does an opted-in pull request into its own branch. It restores from its branch, then from the default branch.
+- A push, schedule or manual run of the default branch or of `build.branches` saves into its branch, and restores from its branch, then from the default branch.
+- An opted-in pull request saves into the pull request's own scope, never its head branch's, and restores from that, then from its base branch, then from the default branch.
 - Every other job restores from the default branch only. Its saves say they saved, so Docker builds that save to the cache do not fail, and are dropped.
 - A pull request never writes what a default-branch job restores.
 - Restores at the start of a job, before GitHub has said what the job is, read the default branch. The first job of a repository after runnerd starts finds nothing then.
 
-A save of a key its branch already has is skipped, as on GitHub. An entry may take at most a quarter of `build.max_size`. Artifacts (`upload-artifact`, `download-artifact`) still go to GitHub: runnerd passes those requests on unchanged.
+A save of a key its scope already has is skipped, as on GitHub. An entry may take at most a quarter of `build.max_size`, however it is uploaded. Artifacts (`upload-artifact`, `download-artifact`) still go to GitHub: runnerd passes those requests on unchanged.
 
-It does not reach a workflow that sets `NODE_OPTIONS` itself, `container:` jobs and `docker://` actions: those use GitHub's cache. Turning it on starts the cache cold; the first default-branch run of each key saves it.
+It does not reach a workflow that sets `NODE_OPTIONS` itself, `container:` jobs and `docker://` actions: those use GitHub's cache. Turning it on starts the cache cold; the first default-branch run of each key saves it. Turning it off takes effect for jobs that start after the change; a job already running when runnerd restarts restores nothing and saves nothing for the rest of it, and its artifacts still upload.
 
 ## Records of failed jobs
 

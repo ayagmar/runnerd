@@ -12,7 +12,7 @@ use tracing::warn;
 
 use super::tick::CONCURRENT_REQUESTS;
 use super::{Engine, Occupant};
-use crate::buildcache::{self, ActionsCache, Branches, Writes};
+use crate::buildcache::{self, ActionsCache, Scopes, Writes};
 use crate::cache;
 use crate::config::BuildCacheWriters;
 use crate::docker::DockerApi;
@@ -46,20 +46,27 @@ pub(super) struct Undecided {
     job: JobDetails,
 }
 
-/// What GitHub said of an undecided job: whether it may write, `None` when GitHub could not say, the branch its run
-/// is of, and its repository's default branch, once known.
+/// What GitHub said of an undecided job: whether it may write, `None` when GitHub could not say, the scopes of a job
+/// that may, and its repository's default branch, once known.
 struct Answer {
     runner: String,
     repository: String,
     writes: Option<Writes>,
-    branch: Option<String>,
+    scopes: Scoped,
     default_branch: Option<String>,
 }
 
-/// Whether a job may write, and the branch its run is of, as GitHub said.
+/// Whether a job may write and, when it may, the refs of its own and its pull request's base scopes, as GitHub said.
 struct Decision {
     writes: Writes,
-    branch: Option<String>,
+    scopes: Scoped,
+}
+
+/// A writing job's own scope, and its pull request's base, as refs.
+#[derive(Default)]
+struct Scoped {
+    own: Option<String>,
+    base: Option<String>,
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -234,11 +241,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 );
             }
             if let (Some(writes), Some(cache)) = (answer.writes, &self.build_cache) {
-                let branches = Branches {
-                    run: answer.branch,
-                    default: answer.default_branch,
+                let scopes = Scopes {
+                    own: answer.scopes.own,
+                    base: answer.scopes.base,
+                    default: answer.default_branch.map(|branch| branch_ref(&branch)),
                 };
-                cache.decide(&answer.runner, writes, branches);
+                cache.decide(&answer.runner, writes, scopes);
             }
         }
     }
@@ -264,15 +272,15 @@ async fn read_answers<G: GithubApi>(
                     .map(|details| details.default_branch),
             };
             let decision = decide(github, &undecided, branches, default_branch.as_ref()).await;
-            let (writes, branch) = match decision {
-                Some(decision) => (Some(decision.writes), decision.branch),
-                None => (None, None),
+            let (writes, scopes) = match decision {
+                Some(decision) => (Some(decision.writes), decision.scopes),
+                None => (None, Scoped::default()),
             };
             Answer {
                 runner: undecided.runner,
                 repository: undecided.repository,
                 writes,
-                branch,
+                scopes,
                 default_branch: default_branch.ok(),
             }
         })
@@ -281,8 +289,9 @@ async fn read_answers<G: GithubApi>(
         .await
 }
 
-/// Whether an undecided job may write, with its run's branch: `Undecided` stays so, and `None` while GitHub does not
-/// answer. A job is never allowed on a lookup that failed.
+/// Whether an undecided job may write, with its scopes: `Undecided` stays so, and `None` while GitHub does not
+/// answer. A job is never allowed on a lookup that failed. A pull request's run is scoped by its pull request,
+/// reading its base branch next, never by its head branch, which may share a name with any branch.
 async fn decide<G: GithubApi>(
     github: &G,
     undecided: &Undecided,
@@ -291,7 +300,7 @@ async fn decide<G: GithubApi>(
 ) -> Option<Decision> {
     let decision = |writes| Decision {
         writes,
-        branch: None,
+        scopes: Scoped::default(),
     };
     let repository = &undecided.repository;
     let trigger = match github.run_trigger(repository, undecided.job.run_id).await {
@@ -324,10 +333,23 @@ async fn decide<G: GithubApi>(
     let (Writes::Allowed, Some(branch)) = (writes, &trigger.head_branch) else {
         return (writes != Writes::Undecided).then(|| decision(writes));
     };
+    let mut scopes = Scoped {
+        own: Some(branch_ref(branch)),
+        base: None,
+    };
     if trigger.event == buildcache::PULL_REQUEST_EVENT {
+        scopes.own = None;
         for &number in &trigger.pull_requests {
             match github.pull_request(repository, number).await {
-                Ok(pull) if buildcache::opened_by_user(&pull, repository, &trigger) => {}
+                // Its scope is its pull request's, when GitHub ties it to one: of several, none is its own.
+                Ok(pull) if buildcache::opened_by_user(&pull, repository, &trigger) => {
+                    if let [_] = trigger.pull_requests.as_slice() {
+                        scopes = Scoped {
+                            own: Some(format!("refs/pull/{number}/merge")),
+                            base: Some(branch_ref(&pull.base_branch)),
+                        };
+                    }
+                }
                 Ok(_) => return Some(decision(Writes::Refused)),
                 Err(error) => {
                     warn!("{repository}: cannot read pull request #{number}: {error}");
@@ -342,7 +364,7 @@ async fn decide<G: GithubApi>(
     {
         Ok(true) => Some(Decision {
             writes: Writes::Allowed,
-            branch: Some(branch.clone()),
+            scopes,
         }),
         Ok(false) => Some(decision(Writes::Refused)),
         Err(error) => {
@@ -353,4 +375,9 @@ async fn decide<G: GithubApi>(
             None
         }
     }
+}
+
+/// The ref of `branch`, which names a scope.
+fn branch_ref(branch: &str) -> String {
+    format!("refs/heads/{branch}")
 }

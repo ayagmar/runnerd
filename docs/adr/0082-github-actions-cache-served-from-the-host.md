@@ -56,26 +56,34 @@ every node action, and `$GITHUB_ENV` may not set it.
   with its headers to `https://results-receiver.actions.githubusercontent.com` and its answer passed back, at most 1
   MiB each way. Its headers and body carry the job's token and are never logged. The artifacts themselves go to the
   URLs GitHub signs, never through runnerd.
-- **Scopes, after GitHub's.** An entry is a key and version in a branch's scope of one repository. A job ADR 0052
-  and 0053 let write saves into its run's branch, as GitHub said it, after the same checks (commit on the branch,
-  pull request opened by a person). It reads its branch's entries, then the default branch's. Every other job,
-  forks' and bots' pull requests included, reads only the default branch's and saves nothing. No pull request
-  writes what a `main` job restores: a pull request that may write writes its own branch's scope.
+- **Scopes, after GitHub's.** An entry is a key and version in a ref's scope of one repository. A job ADR 0052
+  and 0053 let write saves into its own scope, after the same checks (commit on the branch, pull request opened by
+  a person): a branch run's is its branch, `refs/heads/<branch>`; a `pull_request` run's is its pull request,
+  `refs/pull/<number>/merge`, never its head branch, since a pull request may come from `main` into a branch its
+  author can push to, and its run then runs that branch's workflow. A run GitHub ties to several pull requests has
+  no scope of its own and saves nothing. A writer reads its own scope's entries, then its pull request's base
+  branch's, then the default branch's. Every other job, forks' and bots' pull requests included, reads only the
+  default branch's and saves nothing. No pull request writes what a `main` job restores.
 - **Undecided jobs.** Restores come before GitHub has said what the job is, typically in its first poll interval:
   a lookup then reads the default branch the cache learnt from an earlier decision, and finds nothing on the first
   job of a repository after a start. A save waits up to 60 s for the decision, then is refused.
 - **Refused saves answer success.** BuildKit fails a build whose cache reservation fails, so a save a job may not
   make is answered as `actions/cache` and BuildKit expect, its bytes read and dropped, and counted as refused, as
-  0052 does for Gradle. A key already in the job's scope is refused as GitHub refuses it (`ok: false`), which
-  `@actions/cache` reports as an information line.
+  0052 does for Gradle. So is a key its scope has, or that another job is saving into it, where GitHub answers
+  `ok: false`, which BuildKit's client takes as a failure unless its message says "already exists".
+- **Turned off under a running job.** A daemon restart that turns it off adopts running jobs whose containers still
+  have the forwarder and `NODE_OPTIONS`. Their lookups miss, their saves are answered as kept and dropped, and
+  every other request still goes to GitHub, so their artifacts and Docker builds keep working.
 - **Lookups as GitHub matches.** In each scope in order: the key, then each restore key, exactly, then as a prefix,
   the newest created first.
-- **Store.** Entries are files under `entries/<owner>/<name>/actions/<branch>/~/<version>/<key>/~<created>`, branch and
-  key hex-encoded in segments of 128 characters, so nothing a job names can reach outside its repository's tree
+- **Store.** Entries are files under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>`, the scope's
+  ref and the key hex-encoded in segments of 128 characters, so nothing a job names can reach outside its repository's tree
   and no two scopes or keys share a path. They count against `[caches.build] max_size` with the build cache's
   entries, go least recently used first in the same trim, and are bounded like its uploads: an entry at most a
-  quarter of `max_size` (2.5G by default; GitHub allows 10G). A block upload's blocks are files until its block
-  list joins them. No history change: a runner's lookups, hits, bytes and refused saves count in its build cache
+  quarter of `max_size` (2.5G by default; GitHub allows 10G), whole or the sum of its blocks. A block upload's
+  blocks are files until its block list joins them. The cache keeps an index of each scope's entries beside its
+  own, so a lookup reads only its scopes'. A download URL names its entry by its creation time, which no other
+  entry has, so one from before a restart never reads another entry. No history change: a runner's lookups, hits, bytes and refused saves count in its build cache
   counts.
 
 ## Consequences
@@ -85,7 +93,7 @@ A default-branch run that restored from GitHub before this was on finds nothing 
 hits from then on; GitHub's entries are neither read nor written while it is on. Turning it off brings back GitHub's.
 
 A pull request that may not write saves nothing, where GitHub would keep its own scope; its next push starts from
-the default branch's entries. Its `actions/cache` step still says it saved.
+the default branch's entries. One that may write restores its own entries, then its base branch's, as on GitHub. Its `actions/cache` step still says it saved.
 
 The `NODE_OPTIONS` file runs in every node process of a job, including a build's own: it only compares and sets one
 variable. A job's nested containers reach the cache at the container's address; ADR 0052's loopback-only forwarder
