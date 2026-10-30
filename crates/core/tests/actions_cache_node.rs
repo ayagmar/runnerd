@@ -228,15 +228,16 @@ async fn a_jobs_own_node_options_still_apply_and_its_own_containers_run_node_as_
     let output = tokio::task::spawn_blocking(move || {
         node(
             &main,
-            "NODE_OPTIONS=--require=/work/own.cjs",
-            "console.log('own: ' + globalThis.own);",
+            // An action's inputs reach it as variables such as INPUT_FETCH-DEPTH, which sh drops.
+            "NODE_OPTIONS=--require=/work/own.cjs INPUT_FETCH-DEPTH=0",
+            "console.log('own: ' + globalThis.own + ', fetch-depth: ' + process.env['INPUT_FETCH-DEPTH']);",
         )
     })
     .await
     .unwrap();
     assert!(
-        output.contains("results service: http://") && output.contains("own: true"),
-        "the preload and the job's own NODE_OPTIONS both apply:\n{output}"
+        output.contains("results service: http://") && output.contains("own: true, fetch-depth: 0"),
+        "the preload and the job's own NODE_OPTIONS both apply, and the action keeps its inputs:\n{output}"
     );
 
     // A step's `docker run -e NODE_OPTIONS node ...` passes on what the job has.

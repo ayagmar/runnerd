@@ -87,9 +87,10 @@ COPY build-cache.sh /usr/local/lib/runnerd-build-cache.sh
 COPY build-cache.gradle /usr/local/share/runnerd/build-cache.gradle
 COPY actions-cache.cjs /usr/local/lib/runnerd-actions-cache.cjs
 # The runner's bundled node, wrapped so that only the node actions it starts load the preload (node.sh). A runner
-# that updates itself replaces its externals and loses the wrapper: its jobs use GitHub's cache.
+# that updates itself replaces its externals and loses the wrapper: its jobs use GitHub's cache. The *_alpine builds
+# run only in an Alpine `container:` job, which has no bash and no cache port, so they stay as they are.
 COPY node.sh /usr/local/lib/runnerd-node.sh
-RUN nodes=$(ls /home/runner/externals/node*/bin/node) \
+RUN nodes=$(ls /home/runner/externals/node*/bin/node | grep -v _alpine/) \
     && for node in $nodes; do mv "$node" "$node.real" && install -m 755 /usr/local/lib/runnerd-node.sh "$node"; done \
     && /home/runner/externals/node24/bin/node --version
 COPY job-cleanup.sh /usr/local/sbin/runnerd-job-cleanup
