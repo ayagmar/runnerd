@@ -23,12 +23,13 @@ use crate::api::{
 use crate::config::{Admission, ByteSize, Config, Profile, cpu_budget};
 
 use super::{
-    BUSY, CpusSet, GRANULE, History, WAITED, Window, advise, busy, first_runner, spread, waits,
+    BUSY, CpusSet, GRANULE, HELD, History, Throttling, WAITED, Window, advise, busy, first_runner,
+    spread, waits,
 };
 
 /// The fewest runs a raise of `slots` or `cpus` reads: the jobs queued since the profile's last change, or one job's
 /// runs at its current `cpus`. It does not wait for `min_jobs`: a slot too few costs every queued job a wait now.
-const RAISE_RUNS: u64 = 3;
+pub(crate) const RAISE_RUNS: u64 = 3;
 
 /// A job whose runs averaged this share of their CPU cap or more, in percent, at the median, is held back by it over
 /// the whole run, not in a burst: its checkout, cache restore and upload steps barely use a CPU, so the rest of it
@@ -39,16 +40,6 @@ const BOUND: u64 = 70;
 /// the runs read: a job back at the cap would average half of it, far under `BOUND`, so a lowering never asks for
 /// the raise back.
 const HEADROOM: u64 = 2;
-
-/// A run its CPU quota throttled in this share of its run or more, in percent, was held back by its cap: it ran as
-/// fast as the cap let it, so its average says what the cap allowed. No lowering reads it, and under `measured`
-/// admission it raises the cap (ADR 0079). The share is of the run's wall time in 100 ms periods, not of the periods
-/// the kernel counted, which leave out the time it was idle: a job that waits on the network for most of its run and
-/// bursts past its cap in a few compiles is throttled in most of its busy periods and in little of its run. A
-/// throttled period loses only part of its 100 ms, so the share is more than the time the cap cost. The Android
-/// quality gate lost about 90 s of its 517 at 9 CPUs, 17% of its run, and was throttled in 28% of it, 21% at 13 and
-/// 16% at 19; an 8-minute job whose three 20-second compiles want 20 CPUs is throttled in 11%, and lost about 6%.
-const HELD: u64 = 15;
 
 /// A run without a throttling figure, as one from before schema 17, whose CPU peak came this close to its cap, in
 /// percent, met it in a burst, and counts as held back (ADR 0075). Peaks are the highest 2-second interval, so one
@@ -759,10 +750,8 @@ struct JobCpu {
     throttled: u64,
     /// How many of them without a throttling figure peaked within `MET` percent of the cap.
     peaked: u64,
-    /// How long each of them ran, ms, where it says.
-    took: Vec<u64>,
-    /// The share of its run its quota throttled each of them in, per mille, where it was measured.
-    shares: Vec<u64>,
+    /// What their quota did to each of them.
+    runs: Vec<Throttling>,
 }
 
 impl JobCpu {
@@ -800,13 +789,11 @@ enum Hold {
 
 impl Hold {
     fn of(job: &super::Ran, cap: u64) -> Hold {
-        let held = match throttled_share(job) {
-            Some(share) => {
-                job.cpu_throttled.is_some_and(|throttled| throttled > 0) && share >= HELD * 10
-            }
-            None => return Hold::peaked(job, cap),
-        };
-        if held { Hold::Throttled } else { Hold::Free }
+        match job.throttling().held() {
+            Some(true) => Hold::Throttled,
+            Some(false) => Hold::Free,
+            None => Hold::peaked(job, cap),
+        }
     }
 
     fn peaked(job: &super::Ran, cap: u64) -> Hold {
@@ -816,20 +803,6 @@ impl Hold {
             Hold::Free
         }
     }
-}
-
-/// How long a run ran, ms, from its start to its finish; `None` without either.
-fn took(job: &super::Ran) -> Option<u64> {
-    Some(job.finished_at?.saturating_sub(job.started_at?))
-}
-
-/// The share of its run its quota throttled a run in, per mille: its throttled periods over its run's wall time in
-/// 100 ms periods, or over the periods the kernel counted when those are more, as when its start or finish is
-/// unknown. `None` without a throttling figure.
-fn throttled_share(job: &super::Ran) -> Option<u64> {
-    let (periods, throttled) = job.cpu_periods.zip(job.cpu_throttled)?;
-    let run = took(job).map_or(0, |took| took / 100).max(periods);
-    Some(throttled.saturating_mul(1000) / run.max(1))
 }
 
 /// The runs of the profile a `cpus` change reads, by job: successful runs whose container had `cap`, queued at or
@@ -860,19 +833,89 @@ fn runs_at<'run>(
                 Hold::Peaked => read.peaked += 1,
                 Hold::Free => {}
             }
-            read.took.extend(took(job));
-            read.shares.extend(throttled_share(job));
+            read.runs.push(job.throttling());
         }
     }
     jobs
 }
 
-/// Why the raise before did not help `job`, whose runs at `cap` are `now`; `None` when it did, or when nothing says:
-/// no raise came before, as when its latest runs at other `cpus` had more, or fewer than `RAISE_RUNS` runs at the
-/// `cpus` before. It helped when the job's runs at `cap` took less time at the median than at the `cpus` before, or
-/// were throttled in less of their run. A tool that sizes its pool from the quota (the JVM's
-/// `availableProcessors`, cargo's `-j`, Go's `GOMAXPROCS`) starts more workers at each raise and stays throttled,
-/// running no faster: its raises stop there, as more `cpus` would only take memory and weight (ADR 0079).
+/// One successful run of a job in a profile, as [`unhelped_raise`] reads it.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CpuRun {
+    /// Its container's CPU cap, millicores, when recorded.
+    pub cap: Option<u64>,
+    /// When it was queued, ms.
+    pub queued_at: u64,
+    /// What its quota did to it.
+    pub throttling: Throttling,
+}
+
+/// A figure at the median of a job's runs at its current `cpus` and at the `cpus` before.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Medians {
+    /// At its current `cpus`.
+    pub now: u64,
+    /// At the `cpus` before.
+    pub before: u64,
+}
+
+/// A raise of `cpus` that did not help a job: its runs neither took less time nor were throttled in less of their run.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Unhelped {
+    /// The CPU cap before, millicores.
+    pub from: u64,
+    /// How long its runs took, ms, where that is known on both sides.
+    pub took: Option<Medians>,
+    /// The share of their run their quota throttled them in, per mille, where that is known on both sides.
+    pub throttled: Option<Medians>,
+}
+
+/// Whether the raise that brought a job to `cap` (millicores) did not help it, by `runs`, its successful runs in one
+/// profile at any cap, and `now`, those at `cap` the reader counts; `None` when it did, or when nothing says: no
+/// raise came before, as when its latest runs at another cap had more, or fewer than `RAISE_RUNS` runs at the cap
+/// before. It helped when its runs at `cap` took less time at the median than at the cap before, or were throttled
+/// in less of their run. A tool that sizes its pool from the quota (the JVM's `availableProcessors`, cargo's `-j`,
+/// Go's `GOMAXPROCS`) starts more workers at each raise and stays throttled, running no faster: its raises stop
+/// there, as more `cpus` would only take memory and weight (ADR 0079).
+pub fn unhelped_raise(runs: &[CpuRun], cap: u64, now: &[Throttling]) -> Option<Unhelped> {
+    let from = runs
+        .iter()
+        .filter(|run| run.cap.is_some_and(|other| other != cap))
+        .max_by_key(|run| run.queued_at)?
+        .cap
+        .filter(|before| *before < cap)?;
+    let at_before: Vec<Throttling> = runs
+        .iter()
+        .filter(|run| run.cap == Some(from))
+        .map(|run| run.throttling)
+        .collect();
+    if (at_before.len() as u64) < RAISE_RUNS {
+        return None;
+    }
+    let median = |runs: &[Throttling], figure: fn(Throttling) -> Option<u64>| {
+        let values: Vec<u64> = runs.iter().copied().filter_map(figure).collect();
+        (!values.is_empty()).then(|| spread(values).p50)
+    };
+    let medians = |figure: fn(Throttling) -> Option<u64>| {
+        Some(Medians {
+            now: median(now, figure)?,
+            before: median(&at_before, figure)?,
+        })
+    };
+    let took = medians(Throttling::took);
+    let throttled = medians(Throttling::share);
+    let helped = |medians: Option<Medians>| medians.map(|medians| medians.now < medians.before);
+    match (helped(took), helped(throttled)) {
+        (None, None) | (Some(true), _) | (_, Some(true)) => None,
+        _ => Some(Unhelped {
+            from,
+            took,
+            throttled,
+        }),
+    }
+}
+
+/// Why the raise before did not help `job`, whose runs at `cap` are `now`, as [`unhelped_raise`] finds it.
 fn unhelped(
     history: &History,
     profile: &str,
@@ -880,8 +923,10 @@ fn unhelped(
     cap: u64,
     now: &JobCpu,
 ) -> Option<String> {
-    let runs = || {
-        history.jobs.iter().filter(move |run| {
+    let runs: Vec<CpuRun> = history
+        .jobs
+        .iter()
+        .filter(|run| {
             run.profile == profile
                 && run.succeeded
                 && (
@@ -890,58 +935,36 @@ fn unhelped(
                     run.name.as_str(),
                 ) == job
         })
-    };
-    let before = runs()
-        .filter(|run| run.cpu_cap.is_some_and(|other| other != cap))
-        .max_by_key(|run| run.queued_at)?
-        .cpu_cap
-        .filter(|before| *before < cap)?;
-    let at_before: Vec<&super::Ran> = runs().filter(|run| run.cpu_cap == Some(before)).collect();
-    if (at_before.len() as u64) < RAISE_RUNS {
-        return None;
-    }
-    let median = |values: Vec<u64>| (!values.is_empty()).then(|| spread(values).p50);
-    let took_before = median(at_before.iter().filter_map(|run| took(run)).collect());
-    let share_before = median(
-        at_before
-            .iter()
-            .filter_map(|run| throttled_share(run))
-            .collect(),
+        .map(|run| CpuRun {
+            cap: run.cpu_cap,
+            queued_at: run.queued_at,
+            throttling: run.throttling(),
+        })
+        .collect();
+    let unhelped = unhelped_raise(&runs, cap, &now.runs)?;
+    let mut why = format!(
+        "the raise from {} to its {} CPUs did not help it:",
+        unhelped.from / 1000,
+        cap / 1000
     );
-    let took_now = median(now.took.clone());
-    let share_now = median(now.shares.clone());
-    let faster = took_now.zip(took_before).map(|(now, before)| now < before);
-    let freer = share_now
-        .zip(share_before)
-        .map(|(now, before)| now < before);
-    match (faster, freer) {
-        (None, None) | (Some(true), _) | (_, Some(true)) => None,
-        _ => {
-            let mut why = format!(
-                "the raise from {} to its {} CPUs did not help it:",
-                before / 1000,
-                cap / 1000
-            );
-            if let Some((now, before)) = took_now.zip(took_before) {
-                let _ = write!(
-                    why,
-                    " its runs took {} at the median, against {} before",
-                    duration(now / 1000),
-                    duration(before / 1000)
-                );
-            }
-            if let Some((now, before)) = share_now.zip(share_before) {
-                let joined = if faster.is_some() { "," } else { "" };
-                let _ = write!(
-                    why,
-                    "{joined} its quota throttled them in {}% of their run, against {}%",
-                    now / 10,
-                    before / 10
-                );
-            }
-            Some(why)
-        }
+    if let Some(took) = unhelped.took {
+        let _ = write!(
+            why,
+            " its runs took {} at the median, against {} before",
+            duration(took.now / 1000),
+            duration(took.before / 1000)
+        );
     }
+    if let Some(throttled) = unhelped.throttled {
+        let joined = if unhelped.took.is_some() { "," } else { "" };
+        let _ = write!(
+            why,
+            "{joined} its quota throttled them in {}% of their run, against {}%",
+            throttled.now / 10,
+            throttled.before / 10
+        );
+    }
+    Some(why)
 }
 
 /// Under measured admission, why the runs the cap held back raise `cpus` at `cap`: the job with the most held runs,
@@ -1040,6 +1063,11 @@ fn raised(
     }
 }
 
+/// How many `cpus` one change moves a profile at `current` by: `[sizing] max_step` percent of them, at least 1.
+pub(crate) fn cpu_step(config: &Config, current: u32) -> u32 {
+    (current.saturating_mul(config.sizing.max_step) / 100).max(1)
+}
+
 /// The profile's next `cpus`, from the CPU averages of its runs at its current `cpus` since `since` (ms), the last
 /// change, and since it got them (`runs_at`). A raise, `max_step` percent, at least 1, when one job's `RAISE_RUNS`
 /// runs or more averaged `BOUND` percent of the cap at the median, or under `measured` admission were held back by it
@@ -1073,7 +1101,7 @@ fn cpus(
         context.window.now,
     ));
     let jobs = runs_at(history, &advised.name, cap, since);
-    let step = (current.saturating_mul(config.sizing.max_step) / 100).max(1);
+    let step = cpu_step(config, current);
     let raise = |held| {
         raised(
             config,
