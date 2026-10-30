@@ -9,8 +9,8 @@ use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::sizing;
 
 use super::{
-    Check, ConfigFile, DaemonState, DockerFacts, Host, ImageFound, SYSBOX_DAEMONS, Slice, Status,
-    SysboxDaemon, checks, process_runs,
+    Check, ConfigFile, DaemonState, DockerFacts, Host, ImageFound, READS_AT_ONCE, SYSBOX_DAEMONS,
+    Slice, Status, SysboxDaemon, checks, process_runs, read_each,
 };
 use crate::testdir::Dir;
 
@@ -952,5 +952,32 @@ fn under_measured_admission_caps_over_memory_max_pass_without_claiming_to_fit() 
         !check.detail.contains("fits in") && check.detail.contains("41.5G"),
         "says the caps sum past MemoryMax: {}",
         check.detail
+    );
+}
+
+#[test]
+fn many_repositories_are_read_a_few_at_a_time_and_answered_in_their_order() {
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    let names: Vec<String> = (0..30).map(|n| format!("halyard/service-{n}")).collect();
+    let running = AtomicUsize::new(0);
+    let most = AtomicUsize::new(0);
+    let read = read_each(&names, |name: &String| {
+        let now = running.fetch_add(1, Ordering::SeqCst) + 1;
+        most.fetch_max(now, Ordering::SeqCst);
+        std::thread::sleep(std::time::Duration::from_millis(20));
+        running.fetch_sub(1, Ordering::SeqCst);
+        format!("{name}: private")
+    });
+    let expected: Vec<String> = names
+        .iter()
+        .map(|name| format!("{name}: private"))
+        .collect();
+    assert_eq!(read, expected);
+    let most = most.into_inner();
+    assert!(most <= READS_AT_ONCE, "{most} reads ran at once");
+    assert!(most > 1, "the reads run side by side");
+    assert!(
+        read_each(&Vec::<String>::new(), |name: &String| name.clone()).is_empty(),
+        "no repositories, no reads"
     );
 }

@@ -106,20 +106,18 @@ pub(crate) struct Slice {
 
 impl Host {
     /// The host, for `config` read from the file `path`. `gh` takes about half a second a call, one call per
-    /// repository, so `gh`, each repository and Docker are read at once: the doctor takes as long as its slowest read,
-    /// not their sum.
+    /// repository, so `gh`, the repositories (`READS_AT_ONCE` at a time) and Docker are read at once: the doctor takes
+    /// about as long as its slowest read, not their sum.
     pub(crate) fn read(config: Option<&Config>, path: Option<&Path>) -> Host {
+        let names: Vec<&str> = config
+            .map(|config| config.repositories.as_slice())
+            .unwrap_or_default()
+            .iter()
+            .map(|repository| repository.name.as_str())
+            .collect();
         std::thread::scope(|scope| {
             let gh_scopes = scope.spawn(read_gh_scopes);
-            let visibility: Vec<_> = config
-                .map(|config| config.repositories.as_slice())
-                .unwrap_or_default()
-                .iter()
-                .map(|repository| {
-                    let name = repository.name.as_str();
-                    (name, scope.spawn(move || read_visibility(name)))
-                })
-                .collect();
+            let visibility = scope.spawn(|| read_each(&names, |name: &&str| read_visibility(name)));
             let docker = scope.spawn(|| {
                 let docker = read_docker();
                 let images = match (config, &docker) {
@@ -163,16 +161,16 @@ impl Host {
                 })
             };
             let gh_scopes = joined(gh_scopes);
-            let visibility = visibility
-                .into_iter()
+            let visibility = names
+                .iter()
+                .zip(joined(visibility))
                 .map(|(name, read)| {
-                    let read = joined(read);
                     // Without gh logged in, what it said of a repository is only that.
                     let visibility = match &gh_scopes {
                         Ok(_) => read,
                         Err(_) => Err("needs gh logged in to github.com".to_owned()),
                     };
-                    (name.to_owned(), visibility)
+                    ((*name).to_owned(), visibility)
                 })
                 .collect();
             let DockerReads {
@@ -204,6 +202,34 @@ struct DockerReads {
     docker: Result<DockerFacts, String>,
     images: BTreeMap<String, Result<ImageFound, String>>,
     records: Option<Result<u64, String>>,
+}
+
+/// How many repositories `Host::read` reads at once: each read is a `gh` process and a request to GitHub.
+pub(crate) const READS_AT_ONCE: usize = 8;
+
+/// `read` of each of `items`, in their order, at most `READS_AT_ONCE` at a time: as many threads take the next item
+/// until none is left.
+pub(crate) fn read_each<I: Sync, T: Send>(items: &[I], read: impl Fn(&I) -> T + Sync) -> Vec<T> {
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let mut read: Vec<(usize, T)> = std::thread::scope(|scope| {
+        let workers: Vec<_> = (0..items.len().min(READS_AT_ONCE))
+            .map(|_| {
+                scope.spawn(|| {
+                    let mut done = Vec::new();
+                    loop {
+                        let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                        let Some(item) = items.get(index) else {
+                            return done;
+                        };
+                        done.push((index, read(item)));
+                    }
+                })
+            })
+            .collect();
+        workers.into_iter().flat_map(joined).collect()
+    });
+    read.sort_by_key(|(index, _)| *index);
+    read.into_iter().map(|(_, value)| value).collect()
 }
 
 /// What the thread of `handle` returned; its panic, if it panicked, goes on in this thread.
