@@ -317,7 +317,7 @@ impl<'inner> Receiving<'inner> {
     }
 
     /// Removes its file and gives back its room now, before the rest of its body is read and dropped: a sender that
-    /// stalls holds nothing.
+    /// stalls holds nothing. Its file must be closed first.
     fn give_up(&mut self) {
         let _ = std::fs::remove_file(&self.file);
         self.inner.release(Some(self.runner), self.room);
@@ -366,6 +366,7 @@ pub(super) async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming) -
                 let frame = frame.map_err(io::Error::other)?;
                 if let Ok(data) = frame.into_data() {
                     if !receiving.grow(data.len() as u64) {
+                        close(out).await;
                         receiving.give_up();
                         drain(body).await;
                         return Ok(false);
@@ -375,6 +376,7 @@ pub(super) async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming) -
             }
             Some(Ok(())) = changed(&mut decided) => {
                 if !receiving.wanted() {
+                    close(out).await;
                     receiving.give_up();
                     drain(body).await;
                     return Ok(false);
@@ -384,6 +386,11 @@ pub(super) async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming) -
     }
     out.flush().await?;
     Ok(true)
+}
+
+/// Closes an upload's file once its writes in flight end: removed while open, its blocks stay taken until then.
+async fn close(out: tokio::fs::File) {
+    drop(out.into_std().await);
 }
 
 /// Waits for `decided` to change; `None` at once without one.

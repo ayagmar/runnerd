@@ -129,6 +129,18 @@ async fn until(done: impl Fn() -> bool, what: &str) {
     panic!("never {what}");
 }
 
+/// How many files under `dir` this process still has open though they were removed: their disk stays taken.
+fn removed_but_open(dir: &TestDir) -> usize {
+    let dir = dir.0.to_string_lossy().into_owned();
+    std::fs::read_dir("/proc/self/fd")
+        .unwrap()
+        .flatten()
+        .filter_map(|fd| std::fs::read_link(fd.path()).ok())
+        .map(|target| target.to_string_lossy().into_owned())
+        .filter(|target| target.starts_with(&dir) && target.ends_with(" (deleted)"))
+        .count()
+}
+
 /// What the uploads not yet entries take of the uploads' room.
 fn uploading(cache: &BuildCache) -> u64 {
     lock(&cache.inner.state).uploading
@@ -390,12 +402,37 @@ async fn a_refused_jobs_uploads_give_back_their_room_while_their_senders_stall()
     }
     until(|| uploads(&dir) == 3, "were the three uploads on disk").await;
 
+    // Another undecided job passes the quarter of the limit it may hold, then stalls.
+    let greedy = cache
+        .attach("greedy", "o/app", ActionsCache::Served)
+        .unwrap();
+    let big = reserve(&greedy, "big").await;
+    let mut over = stalled_put(&greedy, &big, 32 << 10, &[3; 1 << 10]).await;
+    until(|| uploads(&dir) == 4, "was the greedy upload on disk").await;
+    over.write_all(&[3; 16 << 10]).await.unwrap();
+    until(
+        || uploads(&dir) == 3 && uploading(&cache) == 12 << 10,
+        "did the upload past its room give it back",
+    )
+    .await;
+    assert_eq!(
+        removed_but_open(&dir),
+        0,
+        "the upload past its room closed its file while its sender stalls"
+    );
+
     cache.decide("fork", Writes::Refused, reader());
     until(
         || uploads(&dir) == 0 && uploading(&cache) == 0,
         "did the refusal free the stalled uploads",
     )
     .await;
+    assert_eq!(
+        removed_but_open(&dir),
+        0,
+        "the refused uploads closed their files while their senders stall"
+    );
+    drop(over);
     // The rest of each body is read and dropped, and answered as stored.
     for mut stream in stalled {
         stream

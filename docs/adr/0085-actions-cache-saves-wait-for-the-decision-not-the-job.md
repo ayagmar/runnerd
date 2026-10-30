@@ -27,8 +27,8 @@ names who may write.
   has, or that another decided job is saving, is still answered with the dropping URL at once.
 - **Refused or never decided.** A refusal drops the job's finalized saves, and the archive and blocks of those it is
   still sending, at once and counted as refused; the rest of those saves is read, dropped and answered as Azure and
-  GitHub would. An upload still arriving, a tool's or a save's, gives back its file and room at the refusal, before
-  the rest of its body is read, so a sender that stalls holds nothing; a refused runner takes no more room. A job that may write but has no scope of its own, as a run GitHub ties to several pull requests, is
+  GitHub would. An upload still arriving, a tool's or a save's, closes and removes its file and gives back its room at the
+  refusal, before the rest of its body is read, as one past its room does, so a sender that stalls holds no disk; a refused runner takes no more room. A job that may write but has no scope of its own, as a run GitHub ties to several pull requests, is
   treated the same way.
 - **Bounded while undecided.** A finalized save keeps the room its archive took, so an undecided job holds at most a
   quarter of `max_size`, and all jobs' uploads at most `max_size`, as 0052's held uploads do; each entry counts at
