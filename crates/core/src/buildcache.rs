@@ -3,8 +3,10 @@
 //! on a Unix socket of its own, which the runner image forwards to `127.0.0.1`. Owns the entries, the size limit, the
 //! sockets, and what each runner was served and stored. Which socket a request came in on is who sent it; no job can
 //! claim another's. It never decides whether a job may write: the engine tells it (`Writes`), from what GitHub says
-//! of the job. It never logs a request's headers, which may carry a tool's token.
+//! of the job. It never logs a request's headers, which may carry a tool's token. Where the config turns it on, the
+//! same socket serves GitHub Actions' cache (`actions`, ADR 0082) from the same entries' directory and limits.
 
+pub(crate) mod actions;
 mod serve;
 
 use std::collections::HashMap;
@@ -14,6 +16,7 @@ use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex};
 
 use tokio::net::UnixListener;
+use tokio::sync::Notify;
 use tokio::task::{JoinHandle, JoinSet};
 use tracing::warn;
 
@@ -27,6 +30,10 @@ pub const MOUNT: &str = "/run/runnerd-build-cache";
 
 /// The socket's name in that directory.
 pub const SOCKET: &str = "cache.sock";
+
+/// A file in that directory when the runner's socket serves GitHub Actions' cache too: the image forwards it for
+/// node actions and BuildKit only then (`image/build-cache.sh`).
+pub const ACTIONS_MARKER: &str = "actions";
 
 /// The directory of the entries, in the build cache's directory: nothing else there is counted or trimmed.
 const ENTRIES: &str = "entries";
@@ -60,6 +67,24 @@ pub enum Writes {
     Allowed,
     /// Anything else: another pull request, another branch, or a job GitHub does not place on this runner.
     Refused,
+}
+
+/// Whether a runner's socket serves GitHub Actions' cache besides the build cache's tools (ADR 0082).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActionsCache {
+    /// It does: the image points the job's `actions/cache`, `setup-*` caches and BuildKit's `type=gha` at it.
+    Served,
+    /// It does not: the job uses GitHub's cache service.
+    Off,
+}
+
+/// The branches GitHub said a runner's job has to do with, which scope its GitHub Actions cache entries (ADR 0082).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Branches {
+    /// The branch its run is of: where its entries go and what it reads first, when its writes are `Allowed`.
+    pub run: Option<String>,
+    /// Its repository's default branch, whose entries every job of the repository reads.
+    pub default: Option<String>,
 }
 
 /// The events whose runs may write: they run code that reached a branch, never a pull request's.
@@ -152,6 +177,8 @@ struct Inner {
     uploads: PathBuf,
     /// One directory per runner, holding its socket.
     sockets: PathBuf,
+    /// Where requests for GitHub's results service it does not answer go.
+    results: actions::Results,
     // A panic midway leaves at worst an entry counted that is gone, or a file not counted, which `open` counts at
     // the next start.
     state: Mutex<State>,
@@ -170,6 +197,11 @@ struct State {
     /// What the uploads not yet entries, being received or held, count for (`charge`): at most `max_size`, so jobs
     /// whose writes are undecided cannot fill the disk.
     uploading: u64,
+    /// Each repository's default branch, as the last decision said: what an undecided job's GitHub Actions cache
+    /// lookups read.
+    default_branches: HashMap<String, String>,
+    /// When the last GitHub Actions cache entry was created, in ms: each is created later than the one before.
+    last_created: u64,
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -191,6 +223,16 @@ struct Runner {
     uploading: u64,
     dir: PathBuf,
     serving: JoinHandle<()>,
+    /// Whether it serves GitHub Actions' cache.
+    actions: ActionsCache,
+    /// What GitHub said of its job's branches, once its writes are decided.
+    branches: Branches,
+    /// Woken when its writes are decided, for the GitHub Actions cache saves that wait for that.
+    decided: Arc<Notify>,
+    /// Its GitHub Actions cache saves not yet entries, by the number in their upload URL.
+    saves: HashMap<u64, actions::Save>,
+    /// The entries its GitHub Actions cache lookups found, by the number in their download URL.
+    found: Vec<PathBuf>,
 }
 
 /// An upload written to a file of its own, not an entry yet.
@@ -225,6 +267,7 @@ impl BuildCache {
                 root,
                 uploads,
                 sockets: sockets.to_owned(),
+                results: actions::Results::new(),
                 state: Mutex::new(State {
                     max_size,
                     entries,
@@ -241,14 +284,26 @@ impl BuildCache {
         &self.inner.root
     }
 
+    /// Sends the requests for GitHub's results service it does not answer to `origin` instead of GitHub's.
+    #[cfg(test)]
+    pub(crate) fn set_results_origin(&self, origin: &str) {
+        self.inner.results.set_origin(origin);
+    }
+
     /// Sets the size `trim` brings it under.
     pub fn set_max_size(&self, max_size: u64) {
         lock(&self.inner.state).max_size = max_size;
     }
 
-    /// Opens `runner`'s socket for a job of `repository` and returns the directory its container mounts at `MOUNT`.
-    /// A runner already open, as after a restart, gets its socket back in the directory its container mounts.
-    pub fn attach(&self, runner: &str, repository: &str) -> io::Result<PathBuf> {
+    /// Opens `runner`'s socket for a job of `repository` and returns the directory its container mounts at `MOUNT`,
+    /// with `ACTIONS_MARKER` in it when it serves GitHub Actions' cache too. A runner already open, as after a
+    /// restart, gets its socket back in the directory its container mounts.
+    pub fn attach(
+        &self,
+        runner: &str,
+        repository: &str,
+        actions: ActionsCache,
+    ) -> io::Result<PathBuf> {
         if !valid_repository(repository) {
             return Err(io::Error::new(
                 io::ErrorKind::InvalidInput,
@@ -259,6 +314,17 @@ impl BuildCache {
         std::fs::create_dir_all(&dir)?;
         // The container's root, which forwards to it, is not the daemon's user under sysbox.
         std::fs::set_permissions(&dir, std::fs::Permissions::from_mode(0o755))?;
+        let marker = dir.join(ACTIONS_MARKER);
+        match actions {
+            ActionsCache::Served => {
+                std::fs::write(&marker, b"")?;
+                std::fs::set_permissions(&marker, std::fs::Permissions::from_mode(0o644))?;
+            }
+            ActionsCache::Off => match std::fs::remove_file(&marker) {
+                Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
+                _ => {}
+            },
+        }
         let socket = dir.join(SOCKET);
         match std::fs::remove_file(&socket) {
             Err(error) if error.kind() != io::ErrorKind::NotFound => return Err(error),
@@ -277,11 +343,17 @@ impl BuildCache {
                 uploading: 0,
                 dir: dir.clone(),
                 serving,
+                actions,
+                branches: Branches::default(),
+                decided: Arc::new(Notify::new()),
+                saves: HashMap::new(),
+                found: Vec::new(),
             },
         );
-        if let Some(old) = old {
+        if let Some(mut old) = old {
             old.serving.abort();
             self.inner.remove_uploads(None, &old.held);
+            self.inner.remove_saves(None, &mut old.saves);
         }
         Ok(dir)
     }
@@ -310,8 +382,9 @@ impl BuildCache {
             .is_some_and(|runner| runner.writes == Writes::Undecided)
     }
 
-    /// Decides whether `runner`'s job may write, once: what it sent meanwhile becomes entries or is dropped.
-    pub fn decide(&self, runner: &str, writes: Writes) {
+    /// Decides whether `runner`'s job may write, once, with the branches its GitHub Actions cache entries are scoped
+    /// to: what it sent meanwhile becomes entries or is dropped.
+    pub fn decide(&self, runner: &str, writes: Writes, branches: Branches) {
         let held = {
             let mut state = lock(&self.inner.state);
             let Some(open) = state.runners.get_mut(runner) else {
@@ -321,7 +394,16 @@ impl BuildCache {
                 return;
             }
             open.writes = writes;
-            std::mem::take(&mut open.held)
+            open.decided.notify_waiters();
+            let held = std::mem::take(&mut open.held);
+            let repository = open.repository.clone();
+            if let Some(default) = &branches.default {
+                state.default_branches.insert(repository, default.clone());
+            }
+            if let Some(open) = state.runners.get_mut(runner) {
+                open.branches = branches;
+            }
+            held
         };
         match writes {
             Writes::Allowed => {
@@ -375,6 +457,7 @@ impl BuildCache {
         };
         open.serving.abort();
         self.inner.remove_uploads(None, &open.held);
+        self.inner.remove_saves(None, &mut open.saves);
         open.counts.refused += open.held.len() as u64;
         open.counts.writer = open.writes == Writes::Allowed;
         if let Err(error) = std::fs::remove_dir_all(&open.dir)
@@ -537,6 +620,14 @@ impl Inner {
         for upload in uploads {
             let _ = std::fs::remove_file(&upload.file);
             self.release(runner, upload.room);
+        }
+    }
+
+    /// Removes the GitHub Actions cache saves of `runner`'s, or of a runner no longer open, that did not become
+    /// entries, with their blocks, and gives back their room.
+    fn remove_saves(&self, runner: Option<&str>, saves: &mut HashMap<u64, actions::Save>) {
+        for (_, save) in saves.drain() {
+            self.remove_uploads(runner, &save.into_uploads());
         }
     }
 

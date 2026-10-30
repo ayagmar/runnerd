@@ -25,6 +25,7 @@ host = [
   "dep:rustix",
   "dep:rustls",
   "dep:serde_json",
+  "dep:serde_urlencoded",
   "dep:tar",
   "dep:tokio",
   "dep:tracing",
@@ -83,6 +84,10 @@ required-features = ["host"]
 
 [[test]]
 name = "build_cache_gradle"
+required-features = ["host"]
+
+[[test]]
+name = "actions_cache_node"
 required-features = ["host"]
 
 [[test]]

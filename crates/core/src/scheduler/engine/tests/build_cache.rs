@@ -436,6 +436,49 @@ async fn branches_the_config_names_write_besides_the_default_branch() {
 }
 
 #[tokio::test]
+async fn a_writing_branch_keeps_its_own_actions_cache_entries_and_reads_mains() {
+    use crate::buildcache::actions::{restore, save};
+
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let dir = TestDir::new("engine-actions-cache");
+    let config = CONFIG.replace(
+        "maven = { max_size = \"5G\" }\n",
+        "maven = { max_size = \"5G\" }\nbuild = { branches = [\"release\"], actions_cache = true }\n",
+    );
+    let (mut engine, _handle, cache) = engine_with_cache(&github, &docker, &dir, &config);
+    let [(main, main_socket), (release, release_socket)] = two_jobs(
+        &github,
+        &docker,
+        &mut engine,
+        [trigger("push", "main"), trigger("push", "release")],
+    )
+    .await;
+    assert!(
+        main_socket.join(buildcache::ACTIONS_MARKER).is_file(),
+        "the config turned it on"
+    );
+    until_decided(&mut engine, &cache, &[&main, &release]).await;
+    assert!(save(&main_socket, "deps", b"main's").await);
+    assert!(save(&release_socket, "deps", b"release's").await);
+    assert!(save(&main_socket, "tools", b"main's tools").await);
+    assert_eq!(
+        restore(&main_socket, "deps", &[]).await,
+        Some(("deps".to_owned(), b"main's".to_vec())),
+        "release's save is in release's scope"
+    );
+    assert_eq!(
+        restore(&release_socket, "deps", &[]).await,
+        Some(("deps".to_owned(), b"release's".to_vec()))
+    );
+    assert_eq!(
+        restore(&release_socket, "tools", &[]).await,
+        Some(("tools".to_owned(), b"main's tools".to_vec())),
+        "a branch falls back to the default branch's entries"
+    );
+}
+
+#[tokio::test]
 async fn a_tag_named_like_the_default_branch_only_reads() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

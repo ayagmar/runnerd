@@ -109,6 +109,21 @@ The job page and `runnerctl job` show each job's hits and what it read and store
 
 To keep a repository out, set `build_cache = false` under it. A workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` in its `env`, and any tool's by configuring a remote cache of its own. `runnerctl caches --clean runnerd-build-cache` empties it while no runner runs a job.
 
+### GitHub Actions' cache
+
+With `build.actions_cache = true` under [`[caches]`](../configuration/#caches), the build cache also serves `actions/cache`, the `cache:` input of `setup-node`, `setup-java`, `setup-python` and `setup-gradle`, and Docker's `cache-from: type=gha` and `cache-to: type=gha`. No workflow changes: the image points each node action at the cache in place of GitHub's, and GitHub's cache is neither read nor written while it is on. Restores and saves stay on the host's disk, within `build.max_size` with the build cache's entries.
+
+Entries are scoped to branches, as on GitHub, and only [the jobs that may write](#build-cache) save:
+
+- A push, schedule or manual run of the default branch or of `build.branches` saves into its branch, and so does an opted-in pull request into its own branch. It restores from its branch, then from the default branch.
+- Every other job restores from the default branch only. Its saves say they saved, so Docker builds that save to the cache do not fail, and are dropped.
+- A pull request never writes what a default-branch job restores.
+- Restores at the start of a job, before GitHub has said what the job is, read the default branch. The first job of a repository after runnerd starts finds nothing then.
+
+A save of a key its branch already has is skipped, as on GitHub. An entry may take at most a quarter of `build.max_size`. Artifacts (`upload-artifact`, `download-artifact`) still go to GitHub: runnerd passes those requests on unchanged.
+
+It does not reach a workflow that sets `NODE_OPTIONS` itself, `container:` jobs and `docker://` actions: those use GitHub's cache. Turning it on starts the cache cold; the first default-branch run of each key saves it.
+
 ## Records of failed jobs
 
 With `record_failures` on a profile ([Configuration](../configuration/#records-of-failed-jobs)), a failed job's stopped runner is committed to an image, `runnerd-record:<job>`, before it is removed. `runnerctl shell <job>` starts a container from it and opens bash in the job's workspace, after printing the step that failed and what it ran:

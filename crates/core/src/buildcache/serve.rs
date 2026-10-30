@@ -22,7 +22,7 @@ use tracing::debug;
 use super::{Inner, MAX_HELD, Upload, Writes, charge, valid_segment};
 use crate::sync::lock;
 
-type Body = UnsyncBoxBody<Bytes, io::Error>;
+pub(super) type Body = UnsyncBoxBody<Bytes, io::Error>;
 
 /// The tools whose requests it answers, each under its own path: `/<tool>/<key>`. Each reads with `GET`, a 404
 /// being a miss, and writes with `PUT`; Bazel's keys are `ac/<sha256>` and `cas/<sha256>`, sccache's
@@ -59,6 +59,9 @@ async fn handle(inner: &Inner, runner: &str, request: Request<Incoming>) -> Resp
         return status(StatusCode::SERVICE_UNAVAILABLE);
     };
     let path = request.uri().path().trim_start_matches('/').to_owned();
+    if path.starts_with(super::actions::TWIRP) || path.starts_with(super::actions::BLOBS) {
+        return super::actions::handle(inner, runner, request).await;
+    }
     let Some((tool, rest)) = path.split_once('/') else {
         return status(StatusCode::NOT_FOUND);
     };
@@ -229,7 +232,7 @@ async fn write(inner: &Inner, runner: &str, entry: PathBuf, body: Incoming) -> R
 
 /// An upload being received. Unless it becomes an `Upload`, its file goes and the uploads' room it took is given
 /// back, also when its connection is cut midway, as when its runner is removed.
-struct Receiving<'inner> {
+pub(super) struct Receiving<'inner> {
     inner: &'inner Inner,
     runner: &'inner str,
     file: PathBuf,
@@ -240,7 +243,29 @@ struct Receiving<'inner> {
     max_size: u64,
 }
 
-impl Receiving<'_> {
+impl<'inner> Receiving<'inner> {
+    /// An upload of `runner`'s to a new file of the uploads' directory, under the size limit `max_size` it started
+    /// with.
+    pub(super) fn new(
+        inner: &'inner Inner,
+        runner: &'inner str,
+        max_size: u64,
+    ) -> Receiving<'inner> {
+        let file = {
+            let mut state = lock(&inner.state);
+            state.next_upload += 1;
+            inner.uploads.join(state.next_upload.to_string())
+        };
+        Receiving {
+            inner,
+            runner,
+            file,
+            bytes: 0,
+            room: 0,
+            max_size,
+        }
+    }
+
     /// Takes the room `length` more bytes need, unless the upload would pass a quarter of the size limit, as no entry
     /// may, or the uploads' room runs out.
     fn grow(&mut self, length: u64) -> bool {
@@ -256,7 +281,7 @@ impl Receiving<'_> {
         true
     }
 
-    fn into_upload(mut self, entry: PathBuf) -> Upload {
+    pub(super) fn into_upload(mut self, entry: PathBuf) -> Upload {
         Upload {
             file: std::mem::take(&mut self.file),
             entry,
@@ -277,7 +302,7 @@ impl Drop for Receiving<'_> {
 
 /// Writes the body to the upload's file; false once it passes a quarter of the size limit or the uploads' room runs
 /// out. An empty body takes room too, before its file is made.
-async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming) -> io::Result<bool> {
+pub(super) async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming) -> io::Result<bool> {
     if !receiving.grow(0) {
         drain(body).await;
         return Ok(false);
@@ -298,7 +323,7 @@ async fn receive(receiving: &mut Receiving<'_>, mut body: Incoming) -> io::Resul
     Ok(true)
 }
 
-async fn drain(mut body: Incoming) {
+pub(super) async fn drain(mut body: Incoming) {
     while let Some(Ok(_)) = body.frame().await {}
 }
 
@@ -308,7 +333,7 @@ fn accepted() -> Response<Body> {
     status(StatusCode::OK)
 }
 
-fn status(code: StatusCode) -> Response<Body> {
+pub(super) fn status(code: StatusCode) -> Response<Body> {
     let mut response = Response::new(Empty::new().map_err(|never| match never {}).boxed_unsync());
     *response.status_mut() = code;
     response

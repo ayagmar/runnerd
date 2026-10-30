@@ -159,6 +159,9 @@ pub struct BuildCache {
     pub branches: Vec<String>,
     /// Where its entries are kept; default `$XDG_CACHE_HOME/runnerd/build-cache`.
     pub directory: Option<PathBuf>,
+    /// Whether it also serves GitHub Actions' cache, for `actions/cache`, the `setup-*` actions' caches and
+    /// BuildKit's `type=gha`, in place of GitHub's (ADR 0082). Default false.
+    pub actions_cache: bool,
 }
 
 impl BuildCache {
@@ -179,6 +182,7 @@ impl Default for BuildCache {
             max_size: ByteSize(10 << 30),
             branches: Vec::new(),
             directory: None,
+            actions_cache: false,
         }
     }
 }

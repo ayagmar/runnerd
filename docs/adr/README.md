@@ -57,7 +57,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling (amended by 0068) |
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued |
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends (amended by 0064) |
-| [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch (amended by 0077) |
+| [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch (amended by 0077, 0082) |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache |
 | [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk |
 | [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache (amended by 0063) |
@@ -86,3 +86,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets |
 | [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md) | A job starts in the free slot that ran it last, else one that ran its repository |
 | [0081](0081-waits-leave-out-the-time-no-runnerd-ran.md) | Waits leave out the time no runnerd ran, and the history's schema changes in steps from 15 |
+| [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, off by default |
