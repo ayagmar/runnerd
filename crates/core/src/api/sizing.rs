@@ -409,31 +409,40 @@ pub fn period(seconds: u64) -> String {
     }
 }
 
-impl SizingChange {
-    /// What it changed, such as `memory 9G → 6.75G, slots 2`, and `cpus 12 → 15` when it changed them.
-    pub fn line(&self) -> String {
-        let memory = if self.from.memory == self.to.memory {
-            format!("memory {}", ByteSize(self.to.memory))
-        } else {
-            format!(
+impl Resize {
+    /// What going from `from` to these sizes changes, such as `memory 9G → 6.75G, slots 2`, with `cpus 12 → 15` when
+    /// both have CPUs and they differ; without `from`, these alone, such as `memory 6.75G, slots 2`.
+    pub fn line_from(&self, from: Option<&Resize>) -> String {
+        let memory = match from {
+            Some(from) if from.memory != self.memory => format!(
                 "memory {} → {}",
-                ByteSize(self.from.memory),
-                ByteSize(self.to.memory)
-            )
+                ByteSize(from.memory),
+                ByteSize(self.memory)
+            ),
+            _ => format!("memory {}", ByteSize(self.memory)),
         };
-        let slots = if self.from.slots == self.to.slots {
-            format!("slots {}", self.to.slots)
-        } else {
-            format!("slots {} → {}", self.from.slots, self.to.slots)
+        let slots = match from {
+            Some(from) if from.slots != self.slots => {
+                format!("slots {} → {}", from.slots, self.slots)
+            }
+            _ => format!("slots {}", self.slots),
         };
-        let cpus = match (self.from.cpus, self.to.cpus) {
+        let cpus = match (from.and_then(|from| from.cpus), self.cpus) {
             (Some(from), Some(to)) if from != to => format!(", cpus {from} → {to}"),
             _ => String::new(),
         };
+        format!("{memory}, {slots}{cpus}")
+    }
+}
+
+impl SizingChange {
+    /// What it changed, such as `memory 9G → 6.75G, slots 2`, and `cpus 12 → 15` when it changed them.
+    pub fn line(&self) -> String {
+        let line = self.to.line_from(Some(&self.from));
         if self.uncertain {
-            format!("{memory}, {slots}{cpus} (may not have been written)")
+            format!("{line} (may not have been written)")
         } else {
-            format!("{memory}, {slots}{cpus}")
+            line
         }
     }
 }

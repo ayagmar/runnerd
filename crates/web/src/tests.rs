@@ -2320,25 +2320,111 @@ async fn a_config_that_fits_is_saved_and_checking_one_saves_nothing() {
         .await;
     assert!(saved.body.contains("Saved and reloaded"), "{}", saved.body);
     assert_eq!(dashboard.fake.fixtures.lock().unwrap().config, toml);
+    // Datastar cancels a request still out only for a new one with the same method and address: the doctor's
+    // answer for the config before the save must not land after the one for the config saved.
+    let page = dashboard.page(&cookie, "/config").await.body;
+    assert_eq!(
+        doctor_request(&saved.body).address,
+        doctor_request(&page).address,
+        "{}",
+        saved.body
+    );
+    assert_ne!(
+        doctor_request(&saved.body).init,
+        doctor_request(&page).init,
+        "the doctor's region asks again after a save"
+    );
+    assert!(
+        doctor_request(&saved.body)
+            .init
+            .contains(&runnerd_core::config::revision(&toml)),
+        "it asks for the config saved: {}",
+        saved.body
+    );
+}
+
+/// How a page or a patch's pending doctor region asks for its checks.
+struct DoctorRequest<'html> {
+    /// Its `data-init`.
+    init: &'html str,
+    /// The address it gets.
+    address: &'html str,
+}
+
+fn doctor_request(html: &str) -> DoctorRequest<'_> {
+    let section = &html[html.find(r#"id="doctor""#).unwrap()..];
+    let init = section.split(r#"data-init=""#).nth(1).unwrap();
+    let init = &init[..init.find('"').unwrap()];
+    let address = init
+        .split("@get(&#39;")
+        .nth(1)
+        .or_else(|| init.split("@get('").nth(1))
+        .unwrap();
+    DoctorRequest {
+        init,
+        address: &address[..address.find(['\'', '&']).unwrap()],
+    }
 }
 
 #[tokio::test]
-async fn the_config_page_shows_the_file_its_budget_and_the_doctor() {
+async fn the_config_page_shows_the_file_and_its_budget_at_once_and_the_doctors_checks_after() {
     let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::from_secs(10);
     let cookie = dashboard.sign_in().await;
+    for path in ["/config", "/config?resize=node", "/config?undo=jvm"] {
+        let page = tokio::time::timeout(Duration::from_secs(5), dashboard.page(&cookie, path))
+            .await
+            .unwrap_or_else(|_| panic!("{path} waits for the doctor"));
+        assert_eq!(page.status, StatusCode::OK);
+        for expected in [
+            "halyard/ledger",
+            "/home/forge/.config/runnerd/runnerd.toml",
+            r#"id="config-result""#,
+            r#"id="doctor""#,
+            "@get('/config/doctor'",
+        ] {
+            assert!(page.body.contains(expected), "{path} lacks {expected:?}");
+        }
+        assert!(
+            !page.body.contains("MemoryHigh=30G"),
+            "{path} has no check before the doctor answers"
+        );
+    }
     let page = dashboard.page(&cookie, "/config").await;
-    assert_eq!(page.status, StatusCode::OK);
-    for expected in [
-        "halyard/ledger",
-        "/home/forge/.config/runnerd/runnerd.toml",
-        "Fits the budget",
-        "jvm ×2 18G, node ×2 14G, mirror 512M",
-        "MemoryHigh=30G",
-    ] {
+    for expected in ["Fits the budget", "jvm ×2 18G, node ×2 14G, mirror 512M"] {
         assert!(
             page.body.contains(expected),
-            "config page lacks {expected:?}"
+            "the budget draws without the doctor: lacks {expected:?}"
         );
+    }
+    dashboard.fake.fixtures.lock().unwrap().doctor_delay = Duration::ZERO;
+    let doctor = dashboard.page(&cookie, "/config/doctor").await;
+    assert_eq!(doctor.status, StatusCode::OK);
+    assert!(
+        doctor.body.contains(r#"id="doctor""#) && doctor.body.contains("MemoryHigh=30G"),
+        "{}",
+        doctor.body
+    );
+}
+
+#[tokio::test]
+async fn a_doctor_that_fails_says_why_in_its_region_and_offers_to_run_again() {
+    let dashboard = Dashboard::start().await;
+    dashboard.fake.fixtures.lock().unwrap().doctor_error = Some("cannot read the host".to_owned());
+    let cookie = dashboard.sign_in().await;
+    assert_eq!(
+        dashboard.page(&cookie, "/config").await.status,
+        StatusCode::OK
+    );
+    let doctor = dashboard.page(&cookie, "/config/doctor").await;
+    // Datastar applies only a 200.
+    assert_eq!(doctor.status, StatusCode::OK);
+    for expected in [
+        r#"id="doctor""#,
+        "cannot read the host",
+        "@get('/config/doctor'",
+    ] {
+        assert!(doctor.body.contains(expected), "{}", doctor.body);
     }
 }
 
@@ -2360,6 +2446,13 @@ async fn an_auto_sizing_change_is_listed_and_undoing_it_opens_what_it_replaced_i
         editor.body.contains("memory = &quot;10G&quot;\nslots = 2"),
         "the editor holds jvm's memory from before the change"
     );
+    assert!(
+        editor.body.contains(
+            "Auto sizing's last change to <strong>jvm</strong>, undone: memory 9G → 10G, slots 2."
+        ),
+        "the notice says what the editor changed"
+    );
+    assert_eq!(selected(&editor.body), "memory = \"10G\"\nslots = 2");
     assert_eq!(
         dashboard.fake.fixtures.lock().unwrap().config,
         before,
@@ -2449,6 +2542,28 @@ async fn an_editor_opened_before_the_config_changed_cannot_save_over_the_change(
     );
 }
 
+/// What "Show in the editor" on a config page selects in its editor, as a browser counts: the textarea's text, less
+/// the line break the parser drops after its tag, by UTF-16 units.
+fn selected(page: &str) -> String {
+    let start = page.find("<textarea").unwrap();
+    let open = start + page[start..].find('>').unwrap() + 1;
+    let close = open + page[open..].find("</textarea>").unwrap();
+    let text = page[open..close]
+        .strip_prefix('\n')
+        .unwrap()
+        .replace("&quot;", "\"")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+        .replace("&amp;", "&");
+    let call = page.split("setSelectionRange(").nth(1).unwrap();
+    let offsets: Vec<usize> = call[..call.find(')').unwrap()]
+        .split(", ")
+        .map(|offset| offset.parse().unwrap())
+        .collect();
+    let units: Vec<u16> = text.encode_utf16().collect();
+    String::from_utf16(&units[offsets[0]..offsets[1]]).unwrap()
+}
+
 #[tokio::test]
 async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved() {
     let dashboard = Dashboard::start().await;
@@ -2484,12 +2599,14 @@ async fn sizing_advice_opens_in_the_config_editor_and_is_written_only_when_saved
     assert_ne!(advised, before);
     for expected in [
         "memory = &quot;3.25G&quot;\nslots = 4",
-        "Nothing is written until you save it.",
+        "Sizing advice for <strong>node</strong>: memory 7G → 3.25G, slots 2 → 4. Not saved yet.",
         // 2 × 9G + 4 × 3.25G + 512M.
         "31.5G",
     ] {
         assert!(editor.body.contains(expected), "editor lacks {expected:?}");
     }
+    // The example's comments hold `×`, two bytes and one UTF-16 unit: the offsets are a browser's.
+    assert_eq!(selected(&editor.body), "memory = \"3.25G\"\nslots = 4");
     assert_eq!(
         dashboard.fake.fixtures.lock().unwrap().config,
         before,

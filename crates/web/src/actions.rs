@@ -302,11 +302,12 @@ pub(crate) async fn save_config(State(app): State<App>, Json(edit): Json<Edit>) 
                 .map_or_else(|_| "runnerd.toml".to_owned(), |file| file.path);
             // The revision of the text saved, never a later read's, which may be of a config written since.
             let revision = check.revision.clone();
-            html(&[config::result(
-                &check,
-                &edit.toml,
-                &Outcome::Saved { path, revision },
-            )])
+            // The doctor's checks were of the config before: it runs again.
+            let doctor = config::doctor_pending(revision.as_deref());
+            html(&[
+                config::result(&check, &edit.toml, &Outcome::Saved { path, revision }),
+                doctor,
+            ])
         }
         (StatusCode::UNPROCESSABLE_ENTITY, Ok(check)) => {
             html(&[config::result(&check, &edit.toml, &Outcome::Refused)])

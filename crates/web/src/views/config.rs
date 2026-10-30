@@ -1,7 +1,8 @@
 //! `/config`: the daemon's `runnerd.toml` in an editor, checked against the slice's `MemoryMax` as it is typed and
 //! drawn as the budget it asks for; saving writes it and has the daemon reload it. From the sizing page, the editor
 //! starts with a profile's advised memory and slots in the file, or those an auto sizing change replaced,
-//! unsaved. Also the doctor's checks, and a QR code that signs another device in.
+//! unsaved. Also the doctor's checks, which the page asks for once it shows, since the doctor takes a while; and a
+//! QR code that signs another device in.
 
 use std::fmt::Write as _;
 
@@ -9,7 +10,7 @@ use maud::{Markup, html};
 use qrcode::QrCode;
 use runnerd_core::api::{Check, ConfigCheck, ConfigFile, Doctor, Resize, Sizing, Tone};
 use runnerd_core::client::{Client, ClientError};
-use runnerd_core::config::{ByteSize, Config, resize_profile};
+use runnerd_core::config::{Config, profile_sizes, resize_profile, resized_at};
 use serde::Deserialize;
 
 use super::{Page, page};
@@ -34,7 +35,6 @@ pub(crate) struct ConfigView {
     /// The advice the editor holds, or why it holds none.
     pub(crate) resized: Option<Resized>,
     pub(crate) check: ConfigCheck,
-    pub(crate) doctor: Doctor,
 }
 
 /// A profile's advised `memory` and `slots`, written into the editor's text and not saved yet.
@@ -53,11 +53,16 @@ impl ConfigView {
         daemon: &Client,
         query: ConfigQuery,
     ) -> Result<ConfigView, ClientError> {
-        let file: ConfigFile = daemon.get("/v1/config").await?;
-        let (text, resized) = match (query.resize, query.undo) {
-            (None, None) => (file.text.clone(), None),
-            (_, Some(profile)) => {
-                let sizing: Sizing = daemon.get("/v1/sizing").await?;
+        let sizing = async {
+            match (&query.resize, &query.undo) {
+                (None, None) => Ok(None),
+                _ => daemon.get::<Sizing>("/v1/sizing").await.map(Some),
+            }
+        };
+        let (file, sizing) = tokio::join!(daemon.get::<ConfigFile>("/v1/config"), sizing);
+        let (file, sizing) = (file?, sizing?);
+        let (text, resized) = match (query.resize, query.undo, sizing) {
+            (_, Some(profile), Some(sizing)) => {
                 let last = sizing
                     .changes
                     .iter()
@@ -81,8 +86,7 @@ impl ConfigView {
                     },
                 }
             }
-            (Some(profile), None) => {
-                let sizing: Sizing = daemon.get("/v1/sizing").await?;
+            (Some(profile), None, Some(sizing)) => {
                 let change = sizing
                     .profiles
                     .iter()
@@ -105,16 +109,67 @@ impl ConfigView {
                     },
                 }
             }
+            _ => (file.text.clone(), None),
         };
         let check = daemon.post_toml("/v1/config/check", text.clone()).await?;
         Ok(ConfigView {
-            doctor: daemon.get("/v1/doctor").await?,
             file,
             text,
             resized,
             check,
         })
     }
+}
+
+/// What the editor was opened with from the sizing page: the change in `profile`'s sizes from `file` to `text`, the
+/// editor's, as core words it, and a button that selects them in the editor; or why it holds no change.
+fn notice(resized: &Resized, file: &str, text: &str) -> Markup {
+    let (profile, resize) = match resized {
+        Resized::Applied { profile, resize } | Resized::Undone { profile, resize } => {
+            (profile, resize)
+        }
+        Resized::Not(why) => return html! { div.notice-box { p { (why) } } },
+    };
+    let line = resize.line_from(profile_sizes(file, profile).as_ref());
+    let select = resized_at(text, profile, *resize).and_then(|at| {
+        // A textarea counts UTF-16 units, and reads each line break as one `\n`.
+        let offset = |byte: usize| {
+            Some(
+                text.get(..byte)?
+                    .replace("\r\n", "\n")
+                    .encode_utf16()
+                    .count(),
+            )
+        };
+        Some(select_in_editor(offset(at.start)?, offset(at.end)?))
+    });
+    html! {
+        div.notice-box {
+            p {
+                @if let Resized::Applied { .. } = resized {
+                    "Sizing advice for " strong { (profile) } ": " (line) ". Not saved yet."
+                } @else {
+                    "Auto sizing's last change to " strong { (profile) } ", undone: " (line) ". Not saved yet."
+                }
+            }
+            // Its offsets are of the text the page opened with: an edit moves what they select.
+            @if let Some(select) = select {
+                button.button-quiet type="button" data-show="!$_edited" data-on:click=(select) { "Show in the editor" }
+            }
+        }
+    }
+}
+
+/// Selects `start..end`, in UTF-16 units, in the editor and scrolls it there, which setting a selection does not. A
+/// hidden textarea as wide as the editor, holding the text before the selection, measures how far down it starts,
+/// wrapped lines included.
+fn select_in_editor(start: usize, end: usize) -> String {
+    format!(
+        "const t = document.getElementById('toml'); const m = document.createElement('textarea'); \
+         m.style.cssText = 'position: absolute; visibility: hidden; height: 0; min-height: 0; width: ' + t.offsetWidth + 'px'; \
+         t.after(m); m.value = t.value.slice(0, {start}); const top = m.scrollHeight; m.remove(); \
+         t.focus(); t.setSelectionRange({start}, {end}); t.scrollTop = top - t.clientHeight / 3"
+    )
 }
 
 /// What a save did, for the result region.
@@ -147,17 +202,22 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
             p.muted { code { (view.file.path) } }
         }
         div.config-layout {
-            section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)] {
+            section.editor aria-labelledby="editor-title" "data-signals:revision"=[quoted(&view.file.revision)]
+                "data-signals:_edited"="false" {
                 h2 #editor-title .visually-hidden { "runnerd.toml" }
+                // Before the editor, so it is read and reached before the text it describes.
+                @if let Some(resized) = &view.resized { (notice(resized, &view.file.text, &view.text)) }
                 label.visually-hidden for="toml" { "runnerd.toml" }
+                // The parser drops a line break right after the tag: this one, so the text's own first line stays.
                 textarea #toml name="toml" spellcheck="false" autocomplete="off" rows="28"
-                    data-bind:toml=""
-                    "data-on:input__debounce.400ms"="@post('/config/check')" { (view.text) }
+                    data-bind:toml="" data-indicator:_checking="" data-on:input="$_edited = true"
+                    "data-on:input__debounce.400ms"="@post('/config/check')" { "\n" (view.text) }
                 div.editor-actions {
                     button.button type="button" data-indicator:_saving=""
                         data-attr:aria-busy="$_saving && 'true'" data-attr:disabled="$_saving"
                         data-on:click="@put('/config')" { "Save and reload" }
-                    button.button-quiet type="button" data-on:click="@post('/config/check')" { "Check" }
+                    button.button-quiet type="button" data-indicator:_checking=""
+                        data-on:click="@post('/config/check')" { "Check" }
                     p.muted { "Running jobs keep their slots; slots a change removes go once their jobs finish." }
                     @if view.text.contains(runnerd_core::config::SECRET_SHOWN) {
                         p.muted { "Notification URLs and header values show as " code { "<secret>" } "; saving keeps them." }
@@ -165,27 +225,9 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
                 }
             }
             div.config-side {
-                @match &view.resized {
-                    Some(Resized::Applied { profile, resize }) => {
-                        p.notice-box {
-                            "The editor holds the sizing advice for " strong { (profile) } ": "
-                            code { "memory = \"" (ByteSize(resize.memory)) "\"" } " and " code { "slots = " (resize.slots) }
-                            ". Nothing is written until you save it."
-                        }
-                    }
-                    Some(Resized::Undone { profile, resize }) => {
-                        p.notice-box {
-                            "The editor holds " strong { (profile) } "'s values from before auto sizing last changed them: "
-                            code { "memory = \"" (ByteSize(resize.memory)) "\"" } " and " code { "slots = " (resize.slots) }
-                            ". Nothing is written until you save it."
-                        }
-                    }
-                    Some(Resized::Not(why)) => { p.notice-box { (why) } }
-                    None => {}
-                }
                 (result(&view.check, &view.text, &Outcome::Checked))
                 (devices(proxies))
-                (doctor(&view.doctor))
+                (doctor_pending(None))
             }
         }
     };
@@ -213,7 +255,9 @@ pub(crate) fn result(check: &ConfigCheck, text: &str, outcome: &Outcome) -> Mark
     };
     let needed_name = budget.map_or("", |budget| budget.needed_label());
     html! {
-        section #config-result class=(class) aria-labelledby="result-title" aria-live="polite" {
+        // Dimmed while the daemon checks or saves newer text: what it shows is of the text before.
+        section #config-result class=(class) aria-labelledby="result-title" aria-live="polite"
+            data-attr:aria-busy="($_checking || $_saving) && 'true'" {
             h2 #result-title {
                 @match (outcome, check.valid) {
                     (Outcome::Saved { .. }, _) => "Saved and reloaded",
@@ -289,7 +333,6 @@ fn devices(proxies: &[String]) -> Markup {
                     code { "tailscale serve" } " URL, in " code { "[web] origins" } " and restart runnerd."
                 }
             } @else {
-                p { "Scan a QR code with the phone's camera to sign it in. The code works once, for 5 minutes." }
                 @if let [_, _, ..] = proxies {
                     label for="pairing" { "Sign in on" }
                     select #pairing data-bind:pairing="" {
@@ -346,8 +389,32 @@ fn qr_svg(text: &str) -> Markup {
     }
 }
 
-/// The doctor's checks for the config the daemon runs with.
-fn doctor(doctor: &Doctor) -> Markup {
+/// The doctor's region before its checks arrive: it asks for them as soon as it shows. After a save, `saved` is the
+/// revision saved and goes in a header: the attribute differs from the page's, so Datastar asks again, and the address
+/// stays the same, since Datastar cancels a request still out only for a new one with the same method and address.
+pub(crate) fn doctor_pending(saved: Option<&str>) -> Markup {
+    let after = saved
+        .filter(|revision| quoted(revision).is_some())
+        .map(|revision| format!("headers: {{'Runnerd-After': '{revision}'}}, "));
+    html! {
+        section #doctor .doctor aria-labelledby="doctor-title" aria-busy="true"
+            data-init=(doctor_get(after.as_deref().unwrap_or_default())) {
+            h2 #doctor-title { "Doctor" }
+            ul.check-list.pending aria-hidden="true" {
+                @for _ in 0..4 { li {} }
+            }
+        }
+    }
+}
+
+/// A Datastar request for the doctor's region, with `options` before the filter and no signals: a GET sends them in
+/// its address, and the editor's text, which may hold a secret just typed, has no place in a proxy's access log.
+fn doctor_get(options: &str) -> String {
+    format!("@get('/config/doctor', {{{options}filterSignals: {{include: /^$/}}}})")
+}
+
+/// The doctor's checks for the config the daemon runs with, or why there are none; in place of `doctor_pending`.
+pub(crate) fn doctor(doctor: &Result<Doctor, ClientError>) -> Markup {
     let label = |check: &Check| {
         let class = match check.status.tone() {
             Tone::Good => "success",
@@ -358,18 +425,29 @@ fn doctor(doctor: &Doctor) -> Markup {
         (check.status.label(), class)
     };
     html! {
-        section.doctor aria-labelledby="doctor-title" {
+        section #doctor .doctor aria-labelledby="doctor-title" {
             h2 #doctor-title { "Doctor" }
-            ul.check-list {
-                @for check in &doctor.checks {
-                    @let (text, class) = label(check);
-                    li {
-                        span class=(format!("badge {class}")) { (text) }
-                        div {
-                            p { strong { (check.name) } " " (check.detail) }
-                            @if let Some(fix) = &check.fix { pre.fix { code { (fix) } } }
+            @match doctor {
+                Ok(doctor) => {
+                    ul.check-list {
+                        @for check in &doctor.checks {
+                            @let (text, class) = label(check);
+                            // A check that needs nothing from the reader steps back; one that does keeps its fix.
+                            li class=[matches!(check.status.tone(), Tone::Bad | Tone::Warn).then_some("needs")] {
+                                span class=(format!("badge {class}")) { (text) }
+                                div {
+                                    p { strong { (check.name) } " " (check.detail) }
+                                    @if let Some(fix) = &check.fix { pre.fix { code { (fix) } } }
+                                }
+                            }
                         }
                     }
+                }
+                Err(error) => {
+                    p.check-message { (error) }
+                    button.button-quiet type="button" data-indicator:_doctoring=""
+                        data-attr:aria-busy="$_doctoring && 'true'"
+                        data-on:click=(doctor_get("")) { "Run the doctor again" }
                 }
             }
         }

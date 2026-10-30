@@ -2209,10 +2209,19 @@ dl.health-figures {
 }
 
 .notice-box {
-  margin-bottom: 1rem;
+  display: flex;
+  flex-wrap: wrap;
+  align-items: center;
+  gap: 0.5rem 1rem;
   padding: 0.75rem 1rem;
   background: var(--running-bg);
   color: var(--running-ink);
+}
+
+.notice-box p {
+  flex: 1 1 16rem;
+  margin: 0;
+  text-wrap: pretty;
 }
 
 /* The config editor: the file on the left, what it asks of the budget on the right. */
@@ -2278,6 +2287,18 @@ dl.health-figures {
 .check-result.invalid h2,
 .check-result.invalid .check-message {
   color: var(--failure-ink);
+}
+
+/* While the daemon checks or saves newer text, the verdict on the text before steps back. A check runs after every
+   pause in typing and usually answers within milliseconds: the dimming waits 150 ms, so a quick answer never
+   flickers the verdict, and comes back at once. */
+.check-result {
+  transition: opacity 120ms ease-out;
+}
+
+.check-result[aria-busy='true'] {
+  opacity: 0.55;
+  transition-delay: 150ms;
 }
 
 .bar-small {
@@ -2352,19 +2373,76 @@ dl.health-figures {
   gap: 2px;
 }
 
+/* A check that needs nothing from the reader is a quiet line; one that does stands on the surface with its fix. */
 .check-list li {
   display: grid;
   grid-template-columns: 3.5rem minmax(0, 1fr);
   gap: 0.75rem;
   align-items: start;
-  padding: 0.6rem 0.75rem;
+  padding: 0.35rem 0.75rem;
+  font-size: 0.875rem;
+  color: var(--muted);
+}
+
+.check-list li strong {
+  color: var(--ink);
+  font-weight: 600;
+}
+
+.check-list li.needs {
+  margin-block: 0.35rem;
+  padding-block: 0.65rem;
   background: var(--surface);
   font-size: 0.9375rem;
+  color: var(--ink);
+}
+
+.check-list p,
+.check-message {
+  text-wrap: pretty;
 }
 
 .check-list p {
   margin: 0;
   /* A detail names a path or a URL, which a phone breaks where it must. */
+  overflow-wrap: anywhere;
+}
+
+/* The doctor's checks before they arrive: rows where they will be, breathing while the daemon reads the host. */
+.check-list.pending li {
+  height: 2.25rem;
+  background: var(--surface);
+  animation: waiting 1.4s ease-in-out infinite alternate;
+}
+
+.check-list.pending li:nth-child(2) { animation-delay: 0.15s; }
+.check-list.pending li:nth-child(3) { animation-delay: 0.3s; }
+.check-list.pending li:nth-child(4) { animation-delay: 0.45s; }
+
+@keyframes waiting {
+  to {
+    opacity: 0.4;
+  }
+}
+
+.doctor {
+  display: grid;
+  gap: 0.75rem;
+  justify-items: start;
+}
+
+.doctor h2,
+.doctor .check-message {
+  margin: 0;
+}
+
+.doctor .check-list {
+  justify-self: stretch;
+  margin: 0;
+}
+
+.doctor .check-message {
+  color: var(--failure-ink);
   overflow-wrap: anywhere;
 }
 
@@ -2518,6 +2596,12 @@ dl.health-figures {
 @media (max-width: 60rem) {
   .config-layout {
     grid-template-columns: minmax(0, 1fr);
+  }
+
+  /* The verdict and the buttons stay within a thumb's reach of the text. */
+  .editor textarea {
+    min-height: 16rem;
+    height: 62svh;
   }
 }
 
