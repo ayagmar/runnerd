@@ -58,7 +58,8 @@
       "container_started_at": 1761400010,
       "finished_at": 1761400600,
       "queued_at": 1761400000,
-      "started_at": 1761400020
+      "started_at": 1761400020,
+      "unseen": 15
     },
     "url": "https://github.com/tidewater/halyard/actions/runs/900",
     "workflow": "ci"
@@ -105,6 +106,9 @@
       },
       "cpu_average": 2000,
       "cpu_peak": 3900,
+      "cpu_periods": 5800,
+      "cpu_stalled": 140000,
+      "cpu_throttled": 900,
       "cpu_time": 1200000,
       "memory_average": 3221225472,
       "memory_peak": 5368709120,
@@ -147,7 +151,8 @@
       "container_started_at": 1761400010,
       "finished_at": 1761400600,
       "queued_at": 1761400000,
-      "started_at": 1761400020
+      "started_at": 1761400020,
+      "unseen": 15
     },
     "url": "https://github.com/tidewater/halyard/actions/runs/900",
     "workflow": "ci"

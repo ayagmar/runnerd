@@ -29,7 +29,7 @@ use serde_json::Value;
 mod samples;
 
 /// The release `runnerd-core-previous` is pinned to, whose samples `fixtures/` holds.
-const PREVIOUS: &str = "v0.0.22";
+const PREVIOUS: &str = "v0.0.23";
 
 /// Which side reads the other's JSON.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
