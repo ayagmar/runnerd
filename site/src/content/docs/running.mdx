@@ -77,7 +77,7 @@ A slot is one concurrent job of a profile. Each job gets a new container, but th
 |---|---|
 | the slot's Docker images, `~/.cache`, tool cache, Android SDK | per slot, between jobs, shared by the jobs of every repository and branch on the profile: a job can tag an image, such as `postgres:16`, that a later job in the slot then runs without pulling |
 | the slot's Docker build cache, BuildKit's cache mounts included | per slot, between jobs. After each job the build cache is trimmed, least recently used first, to about half the slot's share, and a store still over the share is emptied, images too. The slots together get a quarter of the free disk plus what their volumes hold, at least 1 GB and at most 20 GB per slot. A store the slot's Docker Engine does not start on, as after a crash, is emptied when the next container starts. A slot closed by a lower `slots` loses its volume at the next check of the caches, and its layers start over from the snapshot if a reseed ran while it was closed. The containers, volumes and networks a job starts go after it |
-| cargo's credentials and config, Gradle's `gradle.properties` and init scripts, the Maven wrapper's settings, Hugging Face's tokens in `~/.cache` | never: no later job or record shell sees them, even from an older snapshot. Anything else a job leaves in the caches, later jobs of other repositories see ([trust boundary](../configuration/#caches-are-shared-between-repositories)) |
+| cargo's credentials and config, Gradle's `gradle.properties` and init scripts, Maven's `settings.xml` and `settings-security.xml`, Hugging Face's tokens in `~/.cache` | never: no later job or record shell sees them, even from an older snapshot. Anything else a job leaves in the caches, later jobs of other repositories see ([trust boundary](../configuration/#caches-are-shared-between-repositories)) |
 | the profile's snapshot | replaced by slot 1's changes once they reach [`reseed_at`](../configuration/#caches) and the profile is idle; a snapshot that would hold more than `snapshot_max` starts over from the image instead, with every slot's changes; once measured above `snapshot_max`, it starts over at the next moment the profile is idle, however little slot 1 changed. After a reseed that did not finish, as when the host went down during one, the profile's jobs run on the image alone until the next reseed starts it over |
 | pnpm store, Maven repository | shared by all slots, emptied above their [`max_size`](../configuration/#caches) when no runner runs: warm runners stop for it at most hourly, at the first moment no job runs |
 | Docker Hub mirror | runs while any runner does, warm ones too; stops, and its storage is emptied above `mirror.max_size`, with the shared caches' check |
@@ -121,7 +121,7 @@ To keep a repository out, set `build_cache = false` under it. A workflow turns o
 
 ### GitHub Actions' cache
 
-The build cache also serves `actions/cache`, the `cache:` input of `setup-node`, `setup-java`, `setup-python` and `setup-gradle`, and Docker's `cache-from: type=gha` and `cache-to: type=gha`. No workflow changes: the image points each node action at the cache in place of GitHub's, and GitHub's cache is neither read nor written while it is on. Restores and saves stay on the host's disk, within `build.max_size` with the build cache's entries. `build.actions_cache = false` under [`[caches]`](../configuration/#caches) leaves jobs on GitHub's cache; `runnerd doctor`, `runnerctl caches` and the Caches page say which it is.
+The build cache also serves `actions/cache`, the `cache:` input of `setup-node`, `setup-java`, `setup-python` and `setup-gradle`, and Docker's `cache-from: type=gha` and `cache-to: type=gha`. No workflow changes: the image points each node action at the cache in place of GitHub's, and GitHub's cache is neither read nor written while it is on. Restores and saves stay on the host's disk, within `build.max_size` with the build cache's entries. Its lookups, hits, bytes and refused saves count with the build cache's, on the job page and in `runnerctl caches`. `build.actions_cache = false` under [`[caches]`](../configuration/#caches) leaves jobs on GitHub's cache, and so does a repository's `build_cache = false`; `runnerd doctor`, `runnerctl caches` and the Caches page say which it is.
 
 Entries are scoped to branches and pull requests, as on GitHub, and only [the jobs that may write](#build-cache) save:
 
@@ -181,9 +181,11 @@ runnerd records every job its runners may run in a SQLite database; [`[history]`
 |---|---|
 | its timeline: queued, container started, job started, finished, container and runner registration removed | with the job |
 | its steps with their start and end, as GitHub shows them | with the job |
-| CPU, memory and network of its container, sampled every 2 s | samples for `history.samples`; totals and peaks with the job |
+| CPU, memory and network of its container, sampled every 2 s, with how often its CPU quota throttled it and how long it waited for a CPU | samples for `history.samples`; totals and peaks with the job |
 | the bytes the Docker Hub mirror served it | with the job |
 | its log, as GitHub shows it with masked secrets still masked, up to `history.log_max` | for `history.logs` |
+
+A job's wait is the time from queued to started; the part of it that passed while runnerd was not running is kept with the job (`unseen`) and left out of the waits [sizing](../admission/#how-a-wait-is-counted) reads.
 
 A job that leaves GitHub's queue without one of this machine's runners is recorded as `elsewhere` (the dashboard's "Not run here"): `cancelled in queue` when its run was cancelled first, as a newer push does, or its conclusion otherwise, such as `skipped`. It has no start, wait or run time, and no median or cost counts it. Only a job another machine's runner took keeps the word `elsewhere`.
 
@@ -194,7 +196,7 @@ Where the data comes from:
 - **Which job a runner took**: a small script runnerd runs in the container (`docker exec`, as root) reads the job's ID from the runner's `_diag/Worker_*.log` within a second of the job starting. GitHub's list of queued jobs still shows the job for several seconds after that, and runnerd does not start a second runner for it.
 - **Steps**: GitHub's jobs API, read every poll while a job runs. The runner's own logs name steps differently from GitHub (`Set up runner` for `Set up job`) and change between runner versions. The API's times have second precision.
 - **The log**: the runner's `_diag/pages`, which the same script follows. The runner writes the log there in 4 KiB blocks, so lines arrive a block at a time, and a quiet step's lines arrive when it ends.
-- **CPU and memory**: the container's and the slice's cgroup files, every 2 s; [Admission and sizing](../admission/#what-a-jobs-memory-is) says what the memory counts. Network from `/proc/<pid>/net/dev`.
+- **CPU and memory**: the container's and the slice's cgroup files, every 2 s, including `cpu.stat`'s throttled periods and `cpu.pressure`, which a kernel without them leaves unknown; [Admission and sizing](../admission/#what-a-jobs-memory-is) says what the memory counts. Network from `/proc/<pid>/net/dev`.
 
 ## API
 
@@ -252,7 +254,7 @@ curl -N --unix-socket "$XDG_RUNTIME_DIR/runnerd.sock" http://runnerd/v1/events
 | `repository.removed` | a reload removed it |
 | `budget.changed`, `cache.reseeded` | the budget changed; a profile has a new snapshot |
 | `record.created`, `record.deleted` | a failed job's runner was kept as a record; a record went, and why |
-| `sizing.changed` | [auto sizing](../admission/#auto-sizing) wrote a profile's new `memory` and `slots`; it carries the old ones |
+| `sizing.changed` | [auto sizing](../admission/#auto-sizing) wrote a profile's new `memory`, `slots` and, when it changed them, `cpus`; it carries the old ones |
 | `runner.failed` | a runner could not be registered or started, and the repository gets none for a while; once until one of its runners takes a job again |
 | `job.sample`, `host.sample`, `log.line` | live: a sample, or a log line with `logs=true` |
 

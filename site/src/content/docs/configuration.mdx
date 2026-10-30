@@ -228,7 +228,7 @@ A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T
 | `reseed_at` | `"2G"` | once slot 1's layers changed this much and the profile is idle, they become the profile's snapshot ([Warm caches](../running/#warm-caches)) |
 | `snapshot_max` | `"10G"` | a reseed that would make a snapshot larger starts it over from the image, and every slot of the profile runs its next job cold; a snapshot measured larger is reseeded once its profile is idle, whatever `reseed_at` says |
 | `build.enabled` | `true` | whether runners get the shared [build cache](../running/#build-cache) |
-| `build.max_size` | `"10G"` | above this, the build cache's least recently used entries go when no runner runs, with the shared caches; between two checks it grows to twice this at most. Each entry counts at least 4K, however small |
+| `build.max_size` | `"10G"` | above this, the build cache's least recently used entries go when no runner runs, with the shared caches; between two checks it grows to twice this at most. Each entry counts at least 4K, however small. [GitHub Actions' cache](../running/#github-actions-cache)'s entries count here too, and one may take at most a quarter of it |
 | `build.branches` | `[]` | the branches whose pushes, scheduled and manual runs write to the build cache besides each repository's default branch, which always does |
 | `build.directory` | `$XDG_CACHE_HOME/runnerd/build-cache` | where the build cache's entries are kept; read when runnerd starts |
 | `build.actions_cache` | `true` | whether the build cache also serves [GitHub Actions' cache](../running/#github-actions-cache) to the repositories it serves, in place of GitHub's; `false` leaves their jobs on GitHub's |
@@ -238,7 +238,7 @@ A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T
 | Key | Default | Means |
 |---|---|---|
 | `image` or `image_stage` | | exactly one: a published or your own image to pull, or a stage of `image/Dockerfile` built on this host ([Runner images](#runner-images)) |
-| `cpus`, `memory` | | each runner's CPU and memory limits; `memory` is its container's hard limit |
+| `cpus`, `memory` | | each runner's CPU and memory limits; `memory` is its container's hard limit, `cpus` its CPU quota and, when the slice's CPUs are all in use, its share of them ([Sharing the CPUs](../admission/#sharing-the-cpus)) |
 | `slots` | | the most runners of the profile at once |
 | `record_failures` | `false` | keep each failed job's runner as a [record](#records-of-failed-jobs), to open a shell in |
 | `min_memory`, `max_memory` | unset | the bounds [auto sizing](../admission/#auto-sizing) keeps `memory` in; unset, as low as its jobs need and as high as `MemoryMax` holds |
