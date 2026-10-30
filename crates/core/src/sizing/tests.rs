@@ -308,6 +308,27 @@ fn history_of(jobs: Vec<Ran>) -> History {
 }
 
 #[test]
+fn a_job_queued_before_runnerd_first_ran_waits_from_when_it_did() {
+    // A scheduled job queued 9 hours before runnerd first ran, taken 30 s after it started: a 30 s wait for a slot,
+    // not 9 hours.
+    let first = NOW - 2 * HOUR;
+    let jobs = (0..10)
+        .map(|_| Ran {
+            queued_at: first - 9 * HOUR,
+            started_at: Some(first + 30_000),
+            ..job("halyard/storefront", "osv-scanner", "node", G, 0)
+        })
+        .collect();
+    let advised = sizing(&History {
+        jobs,
+        kept_since: first,
+        ..History::default()
+    });
+    let node = profile(&advised, "node");
+    assert_eq!((node.wait.p95, node.starts.cold_p50), (30, 30));
+}
+
+#[test]
 fn jobs_a_warm_runner_took_are_told_apart_with_their_waits() {
     // Three taken by a runner up before they were queued, two whose runner started for them.
     let warm = |wait| Ran {

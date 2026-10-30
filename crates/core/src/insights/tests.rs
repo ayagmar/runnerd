@@ -575,6 +575,30 @@ fn a_week_before_the_history_holds_every_job_is_not_compared() {
 }
 
 #[test]
+fn a_job_queued_before_runnerd_first_ran_waits_from_when_it_did() {
+    // runnerd first ran 10 hours ago; six jobs had queued three hours before, and its first runners took them a
+    // minute after it started. They waited a minute for runnerd, not four hours.
+    let first = NOW - 10 * HOUR;
+    let runs: Vec<Run> = (0..6)
+        .map(|n| {
+            let mut run = waited(n, 9, 60, false);
+            run.started_at = Some(first + 60_000);
+            run.finished_at = Some(first + 120_000);
+            run.queued_at = first - 3 * HOUR;
+            run
+        })
+        .collect();
+    let history = History {
+        runs,
+        kept_since: first,
+    };
+    let found = insights(&history, &config(), 14, NOW);
+    assert_eq!(found.waits[0].now.all.p95, Some(60));
+    let day = digest(&history, &config(), NOW);
+    assert_eq!(day.waits[0].waited, 60, "the digest's longest wait too");
+}
+
+#[test]
 fn the_digest_counts_the_day_and_lists_only_new_insights() {
     // Flaky two days ago, and again today: not new. Slower since today: new.
     let mut runs = vec![attempt(900, 1, "failure"), attempt(900, 2, "success")];

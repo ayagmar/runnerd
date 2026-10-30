@@ -756,10 +756,12 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             })
         })?
         .collect::<rusqlite::Result<_>>()?;
+    let kept_since = db.query_row("SELECT jobs_since FROM history_kept", [], |row| row.get(0))?;
     Ok(sizing::History {
         jobs,
         cancelled,
         runners,
+        kept_since,
         ..sizing::History::default()
     })
 }

@@ -317,7 +317,7 @@ impl Fresh {
         Fresh {
             start,
             jobs: jobs.len() as u64,
-            wait: waits(&jobs).p95,
+            wait: waits(&jobs, history.kept_since).p95,
             busy: busy(
                 history,
                 &advised.name,

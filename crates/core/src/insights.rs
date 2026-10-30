@@ -111,8 +111,14 @@ impl Run {
         Some(self.finished_at?.saturating_sub(self.started_at?) / SECOND)
     }
 
-    fn waited(&self) -> Option<u64> {
-        Some(self.started_at?.saturating_sub(self.queued_at) / SECOND)
+    /// Seconds from queued, or from `kept_since` (ms) if that came later, as for a job queued before runnerd first
+    /// ran, to started.
+    fn waited(&self, kept_since: u64) -> Option<u64> {
+        Some(
+            self.started_at?
+                .saturating_sub(self.queued_at.max(kept_since))
+                / SECOND,
+        )
     }
 
     fn link(&self) -> RunLink {
@@ -216,7 +222,7 @@ pub fn digest(history: &History, config: &Config, now: u64) -> Digest {
         .iter()
         .filter(|run| run.started_at.is_some_and(|at| at > since && at <= now))
         .collect();
-    started.sort_by_key(|run| (std::cmp::Reverse(run.waited()), run.id));
+    started.sort_by_key(|run| (std::cmp::Reverse(run.waited(history.kept_since)), run.id));
     Digest {
         since: since / SECOND,
         until: now / SECOND,
@@ -231,7 +237,7 @@ pub fn digest(history: &History, config: &Config, now: u64) -> Digest {
                 repository: run.repository.clone(),
                 workflow: run.workflow.clone(),
                 name: run.name.clone(),
-                waited: run.waited().unwrap_or(0),
+                waited: run.waited(history.kept_since).unwrap_or(0),
                 url: run.url.clone(),
             })
             .collect(),
@@ -563,9 +569,9 @@ fn throttled(window: &[&Run]) -> Vec<Insight> {
         .collect()
 }
 
-/// Each repository's waits in the 7 days before `now` (ms) and the 7 before those. The week before stays empty when
-/// it starts before the history holds every job: it would hold a sliver of it, such as the daemon's first minutes
-/// and the jobs queued before it ran. This week is what the history has of it either way.
+/// Each repository's waits in the 7 days before `now` (ms) and the 7 before those, each counted from no earlier than
+/// when the history holds every job. The week before stays empty when it starts before that: it would hold a sliver
+/// of it, such as the daemon's first minutes. This week is what the history has of it either way.
 fn waits(history: &History, now: u64) -> Vec<RepositoryWaits> {
     let before_kept = now.saturating_sub(2 * WEEK) < history.kept_since;
     let mut weeks: BTreeMap<&str, [Vec<&Run>; 2]> = BTreeMap::new();
@@ -584,16 +590,19 @@ fn waits(history: &History, now: u64) -> Vec<RepositoryWaits> {
         .into_iter()
         .map(|(repository, [now, before])| RepositoryWaits {
             repository: repository.to_owned(),
-            now: week_waits(&now),
-            before: week_waits(&before),
+            now: week_waits(&now, history.kept_since),
+            before: week_waits(&before, history.kept_since),
         })
         .collect()
 }
 
-fn week_waits(runs: &[&Run]) -> WeekWaits {
+fn week_waits(runs: &[&Run], kept_since: u64) -> WeekWaits {
     let warm = |run: &&&Run| run.runner_started_at.is_some_and(|at| at <= run.queued_at);
     let of = |runs: Vec<&&Run>| {
-        let waited: Vec<u64> = runs.iter().filter_map(|run| run.waited()).collect();
+        let waited: Vec<u64> = runs
+            .iter()
+            .filter_map(|run| run.waited(kept_since))
+            .collect();
         let jobs = u32::try_from(waited.len()).unwrap_or(u32::MAX);
         let spread = (!waited.is_empty()).then(|| spread(waited));
         WaitSpread {
