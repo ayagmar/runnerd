@@ -116,7 +116,7 @@ pub struct Image {
 pub struct TaggedImage {
     /// Its ID, such as `sha256:224e…`.
     pub id: String,
-    /// Its tags, such as `ghcr.io/ayagmar/runnerd-runner:node-0.0.21`.
+    /// Its tags, such as `ghcr.io/ayagmar/runnerd-runner:node-0.0.22`.
     pub tags: Vec<String>,
     /// The registry digests it was pulled by, such as `ghcr.io/ayagmar/runnerd-runner@sha256:9e79…`.
     pub digests: Vec<String>,
