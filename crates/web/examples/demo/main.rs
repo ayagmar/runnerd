@@ -213,12 +213,16 @@ fn auto_sizing(fake: &fake::Fake) {
             lower_until: fixtures.now + 86_400,
         }],
         blocked: None,
+        // Worded as core's sizing::auto words a raise the cap holds back and the CPU budget cannot give.
         refused: vec![SizingRefused {
             profile: "jvm".to_owned(),
-            reason: "13 runs of build averaged 7.4 CPUs of its 8 (median): the cap holds them back; 9 CPUs \
-                     do not fit the CPU budget with every profile's warm runners and one more runner at the \
-                     largest cap"
-                .to_owned(),
+            reason: format!(
+                "13 runs of halyard/ledger {} averaged {} of its 8 CPUs (median): the cap holds them back; 9 CPUs \
+                 do not fit the CPU budget with every profile's warm runners and one more runner at the \
+                 largest cap",
+                runnerd_core::api::job_title(Some("CI"), "build", None),
+                runnerd_core::api::cores(7400),
+            ),
         }],
     });
 }
