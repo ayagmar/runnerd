@@ -372,6 +372,7 @@ pub fn advise(
                     Bound::of(profile.max_memory, api::MemoryBound::MaxMemory),
                 ),
                 lower: Bound::of(profile.min_memory, api::MemoryBound::MinMemory),
+                max_slots: profile.max_slots.unwrap_or(u32::MAX),
             };
             let raises = Raises {
                 history,
@@ -579,6 +580,8 @@ struct Sized {
     upper: Option<Bound>,
     /// The least `memory` a lowering goes to, `min_memory`.
     lower: Option<Bound>,
+    /// The most `slots` a lowering or a revert gives it, `max_slots`: the config check refuses more.
+    max_slots: u32,
 }
 
 /// A bound of the config on a profile's `memory`: the config check refuses a profile past it.
@@ -666,7 +669,7 @@ impl Sized {
             let advice = Advice::Lower {
                 memory,
                 slots: if wants_slots && self.admission == Admission::Caps {
-                    fit(self.share).max(self.slots)
+                    fit(self.share).min(self.max_slots).max(self.slots)
                 } else {
                     self.slots
                 },
@@ -677,10 +680,10 @@ impl Sized {
     }
 
     /// The raise that takes back a lowering that went too far, to `to`: as far as `[host] memory_ceiling` and
-    /// `max_memory` allow, which a reload may have lowered since, with as many of `to`'s slots as the slice holds
-    /// now.
+    /// `max_memory` allow, which a reload may have lowered since, with as many of `to`'s slots as the slice and
+    /// `max_slots` hold now.
     fn reverted(&self, to: api::Resize) -> Advised {
-        self.raise(to.memory, to.slots)
+        self.raise(to.memory, to.slots.min(self.max_slots))
     }
 
     /// A raise toward `need` with at most `slots`: no further than `[host] memory_ceiling` and `max_memory` allow,

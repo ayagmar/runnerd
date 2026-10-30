@@ -342,3 +342,70 @@ fn a_lowering_stops_at_min_memory_and_then_keeps_it_saying_what_holds_it() {
         );
     }
 }
+
+#[test]
+fn a_lowering_whose_jobs_waited_adds_no_slots_past_max_slots() {
+    let text = host(
+        &jvm_bound(&jvm_at("10G", 2), "min_memory = \"6G\"\nmax_slots = 2"),
+        "admission = \"caps\"",
+    );
+    let mut daemon = Daemon::new(text, NOW - 2 * 24 * HOUR);
+    // Clear 4G runs that each waited 2 minutes for a slot: 6G would fit 3 in the 20G the 2 slots take.
+    for i in 0..12 {
+        let at = NOW - 40 * HOUR + i * HOUR;
+        let run = ledger(at, 10 * G, 4 * G);
+        daemon.history.jobs.push(crate::sizing::Ran {
+            started_at: Some(at + 2 * 60 * 1000),
+            ..run
+        });
+    }
+    daemon.now = NOW;
+    assert_eq!(
+        daemon.jvm().advice,
+        Advice::Lower {
+            memory: 6 * G,
+            slots: 2
+        }
+    );
+    assert_eq!(daemon.applied_by_hand(), Some(6 * G));
+    let mut changes = Vec::new();
+    for day in 0..4 {
+        changes.extend(daemon.checked_look(NOW + day * 25 * HOUR));
+    }
+    assert!(
+        changes.iter().all(|change| change.to.slots <= 2),
+        "auto sizing keeps to max_slots too: {changes:?}"
+    );
+    assert_eq!(steps(&changes).last().map(|step| step.1), Some(6 * G));
+}
+
+#[test]
+fn a_revert_gives_back_no_slots_past_max_slots() {
+    // jvm was lowered from 14G × 2 to 10G × 3; the owner then set 1 slot, at most 1, and max_memory 11G.
+    let mut after = clear_at_ten(LOWERED + HOUR, 10);
+    after.push(met(ledger(NOW - 2 * HOUR, 10 * G, 0)));
+    let text = jvm_bound(&jvm_at("10G", 1), "max_memory = \"11G\"\nmax_slots = 1");
+    let mut daemon = Daemon::restarted(text, lowered(after), 64 * G, NOW - HOUR);
+    daemon.now = NOW;
+    assert_eq!(
+        daemon.jvm().advice,
+        Advice::Raise {
+            memory: 11 * G,
+            slots: 1
+        }
+    );
+    assert_eq!(daemon.applied_by_hand(), Some(11 * G));
+    let changes = daemon.checked_look(NOW);
+    assert_eq!(
+        steps(&changes),
+        [(10 * G, 11 * G, 1)],
+        "the revert, within its bounds"
+    );
+    assert!(
+        changes[0]
+            .reason
+            .starts_with("raise memory back to 11G, its max_memory: "),
+        "{}",
+        changes[0].reason
+    );
+}

@@ -186,7 +186,7 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
             slots,
             cpus,
         };
-        if to == from || slots == 0 || !within(profile, from, to) {
+        if to == from || slots == 0 {
             continue;
         }
         budget.take(&advised.name, profile, from, to);
@@ -431,12 +431,6 @@ fn memory_reason(
     }
 }
 
-/// Whether `to` keeps the profile's `slots` at most `max_slots` when they grow. Its `memory` is the advice's, which
-/// keeps to `min_memory` and `max_memory` already.
-fn within(profile: &Profile, from: Resize, to: Resize) -> bool {
-    to.slots <= from.slots || profile.max_slots.is_none_or(|max| to.slots <= max)
-}
-
 /// What a look does with a lowering that went too far.
 enum Revert {
     /// Takes it back with this change.
@@ -444,7 +438,7 @@ enum Revert {
     /// Waits while more runners run than the slots it gives back hold, or while the changes before it in this look
     /// leave the slice no slot at its `memory`: nothing else changes the profile meanwhile.
     Wait,
-    /// Its slots are past `max_slots` now, or it gets no raise: the profile is sized as any other.
+    /// It gets no raise: the profile is sized as any other.
     Outside,
 }
 
@@ -486,9 +480,6 @@ fn reverted(
         slots,
         cpus: None,
     };
-    if !within(profile, from, to) {
-        return Revert::Outside;
-    }
     if config.host.admission == Admission::Caps && running > slots {
         return Revert::Wait;
     }
@@ -523,7 +514,7 @@ fn memory(config: &Config, profile: &Profile, advice: Advice, lowering: Lowering
 }
 
 /// Under `caps`: as many slots as the advice gives for the new memory. A lowering whose jobs waited adds as many as
-/// the memory the slots take now holds, up to `max_slots`; a raise keeps as many as the slice holds beside the other
+/// the memory the slots take now holds, up to the advice's slots, which keep to `max_slots`; a raise keeps as many as the slice holds beside the other
 /// profiles, and 0, no change, while more than that run. With the memory kept, one more slot when its jobs waited
 /// since the last change and its cap fits `MemoryMax` beside every other cap, up to `max_slots`. Otherwise the same.
 fn caps_slots(
@@ -536,11 +527,14 @@ fn caps_slots(
     running: u32,
 ) -> u32 {
     let current = profile.slots;
-    let max_slots = profile.max_slots.unwrap_or(u32::MAX);
     let fit = |room: u64| u32::try_from(room / memory.max(1)).unwrap_or(u32::MAX);
-    if memory < profile.memory.0 && advised.wants_slots {
+    // A step toward the advice's memory fits no more slots than the advice gives, which keeps to `max_slots`.
+    if let Advice::Lower { slots, .. } = advised.advice
+        && memory < profile.memory.0
+        && advised.wants_slots
+    {
         let share = profile.memory.0.saturating_mul(u64::from(current));
-        return fit(share).min(max_slots).max(current);
+        return fit(share).min(slots).max(current);
     }
     let Some(memory_max) = context.memory_max else {
         return current;
@@ -553,7 +547,7 @@ fn caps_slots(
         return if slots < running { 0 } else { slots };
     }
     if fresh.wants_slots()
-        && current < max_slots
+        && profile.max_slots.is_none_or(|max| current < max)
         && budget.caps.saturating_add(memory) <= memory_max
     {
         return current + 1;

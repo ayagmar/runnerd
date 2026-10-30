@@ -18,9 +18,10 @@ jobs needed more read as a raise to make at every look.
   it to: a raise and a revert by the lower of what the ceiling leaves one runner (rounded down to 256M, ADR 0086)
   and `max_memory`, and a lowering by `min_memory`. Where the ceiling and `max_memory` give the same size, the
   ceiling is named, since raising `max_memory` alone would not let a raise past it. The slots are fitted at the
-  bounded size. Auto sizing, `runnerctl sizing apply`, the dashboard's editor and the TUI all write
-  `Advice::change` as it is; auto sizing no longer clamps `memory` itself. It still keeps `max_slots` and moves a
-  lowering by at most `max_step`.
+  bounded size, and the slots a lowering adds or a revert gives back stop at `max_slots`. Auto sizing,
+  `runnerctl sizing apply`, the dashboard's editor and the TUI all write `Advice::change` as it is; auto sizing no
+  longer clamps `memory` or a lowering's slots itself, and moves a lowering by at most `max_step`. The one slot it
+  adds on its own for jobs that waited still stops at `max_slots`, since that is not the advice's.
 - **What the jobs need stays visible.** `ProfileSizing::hold` replaces ADR 0086's `ceiling`: a `MemoryHold` with
   what the jobs need, the bound the advice goes to, and which bound it is (`MemoryBound`: the ceiling with the
   mirror beside it, `max_memory` or `min_memory`). It is set only when a bound moves the advice away from the need,
