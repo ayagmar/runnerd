@@ -403,7 +403,8 @@ impl Control {
     /// Runs `commit` to write a validated config, and if it commits, runs with the config from then on, before the
     /// next tick. If it does not, nothing changes and the answer is `Failed`. Running jobs keep running: under
     /// `RunningSlots::Drain` removed profiles and slots go as their runners finish; under `Keep` a config without a
-    /// slot a runner is in is refused (`Conflict`) before `commit` runs.
+    /// slot a runner is in is refused (`Conflict`) before `commit` runs. A config with another `host.slice` is refused
+    /// (`Invalid`) before `commit` runs: the slice takes effect when runnerd starts.
     pub async fn replace_config(
         &self,
         config: Config,
@@ -476,6 +477,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 running,
                 reply,
             } => {
+                // The sampler watches the slice the daemon started in, and runners already in it stay there.
+                if config.host.slice != self.config.host.slice {
+                    let _ = reply.send(Err(ControlError::Invalid(format!(
+                        "restart runnerd to change the slice: it runs in {}, and host.slice is {} in the new config",
+                        self.config.host.slice, config.host.slice
+                    ))));
+                    return;
+                }
                 if running == RunningSlots::Keep
                     && let Some(occupied) = self.occupied_past(&config)
                 {

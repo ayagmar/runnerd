@@ -3264,6 +3264,67 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
     assert_eq!(engine.config.repositories[0].name, "o/r");
 }
 
+#[tokio::test]
+async fn a_config_in_another_slice_is_refused_before_its_file_is_written() {
+    // The sampler watches the slice the daemon started in: a live change would leave it measuring the old one.
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    let moved = Config::parse(
+        &CONFIG
+            .replace("slice = \"ci.slice\"", "slice = \"build.slice\"")
+            .replace("name = \"o/r\"", "name = \"o/x\""),
+    )
+    .unwrap();
+    let written = Arc::new(AtomicBool::new(false));
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    let commit = {
+        let written = written.clone();
+        Commit::new(move || {
+            written.store(true, Ordering::SeqCst);
+            Ok(None)
+        })
+    };
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(moved),
+            memory_max: None,
+            cpus: None,
+            commit,
+            running: RunningSlots::Drain,
+            reply,
+        })
+        .await;
+    match answer.await.unwrap() {
+        Err(ControlError::Invalid(message)) => assert_eq!(
+            message,
+            "restart runnerd to change the slice: it runs in ci.slice, and host.slice is build.slice in the new config"
+        ),
+        other => panic!("not refused: {other:?}"),
+    }
+    assert!(!written.load(Ordering::SeqCst), "the file is not written");
+    assert_eq!(engine.config.host.slice, "ci.slice");
+    assert_eq!(
+        engine.config.repositories[0].name, "o/r",
+        "nothing else changes"
+    );
+    // The same config in the slice it runs in goes through.
+    let (reply, answer) = tokio::sync::oneshot::channel();
+    engine
+        .command(Command::ReplaceConfig {
+            config: Box::new(other_repository()),
+            memory_max: None,
+            cpus: None,
+            commit: Commit::new(|| Ok(None)),
+            running: RunningSlots::Drain,
+            reply,
+        })
+        .await;
+    assert_eq!(answer.await.unwrap(), Ok(None));
+    assert_eq!(engine.config.repositories[0].name, "o/x");
+}
+
 /// How many times the engine polled GitHub's queue.
 fn polls(calls: &[String]) -> usize {
     calls

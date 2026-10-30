@@ -289,6 +289,8 @@ adopted too and drains as it would after a reload.
   on or off, as done or uncertain, never failed ([ADR 0039](docs/adr/0039-auto-sizing.md)).
 - `PUT /v1/config?revision=` refuses a text made from another revision than the config runnerd runs with, or sent
   while the file on disk is not that revision's text, so an editor opened before a change cannot save over it.
+- The engine refuses a new config that changes `host.slice` before its file is written: the sampler, admission's
+  slice and the running containers stay in the slice runnerd started in, so the slice changes only at a restart.
 - What the running containers reserve, a new runner's reservation with them, fits the slice's `MemoryMax`. Under
   `admission = "caps"` a runner reserves its cap and the config check holds `slots × memory` over all profiles,
   with the mirror, to `MemoryMax`, and every runner counts at its cap, whatever it reserved before a reload. Under
