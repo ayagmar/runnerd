@@ -11,8 +11,8 @@ use bollard::models::ContainerCreateBody;
 use futures_util::StreamExt;
 
 use super::{
-    Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, RunningSlots, Setup,
-    Shutdown, Target,
+    Author, Command, Commit, ControlError, Engine, Handle, HostIdentity, RunningJobs, RunningSlots,
+    Setup, Shutdown, Target,
 };
 use crate::api::{self, JobState};
 use crate::cache::Names;
@@ -1866,7 +1866,14 @@ async fn a_listing_finishes_while_a_long_command_runs() {
             Ok(None)
         });
         control
-            .replace_config(other_repository(), None, None, commit, RunningSlots::Drain)
+            .replace_config(
+                other_repository(),
+                None,
+                None,
+                commit,
+                RunningSlots::Drain,
+                Author::Owner,
+            )
             .await
     });
     writes.await.unwrap();
@@ -2474,6 +2481,7 @@ async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runn
             cpus: None,
             commit,
             running: RunningSlots::Keep,
+            author: Author::Owner,
             reply,
         })
         .await;
@@ -2493,6 +2501,7 @@ async fn a_config_that_must_keep_running_slots_is_refused_unwritten_while_a_runn
             cpus: None,
             commit: Commit::new(|| Ok(None)),
             running: RunningSlots::Drain,
+            author: Author::Owner,
             reply,
         })
         .await;
@@ -3253,6 +3262,7 @@ async fn a_config_whose_file_cannot_be_written_changes_nothing_and_a_paused_repo
             cpus: None,
             commit: failing_commit(),
             running: RunningSlots::Drain,
+            author: Author::Owner,
             reply,
         })
         .await;
@@ -3293,6 +3303,7 @@ async fn a_config_in_another_slice_is_refused_before_its_file_is_written() {
             cpus: None,
             commit,
             running: RunningSlots::Drain,
+            author: Author::Owner,
             reply,
         })
         .await;
@@ -3318,6 +3329,7 @@ async fn a_config_in_another_slice_is_refused_before_its_file_is_written() {
             cpus: None,
             commit: Commit::new(|| Ok(None)),
             running: RunningSlots::Drain,
+            author: Author::Owner,
             reply,
         })
         .await;
@@ -3365,6 +3377,7 @@ async fn a_config_that_undoes_a_memory_raise_of_the_last_day_runs_and_says_so() 
             cpus: None,
             commit: Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
             running: RunningSlots::Drain,
+            author: Author::Owner,
             reply,
         })
         .await;
@@ -3378,6 +3391,29 @@ async fn a_config_that_undoes_a_memory_raise_of_the_last_day_runs_and_says_so() 
         ])
     );
     assert_eq!(engine.config.profiles["app"].memory.0, 3 << 30, "it runs");
+    // Back at 4G, then auto sizing's own lowering to 3G: it says nothing about its own raise.
+    for (config, author) in [
+        (CONFIG.to_owned(), Author::Owner),
+        (
+            CONFIG.replace("memory = \"4G\"", "memory = \"3G\""),
+            Author::AutoSizing,
+        ),
+    ] {
+        let (reply, answer) = tokio::sync::oneshot::channel();
+        engine
+            .command(Command::ReplaceConfig {
+                config: Box::new(Config::parse(&config).unwrap()),
+                memory_max: None,
+                cpus: None,
+                commit: Commit::new(|| Ok(None)),
+                running: RunningSlots::Keep,
+                author,
+                reply,
+            })
+            .await;
+        assert_eq!(answer.await.unwrap(), Ok(Vec::new()), "{author:?}");
+    }
+    assert_eq!(engine.config.profiles["app"].memory.0, 3 << 30);
 }
 
 /// How many times the engine polled GitHub's queue.
@@ -3427,6 +3463,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
             None,
             failing_commit(),
             RunningSlots::Drain,
+            Author::Owner,
         )
         .await;
     assert!(matches!(refused, Err(ControlError::Failed(_))));
@@ -3459,6 +3496,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
             None,
             Commit::new(|| Ok(Some("syncing the directory failed".to_owned()))),
             RunningSlots::Drain,
+            Author::Owner,
         )
         .await;
     assert_eq!(

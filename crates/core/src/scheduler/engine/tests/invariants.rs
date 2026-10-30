@@ -974,6 +974,7 @@ impl Case {
                 cpus: Some(SLICE_CPUS),
                 commit: Commit::new(|| Ok(None)),
                 running: RunningSlots::Drain,
+                author: Author::Owner,
                 reply,
             })
             .await;

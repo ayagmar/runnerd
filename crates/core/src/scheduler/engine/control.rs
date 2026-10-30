@@ -59,6 +59,28 @@ pub enum RunningSlots {
     Keep,
 }
 
+/// Who writes a new config.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Author {
+    /// The owner, through `PUT /v1/config`: a save that lowers `memory` under a raise of auto sizing's in the last
+    /// day is answered with a warning (`auto::undone_raises`).
+    Owner,
+    /// Auto sizing, whose own lowering is never a warning about its raise.
+    AutoSizing,
+}
+
+/// `Err` when `new` moves runnerd to another slice than `running` names: the sampler and the running containers stay
+/// in the slice runnerd started in, so the slice changes only at a restart.
+pub fn same_slice(running: &Config, new: &Config) -> Result<(), ControlError> {
+    if new.host.slice == running.host.slice {
+        return Ok(());
+    }
+    Err(ControlError::Invalid(format!(
+        "restart runnerd to change the slice: it runs in {}, and host.slice is {} in the new config",
+        running.host.slice, new.host.slice
+    )))
+}
+
 /// The repositories a pause or a resume applies to.
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum Target {
@@ -144,6 +166,8 @@ pub enum Command {
         commit: Commit,
         /// Whether it may leave runners in slots it does not have.
         running: RunningSlots,
+        /// Who writes it.
+        author: Author,
         /// Answered once the engine runs with it: with the commit's warning and what it undoes of auto sizing's
         /// raises, or why it did not commit.
         reply: oneshot::Sender<Result<Vec<String>, ControlError>>,
@@ -408,8 +432,8 @@ impl Control {
     /// `RunningSlots::Drain` removed profiles and slots go as their runners finish; under `Keep` a config without a
     /// slot a runner is in is refused (`Conflict`) before `commit` runs. A config with another `host.slice` is refused
     /// (`Invalid`) before `commit` runs: the slice takes effect when runnerd starts. The answer warns of what may not
-    /// survive a crash and of each profile whose `memory` it lowers under a raise of auto sizing's in the last day
-    /// (`auto::undone_raises`), which are logged too.
+    /// survive a crash and, for `Author::Owner`, of each profile whose `memory` it lowers under a raise of auto
+    /// sizing's in the last day (`auto::undone_raises`), which are logged too.
     pub async fn replace_config(
         &self,
         config: Config,
@@ -417,6 +441,7 @@ impl Control {
         cpus: Option<u64>,
         commit: Commit,
         running: RunningSlots,
+        author: Author,
     ) -> Result<Vec<String>, ControlError> {
         self.send(|reply| Command::ReplaceConfig {
             config: Box::new(config),
@@ -424,6 +449,7 @@ impl Control {
             cpus,
             commit,
             running,
+            author,
             reply,
         })
         .await?
@@ -480,14 +506,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 cpus,
                 commit,
                 running,
+                author,
                 reply,
             } => {
-                // The sampler watches the slice the daemon started in, and runners already in it stay there.
-                if config.host.slice != self.config.host.slice {
-                    let _ = reply.send(Err(ControlError::Invalid(format!(
-                        "restart runnerd to change the slice: it runs in {}, and host.slice is {} in the new config",
-                        self.config.host.slice, config.host.slice
-                    ))));
+                if let Err(refused) = same_slice(&self.config, &config) {
+                    let _ = reply.send(Err(refused));
                     return;
                 }
                 if running == RunningSlots::Keep
@@ -496,7 +519,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     let _ = reply.send(Err(ControlError::Conflict(occupied)));
                     return;
                 }
-                let undone = self.undone_raises(&config).await;
+                let undone = match author {
+                    Author::Owner => self.undone_raises(&config).await,
+                    Author::AutoSizing => Vec::new(),
+                };
                 let answer = match commit.run().await {
                     Ok(warning) => {
                         for line in &undone {
