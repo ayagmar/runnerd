@@ -12,20 +12,20 @@
 use runnerd_core::api::{
     Activity, ActivityQuery, Admission, AdmissionPolicy, Advice, AutoNote, AutoPlan, Basis, Bucket,
     Budget, BuildCacheCounts, BuildCacheStats, Busy, CacheHistory, CacheHistoryQuery, CacheKind,
-    CacheSize, CacheVolume, Caches, CeilingHold, Check, CheckStatus, ConfigCheck, ConfigFile,
-    CpuAdmission, CpuBudget, Dashboard, Delivery, Digest, Doctor, ErrorResponse, Event,
-    EventEnvelope, EventQuery, HoldCause, Holder, HostBudget, HostMemory, HostSample,
-    HostSampleQuery, HostSamples, Insight, InsightKind, Insights, InsightsQuery, Job, JobMetrics,
-    JobPage, JobPeak, JobQuery, JobRunner, JobSizing, JobState, JobSummary, LogQuery, LogSummary,
-    LongWait, Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Pairing, PairingQuery,
-    Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pressure, PricedRunner, Priority,
-    ProfileSizing, ProfileStatus, QueuedJob, Record, RecordLimits, RecordNote, RecordRemoval,
-    Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus, RepositoryWaits,
-    Resize, RevertCause, RunLink, RunnerFailure, RunnerStatus, RunningJob, Sample, SampleSeries,
-    SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery, ShutdownRequest, Sizing,
-    SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Sku, SlotStatus, Spread,
-    Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, Timeline, Usd, WaitSpread, Waiting,
-    WeekWaits,
+    CacheSize, CacheVolume, Caches, Check, CheckStatus, ConfigCheck, ConfigFile, CpuAdmission,
+    CpuBudget, Dashboard, Delivery, Digest, Doctor, ErrorResponse, Event, EventEnvelope,
+    EventQuery, HoldCause, Holder, HostBudget, HostMemory, HostSample, HostSampleQuery,
+    HostSamples, Insight, InsightKind, Insights, InsightsQuery, Job, JobMetrics, JobPage, JobPeak,
+    JobQuery, JobRunner, JobSizing, JobState, JobSummary, LogQuery, LogSummary, LongWait,
+    MemoryBound, MemoryHold, Notification, NotifyEvent, NotifyTest, NotifyTestQuery, Pairing,
+    PairingQuery, Pairings, PauseQuery, Paused, Peaks, Period, PoolStatus, Pressure, PricedRunner,
+    Priority, ProfileSizing, ProfileStatus, QueuedJob, Record, RecordLimits, RecordNote,
+    RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus,
+    RepositoryWaits, Resize, RevertCause, RunLink, RunnerFailure, RunnerStatus, RunningJob, Sample,
+    SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
+    ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert,
+    Sku, SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, Timeline,
+    Usd, WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
@@ -808,11 +808,13 @@ pub(crate) fn sizing() -> Sizing {
                 job: "tidewater/halyard ci / build".to_owned(),
                 cause: RevertCause::Failed { runs: 3 },
             }),
-            ceiling: Some(CeilingHold {
+            hold: Some(MemoryHold {
                 need: 10 << 30,
-                ceiling: 9 << 30,
-                mirror: 512 << 20,
-                most: 8 << 30,
+                bound: 8 << 30,
+                by: MemoryBound::Ceiling {
+                    ceiling: 9 << 30,
+                    mirror: 512 << 20,
+                },
             }),
         }],
         auto: true,
@@ -870,6 +872,23 @@ fn advice() -> Vec<Advice> {
             | Advice::Lower { .. }
             | Advice::Raise { .. }
             | Advice::SliceTooSmall { .. } => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn memory_bound() -> Vec<MemoryBound> {
+    let every = vec![
+        MemoryBound::Ceiling {
+            ceiling: 9 << 30,
+            mirror: 512 << 20,
+        },
+        MemoryBound::MaxMemory,
+        MemoryBound::MinMemory,
+    ];
+    for bound in &every {
+        match bound {
+            MemoryBound::Ceiling { .. } | MemoryBound::MaxMemory | MemoryBound::MinMemory => {}
         }
     }
     every

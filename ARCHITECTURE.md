@@ -310,7 +310,10 @@ adopted too and drains as it would after a reload.
   with the recorded ones paused, minus those its config lacks, so a paused repository gets no runner after a restart.
 - Sizing advice (`GET /v1/sizing`, `sizing::advise`) is computed from the job history. A client applies it on
   request, after a confirmation, through `PUT /v1/config`
-  ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)). Under `[sizing] auto` the daemon applies what
+  ([ADR 0032](docs/adr/0032-sizing-advice-from-sampled-peaks.md)). A profile's advice keeps to every bound the config
+  check holds its `memory` to, `[host] memory_ceiling` less the mirror, `max_memory` and `min_memory`, and says in
+  `ProfileSizing::hold` which bound moved it away from what the jobs need, so every consumer writes the advice as is
+  ([ADR 0088](docs/adr/0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md)). Under `[sizing] auto` the daemon applies what
   `sizing::auto::changes` picks through the same check and commit (`api::control::replace`): `memory`, `slots` and
   `cpus`, one change per profile at a time, a raise at most once per `[sizing] raise_interval` and a lowering once
   per `interval` ([ADR 0049](docs/adr/0049-auto-sizing-without-hand-tuning.md)), never lowering a profile while a
@@ -321,7 +324,8 @@ adopted too and drains as it would after a reload.
   [ADR 0079](docs/adr/0079-cpu-weights-and-throttling-as-evidence.md)), taking back at the next look a lowering a run met or a job failed at
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)), never leaving a profile's bounds, never raising
   `memory` past what `[host] memory_ceiling` leaves one runner beside the mirror (`Config::runner_ceiling`, which the
-  config check reads too; [ADR 0086](docs/adr/0086-sizing-and-init-know-the-memory-ceiling.md)),
+  config check reads too; [ADR 0086](docs/adr/0086-sizing-and-init-know-the-memory-ceiling.md)) or its
+  `max_memory`, both read from the advice, which keeps to them,
   and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
   before the commit). Each change is recorded as pending in the history, synced to disk, before its file is written,
   then done (with a durable `sizing.changed` event) or failed; a pending one is settled at every look, auto sizing

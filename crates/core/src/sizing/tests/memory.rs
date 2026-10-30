@@ -597,31 +597,6 @@ fn a_kill_at_a_hand_set_cap_raises_it_no_higher_than_a_cap_the_job_ran_clear_of(
 }
 
 #[test]
-fn a_revert_outside_the_profiles_bounds_raises_as_far_as_they_allow_and_the_profile_is_not_held() {
-    let mut after = clear_at_ten(LOWERED + HOUR, 10);
-    after.push(met(ledger(NOW - 2 * HOUR, 10 * G, 0)));
-    // The owner put max_memory under the 14G the lowering came from.
-    let text = jvm_at("10G", 3).replacen(
-        "memory = \"10G\"",
-        "memory = \"10G\"\nmax_memory = \"12G\"",
-        1,
-    );
-    let changed = look(&text, &lowered(after), NOW, Some(LOWERED / 1000));
-    let [change] = &changed[..] else {
-        panic!("one change: {changed:?}")
-    };
-    assert_eq!(change.to.memory, 12 * G);
-    assert!(
-        change.reason.starts_with("raise memory to 12G")
-            && change
-                .reason
-                .ends_with("as far as its max_memory allows, short of 14G"),
-        "{}",
-        change.reason
-    );
-}
-
-#[test]
 fn a_kill_in_the_last_sample_interval_near_the_cap_met_it_and_one_far_under_it_did_not() {
     // The container's own limit killed it before a sample counted the `oom`; Docker's flag still says it was killed.
     let killed = |peak: u64| Ran {

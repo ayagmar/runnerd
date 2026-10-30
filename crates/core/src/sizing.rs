@@ -6,7 +6,7 @@
 use crate::admission::Key;
 use crate::admission::recent::Recent;
 use crate::api::{self, Advice, Peaks, Spread};
-use crate::config::{Admission, Config};
+use crate::config::{Admission, ByteSize, Config};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 
 pub(crate) use crate::api::GRANULE;
@@ -336,8 +336,7 @@ pub fn advise(
     let mirror = config.mirror_memory();
     let rules = &config.sizing;
     let recent = memory::windows(config, history, window.now);
-    // Down to a granule, so the config file says it exactly and the check never reads more back.
-    let most = config.runner_ceiling().map(|most| most / GRANULE * GRANULE);
+    let ceiling = Bound::ceiling(config);
     let profiles = config
         .profiles
         .iter()
@@ -368,8 +367,12 @@ pub fn advise(
                 }),
                 wants_slots: wait.p95 >= WAITED || busy >= BUSY,
                 min_jobs: rules.min_jobs,
-                ceiling: most,
-                max_memory: profile.max_memory.map(|max| max.0),
+                upper: upper(
+                    ceiling,
+                    Bound::of(profile.max_memory, api::MemoryBound::MaxMemory),
+                ),
+                lower: Bound::of(profile.min_memory, api::MemoryBound::MinMemory),
+                max_slots: profile.max_slots.unwrap_or(u32::MAX),
             };
             let raises = Raises {
                 history,
@@ -391,24 +394,23 @@ pub fn advise(
                 cpus: None,
             };
             let revert = memory::revert(config, history, name, current);
-            let (advice, wanted) = if let Some((_, to)) = &revert {
-                (sized.reverted(*to), to.memory)
+            let advised = if let Some((_, to)) = &revert {
+                sized.reverted(*to)
             } else {
                 let needs = Needs {
                     raise: raises.need(None),
                     floor: memory.floor.max(memory::revert_floor(history, name)),
                 };
-                (sized.advice(&peaks, needs, sized.wants_slots), needs.raise)
+                sized.advice(&peaks, needs, sized.wants_slots)
             };
-            let ceiling = ceiling_hold(config, most, advice, wanted);
             api::ProfileSizing {
                 name: name.clone(),
                 memory: cap,
                 cpus: profile.cpus,
                 slots: profile.slots,
-                advice,
+                advice: advised.advice,
                 revert: revert.map(|(revert, _)| revert),
-                ceiling,
+                hold: advised.hold,
                 peaks,
                 wait,
                 starts,
@@ -433,23 +435,13 @@ pub fn advise(
     }
 }
 
-/// What says `[host] memory_ceiling` holds `advice` under the `wanted` memory, when it does: a raise or no raise,
-/// and more wanted than `most`, the most a raise goes to.
-fn ceiling_hold(
-    config: &Config,
-    most: Option<u64>,
-    advice: Advice,
-    wanted: u64,
-) -> Option<api::CeilingHold> {
-    let raises = matches!(advice, Advice::Raise { .. } | Advice::SliceTooSmall { .. });
-    most.filter(|most| raises && wanted > *most)
-        .zip(config.host.memory_ceiling)
-        .map(|(most, ceiling)| api::CeilingHold {
-            need: wanted,
-            ceiling: ceiling.0,
-            mirror: config.mirror_memory(),
-            most,
-        })
+/// The bound of a raise: the lower of `ceiling` and `max_memory`, the ceiling when they are the same, since
+/// raising `max_memory` alone would not let a raise past it.
+fn upper(ceiling: Option<Bound>, max_memory: Option<Bound>) -> Option<Bound> {
+    match (ceiling, max_memory) {
+        (Some(ceiling), Some(max)) if max.memory < ceiling.memory => Some(max),
+        (ceiling, max) => ceiling.or(max),
+    }
 }
 
 /// What a raise of one profile reads (`memory::raise_need`).
@@ -515,15 +507,17 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
             let wait = waits(&runs_of, raises.history.kept_since);
             // A job's advice says what it needs; only its profile's is bounded by what can be written.
             let unbounded = Sized {
-                ceiling: None,
-                max_memory: None,
+                upper: None,
+                lower: None,
                 ..*sized
             };
             api::JobSizing {
                 repository: key.repository.clone(),
                 workflow: key.workflow.clone(),
                 name: key.name.clone(),
-                advice: unbounded.advice(&peaks, needs, wait.p95 >= WAITED || busy >= BUSY),
+                advice: unbounded
+                    .advice(&peaks, needs, wait.p95 >= WAITED || busy >= BUSY)
+                    .advice,
                 peaks,
                 wait,
             }
@@ -581,11 +575,52 @@ struct Sized {
     /// Whether its jobs waited for a slot at p95, or its slots were busy, enough to want more.
     wants_slots: bool,
     min_jobs: u32,
-    /// The most `memory` a raise goes to under `[host] memory_ceiling` (`Config::runner_ceiling`), down to a
-    /// granule; `None` without a ceiling.
-    ceiling: Option<u64>,
-    /// Its `max_memory`: auto sizing raises no further, so the slice need hold no more.
-    max_memory: Option<u64>,
+    /// The most `memory` a raise goes to: what `[host] memory_ceiling` leaves one runner (`Config::runner_ceiling`)
+    /// down to a granule, or `max_memory` when that is less; `None` without either.
+    upper: Option<Bound>,
+    /// The least `memory` a lowering goes to, `min_memory`.
+    lower: Option<Bound>,
+    /// The most `slots` a lowering or a revert gives it, `max_slots`: the config check refuses more.
+    max_slots: u32,
+}
+
+/// A bound of the config on a profile's `memory`: the config check refuses a profile past it.
+#[derive(Clone, Copy)]
+struct Bound {
+    memory: u64,
+    by: api::MemoryBound,
+}
+
+impl Bound {
+    /// What `[host] memory_ceiling` leaves one runner (`Config::runner_ceiling`), down to a granule so the config
+    /// file says it exactly and the check never reads more back.
+    fn ceiling(config: &Config) -> Option<Bound> {
+        let most = config.runner_ceiling()?;
+        Some(Bound {
+            memory: most / GRANULE * GRANULE,
+            by: api::MemoryBound::Ceiling {
+                ceiling: config.host.memory_ceiling?.0,
+                mirror: config.mirror_memory(),
+            },
+        })
+    }
+
+    /// A profile's `size` as the bound `by`.
+    fn of(size: Option<ByteSize>, by: api::MemoryBound) -> Option<Bound> {
+        size.map(|size| Bound { memory: size.0, by })
+    }
+}
+
+/// A profile's advice, and the bound that holds its `memory` away from what its jobs need.
+struct Advised {
+    advice: Advice,
+    hold: Option<api::MemoryHold>,
+}
+
+impl From<Advice> for Advised {
+    fn from(advice: Advice) -> Advised {
+        Advised { advice, hold: None }
+    }
 }
 
 /// What a set of jobs' runs say its `memory` needs (`memory`, ADR 0070).
@@ -598,11 +633,12 @@ struct Needs {
 }
 
 impl Sized {
-    /// A raise toward `needs.raise` when it is above the cap; a lowering toward `needs.floor` when that saves a tenth
-    /// and no job is on its cap; else keep, with `needs.floor` as what the jobs need, above the cap or not.
-    fn advice(&self, peaks: &Peaks, needs: Needs, wants_slots: bool) -> Advice {
+    /// A raise toward `needs.raise` when it is above the cap; a lowering toward `needs.floor`, no further than
+    /// `min_memory`, when that saves a tenth and no job is on its cap; else keep, with `needs.floor` as what the jobs
+    /// need, above the cap or not.
+    fn advice(&self, peaks: &Peaks, needs: Needs, wants_slots: bool) -> Advised {
         if peaks.jobs < u64::from(self.min_jobs) {
-            return Advice::TooFew { jobs: peaks.jobs };
+            return Advice::TooFew { jobs: peaks.jobs }.into();
         }
         if needs.raise > self.cap {
             return self.raise(needs.raise, self.slots);
@@ -613,47 +649,77 @@ impl Sized {
             && need <= self.cap
             && self.cap - need >= self.cap * WORTH_LOWERING / 100
         {
-            let fit = |memory: u64| u32::try_from(memory / need).unwrap_or(u32::MAX);
+            let hold = self
+                .lower
+                .filter(|min| min.memory > need)
+                .map(|min| api::MemoryHold {
+                    need,
+                    bound: min.memory,
+                    by: min.by,
+                });
+            let memory = hold.map_or(need, |hold| hold.bound);
+            if memory >= self.cap {
+                return Advised {
+                    advice: Advice::Keep { memory: need },
+                    hold,
+                };
+            }
+            let fit = |room: u64| u32::try_from(room / memory).unwrap_or(u32::MAX);
             // Under measured admission slots are not bought with caps: the advice line says when more may help.
-            return Advice::Lower {
-                memory: need,
+            let advice = Advice::Lower {
+                memory,
                 slots: if wants_slots && self.admission == Admission::Caps {
-                    fit(self.share).max(self.slots)
+                    fit(self.share).min(self.max_slots).max(self.slots)
                 } else {
                     self.slots
                 },
             };
+            return Advised { advice, hold };
         }
-        Advice::Keep { memory: need }
+        Advice::Keep { memory: need }.into()
     }
 
-    /// The raise that takes back a lowering that went too far, to `to`: as far as `[host] memory_ceiling` allows,
-    /// which a reload may have lowered since, with as many of `to`'s slots as the slice holds now.
-    fn reverted(&self, to: api::Resize) -> Advice {
-        self.raise(to.memory, to.slots)
+    /// The raise that takes back a lowering that went too far, to `to`: as far as `[host] memory_ceiling` and
+    /// `max_memory` allow, which a reload may have lowered since, with as many of `to`'s slots as the slice and
+    /// `max_slots` hold now.
+    fn reverted(&self, to: api::Resize) -> Advised {
+        self.raise(to.memory, to.slots.min(self.max_slots))
     }
 
-    /// A raise toward `need` with at most `slots`: no further than `[host] memory_ceiling` allows, since a raise the
-    /// config check refuses would be proposed again at every look, and with the slots the slice holds at that
-    /// memory, or at `max_memory` when that is less, as `admission` budgets it. None while the ceiling allows
-    /// nothing past the cap or the slice holds no slot: the jobs need `need`.
-    fn raise(&self, need: u64, slots: u32) -> Advice {
-        let memory = self.ceiling.map_or(need, |most| need.min(most));
+    /// A raise toward `need` with at most `slots`: no further than `[host] memory_ceiling` and `max_memory` allow,
+    /// since a raise the config check refuses would be proposed again at every look, and with the slots the slice
+    /// holds at that memory, as `admission` budgets it. None while the bound allows nothing past the cap or the slice
+    /// holds no slot: the jobs need `need`.
+    fn raise(&self, need: u64, slots: u32) -> Advised {
+        let hold = self
+            .upper
+            .filter(|most| need > most.memory)
+            .map(|most| api::MemoryHold {
+                need,
+                bound: most.memory,
+                by: most.by,
+            });
+        let memory = hold.map_or(need, |hold| hold.bound);
+        let too_small = Advised {
+            advice: Advice::SliceTooSmall { memory: need },
+            hold,
+        };
         if memory <= self.cap {
-            return Advice::SliceTooSmall { memory: need };
+            return too_small;
         }
-        // The slice holds what auto sizing writes, which `max_memory` may hold under this.
-        let written = self.max_memory.map_or(memory, |max| memory.min(max)).max(1);
-        let fit = |room: u64| u32::try_from(room / written).unwrap_or(u32::MAX);
+        let fit = |room: u64| u32::try_from(room / memory).unwrap_or(u32::MAX);
         let slots = match (self.admission, self.room) {
             (Admission::Caps, Some(room)) => fit(room).min(slots),
-            (Admission::Measured, Some(room)) if room < written => 0,
+            (Admission::Measured, Some(room)) if room < memory => 0,
             (_, _) => slots,
         };
         if slots == 0 {
-            return Advice::SliceTooSmall { memory: need };
+            return too_small;
         }
-        Advice::Raise { memory, slots }
+        Advised {
+            advice: Advice::Raise { memory, slots },
+            hold,
+        }
     }
 }
 

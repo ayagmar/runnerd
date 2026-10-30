@@ -286,6 +286,7 @@ documents! {
     "savings": Savings => full(samples::savings(), None),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
+    "memory-bound": MemoryBound => variants(samples::memory_bound()),
 }
 
 /// The previous release's samples, one file per document.

@@ -2,6 +2,8 @@
 
 Status: **Accepted** (2026-10-23). Amends [0032](0032-sizing-advice-from-sampled-peaks.md). Amended by
 [0049](0049-auto-sizing-without-hand-tuning.md): `cpus` too, slots without `max_slots`, raises within the hour.
+Amended by [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md): the advice keeps to `min_memory` and
+`max_memory`, so a change goes as far as they allow.
 
 ## Context
 

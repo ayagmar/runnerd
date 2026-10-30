@@ -94,9 +94,10 @@ pub use savings::{
     Savings, Sku, Usd, Visibility, billed_minutes, reads_since,
 };
 pub use sizing::{
-    Advice, AutoPlan, CeilingHold, GRANULE, JobSizing, Need, PAGE_CACHE_ROOM, Peaks, ProfilePlan,
-    ProfileSizing, Resize, RevertCause, SAMPLE_INTERVAL, Sizing, SizingChange, SizingHold,
-    SizingQuery, SizingRefused, SizingRevert, Spread, Starts, need, period, sampled_note,
+    Advice, AutoPlan, GRANULE, JobSizing, MemoryBound, MemoryHold, Need, PAGE_CACHE_ROOM, Peaks,
+    ProfilePlan, ProfileSizing, Resize, RevertCause, SAMPLE_INTERVAL, Sizing, SizingChange,
+    SizingHold, SizingQuery, SizingRefused, SizingRevert, Spread, Starts, need, period,
+    sampled_note,
 };
 pub use slots::{Health, SlotState};
 pub use stats::StatsSummary;

@@ -152,27 +152,44 @@ pub struct ProfileSizing {
     /// When the advice is to take back a lowering auto sizing made that went too far: what showed it.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub revert: Option<SizingRevert>,
-    /// When `[host] memory_ceiling` holds the advice's `memory` under what its jobs need (ADR 0086).
+    /// When a bound of the config holds the advice's `memory` away from what its jobs need: `[host]
+    /// memory_ceiling` or `max_memory` under it, `min_memory` over it (ADR 0086, 0088).
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub ceiling: Option<CeilingHold>,
+    pub hold: Option<MemoryHold>,
     /// Each job that ran in it, by repository, workflow and name.
     pub jobs: Vec<JobSizing>,
 }
 
-/// `[host] memory_ceiling` holding a profile's `memory` under what its jobs need: the config check refuses a
-/// profile whose runner does not fit the ceiling beside the mirror, so the advice raises it no further (ADR 0086).
-/// It says only that no raise past `most` is possible, not that the jobs fit.
+/// A bound of the config holding a profile's `memory` away from what its jobs need: the config check refuses a
+/// profile past it, so the advice goes no further than `bound`, and auto sizing writes it as is (ADR 0086, 0088). Under
+/// a raise it says only that no raise past `bound` is possible, not that the jobs fit.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
-pub struct CeilingHold {
-    /// What the jobs need, in bytes: the raise they ask for, or the `memory` a revert goes back to.
+pub struct MemoryHold {
+    /// What the jobs need, in bytes: the raise they ask for, the `memory` a revert goes back to, or the lowering's
+    /// floor.
     pub need: u64,
-    /// `[host] memory_ceiling`, in bytes.
-    pub ceiling: u64,
-    /// The mirror's memory beside it, 0 while the mirror is off.
-    pub mirror: u64,
-    /// The most `memory` a raise goes to: the ceiling less the mirror, down to a multiple of 256M so that the
-    /// config file says it exactly.
-    pub most: u64,
+    /// The `memory` the advice goes to at most, or for a lowering at least.
+    pub bound: u64,
+    /// Which bound it is.
+    pub by: MemoryBound,
+}
+
+/// Which bound of the config holds a profile's `memory`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case", tag = "kind")]
+pub enum MemoryBound {
+    /// `[host] memory_ceiling` less the mirror, down to a multiple of 256M so that the config file says it exactly:
+    /// the most one runner may have (ADR 0086).
+    Ceiling {
+        /// `[host] memory_ceiling`, in bytes.
+        ceiling: u64,
+        /// The mirror's memory beside it, 0 while the mirror is off.
+        mirror: u64,
+    },
+    /// The profile's `max_memory`.
+    MaxMemory,
+    /// The profile's `min_memory`.
+    MinMemory,
 }
 
 /// A lowering of a profile's `memory` by auto sizing that went too far, which the advice takes back (ADR 0070).
@@ -316,7 +333,7 @@ pub enum Advice {
     },
     /// The jobs need more than the cap, and the slice's `MemoryMax` does not hold one slot of what they need (under
     /// `measured` admission, one runner beside the mirror): the slice has to grow first. Also when the cap is at
-    /// what `[host] memory_ceiling` holds (`ProfileSizing::at_ceiling`): the ceiling has to grow first.
+    /// what `[host] memory_ceiling` or `max_memory` holds it to (`ProfileSizing::held`): that has to grow first.
     SliceTooSmall {
         /// What the jobs need.
         memory: u64,
@@ -474,11 +491,23 @@ impl Sizing {
                 size(memory),
                 size(profile.memory)
             ),
-            Advice::Keep { memory } => {
-                format!("keep {}: {need} is {}", size(profile.memory), size(memory))
-            }
+            Advice::Keep { memory } => match profile.hold {
+                Some(hold) => format!(
+                    "keep {}, {}: {need} is {}",
+                    size(profile.memory),
+                    hold.bound_line(),
+                    size(memory)
+                ),
+                None => format!("keep {}: {need} is {}", size(profile.memory), size(memory)),
+            },
             Advice::Lower { memory, slots } => {
                 let share = profile.memory * u64::from(profile.slots);
+                // `min_memory` holds it over what the jobs need: `lower memory to 6G from 8G, its min_memory: its
+                // largest peak + 15% is 4G`.
+                let need = match profile.hold {
+                    Some(hold) => format!("{}: {need} is {}", hold.bound_line(), size(hold.need)),
+                    None => need,
+                };
                 if self.admission == AdmissionPolicy::Measured {
                     return format!(
                         "lower memory to {} from {}, {need}",
@@ -501,8 +530,8 @@ impl Sizing {
                 )
             }
             Advice::Raise { memory, .. } if let Some(revert) = &profile.revert => {
-                let held = match profile.ceiling {
-                    Some(hold) if memory < revert.to => format!(", {}", hold.most_line()),
+                let held = match profile.hold {
+                    Some(hold) if memory < revert.to => format!(", {}", hold.bound_line()),
                     _ => String::new(),
                 };
                 format!(
@@ -522,11 +551,11 @@ impl Sizing {
                 } else {
                     String::new()
                 };
-                match profile.ceiling {
+                match profile.hold {
                     Some(hold) => format!(
                         "raise memory to {}, {}, short of the {} its jobs need: {why}{slots}",
                         size(memory),
-                        hold.most_line(),
+                        hold.bound_line(),
                         size(hold.need)
                     ),
                     None => format!("raise memory to {}: {why}{slots}", size(memory)),
@@ -538,48 +567,67 @@ impl Sizing {
 }
 
 /// The advice line of a profile whose jobs need `memory` and get no raise, with `need` how that comes from its
-/// peaks, or the revert that asks for it: `[host] memory_ceiling` holds it where it is (`ProfileSizing::at_ceiling`),
-/// or the slice is too small.
+/// peaks, or the revert that asks for it: a bound of the config holds it where it is (`ProfileSizing::held`), or the
+/// slice is too small.
 fn too_small_line(profile: &ProfileSizing, memory: u64, need: String) -> String {
     let why = profile.revert.as_ref().map_or(need, SizingRevert::why);
-    match profile.ceiling {
-        Some(hold) if profile.at_ceiling() => {
+    if let Some(hold) = profile.held() {
+        let then = match hold.by {
+            MemoryBound::Ceiling { .. } => {
+                "raise [host] memory_ceiling if the host can grow further"
+            }
+            MemoryBound::MaxMemory | MemoryBound::MinMemory => "raise max_memory to give them more",
+        };
+        return format!(
+            "keep {}, {}: its jobs need {} ({why}); {then}",
+            ByteSize(profile.memory),
+            hold.bound_line(),
+            ByteSize(memory)
+        );
+    }
+    let then = profile
+        .hold
+        .map(|hold| {
             format!(
-                "keep {}, {}: its jobs need {} ({why}); raise [host] memory_ceiling if the host can grow further",
-                ByteSize(profile.memory),
-                hold.most_line(),
-                ByteSize(memory)
+                "; {} then holds it at {}",
+                hold.by.name(),
+                ByteSize(hold.bound)
             )
-        }
-        hold => {
-            let then = hold
-                .map(|hold| {
-                    format!(
-                        "; [host] memory_ceiling then holds it at {}",
-                        ByteSize(hold.most)
-                    )
-                })
-                .unwrap_or_default();
-            format!(
-                "needs {} ({why}), more than the slice holds for one slot: raise the slice's MemoryMax first{then}",
-                ByteSize(memory)
-            )
+        })
+        .unwrap_or_default();
+    format!(
+        "needs {} ({why}), more than the slice holds for one slot: raise the slice's MemoryMax first{then}",
+        ByteSize(memory)
+    )
+}
+
+impl MemoryHold {
+    /// What holds the `memory`, as the advice line says it after the `memory` it goes to: `the most the host's 24G
+    /// memory_ceiling leaves one runner beside the mirror's 1G`, `its max_memory` or `its min_memory`.
+    pub fn bound_line(&self) -> String {
+        match self.by {
+            MemoryBound::Ceiling { ceiling, mirror: 0 } => format!(
+                "the most the host's {} memory_ceiling leaves one runner",
+                ByteSize(ceiling)
+            ),
+            MemoryBound::Ceiling { ceiling, mirror } => format!(
+                "the most the host's {} memory_ceiling leaves one runner beside the mirror's {}",
+                ByteSize(ceiling),
+                ByteSize(mirror)
+            ),
+            MemoryBound::MaxMemory => "its max_memory".to_owned(),
+            MemoryBound::MinMemory => "its min_memory".to_owned(),
         }
     }
 }
 
-impl CeilingHold {
-    /// What bounds the raise, as the advice line says it after the `memory` it raises to: `the most the host's 24G
-    /// memory_ceiling leaves one runner beside the mirror's 1G`.
-    pub fn most_line(&self) -> String {
-        let ceiling = ByteSize(self.ceiling);
-        if self.mirror == 0 {
-            format!("the most the host's {ceiling} memory_ceiling leaves one runner")
-        } else {
-            format!(
-                "the most the host's {ceiling} memory_ceiling leaves one runner beside the mirror's {}",
-                ByteSize(self.mirror)
-            )
+impl MemoryBound {
+    /// The setting, as the config names it: `[host] memory_ceiling`, `max_memory` or `min_memory`.
+    pub fn name(self) -> &'static str {
+        match self {
+            MemoryBound::Ceiling { .. } => "[host] memory_ceiling",
+            MemoryBound::MaxMemory => "max_memory",
+            MemoryBound::MinMemory => "min_memory",
         }
     }
 }

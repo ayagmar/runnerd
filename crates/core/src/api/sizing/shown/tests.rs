@@ -32,7 +32,7 @@ fn profile(name: &str, max: u64, advice: Advice) -> ProfileSizing {
         wants_slots: false,
         advice,
         revert: None,
-        ceiling: None,
+        hold: None,
         jobs: vec![],
     }
 }
@@ -57,7 +57,7 @@ fn sizing(profiles: Vec<ProfileSizing>) -> Sizing {
 fn too_few_runs_are_marked_at_what_the_advice_would_size_for() {
     // A 1G peak + 15% is 1.15G, but advice keeps 1G for page cache and rounds to 256M: 2G.
     let profile = profile("jvm", G, Advice::TooFew { jobs: 3 });
-    let marked = sizing(vec![]).need(&profile.peaks, profile.advice);
+    let marked = sizing(vec![]).need(&profile);
     assert_eq!(marked.memory, 2 * G);
     assert_eq!(marked.memory, need(G, 15), "the daemon's own arithmetic");
     assert_eq!(marked.reason, "its largest peak + 1G for page cache");
