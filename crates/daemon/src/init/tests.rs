@@ -43,6 +43,7 @@ fn request(dir: &Path, overwrite: Overwrite) -> Request {
         config: dir.join("runnerd/runnerd.toml"),
         unit: dir.join("systemd/user/runnerd.service"),
         overwrite,
+        memory_ceiling: None,
     }
 }
 
@@ -232,6 +233,80 @@ fn a_reading_with_a_ceiling_sizes_by_first_runner_as_admission_counts_it() {
             <= host::first_runner(&machine.memory, super::MIRROR_MEMORY.0),
         "the first runner fits what admission leaves it with the ceiling"
     );
+}
+
+/// `request` with `--memory-ceiling ceiling`.
+fn with_ceiling(request: Request, ceiling: &str) -> Request {
+    Request {
+        memory_ceiling: Some(ceiling.to_owned()),
+        ..request
+    }
+}
+
+#[test]
+fn init_given_a_memory_ceiling_writes_it_and_sizes_the_first_runner_for_the_host_as_it_can_grow() {
+    let dir = Dir::new();
+    let request = with_ceiling(request(&dir.0, Overwrite::Refuse), "24G");
+    // The idle VM init refuses without a ceiling.
+    let machine = idle_vm(None);
+    let sizing = init(&request, &machine).unwrap();
+    assert_eq!(sizing.budget, ByteSize(18 * GIB), "three quarters of 24G");
+    assert_eq!((sizing.slots, sizing.memory), (2, ByteSize(8 * GIB)));
+    let grown = HostMemory {
+        ceiling: Some(24 * GIB),
+        ..machine.memory.clone()
+    };
+    assert!(
+        sizing.memory.0 + super::STARTUP_HEADROOM
+            <= host::first_runner(&grown, super::MIRROR_MEMORY.0),
+        "the first runner fits what admission leaves it on the host as it can grow"
+    );
+    let text = std::fs::read_to_string(&request.config).unwrap();
+    assert!(
+        text.contains("for a host with 2.12G, growing to 24G and 8 CPUs")
+            && text.contains("memory_ceiling = \"24G\""),
+        "{text}"
+    );
+    let checked = check(&text, None);
+    assert!(checked.valid, "{}", checked.message);
+    let config = Config::parse(&text).unwrap();
+    assert_eq!(config.host.memory_ceiling, Some(ByteSize(24 * GIB)));
+}
+
+#[test]
+fn a_memory_ceiling_the_config_check_refuses_writes_and_replaces_nothing() {
+    let dir = Dir::new();
+    let forced = request(&dir.0, Overwrite::Replace);
+    for path in [&forced.config, &forced.unit] {
+        std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+        std::fs::write(path, "kept").unwrap();
+    }
+    // A 64G host sizes 8G runners; a 4G ceiling under MemTotal does not change that, but no host of 4G starts one.
+    let cases = [
+        (
+            "4G",
+            "host.memory_ceiling is 4G, under the 8.5G one runner of default and the mirror take",
+        ),
+        ("0G", "host.memory_ceiling is 0; set it above 0"),
+        ("24", "--memory-ceiling: invalid size \"24\""),
+    ];
+    for (ceiling, refused) in cases {
+        let request = with_ceiling(request(&dir.0, Overwrite::Replace), ceiling);
+        let error = init(&request, &machine(64, 16, None)).unwrap_err();
+        assert!(error.starts_with(refused), "{ceiling}: {error}");
+    }
+    // 0 is refused as 0 even on a host too small for a runner, where sizing would fail first.
+    let zero = with_ceiling(request(&dir.0, Overwrite::Replace), "0G");
+    let error = init(&zero, &idle_vm(None)).unwrap_err();
+    assert!(error.starts_with("host.memory_ceiling is 0"), "{error}");
+    for path in [&forced.config, &forced.unit] {
+        assert_eq!(
+            std::fs::read_to_string(path).unwrap(),
+            "kept",
+            "{}",
+            path.display()
+        );
+    }
 }
 
 #[test]

@@ -1,5 +1,5 @@
-//! `runnerd init`: writes a starter `runnerd.toml` sized for this host and a systemd user unit that serves it, then
-//! prints the doctor's checks and the steps left as commands. It overwrites neither file without `--force` and runs
+//! `runnerd init`: writes a starter `runnerd.toml` sized for this host, or for the host as it can grow to
+//! `--memory-ceiling`, and a systemd user unit that serves it, then prints the doctor's checks and the steps left as commands. It overwrites neither file without `--force` and runs
 //! nothing as root: the steps that need root are printed for the user to run. The config, which the dashboard may
 //! later fill with notification secrets, is readable by its user only, in a directory init makes the same way.
 
@@ -13,7 +13,7 @@ use std::time::{SystemTime, UNIX_EPOCH};
 
 use runnerd_core::admission::host;
 use runnerd_core::api::{Check, CheckStatus, HostMemory};
-use runnerd_core::config::{ByteSize, Config, PUBLISHED_RUNNER, slice_memory_max};
+use runnerd_core::config::{ByteSize, Config, ConfigError, PUBLISHED_RUNNER, slice_memory_max};
 use runnerd_core::observe::metrics::{self, Paths};
 
 use crate::{doctor, output};
@@ -84,8 +84,8 @@ pub(crate) struct Sizing {
 
 /// Sizes one profile to fill the budget: slots of up to 8G, at most one per 4 CPUs, sharing the CPUs. A slot is no
 /// larger than what admission leaves the first runner beside the mirror on this host now (`host::first_runner`), less
-/// `STARTUP_HEADROOM`, so the first job can start once runnerd runs. A reading with a ceiling is the memory the host
-/// can grow to, as admission counts it (ADR 0084).
+/// `STARTUP_HEADROOM`, so the first job can start once runnerd runs. A reading with a ceiling, `--memory-ceiling`'s,
+/// is the memory the host can grow to, as admission counts it (ADR 0084).
 pub(crate) fn size(machine: &Machine) -> Result<Sizing, String> {
     // A slice's MemoryMax is a limit, not memory the host has: never size past what the host can spare.
     let host = machine.memory.grown() / 4 * 3 / MEMORY_STEP * MEMORY_STEP;
@@ -146,10 +146,13 @@ pub(crate) struct Request {
     pub config: PathBuf,
     pub unit: PathBuf,
     pub overwrite: Overwrite,
+    /// `--memory-ceiling` as given: the most memory the host can grow to, which the config gets as `[host]
+    /// memory_ceiling` (ADR 0086).
+    pub memory_ceiling: Option<String>,
 }
 
-/// Writes the config and the unit for `request`, sized for `machine`. With `Overwrite::Refuse`, writes neither when
-/// either exists.
+/// Writes the config and the unit for `request`, sized for `machine` as it can grow to `request.memory_ceiling`.
+/// Writes neither when the config check refuses the config, nor with `Overwrite::Refuse` when either exists.
 pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, String> {
     for repository in &request.repositories {
         let valid = repository.split_once('/').is_some_and(|(owner, name)| {
@@ -186,8 +189,23 @@ pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, Strin
             request.slice
         ));
     }
-    let sizing = size(machine)?;
-    let config = config_text(request, machine, &sizing);
+    let ceiling = memory_ceiling(request.memory_ceiling.as_deref())?;
+    let machine = Machine {
+        memory: HostMemory {
+            ceiling: ceiling.map(|ceiling| ceiling.0),
+            ..machine.memory.clone()
+        },
+        cpus: machine.cpus,
+        slice_memory_max: machine.slice_memory_max,
+    };
+    let sizing = size(&machine)?;
+    let config = config_text(request, &machine, &sizing);
+    // A ceiling under what one runner and the mirror take, as on a large host given a small one, is refused here as
+    // the daemon would refuse it.
+    let (_, check) = Config::check(&config, |_| Ok(machine.slice_memory_max));
+    if !check.valid {
+        return Err(check.message);
+    }
     let unit = unit_text(&request.runnerd, &request.config)?;
     let mut existing = Vec::new();
     for path in [&request.config, &request.unit] {
@@ -224,6 +242,22 @@ pub(crate) fn init(request: &Request, machine: &Machine) -> Result<Sizing, Strin
         });
     }
     Ok(sizing)
+}
+
+/// `--memory-ceiling` read as the config reads `[host] memory_ceiling`, and refused when it is 0, as the config
+/// check refuses it, before a small host's sizing error could hide that.
+fn memory_ceiling(given: Option<&str>) -> Result<Option<ByteSize>, String> {
+    let Some(given) = given else {
+        return Ok(None);
+    };
+    let ceiling: ByteSize = given
+        .parse()
+        .map_err(|error| format!("--memory-ceiling: {error}"))?;
+    if ceiling.0 == 0 {
+        let field = "host.memory_ceiling".to_owned();
+        return Err(ConfigError::ZeroLimit { field }.to_string());
+    }
+    Ok(Some(ceiling))
 }
 
 /// Runs `create` on a fresh path in `dir` named after `name`, trying another name while one exists.
@@ -394,14 +428,35 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
             "\n[[repositories]]\nname = \"{name}\"\nprofile = \"default\"\nlabels = [{labels}]\n"
         );
     }
+    // The ceiling as given, which `memory_ceiling` read as the config does: its `Display` rounds.
+    let (grows, ceiling, of_host, available) = match &request.memory_ceiling {
+        None => (
+            String::new(),
+            String::new(),
+            "the host's\n# memory",
+            "what the host\n# had available when init ran",
+        ),
+        Some(given) => (
+            format!(", growing to {given}"),
+            format!(
+                "# The most memory this host can grow to, as MemTotal reads at the VM's maximum: admission counts what\n\
+                 # it can still grow by. It is the hypervisor's promise, not memory the host has:\n\
+                 # https://ayagmar.github.io/runnerd/admission/#a-host-whose-memory-grows\n\
+                 memory_ceiling = \"{given}\"\n"
+            ),
+            "the memory the host\n# can grow to",
+            "what the host\n# had available when init ran and can still grow by",
+        ),
+    };
     format!(
-        "# Written by `runnerd init` for a host with {host_memory} and {host_cpus} CPUs. Check changes with\n\
+        "# Written by `runnerd init` for a host with {host_memory}{grows} and {host_cpus} CPUs. Check changes with\n\
          # `runnerd check-config`; every setting is in\n\
          # https://github.com/ayagmar/runnerd/blob/main/examples/runnerd.toml\n\
          \n\
          [host]\n\
          slice = \"{slice}\"\n\
          isolation = \"sysbox\"\n\
+         {ceiling}\
          \n\
          [caches]\n\
          mirror = {{ enabled = true, memory = \"{MIRROR_MEMORY}\", cpus = 1, ttl = \"168h\" }}\n\
@@ -413,9 +468,9 @@ fn config_text(request: &Request, machine: &Machine, sizing: &Sizing) -> String 
          [sizing]\n\
          auto = true\n\
          \n\
-         # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of the host's\n\
-         # memory, or the slice's MemoryMax if that is smaller. One runner and the mirror also fit what the host\n\
-         # had available when init ran, less the margin runnerd keeps free and {headroom} for what starts with\n\
+         # {slots} × {memory} + {MIRROR_MEMORY} for the mirror fits in {budget}: three quarters of {of_host}, \
+         or the slice's MemoryMax if that is smaller. One runner and the mirror also fit {available}, less the \
+         margin runnerd keeps free and {headroom} for what starts with\n\
          # runnerd. runnerd pulls the image before the first runner.\n\
          [profiles.default]\n\
          image = \"{image}\"\n\

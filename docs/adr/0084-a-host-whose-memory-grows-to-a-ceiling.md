@@ -1,6 +1,8 @@
 # 0084. A host whose memory grows to a ceiling counts what it can still grow by
 
-Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-hosts-memory.md).
+Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-hosts-memory.md). Amended by
+[0086](0086-sizing-and-init-know-the-memory-ceiling.md): auto sizing raises no profile past the ceiling less the
+mirror, and `runnerd init --memory-ceiling` writes the key and sizes for it.
 
 ## Context
 
@@ -47,8 +49,9 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
   what the grown limit leaves, not 0B.
 - **`runnerd init` and `runnerd doctor` read the host by the same rule**, `admission::host::first_runner` on a
   reading that carries the ceiling: init sizes a reading with a ceiling for the host as it can grow, three quarters
-  of the ceiling and no more than what admission then leaves its first runner. Until init can be given a ceiling
-  (a later `--memory-ceiling`), it reads the host as it is now. The doctor applies the config's
+  of the ceiling and no more than what admission then leaves its first runner. Init takes the ceiling as
+  `--memory-ceiling` ([0086](0086-sizing-and-init-know-the-memory-ceiling.md)); without it, it reads the host as it
+  is now. The doctor applies the config's
   ceiling and says it is in use (`…, growing to 24G, 20.86G to spare for runners past a 2G margin…`). Beside any
   other warning, it warns when the ceiling is strictly under `MemTotal`, where it has no effect.
 - **The config check** refuses a ceiling of 0, and one under the memory of the largest profile's runner beside the
@@ -70,7 +73,7 @@ a promise, not memory: a hypervisor short of RAM gives less than it promised.
   further starts while it lasts.
 - With a ceiling, the margin is larger than a sixteenth of the host as it is now: 6G on a 16G VM that can grow to
   96G. That is what the margin will need once it grew.
-- Auto sizing bounds a memory raise by `MemoryMax`, not by the ceiling. Where the ceiling is under `MemoryMax`, a
-  raise past the ceiling less the mirror fails the config check and is proposed again at each look, logged once.
+- Auto sizing bounds a memory raise by the ceiling less the mirror as well as by `MemoryMax`
+  ([0086](0086-sizing-and-init-know-the-memory-ceiling.md)), so it never proposes a raise the config check refuses.
 - `HostMemory.ceiling` is a new optional field, absent unless set; an older client ignores it and shows the host's
   line without `growing to`.

@@ -8,7 +8,7 @@
     reason = "tests fail by panicking"
 )]
 
-use runnerd_core::api::{self, JobPage};
+use runnerd_core::api::{self, JobPage, ProfilePlan};
 use runnerd_fixtures::{Facts, NOW, TIMED_OUT, daemon, facts};
 
 use super::{
@@ -187,8 +187,12 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_with_each_profile
     assert!(text.contains(&plan.rules()), "{text}");
     assert!(text.contains(&plan.blocked_line().unwrap()), "{text}");
     for profile in &advice.profiles {
-        let (what, _) = plan_line(&advice, plan, profile, NOW);
-        assert!(text.contains(&what), "{}: {text}", profile.name);
+        // A profile with nothing to change shows only its advice, which says why, as for one at its memory ceiling.
+        let shown = match plan.profile_plan(&profile.name, NOW) {
+            ProfilePlan::Nothing => advice.advice_line(profile),
+            _ => plan_line(&advice, plan, profile, NOW).0,
+        };
+        assert!(text.contains(&shown), "{}: {text}", profile.name);
     }
     // Held, with when the change that holds it was made and what it holds.
     assert!(

@@ -1173,25 +1173,35 @@ impl Config {
         }
     }
 
-    /// Refuses a `[host] memory_ceiling` under one runner of the largest profile beside the mirror: no host of that
-    /// size starts one, so it is a typo, such as `24M` for `24G`. Whether the host's `MemTotal` is already past it,
-    /// and what the margin leaves, `runnerd doctor` says, as the config check does not read the host.
+    /// The most `memory` one runner of any profile may have under `[host] memory_ceiling`: the ceiling less the
+    /// mirror while it is enabled, as no host of that size starts more beside it. `None` without a ceiling. The
+    /// config check refuses a profile above it, and auto sizing raises none past it (ADR 0086).
+    pub fn runner_ceiling(&self) -> Option<u64> {
+        self.host
+            .memory_ceiling
+            .map(|ceiling| ceiling.0.saturating_sub(self.mirror_memory()))
+    }
+
+    /// Refuses a `[host] memory_ceiling` under one runner of the largest profile beside the mirror
+    /// (`runner_ceiling`): no host of that size starts one, so it is a typo, such as `24M` for `24G`. Whether the
+    /// host's `MemTotal` is already past it, and what the margin leaves, `runnerd doctor` says, as the config check
+    /// does not read the host.
     fn check_memory_ceiling(&self) -> Result<(), ConfigError> {
-        let Some(ceiling) = self.host.memory_ceiling else {
+        let (Some(ceiling), Some(most)) = (self.host.memory_ceiling, self.runner_ceiling()) else {
             return Ok(());
         };
-        let mirror = self.mirror_memory();
         let largest = self
             .profiles
             .iter()
-            .map(|(name, profile)| (name, profile.memory.0.saturating_add(mirror)))
-            .max_by_key(|(_, needs)| *needs);
+            .max_by_key(|(_, profile)| profile.memory.0);
         match largest {
-            Some((profile, needs)) if needs > ceiling.0 => Err(ConfigError::CeilingUnderProfile {
-                profile: profile.clone(),
-                needs: ByteSize(needs),
-                ceiling,
-            }),
+            Some((profile, largest)) if largest.memory.0 > most => {
+                Err(ConfigError::CeilingUnderProfile {
+                    profile: profile.clone(),
+                    needs: ByteSize(largest.memory.0.saturating_add(self.mirror_memory())),
+                    ceiling,
+                })
+            }
             _ => Ok(()),
         }
     }
@@ -1449,7 +1459,7 @@ pub fn resize_profile(
     let values = [
         (
             "memory",
-            toml_edit::Value::from(ByteSize(resize.memory).to_string()),
+            toml_edit::Value::from(ByteSize(resize.memory).exact()),
         ),
         ("slots", toml_edit::Value::from(i64::from(resize.slots))),
     ];
@@ -1795,6 +1805,29 @@ impl fmt::Display for ByteSize {
 }
 
 impl ByteSize {
+    /// The size as a config file writes it, reading back to the byte: `Display`'s form when that reads back as it,
+    /// else the shortest exact decimal in one of the units, such as `1029.5G` where `Display` says `1.01T`. A size
+    /// written from it, as auto sizing writes `memory`, is the size the config check then reads.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a unit is a power of two, so the quotient is exact below 2^53 bytes; the parse checks it"
+    )]
+    pub fn exact(self) -> String {
+        let reads_back = |text: &String| text.parse::<ByteSize>() == Ok(self);
+        let shown = self.to_string();
+        if reads_back(&shown) {
+            return shown;
+        }
+        let mut shortest: Option<String> = None;
+        for (unit, factor) in UNITS {
+            let text = format!("{}{unit}", self.0 as f64 / factor as f64);
+            if reads_back(&text) && shortest.as_ref().is_none_or(|best| text.len() < best.len()) {
+                shortest = Some(text);
+            }
+        }
+        shortest.unwrap_or(shown)
+    }
+
     /// The size rounded to the nearest, for a label too narrow for its `Display`: two significant digits below 10
     /// of its unit, whole units above, and the next unit up once it rounds to 1024: `3.3G` for 3.25G, `12G`,
     /// `512M`, and `1G` for 1023.5M. Every client's budget bar labels a block with it.

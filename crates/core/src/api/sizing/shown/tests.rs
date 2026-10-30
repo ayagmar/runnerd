@@ -32,6 +32,7 @@ fn profile(name: &str, max: u64, advice: Advice) -> ProfileSizing {
         wants_slots: false,
         advice,
         revert: None,
+        ceiling: None,
         jobs: vec![],
     }
 }

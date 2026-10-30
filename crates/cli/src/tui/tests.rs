@@ -597,6 +597,7 @@ fn sizing() -> Sizing {
                 advice,
             }],
             revert: None,
+            ceiling: None,
         }
     };
     Sizing {

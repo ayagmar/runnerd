@@ -56,6 +56,11 @@ enum Command {
         /// Replace the config and the unit if they exist.
         #[arg(long)]
         force: bool,
+        /// The most memory this host can grow to, such as 24G, for a VM whose hypervisor adds memory as the guest
+        /// asks for it. The config gets it as memory_ceiling, and the first runner is sized for the host as it can
+        /// grow.
+        #[arg(long, value_name = "SIZE")]
+        memory_ceiling: Option<String>,
     },
     /// Validate a config file against the slice's memory budget.
     CheckConfig {
@@ -129,7 +134,8 @@ fn main() -> ExitCode {
             slice,
             config,
             force,
-        }) => init(repositories, slice, config, force),
+            memory_ceiling,
+        }) => init(repositories, slice, config, force, memory_ceiling),
         Some(Command::CheckConfig { path, memory_max }) => {
             config_or_default(path).map(|path| check_config(&path, memory_max))
         }
@@ -175,6 +181,7 @@ fn init(
     slice: String,
     config: Option<PathBuf>,
     force: bool,
+    memory_ceiling: Option<String>,
 ) -> Result<ExitCode, ExitCode> {
     let config = config_or_default(config)?;
     let config = std::path::absolute(&config).map_err(|error| {
@@ -198,6 +205,7 @@ fn init(
         } else {
             init::Overwrite::Refuse
         },
+        memory_ceiling,
     }))
 }
 

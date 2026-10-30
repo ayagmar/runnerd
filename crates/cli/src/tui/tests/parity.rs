@@ -256,7 +256,7 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
     app.update(key(KeyCode::Char('4')));
     let sizing = runnerd_fixtures::sizing(NOW);
     let plan = sizing.auto_plan.clone().unwrap();
-    app.update(Msg::Sizing(sizing));
+    app.update(Msg::Sizing(sizing.clone()));
     let (rows, _) = frame_of(&app, 120, 40);
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
     let shown = words(&rows.join(" "));
@@ -271,6 +271,14 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
         "{}",
         rows.join("\n")
     );
+    // A profile `[host] memory_ceiling` holds reads as such, not as one whose slice has to grow.
+    let android = sizing
+        .profiles
+        .iter()
+        .find(|p| p.name == "android")
+        .unwrap();
+    assert_eq!(android.advice_word(), "at ceiling");
+    assert!(shown.contains("at ceiling"), "{}", rows.join("\n"));
 }
 
 #[test]

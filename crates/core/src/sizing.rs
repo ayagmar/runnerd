@@ -336,6 +336,8 @@ pub fn advise(
     let mirror = config.mirror_memory();
     let rules = &config.sizing;
     let recent = memory::windows(config, history, window.now);
+    // Down to a granule, so the config file says it exactly and the check never reads more back.
+    let most = config.runner_ceiling().map(|most| most / GRANULE * GRANULE);
     let profiles = config
         .profiles
         .iter()
@@ -366,6 +368,8 @@ pub fn advise(
                 }),
                 wants_slots: wait.p95 >= WAITED || busy >= BUSY,
                 min_jobs: rules.min_jobs,
+                ceiling: most,
+                max_memory: profile.max_memory.map(|max| max.0),
             };
             let raises = Raises {
                 history,
@@ -387,20 +391,16 @@ pub fn advise(
                 cpus: None,
             };
             let revert = memory::revert(config, history, name, current);
-            let advice = match &revert {
-                Some((_, to)) => Advice::Raise {
-                    memory: to.memory,
-                    slots: to.slots,
-                },
-                None => sized.advice(
-                    &peaks,
-                    Needs {
-                        raise: raises.need(None),
-                        floor: memory.floor.max(memory::revert_floor(history, name)),
-                    },
-                    sized.wants_slots,
-                ),
+            let (advice, wanted) = if let Some((_, to)) = &revert {
+                (sized.reverted(*to), to.memory)
+            } else {
+                let needs = Needs {
+                    raise: raises.need(None),
+                    floor: memory.floor.max(memory::revert_floor(history, name)),
+                };
+                (sized.advice(&peaks, needs, sized.wants_slots), needs.raise)
             };
+            let ceiling = ceiling_hold(config, most, advice, wanted);
             api::ProfileSizing {
                 name: name.clone(),
                 memory: cap,
@@ -408,6 +408,7 @@ pub fn advise(
                 slots: profile.slots,
                 advice,
                 revert: revert.map(|(revert, _)| revert),
+                ceiling,
                 peaks,
                 wait,
                 starts,
@@ -430,6 +431,25 @@ pub fn advise(
         changes: Vec::new(),
         auto_plan: None,
     }
+}
+
+/// What says `[host] memory_ceiling` holds `advice` under the `wanted` memory, when it does: a raise or no raise,
+/// and more wanted than `most`, the most a raise goes to.
+fn ceiling_hold(
+    config: &Config,
+    most: Option<u64>,
+    advice: Advice,
+    wanted: u64,
+) -> Option<api::CeilingHold> {
+    let raises = matches!(advice, Advice::Raise { .. } | Advice::SliceTooSmall { .. });
+    most.filter(|most| raises && wanted > *most)
+        .zip(config.host.memory_ceiling)
+        .map(|(most, ceiling)| api::CeilingHold {
+            need: wanted,
+            ceiling: ceiling.0,
+            mirror: config.mirror_memory(),
+            most,
+        })
 }
 
 /// What a raise of one profile reads (`memory::raise_need`).
@@ -493,11 +513,17 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
                 .filter(|job| Key::of(job) == *key)
                 .collect();
             let wait = waits(&runs_of, raises.history.kept_since);
+            // A job's advice says what it needs; only its profile's is bounded by what can be written.
+            let unbounded = Sized {
+                ceiling: None,
+                max_memory: None,
+                ..*sized
+            };
             api::JobSizing {
                 repository: key.repository.clone(),
                 workflow: key.workflow.clone(),
                 name: key.name.clone(),
-                advice: sized.advice(&peaks, needs, wait.p95 >= WAITED || busy >= BUSY),
+                advice: unbounded.advice(&peaks, needs, wait.p95 >= WAITED || busy >= BUSY),
                 peaks,
                 wait,
             }
@@ -540,6 +566,7 @@ fn busy(history: &History, profile: &str, slots: u32, since: u64, now: u64) -> u
 }
 
 /// A profile's limits and the rules advice follows.
+#[derive(Clone, Copy)]
 struct Sized {
     cap: u64,
     /// Its `cpus`, in millicores: CPU peaks are read only of runs at them.
@@ -554,6 +581,11 @@ struct Sized {
     /// Whether its jobs waited for a slot at p95, or its slots were busy, enough to want more.
     wants_slots: bool,
     min_jobs: u32,
+    /// The most `memory` a raise goes to under `[host] memory_ceiling` (`Config::runner_ceiling`), down to a
+    /// granule; `None` without a ceiling.
+    ceiling: Option<u64>,
+    /// Its `max_memory`: auto sizing raises no further, so the slice need hold no more.
+    max_memory: Option<u64>,
 }
 
 /// What a set of jobs' runs say its `memory` needs (`memory`, ADR 0070).
@@ -573,20 +605,7 @@ impl Sized {
             return Advice::TooFew { jobs: peaks.jobs };
         }
         if needs.raise > self.cap {
-            let need = needs.raise;
-            let fit = |memory: u64| u32::try_from(memory / need).unwrap_or(u32::MAX);
-            let slots = match (self.admission, self.room) {
-                (Admission::Caps, Some(room)) => fit(room).min(self.slots),
-                (Admission::Measured, Some(room)) if room < need => 0,
-                (_, _) => self.slots,
-            };
-            if slots == 0 {
-                return Advice::SliceTooSmall { memory: need };
-            }
-            return Advice::Raise {
-                memory: need,
-                slots,
-            };
+            return self.raise(needs.raise, self.slots);
         }
         let need = needs.floor.max(GRANULE);
         // A job on its cap may have been held back or killed by it: no lowering until it ran clear of it again.
@@ -606,6 +625,35 @@ impl Sized {
             };
         }
         Advice::Keep { memory: need }
+    }
+
+    /// The raise that takes back a lowering that went too far, to `to`: as far as `[host] memory_ceiling` allows,
+    /// which a reload may have lowered since, with as many of `to`'s slots as the slice holds now.
+    fn reverted(&self, to: api::Resize) -> Advice {
+        self.raise(to.memory, to.slots)
+    }
+
+    /// A raise toward `need` with at most `slots`: no further than `[host] memory_ceiling` allows, since a raise the
+    /// config check refuses would be proposed again at every look, and with the slots the slice holds at that
+    /// memory, or at `max_memory` when that is less, as `admission` budgets it. None while the ceiling allows
+    /// nothing past the cap or the slice holds no slot: the jobs need `need`.
+    fn raise(&self, need: u64, slots: u32) -> Advice {
+        let memory = self.ceiling.map_or(need, |most| need.min(most));
+        if memory <= self.cap {
+            return Advice::SliceTooSmall { memory: need };
+        }
+        // The slice holds what auto sizing writes, which `max_memory` may hold under this.
+        let written = self.max_memory.map_or(memory, |max| memory.min(max)).max(1);
+        let fit = |room: u64| u32::try_from(room / written).unwrap_or(u32::MAX);
+        let slots = match (self.admission, self.room) {
+            (Admission::Caps, Some(room)) => fit(room).min(slots),
+            (Admission::Measured, Some(room)) if room < written => 0,
+            (_, _) => slots,
+        };
+        if slots == 0 {
+            return Advice::SliceTooSmall { memory: need };
+        }
+        Advice::Raise { memory, slots }
     }
 }
 
