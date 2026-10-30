@@ -41,12 +41,12 @@ start_build_cache() {
 # GitHub Actions' cache, for actions/cache, the setup-* actions' caches and BuildKit's type=gha. BuildKit runs in a
 # container of this container's Docker Engine, whose loopback is its own, so the forwarder listens on this
 # container's addresses; the rule drops the port on eth0 and its like, where other containers and the host arrive,
-# and jobs, without root, cannot remove it. The preload points each node action at it (runnerd-actions-cache.cjs).
-# Without the marker or the rule, jobs use GitHub's cache service.
+# and jobs, without root, cannot remove it. The runner's node, wrapped (node.sh), loads the preload that points each
+# node action at it (runnerd-actions-cache.cjs) while RUNNERD_ACTIONS_CACHE_PORT is set. Without the marker or the
+# rule, jobs use GitHub's cache service.
 start_actions_cache() {
     [ -f "$ACTIONS_CACHE_MARKER" ] && [ -f "$ACTIONS_CACHE_PRELOAD" ] || return 0
     iptables -I INPUT -i eth+ -p tcp --dport "$ACTIONS_CACHE_PORT" -j DROP 2> /dev/null || return 0
     socat "TCP4-LISTEN:$ACTIONS_CACHE_PORT,fork,reuseaddr" "UNIX-CONNECT:$BUILD_CACHE_SOCKET" > /dev/null 2>&1 &
-    export RUNNERD_ACTIONS_CACHE_PORT=$ACTIONS_CACHE_PORT \
-        NODE_OPTIONS="--require=$ACTIONS_CACHE_PRELOAD${NODE_OPTIONS:+ $NODE_OPTIONS}"
+    export RUNNERD_ACTIONS_CACHE_PORT=$ACTIONS_CACHE_PORT
 }

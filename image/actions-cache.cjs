@@ -1,8 +1,9 @@
-// Loaded into every node process of a job through NODE_OPTIONS (build-cache.sh, docs/adr/0082). The runner gives
-// each node action GitHub's results service as ACTIONS_RESULTS_URL, after the step's own environment; this puts
-// runnerd's in its place, at this container's address, before the action's code reads it. @actions/cache and
-// BuildKit then save and restore on the host; every other request of the results service, such as an artifact's,
-// runnerd sends to GitHub as it came. It changes nothing else, and nothing when the URL is not GitHub's.
+// Loaded into each node action the runner starts, by the runner's wrapped node (node.sh, build-cache.sh,
+// docs/adr/0082). The runner gives each node action GitHub's results service as ACTIONS_RESULTS_URL, after the step's
+// own environment; this puts runnerd's in its place, at this container's address, before the action's code reads
+// it. @actions/cache and BuildKit then save and restore on the host; every other request of the results service,
+// such as an artifact's, runnerd sends to GitHub as it came. It changes nothing else, and nothing when the URL is not
+// GitHub's.
 'use strict';
 (function () {
     var github = 'https://results-receiver.actions.githubusercontent.com/';

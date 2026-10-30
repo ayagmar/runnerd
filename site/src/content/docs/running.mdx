@@ -123,7 +123,7 @@ Entries are scoped to branches and pull requests, as on GitHub, and only [the jo
 
 A save of a key its scope already has is skipped, as on GitHub. An entry may take at most a quarter of `build.max_size`, however it is uploaded. Artifacts (`upload-artifact`, `download-artifact`) still go to GitHub: runnerd passes those requests on unchanged.
 
-It does not reach a workflow that sets `NODE_OPTIONS` itself, `container:` jobs and `docker://` actions: those use GitHub's cache. It starts cold; the first default-branch run of each key saves it. Turning it off takes effect for jobs that start after the change; a job already running when runnerd restarts restores nothing and saves nothing for the rest of it, and its artifacts still upload.
+It reaches the node actions the runner starts, through the runner's own node; a workflow's own `NODE_OPTIONS` still applies, and the containers a job starts get nothing of it. It does not reach `container:` jobs and `docker://` actions: those use GitHub's cache. It starts cold; the first default-branch run of each key saves it. Turning it off takes effect for jobs that start after the change; a job already running when runnerd restarts restores nothing and saves nothing for the rest of it, and its artifacts still upload. While runnerd restarts, a job's artifact uploads and downloads, which go through it, fail; `upload-artifact` and `download-artifact` retry for about 25 seconds, so a longer restart fails the step.
 
 ## Records of failed jobs
 

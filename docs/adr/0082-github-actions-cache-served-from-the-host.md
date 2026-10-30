@@ -32,9 +32,12 @@ runners reach its cache.
 
 Ways to point a job at runnerd, other than patching the runner: a TLS-intercepting proxy for
 `results-receiver.actions.githubusercontent.com` would carry every job's logs and artifacts and need a CA every
-container trusts; an `https_proxy` would carry all of a job's traffic; replacing the node binaries the runner ships
-modifies the runner's install. Node reads `NODE_OPTIONS` from its environment, the runner passes the container's to
-every node action, and `$GITHUB_ENV` may not set it.
+container trusts; an `https_proxy` would carry all of a job's traffic. `NODE_OPTIONS` in the container's
+environment reaches every node action, but also every container a job starts that is given the job's
+`NODE_OPTIONS` (`docker run -e NODE_OPTIONS`, a compose file's `environment: [NODE_OPTIONS]`), where a `--require`
+of a file that container lacks stops node; and a workflow's own `NODE_OPTIONS` replaces it. The runner runs a node
+action with its own node, `externals/<node20|node24>[_alpine]/bin/node`, by that path (`NodeScriptActionHandler`),
+and the runner image is runnerd's own.
 
 ## Decision
 
@@ -45,21 +48,29 @@ every node action, and `$GITHUB_ENV` may not set it.
     upgrade start cold.
   - Its entries share `build.max_size` with Gradle's, sccache's and Bazel's, so a repository with large
     `type=gha` layers trims those sooner.
-  - Every node process of a job loads the preload, and the image adds an `iptables` rule and a forwarder.
+  - Every node action the runner starts loads the preload, and the image adds an `iptables` rule and a forwarder.
+  - While runnerd restarts, a job's artifact requests, which go through it, fail; `@actions/artifact` retries for
+    about 25 s.
   - A pull request that may not write keeps nothing across pushes (Consequences).
   `runnerd doctor` and the Caches page say whether it is on.
 - **How a job reaches it.** When the runner's socket directory has the `actions` marker the daemon writes, the
   image's `build-cache.sh`, as root before the runner starts, adds an `iptables` rule that drops port 41772 arriving
-  on `eth0`, then forwards that port on every address of the container to the runner's socket, and sets
-  `NODE_OPTIONS=--require=/usr/local/lib/runnerd-actions-cache.cjs`. That file, loaded by every node process of the
-  job, replaces `ACTIONS_RESULTS_URL` with `http://<the container's address>:41772/` when it is GitHub's
-  `https://results-receiver.actions.githubusercontent.com/`, before the action's own code runs. Nothing of the
-  runner changes. The address is the container's own so that BuildKit in a container of the slot's engine, whose
-  traffic arrives on that engine's bridge, reaches it too. Other runners and the host arrive on `eth0`, which drops
+  on `eth0`, then forwards that port on every address of the container to the runner's socket, and exports
+  `RUNNERD_ACTIONS_CACHE_PORT`. The image moves each of the runner's bundled node binaries to `node.real` beside a
+  `sh` wrapper (`image/node.sh`) that, while that variable is set and the preload is there, runs it with
+  `--require=/usr/local/lib/runnerd-actions-cache.cjs`, else as it is. The preload, loaded by each node action the
+  runner starts, replaces `ACTIONS_RESULTS_URL` with `http://<the container's address>:41772/` when it is GitHub's
+  `https://results-receiver.actions.githubusercontent.com/`, before the action's own code runs. The job's
+  environment carries no `NODE_OPTIONS`, so its own containers get nothing, and a workflow's own `NODE_OPTIONS`
+  applies besides the `--require`. A `container:` job's container mounts the runner's externals but has neither the
+  variable nor the preload, so node runs there as it is; the runner already needs `sh` in it. A runner that
+  updates itself replaces its externals and so the wrapper: its jobs use GitHub's cache. The address is the
+  container's own so that BuildKit in a container of the slot's engine, whose traffic arrives on that engine's
+  bridge, reaches it too. Other runners and the host arrive on `eth0`, which drops
   them; jobs have no root to remove the rule (Dockerfile). No forwarder, no rule or no marker: the job uses GitHub's
   service as before.
-- **Not served**: workflows that set `NODE_OPTIONS` themselves (theirs replaces the image's), `container:` jobs and
-  `docker://` actions (their environment is the runner's, not the container's), and the cache service v1.
+- **Not served**: `container:` jobs and `docker://` actions (their environment is the runner's, not the
+  container's), node a job starts itself rather than through the runner, and the cache service v1.
 - **Everything else goes to GitHub.** A request to another Twirp service, such as an artifact's, is sent unchanged
   with its headers to `https://results-receiver.actions.githubusercontent.com` and its answer passed back, at most 1
   MiB each way. Its headers and body carry the job's token and are never logged. The artifacts themselves go to the
@@ -80,19 +91,20 @@ every node action, and `$GITHUB_ENV` may not set it.
   0052 does for Gradle. So is a key its scope has, or that another job is saving into it, where GitHub answers
   `ok: false`, which BuildKit's client takes as a failure unless its message says "already exists".
 - **Turned off under a running job.** A daemon restart that turns it off adopts running jobs whose containers still
-  have the forwarder and `NODE_OPTIONS`; runners started after it get no marker, and so neither, as before this. Their lookups miss, their saves are answered as kept and dropped, and
-  every other request still goes to GitHub, so their artifacts and Docker builds keep working.
+  have the forwarder and the port set; runners started after it get no marker, and so neither, as before this.
+  Their lookups miss, their saves are answered as kept and dropped, and every other request still goes to GitHub,
+  so their artifacts and Docker builds keep working.
 - **Lookups as GitHub matches.** In each scope in order: the key, then each restore key, exactly, then as a prefix,
   the newest created first.
-- **Store.** Entries are files under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>`, the scope's
-  ref and the key hex-encoded in segments of 128 characters, so nothing a job names can reach outside its repository's tree
-  and no two scopes or keys share a path. They count against `[caches.build] max_size` with the build cache's
-  entries, go least recently used first in the same trim, and are bounded like its uploads: an entry at most a
-  quarter of `max_size` (2.5G by default; GitHub allows 10G), whole or the sum of its blocks. A block upload's
+- **Store.** Entries are files under `entries/<owner>/<name>/actions/<scope>/~/<version>/<key>/~<created>`, the
+  scope's ref and the key hex-encoded in segments of 128 characters, so nothing a job names can reach outside its
+  repository's tree and no two scopes or keys share a path. They count against `[caches.build] max_size` with the
+  build cache's entries, go least recently used first in the same trim, and are bounded like its uploads: an entry
+  at most a quarter of `max_size` (2.5G by default; GitHub allows 10G), whole or the sum of its blocks. A block upload's
   blocks are files until its block list joins them. The cache keeps an index of each scope's entries beside its
   own, so a lookup reads only its scopes'. A download URL names its entry by its creation time, which no other
-  entry has, so one from before a restart never reads another entry. No history change: a runner's lookups, hits, bytes and refused saves count in its build cache
-  counts.
+  entry has, so one from before a restart never reads another entry. No history change: a runner's lookups, hits,
+  bytes and refused saves count in its build cache counts.
 
 ## Consequences
 
@@ -102,10 +114,12 @@ hits from then on; GitHub's entries are neither read nor written while it is on.
 for the jobs that start after it.
 
 A pull request that may not write saves nothing, where GitHub would keep its own scope; its next push starts from
-the default branch's entries. One that may write restores its own entries, then its base branch's, as on GitHub. Its `actions/cache` step still says it saved.
+the default branch's entries. One that may write restores its own entries, then its base branch's, as on GitHub.
+Its `actions/cache` step still says it saved.
 
-The `NODE_OPTIONS` file runs in every node process of a job, including a build's own: it only compares and sets one
-variable. A job's nested containers reach the cache at the container's address; ADR 0052's loopback-only forwarder
-for Gradle, sccache and Bazel is unchanged.
+The preload runs in every node action the runner starts, and in nothing a job starts itself: it only compares and
+sets one variable, which the action's child processes, such as buildx, inherit. A job's nested containers reach the
+cache at the container's address; ADR 0052's loopback-only forwarder for Gradle, sccache and Bazel is unchanged.
 
-An image older than this release has no `NODE_OPTIONS` file and no forwarder on 41772: its jobs use GitHub's cache.
+An image older than this release has no wrapper, no preload and no forwarder on 41772: its jobs use GitHub's
+cache.

@@ -242,9 +242,9 @@ adopted too and drains as it would after a reload.
   branch's, then the default branch's, and every other job only the default branch's, so no pull request changes
   what a default-branch job restores. A save it may not make, or of a key its scope has, is read, dropped and
   answered as kept; with the switch off, a runner's lookups miss and its saves are dropped, and other requests still
-  go to GitHub. The image reaches it on port 41772 of the container's
-  own addresses, which an `iptables` rule closes on `eth*`, only through the `NODE_OPTIONS` preload, and only when
-  the socket's directory has the `actions` marker
+  go to GitHub. The image reaches it on port 41772 of the container's own addresses, which an `iptables` rule
+  closes on `eth*`, only through the preload the runner's wrapped node loads into the node actions it starts, never
+  through the job's environment, and only when the socket's directory has the `actions` marker
   ([ADR 0082](docs/adr/0082-github-actions-cache-served-from-the-host.md)).
 - A JIT config reaches a container only as a root-only file (`docker::JIT_CONFIG_PATH`), never the create request
   or a log line. The entrypoint hands it to the runner's listener in `ACTIONS_RUNNER_INPUT_JITCONFIG`, never its
