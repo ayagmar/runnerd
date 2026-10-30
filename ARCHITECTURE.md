@@ -57,7 +57,8 @@ flowchart TB
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)); `sizing` turns the history into advice,
   `sizing::memory` says what a raise and a lowering of `memory` read and which lowering went too far, and
   `sizing::auto` picks the changes auto sizing makes; `insights` reads the history for jobs that got slower, are flaky or near their cap,
-  and the waits of each week ([ADR 0051](docs/adr/0051-insights-and-notifications.md)). All three are pure: the
+  and the waits of each week ([ADR 0051](docs/adr/0051-insights-and-notifications.md)), and for jobs their CPU cap
+  holds back by the rule sizing reads, `sizing::Throttling::held` ([ADR 0087](docs/adr/0087-an-insight-for-jobs-their-cpu-cap-holds-back.md)). All three are pure: the
   engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
   shares and serves it on one Unix socket per runner; the engine tells it whether a runner's job may write
   ([ADR 0052](docs/adr/0052-shared-build-cache.md)), and the branches its run and repository have to do with.
