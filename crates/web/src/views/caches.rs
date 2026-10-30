@@ -2,7 +2,9 @@
 //! the records of failed jobs, the other disk runnerd keeps, with their limits.
 
 use maud::{Markup, html};
-use runnerd_core::api::{CacheHistory, CacheKind, CacheVolume, Caches, Records, Status, Tone};
+use runnerd_core::api::{
+    BUILD_CACHE_TOOLS, CacheHistory, CacheKind, CacheVolume, Caches, Records, Status, Tone,
+};
 use runnerd_core::client::{Client, ClientError};
 
 use super::{Page, Parts, page, profile_class, time_ago};
@@ -101,6 +103,7 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                         @if let Some(limit) = &limit { span.muted { " of " (format::bytes(limit.limit)) ", " (limit.label) } }
                     }
                     @if volume.kind == CacheKind::Build && let Some(build) = &view.caches.build {
+                        p.muted { "For " (BUILD_CACHE_TOOLS) }
                         p.muted { (build.week_line()) }
                         p.muted { (build.actions_cache_line()) }
                     }

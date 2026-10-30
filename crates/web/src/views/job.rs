@@ -224,7 +224,7 @@ pub(crate) fn timeline(view: &JobView, parts: &Parts) -> Markup {
                             }
                         }))
                         @if phase.kind == PhaseKind::Waiting {
-                            @if let Some(note) = summary.unseen_note(now) { span { ", " (note) } }
+                            @if let Some(note) = summary.unseen_note(now) { span.phase-note { (note) } }
                         }
                     }
                 }
