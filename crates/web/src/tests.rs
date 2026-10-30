@@ -1846,6 +1846,41 @@ async fn a_job_stream_the_daemon_refuses_shows_why_and_ends_without_retrying() {
 }
 
 #[tokio::test]
+async fn signing_every_device_out_ends_the_live_pages_already_open() {
+    let dashboard = Dashboard::start().await;
+    let cookie = dashboard.sign_in().await;
+    let mut overview = dashboard.stream(&cookie, "/live/overview").await;
+    read_until(&mut overview, |text| text.contains(r#"id="recent""#)).await;
+    let mut job = dashboard
+        .stream(&cookie, &format!("/live/jobs/{LEDGER_RUNNING}"))
+        .await;
+    read_until(&mut job, |text| text.contains("datastar-patch-elements")).await;
+    dashboard.sessions.sign_out_all().unwrap();
+    for (page, stream) in [("overview", &mut overview), ("job", &mut job)] {
+        let mut text = String::new();
+        let end = tokio::time::timeout(Duration::from_secs(5), async {
+            loop {
+                match stream.frame().await {
+                    Some(Ok(frame)) => text.push_str(&String::from_utf8_lossy(
+                        &frame.into_data().unwrap_or_default(),
+                    )),
+                    Some(Err(_)) => return "failed",
+                    None => return "ended",
+                }
+            }
+        })
+        .await
+        .unwrap_or_else(|_| panic!("the {page} stream still runs after signing out: {text}"));
+        assert!(
+            text.contains("This browser was signed out"),
+            "{page}: {text}"
+        );
+        // A retry would be refused.
+        assert_eq!(end, "ended", "{page}: {text}");
+    }
+}
+
+#[tokio::test]
 async fn a_job_stream_that_misses_log_lines_fails_so_the_page_connects_again() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
