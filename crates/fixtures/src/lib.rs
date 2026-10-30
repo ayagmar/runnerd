@@ -7,8 +7,9 @@
 //! and a slot whose job is known before GitHub lists its runner busy; caps past the budget; records near
 //! `max_total`; a build cache that refused uploads and had no lookups; and jobs priced at GitHub's rates on two
 //! runners, with a 61-second and a 0-second job, and jobs of a public repository, of Dependabot, of a repository
-//! GitHub has not answered for, lost, without an end and run elsewhere; and auto sizing's plan, with a change next,
-//! a profile a change holds and a `cpus` raise it cannot make.
+//! GitHub has not answered for, lost, without an end and run elsewhere; auto sizing's plan, with a change next,
+//! a profile a change holds and a `cpus` raise it cannot make; and insights of a job its CPU cap holds back, as a
+//! warning and as a notice, beside the memory pressure one.
 //!
 //! Test support only: client tests depend on it, a client never does, so no client depends on another to share it.
 //! It computes nothing itself; every fact is core's.
@@ -618,6 +619,87 @@ pub fn sizing(at: u64) -> api::Sizing {
     }
 }
 
+/// `GET /v1/insights` at `at` (s) under measured admission and auto sizing: ledger's tests held back by jvm's CPU cap
+/// after a raise that did not help them, a warning; storefront's held back by node's, which auto sizing raises, a
+/// notice; and memory pressure that slowed storefront's downloads. The sentences are core's (`insights::insights`).
+pub fn insights(at: u64) -> api::Insights {
+    let link = |job: u64, back: u64| api::RunLink {
+        job,
+        run_id: 9_400_000 + job,
+        run_attempt: 1,
+        branch: Some("main".to_owned()),
+        url: None,
+        at: at - back,
+    };
+    let insight =
+        |key: &str, severity, repository: &str, job: Option<&str>, sentence: &str, kind| {
+            api::Insight {
+                key: key.to_owned(),
+                severity,
+                repository: repository.to_owned(),
+                workflow: job.map(|_| "CI".to_owned()),
+                job: job.map(str::to_owned),
+                sentence: sentence.to_owned(),
+                kind,
+                runs: vec![link(TIMED_OUT, 3600)],
+            }
+        };
+    api::Insights {
+        since: at - 14 * 86_400,
+        until: at,
+        insights: vec![
+            insight(
+                "throttled:halyard/storefront",
+                api::Severity::Warning,
+                STOREFRONT,
+                None,
+                "halyard/storefront: memory pressure slowed the downloads of 2 of its 31 jobs: the host, or a job at \
+                 its cap, was short of memory.",
+                api::InsightKind::Throttled {
+                    throttled: 2,
+                    total: 31,
+                },
+            ),
+            insight(
+                "cpu-held:halyard/ledger/CI/test",
+                api::Severity::Warning,
+                LEDGER,
+                Some("test"),
+                "halyard/ledger: CI / test was held back by jvm's 8 CPUs in 4 of its last 10 runs, its quota \
+                 throttling it in 15% of its run or more. The raise of jvm from 6 to 8 CPUs did not make it faster \
+                 or less throttled, as when its tools start a worker per CPU, so its runs ask for no further raise; \
+                 runnerctl sizing says what auto sizing does next.",
+                api::InsightKind::CpuHeld {
+                    profile: "jvm".to_owned(),
+                    cpus: 8,
+                    held: 4,
+                    total: 10,
+                    raised_from: Some(6),
+                    set: None,
+                },
+            ),
+            insight(
+                "cpu-held:halyard/storefront/CI/test",
+                api::Severity::Notice,
+                STOREFRONT,
+                Some("test"),
+                "halyard/storefront: CI / test was held back by node's 8 CPUs in 3 of its last 9 runs, its quota \
+                 throttling it in 15% of its run or more. Auto sizing raises node's cpus while each raise makes it \
+                 faster or less throttled and the slice has room; runnerctl sizing says when it cannot.",
+                api::InsightKind::CpuHeld {
+                    profile: "node".to_owned(),
+                    cpus: 8,
+                    held: 3,
+                    total: 9,
+                    raised_from: None,
+                    set: None,
+                },
+            ),
+        ],
+        waits: Vec::new(),
+    }
+}
+
 /// The fixtures.
 pub fn daemon() -> Daemon {
     Daemon {
@@ -972,6 +1054,18 @@ mod tests {
                 .find(|row| row.job == job)
                 .map(|row| row.label.as_str())
         };
+        let insights = insights(NOW);
+        let held: Vec<api::Severity> = insights
+            .insights
+            .iter()
+            .filter(|insight| matches!(insight.kind, api::InsightKind::CpuHeld { .. }))
+            .map(|insight| insight.severity)
+            .collect();
+        assert_eq!(
+            held,
+            [api::Severity::Warning, api::Severity::Notice],
+            "a CPU cap held back as a warning and as a notice"
+        );
         assert_eq!(label(LOST), Some("lost"));
         assert_eq!(label(ELSEWHERE), Some("elsewhere"));
         assert_eq!(label(NEVER_STARTED), Some("cancelled in queue"));

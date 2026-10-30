@@ -835,7 +835,9 @@ fn insight_title(insight: &Insight) -> String {
         runnerd_core::api::InsightKind::NearCap { .. } => "nears its memory cap",
         runnerd_core::api::InsightKind::ColdCache { .. } => "misses the build cache",
         runnerd_core::api::InsightKind::Throttled { .. } => "was slowed by memory pressure",
+        runnerd_core::api::InsightKind::CpuHeld { .. } => "is held back by its CPU cap",
         runnerd_core::api::InsightKind::Waits { .. } => "waits longer",
+        runnerd_core::api::InsightKind::Unknown => "has an insight",
     };
     format!("{subject} {what}")
 }

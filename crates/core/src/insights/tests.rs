@@ -62,6 +62,9 @@ fn test_run(n: u64, hours_ago: u64, seconds: u64) -> Run {
         build_cache: None,
         sock_throttled: Some(0),
         unseen: 0,
+        cpu_cap: Some(4000),
+        cpu_periods: None,
+        cpu_throttled: None,
     }
 }
 
@@ -465,6 +468,329 @@ fn a_job_served_in_two_profiles_is_near_the_cap_by_its_last_profiles_runs_alone(
     );
 }
 
+/// Runs of 240 s, one every 6 hours, each its quota throttled in the given share of its run, per mille, or without
+/// a throttling figure (`None`), at app's 4 CPUs.
+fn throttled_runs(shares: &[Option<u64>]) -> Vec<Run> {
+    let mut runs = history(&vec![240; shares.len()]);
+    for (run, share) in runs.iter_mut().zip(shares) {
+        // 240 s is 2400 periods of 100 ms, all of them busy.
+        run.cpu_periods = share.map(|_| 2400);
+        run.cpu_throttled = share.map(|share| share * 2400 / 1000);
+    }
+    runs
+}
+
+fn measured(auto: bool) -> Config {
+    Config::parse(&format!(
+        "{}\n[sizing]\nauto = {auto}\n",
+        CONFIG.replace(
+            "isolation = \"sysbox\"",
+            "isolation = \"sysbox\"\nadmission = \"measured\""
+        )
+    ))
+    .unwrap()
+}
+
+fn cpu_held(history: &History, config: &Config) -> Vec<api::Insight> {
+    insights(history, config, 14, NOW)
+        .insights
+        .into_iter()
+        .filter(|insight| matches!(insight.kind, InsightKind::CpuHeld { .. }))
+        .collect()
+}
+
+#[test]
+fn a_job_its_cpu_cap_held_back_three_times_says_the_cpus_to_set_under_caps() {
+    // Throttled in exactly 15% of their run twice and in 30% once: held, as sizing reads them. 14.9% is not.
+    let runs = throttled_runs(&[
+        Some(0),
+        Some(150),
+        Some(149),
+        Some(40),
+        Some(300),
+        Some(150),
+        Some(0),
+    ]);
+
+    let found = cpu_held(&whole(&runs), &config());
+
+    assert_eq!(found.len(), 1, "{found:#?}");
+    assert_eq!(found[0].key, "cpu-held:halyard/api/CI/test");
+    assert_eq!(found[0].severity, Severity::Warning, "the owner acts");
+    assert_eq!(
+        found[0].kind,
+        InsightKind::CpuHeld {
+            profile: "app".to_owned(),
+            cpus: 4,
+            held: 3,
+            total: 7,
+            raised_from: None,
+            set: Some(6),
+        }
+    );
+    assert_eq!(
+        found[0].sentence,
+        "halyard/api: CI / test was held back by app's 4 CPUs in 3 of its last 7 runs, its quota throttling it in 15% \
+         of its run or more. Under caps admission each CPU takes budget, so auto sizing does not raise cpus for this: \
+         set app's cpus to 6 if runnerctl sizing shows the budget has room."
+    );
+    let linked: Vec<u64> = found[0].runs.iter().map(|run| run.job).collect();
+    assert_eq!(linked, [1005, 1004, 1001], "the held runs, newest first");
+
+    // The profile has other cpus now: these runs say nothing of them.
+    let raised = Config::parse(&CONFIG.replace("cpus = 4", "cpus = 6")).unwrap();
+    assert!(
+        cpu_held(&whole(&runs), &raised).is_empty(),
+        "runs at 4 CPUs say nothing of 6"
+    );
+}
+
+#[test]
+fn runs_without_a_throttling_figure_are_neither_held_nor_free() {
+    let unknown = [None; 8];
+    assert!(
+        cpu_held(&whole(&[]), &config()).is_empty(),
+        "no runs say nothing"
+    );
+    assert!(
+        cpu_held(&whole(&throttled_runs(&unknown)), &config()).is_empty(),
+        "runs from before schema 17 say nothing"
+    );
+    // Two held runs are under the three sizing raises on, however few runs were measured.
+    let mut shares = unknown.to_vec();
+    shares.extend([Some(200), Some(200)]);
+    assert!(
+        cpu_held(&whole(&throttled_runs(&shares)), &config()).is_empty(),
+        "two held runs are no insight"
+    );
+    // A third, among runs without the figure: 3 of the 3 measured, the rest not counted either way.
+    shares.insert(3, Some(200));
+    let found = cpu_held(&whole(&throttled_runs(&shares)), &config());
+    assert!(
+        matches!(
+            found[0].kind,
+            InsightKind::CpuHeld {
+                held: 3,
+                total: 3,
+                ..
+            }
+        ),
+        "{found:#?}"
+    );
+}
+
+#[test]
+fn under_measured_admission_auto_sizing_raises_cpus_until_a_raise_does_not_help() {
+    let held = throttled_runs(&[Some(300); 4]);
+
+    let found = cpu_held(&whole(&held), &measured(true));
+    assert_eq!(
+        found[0].severity,
+        Severity::Notice,
+        "auto sizing deals with it"
+    );
+    assert!(
+        found[0].sentence.ends_with(
+            "Auto sizing raises app's cpus while each raise makes it faster or less throttled and the slice \
+             has room; runnerctl sizing says when it cannot."
+        ),
+        "{}",
+        found[0].sentence
+    );
+
+    let off = cpu_held(&whole(&held), &measured(false));
+    assert_eq!(off[0].severity, Severity::Warning);
+    assert!(
+        off[0]
+            .sentence
+            .ends_with("Auto sizing is off: set app's cpus to 6, or turn it on."),
+        "{}",
+        off[0].sentence
+    );
+
+    // Three runs at 3 CPUs before a raise to 4, which took as long and were throttled as much.
+    let mut runs = throttled_runs(&[Some(300); 7]);
+    for run in &mut runs[..3] {
+        run.cpu_cap = Some(3000);
+    }
+    let unhelped = cpu_held(&whole(&runs), &measured(true));
+    assert_eq!(
+        unhelped[0].severity,
+        Severity::Warning,
+        "its runs ask for no further raise"
+    );
+    assert!(
+        matches!(
+            unhelped[0].kind,
+            InsightKind::CpuHeld {
+                raised_from: Some(3),
+                set: None,
+                held: 4,
+                ..
+            }
+        ),
+        "{unhelped:#?}"
+    );
+    assert!(
+        unhelped[0].sentence.ends_with(UNHELPED),
+        "{}",
+        unhelped[0].sentence
+    );
+
+    // Less throttled at 4 than at 3: the raise helped, and auto sizing goes on.
+    for run in &mut runs[..3] {
+        run.cpu_throttled = Some(960);
+    }
+    let helped = cpu_held(&whole(&runs), &measured(true));
+    assert_eq!(helped[0].severity, Severity::Notice, "{helped:#?}");
+}
+
+const UNHELPED: &str = "The raise of app from 3 to 4 CPUs did not make it faster or less throttled, as when its tools \
+                        start a worker per CPU, so its runs ask for no further raise; runnerctl sizing says what auto \
+                        sizing does next.";
+
+/// `runs` as auto sizing reads them, each averaging `average` millicores of CPU.
+fn as_sized(runs: &[Run], average: u64) -> Vec<crate::sizing::Ran> {
+    runs.iter()
+        .map(|run| crate::sizing::Ran {
+            repository: run.repository.clone(),
+            workflow: run.workflow.clone(),
+            name: run.name.clone(),
+            profile: run.profile.clone().unwrap(),
+            memory_cap: Some(4 * G),
+            cpu_cap: run.cpu_cap,
+            memory_peak: G,
+            cpu_peak: run.cpu_cap.unwrap(),
+            cpu_average: Some(average),
+            queued_at: run.queued_at,
+            started_at: run.started_at,
+            runner_started_at: run.runner_started_at.unwrap(),
+            finished_at: run.finished_at,
+            oom_killed: false,
+            hit_cap: None,
+            own_cap: None,
+            measure: crate::sizing::Measure::WithoutPageCache,
+            succeeded: true,
+            failed: false,
+            run_id: run.run_id,
+            branch: run.branch.clone(),
+            reserved: None,
+            host_waited: 0,
+            unseen: 0,
+            cpu_periods: run.cpu_periods,
+            cpu_throttled: run.cpu_throttled,
+        })
+        .collect()
+}
+
+/// The `cpus` auto sizing's look at `NOW` raises app to, in a slice of 32 CPUs and 33G, on `jobs`.
+fn sizing_raises_app_to(config: &Config, jobs: Vec<crate::sizing::Ran>) -> Option<u32> {
+    let history = crate::sizing::History {
+        jobs,
+        ..crate::sizing::History::default()
+    };
+    let (last, running) = (
+        std::collections::BTreeMap::new(),
+        std::collections::BTreeMap::new(),
+    );
+    let changes = crate::sizing::auto::changes(
+        config,
+        &history,
+        crate::sizing::auto::Context {
+            memory_max: Some(33 * G),
+            cpus: Some(32_000),
+            window: crate::sizing::Window {
+                since: NOW - 30 * 24 * HOUR,
+                now: NOW,
+                sample_interval: 2,
+            },
+            last: &last,
+            cpus_set: &[],
+            running: &running,
+        },
+    );
+    changes
+        .iter()
+        .filter(|change| change.profile == "app")
+        .find_map(|change| change.to.cpus.filter(|to| *to > 4))
+}
+
+/// Seven runs of `name` throttled in `before` per mille of their run at 3 CPUs, the first three, and in `now` at 4.
+fn raised(name: &str, ids: u64, before: u64, now: u64) -> Vec<Run> {
+    let mut runs = throttled_runs(&[
+        Some(before),
+        Some(before),
+        Some(before),
+        Some(now),
+        Some(now),
+        Some(now),
+        Some(now),
+    ]);
+    for run in &mut runs {
+        run.name = name.to_owned();
+        run.id += ids;
+        run.run_id += ids;
+    }
+    for run in &mut runs[..3] {
+        run.cpu_cap = Some(3000);
+    }
+    runs
+}
+
+#[test]
+fn a_raise_that_did_not_help_a_job_whose_runs_average_near_the_cap_never_says_auto_sizing_stopped()
+{
+    // As long and as throttled at 4 CPUs as at 3, but averaging 3 of the 4: auto sizing raises app on the averages.
+    let runs = raised("test", 0, 300, 300);
+    let config = measured(true);
+
+    assert_eq!(
+        sizing_raises_app_to(&config, as_sized(&runs, 3000)),
+        Some(6),
+        "auto sizing raises app on the runs' averages"
+    );
+    let found = cpu_held(&whole(&runs), &config);
+    assert!(
+        found[0].sentence.ends_with(UNHELPED),
+        "{}",
+        found[0].sentence
+    );
+    assert!(
+        !found[0].sentence.contains("stopped"),
+        "it says what this job's runs ask for, not what auto sizing does: {}",
+        found[0].sentence
+    );
+}
+
+#[test]
+fn a_raise_that_did_not_help_one_job_but_helped_another_never_says_auto_sizing_stopped() {
+    // test is as throttled at 4 CPUs as at 3; lint is still held back at 4, but less than at 3: its raise helped, so
+    // auto sizing raises app for lint, light as both jobs' averages are.
+    let mut runs = raised("test", 0, 300, 300);
+    runs.extend(raised("lint", 100, 400, 200));
+    let config = measured(true);
+
+    assert_eq!(
+        sizing_raises_app_to(&config, as_sized(&runs, 1000)),
+        Some(6),
+        "auto sizing raises app for lint"
+    );
+    let found = cpu_held(&whole(&runs), &config);
+    let sentence = |job: &str| {
+        found
+            .iter()
+            .find(|insight| insight.job.as_deref() == Some(job))
+            .map(|insight| (insight.severity, insight.sentence.as_str()))
+            .unwrap()
+    };
+    let (_, test) = sentence("test");
+    assert!(test.ends_with(UNHELPED), "{test}");
+    assert!(!test.contains("stopped"), "{test}");
+    let (severity, lint) = sentence("lint");
+    assert_eq!(severity, Severity::Notice, "{lint}");
+    assert!(lint.contains("Auto sizing raises app's cpus"), "{lint}");
+}
+
 /// A job of `halyard/api` that started `hours_ago` hours before `NOW` after waiting `waited` seconds, on a runner
 /// started before it was queued when `warm`.
 fn waited(n: u64, hours_ago: u64, waited: u64, warm: bool) -> Run {
@@ -639,6 +965,10 @@ fn every_kind_of_insight_reads_back_as_the_daemon_sends_it() {
     for run in &mut runs[12..] {
         run.sock_throttled = Some(12);
     }
+    for run in &mut runs[11..] {
+        run.cpu_periods = Some(3600);
+        run.cpu_throttled = Some(1800);
+    }
     let mut others = vec![attempt(900, 1, "failure"), attempt(900, 2, "success")];
     others.extend((0..6).map(|n| waited(n + 2000, 200, 20, false)));
     others.extend((10..16).map(|n| waited(n + 2000, 10, 300, false)));
@@ -656,11 +986,33 @@ fn every_kind_of_insight_reads_back_as_the_daemon_sends_it() {
         .collect();
     assert_eq!(
         kinds,
-        ["throttled", "near-cap", "slower", "waits", "flaky"],
+        [
+            "throttled",
+            "cpu-held",
+            "near-cap",
+            "slower",
+            "waits",
+            "flaky"
+        ],
         "warnings first: {found:#?}"
     );
 
     let sent = serde_json::to_string(&found).unwrap();
     let read: api::Insights = serde_json::from_str(&sent).unwrap();
     assert_eq!(read, found);
+}
+
+#[test]
+fn an_insight_of_a_kind_from_a_later_release_still_reads_by_its_sentence() {
+    let sent = r#"{"since": 0, "until": 86400, "waits": [], "insights": [{"key": "later:halyard/api",
+        "severity": "warning", "repository": "halyard/api", "workflow": null, "job": null,
+        "sentence": "halyard/api: something a later release finds.", "kind": "later", "figure": 3, "runs": []}]}"#;
+
+    let read: api::Insights = serde_json::from_str(sent).unwrap();
+
+    assert_eq!(read.insights[0].kind, InsightKind::Unknown);
+    assert_eq!(
+        read.insights[0].sentence,
+        "halyard/api: something a later release finds."
+    );
 }

@@ -1,8 +1,9 @@
 //! Insights from the job history (ADR 0051): jobs that got slower and stayed so, jobs that fail and pass on a re-run,
 //! jobs whose memory nears their profile's cap, jobs that find almost nothing in the build cache, repositories whose
-//! downloads memory pressure throttled, and how long each repository's jobs wait, this week against the last when the
-//! history holds all of last week; and the daily digest. Pure: the daemon reads the history, the
-//! config and the clock and passes them in. It sends nothing and changes nothing.
+//! downloads memory pressure throttled, jobs their CPU cap held back by the rule auto sizing reads (ADR 0087), and
+//! how long each repository's jobs wait, this week against the last when the history holds all of last week; and the
+//! daily digest. Pure: the daemon reads the history, the config and the clock and passes them in. It sends nothing
+//! and changes nothing.
 
 use std::collections::{BTreeMap, BTreeSet};
 
@@ -10,8 +11,9 @@ use crate::api::{
     self, AutoNote, Digest, Insight, InsightKind, Insights, JobState, LongWait, RepositoryWaits,
     RunLink, Severity, WaitSpread, WeekWaits,
 };
-use crate::config::{ByteSize, Config};
-use crate::sizing::spread;
+use crate::config::{Admission, ByteSize, Config};
+use crate::sizing::auto::{CpuRun, RAISE_RUNS, cpu_step, unhelped_raise};
+use crate::sizing::{HELD, Throttling, spread};
 
 const SECOND: u64 = 1000;
 const DAY: u64 = 24 * 3600 * SECOND;
@@ -84,6 +86,12 @@ pub struct Run {
     pub build_cache: Option<api::BuildCacheCounts>,
     /// Times the kernel throttled its container's sockets for memory pressure, when counted.
     pub sock_throttled: Option<u64>,
+    /// Its container's CPU cap, millicores, when recorded.
+    pub cpu_cap: Option<u64>,
+    /// The periods of its CPU quota it had work in; `None` where the kernel kept no figure, as before schema 17.
+    pub cpu_periods: Option<u64>,
+    /// Of those, the periods its quota throttled it in.
+    pub cpu_throttled: Option<u64>,
     /// How much of its wait passed while no runnerd ran.
     pub unseen: u64,
 }
@@ -121,6 +129,15 @@ impl Run {
             unseen: self.unseen,
         };
         Some(wait.counted(kept_since) / SECOND)
+    }
+
+    fn throttling(&self) -> Throttling {
+        Throttling {
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            periods: self.cpu_periods,
+            throttled: self.cpu_throttled,
+        }
     }
 
     fn link(&self) -> RunLink {
@@ -177,6 +194,7 @@ pub fn insights(history: &History, config: &Config, days: u32, now: u64) -> Insi
         found.extend(flaky(*key, runs));
         found.extend(near_cap(*key, runs, config));
         found.extend(cold_cache(*key, runs));
+        found.extend(cpu_held(*key, runs, config));
     }
     found.extend(throttled(&window));
     let waits = waits(history, now);
@@ -531,6 +549,103 @@ fn cold_cache(key: JobKey<'_>, runs: &[&Run]) -> Option<Insight> {
             lookups: total.lookups(),
         },
         writers.iter().map(|run| run.link()).collect(),
+    ))
+}
+
+/// A job whose CPU cap held back `RAISE_RUNS` or more of its last `CAP_RUNS` runs that measured it, as auto sizing
+/// reads a run (`Throttling::held`): successful runs, as sizing reads only those, in the profile and at the cap of its
+/// last such run, the profile's `cpus` today. A run without a throttling figure is unknown, neither held nor free.
+/// Says what the owner can do: under `measured` admission auto sizing raises `cpus` while each raise helps, under
+/// `caps` it does not for throttling, as each CPU takes budget there. A raise that did not help the job is told as
+/// this job's evidence only: auto sizing may still raise the profile for another job, or on the runs' averages.
+fn cpu_held(key: JobKey<'_>, runs: &[&Run], config: &Config) -> Option<Insight> {
+    let measured = runs.iter().rev().filter(|run| {
+        run.succeeded() && run.profile.is_some() && run.throttling().held().is_some()
+    });
+    let last = measured.clone().next()?;
+    let (name, cap) = (last.profile.as_deref()?, last.cpu_cap?);
+    let profile = config.profiles.get(name)?;
+    // Runs at a cap the profile no longer has say nothing of the one it has: its next runs will.
+    if u64::from(profile.cpus) * 1000 != cap {
+        return None;
+    }
+    let at_cap: Vec<&Run> = measured
+        .filter(|run| run.profile.as_deref() == Some(name) && run.cpu_cap == Some(cap))
+        .take(CAP_RUNS)
+        .copied()
+        .collect();
+    let held: Vec<&Run> = at_cap
+        .iter()
+        .filter(|run| run.throttling().held() == Some(true))
+        .copied()
+        .collect();
+    if (held.len() as u64) < RAISE_RUNS {
+        return None;
+    }
+    let cpus = profile.cpus;
+    let auto = config.host.admission == Admission::Measured && config.sizing.auto;
+    let raised_from = auto
+        .then(|| {
+            let ran: Vec<CpuRun> = runs
+                .iter()
+                .filter(|run| run.succeeded() && run.profile.as_deref() == Some(name))
+                .map(|run| CpuRun {
+                    cap: run.cpu_cap,
+                    queued_at: run.queued_at,
+                    throttling: run.throttling(),
+                })
+                .collect();
+            let now: Vec<Throttling> = at_cap.iter().map(|run| run.throttling()).collect();
+            unhelped_raise(&ran, cap, &now)
+        })
+        .flatten()
+        .map(|unhelped| u32::try_from(unhelped.from / 1000).unwrap_or(u32::MAX));
+    let set = (!auto).then(|| cpus.saturating_add(cpu_step(config, cpus)));
+    let what = match (raised_from, set) {
+        (Some(from), _) => format!(
+            "The raise of {name} from {from} to {cpus} CPUs did not make it faster or less throttled, as when its \
+             tools start a worker per CPU, so its runs ask for no further raise; runnerctl sizing says what auto \
+             sizing does next."
+        ),
+        (None, Some(set)) if config.host.admission == Admission::Measured => {
+            format!("Auto sizing is off: set {name}'s cpus to {set}, or turn it on.")
+        }
+        (None, Some(set)) => format!(
+            "Under caps admission each CPU takes budget, so auto sizing does not raise cpus for this: set {name}'s \
+             cpus to {set} if runnerctl sizing shows the budget has room."
+        ),
+        (None, None) => format!(
+            "Auto sizing raises {name}'s cpus while each raise makes it faster or less throttled and the slice has \
+             room; runnerctl sizing says when it cannot."
+        ),
+    };
+    let sentence = format!(
+        "{} was held back by {name}'s {cpus} CPUs in {} of its last {} runs, its quota throttling it in {HELD}% of \
+         its run or more. {what}",
+        subject(key),
+        held.len(),
+        at_cap.len()
+    );
+    // Auto sizing deals with it: a notice. The owner acts on the rest.
+    let severity = if auto && raised_from.is_none() {
+        Severity::Notice
+    } else {
+        Severity::Warning
+    };
+    Some(insight(
+        key,
+        "cpu-held",
+        severity,
+        sentence,
+        InsightKind::CpuHeld {
+            profile: name.to_owned(),
+            cpus,
+            held: u32::try_from(held.len()).unwrap_or(u32::MAX),
+            total: u32::try_from(at_cap.len()).unwrap_or(u32::MAX),
+            raised_from,
+            set,
+        },
+        held.iter().take(5).map(|run| run.link()).collect(),
     ))
 }
 

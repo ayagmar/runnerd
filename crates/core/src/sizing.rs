@@ -106,6 +106,54 @@ impl Wait {
     }
 }
 
+/// A run its CPU quota throttled in this share of its run or more, in percent, was held back by its cap: it ran as
+/// fast as the cap let it, so its average says what the cap allowed. No lowering reads it, under `measured`
+/// admission it raises the cap, and insights name its job (ADR 0079). The share is of the run's wall time in 100 ms
+/// periods, not of the periods the kernel counted, which leave out the time it was idle: a job that waits on the
+/// network for most of its run and bursts past its cap in a few compiles is throttled in most of its busy periods and
+/// in little of its run. A throttled period loses only part of its 100 ms, so the share is more than the time the cap
+/// cost. The Android quality gate lost about 90 s of its 517 at 9 CPUs, 17% of its run, and was throttled in 28% of
+/// it, 21% at 13 and 16% at 19; an 8-minute job whose three 20-second compiles want 20 CPUs is throttled in 11%, and
+/// lost about 6%.
+pub const HELD: u64 = 15;
+
+/// What a run's CPU quota did to it, as auto sizing and insights read it (ADR 0079). Times in milliseconds.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Throttling {
+    /// When it started.
+    pub started_at: Option<u64>,
+    /// When it finished.
+    pub finished_at: Option<u64>,
+    /// The periods of its CPU quota it had work in (`api::JobMetrics::cpu_periods`); `None` where the kernel kept no
+    /// figure, as in runs from before schema 17.
+    pub periods: Option<u64>,
+    /// Of those, the periods its quota throttled it in (`api::JobMetrics::cpu_throttled`).
+    pub throttled: Option<u64>,
+}
+
+impl Throttling {
+    /// How long it ran, from its start to its finish; `None` without either.
+    pub fn took(self) -> Option<u64> {
+        Some(self.finished_at?.saturating_sub(self.started_at?))
+    }
+
+    /// The share of its run its quota throttled it in, per mille: its throttled periods over its run's wall time in
+    /// 100 ms periods, or over the periods the kernel counted when those are more, as when its start or finish is
+    /// unknown. `None` without a throttling figure.
+    pub fn share(self) -> Option<u64> {
+        let (periods, throttled) = self.periods.zip(self.throttled)?;
+        let run = self.took().map_or(0, |took| took / 100).max(periods);
+        Some(throttled.saturating_mul(1000) / run.max(1))
+    }
+
+    /// Whether its cap held it back: throttled in `HELD` percent of its run or more. `None` without a throttling
+    /// figure: unknown, never read as free.
+    pub fn held(self) -> Option<bool> {
+        let share = self.share()?;
+        Some(self.throttled.is_some_and(|throttled| throttled > 0) && share >= HELD * 10)
+    }
+}
+
 /// What a run's sampled memory counts.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Measure {
@@ -151,6 +199,16 @@ impl Ran {
             started_at: self.started_at?,
             unseen: self.unseen,
         })
+    }
+
+    /// What its CPU quota did to it.
+    pub fn throttling(&self) -> Throttling {
+        Throttling {
+            started_at: self.started_at,
+            finished_at: self.finished_at,
+            periods: self.cpu_periods,
+            throttled: self.cpu_throttled,
+        }
     }
 
     /// What it says about its container's `cap`. A kill that only a descendant's own limit explains, the counters

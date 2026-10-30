@@ -6,7 +6,8 @@ use super::{Digest, Insight, InsightKind, Insights, LongWait, Severity, WaitSpre
 use crate::api::Tone;
 
 impl InsightKind {
-    /// Its name as a label: `Slower`, `Flaky`, `Near its cap`, `Cold cache`, `Memory pressure` or `Waits`.
+    /// Its name as a label: `Slower`, `Flaky`, `Near its cap`, `Cold cache`, `Memory pressure`, `CPU cap`,
+    /// `Waits`, or `Insight` for a kind from a later release.
     pub fn label(&self) -> &'static str {
         match self {
             InsightKind::Slower { .. } => "Slower",
@@ -14,12 +15,14 @@ impl InsightKind {
             InsightKind::NearCap { .. } => "Near its cap",
             InsightKind::ColdCache { .. } => "Cold cache",
             InsightKind::Throttled { .. } => "Memory pressure",
+            InsightKind::CpuHeld { .. } => "CPU cap",
             InsightKind::Waits { .. } => "Waits",
+            InsightKind::Unknown => "Insight",
         }
     }
 
-    /// Its name as one word, the API's `kind`: `slower`, `flaky`, `near-cap`, `cold-cache`, `throttled` or
-    /// `waits`.
+    /// Its name as one word, the API's `kind`: `slower`, `flaky`, `near-cap`, `cold-cache`, `throttled`,
+    /// `cpu-held` or `waits`; `unknown` for a kind from a later release.
     pub fn word(&self) -> &'static str {
         match self {
             InsightKind::Slower { .. } => "slower",
@@ -27,7 +30,9 @@ impl InsightKind {
             InsightKind::NearCap { .. } => "near-cap",
             InsightKind::ColdCache { .. } => "cold-cache",
             InsightKind::Throttled { .. } => "throttled",
+            InsightKind::CpuHeld { .. } => "cpu-held",
             InsightKind::Waits { .. } => "waits",
+            InsightKind::Unknown => "unknown",
         }
     }
 }

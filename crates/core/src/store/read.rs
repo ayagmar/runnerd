@@ -892,8 +892,8 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
         "SELECT j.id, j.repository, j.workflow, j.name, j.branch, j.url, j.run_id, j.run_attempt, j.state, \
          j.conclusion, j.queued_at, j.started_at, j.finished_at, r.started_at, r.profile, j.memory_peak, \
          r.build_cache_hits, r.build_cache_misses, r.build_cache_read_bytes, r.build_cache_written_bytes, \
-         r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen \
-         FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
+         r.build_cache_refused, r.build_cache_writer, r.sock_throttled, j.unseen, r.cpu_cap, j.cpu_periods, \
+         j.cpu_throttled FROM jobs j LEFT JOIN runners r ON r.name = j.runner \
          WHERE j.state IN ('completed', 'lost') AND j.queued_at >= ?1 ORDER BY j.id",
     )?
     .query_map([since], |row| {
@@ -927,6 +927,9 @@ pub(super) fn insights(db: &Connection, since: u64) -> rusqlite::Result<crate::i
             },
             sock_throttled: row.get(22)?,
             unseen: row.get(23)?,
+            cpu_cap: row.get(24)?,
+            cpu_periods: row.get(25)?,
+            cpu_throttled: row.get(26)?,
         })
     })?
     .collect::<rusqlite::Result<_>>()?;
