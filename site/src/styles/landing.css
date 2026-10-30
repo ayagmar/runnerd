@@ -259,6 +259,12 @@ html:not(.js) .theme {
   align-items: start;
 }
 
+/* Output wider than the proof column: the text above it, the output across the page. */
+.split.stacked {
+  grid-template-columns: minmax(0, 1fr);
+  gap: 2rem;
+}
+
 /* Terminals: real output, on the darkest surface in both themes. */
 .terminal {
   margin: 0;

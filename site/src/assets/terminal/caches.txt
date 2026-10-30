@@ -1,0 +1,14 @@
+measured 16m 33s ago
+VOLUME               HOLDS                      SIZE             LIMIT
+runnerd-jvm-base     jvm snapshot                14G                 -
+runnerd-jvm-slot-1   jvm slot 1 layer          1.76G                 -
+runnerd-jvm-slot-2   jvm slot 2 layer           640M                 -
+runnerd-node-base    node snapshot                9G                 -
+runnerd-node-slot-1  node slot 1 layer          950M                 -
+runnerd-node-slot-2  node slot 2 layer          300M                 -
+runnerd-pnpm         pnpm store, shared        3.39G  emptied above 5G
+runnerd-maven        Maven repository, shared   4.1G  emptied above 5G
+runnerd-mirror       Docker Hub mirror            7G                 -
+runnerd-build-cache  build cache, shared       6.29G    trimmed to 10G
+build cache: 18412 entries; 81% of 51085 lookups hit in 7 days, 38G served, 5G stored, 1204 uploads refused
+GitHub Actions' cache: served from the build cache on this host, in place of GitHub's
