@@ -1,5 +1,6 @@
 //! Auto sizing's `cpus`: raised for a job its cap holds back over the whole run, not for a build whose bursts reach
-//! any cap; lowered toward twice the heaviest job's average; and its invariants over generated sequences of runs,
+//! any cap; lowered under `caps` admission toward twice the heaviest job's average or the runs' peak, never on runs
+//! that met the cap (ADR 0075); and its invariants over generated sequences of runs,
 //! looks, hand edits, undos and restarts.
 
 use std::collections::BTreeMap;
@@ -39,6 +40,19 @@ fn jvm_at(cpus: u32, rules: &str) -> Config {
     )
 }
 
+/// `jvm_at` under `admission = "measured"`.
+fn measured_at(cpus: u32) -> Config {
+    on(
+        &CONFIG
+            .replacen("cpus = 8", &format!("cpus = {cpus}"), 1)
+            .replace(
+                "isolation = \"sysbox\"",
+                "isolation = \"sysbox\"\nadmission = \"measured\"",
+            ),
+        "",
+    )
+}
+
 /// `CONFIG` (jvm and node 2 × 8 CPUs) under a CPU budget of the slice's CPUs.
 fn budgeted(rules: &str) -> Config {
     on(
@@ -53,9 +67,14 @@ fn budgeted(rules: &str) -> Config {
 /// `count` runs of halyard/ledger's `name` in jvm at `cpu_cap` millicores, queued at `at`, each averaging `average`
 /// and, as a parallel build does, peaking at the cap.
 fn runs(name: &str, count: usize, average: u64, cpu_cap: u64, at: u64) -> Vec<Ran> {
+    bursts(name, count, average, cpu_cap, cpu_cap, at)
+}
+
+/// `runs` whose bursts peak at `peak` millicores, under the cap when they need less.
+fn bursts(name: &str, count: usize, average: u64, peak: u64, cpu_cap: u64, at: u64) -> Vec<Ran> {
     (0..count)
         .map(|_| Ran {
-            cpu_peak: cpu_cap,
+            cpu_peak: peak.min(cpu_cap),
             cpu_average: Some(average),
             cpu_cap: Some(cpu_cap),
             queued_at: at,
@@ -280,9 +299,9 @@ fn failed_cancelled_and_unmeasured_runs_raise_nothing() {
 
 #[test]
 fn an_over_provisioned_profile_steps_down_to_its_target_over_several_intervals_and_stops_there() {
-    // jvm at 31 CPUs, as auto sizing left it on the owner's host. Its heaviest job averages 5 to 7.75 CPUs, 7.75 at
-    // p95; twice that is 15.5, rounded up to 16. Each day brings ten runs at the cap of that day, and a lint job
-    // averaging half a CPU.
+    // jvm at 31 CPUs. Its heaviest job averages 5 to 7.75 CPUs, 7.75 at p95, and bursts to 20; twice the average is
+    // 15.5, so the peak sets the target. Each day brings ten runs at the cap of that day, and a lint job averaging
+    // half a CPU. At 20 the bursts meet the cap, and nothing comes down again.
     let mut config = jvm_at(31, "");
     let mut text = CONFIG.replacen("cpus = 8", "cpus = 31", 1);
     let mut jobs = Vec::new();
@@ -292,9 +311,16 @@ fn an_over_provisioned_profile_steps_down_to_its_target_over_several_intervals_a
         let now = NOW + day * DAY;
         let cap = u64::from(config.profiles["jvm"].cpus) * 1000;
         for i in 0..10 {
-            jobs.extend(runs("android", 1, 5000 + 250 * (i + 2), cap, now - HOUR));
+            jobs.extend(bursts(
+                "android",
+                1,
+                5000 + 250 * (i + 2),
+                20_000,
+                cap,
+                now - HOUR,
+            ));
         }
-        jobs.extend(runs("lint", 4, 500, cap, now - HOUR));
+        jobs.extend(bursts("lint", 4, 500, 2000, cap, now - HOUR));
         let look = look_at(&config, &history(jobs.clone()), Some(32_000), now, &last);
         for change in &look.changes {
             text = resize_profile(&text, &change.profile, change.to).unwrap();
@@ -306,7 +332,9 @@ fn an_over_provisioned_profile_steps_down_to_its_target_over_several_intervals_a
             assert!(
                 change
                     .reason
-                    .contains("halyard/ledger CI / android, averaged 7.8 CPUs (p95)"),
+                    .contains("peaked at 20 CPUs at most, none near the cap, and the heaviest job, halyard/ledger \
+                               CI / android, averaged 7.8 CPUs (p95); the larger of that peak and twice that \
+                               average is 20"),
                 "{}",
                 change.reason
             );
@@ -314,15 +342,15 @@ fn an_over_provisioned_profile_steps_down_to_its_target_over_several_intervals_a
     }
     assert_eq!(
         seen,
-        [31, 24, 18, 16, 16, 16, 16],
-        "a step of at most 25% a day, down to 16"
+        [31, 24, 20, 20, 20, 20, 20],
+        "a step of at most 25% a day, down to the peak"
     );
 }
 
 #[test]
 fn a_lowering_waits_the_interval_and_min_jobs_runs_since_the_last_change() {
     let config = jvm_at(8, "");
-    let idle = history(runs("test", 10, 1000, 8000, NOW - HOUR));
+    let idle = history(bursts("test", 10, 1000, 2000, 8000, NOW - HOUR));
     assert_eq!(
         cpus_to(&look(&config, &idle, Some(32_000))),
         vec![("jvm", Some(8), Some(6))],
@@ -332,8 +360,8 @@ fn a_lowering_waits_the_interval_and_min_jobs_runs_since_the_last_change() {
     let held = look_at(&config, &idle, Some(32_000), NOW, &changed);
     assert_eq!(held.changes, Vec::new(), "a lowering waits the interval");
     let before = BTreeMap::from([("jvm".to_owned(), (NOW - 25 * HOUR) / 1000)]);
-    let mut old = runs("test", 9, 1000, 8000, NOW - 26 * HOUR);
-    old.extend(runs("test", 9, 1000, 8000, NOW - HOUR));
+    let mut old = bursts("test", 9, 1000, 2000, 8000, NOW - 26 * HOUR);
+    old.extend(bursts("test", 9, 1000, 2000, 8000, NOW - HOUR));
     assert_eq!(
         look_at(&config, &history(old), Some(32_000), NOW, &before).changes,
         Vec::new(),
@@ -436,8 +464,8 @@ fn a_job_without_a_measured_average_keeps_the_cpus_from_coming_down() {
     // Ten lint runs a tenth of a CPU, and three builds at the same cap whose averages were never measured: the lint
     // runs alone would bring 8 CPUs down toward 1, with nothing known of what the builds need.
     let config = jvm_at(8, "");
-    let builds = runs("build", 3, 3000, 8000, NOW - HOUR);
-    let mut jobs = runs("lint", 10, 100, 8000, NOW - HOUR);
+    let builds = bursts("build", 3, 3000, 5000, 8000, NOW - HOUR);
+    let mut jobs = bursts("lint", 10, 100, 1000, 8000, NOW - HOUR);
     jobs.extend(builds.iter().cloned().map(|run| Ran {
         cpu_average: None,
         ..run
@@ -447,7 +475,7 @@ fn a_job_without_a_measured_average_keeps_the_cpus_from_coming_down() {
         Vec::new(),
         "no lowering past a job it knows nothing of"
     );
-    let mut sampled_once = runs("lint", 10, 100, 8000, NOW - HOUR);
+    let mut sampled_once = bursts("lint", 10, 100, 1000, 8000, NOW - HOUR);
     sampled_once.extend(builds.iter().cloned().map(|run| Ran {
         cpu_average: Some(0),
         ..run
@@ -467,11 +495,11 @@ fn a_job_without_a_measured_average_keeps_the_cpus_from_coming_down() {
 
 #[test]
 fn a_day_of_contention_lowers_a_busy_job_a_step_and_it_asks_the_step_back_once_it_is_over() {
-    // A job averaging 14 of its 16 CPUs, held to 2 by other programs on the host for a whole day: the lowering cannot
-    // tell, and takes one step toward 4. Once the host is free the job sits at its new 12 and is raised again. The
-    // step and the interval bound what contention costs; nothing in the averages tells it apart.
+    // A job averaging 14 of its 16 CPUs, held to 2 by other programs on the host for a whole day, its bursts to 3:
+    // the lowering cannot tell, and takes one step toward 4. Once the host is free the job sits at its new 12 and is
+    // raised again. The step and the interval bound what contention costs; nothing in the runs tells it apart.
     let config = jvm_at(16, "");
-    let slowed = history(runs("build", 10, 2000, 16_000, NOW - HOUR));
+    let slowed = history(bursts("build", 10, 2000, 3000, 16_000, NOW - HOUR));
     let day_ago = BTreeMap::from([("jvm".to_owned(), (NOW - 25 * HOUR) / 1000)]);
     let lowered = look_at(&config, &slowed, Some(32_000), NOW, &day_ago);
     assert_eq!(cpus_to(&lowered), vec![("jvm", Some(16), Some(12))]);
@@ -487,6 +515,91 @@ fn a_day_of_contention_lowers_a_busy_job_a_step_and_it_asks_the_step_back_once_i
             &changed
         )),
         vec![("jvm", Some(12), Some(15))]
+    );
+}
+
+/// Ten runs at `cap` CPUs of a build like the owner's Android quality gate, queued at `at`: 371 s of steps near
+/// one CPU and 1,313 CPU-seconds that spread over up to 23.5 CPUs. Its bursts meet any cap under 23.5, and its
+/// average drops with the cap, as the time it spends held grows.
+fn gate(cap: u32, at: u64) -> Vec<Ran> {
+    let cap = u64::from(cap) * 1000;
+    (0..10)
+        .flat_map(|i| {
+            let wide = 23_500 - 100 * i;
+            let used = wide.min(cap);
+            let took = 371_000 + 1_313_000 * 1000 / used;
+            let average = (371_000 + 1_313_000) * 1000 / took;
+            bursts("android", 1, average, used, cap, at)
+        })
+        .collect()
+}
+
+#[test]
+fn cpus_the_bursts_meet_are_never_lowered_on_the_averages_they_hold_down() {
+    // Falling caps, as auto sizing's old lowering or hand edits set them: 31 → 16 → 10 → 9 on the owner's host. At
+    // each, the gate's average drops with the cap; twice it asked for a lower cap every day. A cap its bursts meet
+    // is never lowered; one they do not is lowered no further than their peak, which they then never meet.
+    for cpus in [31, 28, 24, 20, 16, 12, 10, 9, 7, 4] {
+        let day_ago = BTreeMap::from([("jvm".to_owned(), (NOW - 25 * HOUR) / 1000)]);
+        let ran = history(gate(cpus, NOW - HOUR));
+        let caps = look_at(&jvm_at(cpus, ""), &ran, Some(32_000), NOW, &day_ago);
+        for change in &caps.changes {
+            let to = change.to.cpus.unwrap_or(cpus);
+            assert!(
+                to >= 24 && cpus >= 25,
+                "at {cpus} CPUs, lowered to {to}: {}",
+                change.reason
+            );
+        }
+        if cpus <= 24 {
+            assert_eq!(
+                caps.changes,
+                Vec::new(),
+                "at {cpus} CPUs the bursts meet the cap"
+            );
+        }
+        let measured = look_at(&measured_at(cpus), &ran, Some(32_000), NOW, &day_ago);
+        assert_eq!(
+            measured.changes,
+            Vec::new(),
+            "under measured admission {cpus} CPUs stay"
+        );
+    }
+    // The gate's own lowering, look after look: down to its peak, and no further.
+    let mut text = CONFIG.replacen("cpus = 8", "cpus = 31", 1);
+    let mut jobs = Vec::new();
+    let mut last = BTreeMap::new();
+    for day in 0..10 {
+        let now = NOW + day * DAY;
+        let config = on(&text, "");
+        jobs.extend(gate(config.profiles["jvm"].cpus, now - HOUR));
+        let look = look_at(&config, &history(jobs.clone()), Some(32_000), now, &last);
+        for change in &look.changes {
+            text = resize_profile(&text, &change.profile, change.to).unwrap();
+            last.insert(change.profile.clone(), change.at);
+        }
+    }
+    assert_eq!(
+        on(&text, "").profiles["jvm"].cpus,
+        24,
+        "31 → 24, the gate's peak"
+    );
+}
+
+#[test]
+fn under_measured_admission_cpus_never_come_down() {
+    // Measured admission reserves a job's predicted average, not its cap: a lower cap frees no slot and only slows
+    // the bursts. Ten light runs far under 16 CPUs lower them under caps, never under measured.
+    let light = history(bursts("lint", 10, 500, 2000, 16_000, NOW - HOUR));
+    assert_eq!(
+        cpus_to(&look(&jvm_at(16, ""), &light, Some(32_000))),
+        vec![("jvm", Some(16), Some(12))],
+        "under caps"
+    );
+    assert_eq!(
+        look(&measured_at(16), &light, Some(32_000)).changes,
+        Vec::new(),
+        "under measured"
     );
 }
 
@@ -598,8 +711,14 @@ mod invariants {
     const CASES: u64 = 64;
     const EVENTS: usize = 80;
     const PROFILES: [&str; 2] = ["jvm", "node"];
-    /// The jobs a profile runs, each with how heavy it tends to be, in percent of the cap.
-    const JOBS: [(&str, u64); 4] = [("build", 35), ("lint", 5), ("image", 75), ("e2e", 95)];
+    /// The jobs a profile runs, each with how heavy it tends to be, in percent of the CPUs it gets, and how far its
+    /// bursts reach, in CPUs: under a lower cap they meet it, and its average drops with it.
+    const JOBS: [(&str, u64, u64); 4] = [
+        ("build", 35, 24),
+        ("lint", 5, 2),
+        ("image", 75, 12),
+        ("e2e", 95, 40),
+    ];
 
     /// A deterministic generator (`SplitMix64`), as the engine's invariants use.
     struct Rng(u64);
@@ -657,6 +776,8 @@ mod invariants {
         changed: BTreeMap<String, u64>,
         /// What each profile's last change replaced, for an undo.
         undo: BTreeMap<String, Resize>,
+        /// How many lowerings of `cpus` the looks made, so the sequences are known to try them.
+        lowered: u64,
         now: u64,
         log: String,
     }
@@ -753,16 +874,17 @@ mod invariants {
             let config = self.config();
             let limits = &config.profiles[profile];
             let cap = u64::from(limits.cpus) * 1000;
-            let (name, heavy) = rng.pick(&JOBS);
+            let (name, heavy, wide) = rng.pick(&JOBS);
             for _ in 0..=rng.below(5) {
                 let share = heavy.saturating_sub(10) + rng.below(21);
+                let gets = (wide * 1000 - rng.below(1000)).min(cap);
                 let mut ran = Ran {
                     profile: profile.to_owned(),
                     memory_cap: Some(limits.memory.0),
                     memory_peak: limits.memory.0 / 4 + rng.below(limits.memory.0 / 2),
                     cpu_cap: Some(cap),
-                    cpu_peak: cap,
-                    cpu_average: Some((cap * share / 100).max(1)),
+                    cpu_peak: gets,
+                    cpu_average: Some((gets * share / 100).max(1)),
                     queued_at: self.now,
                     started_at: Some(self.now + rng.below(300) * 1000),
                     runner_started_at: self.now,
@@ -802,12 +924,35 @@ mod invariants {
                 && job.succeeded
                 && job.queued_at >= since
         }) {
-            let name = JOBS.iter().find(|(name, _)| *name == job.name).unwrap().0;
+            let name = JOBS.iter().find(|(name, ..)| *name == job.name).unwrap().0;
             jobs.entry(name)
                 .or_default()
                 .extend(job.cpu_average.filter(|average| *average > 0));
         }
         jobs
+    }
+
+    /// The highest CPU peak of the runs `evidence` reads.
+    fn peak(world: &World, profile: &str, cap: u64) -> u64 {
+        let since = world
+            .fresh
+            .get(profile)
+            .copied()
+            .unwrap_or(0)
+            .max(world.now - 30 * DAY);
+        world
+            .history()
+            .jobs
+            .iter()
+            .filter(|job| {
+                job.profile == profile
+                    && job.cpu_cap == Some(cap)
+                    && job.succeeded
+                    && job.queued_at >= since
+            })
+            .map(|job| job.cpu_peak)
+            .max()
+            .unwrap_or(0)
     }
 
     /// The CPUs every profile's slots take, millicores.
@@ -865,6 +1010,20 @@ mod invariants {
                     return Err(format!("{profile}: raised {since}s after its last change"));
                 }
             } else {
+                if config.host.admission == Admission::Measured {
+                    return Err(format!("{profile}: lowered under measured admission"));
+                }
+                let peak = peak(world, profile, cap);
+                if peak * 100 >= cap * 95 {
+                    return Err(format!(
+                        "{profile}: lowered on runs that met the cap, peaking at {peak}"
+                    ));
+                }
+                if u64::from(to_cpus) * 1000 < peak {
+                    return Err(format!(
+                        "{profile}: lowered to {to_cpus} CPUs under the peak {peak}"
+                    ));
+                }
                 let runs: usize = jobs.values().map(Vec::len).sum();
                 if runs < rules.min_jobs as usize {
                     return Err(format!("{profile}: lowered on {runs} runs"));
@@ -921,6 +1080,9 @@ mod invariants {
         let config = world.config();
         for change in look.changes {
             let _ = writeln!(world.log, "look: {} {}", change.profile, change.line());
+            if change.to.cpus < change.from.cpus {
+                world.lowered += 1;
+            }
             let profile = &config.profiles[&change.profile];
             world.undo.insert(
                 change.profile.clone(),
@@ -941,46 +1103,65 @@ mod invariants {
         Ok(())
     }
 
-    fn case(seed: u64) -> Result<(), String> {
-        let mut rng = Rng(seed);
-        let budget = rng.below(2) == 0;
-        let mut text = CONFIG.to_owned();
-        if budget {
-            text = text.replace(
+    impl World {
+        /// A host with a config and rules `rng` picks, the daemon not yet started, and the text it starts with.
+        fn started(rng: &mut Rng) -> (World, String) {
+            let budget = rng.below(2) == 0;
+            let measured = rng.below(3) == 0;
+            let host = |set: bool, line: &str| {
+                if set {
+                    format!("\n{line}")
+                } else {
+                    String::new()
+                }
+            };
+            let text = CONFIG.replace(
                 "isolation = \"sysbox\"",
-                "isolation = \"sysbox\"\ncpu_overcommit = 1.0",
+                &format!(
+                    "isolation = \"sysbox\"{}{}",
+                    host(budget, "cpu_overcommit = 1.0"),
+                    host(measured, "admission = \"measured\"")
+                ),
             );
+            let mut world = World {
+                file: text.clone(),
+                rules: rng
+                    .pick(&["", "min_jobs = 3", "max_step = 50\nmin_jobs = 5"])
+                    .to_owned(),
+                slice: rng.pick(&[Some(32_000), Some(48_000), None]),
+                store: Stored {
+                    jobs: Vec::new(),
+                    cancelled: Vec::new(),
+                    changes: Vec::new(),
+                    events: Vec::new(),
+                },
+                daemon: Daemon {
+                    running: text.clone(),
+                    last: BTreeMap::new(),
+                    cpus_set: Vec::new(),
+                },
+                fresh: BTreeMap::new(),
+                changed: BTreeMap::new(),
+                undo: BTreeMap::new(),
+                lowered: 0,
+                now: NOW,
+                log: String::new(),
+            };
+            let _ = writeln!(
+                world.log,
+                "budget {budget}, measured {measured}, rules {:?}, slice {:?}",
+                world.rules, world.slice
+            );
+            (world, text)
         }
-        let mut world = World {
-            file: text.clone(),
-            rules: rng
-                .pick(&["", "min_jobs = 3", "max_step = 50\nmin_jobs = 5"])
-                .to_owned(),
-            slice: rng.pick(&[Some(32_000), Some(48_000), None]),
-            store: Stored {
-                jobs: Vec::new(),
-                cancelled: Vec::new(),
-                changes: Vec::new(),
-                events: Vec::new(),
-            },
-            daemon: Daemon {
-                running: text.clone(),
-                last: BTreeMap::new(),
-                cpus_set: Vec::new(),
-            },
-            fresh: BTreeMap::new(),
-            changed: BTreeMap::new(),
-            undo: BTreeMap::new(),
-            now: NOW,
-            log: String::new(),
-        };
+    }
+
+    /// One generated sequence; `Ok` with how many lowerings of `cpus` it made.
+    fn case(seed: u64) -> Result<u64, String> {
+        let mut rng = Rng(seed);
+        let (mut world, text) = World::started(&mut rng);
         // The daemon starts: it announces every profile.
         world.run_with(text);
-        let _ = writeln!(
-            world.log,
-            "budget {budget}, rules {:?}, slice {:?}",
-            world.rules, world.slice
-        );
         for _ in 0..EVENTS {
             let step = match rng.below(12) {
                 0..=3 => {
@@ -1039,7 +1220,7 @@ mod invariants {
             };
             step.map_err(|broke| format!("{}{broke}", world.log))?;
         }
-        Ok(())
+        Ok(world.lowered)
     }
 
     #[test]
@@ -1054,10 +1235,16 @@ mod invariants {
         } else {
             (0..env("RUNNERD_INVARIANT_CASES").unwrap_or(CASES)).collect()
         };
-        for seed in seeds {
-            if let Err(broke) = case(seed) {
-                panic!("seed {seed}:\n{broke}");
+        let mut lowered = 0;
+        for seed in &seeds {
+            match case(*seed) {
+                Ok(count) => lowered += count,
+                Err(broke) => panic!("seed {seed}:\n{broke}"),
             }
         }
+        assert!(
+            seeds.len() < 8 || lowered > 0,
+            "the sequences lower cpus somewhere"
+        );
     }
 }

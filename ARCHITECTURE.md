@@ -280,7 +280,8 @@ adopted too and drains as it would after a reload.
   `sizing::auto::changes` picks through the same check and commit (`api::control::replace`): `memory`, `slots` and
   `cpus`, one change per profile at a time, a raise at most once per `[sizing] raise_interval` and a lowering once
   per `interval` ([ADR 0049](docs/adr/0049-auto-sizing-without-hand-tuning.md)), never lowering a profile while a
-  job is on its cap, taking back at the next look a lowering a run met or a job failed at
+  job is on its cap, never lowering `cpus` under `measured` admission or on runs whose bursts met the CPU cap
+  ([ADR 0075](docs/adr/0075-cpus-come-down-only-under-a-cap-no-burst-met.md)), taking back at the next look a lowering a run met or a job failed at
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)), never leaving a profile's bounds,
   and never writing a file that changed on disk or a config without a slot a runner is in (the engine checks it
   before the commit). Each change is recorded as pending in the history, synced to disk, before its file is written,
