@@ -967,7 +967,7 @@ pub(super) fn created_of(path: &Path) -> Option<u64> {
 }
 
 /// Reads a body of at most `limit` bytes.
-async fn read(body: Incoming, limit: usize) -> Option<Bytes> {
+pub(super) async fn read(body: Incoming, limit: usize) -> Option<Bytes> {
     Limited::new(body, limit)
         .collect()
         .await
@@ -975,7 +975,7 @@ async fn read(body: Incoming, limit: usize) -> Option<Bytes> {
         .map(http_body_util::Collected::to_bytes)
 }
 
-fn json(value: &serde_json::Value) -> Response<Body> {
+pub(super) fn json(value: &serde_json::Value) -> Response<Body> {
     let mut response = Response::new(
         Full::new(Bytes::from(value.to_string()))
             .map_err(|never| match never {})

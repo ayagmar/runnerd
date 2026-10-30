@@ -2,7 +2,8 @@
 
 Amended by [0053](0053-build-cache-written-by-own-pull-requests.md): a repository can let its own branches' pull
 requests that people opened write. Amended by [0082](0082-github-actions-cache-served-from-the-host.md): the same
-socket and store can serve GitHub Actions' cache.
+socket and store can serve GitHub Actions' cache. Amended by [0083](0083-turborepo-and-nx-from-the-build-cache.md):
+they serve Turborepo's remote cache, and Nx's to workflows that ask.
 
 Status: **Accepted** (2026-10-24). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md).
 

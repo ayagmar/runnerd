@@ -335,7 +335,10 @@ async fn each_tool_has_its_own_keys_and_no_path_leaves_them() {
     for path in [
         "/gradle/../../other/app/gradle/abc",
         "/gradle/%2e%2e/abc",
-        "/turbo/v8/artifacts/abc",
+        "/turbo/abc",
+        "/turbo/v8/artifacts/",
+        "/turbo/v8/artifacts/../../../gradle/abc",
+        "/nx/abc",
         "/gradle/",
         "/abc",
     ] {
@@ -343,6 +346,142 @@ async fn each_tool_has_its_own_keys_and_no_path_leaves_them() {
         assert_eq!(request(&app, "PUT", path, b"x").await.0, 404, "{path}");
     }
     assert_eq!(cache.size().entries, 3);
+}
+
+#[tokio::test]
+async fn turbo_and_nx_restore_what_main_built_and_never_what_a_pull_request_sent() {
+    let Cache { cache, _dir } = open("turbo", 1 << 20);
+    let main = cache.attach("main", "o/app", ActionsCache::Off).unwrap();
+    let pull = cache.attach("pull", "o/app", ActionsCache::Off).unwrap();
+    let reader = cache.attach("reader", "o/app", ActionsCache::Off).unwrap();
+    cache.decide("main", Writes::Allowed, Scopes::default());
+    cache.decide("pull", Writes::Refused, Scopes::default());
+    // As turbo and Nx send them, turbo with its team in the query: main's task, and one only the pull request ran.
+    let turbo = |hash: &str| format!("/turbo/v8/artifacts/{hash}?slug=runnerd");
+    let nx = |hash: &str| format!("/nx/v1/cache/{hash}");
+    for (built, pulled) in [
+        (turbo("4f9a1c2b3d4e5f60"), turbo("70e5d4c3b2a1f90e")),
+        (nx("1234567890"), nx("9876543210")),
+    ] {
+        assert_eq!(request(&main, "PUT", &built, b"outputs").await.0, 200);
+        assert_eq!(request(&pull, "PUT", &built, b"poison").await.0, 200);
+        assert_eq!(request(&pull, "PUT", &pulled, b"poison").await.0, 200);
+        assert_eq!(
+            request(&reader, "GET", &built, b"").await,
+            (200, b"outputs".to_vec()),
+            "{built}: main's, not the pull request's"
+        );
+        assert_eq!(request(&reader, "GET", &pulled, b"").await.0, 404);
+    }
+    assert_eq!(
+        request(&reader, "HEAD", &turbo("4f9a1c2b3d4e5f60"), b"").await,
+        (200, Vec::new())
+    );
+    let counts = cache.detach("reader").unwrap();
+    assert_eq!((counts.hits, counts.misses, counts.read_bytes), (2, 2, 14));
+    assert_eq!(cache.detach("pull").unwrap().refused, 4);
+    assert_eq!(cache.detach("main").unwrap().written_bytes, 14);
+}
+
+#[tokio::test]
+async fn turbo_finds_its_cache_enabled_and_a_dry_run_looks_up_many_hashes_at_once() {
+    let Cache { cache, _dir } = open("turbo-api", 1 << 20);
+    let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
+    let other = cache.attach("other", "o/other", ActionsCache::Off).unwrap();
+    cache.decide("app", Writes::Allowed, Scopes::default());
+    assert_eq!(
+        request(&app, "PUT", "/turbo/v8/artifacts/aa11", b"dist")
+            .await
+            .0,
+        200
+    );
+    let (code, body) = request(&app, "GET", "/turbo/v8/artifacts/status", b"").await;
+    assert_eq!(code, 200);
+    assert_eq!(
+        serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+        serde_json::json!({ "status": "enabled" })
+    );
+    assert_eq!(
+        request(&app, "POST", "/turbo/v8/artifacts/events", b"[{}]")
+            .await
+            .0,
+        200
+    );
+    let query = br#"{"hashes":["aa11","bb22","../aa11"]}"#;
+    for (dir, hit) in [
+        (&app, serde_json::json!({ "taskDurationMs": 0 })),
+        (&other, serde_json::Value::Null),
+    ] {
+        let (code, body) = request(dir, "POST", "/turbo/v8/artifacts?slug=runnerd", query).await;
+        assert_eq!(code, 200);
+        assert_eq!(
+            serde_json::from_slice::<serde_json::Value>(&body).unwrap(),
+            serde_json::json!({ "aa11": hit, "bb22": null, "../aa11": null }),
+            "a repository finds only its own artifacts"
+        );
+    }
+    // turbo then asks each hash with a HEAD.
+    assert_eq!(
+        request(&app, "POST", "/turbo/v8/artifacts", b"not json")
+            .await
+            .0,
+        400
+    );
+    assert_eq!(
+        request(&app, "PUT", "/turbo/v8/artifacts/status", b"x")
+            .await
+            .0,
+        405
+    );
+    let counts = cache.detach("app").unwrap();
+    assert_eq!(
+        (counts.hits, counts.misses),
+        (0, 0),
+        "a dry run's lookups are not a build's"
+    );
+    assert_eq!(cache.size().entries, 1);
+}
+
+#[tokio::test]
+async fn turbos_artifacts_keep_to_the_limits_and_outlive_a_restart() {
+    let dir = TestDir::new("turbo-restart");
+    let (entries, sockets) = (dir.0.join("entries"), dir.0.join("sockets"));
+    let first = BuildCache::open(&entries, &sockets, 4 * ENTRY as u64).unwrap();
+    let mounted = first.attach("app", "o/app", ActionsCache::Off).unwrap();
+    first.decide("app", Writes::Allowed, Scopes::default());
+    let path = "/turbo/v8/artifacts/aa11";
+    assert_eq!(request(&mounted, "PUT", path, &[1; ENTRY]).await.0, 200);
+    assert_eq!(
+        request(&mounted, "PUT", "/turbo/v8/artifacts/bb22", &[0; ENTRY + 1])
+            .await
+            .0,
+        200,
+        "answered as stored"
+    );
+    drop(first);
+    let second = BuildCache::open(&entries, &sockets, 4 * ENTRY as u64).unwrap();
+    assert_eq!(
+        second.attach("app", "o/app", ActionsCache::Off).unwrap(),
+        mounted
+    );
+    assert_eq!(
+        request(&mounted, "GET", path, b"").await,
+        (200, vec![1; ENTRY])
+    );
+    assert_eq!(
+        request(&mounted, "GET", "/turbo/v8/artifacts/bb22", b"")
+            .await
+            .0,
+        404,
+        "over a quarter of the limit"
+    );
+    let query = br#"{"hashes":["aa11"]}"#;
+    assert_eq!(
+        request(&mounted, "POST", "/turbo/v8/artifacts", query)
+            .await
+            .1,
+        br#"{"aa11":{"taskDurationMs":0}}"#.to_vec()
+    );
 }
 
 #[tokio::test]

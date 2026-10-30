@@ -1,13 +1,15 @@
-//! The build cache every runner shares (ADR 0052, 0053): the entries of Gradle's HTTP build cache, and of the other
-//! tools the runner image points at it, kept per repository in a directory of the daemon's and served to each runner
-//! on a Unix socket of its own, which the runner image forwards to `127.0.0.1`. Owns the entries, the size limit, the
-//! sockets, and what each runner was served and stored. Which socket a request came in on is who sent it; no job can
-//! claim another's. It never decides whether a job may write: the engine tells it (`Writes`), from what GitHub says
-//! of the job. It never logs a request's headers, which may carry a tool's token. Where the config turns it on, the
-//! same socket serves GitHub Actions' cache (`actions`, ADR 0082) from the same entries' directory and limits.
+//! The build cache every runner shares (ADR 0052, 0053, 0083): the entries of Gradle's HTTP build cache, and of the
+//! other tools the runner image points at it, Turborepo's and Nx's among them, kept per repository in a directory of
+//! the daemon's and served to each runner on a Unix socket of its own, which the runner image forwards to
+//! `127.0.0.1`. Owns the entries, the size limit, the sockets, and what each runner was served and stored. Which
+//! socket a request came in on is who sent it; no job can claim another's. It never decides whether a job may write:
+//! the engine tells it (`Writes`), from what GitHub says of the job. It never logs a request's headers, which may
+//! carry a tool's token. Where the config turns it on, the same socket serves GitHub Actions' cache (`actions`, ADR
+//! 0082) from the same entries' directory and limits.
 
 pub(crate) mod actions;
 mod serve;
+mod turbo;
 
 use std::collections::{BTreeSet, HashMap};
 use std::io;

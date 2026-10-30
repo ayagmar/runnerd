@@ -88,3 +88,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md) | A job starts in the free slot that ran it last, else one that ran its repository |
 | [0081](0081-waits-leave-out-the-time-no-runnerd-ran.md) | Waits leave out the time no runnerd ran, and the history's schema changes in steps from 15 |
 | [0082](0082-github-actions-cache-served-from-the-host.md) | GitHub Actions' cache served from the host, on by default |
+| [0083](0083-turborepo-and-nx-from-the-build-cache.md) | Turborepo's remote cache served from the build cache, Nx's on request |
