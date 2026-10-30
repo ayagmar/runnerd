@@ -1459,7 +1459,7 @@ pub fn resize_profile(
     let values = [
         (
             "memory",
-            toml_edit::Value::from(ByteSize(resize.memory).to_string()),
+            toml_edit::Value::from(ByteSize(resize.memory).exact()),
         ),
         ("slots", toml_edit::Value::from(i64::from(resize.slots))),
     ];
@@ -1805,6 +1805,29 @@ impl fmt::Display for ByteSize {
 }
 
 impl ByteSize {
+    /// The size as a config file writes it, reading back to the byte: `Display`'s form when that reads back as it,
+    /// else the shortest exact decimal in one of the units, such as `1029.5G` where `Display` says `1.01T`. A size
+    /// written from it, as auto sizing writes `memory`, is the size the config check then reads.
+    #[allow(
+        clippy::cast_precision_loss,
+        reason = "a unit is a power of two, so the quotient is exact below 2^53 bytes; the parse checks it"
+    )]
+    pub fn exact(self) -> String {
+        let reads_back = |text: &String| text.parse::<ByteSize>() == Ok(self);
+        let shown = self.to_string();
+        if reads_back(&shown) {
+            return shown;
+        }
+        let mut shortest: Option<String> = None;
+        for (unit, factor) in UNITS {
+            let text = format!("{}{unit}", self.0 as f64 / factor as f64);
+            if reads_back(&text) && shortest.as_ref().is_none_or(|best| text.len() < best.len()) {
+                shortest = Some(text);
+            }
+        }
+        shortest.unwrap_or(shown)
+    }
+
     /// The size rounded to the nearest, for a label too narrow for its `Display`: two significant digits below 10
     /// of its unit, whole units above, and the next unit up once it rounds to 1024: `3.3G` for 3.25G, `12G`,
     /// `512M`, and `1G` for 1023.5M. Every client's budget bar labels a block with it.

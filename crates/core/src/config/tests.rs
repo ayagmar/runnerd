@@ -497,6 +497,39 @@ fn example_config_pulls_published_images_no_older_than_this_release() {
 }
 
 #[test]
+fn a_resized_memory_reads_back_to_the_byte_at_every_scale() {
+    // Every 256M step to 3T, where `Display` switches to T and keeps two decimals, and sizes off any step.
+    let granules = (1..=12 * 1024).map(|step| step * (256 << 20));
+    let odd = [
+        1,
+        1023,
+        (1 << 30) + 1,
+        (1029 << 30) + (5 << 29) + 4097,
+        5 << 40,
+    ];
+    for memory in granules.chain(odd) {
+        let resized = super::resize_profile(
+            MINIMAL,
+            "app",
+            crate::api::Resize {
+                memory,
+                slots: 1,
+                cpus: None,
+            },
+        )
+        .unwrap();
+        let read = Config::parse(&resized).unwrap().profiles["app"].memory;
+        assert_eq!(read, ByteSize(memory), "{resized}");
+    }
+    assert_eq!(ByteSize(1029 * (1 << 30) + (1 << 29)).exact(), "1029.5G");
+    assert_eq!(
+        ByteSize(9 << 30).exact(),
+        "9G",
+        "a size Display says exactly"
+    );
+}
+
+#[test]
 fn a_resized_profile_keeps_the_rest_of_the_file_as_written() {
     let text = MINIMAL.replace(
         "memory = \"4G\"\nslots = 1",
