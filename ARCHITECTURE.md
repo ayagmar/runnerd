@@ -364,7 +364,8 @@ adopted too and drains as it would after a reload.
   the engine commits no container whose changes still hold one (`record::secrets_left`). Checking and committing a
   container run off the engine's loop.
 - A file in the cache layer that may hold a token (`CACHE_SECRETS` in `image/layers.sh`: cargo's credentials and
-  config, Gradle's `gradle.properties` and init scripts, the Maven wrapper's settings, Hugging Face's tokens) never
+  config, Gradle's `gradle.properties` and init scripts, Maven's `settings.xml` and `settings-security.xml`, Hugging
+  Face's tokens) never
   reaches the next job in the slot, a record shell or a new snapshot, including one an older snapshot holds
   ([ADR 0035](docs/adr/0035-runner-image-stages.md),
   [ADR 0077](docs/adr/0077-cache-credentials-closed-slots-and-build-cache-counts.md)). Anything else a job writes to

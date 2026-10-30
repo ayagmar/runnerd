@@ -105,9 +105,9 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
 2. Update every place that names the version. `git grep -nF <old version> -- ':!Cargo.lock' ':!site/pnpm-lock.yaml'`
    finds them; today they are:
    - `examples/runnerd.toml`: each profile's `image` tag (the doctor tests compare it with the crate version);
-   - `crates/core/src/config.rs`: the `image` key's doc comment;
-   - the site: `install.md`, `configuration.mdx`, `clients.mdx`, `src/pages/index.astro` and the TUI frames in
-     `src/assets/tui/`, which are recaptured rather than edited.
+   - `crates/core/src/config.rs` and `crates/core/src/docker.rs`: the doc comments that show an image tag;
+   - the site: `install.md`, `configuration.mdx`, `admission.mdx`, `clients.mdx`, `src/pages/index.astro` and the TUI
+     frames in `src/assets/tui/`, which are recaptured rather than edited.
 
    `crates/wire-compat` names the previous release, not this one; it moves after the tag (step 6).
    Tests that use a version only as an example stay.

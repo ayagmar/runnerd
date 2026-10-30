@@ -11,8 +11,11 @@ runnerd runs ephemeral GitHub Actions runners on one Linux host. Each job gets a
 repositories you configure share slots inside a memory budget.
 
 - It records every job's memory and CPU use and sizes each profile from it: memory from peaks, CPUs from
-  averages, slots from how long jobs waited (`runnerd init` turns this on), so you don't tune it by hand.
-- Slots share one build cache that the default branch writes, and a fresh runner can wait ready for the next job.
+  averages and from how often the CPU cap throttled a job, slots from how long jobs waited (`runnerd init` turns
+  this on), so you don't tune it by hand.
+- Runners share one build cache (Gradle, sccache, Bazel, Turborepo, Nx) that the default branch writes, and
+  GitHub Actions' cache is served from the host's disk. A job starts in the slot that ran it last, and a fresh
+  runner can wait ready for the next job.
 - Every queued job shows why it waits; `runnerctl insights` reports slow and flaky jobs and what
   the minutes would have cost on GitHub-hosted runners.
 - A failed job's runner can be kept, so you can open a shell in it.
@@ -65,6 +68,7 @@ runs-on: [self-hosted, linux, x64]
 ```
 
 Serve only private repositories: on a public one, anyone who opens a pull request can run code on this host.
+`runnerd init` and `runnerd doctor` warn for a public one.
 
 ## Requirements
 

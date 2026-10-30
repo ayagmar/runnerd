@@ -63,6 +63,13 @@ Send a workflow job here with:
 A job runs here only when every label in its runs-on is in its repository's labels in runnerd.toml; other jobs, such as runs-on: ubuntu-latest, stay on GitHub's runners.
 ```
 
+A repository that is public gets a warning instead of an `ok`, with the fix:
+
+```text
+WARN  repository: halyard/docs-site is public: anyone who opens a pull request on it can run code on this host, and their jobs share runnerd's caches with your trusted jobs
+      fix: serve private repositories only; for a public one, have GitHub require approval before it runs workflows from fork pull requests (the repository's Actions settings)
+```
+
 Run the root commands your `init` printed, then:
 
 ```sh

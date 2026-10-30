@@ -14,7 +14,7 @@ runnerd reads its [job history](../running/#job-history) for what changed in you
 | Near its cap | the 95th percentile of a job's memory peaks over its last 10 runs in the profile it last ran in is 85% or more of that profile's `memory`. It says whether [auto sizing](../admission/#auto-sizing) raises the profile, cannot, or is off. A notice when auto sizing raises it or only one run came that close; a warning otherwise. |
 | Cold cache | a job's last 5 runs that could write to the [build cache](../running/#build-cache) and looked up 10 entries or more, at least 3 such runs, found 10% or less of what they looked up: the runs before them stored what they built, so their cache keys differ from run to run, such as from a timestamp or an absolute path among a task's inputs. A notice. |
 | Memory pressure | the kernel throttled the downloads of 2 or more of a repository's jobs in the window because their memory was under pressure (`sock_throttled`): the host was short of memory, or a job sat at its cap. A warning. runnerd already [holds starts back](../admission/#the-hosts-memory) while the host is short; this says it still happened. |
-| Waits | a repository's 95th-percentile wait this week is half again and a minute more than the week before. A notice, not a warning. A week before the history starts, or before what pruning kept, is left empty and compared with nothing. |
+| Waits | a repository's 95th-percentile wait this week is half again and a minute more than the week before. A notice, not a warning. A week before the history starts, or before what pruning kept, is left empty and compared with nothing. Waits leave out the time runnerd was not running ([how a wait is counted](../admission/#how-a-wait-is-counted)). |
 
 A job is its repository, workflow and job name. Warnings are what notifications send; notices only show. A slower job stops being reported once its slower runs are most of the runs before the last five, which with a few runs a day is about a week.
 
@@ -26,6 +26,13 @@ runnerctl insights --digest
 
 ```console wrap=false
 $ runnerctl insights
+This month: 264 job-minutes here, about $1.58 at GitHub's 2-core Linux rate before your plan's free minutes
+  264 minutes of 24 jobs at actions_linux (2-core Linux, $0.006 a minute): $1.58
+  An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
+Last 30 days: 264 job-minutes here, about $1.58 at GitHub's 2-core Linux rate before your plan's free minutes
+  264 minutes of 24 jobs at actions_linux (2-core Linux, $0.006 a minute): $1.58
+  An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
+
 warning slower    halyard/ledger: CI / test on main takes 6m 10s now, up from 4m 40s.
 warning near-cap  halyard/ledger: CI / integration peaks at 8.1G, 90% of jvm's 9G. Auto sizing is off: raise jvm's memory, or turn it on.
 warning flaky     halyard/storefront: CI / e2e failed and then passed on a re-run in 2 of its 31 runs.
@@ -40,15 +47,7 @@ The dashboard's Insights page shows the same as cards, with links to each run in
 
 ## What the minutes would have cost
 
-`runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days. The dashboard's overview, `runnerctl tui` and the daily digest show the month's line, whole: the TUI wraps it, and leaves it out rather than cut it when the terminal has no room.
-
-```console wrap=false
-This month: 2,184 job-minutes here, about $13.10 at GitHub's 2-core Linux rate before your plan's free minutes (14 jobs not priced)
-  2,184 minutes of 412 jobs at actions_linux (2-core Linux, $0.006 a minute): $13.10
-  9 jobs free on GitHub: on a standard runner, of a public repository
-  5 jobs not priced: lost, so how long they ran is not known
-  An estimate from this machine's run times, at each profile's priced_as and each repository's visibility as they are now; on GitHub's runners the jobs would run longer or shorter
-```
+`runnerctl insights` opens with what this machine's job minutes would have cost on GitHub-hosted runners, this month (UTC) and over the last 30 days, as in its output above. The dashboard's overview, `runnerctl tui` and the daily digest show the month's line, whole: the TUI wraps it, and leaves it out rather than cut it when the terminal has no room.
 
 Each job that a runner here took and GitHub reported completed is billed as GitHub bills it: its minutes rounded up, at least one, at the per-minute rate of the runner its profile's [`priced_as`](../configuration/#profilesname) names. A profile with more CPUs than GitHub's 2-core runner may be worth pricing at `linux_4_core` or `linux_8_core`; the figure moves with that choice, for the whole history.
 
