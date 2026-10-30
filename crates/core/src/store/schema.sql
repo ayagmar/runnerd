@@ -138,7 +138,8 @@ CREATE TABLE cache_sizes (
 ) WITHOUT ROWID;
 
 -- mirror_log_until: the Docker timestamp (ns) of the last mirror log line counted; mirror_log_seen: how many lines
--- logged at exactly that time were counted.
+-- logged at exactly that time were counted; opened_at: when a daemon last opened the history, a sign of life that
+-- ends a downtime (ADR 0081).
 CREATE TABLE meta (
     key TEXT PRIMARY KEY,
     value INTEGER NOT NULL

@@ -142,6 +142,31 @@ fn a_waiting_job_has_waited_until_now_and_one_that_ended_unstarted_has_no_wait()
 }
 
 #[test]
+fn a_job_never_says_more_of_its_wait_passed_while_runnerd_was_down_than_it_waited() {
+    let down = |unseen: u64| {
+        timed(
+            JobState::Completed,
+            Timeline {
+                queued_at: 100,
+                started_at: Some(160),
+                unseen,
+                ..Timeline::default()
+            },
+        )
+        .unseen_note(200)
+    };
+    assert_eq!(down(0), None);
+    assert_eq!(
+        down(45).as_deref(),
+        Some("45s of it while runnerd was not running")
+    );
+    assert_eq!(
+        down(3600).as_deref(),
+        Some("1m 00s of it while runnerd was not running")
+    );
+}
+
+#[test]
 fn a_final_job_without_a_finish_time_claims_no_run_time() {
     let started = Timeline {
         queued_at: 100,

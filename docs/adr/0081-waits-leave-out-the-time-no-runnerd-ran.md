@@ -19,9 +19,10 @@ and `GET /v1/stats` (SQL). Only the first two had #150's clip.
 
 - **What a job waited through.** Each job keeps `unseen`, the milliseconds of its wait that passed while no runnerd
   ran (schema 16). When the daemon opens the history, the time from the history's last sign of life (its newest host
-  sample or event) to now is downtime. Every job still queued gets the part of it after its queueing; a job queued
-  before now that this daemon records later gets the same. Without a sign of life, as in a new history, nothing is
-  added: the history's start already clips those waits. Host samples are stored a minute at a time, so after a crash
+  sample, event, or open) to now is downtime. Every job still queued gets the part of it after its queueing; a job
+  queued before now that this daemon records later gets the same. The open records itself (`meta.opened_at`) in the
+  same transaction, so a start that fails after the open and is retried does not hand out the same downtime again.
+  Without a sign of life, as in a new history, nothing is added: the history's start already clips those waits. Host samples are stored a minute at a time, so after a crash
   up to a minute more counts as downtime. A runner that outlived the last daemon may take a queued job while none
   runs: when GitHub's start time first says so, the part of the downtime after it comes off again. GitHub's listing
   lag and a paused repository's time are not downtime, and stay in the wait.
@@ -31,8 +32,8 @@ and `GET /v1/stats` (SQL). Only the first two had #150's clip.
   through activity, insights and stats. Sizing still also takes out what a job waited for the host's memory.
   Arrivals keep `queued_at`: `runnerd simulate` and warm runners model the queue as GitHub made it.
 - **A job's own wait** stays queued-to-started, as GitHub shows it. `Timeline.unseen` (seconds, default 0) carries the
-  part no runnerd saw, and core words it (`7h 00m of it while runnerd was not running`) for the job pages of the TUI,
-  the dashboard and `runnerctl job`.
+  part no runnerd saw, and core words it (`7h 00m of it while runnerd was not running`), never more than the wait,
+  for the job pages of the TUI, the dashboard and `runnerctl job`.
 - **Schema changes are steps.** `store::MIGRATIONS` lists them from version 15, each with the version it brings a
   history to, each in its own transaction. A new history still gets `schema.sql`. A test brings 0.0.22's schema 15
   (a frozen copy in `store/tests/schema-15.sql`) forward and compares every table's columns and every index with a

@@ -104,10 +104,12 @@ impl JobSummary {
         Some(end.saturating_sub(self.timeline.queued_at))
     }
 
-    /// What of its wait passed while no runnerd ran, to follow it: `8h 10m of it while runnerd was not running`.
-    /// `None` when none did.
-    pub fn unseen_note(&self) -> Option<String> {
-        let unseen = self.timeline.unseen;
+    /// What of its wait at `now` passed while no runnerd ran, to follow it: `8h 10m of it while runnerd was not
+    /// running`, never more than the wait. `None` when none did.
+    pub fn unseen_note(&self, now: u64) -> Option<String> {
+        let unseen = self.waited(now).map_or(self.timeline.unseen, |waited| {
+            waited.min(self.timeline.unseen)
+        });
         (unseen > 0).then(|| {
             format!(
                 "{} of it while runnerd was not running",

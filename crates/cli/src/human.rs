@@ -462,7 +462,7 @@ fn timeline(summary: &JobSummary, now: u64, paint: Paint) -> String {
         table.row(vec![plain(milestone.label), plain(offset)]);
     }
     out.push_str(&table.render(paint, "  "));
-    if let (Some(waited), Some(note)) = (summary.waited(now), summary.unseen_note()) {
+    if let (Some(waited), Some(note)) = (summary.waited(now), summary.unseen_note(now)) {
         let _ = writeln!(
             out,
             "  {}",

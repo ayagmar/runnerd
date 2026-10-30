@@ -1089,8 +1089,8 @@ fn prepare(db: &mut Connection) -> Result<(), StoreError> {
 }
 
 /// The time before this daemon when no runnerd ran, in ms: from the history's last sign of life, its newest host
-/// sample or event, to this daemon's start. Host samples are stored a minute's worth at a time, so a crash may
-/// count up to a minute more. Without a sign of life, as in a new history, there is none: the history's start
+/// sample, event or open, to this daemon's start. Host samples are stored a minute's worth at a time, so a crash
+/// may count up to a minute more. Without a sign of life, as in a new history, there is none: the history's start
 /// clips the waits of jobs queued before it (`history_kept`).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 struct Downtime {
@@ -1100,32 +1100,37 @@ struct Downtime {
 
 impl Downtime {
     /// The downtime before a daemon that starts at `now`; the jobs still queued in the history leave it out of
-    /// their waits, as the ones first seen after do when they are recorded.
+    /// their waits, as the ones first seen after do when they are recorded. The open is a sign of life itself, kept
+    /// with them: a start that fails after it, and is retried, does not hand out the same downtime again.
     fn before(db: &mut Connection, now: u64) -> Result<Option<Downtime>, StoreError> {
-        let last: Option<u64> = db.query_row(
-            "SELECT max(at) FROM (SELECT max(at) AS at FROM host_samples UNION ALL SELECT max(at) FROM events)",
+        let transaction = db.transaction()?;
+        let last: Option<u64> = transaction.query_row(
+            "SELECT max(at) FROM (SELECT max(at) AS at FROM host_samples UNION ALL SELECT max(at) FROM events \
+             UNION ALL SELECT value FROM meta WHERE key = 'opened_at')",
             [],
             |row| row.get(0),
         )?;
-        let Some(downtime) = last
+        let downtime = last
             .filter(|last| *last < now)
-            .map(|from| Downtime { from, until: now })
-        else {
-            return Ok(None);
-        };
-        let transaction = db.transaction()?;
-        let queued: Vec<(u64, u64)> = transaction
-            .prepare("SELECT id, queued_at FROM jobs WHERE state = 'queued'")?
-            .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
-            .collect::<rusqlite::Result<_>>()?;
-        for (job, queued_at) in queued {
-            transaction.execute(
-                "UPDATE jobs SET unseen = unseen + ?2 WHERE id = ?1",
-                rusqlite::params![job, downtime.of(queued_at)],
-            )?;
+            .map(|from| Downtime { from, until: now });
+        if let Some(downtime) = downtime {
+            let queued: Vec<(u64, u64)> = transaction
+                .prepare("SELECT id, queued_at FROM jobs WHERE state = 'queued'")?
+                .query_map([], |row| Ok((row.get(0)?, row.get(1)?)))?
+                .collect::<rusqlite::Result<_>>()?;
+            for (job, queued_at) in queued {
+                transaction.execute(
+                    "UPDATE jobs SET unseen = unseen + ?2 WHERE id = ?1",
+                    rusqlite::params![job, downtime.of(queued_at)],
+                )?;
+            }
         }
+        transaction.execute(
+            "INSERT OR REPLACE INTO meta (key, value) VALUES ('opened_at', ?1)",
+            [now],
+        )?;
         transaction.commit()?;
-        Ok(Some(downtime))
+        Ok(downtime)
     }
 
     /// How much of it a job queued at `queued_at` (ms) waited through.

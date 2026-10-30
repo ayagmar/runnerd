@@ -249,9 +249,39 @@ async fn waits_leave_out_the_time_no_runnerd_ran_wherever_they_are_counted() {
     let job = second.job(3).await.unwrap().unwrap().summary;
     assert_eq!(job.waited(now), Some(7 * 3600 + 100));
     assert_eq!(
-        job.unseen_note().as_deref(),
+        job.unseen_note(now).as_deref(),
         Some("7h 00m of it while runnerd was not running")
     );
     let seen = second.job(4).await.unwrap().unwrap().summary;
-    assert_eq!((seen.waited(now), seen.unseen_note()), (Some(40), None));
+    assert_eq!((seen.waited(now), seen.unseen_note(now)), (Some(40), None));
+}
+
+#[tokio::test]
+async fn an_open_whose_start_then_fails_does_not_hand_out_the_same_downtime_again() {
+    let dir = TestDir::new("store-reopen");
+    let path = dir.0.join("runnerd.db");
+    let start = crate::time::now_ms() / SECOND * SECOND + SECOND;
+    let first = Store::open_at(&path, start).unwrap();
+    first.queued(
+        "o/r",
+        &QueuedJob {
+            created_at: start + 10 * SECOND,
+            ..queued(1)
+        },
+    );
+    first.flush().await;
+    drop(first);
+    // Eight hours later a start fails after the history opened, writing nothing; systemd retries 3 s later, and
+    // that one runs.
+    let restart = start + 8 * HOUR;
+    drop(Store::open_at(&path, restart).unwrap());
+    let retried = Store::open_at(&path, restart + 3 * SECOND).unwrap();
+    // An open at the same time as the last adds nothing at all.
+    drop(retried);
+    let store = Store::open_at(&path, restart + 3 * SECOND).unwrap();
+    let job = store.job(1).await.unwrap().unwrap().summary;
+    assert_eq!(
+        job.timeline.unseen,
+        (8 * HOUR - 10 * SECOND + 3 * SECOND) / SECOND
+    );
 }

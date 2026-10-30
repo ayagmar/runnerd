@@ -833,7 +833,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
             .into(),
             build_cache_refused,
             cpu_time: api::cpu_time(job.summary.metrics.cpu_time.expect("its CPU time")),
-            unseen: job.summary.unseen_note().expect("downtime in its wait"),
+            unseen: job.summary.unseen_note(NOW).expect("downtime in its wait"),
             failed: compared.failed,
             finished: compared.finished,
         },

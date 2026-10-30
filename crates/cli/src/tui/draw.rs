@@ -2235,7 +2235,7 @@ fn job_details(app: &App, job: &Job, now: u64) -> Vec<(u8, String)> {
         }
     }
     if let Some(waited) = summary.waited(now) {
-        let waited = match summary.unseen_note() {
+        let waited = match summary.unseen_note(now) {
             Some(note) => format!("waited {}, {note}", duration(waited)),
             None => format!("waited {}", duration(waited)),
         };

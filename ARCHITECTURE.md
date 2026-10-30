@@ -262,9 +262,9 @@ adopted too and drains as it would after a reload.
   (`runnerd doctor`, `simulate`) reads an older history through temporary views
   ([ADR 0081](docs/adr/0081-waits-leave-out-the-time-no-runnerd-ran.md)).
 - A wait for a slot is `sizing::Wait::counted`: from queued, or the history's start, to started, less what of it
-  passed while no runnerd ran (`jobs.unseen`, which `Store::open` measures from the history's last sign of life).
-  Sizing, insights, activity and stats count it; a job's own page shows its whole wait and words the rest; arrivals
-  (`simulate`, warm runners) keep `queued_at` ([ADR 0081](docs/adr/0081-waits-leave-out-the-time-no-runnerd-ran.md)).
+  passed while no runnerd ran (`jobs.unseen`, which `Store::open` measures from the history's last sign of life,
+  recording itself as one). Sizing, insights, activity and stats count it; a job's own page shows its whole wait and
+  words the rest; arrivals (`simulate`, warm runners) keep `queued_at` ([ADR 0081](docs/adr/0081-waits-leave-out-the-time-no-runnerd-ran.md)).
 - Only the store's writer thread writes the database; every write goes through `Store`'s queue, in order. The one
   exception is pruning, which only deletes, on its own connection, a batch per transaction
   ([ADR 0027](docs/adr/0027-pruning-runs-beside-the-writer.md)).
