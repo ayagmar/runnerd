@@ -306,7 +306,8 @@ adopted too and drains as it would after a reload.
   `cpus`, one change per profile at a time, a raise at most once per `[sizing] raise_interval` and a lowering once
   per `interval` ([ADR 0049](docs/adr/0049-auto-sizing-without-hand-tuning.md)), never lowering a profile while a
   job is on its cap, never lowering `cpus` under `measured` admission (where runs the cap held back raise them) or on
-  runs the cap held back: throttled in a tenth of their busy time, or without that figure bursting to the cap
+  runs the cap held back: throttled in 15% of their run, or without that figure bursting to the cap; a measured raise
+  goes on only while the one before made the job's runs faster or less throttled
   ([ADR 0075](docs/adr/0075-cpus-come-down-only-under-a-cap-no-burst-met.md),
   [ADR 0079](docs/adr/0079-cpu-weights-and-throttling-as-evidence.md)), taking back at the next look a lowering a run met or a job failed at
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)), never leaving a profile's bounds,
@@ -346,8 +347,9 @@ adopted too and drains as it would after a reload.
   the whole budget; under caps every runner counts at its CPU limit. The mirror, seeds and shells reserve none, no
   runner is stopped for CPU, and a job held 2 minutes for CPU stops younger starts until it fits
   ([ADR 0038](docs/adr/0038-cpu-admission.md)).
-- Every container runnerd starts in the slice has CPU shares of 1024 a CPU of its `cpus` (`docker::cpu_shares`), so
-  a full slice's CPUs go to its runners by `cpus`; `cpus` stays each container's quota, with no ceiling above it
+- Every runner container and record shell has CPU shares of 1024 a CPU of its `cpus` (`docker::cpu_shares`), so a
+  full slice's CPUs go to its runners by `cpus`, and the mirror keeps Docker's default weight; `cpus` stays each
+  container's quota, with no ceiling above it
   ([ADR 0079](docs/adr/0079-cpu-weights-and-throttling-as-evidence.md)).
 - The config file is replaced only by a config that validates against the slice's `MemoryMax`, by a temporary file
   renamed over it, and the engine runs a config only once its file is in place: no tick runs between the two.

@@ -30,19 +30,38 @@ The brief also proposed a ceiling above the reservation: a CPU limit some factor
   those samples lacks is unknown, never 0. The final record keeps them (`jobs.cpu_periods`, `cpu_throttled`,
   `cpu_stalled`). `JobMetrics` carries them as additive fields, and core words them for every client:
   `held at its CPU cap in 18% of its busy time, waited for a CPU 30% of its run`.
-- **Weights.** Each runner's container, a record's shell and the mirror get CPU shares of 1024 a CPU of their `cpus`,
-  within Docker's 2 to 262144, which Docker writes as cgroup v2's `cpu.weight`. They are siblings under the slice, so
-  when its CPUs are all in use they share them by `cpus`; idle CPUs still go to whoever has work, up to each one's
-  quota. The weights do nothing against programs outside the slice, which share the host with the slice by its own
-  `CPUWeight`. Both isolation backends keep the field: sysbox sets only the runtime.
-- **The cap held a run back** when its quota throttled it in `HELD` (10%) of its busy periods or more. 17% of the
-  gate's run was lost at 9 CPUs, and its busy periods are no more than its run's, so its share of them is higher
-  (28% in the model of its runs); a cap touched by a few bursts a minute stays far under 10%. A run without the figure,
-  as one from before schema 17 or on a kernel that keeps none, is judged by its peak as 0075 does: missing is not read
-  as never throttled, or every profile would read as unthrottled after the upgrade and the measured raise would stop.
-  Each run says what it can, so runs with and without the figure count together.
+- **Weights.** Each runner's container and a record's shell get CPU shares of 1024 a CPU of their `cpus`, within
+  Docker's 2 to 262144, which Docker writes as cgroup v2's `cpu.weight`. They are siblings under the slice, so when
+  its CPUs are all in use they share them by `cpus`; idle CPUs still go to whoever has work, up to each one's quota.
+  The mirror keeps Docker's default weight, 100, about a 2.5-CPU runner's: at its 1 CPU it would weigh 39 beside a
+  9-CPU runner's 352, and every job's image pulls go through it. The weights do nothing against programs outside the
+  slice, which share the host with the slice by its own `CPUWeight`. Both isolation backends keep the field: sysbox
+  sets only the runtime.
+- **The cap held a run back** when its quota throttled it in `HELD` (15%) of its run or more: its throttled periods
+  over its run's wall time in 100 ms periods (or the periods counted, if more). Not over `nr_periods`: the period
+  timer stops after a period the cgroup used nothing in, so those count only its busy time, and an 8-minute job idle
+  on its services between three 20-second compiles that want 20 CPUs is throttled in 550 of its 600 busy periods
+  (92%) but 11% of its run, and lost about 30 s of 480. A throttled period loses only part of its 100 ms, so the share
+  is more than the time lost: the gate lost 17% of its run at 9 CPUs and was throttled in 28% of it, 21% at 13 and
+  16% at 19, and 15% keeps it climbing while the 8-minute job stays. The job's own line, "in 18% of its busy time",
+  keeps the busy periods: it says how often the job hit the cap while it worked, not what sizing reads. A run without
+  the figure, as one from before schema 17 or on a kernel that keeps none, is judged by its peak as 0075 does: missing
+  is not read as never throttled, or every profile would read as unthrottled after the upgrade and the measured raise
+  would stop. Each run says what it can, so runs with and without the figure count together.
 - **Sizing.** Under `measured` admission, 3 runs of one job the cap held back raise `cpus` by `max_step`, within the
-  slice and the CPU budget as 0075 decided; the peak rule stays only for runs without the figure. Under `caps`, a
+  slice and the CPU budget as 0075 decided; the peak rule stays only for runs without the figure.
+- **A raise goes on only while the one before helped.** Before raising, the look finds the job's latest runs at other
+  `cpus`; when those were fewer, a raise came before, and with 3 runs or more there, the job's runs at the current
+  `cpus` must have taken less time at the median, or been throttled in less of their run at the median, than at the
+  `cpus` before. When neither did, the raise is refused, and `runnerctl sizing` says the raise from 9 to its 13 CPUs
+  did not help it, with both medians. The throttle rule shares the thread-pool argument against a ceiling below:
+  Gradle at 13 CPUs starts 13 workers, its runnable threads still pass the quota, and it stays throttled at every
+  cap, so without this the raise would climb to the slice, adding weight and memory at each step without making the
+  job faster. A job whose width does not follow the quota, as the gate's 23.5 CPUs, gets faster with each raise and
+  climbs until its quota stops throttling it. With no raise before (the first, or after a lowering) or too few runs
+  at the `cpus` before, nothing says it did not help, and the raise is made. The averages' raise (`BOUND`) is
+  unchanged.
+- Under `caps`, a
   lowering holds while any run it reads was held back, whatever its peak, and still never goes under the runs'
   highest peak. A run slowed by contention, waiting for a CPU without its quota throttling it, raises nothing: the
   slice is short, not the profile. `cpu.pressure` is shown, not read by sizing.
@@ -71,5 +90,9 @@ The brief also proposed a ceiling above the reservation: a CPU limit some factor
   `cpus`. A profile the old peaks raised stays where it is: nothing lowers under `measured`.
 - Under `caps`, a run whose peak met the cap without being throttled no longer holds a lowering, but the lowering
   still stops at that peak, rounded up, so it rarely moves.
-- When the slice is full, a large runner takes CPU from small ones it shared with evenly before, and the mirror weighs
-  as a runner with its `cpus` does.
+- When the slice is full, a large runner takes CPU from small ones it shared with evenly before; the mirror keeps the
+  default weight.
+- Runner containers made before the upgrade keep the default weight until they are replaced, which warm runners are
+  within their idle time, so for a while the slice mixes weighted and unweighted siblings.
+- A profile whose job stays throttled however many `cpus` it gets stops one raise above where it started throttling,
+  and `runnerctl sizing` says why on every look until its runs say otherwise or a hand edit starts the evidence over.
