@@ -626,6 +626,121 @@ fn under_measured_admission_a_cap_the_bursts_meet_goes_back_up_until_they_fit() 
     }
 }
 
+/// The owner's host: measured admission with a CPU budget of 1.5 times a 32-CPU slice, jvm cut to 9 CPUs and node to
+/// 7, a warm runner in each of jvm, node, light and caches.
+const LIVE: &str = r#"
+[host]
+slice = "runnerd.slice"
+isolation = "sysbox"
+admission = "measured"
+cpu_overcommit = 1.5
+
+[caches]
+mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h" }
+pnpm = { max_size = "5G" }
+maven = { max_size = "5G" }
+
+[profiles.caches]
+image_stage = "node"
+cpus = 2
+memory = "2G"
+slots = 2
+
+[profiles.jvm]
+image_stage = "jvm"
+cpus = 9
+memory = "13.25G"
+slots = 4
+
+[profiles.light]
+image_stage = "node"
+cpus = 2
+memory = "2G"
+slots = 4
+
+[profiles.node]
+image_stage = "node"
+cpus = 7
+memory = "9.75G"
+slots = 10
+
+[[repositories]]
+name = "halyard/ledger"
+profile = "jvm"
+labels = ["jvm"]
+
+[[repositories]]
+name = "halyard/storefront"
+profile = "node"
+labels = ["node"]
+
+[[repositories]]
+name = "halyard/lint"
+profile = "light"
+labels = ["light"]
+
+[[repositories]]
+name = "halyard/mirror"
+profile = "caches"
+labels = ["caches"]
+"#;
+
+#[test]
+fn under_measured_admission_with_a_cpu_budget_a_raise_stops_where_warm_runners_would_fill_it() {
+    // The gate bursts to 23.5 CPUs and node's builds to 16.5, so their runs meet any cap under that. Without a CPU
+    // budget both would climb past 24 and 17, and their idle warm runners alone would reserve more than its 48 CPUs.
+    // With it, each raise stops where every warm runner at its cap and one more runner at the largest cap fit.
+    let budget = cpu_budget(32_000, 1.5);
+    let mut text = LIVE.to_owned();
+    let mut jobs = Vec::new();
+    let mut last = BTreeMap::new();
+    let mut seen = Vec::new();
+    for look in 0..8 {
+        let now = NOW + look * 2 * HOUR;
+        let config = on(&text, "max_step = 50");
+        let (jvm, node) = (config.profiles["jvm"].cpus, config.profiles["node"].cpus);
+        seen.push((jvm, node));
+        let warm: u32 = config.profiles.values().map(|profile| profile.cpus).sum();
+        let largest = config
+            .profiles
+            .values()
+            .map(|profile| profile.cpus)
+            .max()
+            .unwrap();
+        assert!(
+            u64::from(warm + largest) * 1000 <= budget,
+            "warm runners and one more at {jvm}/{node} CPUs fit {budget}"
+        );
+        jobs.extend(gate(jvm, now - HOUR));
+        let node_cap = u64::from(node) * 1000;
+        jobs.extend(
+            bursts("build", 10, 4000, 16_500, node_cap, now - HOUR)
+                .into_iter()
+                .map(|run| Ran {
+                    repository: "halyard/storefront".to_owned(),
+                    profile: "node".to_owned(),
+                    memory_cap: Some(config.profiles["node"].memory.0),
+                    ..run
+                }),
+        );
+        let looked = look_at(&config, &history(jobs.clone()), Some(32_000), now, &last);
+        for change in &looked.changes {
+            text = resize_profile(&text, &change.profile, change.to).unwrap();
+            last.insert(change.profile.clone(), change.at);
+        }
+    }
+    assert_eq!(
+        seen.last(),
+        Some(&(17, 10)),
+        "raised, then held at the budget: {seen:?}"
+    );
+    assert!(
+        seen.windows(2)
+            .all(|pair| pair[0].0 <= pair[1].0 && pair[0].1 <= pair[1].1),
+        "{seen:?}"
+    );
+}
+
 #[test]
 fn under_measured_admission_cpus_never_come_down() {
     // Measured admission reserves a job's predicted average, not its cap: a lower cap frees no slot and only slows
@@ -1111,24 +1226,52 @@ mod invariants {
                 }
             }
         }
-        if let (Admission::Caps, Some(overcommit), Some(slice)) = (
-            config.host.admission,
-            config.host.cpu_overcommit,
-            world.slice,
-        ) {
+        if let (Some(overcommit), Some(slice)) = (config.host.cpu_overcommit, world.slice) {
             let mut after = world.daemon.running.clone();
             for change in &look.changes {
                 after = resize_profile(&after, &change.profile, change.to).unwrap();
             }
-            let (before, after) = (taken(&config), taken(&on(&after, &world.rules)));
+            let (held, what) = match config.host.admission {
+                Admission::Caps => (taken as fn(&Config) -> u64, "slots × cpus"),
+                Admission::Measured => (
+                    at_caps as fn(&Config) -> u64,
+                    "warm runners and one more at caps",
+                ),
+            };
+            let (before, after) = (held(&config), held(&on(&after, &world.rules)));
             let budget = cpu_budget(slice, overcommit);
             if after > before.max(budget) {
                 return Err(format!(
-                    "slots × cpus {before} → {after} past the budget {budget}"
+                    "{what} {before} → {after} past the budget {budget}"
                 ));
             }
         }
         Ok(())
+    }
+
+    /// What measured admission holds at caps, millicores: every profile's warm runners idle at their caps, and one
+    /// more runner at the largest cap.
+    fn at_caps(config: &Config) -> u64 {
+        let warm: u64 = config
+            .profiles
+            .iter()
+            .map(|(name, profile)| {
+                let pools: u32 = config
+                    .repositories
+                    .iter()
+                    .filter(|repository| repository.profile == *name)
+                    .map(|repository| repository.warm)
+                    .sum();
+                u64::from(pools.min(profile.slots)) * u64::from(profile.cpus)
+            })
+            .sum();
+        let largest = config
+            .profiles
+            .values()
+            .map(|profile| profile.cpus)
+            .max()
+            .unwrap_or(0);
+        (warm + u64::from(largest)) * 1000
     }
 
     /// Looks, checks what the look picks and applies it, as the daemon does every 5 minutes; nothing while the file

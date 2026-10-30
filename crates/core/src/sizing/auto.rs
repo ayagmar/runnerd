@@ -6,8 +6,9 @@
 //! leaves a profile outside its bounds, and sizes each profile against the budget the changes before it in the same
 //! look leave. Reads `cpus` only from runs at the profile's current `cpus` since its last change and since the daemon
 //! got them. Under `caps` admission raises them only on those runs' CPU averages, never on peaks: a parallel build
-//! peaks at whatever cap it gets, and there `cpus` take budget. Under `measured`, where they take none, runs whose
-//! bursts met the cap raise them too, and nothing lowers them. Under `caps` lowers them only when none of those runs
+//! peaks at whatever cap it gets, and there `cpus` take budget. Under `measured`, where a running job reserves its
+//! average, runs whose bursts met the cap raise them too, within what the CPU budget holds at caps, and nothing
+//! lowers them. Under `caps` lowers them only when none of those runs
 //! met the cap, never under their highest peak (ADR 0075).
 
 use std::collections::BTreeMap;
@@ -75,8 +76,9 @@ pub struct Context<'run> {
 ///
 /// `cpus` go up `max_step` percent, at least 1, when one job's runs at them since the profile's last change and since
 /// the daemon got them (`Context::cpus_set`), 3 at least, averaged `BOUND` percent of them at the median, or under
-/// `measured` admission peaked within `MET` percent of them; up to the slice's CPUs, and under `caps` with a CPU
-/// budget only as far as every profile's `slots × cpus` fit it. Under `caps` admission they come down, `interval` after the
+/// `measured` admission peaked within `MET` percent of them; up to the slice's CPUs, and with a CPU budget only as
+/// far as it holds: every profile's `slots × cpus` under `caps`; under `measured`, what that admission reserves at
+/// caps, every profile's warm runners and one more runner at the largest cap (`Budget::at_caps`). Under `caps` admission they come down, `interval` after the
 /// last change and by `max_step` percent at most, toward `HEADROOM` times the heaviest job's p95 average or the
 /// highest peak of those runs, whichever is larger, rounded up to whole CPUs, at least 1, once `min_jobs` such runs
 /// say so, every job among them has a measured average, and none peaked within `MET` percent of the cap. Under
@@ -253,6 +255,8 @@ struct Budget {
     cpus: u64,
     /// Each profile's slots.
     slots: BTreeMap<String, u32>,
+    /// Each profile's `cpus`.
+    each: BTreeMap<String, u32>,
 }
 
 impl Budget {
@@ -270,6 +274,8 @@ impl Budget {
             .saturating_sub(millicores(from))
             .saturating_add(millicores(to));
         self.slots.insert(name.to_owned(), to.slots);
+        self.each
+            .insert(name.to_owned(), to.cpus.unwrap_or(profile.cpus));
     }
 
     /// The budget the config takes as it is.
@@ -285,8 +291,52 @@ impl Budget {
                 .iter()
                 .map(|advised| (advised.name.clone(), advised.slots))
                 .collect(),
+            each: config
+                .profiles
+                .iter()
+                .map(|(name, profile)| (name.clone(), profile.cpus))
+                .collect(),
         }
     }
+
+    /// The CPUs, millicores, that measured admission holds at caps with `name` at `cpus`: every profile's warm
+    /// runners idle at their caps (`warm_runners`), and one more runner at the largest cap, as one of a job with no
+    /// prediction reserves.
+    fn at_caps(&self, config: &Config, name: &str, cpus: u32) -> u64 {
+        let each = |other: &str| {
+            if other == name {
+                cpus
+            } else {
+                self.each.get(other).copied().unwrap_or(0)
+            }
+        };
+        let warm: u64 = config
+            .profiles
+            .keys()
+            .map(|other| {
+                let slots = self.slots.get(other).copied().unwrap_or(0);
+                u64::from(warm_runners(config, other, slots)) * u64::from(each(other))
+            })
+            .sum();
+        let largest = config
+            .profiles
+            .keys()
+            .map(|other| each(other))
+            .max()
+            .unwrap_or(0);
+        (warm + u64::from(largest)) * 1000
+    }
+}
+
+/// How many warm runners `profile`'s pools keep at most, with `slots`: their `warm` added up, at most its slots.
+fn warm_runners(config: &Config, profile: &str, slots: u32) -> u32 {
+    config
+        .repositories
+        .iter()
+        .filter(|repository| repository.profile == profile)
+        .map(|repository| repository.warm)
+        .sum::<u32>()
+        .min(slots)
 }
 
 /// What the jobs queued since a profile's last change say about its slots: a raise reads only them, so one slot
@@ -733,11 +783,16 @@ fn job_named(job: JobKey<'_>) -> String {
     format!("{repository} {}", job_title(workflow, name, None))
 }
 
-/// A raise of `cpus` held back by the cap, as `held` says: `step` more, up to the slice's CPUs, and under `caps`
-/// admission with a CPU budget only as many as every profile's `slots × cpus` fit in it; refused, with why, when
-/// that is none.
+/// A raise of `name`'s `cpus` held back by the cap, as `held` says: `step` more, up to the slice's CPUs, and with a
+/// CPU budget only as many as it holds: under `caps` every profile's `slots × cpus`, under `measured` every profile's
+/// warm runners and one more runner at the largest cap (`Budget::at_caps`). Refused, with why, when that is none.
+#[expect(
+    clippy::too_many_arguments,
+    reason = "each is one thing a CPU raise reads; a struct for them would be read here only"
+)]
 fn raised(
     config: &Config,
+    name: &str,
     profile: &Profile,
     context: &Context<'_>,
     budget: &Budget,
@@ -769,6 +824,21 @@ fn raised(
             );
         }
     }
+    // Under measured admission a running job reserves its average, whatever its cap, but an idle warm runner and a
+    // runner whose job has no prediction reserve the cap.
+    if let (Admission::Measured, Some(overcommit)) =
+        (config.host.admission, config.host.cpu_overcommit)
+    {
+        let room = cpu_budget(slice, overcommit);
+        while to > current && budget.at_caps(config, name, to) > room {
+            to -= 1;
+            why = format!(
+                "{} CPUs do not fit the CPU budget with every profile's warm runners and one more runner at the \
+                 largest cap",
+                current.saturating_add(1)
+            );
+        }
+    }
     if to > current {
         CpuStep::To(Cpus { to, reason: held })
     } else {
@@ -779,8 +849,8 @@ fn raised(
 /// The profile's next `cpus`, from the CPU averages of its runs at its current `cpus` since `since` (ms), the last
 /// change, and since it got them (`runs_at`). A raise, `max_step` percent, at least 1, when one job's `RAISE_RUNS`
 /// runs or more averaged `BOUND` percent of the cap at the median, or under `measured` admission peaked within `MET`
-/// percent of it (kept, not refused, when the slice has no room): up to the slice's CPUs, and under `caps` admission with a CPU budget
-/// only as many as every profile's `slots × cpus` fit in it, at the `slots` this change gives; refused, with why,
+/// percent of it (kept, not refused, when there is no room): up to the slice's CPUs, and with a CPU budget only as many
+/// as `raised` fits in it, at the `slots` this change gives; refused, with why,
 /// when that is none. A lowering, under `caps` admission while `lowering` allows it, with `min_jobs` runs, none of a
 /// job without a measured average and none that peaked within `MET` percent of the cap: toward `HEADROOM` times the
 /// heaviest job's p95 average or the highest peak, whichever is larger, rounded up to whole CPUs, at least 1, by at
@@ -810,6 +880,18 @@ fn cpus(
     ));
     let jobs = runs_at(history, &advised.name, cap, since);
     let step = (current.saturating_mul(config.sizing.max_step) / 100).max(1);
+    let raise = |held| {
+        raised(
+            config,
+            &advised.name,
+            profile,
+            context,
+            budget,
+            slots,
+            step,
+            held,
+        )
+    };
     let bound = jobs
         .iter()
         .filter(|(_, read)| read.averages.len() as u64 >= RAISE_RUNS)
@@ -823,7 +905,7 @@ fn cpus(
             job_named(job),
             cores(median)
         );
-        return raised(config, profile, context, budget, slots, step, held);
+        return raise(held);
     }
     // Under measured admission `cpus` bound no slot: a cap the bursts meet only slows them, and frees nothing.
     let met = jobs
@@ -840,7 +922,7 @@ fn cpus(
             job_named(*job)
         );
         // A burst the slice's CPUs hold back is the slice's to give, not the profile's.
-        return match raised(config, profile, context, budget, slots, step, held) {
+        return match raise(held) {
             CpuStep::Refused(_) => CpuStep::Keep,
             step => step,
         };
