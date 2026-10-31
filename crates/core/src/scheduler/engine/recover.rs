@@ -29,6 +29,15 @@ struct Caps {
     started_at: Option<SystemTime>,
 }
 
+/// A stopped runner container an earlier run left, which Docker could not yet tell recovery whether to keep as its
+/// failed job's record.
+#[derive(Debug)]
+pub(super) struct Left {
+    pub(super) container: docker::Container,
+    pub(super) slot: SlotRef,
+    pub(super) occupant: Occupant,
+}
+
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Takes over the seed containers a previous daemon left: a running one counts as its profile's reseed, so no
     /// runner of the profile starts while it rewrites the snapshot and the slots' layers.
@@ -158,15 +167,32 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Removes a runner container an earlier run left that is not adopted, unless it stopped after a failed job whose
-    /// runner its profile keeps: that becomes the job's record.
-    async fn remove_left(
+    /// runner its profile keeps: that becomes the job's record. One Docker could not tell that of stays, and each tick
+    /// tries again.
+    pub(super) async fn remove_left(
         &mut self,
         container: docker::Container,
         slot: &SlotRef,
         occupant: &Occupant,
     ) {
-        if !container.running && self.keep_left_record(slot, occupant).await {
-            return;
+        if !container.running {
+            match self.keep_left_record(slot, occupant).await {
+                Ok(true) => return,
+                Ok(false) => {}
+                Err(error) => {
+                    warn!(
+                        "cannot tell whether {} ran a failed job to keep; trying again: {error}",
+                        container.name
+                    );
+                    self.docker_failed(&error);
+                    self.unread.push(Left {
+                        container,
+                        slot: slot.clone(),
+                        occupant: occupant.clone(),
+                    });
+                    return;
+                }
+            }
         }
         info!("removing {}, left by an earlier run", container.name);
         if let Err(error) = self.docker.remove(&container.id).await {

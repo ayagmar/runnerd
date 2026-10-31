@@ -356,6 +356,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// The runner and shell containers an earlier run left that recovery failed to remove, by ID with their names:
     /// each tick tries again.
     leftover: BTreeMap<String, String>,
+    /// The stopped runner containers an earlier run left that Docker could not tell recovery whether to keep as their
+    /// failed jobs' records: each tick tries again.
+    unread: Vec<recover::Left>,
     /// Profiles a reload removed, kept while their runners or reseed still run.
     retired: BTreeMap<String, crate::config::Profile>,
     /// Profiles whose slot 1 ran a job since their last reseed check.
@@ -519,6 +522,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             draining: BTreeSet::new(),
             drained_once: BTreeSet::new(),
             leftover: BTreeMap::new(),
+            unread: Vec::new(),
             reseed_due: BTreeSet::new(),
             oversized: BTreeSet::new(),
             reseeded_at: BTreeMap::new(),

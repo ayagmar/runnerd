@@ -249,3 +249,63 @@ async fn a_failed_start_names_the_container_it_left_only_while_docker_keeps_it()
         assert_eq!(failed.container.as_deref(), left, "{case}");
     }
 }
+
+/// A tar as Docker archives a container's `/home/runner/_diag`: rooted at the directory's own name.
+fn diag_archive() -> Vec<u8> {
+    let mut tar = tar::Builder::new(Vec::new());
+    for (path, contents) in [
+        ("_diag/", None),
+        ("_diag/Runner_20261031-115959-utc.log", Some("listening")),
+        ("_diag/Worker_20261031-120000-utc.log", Some("job message")),
+        ("_diag/pages/", None),
+        ("_diag/pages/1_job_1.log", Some("a step's output")),
+    ] {
+        let mut header = tar::Header::new_gnu();
+        header.set_mode(0o644);
+        if let Some(contents) = contents {
+            header.set_size(contents.len() as u64);
+            tar.append_data(&mut header, path, contents.as_bytes())
+                .unwrap();
+        } else {
+            header.set_entry_type(tar::EntryType::Directory);
+            header.set_size(0);
+            tar.append_data(&mut header, path, std::io::empty())
+                .unwrap();
+        }
+    }
+    tar.into_inner().unwrap()
+}
+
+#[tokio::test]
+async fn files_reads_the_files_at_the_top_of_a_containers_directory_and_no_deeper() {
+    let socket =
+        std::env::temp_dir().join(format!("runnerd-test-{}-files.sock", std::process::id()));
+    let server = serve(&socket, 1, |request| {
+        assert!(
+            request.starts_with("GET /containers/stopped/archive?path=%2Fhome%2Frunner%2F_diag"),
+            "{request}"
+        );
+        let tar = diag_archive();
+        let mut answer = format!(
+            "HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
+            tar.len()
+        )
+        .into_bytes();
+        answer.extend_from_slice(&tar);
+        answer
+    });
+    let docker = connect_to(Some(&format!("unix://{}", socket.display()))).unwrap();
+    let files = docker.files("stopped", "/home/runner/_diag").await.unwrap();
+    server.await.unwrap();
+    let read: Vec<(&str, &str)> = files
+        .iter()
+        .map(|file| (file.name.as_str(), file.contents.as_str()))
+        .collect();
+    assert_eq!(
+        read,
+        [
+            ("Runner_20261031-115959-utc.log", "listening"),
+            ("Worker_20261031-120000-utc.log", "job message"),
+        ]
+    );
+}

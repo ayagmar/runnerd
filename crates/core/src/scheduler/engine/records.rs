@@ -17,8 +17,9 @@ use super::{Engine, Occupant};
 use crate::admission::HIGH_WATER;
 use crate::api;
 use crate::config::ByteSize;
-use crate::docker::{DockerApi, Tty, TtySize, cpu_shares, is_not_found};
+use crate::docker::{self, DockerApi, Tty, TtySize, cpu_shares, is_not_found};
 use crate::github::GithubApi;
+use crate::observe::capture;
 use crate::record;
 use crate::scheduler::SlotRef;
 use crate::time;
@@ -216,23 +217,63 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Keeps a stopped runner container an earlier daemon left as its job's record, as `release` would have, if its
     /// profile keeps failed jobs' runners, its log shows its job failed and no record of the job was made: the runner
-    /// ended while no daemon ran, or a daemon stopped before it collected it or finished the record. Returns whether
-    /// it took the container over; if not, the caller removes it.
-    pub(super) async fn keep_left_record(&mut self, slot: &SlotRef, occupant: &Occupant) -> bool {
-        let Some(job) = occupant.job else {
-            return false;
-        };
+    /// ended while no daemon ran, or a daemon stopped before it collected it or finished the record. A job the history
+    /// never saw it take, as one an idle runner took while the daemon detached, is read from the runner's worker log.
+    /// Returns whether it took the container over; if not, the caller removes it. An error when Docker could not
+    /// tell, and may once asked again: the caller keeps the container to try again.
+    pub(super) async fn keep_left_record(
+        &mut self,
+        slot: &SlotRef,
+        occupant: &Occupant,
+    ) -> Result<bool, docker::Error> {
+        let recorded =
+            |records: &RecordState, job| records.list.iter().any(|record| record.job == job);
         if !self.records_failures(&slot.profile)
-            || self.records.list.iter().any(|record| record.job == job)
+            || occupant.job.is_some_and(|job| recorded(&self.records, job))
         {
-            return false;
+            return Ok(false);
         }
-        let failed = self
-            .docker
-            .logs(&occupant.container)
-            .await
-            .is_ok_and(|log| record::failed(&log));
-        failed && self.begin_record(slot, occupant).await
+        let failed = match self.docker.logs(&occupant.container).await {
+            Ok(log) => record::failed(&log),
+            Err(error) if docker::is_declined(&error) => false,
+            Err(error) => return Err(error),
+        };
+        if !failed {
+            return Ok(false);
+        }
+        let job = match occupant.job {
+            Some(job) => Some(job),
+            None => self.left_job(&occupant.container).await?,
+        };
+        let Some(job) = job else {
+            warn!(
+                "{}: {} ran a job that failed, but names it nowhere: no record of it is kept",
+                occupant.repository, occupant.runner_name
+            );
+            return Ok(false);
+        };
+        if recorded(&self.records, job) {
+            return Ok(false);
+        }
+        let occupant = Occupant {
+            job: Some(job),
+            ..occupant.clone()
+        };
+        Ok(self.begin_record(slot, &occupant).await)
+    }
+
+    /// The job a stopped runner container took, from its worker log's job message, read without starting it: the
+    /// capture reads the same while it runs. `None` when the runner wrote none, or Docker says it cannot read it.
+    async fn left_job(&self, container: &str) -> Result<Option<u64>, docker::Error> {
+        let files = match self.docker.files(container, capture::DIAG).await {
+            Ok(files) => files,
+            Err(error) if docker::is_declined(&error) => return Ok(None),
+            Err(error) => return Err(error),
+        };
+        Ok(files
+            .iter()
+            .filter(|file| capture::is_worker_log(&file.name))
+            .find_map(|file| capture::worker_job(&file.contents)))
     }
 
     /// Notes in the history why a failed job has no record.

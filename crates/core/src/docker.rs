@@ -15,10 +15,11 @@ use bollard::models::{
 };
 use bollard::query_parameters::{
     AttachContainerOptionsBuilder, CommitContainerOptionsBuilder, CreateContainerOptionsBuilder,
-    CreateImageOptionsBuilder, DataUsageOptionsBuilder, InspectContainerOptionsBuilder,
-    ListContainersOptionsBuilder, ListImagesOptionsBuilder, LogsOptionsBuilder,
-    RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder,
-    ResizeContainerTTYOptionsBuilder, UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
+    CreateImageOptionsBuilder, DataUsageOptionsBuilder, DownloadFromContainerOptionsBuilder,
+    InspectContainerOptionsBuilder, ListContainersOptionsBuilder, ListImagesOptionsBuilder,
+    LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder,
+    RemoveVolumeOptionsBuilder, ResizeContainerTTYOptionsBuilder, UploadToContainerOptionsBuilder,
+    WaitContainerOptionsBuilder,
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -121,6 +122,19 @@ pub struct TaggedImage {
     /// The registry digests it was pulled by, such as `ghcr.io/ayagmar/runnerd-runner@sha256:9e79…`.
     pub digests: Vec<String>,
 }
+
+/// A file `files` read from a container.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct File {
+    /// Its name in the directory read, such as `Worker_20261031-120000-utc.log`.
+    pub name: String,
+    /// What it holds, as text: invalid UTF-8 is replaced. Cut short when the directory's archive is longer than
+    /// `FILES_LIMIT`.
+    pub contents: String,
+}
+
+/// The most of a directory's archive `files` reads: a runner's `_diag` holds job logs too, which may be large.
+const FILES_LIMIT: usize = 64 << 20;
 
 /// A container's terminal, attached once it was created and before it started, so none of its output is missed.
 pub struct Tty {
@@ -256,6 +270,18 @@ pub fn is_unreachable(error: &Error) -> bool {
     )
 }
 
+/// Whether Docker answered that it cannot or will not do what was asked: a 4xx, or 501 for what it lacks, such as
+/// the log of a container whose log driver keeps none. Asking again gets the same answer; any other error may not.
+pub fn is_declined(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::DockerResponseServerError {
+            status_code: 400..=499 | 501,
+            ..
+        }
+    )
+}
+
 /// Whether a Docker error says the container, volume or image does not exist.
 pub fn is_not_found(error: &Error) -> bool {
     matches!(
@@ -323,6 +349,13 @@ pub trait DockerApi: Send + Sync {
     fn changes(&self, container: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// The bytes a container's own layer holds.
     fn written(&self, container: &str) -> impl Future<Output = Result<u64, Error>> + Send;
+    /// The files directly in a container's `directory`, not in the directories below it, read from its filesystem
+    /// whether it runs or stopped, without starting it.
+    fn files(
+        &self,
+        container: &str,
+        directory: &str,
+    ) -> impl Future<Output = Result<Vec<File>, Error>> + Send;
     /// Commits a stopped container's own layer as the image `reference` (`repository:tag`) with `labels`; returns
     /// the disk the image takes beyond its parent.
     fn commit(
@@ -695,6 +728,20 @@ impl DockerApi for Docker {
             .unwrap_or(0))
     }
 
+    async fn files(&self, container: &str, directory: &str) -> Result<Vec<File>, Error> {
+        let options = DownloadFromContainerOptionsBuilder::new()
+            .path(directory)
+            .build();
+        let mut archive = self.api.download_from_container(container, Some(options));
+        let mut tar = Vec::new();
+        while tar.len() < FILES_LIMIT
+            && let Some(chunk) = archive.next().await
+        {
+            tar.extend_from_slice(&chunk?);
+        }
+        Ok(files_in(&tar))
+    }
+
     async fn commit(
         &self,
         container: &str,
@@ -933,6 +980,41 @@ fn connect_to(docker_host: Option<&str>) -> Result<Docker, Error> {
 }
 
 /// A tar archive, to extract at `/`, holding the config as a root-only file at `JIT_CONFIG_PATH`.
+/// The regular files at the top of a directory's archive, which Docker roots at the directory's own name. A file the
+/// archive is cut off in keeps what arrived of it, and what comes after it is left out.
+fn files_in(tar: &[u8]) -> Vec<File> {
+    let mut files = Vec::new();
+    let mut archive = tar::Archive::new(tar);
+    let Ok(entries) = archive.entries() else {
+        return files;
+    };
+    for entry in entries {
+        let Ok(mut entry) = entry else {
+            break;
+        };
+        let name = match entry.path() {
+            Ok(path) if path.components().count() == 2 => path
+                .file_name()
+                .map(|name| name.to_string_lossy().into_owned()),
+            _ => None,
+        };
+        let Some(name) = name.filter(|_| entry.header().entry_type().is_file()) else {
+            continue;
+        };
+        let mut contents = Vec::new();
+        // A cut-off file keeps what was read before the error.
+        let cut = std::io::Read::read_to_end(&mut entry, &mut contents).is_err();
+        files.push(File {
+            name,
+            contents: String::from_utf8_lossy(&contents).into_owned(),
+        });
+        if cut {
+            break;
+        }
+    }
+    files
+}
+
 fn jit_config_tar(jit_config: &JitConfig) -> std::io::Result<Vec<u8>> {
     let mut tar = tar::Builder::new(Vec::new());
     let path = JIT_CONFIG_PATH.trim_start_matches('/');

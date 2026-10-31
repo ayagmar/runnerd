@@ -14,6 +14,16 @@ fn busy_and_idle(
     docker: &FakeDocker,
     dir: &TestDir,
 ) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    busy_and_idle_with(github, docker, dir, CONFIG)
+}
+
+/// `busy_and_idle` on `config`, with the mirror enabled.
+fn busy_and_idle_with(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+    config: &str,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
     running_runner(github, docker, "@@job 1 1\n");
     let idle = identity("ci", ID_A).runner_name("app", 2, 1);
     {
@@ -39,7 +49,7 @@ fn busy_and_idle(
             labels: HashMap::from([("runnerd.mirror".to_owned(), String::new())]),
         });
     }
-    let config = CONFIG.replace("mirror = { enabled = false", "mirror = { enabled = true");
+    let config = config.replace("mirror = { enabled = false", "mirror = { enabled = true");
     engine_with(github, docker, dir, &config)
 }
 
@@ -566,10 +576,11 @@ fn runnerd_stop_that_docker_turns_into_a_detach_ends_within_the_deadline_and_the
         .build()
         .unwrap();
     next.block_on(async {
-        let mut state = docker.0.lock().unwrap();
-        state.outage = Outage::None;
-        state.commits_held.send_replace(false);
-        drop(state);
+        {
+            let mut state = docker.0.lock().unwrap();
+            state.outage = Outage::None;
+            state.commits_held.send_replace(false);
+        }
         let (mut engine, handle) = engine_with(&github, &docker, &dir, &records::recording());
         engine.recover().await.unwrap();
         records::until_recorded(&mut engine).await;
@@ -589,4 +600,84 @@ fn runnerd_stop_that_docker_turns_into_a_detach_ends_within_the_deadline_and_the
             "job 1's runner is adopted"
         );
     });
+}
+
+#[tokio::test]
+async fn a_failed_job_an_idle_runner_took_while_detached_becomes_its_record_at_the_next_start() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let config = records::recording();
+    let (engine, handle) = busy_and_idle_with(&github, &docker, &dir, &config);
+    let run = tokio::spawn(engine.run());
+    until_state(&handle, 1, JobState::Running).await;
+    github
+        .until_calls(
+            |calls| calls.iter().any(|call| call.starts_with("runners ")),
+            "asked for its runners",
+        )
+        .await;
+    // The idle runner takes job 5 right before the signal, so GitHub keeps it, and runnerd never sees the job.
+    github.0.lock().unwrap().busy_deletes = 1;
+    handle.control.shutdown(Shutdown::Detach);
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+    drop(handle);
+
+    // Job 5 fails before the next start, and its runner exits; only its worker log names the job.
+    github
+        .0
+        .lock()
+        .unwrap()
+        .runners
+        .retain(|runner| runner.id != 8);
+    {
+        let mut state = docker.0.lock().unwrap();
+        let idle = state
+            .containers
+            .iter_mut()
+            .find(|container| container.id == "container-2")
+            .unwrap();
+        idle.running = false;
+        state
+            .container_logs
+            .insert("container-2".to_owned(), records::FAILED.to_owned());
+        state.diag.insert(
+            "container-2".to_owned(),
+            vec![docker::File {
+                name: "Worker_20261031-120000-utc.log".to_owned(),
+                contents: "{\n  \"k\": \"check_run_id\",\n  \"v\": 5.0\n}\n".to_owned(),
+            }],
+        );
+        // Docker is too busy to read it at first.
+        state.fail_files = 1;
+    }
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    assert!(
+        container_names(&docker).contains(&identity("ci", ID_A).runner_name("app", 2, 1)),
+        "the runner Docker could not read yet stays"
+    );
+    records::until_recorded(&mut engine).await;
+    let kept: Vec<u64> = handle
+        .records
+        .borrow()
+        .records
+        .iter()
+        .map(|record| record.job)
+        .collect();
+    assert_eq!(kept, [5], "job 5's runner becomes its record");
+    let calls = docker.calls();
+    let commit = calls
+        .iter()
+        .position(|call| call == "commit container-2 runnerd-record:5");
+    let remove = calls.iter().position(|call| call == "remove container-2");
+    assert!(
+        commit.is_some() && commit < remove,
+        "the stopped runner is committed, then goes: {calls:?}"
+    );
 }

@@ -60,7 +60,12 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
     deadline for a detach or a forced stop.
   - A failed job's runner that stopped and was not yet kept, because it ended just before the stop, while no daemon
     ran, or while a record was cut off by the deadline, is kept at the next start: recovery makes its record from the
-    stopped container (`keep_left_record`) instead of noting the record lost, as `release` would have.
+    stopped container (`keep_left_record`) instead of noting the record lost, as `release` would have. A job the
+    history never saw the runner take, as one an idle runner took while the daemon detached or could not remove it,
+    is read from the job message in the runner's `_diag/Worker_*.log`, which Docker copies out of the stopped
+    container without starting it (`DockerApi::files`). Such a record has no job name or workflow unless the history
+    saw the job queued. A runner whose log names no job keeps no record, and recovery logs that. While Docker cannot
+    answer, short of declining (a 4xx, or 501), the container stays and each tick asks again.
   - A reseed is not waited for. Its seed container runs on, and the next start adopts it as its profile's reseed. A
     reseed that finished just before the stop is still collected, so its event and the slots' dropped layers are
     recorded.

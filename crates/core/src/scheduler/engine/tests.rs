@@ -465,6 +465,10 @@ struct DockerState {
     changed: Vec<String>,
     /// The bytes a container's layer holds.
     written: u64,
+    /// The files in each runner container's `_diag`, by ID.
+    diag: HashMap<String, Vec<docker::File>>,
+    /// How many reads of a container's files fail next, as when the Engine is busy.
+    fail_files: u32,
     /// Docker's free disk; plenty when unset.
     free: Option<u64>,
     /// The images Docker has, record images among them.
@@ -954,6 +958,31 @@ impl DockerApi for FakeDocker {
     async fn written(&self, _container: &str) -> Result<u64, docker::Error> {
         self.outage().await?;
         Ok(self.0.lock().unwrap().written)
+    }
+
+    async fn files(
+        &self,
+        container: &str,
+        directory: &str,
+    ) -> Result<Vec<docker::File>, docker::Error> {
+        self.outage().await?;
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("files {container} {directory}"));
+        if state.fail_files > 0 {
+            state.fail_files -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
+        state
+            .diag
+            .get(container)
+            .cloned()
+            .ok_or_else(|| docker::Error::DockerResponseServerError {
+                status_code: 404,
+                message: format!("Could not find the file {directory} in container {container}"),
+            })
     }
 
     async fn commit(
