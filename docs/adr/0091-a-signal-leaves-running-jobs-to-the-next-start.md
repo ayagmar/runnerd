@@ -45,8 +45,9 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
   open, such as a doctor's check of a Docker that hangs, get 10 s to finish, and blocking tasks still running 5 s
   more (`Runtime::shutdown_timeout`); the daemon then exits without them.
 - **Docker gone ends the stop.** Once Docker does not answer a call a stop needs (a removal, an inspect of a runner)
-  at all, its socket gone or refusing connections (`docker::is_unreachable`), the stop goes on as a detach: it calls
-  no more stops and leaves the rest to the next start. An error Docker answers with, or a timeout, is tried again at
+  at all, its socket gone or refusing connections (`docker::is_unreachable`), the stop goes on as a detach, with a
+  detach's deadline: it calls no more stops and leaves the rest to the next start, and a record whose commit Docker
+  no longer answers holds it 30 s at most. An error Docker answers with, or a timeout, is tried again at
   the next tick, as while scheduling: one busy moment of Docker's must not turn `runnerd stop` into a detach that
   leaves runners behind. While scheduling, a slot still stays held until Docker confirms its container's removal (ADR 0076): freeing it on a failed removal could
   start a second runner on the volumes of one still running.

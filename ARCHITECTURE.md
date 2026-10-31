@@ -199,7 +199,7 @@ A signal detaches: the engine stops scheduling, removes idle and warm runners at
 start's recovery. `runnerd stop` (`POST /v1/shutdown`) waits for running jobs,
 then removes every runner and the mirror; with `force` it kills running jobs first. None waits for a reseed or a
 check of the caches, which the next start takes over. A signal or a forced stop returns within `STOP_DEADLINE`
-(30 s) whatever Docker and GitHub do, and once Docker stops answering during any stop, the stop detaches. `Engine::run`
+(30 s) whatever Docker and GitHub do, and once Docker stops answering during any stop, the stop detaches, with the same deadline. `Engine::run`
 always returns, so the daemon closes and flushes the history.
 
 ## State

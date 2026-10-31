@@ -487,6 +487,8 @@ struct DockerState {
     seed_exit: Option<i64>,
     /// Measuring the volumes does not finish while this holds true, as when Docker takes long to measure them.
     volume_sizes_held: tokio::sync::watch::Sender<bool>,
+    /// Commits do not finish while this holds true, as when Docker takes long to write a large layer.
+    commits_held: tokio::sync::watch::Sender<bool>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
@@ -961,8 +963,13 @@ impl DockerApi for FakeDocker {
         labels: BTreeMap<String, String>,
     ) -> Result<u64, docker::Error> {
         self.outage().await?;
+        let mut held = {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("commit {container} {reference}"));
+            state.commits_held.subscribe()
+        };
+        let _ = held.wait_for(|held| !held).await;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("commit {container} {reference}"));
         let bytes = state.written;
         state.images.push(docker::Image {
             reference: reference.to_owned(),

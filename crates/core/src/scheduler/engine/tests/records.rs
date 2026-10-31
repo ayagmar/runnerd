@@ -9,10 +9,10 @@ use crate::docker::TtySize;
 use crate::record;
 use crate::scheduler::engine::RecordSelection;
 
-const FAILED: &str = "2026-10-23 01:08:55Z: Running job: build\n\
+pub(super) const FAILED: &str = "2026-10-23 01:08:55Z: Running job: build\n\
                       2026-10-23 01:09:27Z: Job build completed with result: Failed\n";
 
-fn recording() -> String {
+pub(super) fn recording() -> String {
     CONFIG.replace("slots = 2", "slots = 2\nrecord_failures = true")
 }
 
@@ -42,7 +42,7 @@ async fn job_ends(
 }
 
 /// Ticks until the engine took the finished commits.
-async fn until_recorded(engine: &mut Engine<FakeGithub, FakeDocker>) {
+pub(super) async fn until_recorded(engine: &mut Engine<FakeGithub, FakeDocker>) {
     for _ in 0..200 {
         engine.tick(Shutdown::No).await;
         if engine.records.recordings.is_empty() {
@@ -69,7 +69,7 @@ pub(super) fn record_image(job: u64, age: u64) -> docker::Image {
     }
 }
 
-async fn note(handle: &Handle, job: u64) -> Option<api::RecordNote> {
+pub(super) async fn note(handle: &Handle, job: u64) -> Option<api::RecordNote> {
     handle.store.flush().await;
     handle.store.job(job).await.unwrap().unwrap().record
 }

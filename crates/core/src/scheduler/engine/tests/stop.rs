@@ -472,3 +472,121 @@ async fn the_first_tick_after_an_install_replaces_idle_runners_of_the_old_releas
         "job 1's runner keeps running: {calls:?}"
     );
 }
+
+/// Job 1 runs in slot 1 and job 2 in slot 2, on a profile that keeps failed jobs' runners.
+fn two_jobs_recording(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    running_runner(github, docker, "@@job 1 1\n");
+    let second = identity("ci", ID_A).runner_name("app", 2, 1);
+    {
+        let mut state = github.0.lock().unwrap();
+        state.jobs.insert(1, details(1, "in_progress", None));
+        state.jobs.insert(2, details(2, "in_progress", None));
+        state.runners.push(runner(8, &second, true));
+    }
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers.push(runner_container(2, 8, true));
+        state
+            .container_captures
+            .insert("container-2".to_owned(), "@@job 2 2\n".to_owned());
+    }
+    engine_with(github, docker, dir, &records::recording())
+}
+
+/// Waits until the fake Docker was asked for `call`.
+async fn until_docker_call(docker: &FakeDocker, call: &str) {
+    for _ in 0..500 {
+        if docker.calls().iter().any(|made| made == call) {
+            return;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+    }
+    panic!("Docker was never asked to {call}: {:?}", docker.calls());
+}
+
+#[test]
+fn runnerd_stop_that_docker_turns_into_a_detach_ends_within_the_deadline_and_the_next_start_keeps_the_record()
+ {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    // The daemon's own runtime, gone with the process once `run` returns: so is the commit it left waiting.
+    let daemon = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    daemon.block_on(async {
+        let (engine, handle) = two_jobs_recording(&github, &docker, &dir);
+        let run = tokio::spawn(engine.run());
+        until_state(&handle, 2, JobState::Running).await;
+        // Job 2 fails, and its record's commit waits for Docker.
+        {
+            let mut state = docker.0.lock().unwrap();
+            state.commits_held.send_replace(true);
+            state
+                .container_logs
+                .insert("container-2".to_owned(), records::FAILED.to_owned());
+            state.containers[1].running = false;
+        }
+        github
+            .0
+            .lock()
+            .unwrap()
+            .jobs
+            .insert(2, details(2, "completed", Some("failure")));
+        handle.control.wake.notify_one();
+        until_docker_call(&docker, "commit container-2 runnerd-record:2").await;
+
+        // `runnerd stop`, while Docker no longer answers the inspect of job 1's runner.
+        tokio::time::pause();
+        docker.set_outage(Outage::Refused);
+        let asked = tokio::time::Instant::now();
+        handle.control.shutdown(Shutdown::Graceful);
+        tokio::time::timeout(STOP_DEADLINE + Duration::from_secs(10), run)
+            .await
+            .expect("the detach Docker turned the stop into has the deadline of any detach")
+            .unwrap();
+        assert!(
+            asked.elapsed() >= STOP_DEADLINE,
+            "it gave the record its time"
+        );
+        handle.store.close();
+        handle.store.flush().await;
+    });
+    drop(daemon);
+
+    let next = tokio::runtime::Builder::new_current_thread()
+        .enable_all()
+        .build()
+        .unwrap();
+    next.block_on(async {
+        let mut state = docker.0.lock().unwrap();
+        state.outage = Outage::None;
+        state.commits_held.send_replace(false);
+        drop(state);
+        let (mut engine, handle) = engine_with(&github, &docker, &dir, &records::recording());
+        engine.recover().await.unwrap();
+        records::until_recorded(&mut engine).await;
+        let note = records::note(&handle, 2).await;
+        assert!(
+            note.is_some_and(|note| note.created_at.is_some()),
+            "job 2's runner becomes its record at the next start"
+        );
+        engine.publish();
+        let runner = handle.status.borrow().profiles[0].slots[0]
+            .runner
+            .as_ref()
+            .map(|runner| runner.name.clone());
+        assert_eq!(
+            runner,
+            Some(identity("ci", ID_A).runner_name("app", 1, 1)),
+            "job 1's runner is adopted"
+        );
+    });
+}
