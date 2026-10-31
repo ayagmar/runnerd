@@ -1,6 +1,7 @@
 # 0091. A signal leaves running jobs to the next start, and a stop ends within 30 s
 
-Status: **Accepted** (2026-10-31).
+Status: **Accepted** (2026-10-31). Amends [0031](0031-records-of-failed-jobs.md): the next start makes the
+record of a failed job whose stopped runner no daemon kept.
 
 ## Context
 
@@ -52,8 +53,10 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
 - **"removed idle" is logged after the removal**, not before.
 - **What else holds a stop:**
   - A record being made (a failed job's container committed) is waited for in every kind of stop, within the
-    deadline for a detach or a forced stop. Its container left stopped, the next start would remove it and note the
-    record lost.
+    deadline for a detach or a forced stop.
+  - A failed job's runner that stopped and was not yet kept, because it ended just before the stop, while no daemon
+    ran, or while a record was cut off by the deadline, is kept at the next start: recovery makes its record from the
+    stopped container (`keep_left_record`) instead of noting the record lost, as `release` would have.
   - A reseed is not waited for. Its seed container runs on, and the next start adopts it as its profile's reseed. A
     reseed that finished just before the stop is still collected, so its event and the slots' dropped layers are
     recorded.
@@ -70,8 +73,8 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
   and the next start, the caches the daemon serves itself do not answer: GitHub Actions' cache (ADR 0082) and the
   build cache's sockets (ADR 0052) are gone, so a job running then restores and saves nothing there. The registry
   mirror stays up. The next start re-attaches each adopted runner's build cache socket.
-- A runner that finishes its job while no daemon runs stays a stopped container until the next start removes it,
-  and its job's end is recorded from GitHub then, as after a crash.
+- A runner that finishes its job while no daemon runs stays a stopped container until the next start removes it, or
+  keeps it as its failed job's record, and its job's end is recorded from GitHub then, as after a crash.
 - To leave nothing behind, as before another daemon uses this Docker, run `runnerd stop`, not `systemctl stop`.
   CONTRIBUTING's sandbox procedure says so.
 - The unit needs no `TimeoutStopSec`: a stop ends within 30 s plus the history's flush. `KillMode` does not matter,

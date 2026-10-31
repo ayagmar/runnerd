@@ -214,27 +214,25 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         true
     }
 
-    /// Notes that a stopped runner container an earlier daemon left was not kept, if its profile keeps failed jobs'
-    /// runners, its job failed and no record of it was made: no daemon ran when it stopped, or one stopped while it
-    /// made the record.
-    pub(super) async fn note_lost_record(&self, profile: &str, job: Option<u64>, container: &str) {
-        let Some(job) = job else {
-            return;
+    /// Keeps a stopped runner container an earlier daemon left as its job's record, as `release` would have, if its
+    /// profile keeps failed jobs' runners, its log shows its job failed and no record of the job was made: the runner
+    /// ended while no daemon ran, or a daemon stopped before it collected it or finished the record. Returns whether
+    /// it took the container over; if not, the caller removes it.
+    pub(super) async fn keep_left_record(&mut self, slot: &SlotRef, occupant: &Occupant) -> bool {
+        let Some(job) = occupant.job else {
+            return false;
         };
-        if !self.records_failures(profile)
+        if !self.records_failures(&slot.profile)
             || self.records.list.iter().any(|record| record.job == job)
         {
-            return;
+            return false;
         }
-        if let Ok(log) = self.docker.logs(container).await
-            && record::failed(&log)
-        {
-            self.store.record_skipped(
-                job,
-                "runnerd was not running when the runner stopped, or stopped while keeping it"
-                    .to_owned(),
-            );
-        }
+        let failed = self
+            .docker
+            .logs(&occupant.container)
+            .await
+            .is_ok_and(|log| record::failed(&log));
+        failed && self.begin_record(slot, occupant).await
     }
 
     /// Notes in the history why a failed job has no record.

@@ -579,14 +579,14 @@ async fn shells_get_containers_of_their_own_read_only_caches_and_close_after_eig
 }
 
 #[tokio::test]
-async fn a_daemon_that_stopped_mid_record_leaves_the_history_consistent() {
+async fn a_failed_jobs_runner_a_stopped_daemon_did_not_keep_becomes_its_record_at_the_next_start() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let dir = TestDir::new("crash");
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
     job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
     drop((engine, handle));
 
-    // The earlier daemon stopped before it committed job 1's runner, and after it committed job 9's.
+    // The earlier daemon stopped before it collected or committed job 1's runner, and after it committed job 9's.
     docker.0.lock().unwrap().images = vec![record_image(9, 60)];
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
     let store = handle.store.clone();
@@ -601,14 +601,23 @@ async fn a_daemon_that_stopped_mid_record_leaves_the_history_consistent() {
     );
     store.flush().await;
     engine.recover().await.unwrap();
+    until_recorded(&mut engine).await;
 
-    let skipped = note(&handle, 1).await.unwrap().skipped.unwrap();
-    assert!(skipped.contains("runnerd was not running"), "{skipped}");
+    let kept = note(&handle, 1).await.unwrap();
+    assert!(
+        kept.created_at.is_some(),
+        "job 1's record is made: {kept:?}"
+    );
     let made = note(&handle, 9).await.unwrap();
     assert_eq!(made.bytes, Some(1 << 30), "the record found is noted");
+    let calls = docker.calls();
+    let commit = calls
+        .iter()
+        .position(|call| call == "commit container-1 runnerd-record:1");
+    let remove = calls.iter().position(|call| call == "remove container-1");
     assert!(
-        docker.calls().contains(&"remove container-1".to_owned()),
-        "the stopped runner goes"
+        commit.is_some() && commit < remove,
+        "the stopped runner is committed, then goes: {calls:?}"
     );
 }
 
