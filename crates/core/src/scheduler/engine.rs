@@ -671,8 +671,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         self.close_shells().await;
         if mode == Shutdown::Detach {
-            let runners = self.occupied().count();
-            info!("stopped, leaving {runners} busy runners and the mirror to the next start");
+            // The mirror stays up only for the busy runners left behind.
+            let mirror = if self.config.caches.mirror.enabled {
+                " and the mirror"
+            } else {
+                ""
+            };
+            match self.occupied().count() {
+                0 => info!("stopped; no job was running"),
+                1 => info!("stopped, leaving 1 busy runner{mirror} to the next start"),
+                runners => {
+                    info!("stopped, leaving {runners} busy runners{mirror} to the next start");
+                }
+            }
             return;
         }
         if let Err(error) = cache::mirror_down(&*self.docker, &self.names).await {

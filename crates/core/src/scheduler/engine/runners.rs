@@ -291,7 +291,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             return;
         };
         if jobs == RunningJobs::Kill {
-            info!("{}: killing {}", occupant.repository, occupant.runner_name);
+            let busy = occupant.busy || occupant.job.is_some();
+            let what = if busy { "killing" } else { "removing idle" };
+            info!("{}: {what} {}", occupant.repository, occupant.runner_name);
             if let Err(error) = self.docker.remove(&occupant.container).await
                 && !is_not_found(&error)
             {
@@ -316,7 +318,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Ok(_) => {}
                 Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
             }
-            self.vacate(slot, occupant.busy || occupant.job.is_some());
+            self.vacate(slot, busy);
             return;
         }
         match self
