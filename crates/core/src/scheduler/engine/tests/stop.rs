@@ -311,6 +311,39 @@ async fn a_second_signal_during_a_stop_kills_running_jobs() {
 }
 
 #[tokio::test]
+async fn a_second_signal_while_a_signal_removes_idle_runners_kills_running_jobs() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let (engine, handle) = busy_and_idle(&github, &docker, &dir);
+    let run = tokio::spawn(engine.run());
+    until_state(&handle, 1, JobState::Running).await;
+    github
+        .until_calls(
+            |calls| calls.iter().any(|call| call.starts_with("runners ")),
+            "asked for its runners",
+        )
+        .await;
+    // The second signal comes while GitHub has not answered the idle runner's deregistration.
+    github.hold_deletes();
+    handle.control.shutdown(Shutdown::Detach);
+    github.until_waiting(1).await;
+    handle.control.shutdown(Shutdown::Force);
+    github.release_deletes();
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+    assert_eq!(
+        container_names(&docker),
+        BTreeSet::new(),
+        "job 1's runner and the mirror are removed too"
+    );
+}
+
+#[tokio::test]
 async fn a_stop_leaves_a_reseed_and_a_check_of_the_caches_to_the_next_start() {
     let (github, docker, dir) = (
         FakeGithub::default(),

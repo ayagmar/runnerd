@@ -107,7 +107,9 @@ struct GithubState {
     held_jobs: tokio::sync::watch::Sender<bool>,
     /// While true, `GET /repos/{owner}/{name}` does not answer.
     held_repositories: tokio::sync::watch::Sender<bool>,
-    /// Listings and job reads waiting for an answer.
+    /// While true, runner deletes do not answer.
+    held_deletes: tokio::sync::watch::Sender<bool>,
+    /// Listings, job reads and deletes waiting for an answer.
     waiting: usize,
 }
 
@@ -160,6 +162,15 @@ impl FakeGithub {
         self.0.lock().unwrap().held_jobs.send_replace(false);
     }
 
+    /// Holds runner deletes until `release_deletes`.
+    fn hold_deletes(&self) {
+        self.0.lock().unwrap().held_deletes.send_replace(true);
+    }
+
+    fn release_deletes(&self) {
+        self.0.lock().unwrap().held_deletes.send_replace(false);
+    }
+
     /// Holds repository reads, which never answer.
     fn hold_repositories(&self) {
         self.0.lock().unwrap().held_repositories.send_replace(true);
@@ -180,7 +191,7 @@ impl FakeGithub {
         self.0.lock().unwrap().waiting -= 1;
     }
 
-    /// Waits until `count` listings wait for an answer at once.
+    /// Waits until `count` listings, job reads or deletes wait for an answer at once.
     async fn until_waiting(&self, count: usize) {
         for _ in 0..500 {
             if self.0.lock().unwrap().waiting >= count {
@@ -273,8 +284,9 @@ impl GithubApi for FakeGithub {
     }
 
     async fn delete_runner(&self, _repository: &str, id: u64) -> Result<Deleted, github::Error> {
+        self.0.lock().unwrap().call(format!("delete {id}"));
+        self.wait(|state| &state.held_deletes).await;
         let mut state = self.0.lock().unwrap();
-        state.call(format!("delete {id}"));
         if state.busy_deletes > 0 {
             state.busy_deletes -= 1;
             return Ok(Deleted::Busy);

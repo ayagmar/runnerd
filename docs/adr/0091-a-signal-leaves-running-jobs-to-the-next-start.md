@@ -37,7 +37,8 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
     containers are removed together, as each removal waits for its container to stop. GitHub's `Busy` keeps a runner
     that just took a job, and one whose deregistration or removal fails stays. Busy runners and the mirror stay for
     the next start to adopt.
-  - `Force`, `runnerd stop --force` or a second signal: kill running jobs and remove every runner.
+  - `Force`, `runnerd stop --force` or a second signal: kill running jobs and remove every runner. It takes over
+    whenever it comes, also while a detach waits for GitHub or Docker to remove an idle runner.
 - **A deadline.** `Engine::run` returns `STOP_DEADLINE` (30 s) after a detach or a forced stop was asked for,
   wherever it is: in a tick waiting for Docker or GitHub, or in recovery. It returns normally, so the daemon still
   closes and flushes the history; nothing calls `process::exit`. After the engine, API and dashboard requests still

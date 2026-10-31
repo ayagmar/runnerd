@@ -633,12 +633,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.tick(mode).await;
             }
             self.publish();
-            if self.stopped(mode) {
-                break mode;
-            }
-            // A stop asked for or changed meanwhile, as one Docker failed turns into a detach, goes on at once.
+            // A stop asked for or changed meanwhile goes on at once, before this one counts as done: a second signal
+            // while a detach removed idle runners kills the running jobs, and one Docker failed turns into a detach.
             if self.stopping() != mode {
                 continue;
+            }
+            if self.stopped(mode) {
+                break mode;
             }
             let interval = if mode == Shutdown::No {
                 self.config.host.poll_interval
