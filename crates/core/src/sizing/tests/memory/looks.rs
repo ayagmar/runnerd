@@ -99,6 +99,7 @@ impl Daemon {
                 last: &last,
                 cpus_set: &self.cpus_set,
                 running: &BTreeMap::new(),
+                disk: None,
             },
         );
         for change in &look.changes {
@@ -408,6 +409,8 @@ mod generated {
             }),
             ..ledger(at, cap, peak.min(cap))
         };
+        // Its wait was all for a slot.
+        run.slot_waited = run.started_at.map_or(0, |started| started - at);
         if need > cap {
             run = super::met(run);
         }

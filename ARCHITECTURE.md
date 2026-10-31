@@ -56,7 +56,9 @@ flowchart TB
   each job's recent runs, the one window both admission and sizing read memory from
   ([ADR 0070](docs/adr/0070-predictions-follow-recent-runs.md)); `sizing` turns the history into advice,
   `sizing::memory` says what a raise and a lowering of `memory` read and which lowering went too far, and
-  `sizing::auto` picks the changes auto sizing makes; `insights` reads the history for jobs that got slower, are flaky or near their cap,
+  `sizing::auto` picks the changes auto sizing makes, under `measured` adding slots on waits for a slot alone
+  (`scheduler::Plan::slot_waiting`, which the engine adds up per job) as far as the engine's last measure of Docker's
+  disk (`Handle::disk`) allows ([ADR 0090](docs/adr/0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md)); `insights` reads the history for jobs that got slower, are flaky or near their cap,
   and the waits of each week ([ADR 0051](docs/adr/0051-insights-and-notifications.md)), and for jobs their CPU cap
   holds back by the rule sizing reads, `sizing::Throttling::held` ([ADR 0087](docs/adr/0087-an-insight-for-jobs-their-cpu-cap-holds-back.md)). All three are pure: the
   engine and the daemon read the store and act on what they return. `buildcache` keeps the build cache every runner
@@ -212,7 +214,7 @@ always returns, so the daemon closes and flushes the history.
 | Records of failed jobs | Docker images `runnerd-record:<job>`, labelled `runnerd.record` with the job's ID, repository, profile, name and when it was made; shells in them are containers labelled `runnerd.shell` |
 | Budget | the systemd slice's `MemoryMax`, read with `systemctl`; the host's memory, its latest reading kept in the store's memory, not stored |
 | Dashboard session | the secret in `dashboard-session` beside the job history (0600), kept across restarts; a one-time login link per address in `runnerd.web` next to the socket (0600); pairing codes in memory, 5 minutes each, bound to one origin |
-| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory and how much of its wait passed while no runnerd ran; times in ms |
+| Job history | SQLite, default `$XDG_STATE_HOME/runnerd/runnerd.db` (`store::Store`); jobs, runners, steps, samples, logs, events, cache sizes, what the build cache did for each runner, paused repositories, what became of each record, auto sizing's changes, where each `[notify]` target got to, how long each job waited for the host's memory and for a slot alone, and how much of its wait passed while no runnerd ran; times in ms |
 
 ## Invariants
 

@@ -17,8 +17,8 @@ const AT_CAP: u64 = 95;
 /// Lowering a cap is advised once it saves at least this share of it, in percent.
 const WORTH_LOWERING: u64 = 10;
 
-/// Jobs that waited this long at p95, in seconds, or slots busy this share of the time, in percent, want more
-/// slots.
+/// Jobs that waited this long for a slot at p95, in seconds, or under `caps` admission slots busy this share of the
+/// time, in percent, want more slots.
 const WAITED: u64 = 60;
 const BUSY: u32 = 50;
 
@@ -81,6 +81,10 @@ pub struct Ran {
     pub cpu_periods: Option<u64>,
     /// Of those, the periods its quota throttled it in (`api::JobMetrics::cpu_throttled`).
     pub cpu_throttled: Option<u64>,
+    /// How long of its wait no slot of its profile was free while the slice's memory, the host's and the CPU budget
+    /// had room for its runner, in ms: what one more slot would have saved it (ADR 0090). 0 in runs from before
+    /// schema 18.
+    pub slot_waited: u64,
 }
 
 /// A job's wait for a runner as sizing, insights and the history's figures count it: from when GitHub queued it, or
@@ -276,6 +280,18 @@ pub struct MemorySet {
     pub at: u64,
 }
 
+/// A profile's `slots` as the daemon ran them from `at` (ms), by its `profile.changed` event, as `CpusSet` has its
+/// `cpus`.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotsSet {
+    /// The profile.
+    pub profile: String,
+    /// Its slots from then.
+    pub slots: u32,
+    /// When, in milliseconds.
+    pub at: u64,
+}
+
 /// What the store reads for sizing.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct History {
@@ -291,6 +307,8 @@ pub struct History {
     pub changes: Vec<api::SizingChange>,
     /// Each profile's `memory` as the daemon ran it, oldest first: since when a raise reads runs at it.
     pub memory_set: Vec<MemorySet>,
+    /// Each profile's slots as the daemon ran them, oldest first: since when a lowering of slots reads how many ran.
+    pub slots_set: Vec<SlotsSet>,
     /// From when, in ms, the history holds every job (`history_kept`): a wait before it, as of a job queued before
     /// runnerd first ran, counts from then.
     pub kept_since: u64,
@@ -348,7 +366,7 @@ pub fn advise(
                 .collect();
             let share = profile.memory.0.saturating_mul(u64::from(profile.slots));
             let busy = busy(history, name, profile.slots, since, window.now);
-            let wait = waits(&jobs, history.kept_since);
+            let (wait, slot_wait) = (waits(&jobs, history.kept_since), slot_waits(&jobs));
             let starts = starts(&jobs, history.kept_since);
             let cap = profile.memory.0;
             let took = memory::took(&history.memory_set, name, cap, window.now);
@@ -365,7 +383,7 @@ pub fn advise(
                     // runner of each profile beside the mirror.
                     Admission::Measured => max.saturating_sub(mirror),
                 }),
-                wants_slots: wait.p95 >= WAITED || busy >= BUSY,
+                wants_slots: wants_slots(config.host.admission, slot_wait.p95, busy),
                 min_jobs: rules.min_jobs,
                 upper: upper(
                     ceiling,
@@ -413,6 +431,7 @@ pub fn advise(
                 hold: advised.hold,
                 peaks,
                 wait,
+                slot_wait,
                 starts,
                 busy,
                 wants_slots: sized.wants_slots,
@@ -505,6 +524,7 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
                 .filter(|job| Key::of(job) == *key)
                 .collect();
             let wait = waits(&runs_of, raises.history.kept_since);
+            let wants = wants_slots(sized.admission, slot_waits(&runs_of).p95, busy);
             // A job's advice says what it needs; only its profile's is bounded by what can be written.
             let unbounded = Sized {
                 upper: None,
@@ -515,9 +535,7 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
                 repository: key.repository.clone(),
                 workflow: key.workflow.clone(),
                 name: key.name.clone(),
-                advice: unbounded
-                    .advice(&peaks, needs, wait.p95 >= WAITED || busy >= BUSY)
-                    .advice,
+                advice: unbounded.advice(&peaks, needs, wants).advice,
                 peaks,
                 wait,
             }
@@ -572,7 +590,7 @@ struct Sized {
     /// The memory the slice holds for it, as `admission` budgets it: all its slots at their caps under `caps`, one
     /// runner under `measured`; `None` for an unlimited slice.
     room: Option<u64>,
-    /// Whether its jobs waited for a slot at p95, or its slots were busy, enough to want more.
+    /// Whether its jobs waited for a slot at p95, or under `caps` its slots were busy, enough to want more.
     wants_slots: bool,
     min_jobs: u32,
     /// The most `memory` a raise goes to: what `[host] memory_ceiling` leaves one runner (`Config::runner_ceiling`)
@@ -733,6 +751,53 @@ fn waits(jobs: &[&Ran], kept_since: u64) -> Spread {
             })
             .collect(),
     )
+}
+
+/// The waits of the jobs that started with no slot free while the budgets had room for their runners, in seconds
+/// (`Ran::slot_waited`).
+fn slot_waits(jobs: &[&Ran]) -> Spread {
+    spread(
+        jobs.iter()
+            .filter(|job| job.started_at.is_some())
+            .map(|job| job.slot_waited / 1000)
+            .collect(),
+    )
+}
+
+/// Whether more slots would help a profile, or a job of it: its jobs waited `WAITED` for a slot at p95 while the
+/// budgets had room for them (`slot_wait`, seconds at p95), or under `caps`, where a slot is bought with its cap, its
+/// slots were `busy` half the time. Under `measured` slots that are busy and never waited for would start nothing
+/// sooner.
+fn wants_slots(admission: Admission, slot_wait: u64, busy: u32) -> bool {
+    slot_wait >= WAITED || (admission == Admission::Caps && busy >= BUSY)
+}
+
+/// The most of `jobs` that waited only for a slot at once, each from `Ran::slot_waited` before its start to its
+/// start: the slots that would have started them all.
+fn short_of_slots(jobs: &[&Ran]) -> u32 {
+    let mut edges: Vec<(u64, i32)> = jobs
+        .iter()
+        .filter(|job| job.slot_waited > 0)
+        .filter_map(|job| {
+            let started = job.started_at?;
+            Some([(started.saturating_sub(job.slot_waited), 1), (started, -1)])
+        })
+        .flatten()
+        .collect();
+    peak(&mut edges)
+}
+
+/// The most intervals open at once, from each one's opening (`1`) and closing (`-1`) edge; one that closes as
+/// another opens does not overlap it.
+fn peak(edges: &mut [(u64, i32)]) -> u32 {
+    edges.sort_unstable();
+    let mut open = 0i32;
+    let mut most = 0;
+    for (_, edge) in edges.iter() {
+        open += edge;
+        most = most.max(open);
+    }
+    u32::try_from(most).unwrap_or(0)
 }
 
 /// The jobs that started on a warm runner and the others, and their median waits.

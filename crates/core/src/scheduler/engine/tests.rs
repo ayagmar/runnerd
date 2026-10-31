@@ -4877,12 +4877,15 @@ async fn a_start_schedules_while_docker_still_measures_the_volumes() {
         .send_replace(false);
     for _ in 0..100 {
         engine.tick(Shutdown::No).await;
-        if engine.docker_disk.is_some() {
+        if engine.docker_disk.borrow().is_some() {
             break;
         }
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
-    assert!(engine.docker_disk.is_some(), "the measure is taken in");
+    assert!(
+        engine.docker_disk.borrow().is_some(),
+        "the measure is taken in"
+    );
 }
 
 #[tokio::test]

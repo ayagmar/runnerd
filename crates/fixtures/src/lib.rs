@@ -573,6 +573,7 @@ pub fn sizing(at: u64) -> api::Sizing {
             cpu_runs: 40,
         },
         wait: spread(20, 300, 400, 400),
+        slot_wait: spread(10, 240, 300, 300),
         starts: api::Starts::default(),
         busy: 70,
         wants_slots: true,

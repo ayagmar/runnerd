@@ -314,23 +314,38 @@ pub async fn trim_shared(
     })
 }
 
-/// What the slots' Docker Engines may keep together, in bytes: a quarter of Docker's disk not otherwise used, which
-/// is what is free plus what the slot volumes already hold, measured together (docs/adr/0054).
+/// What the slots' Docker stores have of Docker's disk, as a check of the caches measured it (docs/adr/0054).
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Disk {
+    /// What the slots' Docker Engines may keep together, in bytes: a quarter of Docker's disk not otherwise used,
+    /// which is what is free plus what the configured slots' volumes already hold, measured together.
+    pub docker: u64,
+    /// The size of each configured slot's volume that exists, in bytes, by profile: what its slots keep.
+    pub slots: BTreeMap<String, Vec<u64>>,
+}
+
+/// The `Disk` of `config`'s slots, from Docker's `free` disk and the volumes' `sizes`, by name.
 pub fn docker_disk(
     names: &Names,
     config: &config::Config,
     free: u64,
     sizes: &BTreeMap<String, u64>,
-) -> u64 {
-    let held: u64 = config
+) -> Disk {
+    let slots: BTreeMap<String, Vec<u64>> = config
         .profiles
         .iter()
-        .flat_map(|(profile, settings)| {
-            (1..=settings.slots as usize).map(move |slot| names.slot(profile, slot))
+        .map(|(profile, settings)| {
+            let held = (1..=settings.slots as usize)
+                .filter_map(|slot| sizes.get(&names.slot(profile, slot)).copied())
+                .collect();
+            (profile.clone(), held)
         })
-        .filter_map(|name| sizes.get(&name))
-        .sum();
-    free.saturating_add(held) / DOCKER_DISK_SHARE
+        .collect();
+    let held: u64 = slots.values().flatten().sum();
+    Disk {
+        docker: free.saturating_add(held) / DOCKER_DISK_SHARE,
+        slots,
+    }
 }
 
 /// One slot's share of `disk` among `slots`, in whole GiB as `image/layers.sh` takes it: at least 1, at most
@@ -343,7 +358,7 @@ pub fn docker_budget_gib(disk: u64, slots: u64) -> u64 {
 const DOCKER_DISK_SHARE: u64 = 4;
 
 /// The most one slot's Docker Engine keeps, in GiB: the image's own default, for a daemon that sets none.
-const DOCKER_SLOT_MAX_GIB: u64 = 20;
+pub(crate) const DOCKER_SLOT_MAX_GIB: u64 = 20;
 
 /// Every cache volume the config's profiles use, what it holds and its limit, with size 0.
 pub fn volumes(names: &Names, config: &config::Config) -> Vec<api::CacheVolume> {

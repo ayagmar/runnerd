@@ -257,8 +257,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             })) => {
                 self.mark_oversized(&sizes);
                 if let Some(free) = free {
-                    self.docker_disk =
-                        Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+                    self.docker_disk.send_replace(Some(cache::docker_disk(
+                        &self.names,
+                        &self.config,
+                        free,
+                        &sizes,
+                    )));
                 }
                 let ours = self.names.network();
                 self.store.cache_sizes(
@@ -308,9 +312,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         match task.await {
             Ok(Ok(Disk { free, sizes })) => {
-                if self.docker_disk.is_none() {
-                    self.docker_disk =
-                        Some(cache::docker_disk(&self.names, &self.config, free, &sizes));
+                if self.docker_disk.borrow().is_none() {
+                    self.docker_disk.send_replace(Some(cache::docker_disk(
+                        &self.names,
+                        &self.config,
+                        free,
+                        &sizes,
+                    )));
                 }
             }
             Ok(Err(error)) => warn!(

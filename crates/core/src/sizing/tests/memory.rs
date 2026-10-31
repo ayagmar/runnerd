@@ -99,6 +99,7 @@ fn look(text: &str, history: &History, now: u64, last: Option<u64>) -> Vec<Sizin
             last: &last,
             cpus_set: &[],
             running: &BTreeMap::new(),
+            disk: None,
         },
     )
 }

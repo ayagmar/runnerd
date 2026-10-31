@@ -45,6 +45,11 @@ async fn a_history_at_15_reads_read_only_as_it_is_and_opens_at_16_with_its_rows_
         wait.map(|wait| wait.counted(history.kept_since)),
         Some(30 * SECOND)
     );
+    assert_eq!(
+        history.jobs.first().map(|job| job.slot_waited),
+        Some(0),
+        "a row from before schema 18 counts as no wait for a slot"
+    );
     assert_eq!(user_version(&path), 15);
     let store = Store::open(&path).unwrap();
     assert_eq!(user_version(&path), VERSION);

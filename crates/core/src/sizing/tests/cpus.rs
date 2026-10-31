@@ -118,6 +118,7 @@ fn look_set(
             last,
             cpus_set,
             running: &BTreeMap::new(),
+            disk: None,
         },
     )
 }
@@ -1078,6 +1079,7 @@ fn a_slot_the_cpu_budget_refuses_does_not_also_refuse_a_cpu_raise_that_fits_with
             last: &BTreeMap::new(),
             cpus_set: &[],
             running: &BTreeMap::new(),
+            disk: None,
         },
     );
     assert_eq!(

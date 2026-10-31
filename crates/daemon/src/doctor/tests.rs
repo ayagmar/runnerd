@@ -877,6 +877,7 @@ fn ran(repository: &str, profile: &str, count: u64, peak: u64) -> Vec<sizing::Ra
             oom_killed: false,
             reserved: None,
             host_waited: 0,
+            slot_waited: 0,
             unseen: 0,
             cpu_periods: None,
             cpu_throttled: None,

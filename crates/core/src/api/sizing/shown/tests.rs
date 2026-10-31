@@ -27,6 +27,7 @@ fn profile(name: &str, max: u64, advice: Advice) -> ProfileSizing {
             on_cap: 0,
         },
         wait: Spread::default(),
+        slot_wait: Spread::default(),
         starts: Starts::default(),
         busy: 0,
         wants_slots: false,

@@ -1,6 +1,6 @@
 //! `plan` as a pure function: slots, labels, the budget, idle runners, paused and held repositories.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use super::{
@@ -585,6 +585,45 @@ fn a_job_held_only_by_an_older_jobs_start_waits_behind_it_not_for_what_runs() {
         }),
         "o/2 is held for CPU as before"
     );
+}
+
+#[test]
+fn only_the_jobs_memory_and_cpu_have_room_for_wait_for_a_slot_alone() {
+    // Catches every job without a slot read as one more slot's worth, though memory would hold it back next: what
+    // auto sizing reads to add slots (ADR 0090).
+    let one = |id| repository(&format!("o/{id}"), "app", vec![job(id, &["app"])]);
+    let busy = Slot::Runner(RunnerSlot {
+        repository: "o/other".to_owned(),
+        busy: true,
+        started_at: now(),
+        memory: GIB,
+        cpu: 1000,
+    });
+    let jobs: Vec<Repository> = (1..=5).map(one).collect();
+    // 13G: job 1 takes the free slot and 4G; 9G holds the runners of jobs 2 and 3 beside it, not of 4 or 5.
+    let plan = plan_of(
+        &jobs,
+        &profiles(vec![busy.clone(), Slot::Free]),
+        Some(13 * GIB),
+        None,
+    );
+    assert_eq!(starts(&plan.decisions), [(1, "o/1")]);
+    assert_eq!(plan.slot_waiting, BTreeSet::from([2, 3]));
+    // The CPU budget bounds them the same way: 2 CPUs of runners beside job 1's.
+    let plan = plan_of(
+        &jobs,
+        &profiles(vec![busy.clone(), Slot::Free]),
+        None,
+        Some(4000),
+    );
+    assert_eq!(plan.slot_waiting, BTreeSet::from([2]));
+    // A profile whose slots wait for a reseed has none to add.
+    let mut reseeding = profiles(vec![busy, Slot::Free]);
+    if let Some(app) = reseeding.get_mut("app") {
+        app.preparing = Some(Preparing::Reseeding);
+    }
+    let plan = plan_of(&jobs, &reseeding, None, None);
+    assert_eq!(plan.slot_waiting, BTreeSet::new());
 }
 
 fn plan_of(

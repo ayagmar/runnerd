@@ -361,6 +361,7 @@ async fn get_sizing() -> axum::Json<Sizing> {
             slots: 2,
             peaks: peaks.clone(),
             wait: spread(30, 240, 300, 320),
+            slot_wait: spread(20, 180, 240, 240),
             starts: Starts {
                 warm: 30,
                 warm_p50: 2,

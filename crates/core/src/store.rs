@@ -49,6 +49,10 @@ const MIGRATIONS: &[(u32, &str)] = &[
          ALTER TABLE samples ADD COLUMN cpu_throttled INTEGER;\n\
          ALTER TABLE samples ADD COLUMN cpu_stalled INTEGER;",
     ),
+    (
+        18,
+        "ALTER TABLE jobs ADD COLUMN slot_waited INTEGER NOT NULL DEFAULT 0;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -250,6 +254,10 @@ enum Write {
         jobs: Vec<u64>,
         ms: u64,
     },
+    SlotWaited {
+        jobs: Vec<u64>,
+        ms: u64,
+    },
     BuildCache {
         runner: String,
         counts: api::BuildCacheCounts,
@@ -377,6 +385,9 @@ pub struct AutoSizing {
     pub cpus: Vec<sizing::CpusSet>,
     /// Each profile's `memory` as the daemon ran it, from the same events.
     pub memory: Vec<sizing::MemorySet>,
+    /// Each profile's slots as the daemon ran them, from the same events: one more for each slot a lowering left a
+    /// runner in until it ends.
+    pub slots: Vec<sizing::SlotsSet>,
 }
 
 /// The job history. Cloning shares it.
@@ -620,6 +631,12 @@ impl Store {
     /// sizing does not read as a wait for a slot.
     pub fn host_waited(&self, jobs: Vec<u64>, ms: u64) {
         self.send(Write::HostWaited { jobs, ms });
+    }
+
+    /// Adds `ms` to how long each of `jobs` waited with no slot of its profile free while the budgets had room for
+    /// its runner: what auto sizing reads as a wait for a slot (ADR 0090).
+    pub fn slot_waited(&self, jobs: Vec<u64>, ms: u64) {
+        self.send(Write::SlotWaited { jobs, ms });
     }
 
     /// The last host sample sent, stored or not; `None` before the first.
@@ -1010,7 +1027,9 @@ fn sizing_of(db: &Connection, since: u64) -> Result<sizing::History, StoreError>
         _ => read_as_current(db)?,
     }
     let mut history = read::sizing(db, since)?;
-    history.memory_set = read::auto_sizing(db)?.memory;
+    let auto = read::auto_sizing(db)?;
+    history.memory_set = auto.memory;
+    history.slots_set = auto.slots;
     history.changes = read::sizing_changes(db, since.saturating_sub(sizing::memory::HISTORY))?;
     Ok(history)
 }

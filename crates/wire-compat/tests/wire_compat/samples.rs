@@ -818,6 +818,7 @@ pub(crate) fn sizing() -> Sizing {
             slots: 2,
             peaks: peaks(),
             wait: spread(),
+            slot_wait: spread(),
             starts: Starts {
                 warm: 10,
                 warm_p50: 5,

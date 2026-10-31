@@ -580,6 +580,7 @@ fn sizing() -> Sizing {
             slots: 2,
             peaks: peaks.clone(),
             wait: spread(20, 300, 400, 400),
+            slot_wait: spread(10, 240, 300, 300),
             starts: Starts {
                 warm: 30,
                 warm_p50: 2,

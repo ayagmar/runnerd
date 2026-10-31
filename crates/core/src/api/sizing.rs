@@ -139,13 +139,17 @@ pub struct ProfileSizing {
     /// Seconds from queued to started, leaving out the time before the history's start and the time no runnerd
     /// ran (ADR 0081).
     pub wait: Spread,
+    /// Seconds of that wait with no slot of the profile free while the slice's memory, the host's and the CPU budget
+    /// had room for the job's runner: what one more slot would have saved (ADR 0090).
+    #[serde(default)]
+    pub slot_wait: Spread,
     /// Its jobs by whether a warm runner took them, and how long each kind waited.
     pub starts: Starts,
     /// The percent of the time since `since` its slots held a runner for a job, from when the job was queued, over
     /// its `slots` now.
     pub busy: u32,
-    /// Whether its jobs waited a minute or more for a slot at p95, or its slots were busy half the time: more slots
-    /// would help.
+    /// Whether more slots would help: its jobs waited a minute or more for a slot at p95 (`slot_wait`), or under
+    /// `caps` admission its slots were busy half the time.
     pub wants_slots: bool,
     /// What to set `memory` and `slots` to. Sized for its largest peak, so no job gets less than it used.
     pub advice: Advice,
@@ -459,13 +463,14 @@ impl Sizing {
             && !matches!(profile.advice, Advice::TooFew { .. })
         {
             let then = if self.auto {
-                "auto sizing adds one at a time while every profile's slots fit the slice at their jobs' peaks"
+                "auto sizing adds slots while each slot's share of Docker's disk still holds what the slots keep"
             } else {
-                "measured admission reserves predicted peaks, not caps, so more slots may fit: raise slots by hand"
+                "measured admission reserves predicted peaks, not caps, so more slots start them sooner: raise slots \
+                 by hand"
             };
             format!(
-                "{line}; jobs waited {}s for a slot (p95) and slots were busy {}%: {then}",
-                profile.wait.p95, profile.busy
+                "{line}; jobs waited {}s for a slot (p95) while memory and CPU had room: {then}",
+                profile.slot_wait.p95
             )
         } else {
             line

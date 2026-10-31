@@ -295,6 +295,7 @@ async fn start_serving(
         caches: watch::channel(Vec::new()).1,
         records: watch::channel(Records::default()).1,
         build_cache: None,
+        disk: watch::channel(None).1,
     };
     let config = dir.join("runnerd.toml");
     let file = dir.join("config.toml");

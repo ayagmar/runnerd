@@ -9,6 +9,7 @@ use std::collections::BTreeMap;
 use std::time::Duration;
 
 use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
+use runnerd_core::cache::Disk;
 use runnerd_core::config::{Config, resize_profile};
 use runnerd_core::scheduler::engine::{Author, RunningSlots, Shutdown};
 use runnerd_core::sizing::auto::{Context, changes, next_look};
@@ -95,6 +96,7 @@ async fn look(state: &AppState, refused: &mut BTreeMap<String, String>) {
         last: &read.last,
         cpus_set: &read.cpus_set,
         running: &read.running,
+        disk: read.disk.as_ref(),
     };
     for change in changes(&config, &read.history, context) {
         if !write(state, &mut file, change, refused).await {
@@ -114,6 +116,8 @@ struct Read {
     /// Each profile's `cpus` as the daemon ran them, read with `last`.
     cpus_set: Vec<CpusSet>,
     running: BTreeMap<String, u32>,
+    /// What the slots' Docker stores have of Docker's disk, from the engine's last measure.
+    disk: Option<Disk>,
 }
 
 /// Checks the file on disk is the one runnerd runs with, and reads the history, the slice's `MemoryMax` and CPUs and
@@ -152,6 +156,7 @@ async fn read(state: &AppState, file: &ConfigText, config: &Config) -> Result<Re
         last,
         cpus_set,
         running: running(state),
+        disk: state.handle.disk.borrow().clone(),
     })
 }
 
@@ -167,7 +172,8 @@ pub(super) async fn last_changes(state: &AppState) -> Result<AutoSizing, StoreEr
 }
 
 /// Adds to `history` what a revert reads (ADR 0070): each profile's `memory` as the daemon ran it, from `auto`, and
-/// auto sizing's changes since `CHANGES_READ` before `window`'s end, read after the history as `auto` is.
+/// auto sizing's changes since `CHANGES_READ` before `window`'s end, read after the history as `auto` is; and each
+/// profile's slots as the daemon ran them, which a lowering of slots reads (ADR 0090).
 pub(super) async fn recorded(
     state: &AppState,
     history: &mut History,
@@ -175,6 +181,7 @@ pub(super) async fn recorded(
     window: Window,
 ) -> Result<(), StoreError> {
     history.memory_set.clone_from(&auto.memory);
+    history.slots_set.clone_from(&auto.slots);
     history.changes = state
         .handle
         .store
@@ -258,6 +265,7 @@ pub(super) async fn plan(
     } = auto;
     let running = running(state);
     let blocked = on_disk(&*state.config.lock().await).err();
+    let disk = state.handle.disk.borrow().clone();
     let context = Context {
         memory_max,
         cpus: slice_cpus(state, config).await,
@@ -265,6 +273,7 @@ pub(super) async fn plan(
         last: &last,
         cpus_set: &cpus_set,
         running: &running,
+        disk: disk.as_ref(),
     };
     let interval = config.sizing.interval.as_secs();
     let raise_interval = config.sizing.raise_after().as_secs();
