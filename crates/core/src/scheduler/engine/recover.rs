@@ -30,13 +30,40 @@ struct Caps {
     started_at: Option<SystemTime>,
 }
 
-/// A stopped runner container an earlier run left, which Docker could not yet tell recovery whether to keep as its
-/// failed job's record.
+/// A runner container an earlier run left, not adopted. One that stopped and Docker could not yet tell recovery
+/// whether to keep as its failed job's record waits in `Engine::unread` until `due`.
 #[derive(Debug)]
 pub(super) struct Left {
     pub(super) container: docker::Container,
     pub(super) slot: SlotRef,
     pub(super) occupant: Occupant,
+    /// How many times Docker could not tell.
+    undecided: u32,
+    /// When it is asked again.
+    pub(super) due: tokio::time::Instant,
+}
+
+impl Left {
+    fn new(container: docker::Container, slot: SlotRef, occupant: Occupant) -> Left {
+        Left {
+            container,
+            slot,
+            occupant,
+            undecided: 0,
+            due: tokio::time::Instant::now(),
+        }
+    }
+}
+
+/// The longest a container recovery could not decide on waits before it is asked about again.
+const UNREAD_BACKOFF_MAX: Duration = Duration::from_secs(600);
+
+/// How long a container recovery could not decide on `undecided` times waits before it is asked about again: one
+/// poll interval, doubling each time, up to `UNREAD_BACKOFF_MAX`.
+fn unread_backoff(poll_interval: Duration, undecided: u32) -> Duration {
+    poll_interval
+        .saturating_mul(1 << undecided.saturating_sub(1).min(16))
+        .min(UNREAD_BACKOFF_MAX)
 }
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
@@ -168,35 +195,32 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Removes a runner container an earlier run left that is not adopted, unless it stopped after a failed job whose
-    /// runner its profile keeps: that becomes the job's record. One Docker could not tell that of stays, and each tick
-    /// tries again.
-    pub(super) async fn remove_left(
-        &mut self,
-        container: docker::Container,
-        slot: &SlotRef,
-        occupant: &Occupant,
-    ) {
-        if !container.running {
-            match self.keep_left_record(slot, occupant).await {
+    /// runner its profile keeps: that becomes the job's record. One Docker could not tell that of stays, never
+    /// removed, and is asked about again after a backoff (`unread_backoff`), as an unreadable one would otherwise be
+    /// read again at every tick.
+    pub(super) async fn remove_left(&mut self, mut left: Left) {
+        if !left.container.running {
+            match self.keep_left_record(&left.slot, &left.occupant).await {
                 Ok(true) => return,
                 Ok(false) => {}
                 Err(error) => {
+                    left.undecided += 1;
+                    let wait = unread_backoff(self.config.host.poll_interval, left.undecided);
+                    left.due = tokio::time::Instant::now() + wait;
                     warn!(
-                        "cannot tell whether {} ran a failed job to keep; trying again: {error}",
-                        container.name
+                        "cannot tell whether {} ran a failed job to keep; trying again in {}s: {error}",
+                        left.container.name,
+                        wait.as_secs()
                     );
                     if let Undecided::Docker(error) = &error {
                         self.docker_failed(error);
                     }
-                    self.unread.push(Left {
-                        container,
-                        slot: slot.clone(),
-                        occupant: occupant.clone(),
-                    });
+                    self.unread.push(left);
                     return;
                 }
             }
         }
+        let container = left.container;
         info!("removing {}, left by an earlier run", container.name);
         if let Err(error) = self.docker.remove(&container.id).await {
             warn!("cannot remove {}: {error}", container.name);
@@ -332,7 +356,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         profile,
                         index: index.unwrap_or(0),
                     };
-                    self.remove_left(container, &slot, &occupant).await;
+                    self.remove_left(Left::new(container, slot, occupant)).await;
                 }
             }
         }

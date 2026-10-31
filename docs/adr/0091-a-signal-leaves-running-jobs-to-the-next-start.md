@@ -66,9 +66,12 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
     container without starting it (`DockerApi::files`). The archive is read as it streams: the job log pages
     below `_diag` are read through and dropped, and only the worker logs kept count against a 16 MiB cap. Such a
     record has no job name or workflow unless the history saw the job queued. A runner whose worker logs, read
-    whole, name no job keeps no record, and recovery logs that. While Docker cannot answer, short of declining (a
-    4xx, or 501), or a read breaks off or hits the cap before a worker log names the job, the container stays and
-    each tick asks again.
+    whole, name no job keeps no record, and recovery logs that. A read is whole only once the archive's end marker
+    arrives: one that breaks off, between entries too, or hits the cap before a worker log names the job is not.
+    While Docker cannot answer, short of declining (a 4xx, or 501), or the read is not whole, the container stays
+    and is asked about again one poll interval later, then twice as long each time up to 10 minutes, with one
+    warning each time. It is never removed for that: a container that stays unreadable stays on disk, outside the
+    records' limits, until it reads or the owner removes it (`docker rm`).
   - A reseed is not waited for. Its seed container runs on, and the next start adopts it as its profile's reseed. A
     reseed that finished just before the stop is still collected, so its event and the slots' dropped layers are
     recorded.

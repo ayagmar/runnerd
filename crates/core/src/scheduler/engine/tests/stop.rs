@@ -649,10 +649,11 @@ async fn a_failed_job_an_idle_runner_took_while_detached_becomes_its_record_at_t
         state
             .diag
             .insert("container-2".to_owned(), docker::tests::diag_archive(5));
-        // Docker is too busy to read it at first, then the read breaks off before the worker log.
+        // Docker is too busy to read it at first, then the read breaks off right after the archive's first entry.
         state.fail_files = 1;
-        state.cut_files = 1;
+        state.cut_files.push_back(512);
     }
+    tokio::time::pause();
     let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
     engine.recover().await.unwrap();
     let left = identity("ci", ID_A).runner_name("app", 2, 1);
@@ -660,11 +661,15 @@ async fn a_failed_job_an_idle_runner_took_while_detached_becomes_its_record_at_t
         container_names(&docker).contains(&left),
         "the runner Docker could not read yet stays"
     );
+    // Each try comes after a backoff, which is at most 10 minutes.
+    let backoff = Duration::from_secs(600);
+    tokio::time::sleep(backoff).await;
     engine.tick(Shutdown::No).await;
     assert!(
         container_names(&docker).contains(&left),
         "the runner whose worker log was not read stays"
     );
+    tokio::time::sleep(backoff).await;
     records::until_recorded(&mut engine).await;
     let kept: Vec<u64> = handle
         .records

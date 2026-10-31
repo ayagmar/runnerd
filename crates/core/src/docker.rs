@@ -1050,19 +1050,47 @@ impl std::io::Read for Chunks {
     }
 }
 
+/// A reader that notes whether its last read found the end: `tar` reads past a zero block, the archive's end, no
+/// further, and takes running out between entries as the end too.
+struct Ends<R> {
+    inner: R,
+    ran_out: bool,
+}
+
+impl<R: std::io::Read> std::io::Read for Ends<R> {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        self.ran_out = n == 0 && !buf.is_empty();
+        Ok(n)
+    }
+}
+
 /// The regular files at the top of a directory's `tar` whose names start with `prefix`. Docker roots the archive at
 /// the directory's own name. Every other entry is read through and dropped, so only the files kept count against
-/// `FILES_LIMIT`. Incomplete when the archive breaks off or a file is cut at the limit; what was read is kept.
+/// `FILES_LIMIT`. Complete only once the archive's end marker is read: one that breaks off, between entries too, or
+/// a file cut at the limit is not; what was read is kept.
 pub(crate) fn files_in(tar: impl std::io::Read, prefix: &str) -> Files {
+    let mut tar = Ends {
+        inner: tar,
+        ran_out: false,
+    };
     let mut read = Files::default();
+    let ended = files_until_end(&mut tar, prefix, &mut read.files);
+    read.complete = ended && !tar.ran_out;
+    read
+}
+
+/// Reads `tar` into `files` as `files_in` says; whether it got to the archive's end, which `files_in` checks was its
+/// marker.
+fn files_until_end(tar: impl std::io::Read, prefix: &str, files: &mut Vec<File>) -> bool {
     let mut archive = tar::Archive::new(tar);
     let Ok(entries) = archive.entries() else {
-        return read;
+        return false;
     };
     let mut kept = 0;
     for entry in entries {
         let Ok(mut entry) = entry else {
-            return read;
+            return false;
         };
         let name = match entry.path() {
             Ok(path) if path.components().count() == 2 => path
@@ -1086,16 +1114,15 @@ pub(crate) fn files_in(tar: impl std::io::Read, prefix: &str) -> Files {
             && contents.len() <= room;
         contents.truncate(room);
         kept += contents.len();
-        read.files.push(File {
+        files.push(File {
             name,
             contents: String::from_utf8_lossy(&contents).into_owned(),
         });
         if !whole {
-            return read;
+            return false;
         }
     }
-    read.complete = true;
-    read
+    true
 }
 
 fn jit_config_tar(jit_config: &JitConfig) -> std::io::Result<Vec<u8>> {

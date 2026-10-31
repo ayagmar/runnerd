@@ -469,8 +469,9 @@ struct DockerState {
     diag: HashMap<String, Vec<u8>>,
     /// How many reads of a container's files fail next, as when the Engine is busy.
     fail_files: u32,
-    /// How many reads of a container's files break off halfway through its archive next.
-    cut_files: u32,
+    /// Where the next reads of a container's files break off in its archive, in bytes, as when Docker stops
+    /// sending it.
+    cut_files: VecDeque<usize>,
     /// Docker's free disk; plenty when unset.
     free: Option<u64>,
     /// The images Docker has, record images among them.
@@ -978,8 +979,7 @@ impl DockerApi for FakeDocker {
                 message: "the Engine is busy".to_owned(),
             });
         }
-        let cut = state.cut_files > 0;
-        state.cut_files = state.cut_files.saturating_sub(1);
+        let cut = state.cut_files.pop_front();
         let tar =
             state
                 .diag
@@ -990,7 +990,7 @@ impl DockerApi for FakeDocker {
                         "Could not find the file {directory} in container {container}"
                     ),
                 })?;
-        let tar = if cut { &tar[..tar.len() / 2] } else { &tar[..] };
+        let tar = &tar[..cut.unwrap_or(tar.len()).min(tar.len())];
         Ok(docker::files_in(tar, prefix))
     }
 

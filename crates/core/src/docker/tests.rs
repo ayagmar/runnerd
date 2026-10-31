@@ -328,7 +328,17 @@ async fn files_reads_the_worker_log_past_the_pages_the_capture_kept_and_no_deepe
 #[test]
 fn a_directory_read_that_breaks_off_is_not_complete() {
     let tar = diag_archive(5);
-    let read = files_in(&tar[..tar.len() / 2], "Worker_");
-    assert_eq!(read.files, []);
-    assert!(!read.complete, "the worker log may be in the rest");
+    // Right after `_diag/`'s header, between entries, and within the pages the capture kept.
+    for cut in [512, tar.len() / 2] {
+        let read = files_in(&tar[..cut], "Worker_");
+        assert_eq!(read.files, [], "cut at {cut}");
+        assert!(
+            !read.complete,
+            "cut at {cut}: the worker log may be in the rest"
+        );
+    }
+    assert!(
+        files_in(&tar[..], "Worker_").complete,
+        "the whole archive is"
+    );
 }

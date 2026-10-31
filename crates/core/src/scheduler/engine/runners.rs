@@ -66,11 +66,16 @@ pub(super) fn backoff(failures: u32) -> Duration {
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Frees the slots whose container stopped: the runner took its job and exited, or it never started. First
-    /// removes again the containers recovery failed to remove, and keeps or removes those it could not tell about.
+    /// removes again the containers recovery failed to remove, and keeps or removes those it could not tell about
+    /// once their backoff is over.
     pub(super) async fn collect_finished(&mut self) {
-        for left in std::mem::take(&mut self.unread) {
-            self.remove_left(left.container, &left.slot, &left.occupant)
-                .await;
+        let now = tokio::time::Instant::now();
+        let (due, waiting) = std::mem::take(&mut self.unread)
+            .into_iter()
+            .partition(|left| left.due <= now);
+        self.unread = waiting;
+        for left in due {
+            self.remove_left(left).await;
         }
         for (id, name) in std::mem::take(&mut self.leftover) {
             match self.docker.remove(&id).await {

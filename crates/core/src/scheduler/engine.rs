@@ -357,7 +357,7 @@ pub struct Engine<G = Github, D = Docker> {
     /// each tick tries again.
     leftover: BTreeMap<String, String>,
     /// The stopped runner containers an earlier run left that Docker could not tell recovery whether to keep as their
-    /// failed jobs' records: each tick tries again.
+    /// failed jobs' records: the first tick after each one's backoff tries again.
     unread: Vec<recover::Left>,
     /// Profiles a reload removed, kept while their runners or reseed still run.
     retired: BTreeMap<String, crate::config::Profile>,
