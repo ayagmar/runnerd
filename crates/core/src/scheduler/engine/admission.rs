@@ -40,6 +40,8 @@ pub(super) struct Measured {
     pub host: host::Remembered,
     /// The jobs the last plan had waiting for the host's memory, and when (ms): each waited since then.
     host_waiting: (BTreeSet<u64>, u64),
+    /// The jobs the last plan had waiting only for a slot (`Plan::slot_waiting`), and when (ms): each waited since.
+    slot_waiting: (BTreeSet<u64>, u64),
     /// What predicts the jobs' peaks, and when it read the history.
     predictor: Option<(Predictor, SystemTime)>,
     /// Whether the slice was at the high-water mark at the last plan, so the change is logged once.
@@ -370,6 +372,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 info!("the host has memory to spare again: runners start as the budget allows");
             }
             _ => {}
+        }
+    }
+
+    /// Remembers which jobs this plan had waiting only for a slot (`Plan::slot_waiting`), and adds the time since the
+    /// last plan to the slot waits of those that did then: what auto sizing reads to add slots (ADR 0090). A job a
+    /// restart left waiting counts again from the first plan after it.
+    pub(super) fn note_slots(&mut self, waiting: BTreeSet<u64>) {
+        let now = time::now_ms();
+        let (waited, since) = std::mem::replace(&mut self.measured.slot_waiting, (waiting, now));
+        if !waited.is_empty() {
+            self.store
+                .slot_waited(waited.into_iter().collect(), now.saturating_sub(since));
         }
     }
 

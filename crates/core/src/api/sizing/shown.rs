@@ -4,7 +4,7 @@
 
 use super::{
     Advice, AutoPlan, JobSizing, MemoryBound, MemoryHold, PAGE_CACHE_ROOM, Peaks, ProfileSizing,
-    Sizing, SizingChange, SizingHold, Starts,
+    Sizing, SizingChange, SizingHold, SizingRefused, Starts,
 };
 use crate::api::{Check, CheckStatus, Tone, Toned};
 use crate::config::ByteSize;
@@ -299,13 +299,20 @@ pub enum ProfilePlan<'plan> {
 }
 
 impl AutoPlan {
-    /// The `cpus` raise `profile`'s jobs ask for and the next look cannot make, as a line of its own beside what it
-    /// does next, which can still change its memory or slots: `No CPU raise: 3 runs of … the cap holds them back; …`.
-    pub fn refusal(&self, profile: &str) -> Option<String> {
-        self.refused
-            .iter()
-            .find(|refused| refused.profile == profile)
-            .map(|refused| format!("No CPU raise: {}", refused.reason))
+    /// The `cpus` and `slots` raises `profile`'s jobs ask for and the next look cannot make, each a line of its own
+    /// beside what it does next, which can still change its memory or slots: `No CPU raise: 3 runs of … the cap holds
+    /// them back; …`, then `No slot raise: 12 jobs waited 300s for a slot …; it is at its max_slots, 12`.
+    pub fn refusals(&self, profile: &str) -> Vec<String> {
+        let lines = |refused: &[SizingRefused], what: &str| -> Vec<String> {
+            refused
+                .iter()
+                .filter(|refused| refused.profile == profile)
+                .map(|refused| format!("No {what} raise: {}", refused.reason))
+                .collect()
+        };
+        let mut refusals = lines(&self.refused, "CPU");
+        refusals.extend(lines(&self.refused_slots, "slot"));
+        refusals
     }
 
     /// What keeps every look from changing anything, as clients say it over the profiles: `No look changes anything

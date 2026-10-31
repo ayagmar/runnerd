@@ -66,6 +66,7 @@ fn job(repository: &str, name: &str, profile: &str, peak: u64, wait_secs: u64) -
         oom_killed: false,
         reserved: None,
         host_waited: 0,
+        slot_waited: 0,
         unseen: 0,
         cpu_periods: None,
         cpu_throttled: None,
@@ -546,11 +547,13 @@ fn measured_sizing(history: &History, memory_max: u64) -> Sizing {
     )
 }
 
-/// `count` storefront builds at a 5.5G cap peaking at `peak`, each waiting `wait_secs`.
+/// `count` storefront builds at a 5.5G cap peaking at `peak`, each waiting `wait_secs` for a slot while memory and
+/// CPU had room.
 fn capped_builds(count: u64, peak: u64, wait_secs: u64) -> Vec<Ran> {
     (0..count)
         .map(|_| Ran {
             memory_cap: Some(5632 * M),
+            slot_waited: wait_secs * 1000,
             ..job("halyard/storefront", "build", "node", peak, wait_secs)
         })
         .collect()
@@ -615,12 +618,7 @@ fn under_measured_admission_a_raise_is_refused_only_when_one_runner_and_the_mirr
 #[test]
 fn under_measured_admission_waiting_jobs_are_told_about_slots_without_changing_them() {
     // Builds peak at 2G of 5.5G and waited 5 minutes for a slot: lower the cap, keep the slots, and say so.
-    let jobs = (0..20)
-        .map(|_| Ran {
-            memory_cap: Some(5632 * M),
-            ..job("halyard/storefront", "build", "node", 2 * G, 300)
-        })
-        .collect();
+    let jobs = capped_builds(20, 2 * G, 300);
     let sizing = measured_sizing(
         &History {
             jobs,
@@ -649,9 +647,29 @@ fn under_measured_admission_waiting_jobs_are_told_about_slots_without_changing_t
     };
     let line = auto.advice_line(profile(&auto, "node"));
     assert!(
-        line.contains("auto sizing adds one") && !line.contains("by hand"),
+        line.contains("auto sizing adds as many as waited at once") && !line.contains("by hand"),
         "with auto sizing on, the line says what it does: {line}"
     );
+    // Catches the line promising a raise the next look refuses.
+    let refused = Sizing {
+        auto_plan: Some(crate::api::AutoPlan {
+            every: 300,
+            interval: 86_400,
+            raise_interval: 3600,
+            max_step: 25,
+            next: Vec::new(),
+            held: Vec::new(),
+            blocked: None,
+            refused: Vec::new(),
+            refused_slots: vec![crate::api::SizingRefused {
+                profile: "node".to_owned(),
+                reason: "it is at its max_slots, 4".to_owned(),
+            }],
+        }),
+        ..auto
+    };
+    let line = refused.advice_line(profile(&refused, "node"));
+    assert!(line.ends_with("auto sizing cannot add one now"), "{line}");
 }
 
 mod auto {
@@ -664,7 +682,7 @@ mod auto {
     };
     use crate::api::{Resize, SizingChange};
     use crate::config::Config;
-    use crate::sizing::auto::{Context, changes};
+    use crate::sizing::auto::{Context, Look, changes, next_look};
 
     /// `text` with `[sizing] auto` on and `rules` added.
     fn on(text: &str, rules: &str) -> Config {
@@ -701,7 +719,7 @@ mod auto {
     }
 
     /// The changes due at `NOW` against a slice of `memory_max`, after the last changes `last`, with nothing
-    /// running.
+    /// running and Docker's disk room for many more slots.
     fn due(
         config: &Config,
         history: &History,
@@ -718,9 +736,35 @@ mod auto {
                 last,
                 cpus_set: &[],
                 running: &BTreeMap::new(),
+                disk: Some(ROOMY),
             },
         )
     }
+
+    /// The look at `NOW` in a 64G slice with `disk` for the slots' Docker stores, after the last changes `last`.
+    fn due_on(
+        config: &Config,
+        history: &History,
+        disk: Option<u64>,
+        last: &BTreeMap<String, u64>,
+    ) -> Look {
+        next_look(
+            config,
+            history,
+            Context {
+                memory_max: Some(64 * G),
+                cpus: Some(32_000),
+                window: window(),
+                last,
+                cpus_set: &[],
+                running: &BTreeMap::new(),
+                disk,
+            },
+        )
+    }
+
+    /// What the slots' Docker stores may keep together: room for many more slots.
+    const ROOMY: u64 = 1 << 40;
 
     fn resized(changes: &[SizingChange]) -> Vec<(&str, Resize)> {
         changes
@@ -896,6 +940,7 @@ mod auto {
                 last: &BTreeMap::new(),
                 cpus_set: &[],
                 running: &running,
+                disk: None,
             },
         );
         assert_eq!(raised, Vec::new());
@@ -913,105 +958,77 @@ mod auto {
         assert_eq!(due(&config, &killed, 33 * G, &BTreeMap::new()), Vec::new());
     }
 
-    #[test]
-    fn two_profiles_never_both_take_a_slot_only_one_fits() {
-        // Both 2 slots at 3G caps, their jobs peaking at 2G and waiting; a 1G mirror in an 11G slice. One more slot
-        // fits (3 × 2G + 2 × 2G + 1G = 11G), two do not.
-        let text = r#"
-[host]
-slice = "runnerd.slice"
-isolation = "sysbox"
-admission = "measured"
+    /// `count` storefront builds that each waited `wait_secs` for a slot while memory and CPU had room, `apart` ms
+    /// apart.
+    fn slot_waits(count: u64, wait_secs: u64, apart: u64) -> Vec<Ran> {
+        (0..count)
+            .map(|i| Ran {
+                queued_at: NOW - 2 * HOUR + i * apart,
+                started_at: Some(NOW - 2 * HOUR + i * apart + wait_secs * 1000),
+                ..capped_builds(1, 4500 * M, wait_secs).remove(0)
+            })
+            .collect()
+    }
 
-[caches]
-mirror = { enabled = true, memory = "1G", cpus = 1, ttl = "168h" }
-pnpm = { max_size = "5G" }
-maven = { max_size = "5G" }
-
-[profiles.jvm]
-image_stage = "jvm"
-cpus = 4
-memory = "3G"
-slots = 2
-max_slots = 3
-
-[profiles.node]
-image_stage = "node"
-cpus = 4
-memory = "3G"
-slots = 2
-max_slots = 3
-
-[[repositories]]
-name = "halyard/ledger"
-profile = "jvm"
-labels = ["jvm"]
-
-[[repositories]]
-name = "halyard/storefront"
-profile = "node"
-labels = ["node"]
-"#;
-        let config = on(text, "");
-        let waited = |repository: &str, profile: &str| -> Vec<Ran> {
-            (0..10)
-                .map(|_| Ran {
-                    memory_cap: Some(3 * G),
-                    ..job(repository, "build", profile, 2 * G, 300)
-                })
-                .collect()
-        };
-        let mut jobs = waited("halyard/ledger", "jvm");
-        jobs.extend(waited("halyard/storefront", "node"));
-        let raised = due(&config, &history(jobs), 11 * G, &BTreeMap::new());
-        assert_eq!(
-            raised
-                .iter()
-                .filter(|change| change.to.slots > change.from.slots)
-                .count(),
-            1,
-            "one profile gets the third slot: {raised:?}"
-        );
+    fn slots_of(changes: &[SizingChange], profile: &str) -> Option<u32> {
+        changes
+            .iter()
+            .find(|change| change.profile == profile)
+            .map(|change| change.to.slots)
     }
 
     #[test]
-    fn under_measured_admission_waiting_jobs_get_one_more_slot_up_to_max_slots_while_their_peaks_fit()
-     {
-        let text = measured().replace("slots = 4", "slots = 4\nmax_slots = 5");
-        let config = on(&text, "");
-        // Peaks of 4500M at a 5.5G cap: kept, as 1G of page cache room rounds up to it, and they waited 5 minutes.
-        let waited = history(capped_builds(10, 4500 * M, 300));
-        // jvm 2 × 9G (too few jobs: at its cap), node 5 × 4500M, the mirror 0.5G: 41444M.
-        assert_eq!(due(&config, &waited, 40 * G, &BTreeMap::new()), Vec::new());
-        let raised = due(&config, &waited, 41 * G, &BTreeMap::new());
+    fn waiting_jobs_get_as_many_slots_as_waited_at_once_up_to_max_step_and_max_slots() {
+        // Catches a raise of one slot an hour when ten jobs waited at once, or one past max_step or max_slots.
+        let config = on(&measured(), "max_step = 50");
+        let burst = history(slot_waits(10, 300, 0));
         assert_eq!(
-            resized(&raised),
-            vec![(
-                "node",
-                Resize {
-                    memory: 5632 * M,
-                    slots: 5,
-                    cpus: None
-                }
-            )]
+            slots_of(&due(&config, &burst, 64 * G, &BTreeMap::new()), "node"),
+            Some(6),
+            "ten waited at once; half of node's 4 slots is the most one change adds"
+        );
+        let one_at_a_time = history(slot_waits(10, 300, 600_000));
+        assert_eq!(
+            slots_of(
+                &due(&config, &one_at_a_time, 64 * G, &BTreeMap::new()),
+                "node"
+            ),
+            Some(5),
+            "one waited at a time: one more slot would have started each"
+        );
+        let capped = on(
+            &measured().replace("slots = 4", "slots = 4\nmax_slots = 5"),
+            "max_step = 50",
+        );
+        assert_eq!(
+            slots_of(&due(&capped, &burst, 64 * G, &BTreeMap::new()), "node"),
+            Some(5)
         );
         let at_max = on(
             &measured().replace("slots = 4", "slots = 4\nmax_slots = 4"),
             "",
         );
-        assert_eq!(due(&at_max, &waited, 64 * G, &BTreeMap::new()), Vec::new());
+        let look = due_on(&at_max, &burst, Some(ROOMY), &BTreeMap::new());
+        assert_eq!(look.changes, Vec::new());
+        assert!(
+            look.refused_slots[0]
+                .reason
+                .ends_with("; it is at its max_slots, 4"),
+            "a raise the jobs ask for and max_slots refuses says so: {:?}",
+            look.refused_slots
+        );
     }
 
     #[test]
-    fn waits_while_the_host_was_short_of_memory_ask_for_no_more_slots() {
-        let text = measured().replace("slots = 4", "slots = 4\nmax_slots = 5");
-        let config = on(&text, "");
-        // They waited 5 minutes, all of it while admission held starts back for the host's memory.
+    fn waits_for_memory_or_cpu_ask_for_no_more_slots() {
+        // Catches the bug this replaced: any wait, whatever held the job back, read as one for a slot. These waited
+        // 5 minutes, none of it with only a slot missing.
+        let config = on(&measured(), "");
         let held = history(
-            capped_builds(10, 4500 * M, 300)
+            slot_waits(10, 300, 0)
                 .into_iter()
                 .map(|build| Ran {
-                    host_waited: 300_000,
+                    slot_waited: 0,
                     ..build
                 })
                 .collect(),
@@ -1020,42 +1037,166 @@ labels = ["node"]
     }
 
     #[test]
-    fn without_max_slots_waiting_jobs_get_a_slot_only_while_every_profiles_peaks_fit_the_slice() {
+    fn busy_slots_no_job_waited_for_add_one_under_caps_and_none_under_measured() {
+        // Catches measured admission adding slots on a busy share, which starts no job sooner, and caps losing it.
+        let busy = History {
+            jobs: builds(10, 5632 * M, 6 * G, 0),
+            runners: (0..2)
+                .map(|_| super::Held {
+                    profile: "node".to_owned(),
+                    started_at: NOW - 30 * 24 * HOUR,
+                    removed_at: None,
+                })
+                .collect(),
+            ..History::default()
+        };
+        assert_eq!(
+            slots_of(
+                &due(&on(CONFIG, ""), &busy, 40 * G, &BTreeMap::new()),
+                "node"
+            ),
+            Some(3),
+            "caps: slots busy all the time get one more"
+        );
+        let measured_busy = History {
+            jobs: capped_builds(10, 4500 * M, 0),
+            ..busy
+        };
+        assert_eq!(
+            slots_of(
+                &due(
+                    &on(&measured(), ""),
+                    &measured_busy,
+                    64 * G,
+                    &BTreeMap::new()
+                ),
+                "node"
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn slots_stop_where_each_slot_would_keep_less_than_2g_of_dockers_disk_and_say_so() {
+        // Catches slots added until every store is emptied after its jobs, a raise before the disk was measured, and
+        // a blocked raise nothing reports. jvm's 2 and node's 4 slots share 18G: 3G each, 2G at 7 to 9, 1G at 10.
+        let config = on(&measured(), "max_step = 50");
+        let burst = history(slot_waits(10, 300, 0));
+        let raised = due_on(&config, &burst, Some(18 * G), &BTreeMap::new());
+        assert_eq!(slots_of(&raised.changes, "node"), Some(6));
+        assert!(
+            raised.changes[0].reason.contains("waited 300s for a slot")
+                && raised.changes[0]
+                    .reason
+                    .ends_with("at 6 slots each slot keeps 2G of Docker's disk, down from 3G"),
+            "the reason says what waited and how the share drops: {}",
+            raised.changes[0].reason
+        );
+        // 12G: 2G each at 6, 1G at 7.
+        let full = due_on(&config, &burst, Some(12 * G), &BTreeMap::new());
+        assert_eq!(full.changes, Vec::new());
+        assert_eq!(
+            full.refused_slots[0].reason,
+            "10 jobs waited 300s for a slot (p95) while memory and CPU had room, 10 at once at most; at 5 slots, \
+             beside the other profiles' 2, each slot would keep 1G of Docker's disk, down from 2G, under the 2G auto \
+             sizing leaves each slot"
+        );
+        let unmeasured = due_on(&config, &burst, None, &BTreeMap::new());
+        assert_eq!(unmeasured.changes, Vec::new());
+        assert!(
+            unmeasured.refused_slots[0].reason.ends_with(
+                "; Docker's disk is not measured yet, which the next check of the caches does"
+            ),
+            "{:?}",
+            unmeasured.refused_slots
+        );
+    }
+
+    #[test]
+    fn a_burst_on_the_owners_host_adds_slots() {
+        // Catches a bound that holds a real host's slots where they are. The owner's: 79G for the slots' Docker
+        // stores, jvm 4, light 4 and node 10 slots, and stores that keep up to 4.2G (jvm), 1.4G (light) and 8.2G
+        // (node); a burst of 6 jvm jobs, held back by slots alone, where 4G per slot held them at 18.
+        let config = on(
+            &measured()
+                .replace("memory = \"9G\"\nslots = 2", "memory = \"9G\"\nslots = 4")
+                .replace("memory = \"5.5G\"\nslots = 4", "memory = \"5.5G\"\nslots = 10")
+                .replacen(
+                    "[[repositories]]",
+                    "[profiles.light]\nimage_stage = \"node\"\ncpus = 2\nmemory = \"2G\"\nslots = 4\n\n[[repositories]]",
+                    1,
+                ),
+            "max_step = 50",
+        );
+        let slots: Vec<_> = ["jvm", "light", "node"]
+            .iter()
+            .map(|name| config.profiles[*name].slots)
+            .collect();
+        assert_eq!(slots, [4, 4, 10], "the owner's slots");
+        let burst = history(
+            slot_waits(6, 600, 0)
+                .into_iter()
+                .map(|run| Ran {
+                    repository: "halyard/ledger".to_owned(),
+                    profile: "jvm".to_owned(),
+                    memory_cap: Some(9 * G),
+                    ..run
+                })
+                .collect(),
+        );
+        let look = due_on(&config, &burst, Some(79_000_000_000), &BTreeMap::new());
+        assert_eq!(slots_of(&look.changes, "jvm"), Some(6), "{look:?}");
+        assert!(
+            look.changes[0]
+                .reason
+                .ends_with("at 6 slots each slot keeps 3G of Docker's disk, down from 4G"),
+            "{}",
+            look.changes[0].reason
+        );
+        assert_eq!(look.refused_slots, Vec::new());
+    }
+
+    #[test]
+    fn two_profiles_never_both_take_a_slot_only_one_fits() {
+        // Catches a look that sizes each profile against the disk as the config has it, not as the change before
+        // it left it. Both waited; 14G holds 7 slots of 2G, one more than the 6 there are.
         let config = on(&measured(), "");
-        let waited = history(capped_builds(10, 4500 * M, 300));
-        // jvm 2 × 9G at its cap, node 5 × 4500M, the mirror 0.5G: 41444M.
+        let mut jobs = slot_waits(10, 300, 0);
+        jobs.extend(slot_waits(10, 300, 0).into_iter().map(|run| Ran {
+            repository: "halyard/ledger".to_owned(),
+            profile: "jvm".to_owned(),
+            memory_cap: Some(9 * G),
+            ..run
+        }));
+        let look = due_on(&config, &history(jobs), Some(14 * G), &BTreeMap::new());
         assert_eq!(
-            due(&config, &waited, 40 * G, &BTreeMap::new()),
-            Vec::new(),
-            "a fifth slot does not fit 40G"
+            look.changes
+                .iter()
+                .filter(|change| change.to.slots > change.from.slots)
+                .count(),
+            1,
+            "one profile gets the seventh slot: {look:?}"
         );
         assert_eq!(
-            resized(&due(&config, &waited, 41 * G, &BTreeMap::new())),
-            vec![(
-                "node",
-                Resize {
-                    memory: 5632 * M,
-                    slots: 5,
-                    cpus: None
-                }
-            )]
+            look.refused_slots.len(),
+            1,
+            "the other is refused: {look:?}"
         );
-        let unlimited = changes(
-            &config,
-            &waited,
-            Context {
-                memory_max: None,
-                cpus: Some(32_000),
-                window: window(),
-                last: &BTreeMap::new(),
-                cpus_set: &[],
-                running: &BTreeMap::new(),
-            },
+    }
+
+    #[test]
+    fn under_caps_jobs_that_waited_get_a_slot_though_no_wait_was_for_a_slot_alone() {
+        // Catches caps reading only waits for a slot alone: with every slot busy and the caps filling the slice, no
+        // job has room for its runner, so none counts, and the waits stay. These waited 5 minutes, slot_waited 0.
+        let config = on(CONFIG, "");
+        let waited = history(builds(10, 5632 * M, 6 * G, 300));
+        assert!(
+            waited.jobs.iter().all(|run| run.slot_waited == 0),
+            "no wait for a slot alone"
         );
         assert_eq!(
-            unlimited,
-            Vec::new(),
-            "without max_slots or a MemoryMax nothing bounds slots"
+            slots_of(&due(&config, &waited, 40 * G, &BTreeMap::new()), "node"),
+            Some(3)
         );
     }
 
@@ -1200,6 +1341,7 @@ labels = ["node"]
                 last: &BTreeMap::new(),
                 cpus_set: &[],
                 running: &BTreeMap::new(),
+                disk: None,
             },
         )
     }
@@ -1262,3 +1404,4 @@ labels = ["node"]
 
 mod cpus;
 mod memory;
+mod slots;

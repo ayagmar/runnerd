@@ -632,8 +632,8 @@ pub(crate) fn sizing(sizing: &Sizing, now: u64, paint: Paint) -> String {
                     let _ = writeln!(out, "  {what}, {why}");
                 }
             }
-            // A raise of `cpus` its jobs ask for and auto sizing cannot make.
-            if let Some(refusal) = plan.refusal(&profile.name) {
+            // A raise of `cpus` or `slots` its jobs ask for and auto sizing cannot make.
+            for refusal in plan.refusals(&profile.name) {
                 let _ = writeln!(out, "  {}", paint.paint(api::Tone::Warn.into(), &refusal));
             }
         }

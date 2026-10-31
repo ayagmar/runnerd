@@ -44,7 +44,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0036](0036-young-jobs-predicted-from-their-own-runs.md) | A young job predicted from its own runs, one copy at a time |
 | [0037](0037-memory-without-page-cache.md) | A job's memory is estimated without page cache; a cap is met when the kernel says so |
 | [0038](0038-cpu-admission.md) | Admission by CPU, from each job's average, off by default |
-| [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default (amended by 0049, 0088) |
+| [0039](0039-auto-sizing.md) | Auto sizing: the daemon applies advice itself, a step at a time, off by default (amended by 0049, 0088, 0090) |
 | [0040](0040-unused-runner-images-removed.md) | Published runner images no profile runs are removed |
 | [0041](0041-snapshot-and-mirror-limits.md) | A profile's snapshot and the mirror's storage have size limits (amended: a snapshot over its limit is due for a reseed; amended by 0065) |
 | [0042](0042-dashboard-behind-a-proxy-and-installable.md) | The dashboard behind a proxy the owner runs, and installable as an app (amended by 0043) |
@@ -54,12 +54,12 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0046](0046-sizing-says-what-auto-sizing-does-next.md) | Sizing says what auto sizing does next (amended by 0068) |
 | [0047](0047-activity-of-the-last-day.md) | The jobs started and ended in a window, by those times |
 | [0048](0048-slice-charts-scaled-to-the-slice.md) | The slice's charts reach up to the slice |
-| [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling (amended by 0068) |
+| [0049](0049-auto-sizing-without-hand-tuning.md) | Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling (amended by 0068, 0090) |
 | [0050](0050-warm-runners.md) | Warm runners: a runner waits for a job before it is queued |
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends (amended by 0064) |
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch (amended by 0077, 0082) |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache |
-| [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk (amended by 0089) |
+| [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk (amended by 0089, 0090) |
 | [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache (amended by 0063, 0084) |
 | [0056](0056-adopted-runners-keep-their-reservations.md) | A runner a restart adopts keeps what it reserved |
 | [0057](0057-name-what-holds-the-hosts-memory.md) | Name the programs that hold the host's memory, by name only |
@@ -95,4 +95,5 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0087](0087-an-insight-for-jobs-their-cpu-cap-holds-back.md) | An insight for jobs their CPU cap holds back |
 | [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md) | Sizing advice keeps to a profile's memory bounds |
 | [0089](0089-a-slots-cache-mounts-go-last.md) | A slot's build cache follows its share, and cache mounts go last |
+| [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md) | Under measured admission, slots follow waits for a slot alone and Docker's disk |
 | [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md) | A signal leaves running jobs to the next start, and the daemon exits within 45 s |

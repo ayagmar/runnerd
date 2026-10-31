@@ -1159,11 +1159,13 @@ fn host_at(store: &Store, slice: u64, available: u64, stalled: u32) {
     });
 }
 
-/// How long each of the jobs 1 to 4 waited for the host's memory, in ms, by the history.
-fn host_waited(dir: &TestDir) -> Vec<u64> {
+/// How long each of the jobs 1 to 4 waited, in ms, by the history's `column`: `host_waited` or `slot_waited`.
+fn waited(dir: &TestDir, column: &str) -> Vec<u64> {
     let db = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
     let mut statement = db
-        .prepare("SELECT host_waited FROM jobs WHERE id <= 4 ORDER BY id")
+        .prepare(&format!(
+            "SELECT {column} FROM jobs WHERE id <= 4 ORDER BY id"
+        ))
         .unwrap();
     statement
         .query_map([], |row| row.get(0))
@@ -1236,13 +1238,47 @@ async fn jobs_wait_while_the_host_is_short_of_memory_and_start_once_it_has_room_
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()).len(), 4);
     handle.store.flush().await;
-    let waited = host_waited(&dir);
+    let waited = waited(&dir, "host_waited");
     assert_eq!(waited[..2], [0, 0], "the jobs that started waited not");
     assert!(
         waited[2..].iter().all(|&ms| ms >= 40),
         "the two that waited count both ticks: {waited:?}"
     );
     assert!(removed(&docker.calls()).is_empty(), "no runner was stopped");
+}
+
+#[tokio::test]
+async fn jobs_count_a_wait_for_a_slot_only_while_memory_had_room_for_their_runners() {
+    // Catches auto sizing adding slots for jobs memory would have held back anyway (ADR 0090). Two slots, four jobs
+    // of 1.25G, and a slice with room for one more runner beside the two that start: job 3 waits for a slot alone,
+    // job 4 for memory too.
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = engine_with(
+        &github,
+        &docker,
+        &dir,
+        &measured().replace("slots = 4", "slots = 2"),
+    );
+    engine.memory_max = Some(3 * 1280 * M + 100 * M);
+    history(&handle.store, G, 0).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = (1..=4).map(job).collect();
+    slice_at(&handle.store, 0);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2);
+    tokio::time::sleep(Duration::from_millis(20)).await;
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    let waited = waited(&dir, "slot_waited");
+    assert_eq!(
+        waited.iter().map(|&ms| ms >= 20).collect::<Vec<_>>(),
+        [false, false, true, false],
+        "only job 3 waited for a slot alone: {waited:?}"
+    );
 }
 
 #[tokio::test]

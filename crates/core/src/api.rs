@@ -95,9 +95,9 @@ pub use savings::{
 };
 pub use sizing::{
     Advice, AutoPlan, GRANULE, JobSizing, MemoryBound, MemoryHold, Need, PAGE_CACHE_ROOM, Peaks,
-    ProfilePlan, ProfileSizing, Resize, RevertCause, SAMPLE_INTERVAL, Sizing, SizingChange,
-    SizingHold, SizingQuery, SizingRefused, SizingRevert, Spread, Starts, need, period,
-    sampled_note,
+    ProfilePlan, ProfileSizing, Resize, RevertCause, SAMPLE_INTERVAL, SLOT_DISK, Sizing,
+    SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Spread, Starts, need,
+    period, sampled_note,
 };
 pub use slots::{Health, SlotState};
 pub use stats::StatsSummary;

@@ -213,5 +213,13 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_with_each_profile
         text.contains("changed 2h 00m ago; the interval holds it until then"),
         "{text}"
     );
-    assert!(text.contains(&plan.refusal("node").unwrap()), "{text}");
+    let refusals = plan.refusals("node");
+    assert_eq!(
+        refusals.len(),
+        2,
+        "a CPU and a slot raise refused: {refusals:?}"
+    );
+    for refusal in &refusals {
+        assert!(text.contains(refusal), "{text}");
+    }
 }

@@ -46,7 +46,10 @@ CREATE TABLE jobs (
     -- CPU (`cpu.pressure`). NULL where the kernel kept none, and in rows from before schema 17.
     cpu_periods INTEGER,
     cpu_throttled INTEGER,
-    cpu_stalled INTEGER
+    cpu_stalled INTEGER,
+    -- How long it waited with no slot of its profile free while the slice's memory, the host's and the CPU budget had
+    -- room for its runner: what one more slot would have saved it (ADR 0090). 0 in rows from before schema 18.
+    slot_waited INTEGER NOT NULL DEFAULT 0
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);

@@ -108,17 +108,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.refresh_predictor().await;
             self.rereserve().await;
         }
-        let (Plan { decisions, .. }, mut admitting) = match mode {
+        let (plan, mut admitting) = match mode {
             Shutdown::No => self.plan(),
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => {
                 (self.stops(mode), self.admitting(&mut [], None))
             }
         };
         self.note_high_water(&admitting);
+        self.note_slots(plan.slot_waiting);
         let mut held_for_cpu = BTreeSet::new();
         // Once a start waits for a warm runner that took a job, the plan's later starts counted on its room too.
         let mut deferred = false;
-        for decision in decisions {
+        for decision in plan.decisions {
             match decision {
                 Decision::Stop { slot } => {
                     let jobs = match mode {
@@ -171,8 +172,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 .map(|(slot, _)| Decision::Stop { slot })
                 .collect(),
-            waiting: BTreeMap::new(),
-            warm: BTreeSet::new(),
+            ..Plan::default()
         }
     }
 

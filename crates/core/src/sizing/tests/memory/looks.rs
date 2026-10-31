@@ -99,6 +99,7 @@ impl Daemon {
                 last: &last,
                 cpus_set: &self.cpus_set,
                 running: &BTreeMap::new(),
+                disk: None,
             },
         );
         for change in &look.changes {

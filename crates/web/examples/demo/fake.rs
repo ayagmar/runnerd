@@ -1173,6 +1173,8 @@ fn sizing(fixtures: &Fixtures) -> Sizing {
                     on_cap: 0,
                 },
                 wait,
+                // The demo's waits are all for a slot.
+                slot_wait: wait,
                 // Every run of its jobs started warm or cold, 31 in 40 of them warm.
                 starts: Starts {
                     warm: u32::try_from(runs * 31 / 40).unwrap(),

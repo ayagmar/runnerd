@@ -549,6 +549,13 @@ pub fn auto_plan(at: u64) -> api::AutoPlan {
                  the CPU budget with every profile's warm runners and one more runner at the largest cap"
             ),
         }],
+        refused_slots: vec![api::SizingRefused {
+            profile: "node".to_owned(),
+            reason: "14 jobs since its last change waited 240s for a slot (p95) while memory and CPU had room, 5 at \
+                     once at most; at 3 slots, beside the other profiles' 6, each slot would keep 1G of Docker's \
+                     disk, down from 2G, under the 2G auto sizing leaves each slot"
+                .to_owned(),
+        }],
     }
 }
 
@@ -573,6 +580,7 @@ pub fn sizing(at: u64) -> api::Sizing {
             cpu_runs: 40,
         },
         wait: spread(20, 300, 400, 400),
+        slot_wait: spread(10, 240, 300, 300),
         starts: api::Starts::default(),
         busy: 70,
         wants_slots: true,

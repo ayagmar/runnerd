@@ -226,6 +226,7 @@ fn auto_sizing(fake: &fake::Fake) {
                 runnerd_core::api::cores(7400),
             ),
         }],
+        refused_slots: Vec::new(),
     });
 }
 

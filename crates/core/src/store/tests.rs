@@ -725,19 +725,25 @@ fn profile(name: &str) -> crate::api::ProfileStatus {
 }
 
 #[tokio::test]
-async fn auto_sizing_reads_each_profile_s_cpus_as_the_daemon_ran_them_and_a_restart_reads_them_back()
+async fn auto_sizing_reads_each_profile_s_cpus_and_slots_as_the_daemon_ran_them_and_a_restart_reads_them_back()
  {
     use crate::api::Event;
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    let at = |cpus| crate::api::ProfileStatus {
+    let at = |cpus, slots| crate::api::ProfileStatus {
         cpus,
+        slots: (1..=slots)
+            .map(|slot| crate::api::SlotStatus { slot, runner: None })
+            .collect(),
         ..profile("app")
     };
-    // Started at 2 CPUs, a reload to 4 and one back to 2, with no run between: what a `cpus` change reads runs since.
-    for cpus in [2, 4, 2] {
-        store.event(Event::ProfileChanged { profile: at(cpus) });
+    // Started at 2 CPUs, a reload to 4 and one back to 2 with 5 slots, with no run between: what a `cpus` change
+    // reads runs since, and a lowering of slots reads runners since.
+    for (cpus, slots) in [(2, 3), (4, 3), (2, 5)] {
+        store.event(Event::ProfileChanged {
+            profile: at(cpus, slots),
+        });
     }
     store.event(Event::ProfileChanged {
         profile: profile("small"),
@@ -762,6 +768,19 @@ async fn auto_sizing_reads_each_profile_s_cpus_as_the_daemon_ran_them_and_a_rest
         seen(&store).await,
         [("app", 2), ("app", 4), ("app", 2), ("small", 2)]
             .map(|(profile, cpus)| (profile.to_owned(), cpus))
+    );
+    let slots: Vec<(String, u32)> = store
+        .auto_sizing()
+        .await
+        .unwrap()
+        .slots
+        .into_iter()
+        .map(|set| (set.profile, set.slots))
+        .collect();
+    assert_eq!(
+        slots,
+        [("app", 3), ("app", 3), ("app", 5), ("small", 0)]
+            .map(|(profile, slots)| (profile.to_owned(), slots))
     );
     // Pruned, each profile keeps its latest: the `cpus` it has had since before what the history keeps.
     let later = crate::time::now_ms() + 400 * 24 * 3600 * 1000;
@@ -1428,7 +1447,7 @@ async fn a_job_whose_sockets_memory_pressure_throttled_says_so_in_its_record() {
 }
 
 #[tokio::test]
-async fn sizing_reads_how_long_each_job_waited_for_the_hosts_memory() {
+async fn sizing_reads_how_long_each_job_waited_for_the_hosts_memory_and_for_a_slot_alone() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
@@ -1445,23 +1464,25 @@ async fn sizing_reads_how_long_each_job_waited_for_the_hosts_memory() {
     // Job 1 waited over two plans; job 2 for something else.
     store.host_waited(vec![1], 100);
     store.host_waited(vec![1], 20);
+    store.slot_waited(vec![2], 50);
+    store.slot_waited(vec![2], 5);
     store.flush().await;
     drop(store);
 
     let store = Store::open(&path).unwrap();
-    let mut waited: Vec<u64> = store
+    let mut waited: Vec<(u64, u64)> = store
         .sizing(0)
         .await
         .unwrap()
         .jobs
         .iter()
-        .map(|job| job.host_waited)
+        .map(|job| (job.host_waited, job.slot_waited))
         .collect();
     waited.sort_unstable();
     assert_eq!(
         waited,
-        [0, 120],
-        "job 1's two waits add up; job 2's is none"
+        [(0, 55), (120, 0)],
+        "each job's waits add up, each kind on its own"
     );
 }
 

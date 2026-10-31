@@ -73,16 +73,30 @@ pub struct AutoPlan {
     /// The profiles whose jobs the CPU cap holds back and whose `cpus` the next look cannot raise, and why.
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused: Vec<SizingRefused>,
+    /// Under `measured` admission, the profiles whose jobs waited for a slot alone and whose `slots` the next look
+    /// cannot raise, and why (ADR 0090).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub refused_slots: Vec<SizingRefused>,
 }
 
-/// A raise of a profile's `cpus` its jobs ask for that auto sizing cannot make, as when it does not fit the CPU
-/// budget.
+/// A raise of a profile's `cpus` or `slots` its jobs ask for that auto sizing cannot make, as when it does not fit
+/// the CPU budget or Docker's disk.
 #[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 pub struct SizingRefused {
     /// The profile.
     pub profile: String,
-    /// Which job the cap holds back, and what keeps it from a raise.
+    /// Which job the cap holds back, or how long its jobs waited for a slot, and what keeps it from a raise.
     pub reason: String,
+}
+
+impl SizingRefused {
+    /// `profile`'s raise, refused for `reason`.
+    pub fn new(profile: &str, reason: String) -> SizingRefused {
+        SizingRefused {
+            profile: profile.to_owned(),
+            reason,
+        }
+    }
 }
 
 /// A profile auto sizing changes nothing in before `until`, and lowers nothing in before `lower_until`.
@@ -139,13 +153,17 @@ pub struct ProfileSizing {
     /// Seconds from queued to started, leaving out the time before the history's start and the time no runnerd
     /// ran (ADR 0081).
     pub wait: Spread,
+    /// Seconds of that wait with no slot of the profile free while the slice's memory, the host's and the CPU budget
+    /// had room for the job's runner: what one more slot would have saved (ADR 0090).
+    #[serde(default)]
+    pub slot_wait: Spread,
     /// Its jobs by whether a warm runner took them, and how long each kind waited.
     pub starts: Starts,
     /// The percent of the time since `since` its slots held a runner for a job, from when the job was queued, over
     /// its `slots` now.
     pub busy: u32,
-    /// Whether its jobs waited a minute or more for a slot at p95, or its slots were busy half the time: more slots
-    /// would help.
+    /// Whether more slots would help: under `measured` admission its jobs waited a minute or more for a slot alone at
+    /// p95 (`slot_wait`); under `caps` they waited that long at all (`wait`), or its slots were busy half the time.
     pub wants_slots: bool,
     /// What to set `memory` and `slots` to. Sized for its largest peak, so no job gets less than it used.
     pub advice: Advice,
@@ -294,6 +312,12 @@ pub struct Spread {
     /// The largest.
     pub max: u64,
 }
+
+/// The least share of Docker's disk, in bytes, auto sizing leaves each slot when it adds slots under measured
+/// admission: 2G. Every slot's Docker store shares a quarter of Docker's disk; at a 2G share the stores measured on
+/// a busy host keep their images between jobs, and at 1G, the least a share can be, every store over 1G is emptied
+/// after each job. What a store keeps does not set it: a store fills the share it gets (ADR 0090).
+pub const SLOT_DISK: u64 = 2 << 30;
 
 /// What a cap keeps at least over the largest peak, for page cache: 1G. Peaks leave page cache out, and a container
 /// whose memory past them leaves the kernel less than about 500M of page cache to reclaim at its cap reclaims badly,
@@ -451,21 +475,33 @@ impl Sizing {
     /// One line on what to do with a profile and why, as `runnerctl sizing`, the dashboard and `runnerd doctor`
     /// say it, such as `lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G`.
     /// Under `measured` admission, when jobs wanted more slots, it adds that `slots` is not bought with caps there, or
-    /// with auto sizing on, that it adds them.
+    /// with auto sizing on, that it adds them, or that it cannot when the next look refuses (`AutoPlan::refusals`).
     pub fn advice_line(&self, profile: &ProfileSizing) -> String {
         let line = self.memory_line(profile);
         if self.admission == AdmissionPolicy::Measured
             && profile.wants_slots
             && !matches!(profile.advice, Advice::TooFew { .. })
         {
-            let then = if self.auto {
-                "auto sizing adds one at a time while every profile's slots fit the slice at their jobs' peaks"
+            let refused = self.auto_plan.as_ref().is_some_and(|plan| {
+                plan.refused_slots
+                    .iter()
+                    .any(|refused| refused.profile == profile.name)
+            });
+            let then = if refused {
+                "auto sizing cannot add one now"
+            } else if self.auto {
+                &format!(
+                    "auto sizing adds as many as waited at once, up to max_slots and while each slot keeps {} of \
+                     Docker's disk",
+                    ByteSize(SLOT_DISK)
+                )
             } else {
-                "measured admission reserves predicted peaks, not caps, so more slots may fit: raise slots by hand"
+                "measured admission reserves predicted peaks, not caps, so more slots start them sooner: raise slots \
+                 by hand"
             };
             format!(
-                "{line}; jobs waited {}s for a slot (p95) and slots were busy {}%: {then}",
-                profile.wait.p95, profile.busy
+                "{line}; jobs waited {}s for a slot (p95) while memory and CPU had room: {then}",
+                profile.slot_wait.p95
             )
         } else {
             line

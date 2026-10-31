@@ -676,6 +676,7 @@ fn as_sized(runs: &[Run], average: u64) -> Vec<crate::sizing::Ran> {
             branch: run.branch.clone(),
             reserved: None,
             host_waited: 0,
+            slot_waited: 0,
             unseen: 0,
             cpu_periods: run.cpu_periods,
             cpu_throttled: run.cpu_throttled,
@@ -707,6 +708,7 @@ fn sizing_raises_app_to(config: &Config, jobs: Vec<crate::sizing::Ran>) -> Optio
             last: &last,
             cpus_set: &[],
             running: &running,
+            disk: None,
         },
     );
     changes

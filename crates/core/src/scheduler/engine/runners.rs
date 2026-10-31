@@ -250,6 +250,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// image's job cleanup holds it to, once the caches' check has measured Docker's disk.
     fn runner_env(&self) -> Vec<String> {
         self.docker_disk
+            .borrow()
             .map(|disk| {
                 let slots = self
                     .config

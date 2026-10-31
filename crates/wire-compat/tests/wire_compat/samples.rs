@@ -818,6 +818,7 @@ pub(crate) fn sizing() -> Sizing {
             slots: 2,
             peaks: peaks(),
             wait: spread(),
+            slot_wait: spread(),
             starts: Starts {
                 warm: 10,
                 warm_p50: 5,
@@ -861,6 +862,10 @@ pub(crate) fn sizing() -> Sizing {
             refused: vec![SizingRefused {
                 profile: "halyard".to_owned(),
                 reason: "the CPU budget is full".to_owned(),
+            }],
+            refused_slots: vec![SizingRefused {
+                profile: "halyard".to_owned(),
+                reason: "it is at its max_slots, 4".to_owned(),
             }],
         }),
     }

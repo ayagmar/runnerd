@@ -206,6 +206,11 @@ pub struct Plan {
     pub waiting: BTreeMap<u64, Waiting>,
     /// The idle runners kept warm: no queued job of their repository waits for them.
     pub warm: BTreeSet<SlotRef>,
+    /// The queued jobs one more slot of their profile would start now: none of its slots is free or a warm runner's
+    /// to give, while the memory and CPU budgets, less what the older of these jobs would take, have room for their
+    /// runners. Whatever `waiting` calls it, `NoSlot` or `BehindStart`; a job that also lacks memory or CPU is not
+    /// one (ADR 0090).
+    pub slot_waiting: BTreeSet<u64>,
 }
 
 /// The budgets a plan starts runners within.
@@ -298,17 +303,11 @@ pub fn plan(
 ) -> Plan {
     let mut decided = Plan::default();
     unserved(repositories, &mut decided);
-    let mut wanted = BTreeMap::new();
-    let mut warm_wanted = Vec::new();
-    let mut jobs = Vec::new();
-    for repository in repositories {
-        if let Some(sorted) = sort_out(repository, profiles, now, &mut decided) {
-            wanted.insert(pool_key(repository), sorted.serve.len());
-            jobs.extend(sorted.serve.into_iter().map(|job| (job, repository)));
-            warm_wanted.push((repository, sorted.warm));
-        }
-    }
-    jobs.sort_by_key(|(id, _)| *id);
+    let ToServe {
+        mut wanted,
+        jobs,
+        warm: warm_wanted,
+    } = to_serve(repositories, profiles, now, &mut decided);
 
     let mut warm = Warm::new(&decided.warm, profiles, budget.held);
     let mut taken = taken_slots(profiles);
@@ -318,6 +317,7 @@ pub fn plan(
         host: budget.host,
     };
     let mut started = Started::new(&taken, left);
+    let mut slot_bound = SlotBound::default();
     // The job that waited long enough for CPU that no younger one takes CPU before it.
     let mut first_for_cpu = None;
     for (position, &(job, repository)) in jobs.iter().enumerate() {
@@ -362,6 +362,12 @@ pub fn plan(
                     &started,
                 );
                 decided.waiting.insert(job, reason);
+                if free.is_none()
+                    && profile.preparing.is_none()
+                    && slot_bound.takes(left, memory, cpu)
+                {
+                    decided.slot_waiting.insert(job);
+                }
                 if short == Short::Cpu {
                     let held = held_for_cpu(repository);
                     if !decided.decisions.contains(&held) {
@@ -398,6 +404,65 @@ pub fn plan(
         start_warm(&warm_wanted, profiles, &mut taken, left, &mut decided);
     }
     decided
+}
+
+/// What `sort_out` leaves the plan to serve.
+struct ToServe<'plan> {
+    /// How many runners each pool wants for its jobs, by `pool_key`.
+    wanted: BTreeMap<(&'plan str, &'plan str), usize>,
+    /// Their jobs, oldest first, each with its pool.
+    jobs: Vec<(u64, &'plan Repository)>,
+    /// How many warm runners each pool is short of.
+    warm: Vec<(&'plan Repository, usize)>,
+}
+
+/// Sorts out each of `repositories` (`sort_out`) into what the plan serves.
+fn to_serve<'plan>(
+    repositories: &'plan [Repository],
+    profiles: &BTreeMap<String, Profile>,
+    now: SystemTime,
+    decided: &mut Plan,
+) -> ToServe<'plan> {
+    let mut serve = ToServe {
+        wanted: BTreeMap::new(),
+        jobs: Vec::new(),
+        warm: Vec::new(),
+    };
+    for repository in repositories {
+        if let Some(sorted) = sort_out(repository, profiles, now, decided) {
+            serve
+                .wanted
+                .insert(pool_key(repository), sorted.serve.len());
+            serve
+                .jobs
+                .extend(sorted.serve.into_iter().map(|job| (job, repository)));
+            serve.warm.push((repository, sorted.warm));
+        }
+    }
+    serve.jobs.sort_by_key(|(id, _)| *id);
+    serve
+}
+
+/// What the jobs a plan has waiting only for a slot would take of the budgets, oldest first
+/// (`Plan::slot_waiting`).
+#[derive(Debug, Default)]
+struct SlotBound {
+    memory: u64,
+    cpu: u64,
+}
+
+impl SlotBound {
+    /// Whether a runner of `memory` and `cpu` fits what is `left` beside the older ones it holds, and if so takes it.
+    fn takes(&mut self, left: Left, memory: u64, cpu: u64) -> bool {
+        let mut spare = left;
+        spare.take(self.memory, self.cpu);
+        let fits = spare.fits(memory, cpu);
+        if fits {
+            self.memory = self.memory.saturating_add(memory);
+            self.cpu = self.cpu.saturating_add(cpu);
+        }
+        fits
+    }
 }
 
 /// The free slot the queued job `job` of `repository` starts in: the one that ran the same job last (repository,

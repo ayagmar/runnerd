@@ -580,6 +580,7 @@ fn sizing() -> Sizing {
             slots: 2,
             peaks: peaks.clone(),
             wait: spread(20, 300, 400, 400),
+            slot_wait: spread(10, 240, 300, 300),
             starts: Starts {
                 warm: 30,
                 warm_p50: 2,
@@ -2127,6 +2128,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         }],
         blocked: None,
         refused: Vec::new(),
+        refused_slots: Vec::new(),
     });
     app.update(Msg::Sizing(sizing.clone()));
     for width in [80, 120] {
@@ -2161,9 +2163,14 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         "{shown}"
     );
 
-    // A refused CPU raise shows beside the memory change the same look makes, here and in runnerctl sizing.
+    // Refused CPU and slot raises show beside the memory change the same look makes, here and in runnerctl sizing.
     let plan = runnerd_fixtures::auto_plan(NOW);
-    let refusal = plan.refusal("node").unwrap();
+    let refusals = plan.refusals("node");
+    assert_eq!(
+        refusals.len(),
+        2,
+        "a CPU and a slot raise refused: {refusals:?}"
+    );
     sizing.auto_plan = Some(plan);
     app.update(Msg::Sizing(sizing.clone()));
     let shown = screen(&app, 120, 40, false);
@@ -2172,12 +2179,14 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         "{shown}"
     );
     let words = |text: &str| text.split_whitespace().collect::<Vec<_>>().join(" ");
-    assert!(
-        words(&shown).contains(&words(&refusal)),
-        "the refusal shows beside it, wrapped, never cut: {shown}"
-    );
     let printed = crate::human::sizing(&sizing, NOW, crate::human::Paint { colour: false });
-    assert!(printed.contains(&refusal), "{printed}");
+    for refusal in &refusals {
+        assert!(
+            words(&shown).contains(&words(refusal)),
+            "the refusal shows beside it, wrapped, never cut: {shown}"
+        );
+        assert!(printed.contains(refusal), "{printed}");
+    }
 }
 
 /// Whether an effect reads the day's activity.

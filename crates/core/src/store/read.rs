@@ -495,10 +495,10 @@ pub(super) fn auto_sizing(db: &Connection) -> rusqlite::Result<super::AutoSizing
         .prepare_cached("SELECT * FROM auto_sizing WHERE state = 'pending' ORDER BY id")?
         .query_map([], |row| Ok((row.get("id")?, sizing_change(row)?)))?
         .collect::<rusqlite::Result<_>>()?;
-    let cpus = db
+    let events = db
         .prepare_cached(
             "SELECT json_extract(body, '$.profile.name'), json_extract(body, '$.profile.cpus'), at, \
-             json_extract(body, '$.profile.memory') FROM events \
+             json_extract(body, '$.profile.memory'), json_array_length(body, '$.profile.slots') FROM events \
              WHERE json_extract(body, '$.type') = 'profile.changed' ORDER BY id",
         )?
         .query_map([], |row| {
@@ -509,12 +509,13 @@ pub(super) fn auto_sizing(db: &Connection) -> rusqlite::Result<super::AutoSizing
                     at: row.get(2)?,
                 },
                 row.get::<_, Option<u64>>(3)?,
+                row.get::<_, Option<u32>>(4)?,
             ))
         })?
         .collect::<rusqlite::Result<Vec<_>>>()?;
-    let memory = cpus
+    let memory = events
         .iter()
-        .filter_map(|(set, memory): &(sizing::CpusSet, Option<u64>)| {
+        .filter_map(|(set, memory, _)| {
             memory.map(|memory| sizing::MemorySet {
                 profile: set.profile.clone(),
                 memory,
@@ -522,11 +523,22 @@ pub(super) fn auto_sizing(db: &Connection) -> rusqlite::Result<super::AutoSizing
             })
         })
         .collect();
+    let slots = events
+        .iter()
+        .filter_map(|(set, _, slots)| {
+            slots.map(|slots| sizing::SlotsSet {
+                profile: set.profile.clone(),
+                slots,
+                at: set.at,
+            })
+        })
+        .collect();
     Ok(super::AutoSizing {
         last,
         pending,
-        cpus: cpus.into_iter().map(|(set, _)| set).collect(),
+        cpus: events.into_iter().map(|(set, _, _)| set).collect(),
         memory,
+        slots,
     })
 }
 
@@ -784,6 +796,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
             unseen: row.get(23)?,
             cpu_periods: row.get(24)?,
             cpu_throttled: row.get(25)?,
+            slot_waited: row.get(26)?,
         })
     };
     let jobs = db
@@ -794,7 +807,7 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
              j.state = 'completed' AND j.conclusion IS 'success', r.ooms, r.memory_measure IS 'without_page_cache', \
              j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, r.local_ooms, j.run_id, j.branch, \
              j.state = 'completed' AND j.conclusion IN ('failure', 'timed_out'), j.unseen, j.cpu_periods, \
-             j.cpu_throttled FROM jobs j \
+             j.cpu_throttled, j.slot_waited FROM jobs j \
              JOIN runners r ON r.name = j.runner \
              WHERE j.state IN ('completed', 'lost') AND j.conclusion IS NOT 'cancelled' \
              AND j.memory_peak IS NOT NULL AND j.queued_at >= ?1 ORDER BY j.id",
@@ -807,7 +820,8 @@ pub(super) fn sizing(db: &Connection, since: u64) -> rusqlite::Result<sizing::Hi
              coalesce(j.cpu_peak, 0), j.queued_at, j.started_at, j.finished_at, \
              coalesce(r.oom_kills, 0) > 0, json_extract(r.admission, '$.reserved'), 0, r.ooms, \
              r.memory_measure IS 'without_page_cache', j.cpu_average, r.cpu_cap, r.started_at, j.host_waited, \
-             r.local_ooms, j.run_id, j.branch, 0, j.unseen, j.cpu_periods, j.cpu_throttled FROM jobs j \
+             r.local_ooms, j.run_id, j.branch, 0, j.unseen, j.cpu_periods, j.cpu_throttled, j.slot_waited \
+             FROM jobs j \
              JOIN runners r ON r.name = j.runner \
              WHERE j.state = 'completed' AND j.conclusion = 'cancelled' AND j.queued_at >= ?1 ORDER BY j.id",
         )?

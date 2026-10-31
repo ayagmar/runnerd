@@ -85,6 +85,7 @@ impl Writer<'_> {
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
             Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
             Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
+            Write::SlotWaited { jobs, ms } => self.slot_waited(&jobs, ms),
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
             Write::RunnerRemoved { runner, at } => {
                 self.change("record a removed runner", |announced| {
@@ -318,6 +319,18 @@ impl Writer<'_> {
                 "record a wait for the host's memory",
                 self.db.execute(
                     "UPDATE jobs SET host_waited = host_waited + ?2 WHERE id = ?1",
+                    params![job, ms],
+                ),
+            );
+        }
+    }
+
+    fn slot_waited(&self, jobs: &[u64], ms: u64) {
+        for job in jobs {
+            logged(
+                "record a wait for a slot",
+                self.db.execute(
+                    "UPDATE jobs SET slot_waited = slot_waited + ?2 WHERE id = ?1",
                     params![job, ms],
                 ),
             );
