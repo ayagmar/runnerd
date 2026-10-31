@@ -867,6 +867,7 @@ pub(crate) fn sizing() -> Sizing {
                 profile: "halyard".to_owned(),
                 reason: "it is at its max_slots, 4".to_owned(),
             }],
+            waited_before_change: vec!["halyard".to_owned()],
         }),
     }
 }

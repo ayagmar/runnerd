@@ -82,6 +82,7 @@ fn a_hold_is_judged_by_the_readers_clock_not_by_when_the_plan_was_made() {
         blocked: None,
         refused: Vec::new(),
         refused_slots: Vec::new(),
+        waited_before_change: Vec::new(),
     };
     assert!(
         matches!(plan.profile_plan("jvm", 60), ProfilePlan::Held { .. }),
@@ -139,6 +140,7 @@ fn a_cpu_raise_auto_sizing_cannot_make_shows_beside_the_memory_change_it_makes()
                      its max_slots, 4"
                 .to_owned(),
         }],
+        waited_before_change: Vec::new(),
     };
     assert!(
         matches!(plan.profile_plan("jvm", 60), ProfilePlan::Next { .. }),

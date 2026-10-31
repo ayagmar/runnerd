@@ -620,8 +620,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Schedules until a shutdown request is carried out, from a recovered engine.
     async fn schedule(&mut self) {
+        let mut shown = Shutdown::No;
         let mode = loop {
             let mode = self.stopping();
+            // A stop shows before it removes idle runners, which can take until `STOP_DEADLINE` on a slow GitHub or
+            // Docker: until then status would show a daemon that is not stopping.
+            if mode != shown {
+                self.publish();
+                shown = mode;
+            }
             if mode == Shutdown::Detach {
                 self.remove_idle().await;
                 self.collect_recordings().await;
@@ -664,8 +671,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         self.close_shells().await;
         if mode == Shutdown::Detach {
-            let runners = self.occupied().count();
-            info!("stopped, leaving {runners} busy runners and the mirror to the next start");
+            // The mirror stays up only for the busy runners left behind.
+            let mirror = if self.config.caches.mirror.enabled {
+                " and the mirror"
+            } else {
+                ""
+            };
+            match self.occupied().count() {
+                0 => info!("stopped; no job was running"),
+                1 => info!("stopped, leaving 1 busy runner{mirror} to the next start"),
+                runners => {
+                    info!("stopped, leaving {runners} busy runners{mirror} to the next start");
+                }
+            }
             return;
         }
         if let Err(error) = cache::mirror_down(&*self.docker, &self.names).await {

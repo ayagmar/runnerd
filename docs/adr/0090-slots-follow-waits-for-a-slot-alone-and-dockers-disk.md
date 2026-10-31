@@ -77,7 +77,9 @@ What a slot does cost is disk. Every slot's Docker store shares the same quarter
 - A raise the jobs ask for and auto sizing cannot make, at `max_slots`, before the measure or at the 2G share, is a
   refusal (`AutoPlan::refused_slots`), which clients show as `No slot raise: …` beside the profile's next change, as
   they show a `cpus` raise the CPU budget refuses. The advice line then says auto sizing cannot add one now, instead
-  of promising it.
+  of promising it. Nor does it promise one for waits before the profile's last change, which no look reads again
+  (`AutoPlan::waited_before_change`): it says auto sizing adds more only once jobs queued after that change wait for
+  a slot too.
 - CPU: with `cpu_overcommit` set, admission guards CPU, and a job the CPU budget would hold back is not a wait for a
   slot alone. Without it there is no CPU budget, as before: more slots run more jobs on the same cores, each with its
   CPU weight ([0079](0079-cpu-weights-and-throttling-as-evidence.md)), which slows them but does not stop them, and

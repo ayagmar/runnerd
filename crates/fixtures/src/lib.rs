@@ -556,14 +556,15 @@ pub fn auto_plan(at: u64) -> api::AutoPlan {
                      disk, down from 2G, under the 2G auto sizing leaves each slot"
                 .to_owned(),
         }],
+        waited_before_change: Vec::new(),
     }
 }
 
 /// `GET /v1/sizing` at `at` (s) under auto sizing, with [`auto_plan`]: jvm keeps its 9G, and a change 2 hours before
-/// holds it from any other for 1 more hour; node's next look would lower its memory, and cannot raise its `cpus`;
-/// android's jobs need 17G, but `[host] memory_ceiling` holds it at its 14G; gradle's need 13.25G, but its
-/// `max_memory` holds it at its 11G; and the config file changed on disk, so no look changes anything until runnerd
-/// runs with it.
+/// holds it from any other for 1 more hour, its jobs since having waited for no slot; node's next look would lower
+/// its memory, and cannot raise its `cpus`; android's jobs need 17G, but `[host] memory_ceiling` holds it at its 14G;
+/// gradle's need 13.25G, but its `max_memory` holds it at its 11G; and the config file changed on disk, so no look
+/// changes anything until runnerd runs with it.
 pub fn sizing(at: u64) -> api::Sizing {
     let spread = |p50, p95, p99, max| api::Spread { p50, p95, p99, max };
     let profile = |name: &str, memory: u64, peak: u64, advice| api::ProfileSizing {
@@ -595,6 +596,7 @@ pub fn sizing(at: u64) -> api::Sizing {
          or make the edit in the dashboard's editor)"
             .to_owned(),
     );
+    plan.waited_before_change.push("jvm".to_owned());
     plan.held.push(api::SizingHold {
         profile: "jvm".to_owned(),
         changed: at - 7200,
