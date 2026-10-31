@@ -64,6 +64,10 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
     recorded.
   - A check of the shared caches is abandoned: it only measures volumes and removes those over their limit, and the
     next start checks first.
+- **Clients say how it stops.** `Status::stopping` (`api::Stopping`: waits for running jobs, leaves them to the
+  next start, kills them) is one fact core words (`Stopping::line`); `runnerctl` and the dashboard render it, and
+  `POST /v1/shutdown` answers it, so `runnerd stop` sent during a detach says it detaches. `shutting_down` stays for
+  clients before it.
 - **Nothing more while stopping.** A detaching engine answers no commands; one sent meanwhile fails as it would once
   the daemon is gone. Auto sizing stops looking once any stop is asked for.
 

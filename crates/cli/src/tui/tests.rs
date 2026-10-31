@@ -79,6 +79,7 @@ fn app() -> App {
         status: Status {
             version: "0.0.1".to_owned(),
             shutting_down: false,
+            stopping: None,
             budget: Budget {
                 admission: AdmissionPolicy::Caps,
                 held: false,

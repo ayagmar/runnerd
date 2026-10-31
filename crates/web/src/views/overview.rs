@@ -1090,8 +1090,8 @@ pub(crate) fn health(overview: &Overview) -> Markup {
             @if let Some(savings) = &overview.savings {
                 p.health-savings { (savings.month.headline()) }
             }
-            @if overview.status.shutting_down {
-                p.warning { "runnerd is shutting down: it starts no new runners." }
+            @if let Some(stopping) = overview.status.stopping_line() {
+                p.warning { "runnerd is " (stopping) "; it starts no new runners." }
             }
         }
     }

@@ -21,7 +21,8 @@ use axum::routing::{delete, get, post, put};
 use axum::serve::IncomingStream;
 use axum::{Json, Router};
 use runnerd_core::api::{
-    Dashboard, ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownRequest, Status,
+    Dashboard, ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownAnswer,
+    ShutdownRequest, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::scheduler::engine::{Handle, Shutdown};
@@ -196,18 +197,21 @@ async fn shutdown(
     Authenticated(principal): Authenticated,
     State(state): State<AppState>,
     request: Option<Json<ShutdownRequest>>,
-) -> StatusCode {
+) -> Response {
     let Json(request) = request.unwrap_or_default();
     info!(
         "shutdown (force: {}) requested by {principal:?}",
         request.force
     );
-    state.handle.control.shutdown(if request.force {
+    let mode = state.handle.control.shutdown(if request.force {
         Shutdown::Force
     } else {
         Shutdown::Graceful
     });
-    StatusCode::ACCEPTED
+    match mode.stopping() {
+        Some(stopping) => (StatusCode::ACCEPTED, Json(ShutdownAnswer { stopping })).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 /// `GET /v1/dashboard`: the dashboard's `[web]` settings as the daemon started with them.

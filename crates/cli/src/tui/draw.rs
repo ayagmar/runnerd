@@ -144,8 +144,8 @@ fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
         ));
     }
     let mut right = Vec::new();
-    if app.live.status.shutting_down {
-        right.push(Span::styled("shutting down  ", theme.wait()));
+    if let Some(stopping) = app.live.status.stopping_line() {
+        right.push(Span::styled(format!("{stopping}  "), theme.wait()));
     }
     match &app.connection {
         Connection::Live => right.push(Span::styled("■ live ", theme.memory())),

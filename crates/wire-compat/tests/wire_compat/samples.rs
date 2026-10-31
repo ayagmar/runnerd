@@ -23,15 +23,16 @@ use runnerd_core::api::{
     RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords, ReplaceQuery, RepositoryStatus,
     RepositoryWaits, Resize, RevertCause, RunLink, RunnerFailure, RunnerStatus, RunningJob, Sample,
     SampleSeries, SavedWindow, Savings, SeedMemory, Severity, ShellMemory, ShellQuery,
-    ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert,
-    Sku, SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow, Status, Step, Timeline,
-    Usd, WaitSpread, Waiting, WeekWaits,
+    ShutdownAnswer, ShutdownRequest, Sizing, SizingChange, SizingHold, SizingQuery, SizingRefused,
+    SizingRevert, Sku, SlotStatus, Spread, Started, Starts, Stats, StatsQuery, StatsRow, Status,
+    Step, Stopping, Timeline, Usd, WaitSpread, Waiting, WeekWaits,
 };
 
 pub(crate) fn status() -> Status {
     Status {
         version: "0.0.0".to_owned(),
-        shutting_down: false,
+        shutting_down: true,
+        stopping: Some(Stopping::LeavesJobs),
         budget: budget(),
         profiles: vec![profile_status()],
         repositories: vec![repository_status()],
@@ -51,6 +52,7 @@ pub(crate) fn status_empty() -> Status {
     status.budget.slice_cpus = None;
     status.queued[0].profile = None;
     status.queued[0].waiting = None;
+    status.stopping = None;
     status
 }
 
@@ -395,6 +397,26 @@ pub(crate) fn pairings() -> Pairings {
             url: "https://ci.tidewater.example/pair#code".to_owned(),
             lifetime: 300,
         }],
+    }
+}
+
+pub(crate) fn stopping() -> Vec<Stopping> {
+    let every = vec![
+        Stopping::WaitsForJobs,
+        Stopping::LeavesJobs,
+        Stopping::KillsJobs,
+    ];
+    for stopping in &every {
+        match stopping {
+            Stopping::WaitsForJobs | Stopping::LeavesJobs | Stopping::KillsJobs => {}
+        }
+    }
+    every
+}
+
+pub(crate) fn shutdown_answer() -> ShutdownAnswer {
+    ShutdownAnswer {
+        stopping: Stopping::KillsJobs,
     }
 }
 

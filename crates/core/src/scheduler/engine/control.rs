@@ -45,6 +45,18 @@ pub enum Shutdown {
     Force,
 }
 
+impl Shutdown {
+    /// How a daemon stopping in this mode says it stops; `None` for `No`.
+    pub fn stopping(self) -> Option<api::Stopping> {
+        match self {
+            Shutdown::No => None,
+            Shutdown::Graceful => Some(api::Stopping::WaitsForJobs),
+            Shutdown::Detach => Some(api::Stopping::LeavesJobs),
+            Shutdown::Force => Some(api::Stopping::KillsJobs),
+        }
+    }
+}
+
 /// What a pause, a shutdown or a runner's removal does with the jobs runners are running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunningJobs {
@@ -349,14 +361,16 @@ impl Control {
         *configured = repositories;
     }
 
-    /// Asks the loop to stop; a more urgent request overrides a less urgent one, never the other way.
-    pub fn shutdown(&self, mode: Shutdown) {
+    /// Asks the loop to stop; a more urgent request overrides a less urgent one, never the other way. Returns how it
+    /// stops now.
+    pub fn shutdown(&self, mode: Shutdown) -> Shutdown {
         self.shutdown.send_if_modified(|shutdown| {
             let changed = mode > *shutdown;
             *shutdown = (*shutdown).max(mode);
             changed
         });
         self.wake.notify_one();
+        self.mode()
     }
 
     /// Whether the repository is paused.

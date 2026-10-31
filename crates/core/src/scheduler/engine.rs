@@ -472,6 +472,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (status, receiver) = watch::channel(api::Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
+            stopping: None,
             budget: api::Budget {
                 slice: config.host.slice.clone(),
                 memory_max,

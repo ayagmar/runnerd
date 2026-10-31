@@ -123,6 +123,7 @@ fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_doe
     assert!(shows(&rows, &facts.budget), "{all}");
     assert!(shows(&rows, &facts.cpu), "{all}");
     assert!(shows(&rows, &facts.host), "{all}");
+    assert!(shows(&rows, facts.stopping), "{}: {all}", facts.stopping);
     let health = &facts.health;
     for figure in [
         format!("{}/{} running", health.running, health.slots),

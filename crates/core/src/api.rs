@@ -17,7 +17,7 @@
 //! | `POST /v1/config/check` | TOML in, [`ConfigCheck`] |
 //! | `PUT /v1/config` | TOML in, [`ConfigCheck`]; 422 [`ConfigCheck`] when invalid |
 //! | `GET /v1/doctor` | [`Doctor`] |
-//! | `POST /v1/shutdown` | [`ShutdownRequest`] in, 202 |
+//! | `POST /v1/shutdown` | [`ShutdownRequest`] in, 202 [`ShutdownAnswer`] |
 //! | `GET /v1/dashboard` | [`Dashboard`] |
 //! | `POST /v1/dashboard/sign-out` | none, 204 |
 //! | `POST /v1/dashboard/pairings?`[`PairingQuery`] | [`Pairings`]; 409 when the dashboard is off or has no `[web] origins` |
@@ -127,8 +127,11 @@ pub enum Principal {
 pub struct Status {
     /// The daemon's version, from its `Cargo.toml`.
     pub version: String,
-    /// Set once the daemon stops polling to shut down.
+    /// Set once the daemon stops polling to shut down. [`Status::stopping_line`] says how.
     pub shutting_down: bool,
+    /// How it stops, once it does; absent from a daemon before it said.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stopping: Option<Stopping>,
     /// The memory budget and what runners use of it.
     pub budget: Budget,
     /// Every configured profile with its slots.
@@ -697,6 +700,49 @@ pub struct ShutdownRequest {
     /// Kill running jobs and delete their runners instead of waiting for them.
     #[serde(default)]
     pub force: bool,
+}
+
+/// What `POST /v1/shutdown` answers: how the daemon stops now, which a stop asked for earlier may have made more
+/// urgent than the request.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+pub struct ShutdownAnswer {
+    /// How it stops.
+    pub stopping: Stopping,
+}
+
+/// How a stopping daemon treats running jobs (ADR 0091).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum Stopping {
+    /// `runnerd stop`: it waits for running jobs, then removes every runner.
+    WaitsForJobs,
+    /// A signal: it removes idle runners and leaves running jobs to the next start.
+    LeavesJobs,
+    /// `runnerd stop --force` or a second signal: it kills running jobs.
+    KillsJobs,
+}
+
+impl Stopping {
+    /// What it does, as every client says it: `shutting down: waits for running jobs`.
+    pub fn line(self) -> &'static str {
+        match self {
+            Stopping::WaitsForJobs => "shutting down: waits for running jobs",
+            Stopping::LeavesJobs => "shutting down: leaves running jobs to the next start",
+            Stopping::KillsJobs => "shutting down: kills running jobs",
+        }
+    }
+}
+
+impl Status {
+    /// What a stopping daemon does, as every client says it ([`Stopping::line`]); `shutting down` from a daemon
+    /// that does not say how; `None` while it runs.
+    pub fn stopping_line(&self) -> Option<&'static str> {
+        match (self.stopping, self.shutting_down) {
+            (Some(stopping), _) => Some(stopping.line()),
+            (None, true) => Some("shutting down"),
+            (None, false) => None,
+        }
+    }
 }
 
 /// The body of every error response.

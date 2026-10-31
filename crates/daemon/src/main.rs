@@ -652,13 +652,15 @@ async fn stop(force: bool, socket: Option<PathBuf>) -> Result<ExitCode, ExitCode
     if !response.status().is_success() {
         return Err(fail(&format!("the daemon answered {}", response.status())));
     }
+    // How it stops now, which an earlier stop may have made more urgent; a daemon before the answer says nothing.
+    let answer = response
+        .text()
+        .await
+        .ok()
+        .and_then(|body| serde_json::from_str::<runnerd_core::api::ShutdownAnswer>(&body).ok());
     output::line(format_args!(
-        "runnerd stops {}",
-        if force {
-            "now, killing running jobs"
-        } else {
-            "once running jobs finish"
-        }
+        "runnerd is {}",
+        answer.map_or("shutting down", |answer| answer.stopping.line())
     ));
     Ok(ExitCode::SUCCESS)
 }

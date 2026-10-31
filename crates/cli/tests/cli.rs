@@ -54,6 +54,7 @@ fn status() -> Status {
     Status {
         version: "0.0.1".to_owned(),
         shutting_down: false,
+        stopping: None,
         budget: Budget {
             admission: runnerd_core::api::AdmissionPolicy::Caps,
             held: false,

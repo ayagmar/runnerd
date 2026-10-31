@@ -49,6 +49,7 @@ fn status_states_the_budget_each_slot_and_why_each_job_waits_as_core_does() {
     assert!(first.contains(&facts.budget), "{first}");
     assert!(first.contains(&facts.cpu), "{first}");
     assert!(first.contains(&facts.host), "{first}");
+    assert!(first.contains(facts.stopping), "{first}");
     let painted = status(&daemon.status, NOW, COLOUR);
     for slot in &facts.slots {
         let row = line_of(&text, &[&slot.profile, &slot.slot.to_string()]);

@@ -11,7 +11,7 @@ use reqwest::StatusCode;
 use runnerd_core::api::{
     Advice, Budget, Busy, ConfigCheck, ConfigFile, ErrorResponse, Event, EventEnvelope, HostSample,
     HostSamples, JobState, Pairings, Paused, ProfileStatus, Records, RemovedRecords, Resize,
-    RunningJob, Sizing, SizingChange, Status,
+    RunningJob, ShutdownAnswer, Sizing, SizingChange, Status, Stopping,
 };
 use runnerd_core::config::{ByteSize, Config};
 use runnerd_core::docker::Tty;
@@ -171,6 +171,7 @@ fn status() -> Status {
     Status {
         version: "0.1.0".to_owned(),
         shutting_down: false,
+        stopping: None,
         budget: Budget {
             admission: runnerd_core::api::AdmissionPolicy::Caps,
             held: false,
@@ -1152,23 +1153,29 @@ async fn a_pause_the_history_cannot_record_fails_saying_a_restart_undoes_it() {
 }
 
 #[tokio::test]
-async fn shutdown_is_graceful_unless_forced() {
+async fn shutdown_is_graceful_unless_forced_and_answers_how_the_daemon_stops() {
     let (client, control, _dir) = daemon().await;
-    let response = client
-        .post("http://runnerd/v1/shutdown")
-        .send()
-        .await
-        .unwrap();
-    assert_eq!(response.status(), StatusCode::ACCEPTED);
+    let shutdown = async |request: &'static str| {
+        let response = client
+            .post("http://runnerd/v1/shutdown")
+            .header("content-type", "application/json")
+            .body(request)
+            .send()
+            .await
+            .unwrap();
+        assert_eq!(response.status(), StatusCode::ACCEPTED);
+        let answer: ShutdownAnswer = serde_json::from_slice(&body(response).await).unwrap();
+        answer.stopping
+    };
+    assert_eq!(shutdown("{}").await, Stopping::WaitsForJobs);
     assert_eq!(control.mode(), Shutdown::Graceful);
-    client
-        .post("http://runnerd/v1/shutdown")
-        .header("content-type", "application/json")
-        .body(r#"{"force":true}"#)
-        .send()
-        .await
-        .unwrap();
+    assert_eq!(shutdown(r#"{"force":true}"#).await, Stopping::KillsJobs);
     assert_eq!(control.mode(), Shutdown::Force);
+    assert_eq!(
+        shutdown("{}").await,
+        Stopping::KillsJobs,
+        "a later graceful stop does not undo a forced one"
+    );
 }
 
 #[tokio::test]

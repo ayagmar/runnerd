@@ -221,7 +221,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `POST /v1/config/check` with TOML | what `runnerd check-config` says about it, each `"<secret>"` read as the value it stands for |
 | `PUT /v1/config?revision=` with TOML | checks it, with each `"<secret>"` read as the value it stands for, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
 | `GET /v1/doctor` | `runnerd doctor`'s checks, for the config runnerd runs with |
-| `POST /v1/shutdown` with `{"force": false}` | `202`; stops once running jobs finish, removing every runner, or with `"force": true` kills them |
+| `POST /v1/shutdown` with `{"force": false}` | `202` with how runnerd stops now (`stopping`: `waits-for-jobs`, `leaves-jobs` after a signal, `kills-jobs`); it stops once running jobs finish, removing every runner, or with `"force": true` kills them. The status's `stopping` says the same while it stops, and `runnerctl status`, `watch`, the TUI and the dashboard show it |
 | `GET /v1/dashboard` | the dashboard's `[web] open`, as runnerd read it at start |
 | `POST /v1/dashboard/sign-out` | `204`; signs every browser out of the dashboard and ends every login link and pairing code made before |
 | `POST /v1/dashboard/pairings?origin=` | a 5-minute one-time login link for `origin`, one of `[web] origins`, or one for each of them; `409` when the dashboard is off or has no `[web] origins` |
