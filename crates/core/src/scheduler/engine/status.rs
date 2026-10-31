@@ -17,7 +17,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // A shutdown starts nothing, so no job says why it waits and no runner is warm.
         let plan = match mode {
             Shutdown::No => self.plan().0,
-            Shutdown::Graceful | Shutdown::Force => Plan::default(),
+            Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => Plan::default(),
         };
         let profiles = self
             .config

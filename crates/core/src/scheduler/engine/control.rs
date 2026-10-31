@@ -9,7 +9,7 @@ use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Mutex;
 use std::time::Duration;
 
-use tokio::sync::{Notify, mpsc, oneshot};
+use tokio::sync::{Notify, mpsc, oneshot, watch};
 use tracing::{info, warn};
 
 use super::records::RecordSelection;
@@ -30,23 +30,27 @@ use crate::time;
 /// removed: GitHub completes a cancelled run only once its runner reports it, which took 40s in a test.
 pub(super) const CANCEL_GRACE: Duration = Duration::from_secs(90);
 
-/// How the daemon is asked to stop.
+/// How the daemon is asked to stop, from the least to the most urgent: a later request only ever makes the stop more
+/// urgent (ADR 0091).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Shutdown {
     /// Keep scheduling.
     No,
-    /// Start nothing new, let running jobs finish.
+    /// Start nothing new, let running jobs finish, then remove every runner: `runnerd stop`.
     Graceful,
-    /// Kill running jobs and delete their runners.
+    /// Leave every runner and the mirror to the next start, which adopts them, and stop within `STOP_DEADLINE`: a
+    /// signal, as systemd sends on a stop.
+    Detach,
+    /// Kill running jobs and delete their runners, within `STOP_DEADLINE`: `runnerd stop --force`, a second signal.
     Force,
 }
 
 /// What a pause, a shutdown or a runner's removal does with the jobs runners are running.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum RunningJobs {
-    /// Leave them running: a pause refuses, a shutdown waits for them, a busy runner stays.
+    /// Leave them running: a pause refuses, a busy runner stays.
     Keep,
-    /// Kill them: a pause cancels their runs, a shutdown and a removal kill their runners.
+    /// Kill them: a pause cancels their runs, a removal kills their runners.
     Kill,
 }
 
@@ -239,7 +243,7 @@ pub struct Control {
     paused: Mutex<BTreeSet<String>>,
     /// Where `paused` is recorded.
     store: Store,
-    shutdown: Mutex<Shutdown>,
+    shutdown: watch::Sender<Shutdown>,
     pub(super) wake: Notify,
     commands: mpsc::UnboundedSender<Command>,
 }
@@ -265,7 +269,7 @@ impl Control {
             repositories: Mutex::new(repositories),
             paused: Mutex::new(paused),
             store,
-            shutdown: Mutex::new(Shutdown::No),
+            shutdown: watch::Sender::new(Shutdown::No),
             wake: Notify::new(),
             commands,
         };
@@ -274,7 +278,14 @@ impl Control {
 
     /// Whether a shutdown was requested, and how.
     pub fn mode(&self) -> Shutdown {
-        *lock(&self.shutdown)
+        *self.shutdown.borrow()
+    }
+
+    /// Resolves once the stop has a deadline: it detaches or is forced.
+    pub(super) async fn hurried(&self) {
+        let mut mode = self.shutdown.subscribe();
+        // `self` holds the sender, so the wait ends only once the mode is reached.
+        let _ = mode.wait_for(|mode| *mode >= Shutdown::Detach).await;
     }
 
     /// Pauses or resumes one repository or all, whatever they run, and records it in the store before it answers,
@@ -338,15 +349,13 @@ impl Control {
         *configured = repositories;
     }
 
-    /// Asks the loop to stop; a forced request overrides a graceful one, never the other way.
-    pub fn shutdown(&self, jobs: RunningJobs) {
-        let mode = match jobs {
-            RunningJobs::Keep => Shutdown::Graceful,
-            RunningJobs::Kill => Shutdown::Force,
-        };
-        let mut shutdown = lock(&self.shutdown);
-        *shutdown = (*shutdown).max(mode);
-        drop(shutdown);
+    /// Asks the loop to stop; a more urgent request overrides a less urgent one, never the other way.
+    pub fn shutdown(&self, mode: Shutdown) {
+        self.shutdown.send_if_modified(|shutdown| {
+            let changed = mode > *shutdown;
+            *shutdown = (*shutdown).max(mode);
+            changed
+        });
         self.wake.notify_one();
     }
 

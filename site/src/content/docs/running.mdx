@@ -33,10 +33,14 @@ systemctl --user enable --now runnerd   # start now and at login
 loginctl enable-linger "$USER"          # keep it running while you are logged out
 journalctl --user -u runnerd -f         # its log
 systemctl --user restart runnerd        # after editing runnerd.toml by hand
-systemctl --user stop runnerd           # waits for running jobs, up to systemd's stop timeout
+systemctl --user stop runnerd           # stops within 30s; running jobs carry on
 ```
 
-A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]`, `history.database` and `caches.build.directory`. `runnerd stop` waits for running jobs too; `runnerd stop --force`, or a second signal, kills them.
+A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]`, `history.database` and `caches.build.directory`.
+
+Stopping the service, or any SIGTERM or SIGINT, leaves every runner container running, busy or idle, and the registry mirror up, so jobs carry on. runnerd stops within 30 seconds, even when Docker or GitHub do not answer, and the next start adopts what it left. Until then, the caches runnerd serves itself do not answer, so a job running meanwhile restores and saves nothing in [GitHub Actions' cache](#github-actions-cache) or the [build cache](#build-cache). A second signal kills running jobs instead.
+
+`runnerd stop` waits for running jobs, then removes every runner and stops the mirror: use it when nothing should be left behind, such as before another daemon uses this Docker. `runnerd stop --force` kills running jobs and removes their runners, within 30 seconds. If Docker stops answering while runnerd stops, it leaves the rest to the next start.
 
 To back up the config, copy `runnerd.toml` itself: `runnerctl config show` shows [notification](../insights/#notifications) URLs and headers as `"<secret>"`, and runnerd refuses to start with those.
 
@@ -217,7 +221,7 @@ JSON on `$XDG_RUNTIME_DIR/runnerd.sock`, mode 0600: only the user runnerd runs a
 | `POST /v1/config/check` with TOML | what `runnerd check-config` says about it, each `"<secret>"` read as the value it stands for |
 | `PUT /v1/config?revision=` with TOML | checks it, with each `"<secret>"` read as the value it stands for, writes it in place of the file and runs with it; invalid (`422`), not writable (`500`) or runnerd stopping (`503`) leaves the file and what runs as they were. With `revision`, from `GET /v1/config`, a config replaced since, as by [auto sizing](../admission/#auto-sizing), or a file edited on disk since, is not overwritten (`409`); the reply's `revision` is that of the text written, to send with the next change |
 | `GET /v1/doctor` | `runnerd doctor`'s checks, for the config runnerd runs with |
-| `POST /v1/shutdown` with `{"force": false}` | `202` |
+| `POST /v1/shutdown` with `{"force": false}` | `202`; stops once running jobs finish, removing every runner, or with `"force": true` kills them |
 | `GET /v1/dashboard` | the dashboard's `[web] open`, as runnerd read it at start |
 | `POST /v1/dashboard/sign-out` | `204`; signs every browser out of the dashboard and ends every login link and pairing code made before |
 | `POST /v1/dashboard/pairings?origin=` | a 5-minute one-time login link for `origin`, one of `[web] origins`, or one for each of them; `409` when the dashboard is off or has no `[web] origins` |

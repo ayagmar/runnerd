@@ -191,11 +191,7 @@ pub(crate) fn status(status: &Status, now: u64, paint: Paint) -> String {
         status.budget.line()
     );
     if status.shutting_down {
-        let _ = write!(
-            out,
-            "  {}",
-            paint.paint(Tone::Busy, "shutting down: waiting for running jobs")
-        );
+        let _ = write!(out, "  {}", paint.paint(Tone::Busy, "shutting down"));
     }
     out.push_str("\n\n");
     let mut slots =

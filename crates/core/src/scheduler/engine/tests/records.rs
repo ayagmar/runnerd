@@ -114,6 +114,25 @@ async fn a_failed_job_leaves_a_record_and_its_container_goes_once_committed() {
 }
 
 #[tokio::test]
+async fn a_signal_waits_for_the_record_being_made() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("record");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    job_ends(&github, &docker, &mut engine, &handle, FAILED).await;
+    engine.tick(Shutdown::No).await;
+    assert!(
+        !engine.records.recordings.is_empty(),
+        "job 1's record is being made"
+    );
+    handle.control.shutdown(Shutdown::Detach);
+    tokio::time::timeout(Duration::from_secs(10), engine.schedule())
+        .await
+        .unwrap();
+    let note = note(&handle, 1).await.unwrap();
+    assert!(note.created_at.is_some(), "the record was made: {note:?}");
+}
+
+#[tokio::test]
 async fn only_failed_jobs_of_a_profile_that_records_them_are_kept() {
     let succeeded = FAILED.replace("Failed", "Succeeded");
     for (config, log) in [

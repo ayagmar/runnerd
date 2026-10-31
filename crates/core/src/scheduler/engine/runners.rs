@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use tracing::{info, warn};
 
-use super::{Engine, Occupant, Purpose, RunningJobs, unix_secs};
+use super::{DockerInStop, Engine, Occupant, Purpose, RunningJobs, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
@@ -81,8 +81,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 Ok(state) => state.running,
                 Err(error) if is_not_found(&error) => false,
+                // Its slot stays its until Docker says it stopped (ADR 0076); a stop leaves it to the next start.
                 Err(error) => {
                     warn!("cannot inspect {}: {error}", occupant.runner_name);
+                    self.docker_failed();
                     continue;
                 }
             };
@@ -94,7 +96,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Removes a slot's container and its runner, then frees the slot. If the container `Ended` and its runner took
-    /// no job, the repository's next runners are held back for a while.
+    /// no job, the repository's next runners are held back for a while. A container Docker fails to remove keeps its
+    /// slot (ADR 0076): the next tick tries again, and a stop leaves it to the next start.
     async fn release(&mut self, slot: &SlotRef, occupant: &Occupant, why: Release) {
         // The runner logs each job it takes and how it ended; its exit code says nothing (run.sh exits 0 when it
         // fails to start).
@@ -120,10 +123,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match self.docker.remove(&occupant.container).await {
                 Err(error) if !is_not_found(&error) => {
                     warn!("cannot remove {}: {error}", occupant.runner_name);
+                    self.docker_failed();
                     return;
                 }
                 _ => {}
             }
+        }
+        if why == Release::Idle {
+            info!(
+                "{}: removed idle {}",
+                occupant.repository, occupant.runner_name
+            );
         }
         match self
             .github
@@ -246,8 +256,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .unwrap_or_default()
     }
 
-    /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job.
+    /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job. Nothing once Docker failed during a
+    /// stop: the next start finds the runners as the stop left them.
     pub(super) async fn stop(&mut self, slot: &SlotRef, jobs: RunningJobs) {
+        if self.docker_in_stop == DockerInStop::Failed {
+            return;
+        }
         let Some(occupant) = self
             .slots
             .get(&slot.profile)
@@ -263,6 +277,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 && !is_not_found(&error)
             {
                 warn!("cannot remove {}: {error}", occupant.runner_name);
+                self.docker_failed();
                 return;
             }
             self.end_capture(&occupant.runner_name).await;
@@ -300,10 +315,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
             Ok(Deleted::Deleted | Deleted::NotFound) => {
-                info!(
-                    "{}: removed idle {}",
-                    occupant.repository, occupant.runner_name
-                );
                 self.release(slot, &occupant, Release::Idle).await;
             }
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),

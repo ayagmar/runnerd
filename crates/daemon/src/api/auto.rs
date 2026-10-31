@@ -10,7 +10,7 @@ use std::time::Duration;
 
 use runnerd_core::api::{AutoPlan, SizingChange, SizingHold};
 use runnerd_core::config::{Config, resize_profile};
-use runnerd_core::scheduler::engine::{Author, RunningSlots};
+use runnerd_core::scheduler::engine::{Author, RunningSlots, Shutdown};
 use runnerd_core::sizing::auto::{Context, changes, next_look};
 use runnerd_core::sizing::memory::CHANGES_READ;
 use runnerd_core::sizing::{CpusSet, History, Window};
@@ -24,7 +24,8 @@ use super::{AppState, ConfigText};
 /// How often auto sizing looks at the advice in the daemon.
 pub(crate) const EVERY: Duration = Duration::from_mins(5);
 
-/// Looks now, then every `every` until the server stops. What a look refuses is logged once until it changes.
+/// Looks now, then every `every` until the daemon is asked to stop. What a look refuses is logged once until it
+/// changes.
 pub(super) async fn run(state: AppState, every: Duration) {
     let mut stopping = state.stopping.clone();
     let mut ticks = tokio::time::interval(every);
@@ -34,6 +35,10 @@ pub(super) async fn run(state: AppState, every: Duration) {
         tokio::select! {
             _ = ticks.tick() => {}
             _ = stopping.wait_for(|stopping| *stopping) => return,
+        }
+        // A stopping engine schedules nothing the change would size.
+        if state.handle.control.mode() != Shutdown::No {
+            return;
         }
         look(&state, &mut refused).await;
     }

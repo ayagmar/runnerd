@@ -12,7 +12,9 @@ use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
-use runnerd_core::scheduler::engine::{Control, Engine, HostIdentity, RunningJobs, Setup};
+use runnerd_core::scheduler::engine::{
+    Control, Engine, HostIdentity, STOP_DEADLINE, Setup, Shutdown,
+};
 use runnerd_core::store::{Announced, Store};
 use tracing::{info, warn};
 
@@ -104,7 +106,8 @@ enum Command {
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
-    /// SIGTERM or SIGINT stops polling and waits for running jobs; a second one kills them.
+    /// SIGTERM or SIGINT stops within 30s and leaves runners, running jobs among them, to the next start, which
+    /// adopts them; a second one kills running jobs.
     Serve {
         /// The config file [default: $XDG_CONFIG_HOME/runnerd/runnerd.toml].
         #[arg(long)]
@@ -574,21 +577,22 @@ async fn serve(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Stops the engine on SIGTERM or SIGINT once running jobs finish, and kills them on a second.
+/// Stops the engine on SIGTERM or SIGINT, leaving the runners to the next start, and kills running jobs on a second.
 async fn shut_down_on_signals(control: std::sync::Arc<Control>) {
-    for jobs in [RunningJobs::Keep, RunningJobs::Kill] {
+    for mode in [Shutdown::Detach, Shutdown::Force] {
         if wait_for_signal().await.is_err() {
             return;
         }
-        info!(
-            "{}",
-            if jobs == RunningJobs::Kill {
-                "killing running jobs"
-            } else {
-                "stopping once running jobs finish; signal again to kill them"
-            }
-        );
-        control.shutdown(jobs);
+        if mode == Shutdown::Force {
+            info!("killing running jobs");
+        } else {
+            info!(
+                "stopping within {}s, leaving runners and running jobs to the next start; signal again to kill \
+                 running jobs",
+                STOP_DEADLINE.as_secs()
+            );
+        }
+        control.shutdown(mode);
     }
 }
 

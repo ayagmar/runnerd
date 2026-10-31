@@ -1,7 +1,7 @@
 //! The engine's invariants over generated sequences of events, on the fakes: jobs queued with every kind of labels,
 //! taken, finished, cancelled and lost; runners that fail to start, before or after Docker made their container,
 //! wait or exit idle; Docker calls that fail once; log captures that fail or break off; samples of the slice and the
-//! host, short of memory or stalling, also between two starts of one tick; reseeds asked for; reloads and restarts;
+//! host, short of memory or stalling, also between two starts of one tick; reseeds asked for; reloads, restarts and stops;
 //! time passing. After each
 //! tick the named checks below must hold, and once the sequence drains no runner may be left.
 //!
@@ -307,6 +307,10 @@ enum Step {
     Restart,
     /// As `Restart`, while Docker fails the first inspect of a runner's container.
     RestartInspectFails(usize),
+    /// The daemon stops, then starts again: on a signal, or with `runnerd stop` once Docker is gone.
+    Stop {
+        docker_gone: bool,
+    },
     /// Time passes: idle runners waited `IDLE_TIMEOUT`, holds after failures ran out.
     Elapse,
     Tick,
@@ -368,6 +372,9 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             },
             79..=80 => Step::CaptureFails {
                 mid_stream: rng.below(2) == 0,
+            },
+            81..=82 => Step::Stop {
+                docker_gone: rng.below(2) == 0,
             },
             _ => Step::Tick,
         })
@@ -710,6 +717,11 @@ impl Case {
                 self.restart().await?;
                 self.tick().await?;
             }
+            Step::Stop { docker_gone } => {
+                self.stop(docker_gone).await?;
+                self.restart().await?;
+                self.tick().await?;
+            }
             Step::RestartInspectFails(pick) => {
                 self.inspect_fails(pick);
                 self.restart().await?;
@@ -987,6 +999,38 @@ impl Case {
             );
         }
         self.shape = shape;
+        Ok(())
+    }
+
+    /// Invariant 7: a stop on a signal, or one Docker fails, ends at once and leaves every container as it was, to the
+    /// next start.
+    async fn stop(&mut self, docker_gone: bool) -> Result<(), Violation> {
+        let containers = |case: &Case| -> Vec<(String, bool)> {
+            let docker = case.docker.0.lock().unwrap();
+            docker
+                .containers
+                .iter()
+                .map(|container| (container.id.clone(), container.running))
+                .collect()
+        };
+        let before = containers(self);
+        let mode = if docker_gone {
+            self.docker.set_outage(Outage::Refused);
+            Shutdown::Graceful
+        } else {
+            Shutdown::Detach
+        };
+        self.handle.control.shutdown(mode);
+        let stopped = tokio::time::timeout(Duration::from_secs(10), self.engine.schedule()).await;
+        self.docker.set_outage(Outage::None);
+        if stopped.is_err() {
+            return violation(self, "a_stop_ends", format!("{mode:?} never ended"));
+        }
+        let after = containers(self);
+        if after != before {
+            let detail = format!("{mode:?} changed {before:?} into {after:?}");
+            return violation(self, "a_stop_leaves_every_container", detail);
+        }
         Ok(())
     }
 

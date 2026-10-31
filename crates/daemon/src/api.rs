@@ -24,7 +24,7 @@ use runnerd_core::api::{
     Dashboard, ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownRequest, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
-use runnerd_core::scheduler::engine::{Handle, RunningJobs};
+use runnerd_core::scheduler::engine::{Handle, Shutdown};
 use runnerd_web::{PAIRING_LIFETIME, PAIRING_MAX, PairError, Sessions};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
@@ -203,9 +203,9 @@ async fn shutdown(
         request.force
     );
     state.handle.control.shutdown(if request.force {
-        RunningJobs::Kill
+        Shutdown::Force
     } else {
-        RunningJobs::Keep
+        Shutdown::Graceful
     });
     StatusCode::ACCEPTED
 }

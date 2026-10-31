@@ -1091,7 +1091,7 @@ pub(crate) fn health(overview: &Overview) -> Markup {
                 p.health-savings { (savings.month.headline()) }
             }
             @if overview.status.shutting_down {
-                p.warning { "runnerd is shutting down: it starts no new runners and stops once running jobs finish." }
+                p.warning { "runnerd is shutting down: it starts no new runners." }
             }
         }
     }
