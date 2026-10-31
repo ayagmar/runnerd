@@ -1002,18 +1002,10 @@ impl Case {
         Ok(())
     }
 
-    /// Invariant 7: a stop on a signal, or one Docker fails, ends at once and leaves every container as it was, to the
-    /// next start.
+    /// Invariant 7: a stop on a signal, or one Docker fails, ends at once and leaves every container that runs a job
+    /// running, for the next start.
     async fn stop(&mut self, docker_gone: bool) -> Result<(), Violation> {
-        let containers = |case: &Case| -> Vec<(String, bool)> {
-            let docker = case.docker.0.lock().unwrap();
-            docker
-                .containers
-                .iter()
-                .map(|container| (container.id.clone(), container.running))
-                .collect()
-        };
-        let before = containers(self);
+        let running = self.running();
         let mode = if docker_gone {
             self.docker.set_outage(Outage::Refused);
             Shutdown::Graceful
@@ -1026,10 +1018,18 @@ impl Case {
         if stopped.is_err() {
             return violation(self, "a_stop_ends", format!("{mode:?} never ended"));
         }
-        let after = containers(self);
-        if after != before {
-            let detail = format!("{mode:?} changed {before:?} into {after:?}");
-            return violation(self, "a_stop_leaves_every_container", detail);
+        let left: BTreeSet<String> = self
+            .running_containers()
+            .into_iter()
+            .map(|container| container.id)
+            .collect();
+        let gone: Vec<&(u64, String)> = running
+            .iter()
+            .filter(|(_, container)| !left.contains(container))
+            .collect();
+        if !gone.is_empty() {
+            let detail = format!("{mode:?} took the containers of running jobs {gone:?}");
+            return violation(self, "a_stop_leaves_running_jobs", detail);
         }
         Ok(())
     }

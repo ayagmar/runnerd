@@ -38,8 +38,8 @@ pub enum Shutdown {
     No,
     /// Start nothing new, let running jobs finish, then remove every runner: `runnerd stop`.
     Graceful,
-    /// Leave every runner and the mirror to the next start, which adopts them, and stop within `STOP_DEADLINE`: a
-    /// signal, as systemd sends on a stop.
+    /// Remove idle runners, leave busy ones and the mirror to the next start, which adopts them, and stop within
+    /// `STOP_DEADLINE`: a signal, as systemd sends on a stop.
     Detach,
     /// Kill running jobs and delete their runners, within `STOP_DEADLINE`: `runnerd stop --force`, a second signal.
     Force,

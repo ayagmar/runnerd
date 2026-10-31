@@ -5,6 +5,7 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+use futures_util::StreamExt;
 use tracing::{info, warn};
 
 use super::{DockerInStop, Engine, Occupant, Purpose, RunningJobs, unix_secs};
@@ -318,6 +319,77 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.release(slot, &occupant, Release::Idle).await;
             }
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
+        }
+    }
+
+    /// Removes the idle and warm runners a detaching stop leaves no work for, best effort and all at once: each is
+    /// deregistered, a few at a time as GitHub asks, and then the containers are removed together, as each removal
+    /// waits for its container to stop. GitHub's `Busy` keeps a runner that just took a job, and busy runners stay
+    /// for the next start, as does one whose deregistration or removal fails. An idle runner left registered would
+    /// take one more job with no daemon to watch it.
+    pub(super) async fn remove_idle(&mut self) {
+        if self.docker_in_stop == DockerInStop::Failed {
+            return;
+        }
+        let idle: Vec<(SlotRef, Occupant)> = self
+            .occupied()
+            .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
+            .map(|(slot, occupant)| (slot, occupant.clone()))
+            .collect();
+        if idle.is_empty() {
+            return;
+        }
+        let github = &*self.github;
+        let deleted: Vec<_> = futures_util::stream::iter(idle)
+            .map(|(slot, occupant)| async move {
+                let answer = github
+                    .delete_runner(&occupant.repository, occupant.runner_id)
+                    .await;
+                (slot, occupant, answer)
+            })
+            .buffer_unordered(super::tick::CONCURRENT_REQUESTS)
+            .collect()
+            .await;
+        let mut removing = Vec::new();
+        for (slot, occupant, answer) in deleted {
+            match answer {
+                Ok(Deleted::Deleted | Deleted::NotFound) => removing.push((slot, occupant)),
+                Ok(Deleted::Busy) => {
+                    if let Some(Some(entry)) = self
+                        .slots
+                        .get_mut(&slot.profile)
+                        .and_then(|slots| slots.get_mut(slot.index))
+                    {
+                        entry.busy = true;
+                    }
+                }
+                Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
+            }
+        }
+        let docker = &*self.docker;
+        let removed = futures_util::future::join_all(removing.into_iter().map(
+            |(slot, occupant)| async move {
+                let removed = docker.remove(&occupant.container).await;
+                (slot, occupant, removed)
+            },
+        ))
+        .await;
+        for (slot, occupant, removed) in removed {
+            match removed {
+                Err(error) if !is_not_found(&error) => {
+                    warn!("cannot remove {}: {error}", occupant.runner_name);
+                    self.docker_failed(&error);
+                }
+                _ => {
+                    info!(
+                        "{}: removed idle {}",
+                        occupant.repository, occupant.runner_name
+                    );
+                    self.end_capture(&occupant.runner_name).await;
+                    self.forget(&occupant);
+                    self.vacate(&slot, false);
+                }
+            }
         }
     }
 

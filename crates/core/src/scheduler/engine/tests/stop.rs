@@ -1,5 +1,5 @@
-//! Stopping on the fakes (ADR 0091): a signal leaves every runner and the mirror to the next start, which takes them
-//! over; a stop ends when Docker is gone or fails midway, and within `STOP_DEADLINE` when Docker hangs; a second
+//! Stopping on the fakes (ADR 0091): a signal removes idle runners and leaves busy ones and the mirror to the next
+//! start, which takes them over; a stop ends when Docker is gone or fails midway, and within `STOP_DEADLINE` when Docker hangs; a second
 //! signal kills running jobs; a stop waits for a record being made but not for a reseed or a check of the caches.
 
 use std::sync::atomic::AtomicBool;
@@ -23,6 +23,10 @@ fn busy_and_idle(
     {
         let mut state = docker.0.lock().unwrap();
         state.containers.push(runner_container(2, 8, true));
+        // Its log capture finds no job.
+        state
+            .container_captures
+            .insert("container-2".to_owned(), String::new());
         state
             .started
             .insert("container-2".to_owned(), crate::time::now_ms());
@@ -69,54 +73,72 @@ async fn next_start(
 }
 
 #[tokio::test]
-async fn a_signal_leaves_runners_and_the_mirror_and_the_next_start_takes_them_over() {
-    let (github, docker, dir) = (
-        FakeGithub::default(),
-        FakeDocker::default(),
-        TestDir::new("stop"),
-    );
-    let (engine, handle) = busy_and_idle(&github, &docker, &dir);
-    let run = tokio::spawn(engine.run());
-    until_state(&handle, 1, JobState::Running).await;
-    github
-        .until_calls(
-            |calls| calls.iter().any(|call| call.starts_with("runners ")),
-            "asked for its runners",
-        )
-        .await;
-    let before = container_names(&docker);
-    let (github_calls, docker_calls) = (github.calls().len(), docker.calls().len());
+async fn a_signal_removes_idle_runners_and_leaves_busy_ones_and_the_mirror_to_the_next_start() {
+    // The idle runner may take a job right before the signal, which GitHub knows before runnerd does.
+    for took_job in [false, true] {
+        let (github, docker, dir) = (
+            FakeGithub::default(),
+            FakeDocker::default(),
+            TestDir::new("stop"),
+        );
+        let (engine, handle) = busy_and_idle(&github, &docker, &dir);
+        let run = tokio::spawn(engine.run());
+        until_state(&handle, 1, JobState::Running).await;
+        github
+            .until_calls(
+                |calls| calls.iter().any(|call| call.starts_with("runners ")),
+                "asked for its runners",
+            )
+            .await;
+        if took_job {
+            github.0.lock().unwrap().busy_deletes = 1;
+        }
+        let (github_calls, docker_calls) = (github.calls().len(), docker.calls().len());
 
-    handle.control.shutdown(Shutdown::Detach);
-    tokio::time::timeout(Duration::from_secs(10), run)
-        .await
-        .expect("a signal stops at once")
-        .unwrap();
-    assert_eq!(container_names(&docker), before, "every container stays");
-    let deleted: Vec<String> = github.calls()[github_calls..]
-        .iter()
-        .filter(|call| call.starts_with("delete "))
-        .cloned()
-        .collect();
-    assert_eq!(deleted, Vec::<String>::new(), "no runner is deregistered");
-    let removed: Vec<String> = docker.calls()[docker_calls..]
-        .iter()
-        .filter(|call| call.starts_with("remove "))
-        .cloned()
-        .collect();
-    assert_eq!(removed, Vec::<String>::new(), "nothing is removed");
+        handle.control.shutdown(Shutdown::Detach);
+        tokio::time::timeout(Duration::from_secs(10), run)
+            .await
+            .expect("a signal stops at once")
+            .unwrap();
+        let name = |slot| identity("ci", ID_A).runner_name("app", slot, 1);
+        let mut kept = BTreeSet::from([name(1), Names::new("runnerd").mirror()]);
+        if took_job {
+            kept.insert(name(2));
+        }
+        assert_eq!(container_names(&docker), kept, "took a job: {took_job}");
+        let deleted: Vec<String> = github.calls()[github_calls..]
+            .iter()
+            .filter(|call| call.starts_with("delete "))
+            .cloned()
+            .collect();
+        assert_eq!(
+            deleted,
+            ["delete 8"],
+            "only the idle runner is deregistered"
+        );
+        let removed: Vec<String> = docker.calls()[docker_calls..]
+            .iter()
+            .filter(|call| call.starts_with("remove "))
+            .cloned()
+            .collect();
+        let expected: &[&str] = if took_job {
+            &[]
+        } else {
+            &["remove container-2"]
+        };
+        assert_eq!(removed, expected, "took a job: {took_job}");
 
-    let (slots, handle) = next_start(&github, &docker, &dir).await;
-    let name = |slot| Some(identity("ci", ID_A).runner_name("app", slot, 1));
-    assert_eq!(
-        slots,
-        [name(1), name(2)],
-        "each runner is adopted in its slot"
-    );
-    assert_eq!(registered(&github.calls()), Vec::<&String>::new());
-    handle.store.flush().await;
-    let job = handle.store.job(1).await.unwrap().unwrap();
-    assert_eq!(job.summary.state, JobState::Running);
+        let (slots, handle) = next_start(&github, &docker, &dir).await;
+        assert_eq!(
+            slots,
+            [Some(name(1)), took_job.then(|| name(2))],
+            "the next start adopts what runs (took a job: {took_job})"
+        );
+        assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+        handle.store.flush().await;
+        let job = handle.store.job(1).await.unwrap().unwrap();
+        assert_eq!(job.summary.state, JobState::Running);
+    }
 }
 
 #[tokio::test]

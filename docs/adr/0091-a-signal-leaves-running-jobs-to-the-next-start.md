@@ -1,4 +1,4 @@
-# 0091. A signal leaves the runners to the next start, and a stop ends within 30 s
+# 0091. A signal leaves running jobs to the next start, and a stop ends within 30 s
 
 Status: **Accepted** (2026-10-31).
 
@@ -18,6 +18,10 @@ systemd stops a user service with SIGTERM and kills it 90 s later (`TimeoutStopS
 Even a clean stop removed idle runners one after the other, about 12 s each; five took 49 to 58 s. One Docker
 request can take 120 s before it times out, and one GitHub request 10 s, so no per-call timeout bounds a stop.
 
+Leaving every runner to the next start would end a stop fastest, but an idle runner left registered stays online
+and takes one more job with no daemon to watch it, record it or serve its caches. After an install, the next start
+would also adopt idle runners started with the old release's container spec, and they would take the first jobs.
+
 Recovery (`Engine::recover`) already adopts every runner container left running, idle ones as busy until the first
 listing, and a running seed container as its profile's reseed; it removes stopped ones, and those of no slot.
 
@@ -27,8 +31,11 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
   urgent:
   - `Graceful`, `runnerd stop` and `POST /v1/shutdown`: start nothing new, wait for running jobs, then remove every
     runner and stop the mirror. No deadline: waiting is what it is for.
-  - `Detach`, the first SIGTERM or SIGINT: run no more ticks, deregister nothing, remove nothing. Every runner
-    container, busy or idle, and the mirror stay for the next start to adopt.
+  - `Detach`, the first SIGTERM or SIGINT: run no more ticks. Idle and warm runners are removed, best effort and
+    all at once within the deadline: each is deregistered first, a few GitHub requests at a time, then their
+    containers are removed together, as each removal waits for its container to stop. GitHub's `Busy` keeps a runner
+    that just took a job, and one whose deregistration or removal fails stays. Busy runners and the mirror stay for
+    the next start to adopt.
   - `Force`, `runnerd stop --force` or a second signal: kill running jobs and remove every runner.
 - **A deadline.** `Engine::run` returns `STOP_DEADLINE` (30 s) after a detach or a forced stop was asked for,
   wherever it is: in a tick waiting for Docker or GitHub, or in recovery. It returns normally, so the daemon still
@@ -37,8 +44,7 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
   at all, its socket gone or refusing connections (`docker::is_unreachable`), the stop goes on as a detach: it calls
   no more stops and leaves the rest to the next start. An error Docker answers with, or a timeout, is tried again at
   the next tick, as while scheduling: one busy moment of Docker's must not turn `runnerd stop` into a detach that
-  leaves runners behind. While scheduling, a slot
-  still stays held until Docker confirms its container's removal (ADR 0076): freeing it on a failed removal could
+  leaves runners behind. While scheduling, a slot still stays held until Docker confirms its container's removal (ADR 0076): freeing it on a failed removal could
   start a second runner on the volumes of one still running.
 - **"removed idle" is logged after the removal**, not before.
 - **What else holds a stop:**
@@ -55,7 +61,9 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
 
 ## Consequences
 
-- `systemctl --user stop runnerd` and machine shutdowns end in seconds, and running jobs carry on. Between the stop
+- `systemctl --user stop runnerd` and machine shutdowns end in seconds, about one container removal's time, and
+  running jobs carry on. Each busy runner exits after its job, so this machine takes no new job until the next start,
+  except on an idle runner the detach could not remove, which stays online and can take one. Between the stop
   and the next start, the caches the daemon serves itself do not answer: GitHub Actions' cache (ADR 0082) and the
   build cache's sockets (ADR 0052) are gone, so a job running then restores and saves nothing there. The registry
   mirror stays up. The next start re-attaches each adopted runner's build cache socket.

@@ -106,8 +106,8 @@ enum Command {
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
-    /// SIGTERM or SIGINT stops within 30s and leaves runners, running jobs among them, to the next start, which
-    /// adopts them; a second one kills running jobs.
+    /// SIGTERM or SIGINT removes idle runners and stops within 30s, leaving running jobs to the next start, which
+    /// adopts them; a second one kills them.
     Serve {
         /// The config file [default: $XDG_CONFIG_HOME/runnerd/runnerd.toml].
         #[arg(long)]
@@ -577,7 +577,7 @@ async fn serve(
     Ok(ExitCode::SUCCESS)
 }
 
-/// Stops the engine on SIGTERM or SIGINT, leaving the runners to the next start, and kills running jobs on a second.
+/// Stops the engine on SIGTERM or SIGINT, leaving running jobs to the next start, and kills them on a second.
 async fn shut_down_on_signals(control: std::sync::Arc<Control>) {
     for mode in [Shutdown::Detach, Shutdown::Force] {
         if wait_for_signal().await.is_err() {
@@ -587,7 +587,7 @@ async fn shut_down_on_signals(control: std::sync::Arc<Control>) {
             info!("killing running jobs");
         } else {
             info!(
-                "stopping within {}s, leaving runners and running jobs to the next start; signal again to kill \
+                "stopping within {}s, leaving running jobs to the next start; signal again to kill \
                  running jobs",
                 STOP_DEADLINE.as_secs()
             );

@@ -38,7 +38,7 @@ systemctl --user stop runnerd           # stops within 30s; running jobs carry o
 
 A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]`, `history.database` and `caches.build.directory`.
 
-Stopping the service, or any SIGTERM or SIGINT, leaves every runner container running, busy or idle, and the registry mirror up, so jobs carry on. runnerd stops within 30 seconds, even when Docker or GitHub do not answer, and the next start adopts what it left. Until then, the caches runnerd serves itself do not answer, so a job running meanwhile restores and saves nothing in [GitHub Actions' cache](#github-actions-cache) or the [build cache](#build-cache). A second signal kills running jobs instead.
+Stopping the service, or any SIGTERM or SIGINT, removes the idle and warm runners and stops within 30 seconds, even when Docker or GitHub do not answer. The runners of running jobs and the registry mirror stay up, so those jobs carry on, and the next start adopts them. Until it does, the caches runnerd serves itself do not answer, so a job running meanwhile restores and saves nothing in [GitHub Actions' cache](#github-actions-cache) or the [build cache](#build-cache), and an idle runner the stop could not remove stays online and can take one more job. `runnerd stop` keeps this machine out of rotation. A second signal kills running jobs instead.
 
 `runnerd stop` waits for running jobs, then removes every runner and stops the mirror: use it when nothing should be left behind, such as before another daemon uses this Docker. `runnerd stop --force` kills running jobs and removes their runners, within 30 seconds. If Docker stops answering while runnerd stops, it leaves the rest to the next start.
 

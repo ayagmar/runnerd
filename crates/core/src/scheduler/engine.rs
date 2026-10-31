@@ -597,6 +597,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mode = loop {
             let mode = self.stopping();
             if mode == Shutdown::Detach {
+                self.remove_idle().await;
                 self.collect_recordings().await;
             } else {
                 self.tick(mode).await;
@@ -637,7 +638,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.close_shells().await;
         if mode == Shutdown::Detach {
             let runners = self.occupied().count();
-            info!("stopped, leaving {runners} runners and the mirror to the next start");
+            info!("stopped, leaving {runners} busy runners and the mirror to the next start");
             return;
         }
         if let Err(error) = cache::mirror_down(&*self.docker, &self.names).await {
