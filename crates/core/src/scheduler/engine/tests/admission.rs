@@ -673,6 +673,8 @@ async fn two_light_runs_then_a_burst_of_heavy_copies_with_warm_up_never_overlap_
     // 200M + 15%, rounded up to 256M.
     assert_eq!(registered(&github.calls()).len(), 2);
     // Their captures report their jobs.
+    until_state(&handle, 1, JobState::Running).await;
+    until_state(&handle, 2, JobState::Running).await;
     github.0.lock().unwrap().queued = Vec::new();
     slice_at(&handle.store, G);
     engine.tick(Shutdown::No).await;
