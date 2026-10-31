@@ -1,9 +1,3 @@
 {
-  "registry-mirrors": ["http://mirror:5000"],
-  "builder": {
-    "gc": {
-      "enabled": true,
-      "defaultReservedSpace": "512MB"
-    }
-  }
+  "registry-mirrors": ["http://mirror:5000"]
 }

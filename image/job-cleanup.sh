@@ -16,8 +16,24 @@ fi
 docker ps -aq | xargs -r docker rm -f > /dev/null
 docker volume prune -af > /dev/null
 docker network prune -f > /dev/null
-# The build cache first, least recently used first, to about half the budget: what images and running builds do not
-# use. Only a store still over its budget then goes whole, images too.
-docker builder prune -af --max-used-space "$((DOCKER_BUDGET_GB * 512))MB" > /dev/null
-[ "$(size_gb "$DOCKER_DATA_ROOT")" -le "$DOCKER_BUDGET_GB" ] || docker system prune -af > /dev/null
+# The build cache first, to about half the budget, in BuildKit's GC order (docker_gc_policy in layers.sh): build
+# contexts and git checkouts, then layers, least recently used first. Cache mounts, the package stores that cost the
+# network to fill again, stay. One prune per type: Moby passes only `type=` filters on, and `type!=` matches all.
+half="$((DOCKER_BUDGET_GB * 512))MB"
+docker builder prune -af --filter type=source.local > /dev/null
+docker builder prune -af --filter type=source.git.checkout > /dev/null
+docker builder prune -af --filter type=regular --max-used-space "$half" > /dev/null
+# A store still over its budget loses every layer the build cache keeps, then its images, and only then the cache
+# mounts with everything else.
+held=$(size_gb "$DOCKER_DATA_ROOT")
+if [ "$held" -gt "$DOCKER_BUDGET_GB" ]; then
+    docker builder prune -af --filter type=regular > /dev/null
+    [ "$(size_gb "$DOCKER_DATA_ROOT")" -le "$DOCKER_BUDGET_GB" ] || docker image prune -af > /dev/null
+    left=$(size_gb "$DOCKER_DATA_ROOT")
+    if [ "$left" -gt "$DOCKER_BUDGET_GB" ]; then
+        echo "runnerd: the slot's Docker store held $held GB of its $DOCKER_BUDGET_GB GB share, $left GB without" \
+            "its layers and images: emptied it, cache mounts too, so the slot's next job starts cold"
+        docker system prune -af > /dev/null
+    fi
+fi
 exit 0

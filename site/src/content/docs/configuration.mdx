@@ -199,7 +199,7 @@ Never serve public repositories from self-hosted runners: anyone who can open a 
 
 ## Caches are shared between repositories
 
-A cache is a trust boundary. A slot's `~/.cache`, tool cache and Docker images are kept for the next job in the slot, whichever repository it belongs to, and reach every slot of the profile through its snapshot. The pnpm store and the Maven repository are shared by every slot of every profile. A job that can write there can leave a package or a tool that a later job of another repository runs. runnerd removes the credential files it knows of from `~/.cache` ([Warm caches](../running/#warm-caches)), and the [build cache](../running/#build-cache) keeps only what trusted jobs write, but nothing else is checked. Put repositories that must not trust each other on different profiles, and keep them off the same machine if they must not share the pnpm store or the Maven repository.
+A cache is a trust boundary. A slot's `~/.cache`, tool cache, Docker images and Docker cache mounts are kept for the next job in the slot, whichever repository it belongs to, and reach every slot of the profile through its snapshot. The pnpm store and the Maven repository are shared by every slot of every profile. A job that can write there can leave a package or a tool that a later job of another repository runs. runnerd removes the credential files it knows of from `~/.cache` ([Warm caches](../running/#warm-caches)), and the [build cache](../running/#build-cache) keeps only what trusted jobs write, but nothing else is checked. Put repositories that must not trust each other on different profiles, and keep them off the same machine if they must not share the pnpm store or the Maven repository.
 
 ## Every key
 

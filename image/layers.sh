@@ -28,10 +28,11 @@ GENERATION=/base/.generation
 SLOT_GENERATION=/state/.generation
 
 # Disk budgets per slot, in GB. A layer whose changes outgrow LAYER_BUDGET_GB starts over from the snapshot when
-# a container starts; after a job and when a container starts, the build cache is trimmed to about half of
-# DOCKER_BUDGET_GB, and a Docker store still over it is emptied. runnerd sets the slot's Docker budget, its share of the disk (docs/adr/0054), in the container's
-# RUNNERD_DOCKER_BUDGET_GB; the entrypoint keeps it in DOCKER_BUDGET_FILE for job-cleanup.sh, which sudo starts
-# without that environment. Without one, 20.
+# a container starts. The build cache stays within about half of DOCKER_BUDGET_GB, cache mounts given up last
+# (BuildKit's GC, docker_gc_policy, and job-cleanup.sh after a job and when a container starts), and a Docker store
+# still over it loses its images, then everything. runnerd sets the slot's Docker budget, its share of the disk
+# (docs/adr/0054), in the container's RUNNERD_DOCKER_BUDGET_GB; start_docker keeps it in DOCKER_BUDGET_FILE for
+# job-cleanup.sh, which sudo starts without that environment. Without one, 20.
 LAYER_BUDGET_GB=4
 DOCKER_BUDGET_FILE=/run/runnerd-docker-budget-gb
 DOCKER_BUDGET_GB=$(cat "$DOCKER_BUDGET_FILE" 2> /dev/null || echo 20)
@@ -57,8 +58,12 @@ rx_bytes() {
 # directory of its own over it, which it deletes with the container, so no job would find the last one's images.
 # A store the engine does not start on, as one a crash or a full disk damaged, is only a cache: it is emptied, with
 # dockerd's log printed, and the engine started once more. Otherwise every job of the slot would fail on it.
+# BuildKit's GC follows the slot's Docker budget, kept first.
 start_docker() {
     local attempt pid
+    keep_docker_budget
+    docker_gc_policy || echo "runnerd: could not write BuildKit's GC policy: it falls back to Docker's disk-based" \
+        "defaults, not the slot's Docker share" >&2
     for attempt in 1 2; do
         dockerd --group docker --data-root "$DOCKER_DATA_ROOT" > /var/log/dockerd.log 2>&1 &
         pid=$!
@@ -84,6 +89,24 @@ start_docker() {
 keep_docker_budget() {
     [[ ${RUNNERD_DOCKER_BUDGET_GB:-} =~ ^[0-9]+$ ]] || return 0
     echo "$RUNNERD_DOCKER_BUDGET_GB" > "$DOCKER_BUDGET_FILE"
+    DOCKER_BUDGET_GB=$RUNNERD_DOCKER_BUDGET_GB
+}
+
+# Writes BuildKit's GC policy into the engine's daemon.json, sized from DOCKER_BUDGET_GB (docs/adr/0089). Build
+# context snapshots and git checkouts go first, then layers while the unshared build cache holds over half the
+# budget, and cache mounts (`RUN --mount=type=cache`) only while it holds over three quarters, so a package store of
+# up to about three quarters of the budget stays. Each rule compares the whole build cache with its limit and removes
+# only its type, least recently used first. A policy with only a reserved space keeps no more than that space:
+# `defaultReservedSpace` alone kept 512 MB and dropped every larger cache mount within a minute of its build. Moby
+# passes only `type=` filters to BuildKit; a `type!=` filter comes out empty and matches everything.
+docker_gc_policy() {
+    local config=/etc/docker/daemon.json
+    jq --arg half "$((DOCKER_BUDGET_GB * 512))MB" --arg most "$((DOCKER_BUDGET_GB * 768))MB" \
+        '.builder.gc = {enabled: true, policy: [
+            {filter: ["type=source.local"], maxUsedSpace: "512MB"},
+            {filter: ["type=source.git.checkout"], maxUsedSpace: "512MB"},
+            {filter: ["type=regular"], maxUsedSpace: $half},
+            {all: true, maxUsedSpace: $most}]}' "$config" > "$config.new" && mv "$config.new" "$config"
 }
 
 # Mounts each layer over its path: this slot's changes in /state/<name> over the profile's snapshot in /base/<name>
