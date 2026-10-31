@@ -2129,6 +2129,7 @@ fn sizing_says_what_auto_sizing_changes_next_and_when_or_why_it_will_not() {
         blocked: None,
         refused: Vec::new(),
         refused_slots: Vec::new(),
+        waited_before_change: Vec::new(),
     });
     app.update(Msg::Sizing(sizing.clone()));
     for width in [80, 120] {

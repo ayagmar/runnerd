@@ -117,6 +117,9 @@ pub struct Look {
     /// Docker's disk is not measured yet, they are at `max_slots`, or one more slot would leave every slot less than
     /// `SLOT_DISK` of Docker's disk.
     pub refused_slots: Vec<SizingRefused>,
+    /// Under `measured` admission, the profiles changed before whose jobs waited for a slot alone in the window but
+    /// whose jobs since the change do not ask for one (`Fresh::wants_slots`): no slot is added for the waits before.
+    pub waited_before_change: Vec<String>,
 }
 
 /// The changes [`changes`] picks, and the `cpus` and `slots` raises the same look cannot make.
@@ -221,7 +224,41 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
             uncertain: false,
         });
     }
+    look.waited_before_change = waited_before_change(config, history, &sizing, &context);
     look
+}
+
+/// Under `measured` admission, the profiles changed before whose jobs in the window waited for a slot alone
+/// (`ProfileSizing::wants_slots`) but whose jobs since the change do not ask for one (`Fresh::wants_slots`), which is
+/// all a look reads: the advice must not promise a slot for the waits before the change.
+fn waited_before_change(
+    config: &Config,
+    history: &History,
+    sizing: &Sizing,
+    context: &Context<'_>,
+) -> Vec<String> {
+    if config.host.admission != Admission::Measured {
+        return Vec::new();
+    }
+    sizing
+        .profiles
+        .iter()
+        .filter(|advised| advised.wants_slots)
+        .filter(|advised| {
+            let Some(last) = context.last.get(&advised.name).copied() else {
+                return false;
+            };
+            !Fresh::read(
+                history,
+                advised,
+                config.host.admission,
+                Some(last),
+                context.window,
+            )
+            .wants_slots()
+        })
+        .map(|advised| advised.name.clone())
+        .collect()
 }
 
 /// How far back a config that lowers `memory` is compared with auto sizing's raises, in seconds: a day.

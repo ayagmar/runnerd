@@ -227,6 +227,7 @@ fn auto_sizing(fake: &fake::Fake) {
             ),
         }],
         refused_slots: Vec::new(),
+        waited_before_change: Vec::new(),
     });
 }
 

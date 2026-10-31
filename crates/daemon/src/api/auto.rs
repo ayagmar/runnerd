@@ -300,6 +300,7 @@ pub(super) async fn plan(
         blocked,
         refused: look.refused,
         refused_slots: look.refused_slots,
+        waited_before_change: look.waited_before_change,
     }))
 }
 

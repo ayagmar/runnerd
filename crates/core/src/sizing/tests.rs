@@ -665,6 +665,7 @@ fn under_measured_admission_waiting_jobs_are_told_about_slots_without_changing_t
                 profile: "node".to_owned(),
                 reason: "it is at its max_slots, 4".to_owned(),
             }],
+            waited_before_change: Vec::new(),
         }),
         ..auto
     };
@@ -678,7 +679,8 @@ mod auto {
     use std::collections::BTreeMap;
 
     use super::{
-        CONFIG, G, HOUR, History, M, NOW, Ran, Window, builds, capped_builds, job, measured, oom,
+        CONFIG, G, HOUR, History, M, NOW, Ran, Window, advise, builds, capped_builds, job,
+        measured, oom,
     };
     use crate::api::{Resize, SizingChange};
     use crate::config::Config;
@@ -1316,6 +1318,49 @@ mod auto {
         }));
         let changed = BTreeMap::from([("node".to_owned(), (NOW - 90 * 60_000) / 1000)]);
         assert_eq!(due(&config, &history(jobs), 64 * G, &changed), Vec::new());
+    }
+
+    #[test]
+    fn right_after_a_slot_raise_the_advice_promises_no_other_for_the_same_waits() {
+        // Catches the advice reading the whole window while a look reads only the jobs since the last change: node's
+        // builds waited 5 minutes for a slot, auto sizing raised its slots just now, and no job queued since.
+        let config = on(&measured(), "");
+        let waited = history(capped_builds(10, 4500 * M, 300));
+        let line = |last: &BTreeMap<String, u64>| {
+            let look = due_on(&config, &waited, Some(ROOMY), last);
+            let mut sizing = advise(&config, Some(64 * G), &waited, window());
+            sizing.auto_plan = Some(crate::api::AutoPlan {
+                every: 300,
+                interval: 86_400,
+                raise_interval: 3600,
+                max_step: 25,
+                next: look.changes,
+                held: Vec::new(),
+                blocked: None,
+                refused: look.refused,
+                refused_slots: look.refused_slots,
+                waited_before_change: look.waited_before_change,
+            });
+            let node = sizing
+                .profiles
+                .iter()
+                .find(|profile| profile.name == "node");
+            sizing.advice_line(node.unwrap())
+        };
+        assert!(
+            line(&BTreeMap::new()).ends_with(
+                "auto sizing adds as many as waited at once, up to max_slots and while \
+                                              each slot keeps 2G of Docker's disk"
+            ),
+            "before any change the waits ask for slots: {}",
+            line(&BTreeMap::new())
+        );
+        let raised = BTreeMap::from([("node".to_owned(), NOW / 1000)]);
+        let after = line(&raised);
+        assert!(
+            !after.contains("auto sizing adds") && after.contains("auto sizing changed it since"),
+            "{after}"
+        );
     }
 
     /// `CONFIG` (jvm and node 2 × 8 CPUs each) under a CPU budget of the slice's CPUs.

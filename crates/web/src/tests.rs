@@ -3125,6 +3125,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
             blocked: None,
             refused: Vec::new(),
             refused_slots: Vec::new(),
+            waited_before_change: Vec::new(),
         });
     }
     let on = dashboard.page(&cookie, "/sizing").await.body;

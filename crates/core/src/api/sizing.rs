@@ -77,6 +77,11 @@ pub struct AutoPlan {
     /// cannot raise, and why (ADR 0090).
     #[serde(default, skip_serializing_if = "Vec::is_empty")]
     pub refused_slots: Vec<SizingRefused>,
+    /// Under `measured` admission, the profiles whose jobs waited for a slot alone (`ProfileSizing::wants_slots`)
+    /// while those queued since auto sizing last changed them did not: a look reads only those, so it adds no slot
+    /// for the waits before the change.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub waited_before_change: Vec<String>,
 }
 
 /// A raise of a profile's `cpus` or `slots` its jobs ask for that auto sizing cannot make, as when it does not fit
@@ -475,20 +480,27 @@ impl Sizing {
     /// One line on what to do with a profile and why, as `runnerctl sizing`, the dashboard and `runnerd doctor`
     /// say it, such as `lower memory to 2.5G from 7G, its largest peak + 15%; 5 slots fit in the same 14G`.
     /// Under `measured` admission, when jobs wanted more slots, it adds that `slots` is not bought with caps there, or
-    /// with auto sizing on, that it adds them, or that it cannot when the next look refuses (`AutoPlan::refusals`).
+    /// with auto sizing on, that it adds them, that it cannot when the next look refuses (`AutoPlan::refusals`), or
+    /// that it waits for the jobs since its last change when they did not wait (`AutoPlan::waited_before_change`).
     pub fn advice_line(&self, profile: &ProfileSizing) -> String {
         let line = self.memory_line(profile);
         if self.admission == AdmissionPolicy::Measured
             && profile.wants_slots
             && !matches!(profile.advice, Advice::TooFew { .. })
         {
-            let refused = self.auto_plan.as_ref().is_some_and(|plan| {
+            let plan = self.auto_plan.as_ref();
+            let refused = plan.is_some_and(|plan| {
                 plan.refused_slots
                     .iter()
                     .any(|refused| refused.profile == profile.name)
             });
+            let before_change =
+                plan.is_some_and(|plan| plan.waited_before_change.contains(&profile.name));
             let then = if refused {
                 "auto sizing cannot add one now"
+            } else if before_change {
+                "auto sizing changed it since, and adds more only once jobs queued after that change wait for a slot \
+                 too"
             } else if self.auto {
                 &format!(
                     "auto sizing adds as many as waited at once, up to max_slots and while each slot keeps {} of \
