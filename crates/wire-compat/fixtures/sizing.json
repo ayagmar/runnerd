@@ -236,6 +236,12 @@
           "job": "tidewater/halyard ci / build",
           "to": 8589934592
         },
+        "slot_wait": {
+          "max": 7516192768,
+          "p50": 3221225472,
+          "p95": 5368709120,
+          "p99": 6442450944
+        },
         "slots": 2,
         "starts": {
           "cold": 3,
@@ -296,6 +302,15 @@
           "profile": "halyard",
           "reason": "the CPU budget is full"
         }
+      ],
+      "refused_slots": [
+        {
+          "profile": "halyard",
+          "reason": "it is at its max_slots, 4"
+        }
+      ],
+      "waited_before_change": [
+        "halyard"
       ]
     },
     "changes": [
@@ -533,6 +548,12 @@
           "from": 6442450944,
           "job": "tidewater/halyard ci / build",
           "to": 8589934592
+        },
+        "slot_wait": {
+          "max": 7516192768,
+          "p50": 3221225472,
+          "p95": 5368709120,
+          "p99": 6442450944
         },
         "slots": 2,
         "starts": {
