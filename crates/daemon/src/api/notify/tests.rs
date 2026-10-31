@@ -176,8 +176,31 @@ impl Running {
             stopping,
             setup: SETUP,
         }));
-        // Lets it read where each target got to before the test stores events.
-        tokio::time::sleep(Duration::from_millis(100)).await;
+        // Waits until the history holds where each target starts, so no event the test stores comes before a new
+        // target's "now". A fixed sleep lost that race on a slow CI runner.
+        let names: Vec<String> = Config::parse(&config.lock().await.text)
+            .map(|parsed| {
+                parsed
+                    .notify
+                    .targets
+                    .into_iter()
+                    .map(|target| target.name)
+                    .collect()
+            })
+            .unwrap_or_default();
+        let deadline = tokio::time::Instant::now() + Duration::from_secs(10);
+        loop {
+            let state = store.notify_state().await.unwrap_or_default();
+            let started = names.iter().all(|name| {
+                state
+                    .get(name)
+                    .is_some_and(|kept| kept.contains_key("event"))
+            });
+            if started || tokio::time::Instant::now() >= deadline {
+                break;
+            }
+            tokio::time::sleep(Duration::from_millis(10)).await;
+        }
         Running {
             stop,
             task,
@@ -425,6 +448,18 @@ async fn a_failing_endpoint_is_retried_without_holding_back_the_history() {
     tokio::time::timeout(Duration::from_secs(1), store.flush())
         .await
         .expect("the store is not held back");
+    // Accepts only once a refused post folds job 2 in: a retry built before job 2 was stored could otherwise arrive
+    // just after the switch and be delivered alone.
+    for _ in 0..200 {
+        let folded = endpoint.received.lock().unwrap().iter().any(|post| {
+            serde_json::from_slice::<Notification>(&post.2)
+                .is_ok_and(|sent| sent.jobs.iter().any(|job| job.id == 2))
+        });
+        if folded {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(20)).await;
+    }
     endpoint.status.store(200, Ordering::SeqCst);
     endpoint.wait_for(endpoint.count() + 1).await;
     notifier.stop().await;
@@ -669,10 +704,11 @@ async fn no_log_line_shows_a_targets_url_or_token() {
 
     let (dir, endpoint) = (Dir::new(), Endpoint::start().await);
     endpoint.status.store(401, Ordering::SeqCst);
-    // A closed port too: a connection error must not quote the URL either.
-    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // A closed port too: a connection error must not quote the URL either. The socket stays bound without
+    // listening, so connections are refused and no other test's endpoint can take the port.
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let closed_address = closed.local_addr().unwrap().to_string();
-    drop(closed);
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     let text = format!(
         "{}\n[[notify.targets]]\nname = \"desk\"\nkind = \"ntfy\"\nurl = \"http://{closed_address}/s3cret-topic\"\n",

@@ -2256,9 +2256,10 @@ async fn a_cpu_budget_needs_the_slices_cpus_and_a_config_without_one_never_reads
 #[tokio::test]
 async fn a_notify_test_says_what_each_target_did_without_its_url() {
     let dir = Dir::new();
-    let closed = tokio::net::TcpListener::bind("127.0.0.1:0").await.unwrap();
+    // Bound without listening: connections are refused and no other test can take the port.
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
     let address = closed.local_addr().unwrap().to_string();
-    drop(closed);
     let text = format!(
         "{EXAMPLE}\n[[notify.targets]]\nname = \"phone\"\nkind = \"ntfy\"\nurl = \"http://{address}/s3cret-topic\"\n"
     );

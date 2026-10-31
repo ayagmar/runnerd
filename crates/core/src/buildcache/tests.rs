@@ -639,9 +639,10 @@ async fn a_workflows_own_turbo_token_reaches_vercel_as_it_came_and_runnerds_stay
 #[tokio::test]
 async fn a_workflows_own_turbo_token_gets_an_error_turbo_builds_past_when_vercel_does_not_answer() {
     let Cache { cache, _dir } = open("turbo-vercel-down", 1 << 20);
-    let listener = std::net::TcpListener::bind("127.0.0.1:0").unwrap();
-    cache.set_vercel_origin(&format!("http://{}/api", listener.local_addr().unwrap()));
-    drop(listener);
+    // Bound without listening: connections are refused and no other test can take the port.
+    let closed = tokio::net::TcpSocket::new_v4().unwrap();
+    closed.bind("127.0.0.1:0".parse().unwrap()).unwrap();
+    cache.set_vercel_origin(&format!("http://{}/api", closed.local_addr().unwrap()));
     let app = cache.attach("app", "o/app", ActionsCache::Off).unwrap();
     let own = [("Authorization", "Bearer vercel-token")];
     let answer = actions::send(&app, "GET", "/turbo/v8/artifacts/aa11", &own, b"").await;
