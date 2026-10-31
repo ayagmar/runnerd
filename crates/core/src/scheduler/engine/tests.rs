@@ -1412,6 +1412,24 @@ async fn until_state(handle: &Handle, job: u64, state: JobState) -> api::Job {
     panic!("job {job} never got to {state:?}");
 }
 
+/// Waits until every log capture the engine started has ended, so the next tick sees how each ended: a tick does
+/// not wait for them, and this test's one thread runs them only while the test waits. Bounded by the wall clock, as
+/// the test may have paused Tokio's.
+async fn until_captures_end(engine: &Engine<FakeGithub, FakeDocker>) {
+    let deadline = std::time::Instant::now() + Duration::from_secs(60);
+    while !engine
+        .captures
+        .values()
+        .all(tokio::task::JoinHandle::is_finished)
+    {
+        assert!(
+            std::time::Instant::now() < deadline,
+            "a log capture never ended"
+        );
+        tokio::task::yield_now().await;
+    }
+}
+
 /// Waits until the history holds `lines` lines of the job's log.
 async fn until_log_lines(handle: &Handle, job: u64, lines: u64) {
     for _ in 0..200 {
@@ -4821,9 +4839,11 @@ async fn a_log_capture_docker_breaks_off_starts_again_where_its_stored_log_ends(
     let (mut engine, handle, _dir) = engine(&github, &docker);
     engine.recover().await.unwrap();
     // The first break: started again at once.
+    until_captures_end(&engine).await;
     engine.tick(Shutdown::No).await;
     until_log_lines(&handle, 1, 1).await;
     // The second: the next start waits.
+    until_captures_end(&engine).await;
     engine.tick(Shutdown::No).await;
     let captured = || docker.0.lock().unwrap().captured.clone();
     let container = "container-1".to_owned();
@@ -4846,6 +4866,7 @@ async fn a_log_capture_docker_breaks_off_starts_again_where_its_stored_log_ends(
     assert_eq!(job.runner.map(|runner| runner.slot), Some(1));
 
     // The container stops before its capture's next start: none starts on it.
+    until_captures_end(&engine).await;
     engine.tick(Shutdown::No).await;
     docker.0.lock().unwrap().containers[0].running = false;
     tokio::time::advance(Duration::from_secs(10)).await;
