@@ -81,6 +81,7 @@ fn a_hold_is_judged_by_the_readers_clock_not_by_when_the_plan_was_made() {
         }],
         blocked: None,
         refused: Vec::new(),
+        refused_slots: Vec::new(),
     };
     assert!(
         matches!(plan.profile_plan("jvm", 60), ProfilePlan::Held { .. }),
@@ -131,20 +132,29 @@ fn a_cpu_raise_auto_sizing_cannot_make_shows_beside_the_memory_change_it_makes()
                      back; 9 CPUs for each of its 2 slots do not fit the CPU budget beside the other profiles'"
                 .to_owned(),
         }],
+
+        refused_slots: vec![SizingRefused {
+            profile: "jvm".to_owned(),
+            reason: "12 jobs waited 300s for a slot (p95) while memory and CPU had room, 4 at once at most; it is at \
+                     its max_slots, 4"
+                .to_owned(),
+        }],
     };
     assert!(
         matches!(plan.profile_plan("jvm", 60), ProfilePlan::Next { .. }),
         "the memory change is due"
     );
     assert_eq!(
-        plan.refusal("jvm").as_deref(),
-        Some(
+        plan.refusals("jvm"),
+        [
             "No CPU raise: 3 runs of halyard/ledger CI / test averaged 7.9 of its 8 CPUs (median): the cap holds \
-             them back; 9 CPUs for each of its 2 slots do not fit the CPU budget beside the other profiles'"
-        ),
-        "and why its cpus cannot rise, beside it"
+             them back; 9 CPUs for each of its 2 slots do not fit the CPU budget beside the other profiles'",
+            "No slot raise: 12 jobs waited 300s for a slot (p95) while memory and CPU had room, 4 at once at most; \
+             it is at its max_slots, 4"
+        ],
+        "and why its cpus and slots cannot rise, beside it, CPUs first"
     );
-    assert_eq!(plan.refusal("node"), None);
+    assert_eq!(plan.refusals("node"), Vec::<String>::new());
 }
 
 #[test]

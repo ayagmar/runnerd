@@ -1936,7 +1936,7 @@ fn auto_plan(
         lines.push(Line::from(spans));
         // Beside the change, which can still be to its memory or slots.
         // A sentence with its figures and its reason, wrapped rather than cut.
-        if let Some(refusal) = plan.refusal(&profile.name) {
+        for refusal in plan.refusals(&profile.name) {
             let indent = 2 + name_width + 1;
             lines.extend(
                 wrap(&refusal, width.saturating_sub(indent))

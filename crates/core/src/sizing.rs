@@ -383,7 +383,7 @@ pub fn advise(
                     // runner of each profile beside the mirror.
                     Admission::Measured => max.saturating_sub(mirror),
                 }),
-                wants_slots: wants_slots(config.host.admission, slot_wait.p95, busy),
+                wants_slots: wants_slots(config.host.admission, &jobs, history.kept_since, busy),
                 min_jobs: rules.min_jobs,
                 upper: upper(
                     ceiling,
@@ -524,7 +524,7 @@ fn job_memory(raises: &Raises<'_>, jobs: &[&Ran], sized: &Sized, now: u64, busy:
                 .filter(|job| Key::of(job) == *key)
                 .collect();
             let wait = waits(&runs_of, raises.history.kept_since);
-            let wants = wants_slots(sized.admission, slot_waits(&runs_of).p95, busy);
+            let wants = wants_slots(sized.admission, &runs_of, raises.history.kept_since, busy);
             // A job's advice says what it needs; only its profile's is bounded by what can be written.
             let unbounded = Sized {
                 upper: None,
@@ -764,12 +764,24 @@ fn slot_waits(jobs: &[&Ran]) -> Spread {
     )
 }
 
-/// Whether more slots would help a profile, or a job of it: its jobs waited `WAITED` for a slot at p95 while the
-/// budgets had room for them (`slot_wait`, seconds at p95), or under `caps`, where a slot is bought with its cap, its
-/// slots were `busy` half the time. Under `measured` slots that are busy and never waited for would start nothing
-/// sooner.
-fn wants_slots(admission: Admission, slot_wait: u64, busy: u32) -> bool {
-    slot_wait >= WAITED || (admission == Admission::Caps && busy >= BUSY)
+/// The p95 wait of `jobs`, in seconds, that asks for more slots under `admission`. Under `measured` only the wait
+/// with no slot free while the budgets had room for the job's runner (`slot_waits`): a job memory or CPU held back
+/// would wait for them in a new slot as well (ADR 0090). Under `caps` the whole wait less the host's part (`waits`):
+/// a slot is bought with its cap, and with every slot busy and the caps filling `MemoryMax` no job has room for its
+/// runner, so none would count.
+fn slot_asking_wait(admission: Admission, jobs: &[&Ran], kept_since: u64) -> u64 {
+    match admission {
+        Admission::Caps => waits(jobs, kept_since).p95,
+        Admission::Measured => slot_waits(jobs).p95,
+    }
+}
+
+/// Whether more slots would help a profile, or a job of it: its `jobs` waited `WAITED` at p95 by
+/// `slot_asking_wait`, or under `caps`, where a slot is bought with its cap, its slots were `busy` half the time.
+/// Under `measured` slots that are busy and never waited for would start nothing sooner.
+fn wants_slots(admission: Admission, jobs: &[&Ran], kept_since: u64, busy: u32) -> bool {
+    slot_asking_wait(admission, jobs, kept_since) >= WAITED
+        || (admission == Admission::Caps && busy >= BUSY)
 }
 
 /// The most of `jobs` that waited only for a slot at once, each from `Ran::slot_waited` before its start to its

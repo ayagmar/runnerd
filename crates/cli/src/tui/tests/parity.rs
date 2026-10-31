@@ -267,11 +267,15 @@ fn sizing_states_what_blocks_auto_sizing_and_what_it_does_next_as_core_does() {
         "{}",
         rows.join("\n")
     );
-    assert!(
-        shown.contains(&words(&plan.refusal("node").unwrap())),
-        "{}",
-        rows.join("\n")
+    let refusals = plan.refusals("node");
+    assert_eq!(
+        refusals.len(),
+        2,
+        "a CPU and a slot raise refused: {refusals:?}"
     );
+    for refusal in &refusals {
+        assert!(shown.contains(&words(refusal)), "{}", rows.join("\n"));
+    }
     // A profile `[host] memory_ceiling` holds reads as such, not as one whose slice has to grow.
     let android = sizing
         .profiles

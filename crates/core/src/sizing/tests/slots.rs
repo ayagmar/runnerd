@@ -5,7 +5,6 @@ use std::collections::BTreeMap;
 
 use super::{G, HOUR, M, NOW, job, measured};
 use crate::api::{Resize, SizingChange};
-use crate::cache::Disk;
 use crate::config::{Config, resize_profile};
 use crate::sizing::auto::{Context, IDLE_FOR, changes};
 use crate::sizing::{Held, History, Ran, SlotsSet, Window, spread};
@@ -73,10 +72,6 @@ mod idle {
     fn look(history: &History, running: u32, last: &BTreeMap<String, u64>) -> Vec<SizingChange> {
         let config = Config::parse(&config_text()).unwrap();
         let running = BTreeMap::from([("node".to_owned(), running)]);
-        let disk = Disk {
-            docker: 1 << 40,
-            slots: BTreeMap::new(),
-        };
         changes(
             &config,
             history,
@@ -87,7 +82,7 @@ mod idle {
                 last,
                 cpus_set: &[],
                 running: &running,
-                disk: Some(&disk),
+                disk: Some(1 << 40),
             },
         )
         .into_iter()
@@ -136,13 +131,48 @@ mod idle {
         );
         raised.slots_set.retain(|set| set.at != NOW - 20 * DAY);
         assert_eq!(look(&raised, 0, &BTreeMap::new()), Vec::new());
-        let changed = BTreeMap::from([("node".to_owned(), (NOW - 3 * DAY) / 1000)]);
-        assert_eq!(
-            look(&quiet(1), 0, &changed),
-            Vec::new(),
-            "auto sizing's own change 3 days ago"
-        );
         assert_eq!(look(&quiet(1), 4, &BTreeMap::new()), Vec::new());
+    }
+
+    #[test]
+    fn only_a_change_of_its_slots_starts_the_week_again() {
+        // Catches idle slots kept forever on a profile whose memory or cpus auto sizing changes every few days.
+        let at = (NOW - 3 * DAY) / 1000;
+        let last = BTreeMap::from([("node".to_owned(), at)]);
+        let changed = |slots: u32| {
+            let mut history = quiet(1);
+            history.changes.push(SizingChange {
+                at,
+                profile: "node".to_owned(),
+                from: Resize {
+                    memory: 6 * G,
+                    slots,
+                    cpus: None,
+                },
+                to: Resize {
+                    memory: 5632 * M,
+                    slots: 4,
+                    cpus: None,
+                },
+                reason: String::new(),
+                uncertain: false,
+            });
+            history
+        };
+        assert_eq!(
+            look(&changed(3), 0, &last),
+            Vec::new(),
+            "auto sizing's own raise of its slots 3 days ago"
+        );
+        let lowered = look(&changed(4), 0, &last);
+        assert_eq!(
+            lowered
+                .iter()
+                .map(|change| change.to.slots)
+                .collect::<Vec<_>>(),
+            [3],
+            "a lowering of its memory 3 days ago leaves the slots' week running"
+        );
     }
 
     #[test]
@@ -172,8 +202,8 @@ mod generated {
     use super::*;
 
     const SEEDS: u64 = 6;
-    /// Docker's disk: 48G holds 12 slots of 4G, node's 10 beside jvm's 2.
-    const DOCKER: u64 = 48 * G;
+    /// What the slots' Docker stores may keep together: 12 slots of 1G, node's 10 beside jvm's 2.
+    const DOCKER: u64 = 12 * G;
 
     /// A deterministic generator (`SplitMix64`).
     struct Rng(u64);
@@ -245,13 +275,6 @@ mod generated {
             self.history
                 .runners
                 .retain(|runner| runner.removed_at.is_none_or(|at| at >= now - 30 * DAY));
-            let disk = Disk {
-                docker: DOCKER,
-                slots: BTreeMap::from([
-                    ("node".to_owned(), vec![3 * G; 4]),
-                    ("jvm".to_owned(), vec![2 * G; 2]),
-                ]),
-            };
             let running = BTreeMap::from([("node".to_owned(), running)]);
             let made = changes(
                 &Config::parse(&self.text).unwrap(),
@@ -263,12 +286,13 @@ mod generated {
                     last: &self.last,
                     cpus_set: &[],
                     running: &running,
-                    disk: Some(&disk),
+                    disk: Some(DOCKER),
                 },
             );
             for change in &made {
                 self.text = resize_profile(&self.text, &change.profile, change.to).unwrap();
                 self.last.insert(change.profile.clone(), change.at);
+                self.history.changes.push(change.clone());
             }
             if !made.is_empty() {
                 self.announce(now);
@@ -354,8 +378,8 @@ mod generated {
                     most_waiting(&fresh)
                 ));
             }
-            if to > 12 || DOCKER / u64::from(to + 2) < 4 * G {
-                return Err("raised past max_slots or the disk's floor".to_owned());
+            if to > 12 || DOCKER / u64::from(to + 2) < G {
+                return Err("raised past max_slots or under 1G of Docker's disk a slot".to_owned());
             }
         } else if to < from {
             let set = before
@@ -366,7 +390,13 @@ mod generated {
                 .take_while(|set| set.slots == from)
                 .last()
                 .map_or(0, |set| set.at);
-            let changed = last.map_or(0, |at| at * 1000);
+            let changed = before
+                .changes
+                .iter()
+                .filter(|change| change.profile == "node" && change.to.slots != change.from.slots)
+                .map(|change| change.at * 1000)
+                .max()
+                .unwrap_or(0);
             let start = now - IDLE_FOR;
             if to + 1 != from || to < running.max(1) {
                 return Err(format!(

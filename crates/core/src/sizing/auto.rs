@@ -20,12 +20,12 @@ use crate::api::{
     Advice, ProfileSizing, Resize, Sizing, SizingChange, SizingRefused, ago, cores, duration,
     job_title,
 };
-use crate::cache::{DOCKER_SLOT_MAX_GIB, Disk, docker_budget_gib};
+use crate::cache::docker_budget_gib;
 use crate::config::{Admission, ByteSize, Config, Profile, cpu_budget};
 
 use super::{
     CpusSet, GRANULE, HELD, History, SlotsSet, Throttling, Window, advise, busy, first_runner,
-    peak, short_of_slots, slot_waits, spread, wants_slots,
+    peak, short_of_slots, slot_asking_wait, spread, wants_slots,
 };
 
 /// The fewest runs a raise of `slots` or `cpus` reads: the jobs queued since the profile's last change, or one job's
@@ -47,10 +47,11 @@ const HEADROOM: u64 = 2;
 /// can pass the cap a little.
 const MET: u64 = 95;
 
-/// The least share of Docker's disk, in bytes, that slots added for waits leave each slot, whatever the slots keep
-/// now: under it a JVM or Android job's images and half the share for its build cache no longer fit, and the store is
-/// emptied after every job (ADR 0054), which trades the wait for a cold build (ADR 0090).
-pub const SLOT_DISK: u64 = 4 << 30;
+/// The least share of Docker's disk, in bytes, that slots added for waits leave each slot: the least
+/// `cache::docker_budget_gib` gives. Under it the shares would add up past the quarter of Docker's disk the slots'
+/// stores may keep together (ADR 0054). It is not what a store keeps: a store fills the share it gets, so the stores'
+/// sizes would only hold the slots where they are (ADR 0090).
+pub const SLOT_DISK: u64 = 1 << 30;
 
 /// How long a profile's slots must stay `IDLE_SLOTS` above what ran at once before auto sizing takes one away, in ms:
 /// a week, so a quiet weekend does not take back what the weekdays' bursts need.
@@ -76,9 +77,9 @@ pub struct Context<'run> {
     pub cpus_set: &'run [CpusSet],
     /// How many runners each profile runs now, by name.
     pub running: &'run BTreeMap<String, u32>,
-    /// What the slots' Docker stores have of Docker's disk, from the last measure; `None` before the first, and then
-    /// no slot is added (ADR 0090).
-    pub disk: Option<&'run Disk>,
+    /// What the slots' Docker Engines may keep together, in bytes, from the last measure (`cache::docker_disk`);
+    /// `None` before the first, and then no slot is added (ADR 0090).
+    pub disk: Option<u64>,
 }
 
 /// The changes to make now, in order, one per profile at most. Empty unless `[sizing] auto` is on.
@@ -92,8 +93,8 @@ pub struct Context<'run> {
 /// slot when every profile's caps still fit `MemoryMax`, and a lowered `memory` adds the slots the advice gives. Under
 /// `measured` a profile whose jobs waited for a slot while memory and CPU had room for them (`Ran::slot_waited`)
 /// since its last change gets as many more as waited at once, at most `max_step` percent of its slots, at least 1,
-/// while every slot's share of Docker's disk still holds what the slots keep (`measured_slots`); and one whose slots
-/// stayed `IDLE_SLOTS` above what ran at once for `IDLE_FOR` loses one. Never past `max_slots`, never under what
+/// while every slot keeps `SLOT_DISK` of Docker's disk (`measured_slots`), or a refusal says why it cannot; and one
+/// whose slots stayed `IDLE_SLOTS` above what ran at once for `IDLE_FOR` since they were last set loses one. Never past `max_slots`, never under what
 /// runs. Each change is sized as if the ones before it were written: they take budget the later ones cannot.
 ///
 /// `cpus` go up `max_step` percent, at least 1, when one job's runs at them since the profile's last change and since
@@ -110,7 +111,7 @@ pub fn changes(config: &Config, history: &History, context: Context<'_>) -> Vec<
     next_look(config, history, context).changes
 }
 
-/// What a look does: the changes [`changes`] picks, and the `cpus` raises it cannot make.
+/// What a look does: the changes [`changes`] picks, and the `cpus` and `slots` raises it cannot make.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct Look {
     /// The changes to make now, in order, one per profile at most.
@@ -118,9 +119,13 @@ pub struct Look {
     /// The profiles whose jobs the CPU cap holds back but whose `cpus` cannot go up: the slice's CPUs are unknown or
     /// all theirs, the CPU budget has no room, or under `measured` admission the raise before did not help them.
     pub refused: Vec<SizingRefused>,
+    /// Under `measured` admission, the profiles whose jobs waited for a slot alone but whose `slots` cannot go up:
+    /// Docker's disk is not measured yet, they are at `max_slots`, or one more slot would leave every slot less than
+    /// `SLOT_DISK` of Docker's disk.
+    pub refused_slots: Vec<SizingRefused>,
 }
 
-/// The changes [`changes`] picks, and the `cpus` raises the same look cannot make.
+/// The changes [`changes`] picks, and the `cpus` and `slots` raises the same look cannot make.
 pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Look {
     let rules = &config.sizing;
     if !rules.auto {
@@ -130,8 +135,7 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
     let sizing = advise(config, context.memory_max, history, window);
     let now = window.now / 1000;
     let mut budget = Budget::new(config, &sizing.profiles);
-    let mut changes = Vec::new();
-    let mut refused = Vec::new();
+    let mut look = Look::default();
     for advised in &sizing.profiles {
         let Some(profile) = config.profiles.get(&advised.name) else {
             continue;
@@ -142,7 +146,7 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
             match reverted(config, profile, advised, &sizing, &context, &budget) {
                 Revert::Write(change) => {
                     budget.take(&advised.name, profile, change.from, change.to);
-                    changes.push(change);
+                    look.changes.push(change);
                     continue;
                 }
                 Revert::Wait => continue,
@@ -154,7 +158,7 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
             continue;
         }
         let lowering = Lowering::after(since, rules.interval.as_secs());
-        let fresh = Fresh::read(history, advised, last, window);
+        let fresh = Fresh::read(history, advised, config.host.admission, last, window);
         let mut reasons = Vec::new();
         let memory = memory(config, profile, advised.advice, lowering);
         let running = context.running.get(&advised.name).copied().unwrap_or(0);
@@ -165,9 +169,8 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
             ),
             Admission::Measured => {
                 measured_slots(config, profile, advised, &fresh, &context, &budget)
-                    // Jobs that waited for a slot since the last change keep it, though the disk holds no more.
-                    .or_else(|| {
-                        (lowering == Lowering::Allowed && !fresh.wants_slots(Admission::Measured))
+                    .step(&advised.name, &mut look.refused_slots, || {
+                        (lowering == Lowering::Allowed)
                             .then(|| idle_slots(config, history, advised, &context, running))?
                     })
                     .map_or((advised.slots, None), |step| (step.to, Some(step.reason)))
@@ -200,7 +203,7 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
         } else if slots > profile.slots && !advised_slots {
             reasons.push(fresh.waited(last.is_some()));
         }
-        let cpus = cpus.taken(&advised.name, &mut reasons, &mut refused);
+        let cpus = cpus.taken(&advised.name, &mut reasons, &mut look.refused);
         let from = Resize {
             memory: profile.memory.0,
             slots: profile.slots,
@@ -215,7 +218,7 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
             continue;
         }
         budget.take(&advised.name, profile, from, to);
-        changes.push(SizingChange {
+        look.changes.push(SizingChange {
             at: now,
             profile: advised.name.clone(),
             from,
@@ -224,7 +227,7 @@ pub fn next_look(config: &Config, history: &History, context: Context<'_>) -> Lo
             uncertain: false,
         });
     }
-    Look { changes, refused }
+    look
 }
 
 /// How far back a config that lowers `memory` is compared with auto sizing's raises, in seconds: a day.
@@ -383,7 +386,9 @@ struct Fresh {
     /// When the evidence starts, in milliseconds: the last change, or the window's start.
     start: u64,
     jobs: u64,
-    /// Seconds they waited only for a slot (`Ran::slot_waited`), p95.
+    /// Whether they ask for more slots (`sizing::wants_slots`), however few.
+    wants: bool,
+    /// Seconds they waited that ask for a slot under `admission` (`slot_asking_wait`), p95.
     wait: u64,
     /// The most of them that waited only for a slot at once.
     short: u32,
@@ -395,6 +400,7 @@ impl Fresh {
     fn read(
         history: &History,
         advised: &ProfileSizing,
+        admission: Admission,
         last: Option<u64>,
         window: Window,
     ) -> Fresh {
@@ -404,25 +410,27 @@ impl Fresh {
             .iter()
             .filter(|job| job.profile == advised.name && job.queued_at >= start)
             .collect();
+        let busy = busy(
+            history,
+            &advised.name,
+            advised.slots,
+            first_runner(history, start),
+            window.now,
+        );
         Fresh {
             start,
             jobs: jobs.len() as u64,
-            wait: slot_waits(&jobs).p95,
+            wants: wants_slots(admission, &jobs, history.kept_since, busy),
+            wait: slot_asking_wait(admission, &jobs, history.kept_since),
             short: short_of_slots(&jobs),
-            busy: busy(
-                history,
-                &advised.name,
-                advised.slots,
-                first_runner(history, start),
-                window.now,
-            ),
+            busy,
         }
     }
 
-    /// Whether another slot would help under `admission`: enough jobs, which waited a minute for a slot at p95, or
-    /// under `caps` kept the slots busy half the time.
-    fn wants_slots(&self, admission: Admission) -> bool {
-        self.jobs >= RAISE_RUNS && wants_slots(admission, self.wait, self.busy)
+    /// Whether another slot would help: enough jobs, which waited a minute for a slot at p95, or under `caps` kept
+    /// the slots busy half the time.
+    fn wants_slots(&self) -> bool {
+        self.jobs >= RAISE_RUNS && self.wants
     }
 
     /// Why a slot is added.
@@ -585,7 +593,7 @@ fn caps_slots(
         let slots = fit(room).min(current);
         return if slots < running { 0 } else { slots };
     }
-    if fresh.wants_slots(Admission::Caps)
+    if fresh.wants_slots()
         && profile.max_slots.is_none_or(|max| current < max)
         && budget.caps.saturating_add(memory) <= memory_max
     {
@@ -600,13 +608,43 @@ struct SlotStep {
     reason: String,
 }
 
+/// What a profile's jobs since its last change ask of its slots under `measured` admission.
+enum Raise {
+    /// No more: nothing waited for a slot alone.
+    Unasked,
+    /// This many, and why.
+    To(SlotStep),
+    /// More, which cannot be added, and why.
+    Refused(String),
+}
+
+impl Raise {
+    /// The change of `profile`'s slots to make: the raise, or with none asked, `idle`'s lowering. A refused raise
+    /// goes to `refused`, and its jobs, which waited for a slot since the last change, keep the slots they have.
+    fn step(
+        self,
+        profile: &str,
+        refused: &mut Vec<SizingRefused>,
+        idle: impl FnOnce() -> Option<SlotStep>,
+    ) -> Option<SlotStep> {
+        match self {
+            Raise::To(step) => Some(step),
+            Raise::Refused(reason) => {
+                refused.push(SizingRefused::new(profile, reason));
+                None
+            }
+            Raise::Unasked => idle(),
+        }
+    }
+}
+
 /// Under `measured`, more slots when its jobs since the last change waited for one while memory and CPU had room
 /// (`Fresh::wants_slots`): as many as waited at once, at least 1 and at most `max_step` percent of its slots, up to
-/// `max_slots`, and only as many as leave every slot, with the slots the changes before it gave, a share of Docker's
-/// disk (`cache::docker_budget_gib`) that holds what the slots keep (`floor`). A slot under measured admission costs
-/// no memory or CPU: each runner reserves its job's prediction when it starts, and the budgets stop a start that does
-/// not fit. What it costs is disk: every slot's Docker store shares the same quarter of it. `None` while nothing
-/// waited, or no slot fits, or Docker's disk was not measured yet.
+/// `max_slots`, and only as many as leave every slot, with the slots the changes before it gave, `SLOT_DISK` of
+/// Docker's disk. A slot under measured admission costs no memory or CPU: each runner reserves its job's prediction
+/// when it starts, and the budgets stop a start that does not fit. What it costs is disk: every slot's Docker store
+/// shares the same quarter of it (`cache::docker_budget_gib`). Refused when Docker's disk was not measured yet, the
+/// profile is at `max_slots`, or one more slot leaves too little disk.
 fn measured_slots(
     config: &Config,
     profile: &Profile,
@@ -614,68 +652,71 @@ fn measured_slots(
     fresh: &Fresh,
     context: &Context<'_>,
     budget: &Budget,
-) -> Option<SlotStep> {
+) -> Raise {
     let current = advised.slots;
-    if !fresh.wants_slots(Admission::Measured) {
-        return None;
+    if !fresh.wants_slots() {
+        return Raise::Unasked;
     }
-    let disk = context.disk?;
+    let asked = format!(
+        "{} jobs {}waited {}s for a slot (p95) while memory and CPU had room, {} at once at most",
+        fresh.jobs,
+        if context.last.contains_key(&advised.name) {
+            "since its last change "
+        } else {
+            ""
+        },
+        fresh.wait,
+        fresh.short,
+    );
+    let max = profile.max_slots.unwrap_or(u32::MAX);
+    if current >= max {
+        return Raise::Refused(format!("{asked}; it is at its max_slots, {max}"));
+    }
+    let Some(disk) = context.disk else {
+        return Raise::Refused(format!(
+            "{asked}; Docker's disk is not measured yet, which the next check of the caches does"
+        ));
+    };
     let step = (current.saturating_mul(config.sizing.max_step) / 100).max(1);
-    let wanted = current
-        .saturating_add(fresh.short.clamp(1, step))
-        .min(profile.max_slots.unwrap_or(u32::MAX));
-    let floor = floor(config, disk);
+    let wanted = current.saturating_add(fresh.short.clamp(1, step)).min(max);
     let others: u32 = budget
         .slots
         .iter()
         .filter(|(name, _)| **name != advised.name)
         .map(|(_, slots)| *slots)
         .sum();
-    let to = (current.saturating_add(1)..=wanted)
+    let Some(to) = (current.saturating_add(1)..=wanted)
         .rev()
-        .find(|slots| share(disk, others.saturating_add(*slots)) >= floor)?;
-    Some(SlotStep {
+        .find(|slots| fits_disk(disk, others.saturating_add(*slots)))
+    else {
+        return Raise::Refused(format!(
+            "{asked}; at {} slots, beside the other profiles' {others}, each slot would keep less than {} of the {} \
+             the slots' Docker stores may keep together",
+            current.saturating_add(1),
+            ByteSize(SLOT_DISK),
+            ByteSize(disk)
+        ));
+    };
+    Raise::To(SlotStep {
         to,
         reason: format!(
-            "{} jobs {}waited {}s for a slot (p95) while memory and CPU had room, {} at once at most; at {to} slots \
-             each slot keeps {} of Docker's disk, at least the {} the slots keep",
-            fresh.jobs,
-            if context.last.contains_key(&advised.name) {
-                "since its last change "
-            } else {
-                ""
-            },
-            fresh.wait,
-            fresh.short,
-            ByteSize(share(disk, others.saturating_add(to))),
-            ByteSize(floor)
+            "{asked}; at {to} slots each slot keeps {}G of Docker's disk",
+            docker_budget_gib(disk, u64::from(others.saturating_add(to)))
         ),
     })
 }
 
-/// What a slot's Docker store must keep for slots to be added: the largest of the profiles' median slot volumes, at
-/// least `SLOT_DISK`, and at most what a share can be (`DOCKER_SLOT_MAX_GIB`). A store held to its share that fills
-/// it would be emptied after its jobs once the share shrank under it.
-fn floor(config: &Config, disk: &Disk) -> u64 {
-    disk.slots
-        .iter()
-        .filter(|(profile, sizes)| config.profiles.contains_key(*profile) && !sizes.is_empty())
-        .map(|(_, sizes)| spread(sizes.clone()).p50)
-        .max()
-        .unwrap_or(0)
-        .clamp(SLOT_DISK, DOCKER_SLOT_MAX_GIB << 30)
-}
-
-/// One slot's share of `disk` among `slots`, in bytes, as the runners get it.
-fn share(disk: &Disk, slots: u32) -> u64 {
-    docker_budget_gib(disk.docker, u64::from(slots)) << 30
+/// Whether `slots` slots each keep `SLOT_DISK` of the `disk` their Docker stores may keep together.
+fn fits_disk(disk: u64, slots: u32) -> bool {
+    disk / u64::from(slots.max(1)) >= SLOT_DISK
 }
 
 /// Under `measured`, one slot fewer when, for the `IDLE_FOR` before now, its slots stayed `IDLE_SLOTS` or more above
 /// the most runners that held one for a job at once, its warm runners counted: an idle slot shrinks every slot's
 /// share of Docker's disk and keeps a volume. Only once the history holds a runner from before that time and the
-/// profile has had its slots that long, by its `profile.changed` events and auto sizing's last change, and `min_jobs`
-/// of its jobs ran in it, so a host that was off says nothing; never under what runs or 1. This takes back a raise made by hand as well (ADR 0090).
+/// profile has had its slots that long, by its `profile.changed` events and auto sizing's last change of its slots,
+/// and `min_jobs` of its jobs ran in it, so a host that was off says nothing; never under what runs or 1. This takes
+/// back a raise made by hand as well (ADR 0090).
 fn idle_slots(
     config: &Config,
     history: &History,
@@ -687,11 +728,15 @@ fn idle_slots(
     let now = context.window.now;
     let start = now.checked_sub(IDLE_FOR)?;
     let set = slots_since(&history.slots_set, &advised.name, current, now);
-    let changed = context
-        .last
-        .get(&advised.name)
-        .map_or(0, |at| at.saturating_mul(1000));
-    // The history must cover the whole time: a runner from before it, the profile's slots and no change since.
+    // A change of its memory or cpus leaves the slots as they ran.
+    let changed = history
+        .changes
+        .iter()
+        .filter(|change| change.profile == advised.name && change.to.slots != change.from.slots)
+        .map(|change| change.at.saturating_mul(1000))
+        .max()
+        .unwrap_or(0);
+    // The history must cover the whole time: a runner from before it, the profile's slots and no change of them since.
     let first = history
         .runners
         .iter()

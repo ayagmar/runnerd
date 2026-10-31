@@ -143,9 +143,9 @@ pub struct Handle {
     pub records: watch::Receiver<api::Records>,
     /// The shared build cache, for its size now.
     pub build_cache: Option<BuildCache>,
-    /// What the slots' Docker stores have of Docker's disk, from the last measure; `None` before the first. Auto
-    /// sizing adds no slot without it (ADR 0090).
-    pub disk: watch::Receiver<Option<cache::Disk>>,
+    /// What the slots' Docker Engines may keep together, in bytes, from the last measure (`cache::docker_disk`);
+    /// `None` before the first. Auto sizing adds no slot without it (ADR 0090).
+    pub disk: watch::Receiver<Option<u64>>,
 }
 
 impl Handle {
@@ -377,9 +377,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// The job each slot ran last, which left its caches in the slot's layer: what `plan` matches queued jobs to
     /// (ADR 0080). A slot is absent once its last job is not known, or a reseed dropped its layer.
     ran: BTreeMap<SlotRef, Key>,
-    /// What the slots' Docker stores have of Docker's disk, from the last check of the caches (`cache::docker_disk`);
+    /// What the slots' Docker Engines may keep together, from the last check of the caches (`cache::docker_disk`);
     /// `None` until one measured Docker's disk, when each image keeps its own default.
-    docker_disk: watch::Sender<Option<cache::Disk>>,
+    docker_disk: watch::Sender<Option<u64>>,
     /// The measure of Docker's disk recovery started, in the background: Docker measures every volume.
     disk: Option<JoinHandle<Result<caches::Disk, docker::Error>>>,
     /// Whether a job ended since the shared caches were last checked.

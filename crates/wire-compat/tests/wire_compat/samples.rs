@@ -863,6 +863,10 @@ pub(crate) fn sizing() -> Sizing {
                 profile: "halyard".to_owned(),
                 reason: "the CPU budget is full".to_owned(),
             }],
+            refused_slots: vec![SizingRefused {
+                profile: "halyard".to_owned(),
+                reason: "it is at its max_slots, 4".to_owned(),
+            }],
         }),
     }
 }

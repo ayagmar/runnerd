@@ -123,7 +123,7 @@ fn plan_line(view: &SizingView, plan: &AutoPlan, profile: &ProfileSizing) -> Mar
                 span.muted { (reason) }
             }
             // Beside the change, which can still be to its memory or slots.
-            @if let Some(refusal) = plan.refusal(&profile.name) {
+            @for refusal in plan.refusals(&profile.name) {
                 span.plan-refused { (refusal) }
             }
         }

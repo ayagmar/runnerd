@@ -549,6 +549,13 @@ pub fn auto_plan(at: u64) -> api::AutoPlan {
                  the CPU budget with every profile's warm runners and one more runner at the largest cap"
             ),
         }],
+        refused_slots: vec![api::SizingRefused {
+            profile: "node".to_owned(),
+            reason: "14 jobs since its last change waited 240s for a slot (p95) while memory and CPU had room, 5 at \
+                     once at most; at 3 slots, beside the other profiles' 6, each slot would keep less than 1G of the \
+                     8G the slots' Docker stores may keep together"
+                .to_owned(),
+        }],
     }
 }
 

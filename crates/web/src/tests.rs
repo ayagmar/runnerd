@@ -3124,6 +3124,7 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
             }],
             blocked: None,
             refused: Vec::new(),
+            refused_slots: Vec::new(),
         });
     }
     let on = dashboard.page(&cookie, "/sizing").await.body;
@@ -3145,11 +3146,16 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
         on.contains("at most once every 24 hours"),
         "the rules in words: {on}"
     );
-    // A refused CPU raise shows beside the memory change the same look makes.
+    // Refused CPU and slot raises show beside the memory change the same look makes.
     let refused = {
         let mut fixtures = dashboard.fake.fixtures.lock().unwrap();
         let plan = runnerd_fixtures::auto_plan(fixtures.now);
-        let refusal = plan.refusal("node").unwrap();
+        let refusal = plan.refusals("node");
+        assert_eq!(
+            refusal.len(),
+            2,
+            "a CPU and a slot raise refused: {refusal:?}"
+        );
         let held = fixtures.auto_plan.replace(plan).unwrap();
         (refusal, held)
     };
@@ -3158,8 +3164,8 @@ async fn the_sizing_page_says_what_auto_sizing_does_next_with_each_profile() {
     let node = node.split("</li>").next().unwrap();
     assert!(
         node.contains("Next look, within 5 minutes: memory 7G → 5.25G")
-            && node.contains(&refused.0),
-        "the change and the refusal: {node}"
+            && refused.0.iter().all(|refusal| node.contains(refusal)),
+        "the change and the refusals: {node}"
     );
     dashboard.fake.fixtures.lock().unwrap().auto_plan = Some(refused.1);
     // The file was edited by hand: no look writes the change, so the page says why instead of promising it.
