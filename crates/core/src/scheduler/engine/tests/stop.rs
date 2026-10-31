@@ -5,6 +5,7 @@
 use std::sync::atomic::AtomicBool;
 
 use super::*;
+use crate::api::Stopping;
 use crate::scheduler::engine::STOP_DEADLINE;
 
 /// Job 1 runs in slot 1, an idle runner started just now waits in slot 2, and the mirror is up.
@@ -186,6 +187,12 @@ async fn a_stop_ends_when_docker_is_gone_or_fails_midway_and_the_next_start_take
             .await
             .unwrap_or_else(|_| panic!("the stop never ended (Docker gone: {gone})"))
             .unwrap();
+        assert_eq!(
+            handle.shutdown(Shutdown::Graceful),
+            Some(Stopping::LeavesJobs),
+            "a second `runnerd stop` says what the first does once Docker stopped answering (Docker gone: {gone})"
+        );
+        assert_eq!(handle.shutdown(Shutdown::Force), Some(Stopping::KillsJobs));
         let calls = github.calls();
         for id in [7, 8] {
             let deletes = calls

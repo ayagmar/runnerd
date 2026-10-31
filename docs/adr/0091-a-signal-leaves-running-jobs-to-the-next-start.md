@@ -1,4 +1,4 @@
-# 0091. A signal leaves running jobs to the next start, and a stop ends within 30 s
+# 0091. A signal leaves running jobs to the next start, and the daemon exits within 45 s
 
 Status: **Accepted** (2026-10-31). Amends [0031](0031-records-of-failed-jobs.md): the next start makes the
 record of a failed job whose stopped runner no daemon kept.
@@ -66,8 +66,9 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
     next start checks first.
 - **Clients say how it stops.** `Status::stopping` (`api::Stopping`: waits for running jobs, leaves them to the
   next start, kills them) is one fact core words (`Stopping::line`); `runnerctl` and the dashboard render it, and
-  `POST /v1/shutdown` answers it, so `runnerd stop` sent during a detach says it detaches. `shutting_down` stays for
-  clients before it.
+  `POST /v1/shutdown` answers it (`Handle::shutdown`), so `runnerd stop` sent during a detach, or after Docker
+  stopped answering an earlier one, says it leaves running jobs. A kind of stop a client does not know reads as
+  `Unknown` and shows as "shutting down". `shutting_down` stays for clients before it.
 - **Nothing more while stopping.** A detaching engine answers no commands; one sent meanwhile fails as it would once
   the daemon is gone. Auto sizing stops looking once any stop is asked for.
 

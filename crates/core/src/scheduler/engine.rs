@@ -145,6 +145,22 @@ pub struct Handle {
     pub build_cache: Option<BuildCache>,
 }
 
+impl Handle {
+    /// Asks the engine to stop in `mode` and says how it stops now: as asked, unless a stop asked for earlier is more
+    /// urgent, or the engine published that a `runnerd stop` leaves running jobs since Docker stopped answering it.
+    /// `None` for `Shutdown::No` when nothing stops.
+    pub fn shutdown(&self, mode: Shutdown) -> Option<api::Stopping> {
+        let requested = self.control.shutdown(mode);
+        let published = self.status.borrow().stopping;
+        match (requested, published) {
+            (Shutdown::Graceful, Some(api::Stopping::LeavesJobs)) => {
+                Some(api::Stopping::LeavesJobs)
+            }
+            _ => requested.stopping(),
+        }
+    }
+}
+
 /// Where the engine runs, besides its config and its GitHub and Docker clients.
 #[derive(Debug)]
 pub struct Setup {

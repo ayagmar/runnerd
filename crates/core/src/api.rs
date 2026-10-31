@@ -720,6 +720,10 @@ pub enum Stopping {
     LeavesJobs,
     /// `runnerd stop --force` or a second signal: it kills running jobs.
     KillsJobs,
+    /// A kind of stop from a newer daemon than this client knows, so one added later does not keep the client from
+    /// reading the status.
+    #[serde(other)]
+    Unknown,
 }
 
 impl Stopping {
@@ -729,6 +733,7 @@ impl Stopping {
             Stopping::WaitsForJobs => "shutting down: waits for running jobs",
             Stopping::LeavesJobs => "shutting down: leaves running jobs to the next start",
             Stopping::KillsJobs => "shutting down: kills running jobs",
+            Stopping::Unknown => "shutting down",
         }
     }
 }

@@ -203,12 +203,12 @@ async fn shutdown(
         "shutdown (force: {}) requested by {principal:?}",
         request.force
     );
-    let mode = state.handle.control.shutdown(if request.force {
+    let stopping = state.handle.shutdown(if request.force {
         Shutdown::Force
     } else {
         Shutdown::Graceful
     });
-    match mode.stopping() {
+    match stopping {
         Some(stopping) => (StatusCode::ACCEPTED, Json(ShutdownAnswer { stopping })).into_response(),
         None => StatusCode::ACCEPTED.into_response(),
     }

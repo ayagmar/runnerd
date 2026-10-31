@@ -408,7 +408,11 @@ pub(crate) fn stopping() -> Vec<Stopping> {
     ];
     for stopping in &every {
         match stopping {
-            Stopping::WaitsForJobs | Stopping::LeavesJobs | Stopping::KillsJobs => {}
+            Stopping::WaitsForJobs
+            | Stopping::LeavesJobs
+            | Stopping::KillsJobs
+            // What a client reads a later daemon's kind of stop as; no daemon sends it, so it has no sample.
+            | Stopping::Unknown => {}
         }
     }
     every
