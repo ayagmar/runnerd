@@ -20,17 +20,18 @@ share. In a throwaway slot with the same image and an 8 GB share, the policy bel
 commit from 657 s, `reused 0, downloaded 2639` and 1,912 MiB received to 343 s, `reused 2639, downloaded 0` and
 674 MiB.
 
-Moby passes only `key=value` filters to BuildKit (`toBuildkitPruneInfo`). A `type!=exec.cachemount` filter, in
-`docker builder prune` or a GC rule, comes out with no filter at all and matches every record.
+A daemon.json GC rule takes only `key=value` filters (`toBuildkitPruneInfo` keeps only known keys): a
+`type!=exec.cachemount` rule comes out with no filter at all and matches every record.
 
 ## Decision
 
 - **The engine starts with a GC policy from the share.** `start_docker` keeps the share first
   (`keep_docker_budget`, which ran after it), then writes `builder.gc` into the container's
   `/etc/docker/daemon.json` (`docker_gc_policy` in `image/layers.sh`) before dockerd reads it. `image/daemon.json`
-  keeps only the mirror. Without a share from runnerd, the image's 20 GB sizes it, as it does the cleanup.
-- **The policy, in order.** Build contexts (`type=source.local`) and git checkouts (`type=source.git.checkout`) to
-  512 MB; layers (`type=regular`) while the unshared build cache holds over half the share; everything, cache mounts
+  holds the same policy for the default 20 GB share, so an engine whose policy could not be written still keeps
+  its build cache bounded, not to Docker's disk-based defaults of most of the host's disk.
+- **The policy, in order.** Build contexts (`type=source.local`) and git checkouts (`type=source.git.checkout`) go,
+  all of them, once the build cache holds over 512 MB; layers (`type=regular`) while the unshared build cache holds over half the share; everything, cache mounts
   included, only while it holds over three quarters. Each BuildKit rule compares the whole unshared build cache with
   its limit and removes only the records its filter matches, least recently used first. Layers therefore go before
   any cache mount, and a package store of up to about three quarters of the share stays. Three quarters, not half:
@@ -38,10 +39,15 @@ Moby passes only `key=value` filters to BuildKit (`toBuildkitPruneInfo`). A `typ
   build, and the last quarter is left for the slot's images.
 - **The cleanup prunes in the same order.** After a job, `job-cleanup.sh` removes build contexts and git checkouts,
   then layers down to half the share, one `docker builder prune --filter type=...` each. A store still over its
-  share loses every layer, then its images, and only then everything, cache mounts too. That last step prints, next
-  to the job's `received N MiB` line, how much the store held, of what share, and what it held without layers and
-  images, so the job's log says why the slot's next job starts cold.
+  share loses every layer, then its least recently used cache mounts down to three quarters of the share (the
+  GC's last rule, run now rather than at its next pass), then its images, and only then everything, cache mounts
+  too. Whenever the cleanup goes past layers, it prints next to the job's `received N MiB` line how much the
+  store held, of what share, and what it removed, so the job's log says what the slot's next job downloads again.
 - **Positive type filters only**, in the policy and in the cleanup.
+- **Cache mounts stay shared between the repositories of a slot.** No prune when a slot's next job comes from
+  another repository: repositories that share a profile trust each other already (its `~/.cache`, images and
+  snapshot), and a shared mount id such as `pnpm-store` is what lets one repository's build reuse another's
+  packages. Untrusted code is kept off a profile, not cleaned up after (below).
 - Nothing changes for `docker/setup-buildx-action`'s default `docker-container` driver, which starts a BuildKit
   container per job and removes it with the job. The docs suggest `driver: docker` on runnerd, which builds on the
   slot's engine and its cache.
@@ -50,8 +56,11 @@ Moby passes only `key=value` filters to BuildKit (`toBuildkitPruneInfo`). A `typ
 
 - A slot's build cache now holds up to half its share and cache mounts up to three quarters, where it held 512 MB.
   A slot whose images are large reaches its share sooner: its layers and then its images go after a job, where they
-  stayed before because the GC had already taken the build cache. Images come back through the mirror; packages a
-  cache mount held come back from the network, which is why images go first.
+  stayed before because the GC had already taken the build cache. Docker Hub images come back through the mirror; images
+  from other registries, and images a job built, come back from their registry or a rebuild, as packages a cache
+  mount held come back from the network. Images still go first: a job pulls only the images it runs, while a
+  cache mount's store is what every build of the repository reads, and a slot that needs both over its share was
+  trading one download for another before as well.
 - A cache mount is per slot, not per repository, and its id is a plain string (`pnpm-store`, `apt`), so a job of
   another repository in the same slot reads and writes the same mount. That is the trust the slot's `~/.cache`
   already has ([0007](0007-warm-caches-snapshot-plus-slot-layer.md), the Consequences of
@@ -65,12 +74,6 @@ Moby passes only `key=value` filters to BuildKit (`toBuildkitPruneInfo`). A `typ
   serves itself; a cache mount is the slot engine's, and the fork's job writes it as any job does. A repository that
   runs untrusted pull requests belongs on a profile of its own, apart from repositories whose builds must not read
   what those jobs leave.
-- A possible follow-up: prune the slot's `exec.cachemount` records when its container starts, if the slot's last job
-  came from another repository or a pull request. The engine keeps each slot's last job as repository, workflow and
-  job name ([0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md)), so the repository is known; the job about to
-  start is known only for a runner registered for it, since a warm one is bound to its slot before GitHub gives it a
-  job. Whether a job was a pull request's is not kept: the engine asks GitHub for a run's trigger only to decide
-  whether its job may write the shared build cache (0053).
 - The GC still runs during a job, at most once a minute, so a build of more than the share's three quarters loses
   its oldest records before the job ends, as Docker's own default would.
 - The policy and the cleanup are the runner image's, not the daemon's: a profile keeps the 512 MB GC until it runs

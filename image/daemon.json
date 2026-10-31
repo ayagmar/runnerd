@@ -1,3 +1,14 @@
 {
-  "registry-mirrors": ["http://mirror:5000"]
+  "registry-mirrors": ["http://mirror:5000"],
+  "builder": {
+    "gc": {
+      "enabled": true,
+      "policy": [
+        { "filter": ["type=source.local"], "maxUsedSpace": "512MB" },
+        { "filter": ["type=source.git.checkout"], "maxUsedSpace": "512MB" },
+        { "filter": ["type=regular"], "maxUsedSpace": "10240MB" },
+        { "all": true, "maxUsedSpace": "15360MB" }
+      ]
+    }
+  }
 }

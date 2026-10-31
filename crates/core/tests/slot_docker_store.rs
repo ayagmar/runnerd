@@ -298,30 +298,37 @@ async fn cache_mount_scenario(docker: &Docker, names: &Names) -> Result<(), Stri
     )
     .await?;
     println!("{output}");
-    if code != 0 || output.contains("emptied it") {
+    if code != 0 || output.contains("cache mounts") {
         return Err(format!(
             "the job cleanup kept images over the slot's share, or gave up the cache mount before them \
              (exit {code}):\n{output}"
         ));
     }
 
-    // A package store over the share leaves the store over it once layers and images are gone. The cleanup, which
-    // here runs before BuildKit's next GC, empties it, cache mounts too, and says so in the job's log.
+    // A package store over the share leaves the store over it once layers are gone. The cleanup gives up the cache
+    // mount, and says so in the job's log. On a slow host BuildKit's GC can reach the mount first;
+    // then the store is within its share either way, and the log line is required only when the mount was still
+    // there for the cleanup.
     let (code, output) = job(
         docker,
         names,
         &[SMALL_SHARE],
         &format!(
             "docker builder prune -af > /dev/null && {SHELL_IMAGE} && build() {{ {MOUNT_BUILD}; }} \
-             && build 1300 > /dev/null && runnerd-job-cleanup \
-             && ! docker buildx du --verbose | grep exec.cachemount > /dev/null"
+             && build 1300 > /dev/null \
+             && {{ docker buildx du --verbose | grep -q exec.cachemount && echo MOUNT-BEFORE-CLEANUP || true; }} \
+             && runnerd-job-cleanup \
+             && ! docker buildx du --verbose | grep exec.cachemount > /dev/null \
+             && [ \"$(size_gb \"$DOCKER_DATA_ROOT\")\" -le 1 ]"
         ),
     )
     .await?;
     println!("{output}");
-    if code != 0 || !output.contains("emptied it, cache mounts too") {
+    let emptied = output.contains("least recently used cache mounts")
+        || output.contains("everything, cache mounts too");
+    if code != 0 || (output.contains("MOUNT-BEFORE-CLEANUP") && !emptied) {
         return Err(format!(
-            "the job cleanup kept a store over the slot's share, or did not say it emptied it \
+            "the job cleanup kept a store over the slot's share, or did not say it gave up its cache mount \
              (exit {code}):\n{output}"
         ));
     }
