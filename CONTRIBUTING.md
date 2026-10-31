@@ -75,7 +75,10 @@ owner's slot layers and can reseed the owner's snapshot, and smaller shared-cach
    terminal `runnerctl --socket <scratch>/runnerd.sock status` (or `watch`, `tui`).
 4. Push to the sandbox repository and watch its jobs run.
 5. Stop the test daemon with `runnerd stop --socket <scratch>/runnerd.sock`, check that `docker ps` lists none of
-   its runners, then `systemctl --user start runnerd`.
+   its runners, then `systemctl --user start runnerd`. The test daemon removed the published runner images its
+   config does not run ([ADR 0040](docs/adr/0040-unused-runner-images-removed.md)), the owner's profile images among
+   them, so the owner's daemon pulls them again before those profiles start runners; `docker pull` each `image` of
+   the owner's config first to skip that wait.
 
 ## The wire between releases
 
