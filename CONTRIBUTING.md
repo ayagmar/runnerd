@@ -62,8 +62,9 @@ volumes are named for the profile, not the daemon (`runnerd-<profile>-base`, `ru
 owner's slot layers and can reseed the owner's snapshot, and smaller shared-cache limits empty the owner's caches.
 
 1. `runnerd stop`, and wait until `systemctl --user is-active runnerd` says `inactive`: it waits for running jobs,
-   then removes its runners. `systemctl --user stop runnerd` alone leaves them running for the next start, which
-   would be the test daemon.
+   then removes its runners. Check that `docker ps --all --filter label=runnerd.job` lists nothing; if Docker stopped
+   answering meanwhile, runnerd left the rest to its next start. `systemctl --user stop runnerd` alone leaves
+   runners running for the next start, which would be the test daemon.
 2. Write a config that serves only the sandbox repository, with its own `[history] database` under a scratch
    directory ([`examples/sandbox.toml`](examples/sandbox.toml) is one, without the history line):
    - name its profiles so that none matches a profile in the owner's config (`sandbox`, not `jvm`);

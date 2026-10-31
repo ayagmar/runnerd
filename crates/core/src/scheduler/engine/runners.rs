@@ -84,7 +84,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 // Its slot stays its until Docker says it stopped (ADR 0076); a stop leaves it to the next start.
                 Err(error) => {
                     warn!("cannot inspect {}: {error}", occupant.runner_name);
-                    self.docker_failed();
+                    self.docker_failed(&error);
                     continue;
                 }
             };
@@ -123,7 +123,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match self.docker.remove(&occupant.container).await {
                 Err(error) if !is_not_found(&error) => {
                     warn!("cannot remove {}: {error}", occupant.runner_name);
-                    self.docker_failed();
+                    self.docker_failed(&error);
                     return;
                 }
                 _ => {}
@@ -256,8 +256,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .unwrap_or_default()
     }
 
-    /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job. Nothing once Docker failed during a
-    /// stop: the next start finds the runners as the stop left them.
+    /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job. Nothing once Docker stopped answering
+    /// a stop: the next start finds the runners as the stop left them.
     pub(super) async fn stop(&mut self, slot: &SlotRef, jobs: RunningJobs) {
         if self.docker_in_stop == DockerInStop::Failed {
             return;
@@ -277,7 +277,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 && !is_not_found(&error)
             {
                 warn!("cannot remove {}: {error}", occupant.runner_name);
-                self.docker_failed();
+                self.docker_failed(&error);
                 return;
             }
             self.end_capture(&occupant.runner_name).await;

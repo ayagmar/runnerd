@@ -154,8 +154,8 @@ async fn a_stop_ends_when_docker_is_gone_or_fails_midway_and_the_next_start_take
         if gone {
             docker.set_outage(Outage::Refused);
         } else {
-            // It answers inspects, so the idle runner is deregistered, then fails its removal.
-            docker.0.lock().unwrap().fail_removes = u32::MAX;
+            // It answers inspects, so the idle runner is deregistered, then goes before its removal.
+            docker.0.lock().unwrap().remove_outage = Outage::Refused;
         }
 
         // `runnerd stop`, which would wait for job 1 if Docker answered.
@@ -174,7 +174,7 @@ async fn a_stop_ends_when_docker_is_gone_or_fails_midway_and_the_next_start_take
         }
 
         docker.set_outage(Outage::None);
-        docker.0.lock().unwrap().fail_removes = 0;
+        docker.0.lock().unwrap().remove_outage = Outage::None;
         let (slots, handle) = next_start(&github, &docker, &dir).await;
         assert_eq!(
             slots[0],
@@ -186,6 +186,38 @@ async fn a_stop_ends_when_docker_is_gone_or_fails_midway_and_the_next_start_take
         let job = handle.store.job(1).await.unwrap().unwrap();
         assert_eq!(job.summary.state, JobState::Running);
     }
+}
+
+#[tokio::test]
+async fn runnerd_stop_tries_again_a_removal_docker_refused_and_leaves_nothing() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let (mut engine, handle) = busy_and_idle(&github, &docker, &dir);
+    // Job 1 ended: both runners are idle, and the job's runner exits.
+    github
+        .0
+        .lock()
+        .unwrap()
+        .runners
+        .iter_mut()
+        .for_each(|runner| runner.busy = false);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().containers[0].running = false;
+    // Docker answers the first removal with an error, as when it is busy.
+    docker.0.lock().unwrap().fail_removes = 1;
+    handle.control.shutdown(Shutdown::Graceful);
+    tokio::time::timeout(Duration::from_secs(30), engine.schedule())
+        .await
+        .expect("the stop ends once Docker removes them");
+    assert_eq!(
+        container_names(&docker),
+        BTreeSet::new(),
+        "both runners and the mirror are removed"
+    );
 }
 
 #[tokio::test]

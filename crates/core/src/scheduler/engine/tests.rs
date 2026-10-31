@@ -394,6 +394,9 @@ struct DockerState {
     fail_started_inspects: u32,
     /// How many `remove`s fail next, as when the Engine is busy.
     fail_removes: u32,
+    /// `Outage::Refused`: every `remove` fails to connect, as when the Engine goes away while it answers inspects
+    /// still.
+    remove_outage: Outage,
     /// How many runner `start`s fail next, as when the Engine is busy, before making anything.
     fail_starts: u32,
     /// How the next runner starts that fail after making their container go, in order.
@@ -700,6 +703,11 @@ impl DockerApi for FakeDocker {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("remove {container}"));
+        if state.remove_outage == Outage::Refused {
+            return Err(docker::Error::IOError {
+                err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            });
+        }
         if state.fail_removes > 0 {
             state.fail_removes -= 1;
             return Err(docker::Error::DockerResponseServerError {

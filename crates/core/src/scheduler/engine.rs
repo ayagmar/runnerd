@@ -178,12 +178,12 @@ enum Purpose {
     Warm,
 }
 
-/// Whether Docker answered the calls a stop needed.
+/// Whether Docker answers a stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DockerInStop {
-    /// It answered, or no stop was asked for.
+    /// It answers, if with errors, or no stop was asked for.
     Answers,
-    /// It failed one: the stop calls it no more.
+    /// It did not answer a call the stop needed: the stop calls it no more.
     Failed,
 }
 
@@ -363,7 +363,7 @@ pub struct Engine<G = Github, D = Docker> {
     /// unless runners were adopted.
     checked_at: SystemTime,
     mirror_up: bool,
-    /// Whether Docker failed a call a stop needed: the stop then leaves the rest to the next start, as a detach does.
+    /// Whether Docker stopped answering a stop: the stop then leaves the rest to the next start, as a detach does.
     docker_in_stop: DockerInStop,
     /// The memory cap the running mirror started with.
     mirror_memory: u64,
@@ -646,7 +646,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         info!("stopped");
     }
 
-    /// How the stop goes on: as requested, or as a detach once Docker failed a call the stop needed.
+    /// How the stop goes on: as requested, or as a detach once Docker stopped answering it.
     fn stopping(&self) -> Shutdown {
         match self.control.mode() {
             Shutdown::No => Shutdown::No,
@@ -667,11 +667,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Notes that Docker failed a call a stop needed, as when it is gone during a machine's shutdown: the stop calls
-    /// it no more and leaves the rest to the next start, which removes or adopts every container by its labels.
-    fn docker_failed(&mut self) {
-        if self.control.mode() != Shutdown::No && self.docker_in_stop == DockerInStop::Answers {
-            warn!("Docker fails during the stop; leaving the rest to the next start");
+    /// Notes that Docker failed a call a stop needed. If it did not answer at all, as when it is gone during a
+    /// machine's shutdown, the stop calls it no more and leaves the rest to the next start, which removes or adopts
+    /// every container by its labels. An answer that is an error, or a timeout, is tried again as any failed call:
+    /// `runnerd stop` must not leave runners behind for one busy moment of Docker's.
+    fn docker_failed(&mut self, error: &docker::Error) {
+        if self.control.mode() != Shutdown::No
+            && self.docker_in_stop == DockerInStop::Answers
+            && docker::is_unreachable(error)
+        {
+            warn!("Docker does not answer during the stop; leaving the rest to the next start");
             self.docker_in_stop = DockerInStop::Failed;
         }
     }

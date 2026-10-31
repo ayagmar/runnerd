@@ -33,8 +33,11 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
 - **A deadline.** `Engine::run` returns `STOP_DEADLINE` (30 s) after a detach or a forced stop was asked for,
   wherever it is: in a tick waiting for Docker or GitHub, or in recovery. It returns normally, so the daemon still
   closes and flushes the history; nothing calls `process::exit`.
-- **Docker failing ends the stop.** Once Docker fails a call a stop needs (a removal, an inspect of a runner), the
-  stop goes on as a detach: it calls no more stops and leaves the rest to the next start. While scheduling, a slot
+- **Docker gone ends the stop.** Once Docker does not answer a call a stop needs (a removal, an inspect of a runner)
+  at all, its socket gone or refusing connections (`docker::is_unreachable`), the stop goes on as a detach: it calls
+  no more stops and leaves the rest to the next start. An error Docker answers with, or a timeout, is tried again at
+  the next tick, as while scheduling: one busy moment of Docker's must not turn `runnerd stop` into a detach that
+  leaves runners behind. While scheduling, a slot
   still stays held until Docker confirms its container's removal (ADR 0076): freeing it on a failed removal could
   start a second runner on the volumes of one still running.
 - **"removed idle" is logged after the removal**, not before.
