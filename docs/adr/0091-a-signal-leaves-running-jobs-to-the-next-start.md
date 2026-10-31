@@ -37,15 +37,17 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
     containers are removed together, as each removal waits for its container to stop. GitHub's `Busy` keeps a runner
     that just took a job, and one whose deregistration or removal fails stays. Busy runners and the mirror stay for
     the next start to adopt.
-  - `Force`, `runnerd stop --force` or a second signal: kill running jobs and remove every runner.
+  - `Force`, `runnerd stop --force` or a second signal: kill running jobs and remove every runner. It takes over
+    whenever it comes, also while a detach waits for GitHub or Docker to remove an idle runner.
 - **A deadline.** `Engine::run` returns `STOP_DEADLINE` (30 s) after a detach or a forced stop was asked for,
   wherever it is: in a tick waiting for Docker or GitHub, or in recovery. It returns normally, so the daemon still
   closes and flushes the history; nothing calls `process::exit`. After the engine, API and dashboard requests still
   open, such as a doctor's check of a Docker that hangs, get 10 s to finish, and blocking tasks still running 5 s
   more (`Runtime::shutdown_timeout`); the daemon then exits without them.
 - **Docker gone ends the stop.** Once Docker does not answer a call a stop needs (a removal, an inspect of a runner)
-  at all, its socket gone or refusing connections (`docker::is_unreachable`), the stop goes on as a detach: it calls
-  no more stops and leaves the rest to the next start. An error Docker answers with, or a timeout, is tried again at
+  at all, its socket gone or refusing connections (`docker::is_unreachable`), the stop goes on as a detach, with a
+  detach's deadline: it calls no more stops and leaves the rest to the next start, and a record whose commit Docker
+  no longer answers holds it 30 s at most. An error Docker answers with, or a timeout, is tried again at
   the next tick, as while scheduling: one busy moment of Docker's must not turn `runnerd stop` into a detach that
   leaves runners behind. While scheduling, a slot still stays held until Docker confirms its container's removal (ADR 0076): freeing it on a failed removal could
   start a second runner on the volumes of one still running.
@@ -58,7 +60,18 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
     deadline for a detach or a forced stop.
   - A failed job's runner that stopped and was not yet kept, because it ended just before the stop, while no daemon
     ran, or while a record was cut off by the deadline, is kept at the next start: recovery makes its record from the
-    stopped container (`keep_left_record`) instead of noting the record lost, as `release` would have.
+    stopped container (`keep_left_record`) instead of noting the record lost, as `release` would have. A job the
+    history never saw the runner take, as one an idle runner took while the daemon detached or could not remove it,
+    is read from the job message in the runner's `_diag/Worker_*.log`, which Docker copies out of the stopped
+    container without starting it (`DockerApi::files`). The archive is read as it streams: the job log pages
+    below `_diag` are read through and dropped, and only the worker logs kept count against a 16 MiB cap. Such a
+    record has no job name or workflow unless the history saw the job queued. A runner whose worker logs, read
+    whole, name no job keeps no record, and recovery logs that. A read is whole only once the archive's end marker
+    arrives: one that breaks off, between entries too, or hits the cap before a worker log names the job is not.
+    While Docker cannot answer, short of declining (a 4xx, or 501), or the read is not whole, the container stays
+    and is asked about again one poll interval later, then twice as long each time up to 10 minutes, with one
+    warning each time. It is never removed for that: a container that stays unreadable stays on disk, outside the
+    records' limits, until it reads or the owner removes it (`docker rm`).
   - A reseed is not waited for. Its seed container runs on, and the next start adopts it as its profile's reseed. A
     reseed that finished just before the stop is still collected, so its event and the slots' dropped layers are
     recorded.

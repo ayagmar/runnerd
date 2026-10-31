@@ -3,7 +3,7 @@
 
 use std::path::Path;
 
-use super::capture::{Captured, MAX_LINE, Parser};
+use super::capture::{Captured, MAX_LINE, Parser, worker_job};
 use super::metrics::{CpuHeld, Events, Paths, Sampler, Tracked, read_holders, read_host_memory};
 use super::mirror::{self, Leases};
 use crate::api;
@@ -513,6 +513,34 @@ fn the_capture_yields_the_job_then_whole_lines_however_the_output_is_split() {
             ..
         })
     ));
+}
+
+#[test]
+fn a_stopped_runners_worker_log_names_its_job_by_the_check_run_id_alone() {
+    // The job message's `github` context, as the runner logs it: other numbers come before the job's.
+    let log = r#"[2026-10-31 12:00:01Z INFO Worker] Job message:
+ {
+  "contextData": {
+    "github": {
+      "t": 2,
+      "d": [
+        {
+          "k": "run_id",
+          "v": "39840158500"
+        },
+        {
+          "k": "run_number",
+          "v": 17.0
+        },
+        {
+          "k": "check_run_id",
+          "v": 120038758684.0
+        },
+"#;
+    assert_eq!(worker_job(log), Some(120_038_758_684));
+    let before =
+        "[2026-10-31 12:00:00Z INFO Worker] Waiting to receive the job message from the channel.\n";
+    assert_eq!(worker_job(before), None, "no job taken yet");
 }
 
 #[test]

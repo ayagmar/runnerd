@@ -7,6 +7,8 @@
 //! The script's output: `@@job <id> <run id>`, then `@@page <page> <offset> <length>` followed by exactly that
 //! many bytes, and `@@end <page>` once a page is complete. `Parser` turns it into whole lines and the position to
 //! resume from, so a restarted daemon continues where the stored log ends.
+//!
+//! `worker_job` reads the same job ID from a worker log copied out of a stopped runner, which no script can run in.
 
 use std::fmt::Write as _;
 
@@ -56,6 +58,27 @@ while :; do
     sleep 0.2
 done
 "#;
+
+/// The runner's diagnostic directory, which `SCRIPT` reads too.
+pub const DIAG: &str = "/home/runner/_diag";
+
+/// How the names of the job's worker logs in `DIAG` start, which `worker_job` reads.
+pub const WORKER_LOG: &str = "Worker_";
+
+/// The job (`check_run_id`) a worker log's job message names, read as `SCRIPT` reads it: the first line with the key,
+/// or the one after it, holds its value. `None` when the log names no job, as before the runner took one.
+pub fn worker_job(log: &str) -> Option<u64> {
+    let lines = log
+        .lines()
+        .skip_while(|line| !line.contains(r#""k": "check_run_id""#));
+    lines.take(2).find_map(|line| {
+        let (_, value) = line.split_once(r#""v": "#)?;
+        let digits = value
+            .find(|c: char| !c.is_ascii_digit())
+            .unwrap_or(value.len());
+        value[..digits].parse().ok()
+    })
+}
 
 /// The `docker exec` command line that captures a job from `position` on.
 pub fn command(position: LogPosition) -> Vec<String> {

@@ -9,10 +9,10 @@ use crate::docker::TtySize;
 use crate::record;
 use crate::scheduler::engine::RecordSelection;
 
-const FAILED: &str = "2026-10-23 01:08:55Z: Running job: build\n\
+pub(super) const FAILED: &str = "2026-10-23 01:08:55Z: Running job: build\n\
                       2026-10-23 01:09:27Z: Job build completed with result: Failed\n";
 
-fn recording() -> String {
+pub(super) fn recording() -> String {
     CONFIG.replace("slots = 2", "slots = 2\nrecord_failures = true")
 }
 
@@ -42,7 +42,7 @@ async fn job_ends(
 }
 
 /// Ticks until the engine took the finished commits.
-async fn until_recorded(engine: &mut Engine<FakeGithub, FakeDocker>) {
+pub(super) async fn until_recorded(engine: &mut Engine<FakeGithub, FakeDocker>) {
     for _ in 0..200 {
         engine.tick(Shutdown::No).await;
         if engine.records.recordings.is_empty() {
@@ -69,7 +69,7 @@ pub(super) fn record_image(job: u64, age: u64) -> docker::Image {
     }
 }
 
-async fn note(handle: &Handle, job: u64) -> Option<api::RecordNote> {
+pub(super) async fn note(handle: &Handle, job: u64) -> Option<api::RecordNote> {
     handle.store.flush().await;
     handle.store.job(job).await.unwrap().unwrap().record
 }
@@ -636,4 +636,61 @@ async fn no_shell_opens_while_the_shared_caches_it_mounts_are_trimmed() {
         "a shell waits for the trim: {refused}"
     );
     assert!(engine.records.shells.is_empty(), "no shell is open");
+}
+
+#[tokio::test(start_paused = true)]
+async fn a_left_runner_docker_cannot_read_is_asked_about_less_and_less_and_never_removed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("unread");
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers = vec![runner_container(2, 8, false)];
+        state
+            .container_logs
+            .insert("container-2".to_owned(), FAILED.to_owned());
+        state
+            .diag
+            .insert("container-2".to_owned(), docker::tests::diag_archive(5));
+        // Docker never manages to read its diagnostic files.
+        state.fail_files = u32::MAX;
+    }
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &recording());
+    let poll = engine.config.host.poll_interval;
+    let start = tokio::time::Instant::now();
+    let mut reads = Vec::new();
+    let mut read = |docker: &FakeDocker| {
+        let count = docker
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("files container-2 "))
+            .count();
+        if count > reads.len() {
+            reads.push(start.elapsed());
+        }
+    };
+    engine.recover().await.unwrap();
+    read(&docker);
+    // A tick each poll interval for an hour.
+    while start.elapsed() < Duration::from_secs(3600) {
+        tokio::time::advance(poll).await;
+        engine.tick(Shutdown::No).await;
+        read(&docker);
+    }
+    let gaps: Vec<u64> = reads
+        .windows(2)
+        .map(|pair| pair[1].saturating_sub(pair[0]).as_secs())
+        .collect();
+    assert_eq!(
+        gaps[..5],
+        [15, 30, 60, 120, 240],
+        "it is read again a poll interval later, then twice as long each time: {reads:?}"
+    );
+    assert!(
+        gaps[5..].iter().all(|gap| (480..=615).contains(gap)),
+        "never more than 10 minutes apart: {gaps:?}"
+    );
+    assert!(
+        !docker.calls().contains(&"remove container-2".to_owned()),
+        "the runner is never removed"
+    );
 }

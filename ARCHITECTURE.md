@@ -191,7 +191,8 @@ queued → slot → container → removed
 On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`) and schedules
 nothing until Docker has listed them. A running runner in a slot, profile or repository the config no longer has is
 adopted too and drains as it would after a reload. An idle one another release started (its `runnerd.spec` label) is
-replaced at the first tick.
+replaced at the first tick. A stopped runner whose failed job has no record yet becomes that record, its job read from
+the history or, if the history never saw it, from the stopped container's `_diag` Worker log.
 
 A stop comes in three kinds (`engine::Shutdown`, [ADR 0091](docs/adr/0091-a-signal-leaves-running-jobs-to-the-next-start.md)).
 A signal detaches: the engine stops scheduling, removes idle and warm runners at once, best effort
@@ -199,7 +200,7 @@ A signal detaches: the engine stops scheduling, removes idle and warm runners at
 start's recovery. `runnerd stop` (`POST /v1/shutdown`) waits for running jobs,
 then removes every runner and the mirror; with `force` it kills running jobs first. None waits for a reseed or a
 check of the caches, which the next start takes over. A signal or a forced stop returns within `STOP_DEADLINE`
-(30 s) whatever Docker and GitHub do, and once Docker stops answering during any stop, the stop detaches. `Engine::run`
+(30 s) whatever Docker and GitHub do, and once Docker stops answering during any stop, the stop detaches, with the same deadline. `Engine::run`
 always returns, so the daemon closes and flushes the history.
 
 ## State

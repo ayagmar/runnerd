@@ -150,17 +150,9 @@ pub struct Handle {
 
 impl Handle {
     /// Asks the engine to stop in `mode` and says how it stops now: as asked, unless a stop asked for earlier is more
-    /// urgent, or the engine published that a `runnerd stop` leaves running jobs since Docker stopped answering it.
-    /// `None` for `Shutdown::No` when nothing stops.
+    /// urgent, or the stop detaches since Docker stopped answering it. `None` for `Shutdown::No` when nothing stops.
     pub fn shutdown(&self, mode: Shutdown) -> Option<api::Stopping> {
-        let requested = self.control.shutdown(mode);
-        let published = self.status.borrow().stopping;
-        match (requested, published) {
-            (Shutdown::Graceful, Some(api::Stopping::LeavesJobs)) => {
-                Some(api::Stopping::LeavesJobs)
-            }
-            _ => requested.stopping(),
-        }
+        self.control.shutdown(mode).stopping()
     }
 }
 
@@ -364,6 +356,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// The runner and shell containers an earlier run left that recovery failed to remove, by ID with their names:
     /// each tick tries again.
     leftover: BTreeMap<String, String>,
+    /// The stopped runner containers an earlier run left that Docker could not tell recovery whether to keep as their
+    /// failed jobs' records: the first tick after each one's backoff tries again.
+    unread: Vec<recover::Left>,
     /// Profiles a reload removed, kept while their runners or reseed still run.
     retired: BTreeMap<String, crate::config::Profile>,
     /// Profiles whose slot 1 ran a job since their last reseed check.
@@ -527,6 +522,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             draining: BTreeSet::new(),
             drained_once: BTreeSet::new(),
             leftover: BTreeMap::new(),
+            unread: Vec::new(),
             reseed_due: BTreeSet::new(),
             oversized: BTreeSet::new(),
             reseeded_at: BTreeMap::new(),
@@ -633,12 +629,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 self.tick(mode).await;
             }
             self.publish();
-            if self.stopped(mode) {
-                break mode;
-            }
-            // A stop asked for or changed meanwhile, as one Docker failed turns into a detach, goes on at once.
+            // A stop asked for or changed meanwhile goes on at once, before this one counts as done: a second signal
+            // while a detach removed idle runners kills the running jobs, and one Docker failed turns into a detach.
             if self.stopping() != mode {
                 continue;
+            }
+            if self.stopped(mode) {
+                break mode;
             }
             let interval = if mode == Shutdown::No {
                 self.config.host.poll_interval
@@ -709,6 +706,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         {
             warn!("Docker does not answer during the stop; leaving the rest to the next start");
             self.docker_in_stop = DockerInStop::Failed;
+            // A detach in the control too: its deadline starts, and a later `runnerd stop` answers that it leaves
+            // running jobs.
+            self.control.shutdown(Shutdown::Detach);
         }
     }
 

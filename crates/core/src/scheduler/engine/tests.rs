@@ -107,7 +107,9 @@ struct GithubState {
     held_jobs: tokio::sync::watch::Sender<bool>,
     /// While true, `GET /repos/{owner}/{name}` does not answer.
     held_repositories: tokio::sync::watch::Sender<bool>,
-    /// Listings and job reads waiting for an answer.
+    /// While true, runner deletes do not answer.
+    held_deletes: tokio::sync::watch::Sender<bool>,
+    /// Listings, job reads and deletes waiting for an answer.
     waiting: usize,
 }
 
@@ -160,6 +162,15 @@ impl FakeGithub {
         self.0.lock().unwrap().held_jobs.send_replace(false);
     }
 
+    /// Holds runner deletes until `release_deletes`.
+    fn hold_deletes(&self) {
+        self.0.lock().unwrap().held_deletes.send_replace(true);
+    }
+
+    fn release_deletes(&self) {
+        self.0.lock().unwrap().held_deletes.send_replace(false);
+    }
+
     /// Holds repository reads, which never answer.
     fn hold_repositories(&self) {
         self.0.lock().unwrap().held_repositories.send_replace(true);
@@ -180,7 +191,7 @@ impl FakeGithub {
         self.0.lock().unwrap().waiting -= 1;
     }
 
-    /// Waits until `count` listings wait for an answer at once.
+    /// Waits until `count` listings, job reads or deletes wait for an answer at once.
     async fn until_waiting(&self, count: usize) {
         for _ in 0..500 {
             if self.0.lock().unwrap().waiting >= count {
@@ -273,8 +284,9 @@ impl GithubApi for FakeGithub {
     }
 
     async fn delete_runner(&self, _repository: &str, id: u64) -> Result<Deleted, github::Error> {
+        self.0.lock().unwrap().call(format!("delete {id}"));
+        self.wait(|state| &state.held_deletes).await;
         let mut state = self.0.lock().unwrap();
-        state.call(format!("delete {id}"));
         if state.busy_deletes > 0 {
             state.busy_deletes -= 1;
             return Ok(Deleted::Busy);
@@ -453,6 +465,13 @@ struct DockerState {
     changed: Vec<String>,
     /// The bytes a container's layer holds.
     written: u64,
+    /// The archive of each runner container's `_diag`, by ID.
+    diag: HashMap<String, Vec<u8>>,
+    /// How many reads of a container's files fail next, as when the Engine is busy.
+    fail_files: u32,
+    /// Where the next reads of a container's files break off in its archive, in bytes, as when Docker stops
+    /// sending it.
+    cut_files: VecDeque<usize>,
     /// Docker's free disk; plenty when unset.
     free: Option<u64>,
     /// The images Docker has, record images among them.
@@ -475,6 +494,8 @@ struct DockerState {
     seed_exit: Option<i64>,
     /// Measuring the volumes does not finish while this holds true, as when Docker takes long to measure them.
     volume_sizes_held: tokio::sync::watch::Sender<bool>,
+    /// Commits do not finish while this holds true, as when Docker takes long to write a large layer.
+    commits_held: tokio::sync::watch::Sender<bool>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
@@ -942,6 +963,37 @@ impl DockerApi for FakeDocker {
         Ok(self.0.lock().unwrap().written)
     }
 
+    async fn files(
+        &self,
+        container: &str,
+        directory: &str,
+        prefix: &str,
+    ) -> Result<docker::Files, docker::Error> {
+        self.outage().await?;
+        let mut state = self.0.lock().unwrap();
+        state.calls.push(format!("files {container} {directory}"));
+        if state.fail_files > 0 {
+            state.fail_files -= 1;
+            return Err(docker::Error::DockerResponseServerError {
+                status_code: 500,
+                message: "the Engine is busy".to_owned(),
+            });
+        }
+        let cut = state.cut_files.pop_front();
+        let tar =
+            state
+                .diag
+                .get(container)
+                .ok_or_else(|| docker::Error::DockerResponseServerError {
+                    status_code: 404,
+                    message: format!(
+                        "Could not find the file {directory} in container {container}"
+                    ),
+                })?;
+        let tar = &tar[..cut.unwrap_or(tar.len()).min(tar.len())];
+        Ok(docker::files_in(tar, prefix))
+    }
+
     async fn commit(
         &self,
         container: &str,
@@ -949,8 +1001,13 @@ impl DockerApi for FakeDocker {
         labels: BTreeMap<String, String>,
     ) -> Result<u64, docker::Error> {
         self.outage().await?;
+        let mut held = {
+            let mut state = self.0.lock().unwrap();
+            state.calls.push(format!("commit {container} {reference}"));
+            state.commits_held.subscribe()
+        };
+        let _ = held.wait_for(|held| !held).await;
         let mut state = self.0.lock().unwrap();
-        state.calls.push(format!("commit {container} {reference}"));
         let bytes = state.written;
         state.images.push(docker::Image {
             reference: reference.to_owned(),
