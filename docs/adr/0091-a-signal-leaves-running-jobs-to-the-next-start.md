@@ -40,7 +40,9 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
   - `Force`, `runnerd stop --force` or a second signal: kill running jobs and remove every runner.
 - **A deadline.** `Engine::run` returns `STOP_DEADLINE` (30 s) after a detach or a forced stop was asked for,
   wherever it is: in a tick waiting for Docker or GitHub, or in recovery. It returns normally, so the daemon still
-  closes and flushes the history; nothing calls `process::exit`.
+  closes and flushes the history; nothing calls `process::exit`. After the engine, API and dashboard requests still
+  open, such as a doctor's check of a Docker that hangs, get 10 s to finish, and blocking tasks still running 5 s
+  more (`Runtime::shutdown_timeout`); the daemon then exits without them.
 - **Docker gone ends the stop.** Once Docker does not answer a call a stop needs (a removal, an inspect of a runner)
   at all, its socket gone or refusing connections (`docker::is_unreachable`), the stop goes on as a detach: it calls
   no more stops and leaves the rest to the next start. An error Docker answers with, or a timeout, is tried again at
@@ -77,7 +79,8 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
   keeps it as its failed job's record, and its job's end is recorded from GitHub then, as after a crash.
 - To leave nothing behind, as before another daemon uses this Docker, run `runnerd stop`, not `systemctl stop`.
   CONTRIBUTING's sandbox procedure says so.
-- The unit needs no `TimeoutStopSec`: a stop ends within 30 s plus the history's flush. `KillMode` does not matter,
+- The unit needs no `TimeoutStopSec`: a signal ends the daemon within 45 s plus the history's flush, half of
+  systemd's 90 s. `KillMode` does not matter,
   as runner containers live in Docker's cgroups, not the unit's.
 - A stop that hits the deadline can leave a runner registered with no container, or a start half done; the next
   start's first listing deletes such registrations, and recovery adopts or removes the container by its labels.
