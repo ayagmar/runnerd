@@ -211,6 +211,9 @@ struct Occupant {
     labels: Option<Vec<String>>,
     /// The image it runs; `None` for one adopted from a container that does not say.
     image: Option<String>,
+    /// The release whose container spec it runs; `None` for one adopted from a container of a release before the
+    /// label.
+    spec: Option<String>,
     /// Whether `observe` watches it: recorded, sampled and its job captured. Not while Docker fails to inspect its
     /// container, which each tick tries again.
     observed: bool,
@@ -241,6 +244,11 @@ impl Occupant {
         self.image
             .as_ref()
             .is_some_and(|image| *image != profile.image.reference())
+    }
+
+    /// Whether another release started it, with another container spec: one that does not say is older.
+    fn other_spec(&self) -> bool {
+        self.spec.as_deref() != Some(runners::THIS_SPEC)
     }
 
     /// What it reserves of the budget under measured admission: its cap if it has no admission.

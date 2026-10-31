@@ -188,7 +188,8 @@ queued → slot → container → removed
 
 On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`) and schedules
 nothing until Docker has listed them. A running runner in a slot, profile or repository the config no longer has is
-adopted too and drains as it would after a reload.
+adopted too and drains as it would after a reload. An idle one another release started (its `runnerd.spec` label) is
+replaced at the first tick.
 
 A stop comes in three kinds (`engine::Shutdown`, [ADR 0091](docs/adr/0091-a-signal-leaves-running-jobs-to-the-next-start.md)).
 A signal detaches: the engine stops scheduling, removes idle and warm runners at once, best effort

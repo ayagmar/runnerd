@@ -405,3 +405,30 @@ async fn a_reload_asked_for_while_a_signal_stops_the_daemon_is_answered_as_it_we
         Err(other) => panic!("the reload failed: {other:?}"),
     }
 }
+
+#[tokio::test]
+async fn the_first_tick_after_an_install_replaces_idle_runners_of_the_old_release() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let (mut engine, _handle) = busy_and_idle(&github, &docker, &dir);
+    // Both runners were started by an earlier release, whose container spec may differ.
+    for container in &mut docker.0.lock().unwrap().containers {
+        container
+            .labels
+            .insert(super::super::runners::SPEC.to_owned(), "0.0.1".to_owned());
+    }
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let calls = docker.calls();
+    assert!(
+        calls.contains(&"remove container-2".to_owned()),
+        "the idle runner goes: {calls:?}"
+    );
+    assert!(
+        !calls.contains(&"remove container-1".to_owned()),
+        "job 1's runner keeps running: {calls:?}"
+    );
+}

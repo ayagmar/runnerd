@@ -23,6 +23,13 @@ pub(super) const LABELS: &str = "runnerd.labels";
 /// The runner container's label with the image it runs, as the config named it, so a restart knows it.
 pub(super) const IMAGE: &str = "runnerd.image";
 
+/// The runner container's label with the release of runnerd that started it, whose container spec (mounts,
+/// environment, entrypoint) it runs: a restart after an install replaces it once it is idle.
+pub(super) const SPEC: &str = "runnerd.spec";
+
+/// This release's `SPEC`.
+pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
+
 /// Why a slot's runner is removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Release {
@@ -48,6 +55,7 @@ fn container_labels(
         ("runnerd.runner-id".to_owned(), runner_id.to_string()),
         (LABELS.to_owned(), labels.join(",")),
         (IMAGE.to_owned(), image.to_owned()),
+        (SPEC.to_owned(), THIS_SPEC.to_owned()),
     ])
 }
 
@@ -540,6 +548,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             key: None,
             labels: Some(labels),
             image: Some(image),
+            spec: Some(THIS_SPEC.to_owned()),
             observed: false,
         };
         self.place(slot, occupant, purpose, failure).await;

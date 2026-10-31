@@ -1172,6 +1172,10 @@ fn runner_container(slot: usize, runner_id: u64, running: bool) -> Container {
             ("runnerd.repository".to_owned(), "o/r".to_owned()),
             ("runnerd.slot".to_owned(), slot.to_string()),
             ("runnerd.runner-id".to_owned(), runner_id.to_string()),
+            (
+                super::runners::SPEC.to_owned(),
+                super::runners::THIS_SPEC.to_owned(),
+            ),
         ]),
     }
 }

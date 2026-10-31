@@ -44,7 +44,7 @@ Stopping the service, or any SIGTERM or SIGINT, removes the idle and warm runner
 
 To back up the config, copy `runnerd.toml` itself: `runnerctl config show` shows [notification](../insights/#notifications) URLs and headers as `"<secret>"`, and runnerd refuses to start with those.
 
-Runner containers live in Docker, not in the unit: a restarted runnerd adopts the ones still running, and keeps the repositories it had paused paused.
+Runner containers live in Docker, not in the unit: a restarted runnerd adopts the ones still running, and keeps the repositories it had paused paused. After an install, it replaces the idle runners an earlier release started, whose containers may be set up differently.
 
 ## How it schedules
 

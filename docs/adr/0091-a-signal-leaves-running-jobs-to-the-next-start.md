@@ -46,6 +46,9 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
   the next tick, as while scheduling: one busy moment of Docker's must not turn `runnerd stop` into a detach that
   leaves runners behind. While scheduling, a slot still stays held until Docker confirms its container's removal (ADR 0076): freeing it on a failed removal could
   start a second runner on the volumes of one still running.
+- **Runners carry their release.** A runner container's `runnerd.spec` label names the release that started it. The
+  first tick after an install replaces an idle runner of another release, or of one before the label, as it replaces
+  one a reload left outdated; a busy one finishes its job. This covers idle runners a detach could not remove.
 - **"removed idle" is logged after the removal**, not before.
 - **What else holds a stop:**
   - A record being made (a failed job's container committed) is waited for in every kind of stop, within the
