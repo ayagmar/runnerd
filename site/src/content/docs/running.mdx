@@ -40,7 +40,7 @@ A config saved from the dashboard or `PUT /v1/config` applies without a restart,
 
 Stopping the service, or any SIGTERM or SIGINT, removes the idle and warm runners and exits within 45 seconds, even when Docker or GitHub do not answer. The runners of running jobs and the registry mirror stay up, so those jobs carry on, and the next start adopts them. Until it does, the caches runnerd serves itself do not answer, so a job running meanwhile restores and saves nothing in [GitHub Actions' cache](#github-actions-cache) or the [build cache](#build-cache), and an idle runner the stop could not remove stays online and can take one more job. `runnerd stop` keeps this machine out of rotation. A second signal kills running jobs instead.
 
-`runnerd stop` waits for running jobs, then removes every runner and stops the mirror: use it when nothing should be left behind, such as before another daemon uses this Docker. `runnerd stop --force` kills running jobs and removes their runners, within 45 seconds. If Docker stops answering while runnerd stops, it leaves the rest to the next start.
+`runnerd stop` waits for running jobs, then removes every runner and stops the mirror: use it when nothing should be left behind, such as before another daemon uses this Docker. It does not wait for a reseed: a reseed in progress finishes on its own, and the next start collects its container. `runnerd stop --force` kills running jobs and removes their runners, within 45 seconds. If Docker stops answering while runnerd stops, it leaves the rest to the next start.
 
 To back up the config, copy `runnerd.toml` itself: `runnerctl config show` shows [notification](../insights/#notifications) URLs and headers as `"<secret>"`, and runnerd refuses to start with those.
 

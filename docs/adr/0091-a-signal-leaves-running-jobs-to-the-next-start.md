@@ -82,7 +82,8 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
 - A runner that finishes its job while no daemon runs stays a stopped container until the next start removes it, or
   keeps it as its failed job's record, and its job's end is recorded from GitHub then, as after a crash.
 - To leave nothing behind, as before another daemon uses this Docker, run `runnerd stop`, not `systemctl stop`.
-  CONTRIBUTING's sandbox procedure says so.
+  CONTRIBUTING's sandbox procedure says so. Even `runnerd stop` leaves a reseed in progress: it finishes on its own,
+  and the next start collects its container.
 - The unit needs no `TimeoutStopSec`: a signal ends the daemon within 45 s plus the history's flush, half of
   systemd's 90 s. `KillMode` does not matter,
   as runner containers live in Docker's cgroups, not the unit's.
