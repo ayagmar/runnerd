@@ -59,7 +59,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0051](0051-insights-and-notifications.md) | Insights from the history, and notifications the daemon sends (amended by 0064) |
 | [0052](0052-shared-build-cache.md) | A build cache every runner shares, written only by the default branch (amended by 0077, 0082) |
 | [0053](0053-build-cache-written-by-own-pull-requests.md) | A repository can let its own branches' pull requests write to the build cache |
-| [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk |
+| [0054](0054-slot-docker-stores-share-the-disk.md) | The slots' Docker stores share a quarter of the disk (amended by 0089) |
 | [0055](0055-admission-follows-the-hosts-memory.md) | Admission follows the host's memory, and caps keep room for page cache (amended by 0063, 0084) |
 | [0056](0056-adopted-runners-keep-their-reservations.md) | A runner a restart adopts keeps what it reserved |
 | [0057](0057-name-what-holds-the-hosts-memory.md) | Name the programs that hold the host's memory, by name only |
@@ -94,3 +94,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0086](0086-sizing-and-init-know-the-memory-ceiling.md) | Auto sizing and `runnerd init` know the memory ceiling (amended by 0088) |
 | [0087](0087-an-insight-for-jobs-their-cpu-cap-holds-back.md) | An insight for jobs their CPU cap holds back |
 | [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md) | Sizing advice keeps to a profile's memory bounds |
+| [0089](0089-a-slots-cache-mounts-go-last.md) | A slot's build cache follows its share, and cache mounts go last |

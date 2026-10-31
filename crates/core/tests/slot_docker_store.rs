@@ -1,6 +1,6 @@
 //! A slot's Docker Engine keeps its images and build cache between the slot's jobs, each in a new container, within
-//! the Docker budget runnerd gives it, and a store its engine does not start on is emptied. Needs Docker, sysbox and
-//! the runner image (`docker build --target base -t runnerd-runner:base image`):
+//! the Docker budget runnerd gives it, BuildKit's cache mounts the longest, and a store its engine does not start on
+//! is emptied. Needs Docker, sysbox and the runner image (`docker build --target base -t runnerd-runner:base image`):
 //!
 //! ```sh
 //! cargo test -p runnerd-core --test slot_docker_store -- --ignored --nocapture
@@ -57,9 +57,7 @@ async fn job(
             "-euo".to_owned(),
             "pipefail".to_owned(),
             "-c".to_owned(),
-            format!(
-                ". /usr/local/lib/runnerd-layers.sh; mount_layers; start_docker; keep_docker_budget; {script}"
-            ),
+            format!(". /usr/local/lib/runnerd-layers.sh; mount_layers; start_docker; {script}"),
         ]),
         jit_config: None,
     };
@@ -175,14 +173,8 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
     Ok(())
 }
 
-#[tokio::test]
-#[ignore = "needs Docker, sysbox and the runner image"]
-async fn a_slots_docker_images_and_build_cache_outlive_its_jobs() {
-    let names = Names::new(&format!("runnerd-test-store-{}", std::process::id()));
-    let docker = Docker::connect().unwrap();
-    let result = scenario(&docker, &names).await;
-
-    let api = bollard::Docker::connect_with_local_defaults().unwrap();
+/// Removes the volumes and the network a scenario made; returns every removal's result.
+async fn clean_up(docker: &Docker, names: &Names) -> Vec<Result<(), String>> {
     let mut cleanup = Vec::new();
     for volume in [
         names.base(PROFILE),
@@ -197,11 +189,159 @@ async fn a_slots_docker_images_and_build_cache_outlive_its_jobs() {
                 .map_err(|e| e.to_string()),
         );
     }
-    cleanup.push(
-        api.remove_network(&names.network())
+    let network = match bollard::Docker::connect_with_local_defaults() {
+        Ok(api) => api
+            .remove_network(&names.network())
             .await
             .map_err(|e| e.to_string()),
-    );
+        Err(e) => Err(e.to_string()),
+    };
+    cleanup.push(network);
+    cleanup
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, sysbox and the runner image"]
+async fn a_slots_docker_images_and_build_cache_outlive_its_jobs() {
+    let names = Names::new(&format!("runnerd-test-store-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = scenario(&docker, &names).await;
+    let cleanup = clean_up(&docker, &names).await;
+    result.unwrap();
+    for removed in cleanup {
+        removed.unwrap();
+    }
+}
+
+/// The slot's Docker share in these jobs, in GB: BuildKit's GC and the cleanup keep the build cache's layers to
+/// 512 MiB and all of it to 768 MiB.
+const SMALL_SHARE: &str = "RUNNERD_DOCKER_BUDGET_GB=1";
+
+/// An image with bash and dd only, made from the runner's own files, so a build needs no network.
+const SHELL_IMAGE: &str = "docker image inspect store-shell > /dev/null 2>&1 \
+    || tar -ch /usr/bin/bash /usr/bin/dd \
+        $(ldd /usr/bin/bash /usr/bin/dd | grep -o '/[^ :]*' | grep -v ^/usr/bin/ | sort -u) 2> /dev/null \
+    | docker import -c 'ENV PATH=/usr/bin' - store-shell > /dev/null";
+
+/// A build of a new commit whose step fills a package store in a cache mount of `$1` MiB the first time, and
+/// reports `MOUNT-HIT` when it finds the store a build left there. The step's own text, which the build shows, has
+/// neither word whole.
+const MOUNT_BUILD: &str = "mkdir -p /root/mount && cd /root/mount && date +%s%N > commit \
+    && printf '%s\\n' 'FROM store-shell' 'SHELL [\"/usr/bin/bash\", \"-c\"]' 'COPY commit /commit' \
+        'ARG MIB' 'RUN --mount=type=cache,id=store-packages,target=/packages [ -f /packages/store ] && echo MOUNT-\"\"HIT \
+        || { echo MOUNT-\"\"MISS; dd if=/dev/zero of=/packages/store bs=1M count=$MIB status=none; }' > Dockerfile \
+    && docker build --progress=plain --build-arg MIB=\"$1\" -t store-mount . 2>&1";
+
+async fn cache_mount_scenario(docker: &Docker, names: &Names) -> Result<(), String> {
+    cache::prepare(docker, names, PROFILE, 1)
+        .await
+        .map_err(|e| e.to_string())?;
+
+    // A job fills a 600 MiB package store in a cache mount, over the 512 MiB the old GC floor kept, and its build
+    // cache's layers go past the share's half. BuildKit's GC runs at most once a minute, so the job waits past one
+    // run before its cleanup, as a longer job's later steps would.
+    let (code, output) = job(
+        docker,
+        names,
+        &[SMALL_SHARE],
+        &format!(
+            "{SHELL_IMAGE} && build() {{ {MOUNT_BUILD}; }} && build 600 && sleep 70 && runnerd-job-cleanup \
+             && docker buildx du"
+        ),
+    )
+    .await?;
+    println!("{output}");
+    if code != 0 || !output.contains("MOUNT-MISS") {
+        return Err(format!(
+            "the job that fills a cache mount failed (exit {code}):\n{output}"
+        ));
+    }
+
+    // The slot's next job, on a new container: its engine runs BuildKit's GC at start, its entrypoint runs the
+    // cleanup, and its build of a new commit finds the package store.
+    let (code, output) = job(
+        docker,
+        names,
+        &[SMALL_SHARE],
+        &format!(
+            "runnerd-job-cleanup && sleep 5 && docker buildx inspect && docker buildx du \
+             && build() {{ {MOUNT_BUILD}; }} && build 600"
+        ),
+    )
+    .await?;
+    println!("{output}");
+    if code != 0 {
+        return Err(format!(
+            "the slot's next job failed its build (exit {code}):\n{output}"
+        ));
+    }
+    if !output.contains("Max Used Space: 768MiB") {
+        return Err(format!(
+            "the slot's BuildKit GC policy does not follow its Docker share:\n{output}"
+        ));
+    }
+    if !output.contains("MOUNT-HIT") {
+        return Err(format!(
+            "the slot's next job built without the cache mount its last job filled:\n{output}"
+        ));
+    }
+
+    // Images put the store over its share: they go, and the package store stays.
+    let (code, output) = job(
+        docker,
+        names,
+        &[SMALL_SHARE],
+        "dd if=/dev/urandom of=/root/big bs=1M count=700 status=none \
+         && tar -C /root -c big | docker import - store-big > /dev/null && runnerd-job-cleanup \
+         && ! docker image inspect store-big > /dev/null 2>&1 \
+         && docker buildx du --verbose | grep exec.cachemount > /dev/null",
+    )
+    .await?;
+    println!("{output}");
+    if code != 0 || output.contains("cache mounts") {
+        return Err(format!(
+            "the job cleanup kept images over the slot's share, or gave up the cache mount before them \
+             (exit {code}):\n{output}"
+        ));
+    }
+
+    // A package store over the share leaves the store over it once layers are gone. The cleanup gives up the cache
+    // mount, and says so in the job's log. On a slow host BuildKit's GC can reach the mount first;
+    // then the store is within its share either way, and the log line is required only when the mount was still
+    // there for the cleanup.
+    let (code, output) = job(
+        docker,
+        names,
+        &[SMALL_SHARE],
+        &format!(
+            "docker builder prune -af > /dev/null && {SHELL_IMAGE} && build() {{ {MOUNT_BUILD}; }} \
+             && build 1300 > /dev/null \
+             && {{ docker buildx du --verbose | grep exec.cachemount > /dev/null && echo MOUNT-BEFORE-CLEANUP || true; }} \
+             && runnerd-job-cleanup \
+             && ! docker buildx du --verbose | grep exec.cachemount > /dev/null \
+             && [ \"$(size_gb \"$DOCKER_DATA_ROOT\")\" -le 1 ]"
+        ),
+    )
+    .await?;
+    println!("{output}");
+    let emptied = output.contains("least recently used cache mounts")
+        || output.contains("everything, cache mounts too");
+    if code != 0 || (output.contains("MOUNT-BEFORE-CLEANUP") && !emptied) {
+        return Err(format!(
+            "the job cleanup kept a store over the slot's share, or did not say it gave up its cache mount \
+             (exit {code}):\n{output}"
+        ));
+    }
+    Ok(())
+}
+
+#[tokio::test]
+#[ignore = "needs Docker, sysbox and the runner image"]
+async fn a_slots_cache_mounts_outlive_its_jobs_within_its_share() {
+    let names = Names::new(&format!("runnerd-test-mount-{}", std::process::id()));
+    let docker = Docker::connect().unwrap();
+    let result = cache_mount_scenario(&docker, &names).await;
+    let cleanup = clean_up(&docker, &names).await;
     result.unwrap();
     for removed in cleanup {
         removed.unwrap();

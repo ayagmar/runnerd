@@ -17,10 +17,11 @@ RUN echo "APT::Snapshot \"${UBUNTU_SNAPSHOT}\";" > /etc/apt/apt.conf.d/50runnerd
 
 # What the workflows expect from GitHub's ubuntu-24.04 image and the base image lacks: iptables for dockerd, make,
 # xz-utils and zstd (setup-* archives, actions/cache) and zip; and socat, which forwards the build cache's socket
-# (build-cache.sh), with iptables keeping GitHub Actions' cache's port from other containers.
+# (build-cache.sh), with iptables keeping GitHub Actions' cache's port from other containers. jq writes BuildKit's
+# GC policy into daemon.json (layers.sh); the base image ships it today, but nothing promises that.
 RUN apt-get update \
     && apt-get install -y --no-install-recommends \
-        iptables make socat xz-utils zip zstd \
+        iptables jq make socat xz-utils zip zstd \
     && rm -rf /var/lib/apt/lists/*
 
 # Docker Engine, CLI, Compose and Buildx from the official image, replacing the older CLI of the base image.
@@ -83,6 +84,8 @@ RUN chmod 755 /home/runner \
 
 COPY daemon.json /etc/docker/daemon.json
 COPY layers.sh /usr/local/lib/runnerd-layers.sh
+# BuildKit's GC policy for the default 20 GB share, from the same function the entrypoint sizes it with per slot.
+RUN bash -c ". /usr/local/lib/runnerd-layers.sh && docker_gc_policy"
 COPY build-cache.sh /usr/local/lib/runnerd-build-cache.sh
 COPY build-cache.gradle /usr/local/share/runnerd/build-cache.gradle
 COPY actions-cache.cjs /usr/local/lib/runnerd-actions-cache.cjs

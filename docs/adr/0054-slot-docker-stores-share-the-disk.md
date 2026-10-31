@@ -1,7 +1,8 @@
 # 0054. The slots' Docker stores share a quarter of the disk
 
 Status: **Accepted** (2026-10-24). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md) and
-[0041](0041-snapshot-and-mirror-limits.md).
+[0041](0041-snapshot-and-mirror-limits.md). Amended by [0089](0089-a-slots-cache-mounts-go-last.md): BuildKit's GC
+follows the slot's share instead of keeping 512 MB, and the build cache gives up cache mounts last, after images.
 
 ## Context
 
