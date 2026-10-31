@@ -243,6 +243,19 @@ fn refused(error: &Error) -> bool {
     )
 }
 
+/// Whether a Docker error says the Engine did not answer at all: its socket is gone, refuses connections or closed
+/// the connection, as while the machine shuts down. Not an answer the Engine gave, nor a timeout, which a busy Engine
+/// also gives.
+pub fn is_unreachable(error: &Error) -> bool {
+    matches!(
+        error,
+        Error::HyperLegacyError { .. }
+            | Error::HyperResponseError { .. }
+            | Error::IOError { .. }
+            | Error::SocketNotFoundError(_)
+    )
+}
+
 /// Whether a Docker error says the container, volume or image does not exist.
 pub fn is_not_found(error: &Error) -> bool {
     matches!(

@@ -5,9 +5,10 @@
 use std::collections::BTreeMap;
 use std::time::{Duration, SystemTime};
 
+use futures_util::StreamExt;
 use tracing::{info, warn};
 
-use super::{Engine, Occupant, Purpose, RunningJobs, unix_secs};
+use super::{DockerInStop, Engine, Occupant, Purpose, RunningJobs, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
@@ -21,6 +22,13 @@ pub(super) const LABELS: &str = "runnerd.labels";
 
 /// The runner container's label with the image it runs, as the config named it, so a restart knows it.
 pub(super) const IMAGE: &str = "runnerd.image";
+
+/// The runner container's label with the release of runnerd that started it, whose container spec (mounts,
+/// environment, entrypoint) it runs: a restart after an install replaces it once it is idle.
+pub(super) const SPEC: &str = "runnerd.spec";
+
+/// This release's `SPEC`.
+pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
 
 /// Why a slot's runner is removed.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -47,6 +55,7 @@ fn container_labels(
         ("runnerd.runner-id".to_owned(), runner_id.to_string()),
         (LABELS.to_owned(), labels.join(",")),
         (IMAGE.to_owned(), image.to_owned()),
+        (SPEC.to_owned(), THIS_SPEC.to_owned()),
     ])
 }
 
@@ -81,8 +90,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 Ok(state) => state.running,
                 Err(error) if is_not_found(&error) => false,
+                // Its slot stays its until Docker says it stopped (ADR 0076); a stop leaves it to the next start.
                 Err(error) => {
                     warn!("cannot inspect {}: {error}", occupant.runner_name);
+                    self.docker_failed(&error);
                     continue;
                 }
             };
@@ -94,7 +105,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Removes a slot's container and its runner, then frees the slot. If the container `Ended` and its runner took
-    /// no job, the repository's next runners are held back for a while.
+    /// no job, the repository's next runners are held back for a while. A container Docker fails to remove keeps its
+    /// slot (ADR 0076): the next tick tries again, and a stop leaves it to the next start.
     async fn release(&mut self, slot: &SlotRef, occupant: &Occupant, why: Release) {
         // The runner logs each job it takes and how it ended; its exit code says nothing (run.sh exits 0 when it
         // fails to start).
@@ -120,10 +132,17 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             match self.docker.remove(&occupant.container).await {
                 Err(error) if !is_not_found(&error) => {
                     warn!("cannot remove {}: {error}", occupant.runner_name);
+                    self.docker_failed(&error);
                     return;
                 }
                 _ => {}
             }
+        }
+        if why == Release::Idle {
+            info!(
+                "{}: removed idle {}",
+                occupant.repository, occupant.runner_name
+            );
         }
         match self
             .github
@@ -246,8 +265,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .unwrap_or_default()
     }
 
-    /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job.
+    /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job. Nothing once Docker stopped answering
+    /// a stop: the next start finds the runners as the stop left them.
     pub(super) async fn stop(&mut self, slot: &SlotRef, jobs: RunningJobs) {
+        if self.docker_in_stop == DockerInStop::Failed {
+            return;
+        }
         let Some(occupant) = self
             .slots
             .get(&slot.profile)
@@ -263,6 +286,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 && !is_not_found(&error)
             {
                 warn!("cannot remove {}: {error}", occupant.runner_name);
+                self.docker_failed(&error);
                 return;
             }
             self.end_capture(&occupant.runner_name).await;
@@ -300,13 +324,80 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
             Ok(Deleted::Deleted | Deleted::NotFound) => {
-                info!(
-                    "{}: removed idle {}",
-                    occupant.repository, occupant.runner_name
-                );
                 self.release(slot, &occupant, Release::Idle).await;
             }
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
+        }
+    }
+
+    /// Removes the idle and warm runners a detaching stop leaves no work for, best effort and all at once: each is
+    /// deregistered, a few at a time as GitHub asks, and then the containers are removed together, as each removal
+    /// waits for its container to stop. GitHub's `Busy` keeps a runner that just took a job, and busy runners stay
+    /// for the next start, as does one whose deregistration or removal fails. An idle runner left registered would
+    /// take one more job with no daemon to watch it.
+    pub(super) async fn remove_idle(&mut self) {
+        if self.docker_in_stop == DockerInStop::Failed {
+            return;
+        }
+        let idle: Vec<(SlotRef, Occupant)> = self
+            .occupied()
+            .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
+            .map(|(slot, occupant)| (slot, occupant.clone()))
+            .collect();
+        if idle.is_empty() {
+            return;
+        }
+        let github = &*self.github;
+        let deleted: Vec<_> = futures_util::stream::iter(idle)
+            .map(|(slot, occupant)| async move {
+                let answer = github
+                    .delete_runner(&occupant.repository, occupant.runner_id)
+                    .await;
+                (slot, occupant, answer)
+            })
+            .buffer_unordered(super::tick::CONCURRENT_REQUESTS)
+            .collect()
+            .await;
+        let mut removing = Vec::new();
+        for (slot, occupant, answer) in deleted {
+            match answer {
+                Ok(Deleted::Deleted | Deleted::NotFound) => removing.push((slot, occupant)),
+                Ok(Deleted::Busy) => {
+                    if let Some(Some(entry)) = self
+                        .slots
+                        .get_mut(&slot.profile)
+                        .and_then(|slots| slots.get_mut(slot.index))
+                    {
+                        entry.busy = true;
+                    }
+                }
+                Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
+            }
+        }
+        let docker = &*self.docker;
+        let removed = futures_util::future::join_all(removing.into_iter().map(
+            |(slot, occupant)| async move {
+                let removed = docker.remove(&occupant.container).await;
+                (slot, occupant, removed)
+            },
+        ))
+        .await;
+        for (slot, occupant, removed) in removed {
+            match removed {
+                Err(error) if !is_not_found(&error) => {
+                    warn!("cannot remove {}: {error}", occupant.runner_name);
+                    self.docker_failed(&error);
+                }
+                _ => {
+                    info!(
+                        "{}: removed idle {}",
+                        occupant.repository, occupant.runner_name
+                    );
+                    self.end_capture(&occupant.runner_name).await;
+                    self.forget(&occupant);
+                    self.vacate(&slot, false);
+                }
+            }
         }
     }
 
@@ -457,6 +548,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             key: None,
             labels: Some(labels),
             image: Some(image),
+            spec: Some(THIS_SPEC.to_owned()),
             observed: false,
         };
         self.place(slot, occupant, purpose, failure).await;

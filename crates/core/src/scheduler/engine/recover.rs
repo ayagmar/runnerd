@@ -152,7 +152,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .get(super::runners::LABELS)
                 .map(|labels| labels.split(',').map(str::to_owned).collect()),
             image: container.labels.get(super::runners::IMAGE).cloned(),
+            spec: container.labels.get(super::runners::SPEC).cloned(),
             observed: false,
+        }
+    }
+
+    /// Removes a runner container an earlier run left that is not adopted, unless it stopped after a failed job whose
+    /// runner its profile keeps: that becomes the job's record.
+    async fn remove_left(
+        &mut self,
+        container: docker::Container,
+        slot: &SlotRef,
+        occupant: &Occupant,
+    ) {
+        if !container.running && self.keep_left_record(slot, occupant).await {
+            return;
+        }
+        info!("removing {}, left by an earlier run", container.name);
+        if let Err(error) = self.docker.remove(&container.id).await {
+            warn!("cannot remove {}: {error}", container.name);
+            self.leftover.insert(container.id, container.name);
         }
     }
 
@@ -280,15 +299,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     );
                 }
                 _ => {
-                    if !container.running {
-                        self.note_lost_record(&profile, occupant.job, &container.id)
-                            .await;
-                    }
-                    info!("removing {}, left by an earlier run", container.name);
-                    if let Err(error) = self.docker.remove(&container.id).await {
-                        warn!("cannot remove {}: {error}", container.name);
-                        self.leftover.insert(container.id, container.name);
-                    }
+                    let slot = SlotRef {
+                        profile,
+                        index: index.unwrap_or(0),
+                    };
+                    self.remove_left(container, &slot, &occupant).await;
                 }
             }
         }

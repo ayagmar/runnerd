@@ -78,7 +78,8 @@ and why it went (`count`, `size`, `age`, `user`), past the record itself.
 in tasks that wake the engine when they finish, so a large workspace does not hold up a tick. The free-space check
 counts the expected size of the records still being committed. A daemon that stops mid-record is caught up at the
 next start: a record image the history has no row for is noted as made, and a stopped runner whose failed job got no
-record is noted as skipped, whether the daemon stopped while keeping it or was not running when it stopped.
+record becomes its record then, whether the daemon stopped while keeping it or was not running when it stopped
+(amended by [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md); it was noted as skipped before).
 
 ## Consequences
 

@@ -21,10 +21,11 @@ use axum::routing::{delete, get, post, put};
 use axum::serve::IncomingStream;
 use axum::{Json, Router};
 use runnerd_core::api::{
-    Dashboard, ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownRequest, Status,
+    Dashboard, ErrorResponse, Pairing, PairingQuery, Pairings, Principal, ShutdownAnswer,
+    ShutdownRequest, Status,
 };
 use runnerd_core::config::{ByteSize, Config};
-use runnerd_core::scheduler::engine::{Handle, RunningJobs};
+use runnerd_core::scheduler::engine::{Handle, Shutdown};
 use runnerd_web::{PAIRING_LIFETIME, PAIRING_MAX, PairError, Sessions};
 use tokio::net::UnixListener;
 use tokio::sync::{Mutex, watch};
@@ -196,18 +197,21 @@ async fn shutdown(
     Authenticated(principal): Authenticated,
     State(state): State<AppState>,
     request: Option<Json<ShutdownRequest>>,
-) -> StatusCode {
+) -> Response {
     let Json(request) = request.unwrap_or_default();
     info!(
         "shutdown (force: {}) requested by {principal:?}",
         request.force
     );
-    state.handle.control.shutdown(if request.force {
-        RunningJobs::Kill
+    let stopping = state.handle.shutdown(if request.force {
+        Shutdown::Force
     } else {
-        RunningJobs::Keep
+        Shutdown::Graceful
     });
-    StatusCode::ACCEPTED
+    match stopping {
+        Some(stopping) => (StatusCode::ACCEPTED, Json(ShutdownAnswer { stopping })).into_response(),
+        None => StatusCode::ACCEPTED.into_response(),
+    }
 }
 
 /// `GET /v1/dashboard`: the dashboard's `[web]` settings as the daemon started with them.

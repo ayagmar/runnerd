@@ -377,6 +377,8 @@ impl GithubApi for FakeGithub {
 /// What the fake Docker Engine runs and what it was asked.
 #[derive(Default)]
 struct DockerState {
+    /// Whether the Engine answers at all.
+    outage: Outage,
     containers: Vec<Container>,
     /// Every `list` fails, as when the Engine does not answer.
     fail_lists: bool,
@@ -392,6 +394,9 @@ struct DockerState {
     fail_started_inspects: u32,
     /// How many `remove`s fail next, as when the Engine is busy.
     fail_removes: u32,
+    /// `Outage::Refused`: every `remove` fails to connect, as when the Engine goes away while it answers inspects
+    /// still.
+    remove_outage: Outage,
     /// How many runner `start`s fail next, as when the Engine is busy, before making anything.
     fail_starts: u32,
     /// How the next runner starts that fail after making their container go, in order.
@@ -527,12 +532,39 @@ fn give_job(github: &FakeGithub, spec: &RunnerSpec) -> Option<u64> {
     Some(job.id)
 }
 
+/// Whether the fake Docker Engine answers.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum Outage {
+    #[default]
+    None,
+    /// Every call fails to connect, as when the Engine stopped during the machine's shutdown.
+    Refused,
+    /// No call ever answers, as when the Engine hangs.
+    Hung,
+}
+
 #[derive(Clone, Default)]
 struct FakeDocker(Arc<Mutex<DockerState>>);
 
 impl FakeDocker {
     fn calls(&self) -> Vec<String> {
         self.0.lock().unwrap().calls.clone()
+    }
+
+    fn set_outage(&self, outage: Outage) {
+        self.0.lock().unwrap().outage = outage;
+    }
+
+    /// Fails or hangs a call while the Engine is out.
+    async fn outage(&self) -> Result<(), docker::Error> {
+        let outage = self.0.lock().unwrap().outage;
+        match outage {
+            Outage::None => Ok(()),
+            Outage::Refused => Err(docker::Error::IOError {
+                err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            }),
+            Outage::Hung => std::future::pending().await,
+        }
     }
 }
 
@@ -549,6 +581,12 @@ impl DockerApi for FakeDocker {
         spec: &RunnerSpec,
         _isolation: &dyn Isolation,
     ) -> Result<String, docker::StartError> {
+        if let Err(error) = self.outage().await {
+            return Err(docker::StartError {
+                container: None,
+                error,
+            });
+        }
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("start {}", spec.name));
         let refused = |error| {
@@ -630,6 +668,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn inspect(&self, container: &str) -> Result<RunnerState, docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         if let Some(failures) = state.fail_inspects.get_mut(container)
             && *failures > 0
@@ -661,8 +700,14 @@ impl DockerApi for FakeDocker {
     }
 
     async fn remove(&self, container: &str) -> Result<(), docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("remove {container}"));
+        if state.remove_outage == Outage::Refused {
+            return Err(docker::Error::IOError {
+                err: std::io::Error::from(std::io::ErrorKind::ConnectionRefused),
+            });
+        }
         if state.fail_removes > 0 {
             state.fail_removes -= 1;
             return Err(docker::Error::DockerResponseServerError {
@@ -681,6 +726,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn run(&self, name: &str, body: ContainerCreateBody) -> Result<String, docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         let memory = body.host_config.and_then(|host| host.memory).unwrap_or(0);
         state
@@ -696,6 +742,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn list(&self, label: &str) -> Result<Vec<Container>, docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("list {label}"));
         if state.fail_lists {
@@ -713,6 +760,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn wait(&self, _container: &str) -> Result<i64, docker::Error> {
+        self.outage().await?;
         if let Some(code) = self.0.lock().unwrap().seed_exit {
             return Ok(code);
         }
@@ -720,6 +768,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn logs(&self, container: &str) -> Result<String, docker::Error> {
+        self.outage().await?;
         let state = self.0.lock().unwrap();
         Ok(state
             .container_logs
@@ -730,6 +779,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn logs_since(&self, _container: &str, _since: u64) -> Result<String, docker::Error> {
+        self.outage().await?;
         Ok(self.0.lock().unwrap().mirror_log.clone())
     }
 
@@ -738,6 +788,7 @@ impl DockerApi for FakeDocker {
         container: &str,
         command: Vec<String>,
     ) -> Result<docker::Output, docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         let broken = || docker::Error::DockerResponseServerError {
             status_code: 500,
@@ -815,10 +866,12 @@ impl DockerApi for FakeDocker {
     }
 
     async fn image_present(&self, image: &str) -> Result<bool, docker::Error> {
+        self.outage().await?;
         Ok(!self.0.lock().unwrap().missing_images.contains(image))
     }
 
     async fn pull(&self, image: &str) -> Result<(), docker::Error> {
+        self.outage().await?;
         self.0.lock().unwrap().calls.push(format!("pull {image}"));
         while self.0.lock().unwrap().block_pulls {
             tokio::time::sleep(Duration::from_millis(5)).await;
@@ -842,10 +895,12 @@ impl DockerApi for FakeDocker {
     }
 
     async fn ensure_network(&self, _name: &str) -> Result<(), docker::Error> {
+        self.outage().await?;
         Ok(())
     }
 
     async fn ensure_volume(&self, name: &str) -> Result<(), docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         if state.fail_volumes > 0 {
             state.fail_volumes -= 1;
@@ -858,6 +913,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn remove_volume(&self, name: &str) -> Result<(), docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("remove volume {name}"));
         if state.volumes_in_use.contains(name) {
@@ -870,16 +926,19 @@ impl DockerApi for FakeDocker {
     }
 
     async fn volume_sizes(&self) -> Result<BTreeMap<String, u64>, docker::Error> {
+        self.outage().await?;
         let mut held = self.0.lock().unwrap().volume_sizes_held.subscribe();
         let _ = held.wait_for(|held| !held).await;
         Ok(self.0.lock().unwrap().volume_sizes.clone())
     }
 
     async fn changes(&self, _container: &str) -> Result<Vec<String>, docker::Error> {
+        self.outage().await?;
         Ok(self.0.lock().unwrap().changed.clone())
     }
 
     async fn written(&self, _container: &str) -> Result<u64, docker::Error> {
+        self.outage().await?;
         Ok(self.0.lock().unwrap().written)
     }
 
@@ -889,6 +948,7 @@ impl DockerApi for FakeDocker {
         reference: &str,
         labels: BTreeMap<String, String>,
     ) -> Result<u64, docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("commit {container} {reference}"));
         let bytes = state.written;
@@ -901,6 +961,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn images(&self, label: &str) -> Result<Vec<docker::Image>, docker::Error> {
+        self.outage().await?;
         let state = self.0.lock().unwrap();
         Ok(state
             .images
@@ -911,10 +972,12 @@ impl DockerApi for FakeDocker {
     }
 
     async fn tagged_images(&self) -> Result<Vec<docker::TaggedImage>, docker::Error> {
+        self.outage().await?;
         Ok(self.0.lock().unwrap().tagged.clone())
     }
 
     async fn image_id(&self, reference: &str) -> Result<Option<String>, docker::Error> {
+        self.outage().await?;
         let state = self.0.lock().unwrap();
         Ok(state
             .tagged
@@ -928,10 +991,12 @@ impl DockerApi for FakeDocker {
     }
 
     async fn container_images(&self) -> Result<BTreeSet<String>, docker::Error> {
+        self.outage().await?;
         Ok(self.0.lock().unwrap().container_images.clone())
     }
 
     async fn remove_image(&self, reference: &str) -> Result<(), docker::Error> {
+        self.outage().await?;
         self.0
             .lock()
             .unwrap()
@@ -965,6 +1030,7 @@ impl DockerApi for FakeDocker {
     }
 
     async fn free_space(&self) -> Result<u64, docker::Error> {
+        self.outage().await?;
         Ok(self.0.lock().unwrap().free.unwrap_or(1 << 40))
     }
 
@@ -974,6 +1040,7 @@ impl DockerApi for FakeDocker {
         body: ContainerCreateBody,
         _size: docker::TtySize,
     ) -> Result<docker::Tty, docker::Error> {
+        self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("shell {name}"));
         let memory = body
@@ -1105,6 +1172,10 @@ fn runner_container(slot: usize, runner_id: u64, running: bool) -> Container {
             ("runnerd.repository".to_owned(), "o/r".to_owned()),
             ("runnerd.slot".to_owned(), slot.to_string()),
             ("runnerd.runner-id".to_owned(), runner_id.to_string()),
+            (
+                super::runners::SPEC.to_owned(),
+                super::runners::THIS_SPEC.to_owned(),
+            ),
         ]),
     }
 }
@@ -1198,7 +1269,7 @@ async fn nothing_is_scheduled_while_docker_cannot_list_containers() {
     assert_eq!(docker.calls(), ["list runnerd.seed"]);
     tokio::time::sleep(Duration::from_millis(50)).await;
     assert_eq!(github.calls(), Vec::<String>::new());
-    handle.control.shutdown(RunningJobs::Keep);
+    handle.control.shutdown(Shutdown::Graceful);
     tokio::time::timeout(Duration::from_secs(5), run)
         .await
         .unwrap()
@@ -3513,7 +3584,7 @@ async fn a_new_config_runs_from_its_commit_on_and_a_refused_one_never_runs() {
             "asked to register a runner for o/x's job",
         )
         .await;
-    handle.control.shutdown(RunningJobs::Kill);
+    handle.control.shutdown(Shutdown::Force);
     tokio::time::timeout(Duration::from_secs(60), run)
         .await
         .unwrap()
@@ -4127,7 +4198,7 @@ async fn a_shutdown_leaves_every_queued_job_without_a_reason() {
     engine.recover().await.unwrap();
     engine.pause(&one("o/r"), RunningJobs::Keep).await.unwrap();
     engine.tick(Shutdown::No).await;
-    handle.control.shutdown(RunningJobs::Keep);
+    handle.control.shutdown(Shutdown::Graceful);
     engine.publish();
     assert_eq!(waiting(&handle), [None]);
 }
@@ -4731,6 +4802,7 @@ mod build_cache;
 mod invariants;
 mod pools;
 mod records;
+mod stop;
 mod warm;
 
 #[tokio::test]

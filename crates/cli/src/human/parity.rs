@@ -42,6 +42,19 @@ fn fixtures() -> (runnerd_fixtures::Daemon, Facts) {
 }
 
 #[test]
+fn status_of_a_later_daemon_stopping_in_a_way_this_client_does_not_know_still_says_it_shuts_down() {
+    let (daemon, _) = fixtures();
+    let mut sent = serde_json::to_value(&daemon.status).unwrap();
+    sent["stopping"] = "waits-for-records".into();
+
+    let read: api::Status = serde_json::from_value(sent).unwrap();
+
+    let text = status(&read, NOW, PLAIN);
+    let first = text.lines().next().unwrap();
+    assert!(first.ends_with("shutting down"), "{first}");
+}
+
+#[test]
 fn status_states_the_budget_each_slot_and_why_each_job_waits_as_core_does() {
     let (daemon, facts) = fixtures();
     let text = status(&daemon.status, NOW, PLAIN);
@@ -49,6 +62,7 @@ fn status_states_the_budget_each_slot_and_why_each_job_waits_as_core_does() {
     assert!(first.contains(&facts.budget), "{first}");
     assert!(first.contains(&facts.cpu), "{first}");
     assert!(first.contains(&facts.host), "{first}");
+    assert!(first.contains(facts.stopping), "{first}");
     let painted = status(&daemon.status, NOW, COLOUR);
     for slot in &facts.slots {
         let row = line_of(&text, &[&slot.profile, &slot.slot.to_string()]);

@@ -145,6 +145,22 @@ pub struct Handle {
     pub build_cache: Option<BuildCache>,
 }
 
+impl Handle {
+    /// Asks the engine to stop in `mode` and says how it stops now: as asked, unless a stop asked for earlier is more
+    /// urgent, or the engine published that a `runnerd stop` leaves running jobs since Docker stopped answering it.
+    /// `None` for `Shutdown::No` when nothing stops.
+    pub fn shutdown(&self, mode: Shutdown) -> Option<api::Stopping> {
+        let requested = self.control.shutdown(mode);
+        let published = self.status.borrow().stopping;
+        match (requested, published) {
+            (Shutdown::Graceful, Some(api::Stopping::LeavesJobs)) => {
+                Some(api::Stopping::LeavesJobs)
+            }
+            _ => requested.stopping(),
+        }
+    }
+}
+
 /// Where the engine runs, besides its config and its GitHub and Docker clients.
 #[derive(Debug)]
 pub struct Setup {
@@ -178,6 +194,15 @@ enum Purpose {
     Warm,
 }
 
+/// Whether Docker answers a stop.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum DockerInStop {
+    /// It answers, if with errors, or no stop was asked for.
+    Answers,
+    /// It did not answer a call the stop needed: the stop calls it no more.
+    Failed,
+}
+
 /// A slot's runner and its container.
 #[derive(Debug, Clone)]
 struct Occupant {
@@ -202,6 +227,9 @@ struct Occupant {
     labels: Option<Vec<String>>,
     /// The image it runs; `None` for one adopted from a container that does not say.
     image: Option<String>,
+    /// The release whose container spec it runs; `None` for one adopted from a container of a release before the
+    /// label.
+    spec: Option<String>,
     /// Whether `observe` watches it: recorded, sampled and its job captured. Not while Docker fails to inspect its
     /// container, which each tick tries again.
     observed: bool,
@@ -232,6 +260,11 @@ impl Occupant {
         self.image
             .as_ref()
             .is_some_and(|image| *image != profile.image.reference())
+    }
+
+    /// Whether another release started it, with another container spec: one that does not say is older.
+    fn other_spec(&self) -> bool {
+        self.spec.as_deref() != Some(runners::THIS_SPEC)
     }
 
     /// What it reserves of the budget under measured admission: its cap if it has no admission.
@@ -292,6 +325,11 @@ struct CpuWait {
     since: SystemTime,
 }
 
+/// How long a stop that detaches or is forced takes at most, from its request: what Docker and GitHub have not
+/// answered by then is left to the next start (ADR 0091). Well within systemd's default stop timeout of 90s, which
+/// a single Docker request (120s) could otherwise outlast.
+pub const STOP_DEADLINE: Duration = Duration::from_secs(30);
+
 /// The scheduler with its side effects, on the real GitHub and Docker unless a test passes fakes.
 #[derive(Debug)]
 pub struct Engine<G = Github, D = Docker> {
@@ -349,6 +387,8 @@ pub struct Engine<G = Github, D = Docker> {
     /// unless runners were adopted.
     checked_at: SystemTime,
     mirror_up: bool,
+    /// Whether Docker stopped answering a stop: the stop then leaves the rest to the next start, as a detach does.
+    docker_in_stop: DockerInStop,
     /// The memory cap the running mirror started with.
     mirror_memory: u64,
     rate_limit_logged: bool,
@@ -448,6 +488,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let (status, receiver) = watch::channel(api::Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: false,
+            stopping: None,
             budget: api::Budget {
                 slice: config.host.slice.clone(),
                 memory_max,
@@ -494,6 +535,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             checked_at: SystemTime::now(),
             // Unknown: an earlier run may have left it up, so the first idle tick stops it.
             mirror_up: true,
+            docker_in_stop: DockerInStop::Answers,
             rate_limit_logged: false,
             busy_orphans: BTreeSet::new(),
             status,
@@ -536,13 +578,30 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         )
     }
 
-    /// Runs until a shutdown request is carried out.
+    /// Runs until a shutdown request is carried out, or `STOP_DEADLINE` after a stop that detaches or is forced
+    /// began, whichever comes first. Either way it returns, so the daemon still closes its history.
     pub async fn run(mut self) {
         tokio::spawn(metrics::run(
             Sampler::new(self.paths.clone(), &self.config.host.slice),
             self.tracked.subscribe(),
             self.store.clone(),
         ));
+        let control = self.control.clone();
+        let deadline = async {
+            control.hurried().await;
+            tokio::time::sleep(STOP_DEADLINE).await;
+        };
+        tokio::select! {
+            () = self.serve() => {}
+            () = deadline => warn!(
+                "stopped after {}s with Docker or GitHub still busy; the next start takes over what is left",
+                STOP_DEADLINE.as_secs()
+            ),
+        }
+    }
+
+    /// Recovers, then schedules until a shutdown request is carried out.
+    async fn serve(&mut self) {
         // Until Docker answers: scheduling without knowing the containers already running would start a second
         // runner on a slot's volume and delete the running one's registration.
         while let Err(error) = self.recover().await {
@@ -555,18 +614,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 () = self.control.wake.notified() => {}
             }
         }
-        loop {
-            let mode = self.control.mode();
-            self.tick(mode).await;
+        self.schedule().await;
+    }
+
+    /// Schedules until a shutdown request is carried out, from a recovered engine.
+    async fn schedule(&mut self) {
+        let mode = loop {
+            let mode = self.stopping();
+            if mode == Shutdown::Detach {
+                self.remove_idle().await;
+                self.collect_recordings().await;
+            } else {
+                self.tick(mode).await;
+            }
             self.publish();
-            let idle = self.slots.values().flatten().all(Option::is_none);
-            if mode != Shutdown::No
-                && idle
-                && self.reseeds.is_empty()
-                && self.trim.is_none()
-                && self.records.recordings.is_empty()
-            {
-                break;
+            if self.stopped(mode) {
+                break mode;
+            }
+            // A stop asked for or changed meanwhile, as one Docker failed turns into a detach, goes on at once.
+            if self.stopping() != mode {
+                continue;
             }
             let interval = if mode == Shutdown::No {
                 self.config.host.poll_interval
@@ -576,7 +643,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             tokio::select! {
                 () = tokio::time::sleep(interval) => {}
                 () = self.control.wake.notified() => {}
-                Some(command) = self.commands.recv() => {
+                // A detaching stop changes nothing more: a command waiting for it fails once the engine is gone.
+                Some(command) = self.commands.recv(), if mode != Shutdown::Detach => {
                     self.command(command).await;
                     self.publish();
                 }
@@ -585,12 +653,58 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.publish();
                 }
             }
+        };
+        // A reseed that finished meanwhile says so; one still running is the next start's (`recover_reseeds`).
+        self.collect_reseeds().await;
+        if self.docker_in_stop == DockerInStop::Failed {
+            info!("stopped; the next start removes or adopts what Docker did not answer for");
+            return;
         }
         self.close_shells().await;
+        if mode == Shutdown::Detach {
+            let runners = self.occupied().count();
+            info!("stopped, leaving {runners} busy runners and the mirror to the next start");
+            return;
+        }
         if let Err(error) = cache::mirror_down(&*self.docker, &self.names).await {
             warn!("cannot stop the mirror: {error}");
         }
         info!("stopped");
+    }
+
+    /// How the stop goes on: as requested, or as a detach once Docker stopped answering it.
+    fn stopping(&self) -> Shutdown {
+        match self.control.mode() {
+            Shutdown::No => Shutdown::No,
+            _ if self.docker_in_stop == DockerInStop::Failed => Shutdown::Detach,
+            mode => mode,
+        }
+    }
+
+    /// Whether a stop in `mode` is done: what it waits for has ended. A record being made is waited for; a reseed and
+    /// a check of the caches are not, as the next start adopts the reseed and checks the caches first.
+    fn stopped(&self, mode: Shutdown) -> bool {
+        let idle = self.slots.values().flatten().all(Option::is_none);
+        let recorded = self.records.recordings.is_empty();
+        match mode {
+            Shutdown::No => false,
+            Shutdown::Detach => recorded,
+            Shutdown::Graceful | Shutdown::Force => idle && recorded,
+        }
+    }
+
+    /// Notes that Docker failed a call a stop needed. If it did not answer at all, as when it is gone during a
+    /// machine's shutdown, the stop calls it no more and leaves the rest to the next start, which removes or adopts
+    /// every container by its labels. An answer that is an error, or a timeout, is tried again as any failed call:
+    /// `runnerd stop` must not leave runners behind for one busy moment of Docker's.
+    fn docker_failed(&mut self, error: &docker::Error) {
+        if self.control.mode() != Shutdown::No
+            && self.docker_in_stop == DockerInStop::Answers
+            && docker::is_unreachable(error)
+        {
+            warn!("Docker does not answer during the stop; leaving the rest to the next start");
+            self.docker_in_stop = DockerInStop::Failed;
+        }
     }
 
     /// Runs `work` as a task of its own, answering commands and publishing after each until it is done, so a command

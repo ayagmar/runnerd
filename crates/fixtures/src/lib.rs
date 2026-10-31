@@ -180,7 +180,9 @@ fn status() -> Status {
     let jvm = |slot: usize, runner: Option<RunnerStatus>| SlotStatus { slot, runner };
     Status {
         version: "0.0.13".to_owned(),
-        shutting_down: false,
+        // `runnerd stop` waits for the running jobs.
+        shutting_down: true,
+        stopping: Some(api::Stopping::WaitsForJobs),
         budget: Budget {
             slice: "runnerd.slice".to_owned(),
             memory_max: Some(24 * GIB),
@@ -925,6 +927,8 @@ pub struct Facts {
     pub savings: String,
     /// The last 30 days', which reach the jobs of September.
     pub savings_30_days: String,
+    /// How the daemon stops.
+    pub stopping: &'static str,
 }
 
 fn row(job: &JobSummary) -> JobRow {
@@ -975,6 +979,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
         .expect("the build cache stored and refused");
     let build_cache_refused = build_cache.refused_line().expect("refused uploads");
     let parts = status.budget_parts();
+    let stopping = status.stopping_line().expect("a stop");
     Facts {
         rows: daemon.finished().iter().map(row).collect(),
         budget: status.budget.memory_reading().line(),
@@ -1044,6 +1049,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
         actions_cache: build.actions_cache_line(),
         savings: daemon.savings.month.headline(),
         savings_30_days: daemon.savings.last_30_days.headline(),
+        stopping,
     }
 }
 

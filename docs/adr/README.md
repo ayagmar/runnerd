@@ -36,7 +36,7 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0028](0028-job-records-expire.md) | Job records expire after `history.jobs` |
 | [0029](0029-profile-events-and-what-a-restart-announces.md) | Profile events, and what a restart announces |
 | [0030](0030-one-socket-client-in-core.md) | One socket client for every client, in core |
-| [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets |
+| [0031](0031-records-of-failed-jobs.md) | Records of failed jobs, without their secrets (amended by 0091) |
 | [0032](0032-sizing-advice-from-sampled-peaks.md) | Sizing advice from sampled peaks, applied through the config check (amended by 0037, 0039) |
 | [0033](0033-measured-admission.md) | Admission by measured peaks, behind a flag (amended by 0036, 0037) |
 | [0034](0034-desktop-framework.md) | Failure notifications from the daemon, the installable dashboard and an optional tray, not a GUI toolkit (installable dashboard built in 0042, notifications in 0051) |
@@ -95,3 +95,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0087](0087-an-insight-for-jobs-their-cpu-cap-holds-back.md) | An insight for jobs their CPU cap holds back |
 | [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md) | Sizing advice keeps to a profile's memory bounds |
 | [0089](0089-a-slots-cache-mounts-go-last.md) | A slot's build cache follows its share, and cache mounts go last |
+| [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md) | A signal leaves running jobs to the next start, and the daemon exits within 45 s |

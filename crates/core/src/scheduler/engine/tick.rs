@@ -84,7 +84,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .collect();
         let queued = match mode {
             Shutdown::No => self.config.repository_names(),
-            Shutdown::Graceful | Shutdown::Force => Vec::new(),
+            Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => Vec::new(),
         };
         let listings = self
             .serving(list(self.github.clone(), runners, queued))
@@ -110,18 +110,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         let (Plan { decisions, .. }, mut admitting) = match mode {
             Shutdown::No => self.plan(),
-            Shutdown::Graceful | Shutdown::Force => (
-                Plan {
-                    decisions: self
-                        .occupied()
-                        .filter(|(_, occupant)| mode == Shutdown::Force || !occupant.busy)
-                        .map(|(slot, _)| Decision::Stop { slot })
-                        .collect(),
-                    waiting: BTreeMap::new(),
-                    warm: BTreeSet::new(),
-                },
-                self.admitting(&mut [], None),
-            ),
+            Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => {
+                (self.stops(mode), self.admitting(&mut [], None))
+            }
         };
         self.note_high_water(&admitting);
         let mut held_for_cpu = BTreeSet::new();
@@ -132,7 +123,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 Decision::Stop { slot } => {
                     let jobs = match mode {
                         Shutdown::Force => RunningJobs::Kill,
-                        Shutdown::No | Shutdown::Graceful => RunningJobs::Keep,
+                        Shutdown::No | Shutdown::Graceful | Shutdown::Detach => RunningJobs::Keep,
                     };
                     self.stop(&slot, jobs).await;
                 }
@@ -167,6 +158,22 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.list_records().await;
         }
         self.prune();
+    }
+
+    /// What a stop in `mode` removes: every runner when forced, the idle ones when graceful, none when it detaches,
+    /// which leaves them to the next start.
+    fn stops(&self, mode: Shutdown) -> Plan {
+        Plan {
+            decisions: self
+                .occupied()
+                .filter(|(_, occupant)| {
+                    mode == Shutdown::Force || mode == Shutdown::Graceful && !occupant.busy
+                })
+                .map(|(slot, _)| Decision::Stop { slot })
+                .collect(),
+            waiting: BTreeMap::new(),
+            warm: BTreeSet::new(),
+        }
     }
 
     /// Carries out a plan's `Decision::Start`, unless a warm runner it replaces is still there: that one took a job
@@ -282,26 +289,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             SystemTime::now(),
         );
         // Waiting runners a reload left outside the config: their repository is gone or uses another profile now,
-        // or its runners start with other labels, image or limits, which a job queued since may need.
+        // or its runners start with other labels, image or limits, which a job queued since may need. Also those an
+        // earlier release started, whose container spec this one may have changed.
         plan.decisions.extend(
             self.occupied()
                 .filter(|(slot, occupant)| {
                     !occupant.busy
                         && occupant.job.is_none()
-                        && !self.config.repositories.iter().any(|repository| {
-                            repository.name == occupant.repository
-                                && repository.profile == slot.profile
-                                && self
-                                    .config
-                                    .profiles
-                                    .get(&slot.profile)
-                                    .is_some_and(|profile| {
-                                        // The old image still runs jobs: kept until the new one is present.
-                                        !occupant.outdated(repository, profile)
-                                            && (!occupant.other_image(profile)
-                                                || self.awaits_image(&profile.image))
-                                    })
-                        })
+                        && (occupant.other_spec()
+                            || !self.config.repositories.iter().any(|repository| {
+                                repository.name == occupant.repository
+                                    && repository.profile == slot.profile
+                                    && self.config.profiles.get(&slot.profile).is_some_and(
+                                        |profile| {
+                                            // The old image still runs jobs: kept until the new one is present.
+                                            !occupant.outdated(repository, profile)
+                                                && (!occupant.other_image(profile)
+                                                    || self.awaits_image(&profile.image))
+                                        },
+                                    )
+                            }))
                 })
                 .map(|(slot, _)| Decision::Stop { slot }),
         );

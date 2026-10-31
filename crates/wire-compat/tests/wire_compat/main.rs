@@ -269,6 +269,8 @@ documents! {
     "memory-bound": MemoryBound => variants(samples::memory_bound()),
     // Documents the previous release does not have; the release after this one reads their fixtures.
     new:
+    "stopping": Stopping => variants(samples::stopping()),
+    "shutdown-answer": ShutdownAnswer => full(samples::shutdown_answer(), None),
 }
 
 /// The previous release's samples, one file per document.

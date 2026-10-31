@@ -11,13 +11,14 @@ use crate::scheduler::{Plan, SlotRef};
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) fn publish(&mut self) {
-        let mode = self.control.mode();
+        // As the stop goes on: one Docker no longer answers leaves running jobs.
+        let mode = self.stopping();
         // Why jobs wait and which runners are warm, from a plan of the engine as it is now, not as the tick's plan
         // saw it: a start that failed, a runner stopped over budget or a pause since then would make that one wrong.
         // A shutdown starts nothing, so no job says why it waits and no runner is warm.
         let plan = match mode {
             Shutdown::No => self.plan().0,
-            Shutdown::Graceful | Shutdown::Force => Plan::default(),
+            Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => Plan::default(),
         };
         let profiles = self
             .config
@@ -72,6 +73,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let status = api::Status {
             version: env!("CARGO_PKG_VERSION").to_owned(),
             shutting_down: mode != Shutdown::No,
+            stopping: mode.stopping(),
             budget: self.budget(),
             profiles,
             repositories,

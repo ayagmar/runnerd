@@ -12,7 +12,7 @@ use runnerd_core::config::{ByteSize, Config, parse_age, slice_cpus, slice_memory
 use runnerd_core::docker::Docker;
 use runnerd_core::github::{self, Github};
 use runnerd_core::observe::metrics::Paths;
-use runnerd_core::scheduler::engine::{Control, Engine, HostIdentity, RunningJobs, Setup};
+use runnerd_core::scheduler::engine::{Control, Engine, HostIdentity, Setup, Shutdown};
 use runnerd_core::store::{Announced, Store};
 use tracing::{info, warn};
 
@@ -104,7 +104,8 @@ enum Command {
     },
     /// Run the daemon: schedule runners for queued jobs and serve the API on a Unix socket.
     ///
-    /// SIGTERM or SIGINT stops polling and waits for running jobs; a second one kills them.
+    /// SIGTERM or SIGINT removes idle runners and exits within 45s, leaving running jobs to the next start, which
+    /// adopts them; a second one kills them.
     Serve {
         /// The config file [default: $XDG_CONFIG_HOME/runnerd/runnerd.toml].
         #[arg(long)]
@@ -167,7 +168,12 @@ fn main() -> ExitCode {
             config,
             socket,
             web,
-        }) => runtime().and_then(|runtime| runtime.block_on(serve(config, socket, &web))),
+        }) => runtime().and_then(|runtime| {
+            let served = runtime.block_on(serve(config, socket, &web));
+            // A blocking task still running, such as a doctor's check of a Docker that hangs, does not hold the exit.
+            runtime.shutdown_timeout(EXIT_GRACE);
+            served
+        }),
         Some(Command::Stop { force, socket }) => {
             runtime().and_then(|runtime| runtime.block_on(stop(force, socket)))
         }
@@ -334,6 +340,12 @@ fn doctor(path: Option<&Path>) -> ExitCode {
 /// spends more CPU contending for the allocator (musl's especially) than it saves: 50 event subscribers through 200
 /// pause and resume pairs took 16.5 s of CPU on 32 workers and 1.2 s on 4.
 const WORKERS: usize = 4;
+
+/// How long API and dashboard requests still open get to finish once the engine stopped (ADR 0091).
+const DRAIN: Duration = Duration::from_secs(10);
+
+/// How long blocking tasks still running get once the daemon is done, before it exits without them (ADR 0091).
+const EXIT_GRACE: Duration = Duration::from_secs(5);
 
 fn runtime() -> Result<tokio::runtime::Runtime, ExitCode> {
     let cores = std::thread::available_parallelism().map_or(1, std::num::NonZero::get);
@@ -562,33 +574,51 @@ async fn serve(
     let _ = stopped.send(());
     store.close();
     store.flush().await;
-    let server_done = server.await;
-    if let Some(web) = web {
-        let _ = web.await;
-    }
+    let drained = drain(server, web).await;
     let _ = std::fs::remove_file(&socket);
     engine_done.map_err(|error| fail(&error))?;
-    server_done
-        .map_err(|error| fail(&error))?
-        .map_err(|error| fail(&error))?;
+    drained?;
     Ok(ExitCode::SUCCESS)
 }
 
-/// Stops the engine on SIGTERM or SIGINT once running jobs finish, and kills them on a second.
+/// Waits up to `DRAIN` for the API and the dashboard to finish the requests still open; past it, stops without
+/// them.
+async fn drain(
+    server: tokio::task::JoinHandle<std::io::Result<()>>,
+    web: Option<tokio::task::JoinHandle<()>>,
+) -> Result<(), ExitCode> {
+    let drained = tokio::time::timeout(DRAIN, async {
+        let server_done = server.await;
+        if let Some(web) = web {
+            let _ = web.await;
+        }
+        server_done
+    })
+    .await;
+    let Ok(server_done) = drained else {
+        warn!(
+            "stopping with API requests still open after {}s",
+            DRAIN.as_secs()
+        );
+        return Ok(());
+    };
+    server_done
+        .map_err(|error| fail(&error))?
+        .map_err(|error| fail(&error))
+}
+
+/// Stops the engine on SIGTERM or SIGINT, leaving running jobs to the next start, and kills them on a second.
 async fn shut_down_on_signals(control: std::sync::Arc<Control>) {
-    for jobs in [RunningJobs::Keep, RunningJobs::Kill] {
+    for mode in [Shutdown::Detach, Shutdown::Force] {
         if wait_for_signal().await.is_err() {
             return;
         }
-        info!(
-            "{}",
-            if jobs == RunningJobs::Kill {
-                "killing running jobs"
-            } else {
-                "stopping once running jobs finish; signal again to kill them"
-            }
-        );
-        control.shutdown(jobs);
+        if mode == Shutdown::Force {
+            info!("killing running jobs");
+        } else {
+            info!("stopping, leaving running jobs to the next start; signal again to kill them");
+        }
+        control.shutdown(mode);
     }
 }
 
@@ -622,13 +652,15 @@ async fn stop(force: bool, socket: Option<PathBuf>) -> Result<ExitCode, ExitCode
     if !response.status().is_success() {
         return Err(fail(&format!("the daemon answered {}", response.status())));
     }
+    // How it stops now, which an earlier stop may have made more urgent; a daemon before the answer says nothing.
+    let answer = response
+        .text()
+        .await
+        .ok()
+        .and_then(|body| serde_json::from_str::<runnerd_core::api::ShutdownAnswer>(&body).ok());
     output::line(format_args!(
-        "runnerd stops {}",
-        if force {
-            "now, killing running jobs"
-        } else {
-            "once running jobs finish"
-        }
+        "runnerd is {}",
+        answer.map_or("shutting down", |answer| answer.stopping.line())
     ));
     Ok(ExitCode::SUCCESS)
 }
