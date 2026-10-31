@@ -92,7 +92,7 @@
         "queued_jobs": 1
       }
     ],
-    "shutting_down": false,
+    "shutting_down": true,
     "version": "0.0.0"
   },
   "full": {
@@ -208,7 +208,8 @@
         "queued_jobs": 1
       }
     ],
-    "shutting_down": false,
+    "shutting_down": true,
+    "stopping": "leaves-jobs",
     "version": "0.0.0"
   }
 }
