@@ -470,11 +470,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Fills in a record's workflow and job name from the history, which may have learnt them from GitHub only after
-    /// the commit started.
+    /// the commit started. Reads after the writes sent before, such as those details: the store reads on its own
+    /// connection, which a busy writer leaves behind.
     async fn name_from_history(&self, record: &mut api::Record) {
         if record.workflow.is_some() && record.name.is_some() {
             return;
         }
+        self.store.flush().await;
         if let Ok(Some(job)) = self.store.job(record.job).await {
             record.workflow = record.workflow.take().or(job.summary.workflow);
             record.name.get_or_insert(job.summary.name);
