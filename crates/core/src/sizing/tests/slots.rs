@@ -202,8 +202,8 @@ mod generated {
     use super::*;
 
     const SEEDS: u64 = 6;
-    /// What the slots' Docker stores may keep together: 12 slots of 1G, node's 10 beside jvm's 2.
-    const DOCKER: u64 = 12 * G;
+    /// What the slots' Docker stores may keep together: 12 slots of 2G, node's 10 beside jvm's 2.
+    const DOCKER: u64 = 24 * G;
 
     /// A deterministic generator (`SplitMix64`).
     struct Rng(u64);
@@ -378,8 +378,8 @@ mod generated {
                     most_waiting(&fresh)
                 ));
             }
-            if to > 12 || DOCKER / u64::from(to + 2) < G {
-                return Err("raised past max_slots or under 1G of Docker's disk a slot".to_owned());
+            if to > 12 || DOCKER / u64::from(to + 2) < 2 * G {
+                return Err("raised past max_slots or under 2G of Docker's disk a slot".to_owned());
             }
         } else if to < from {
             let set = before

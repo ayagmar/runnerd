@@ -17,8 +17,8 @@ use std::collections::BTreeMap;
 use std::fmt::Write as _;
 
 use crate::api::{
-    Advice, ProfileSizing, Resize, Sizing, SizingChange, SizingRefused, ago, cores, duration,
-    job_title,
+    Advice, ProfileSizing, Resize, SLOT_DISK, Sizing, SizingChange, SizingRefused, ago, cores,
+    duration, job_title,
 };
 use crate::cache::docker_budget_gib;
 use crate::config::{Admission, ByteSize, Config, Profile, cpu_budget};
@@ -46,12 +46,6 @@ const HEADROOM: u64 = 2;
 /// percent, met it in a burst, and counts as held back (ADR 0075). Peaks are the highest 2-second interval, so one
 /// can pass the cap a little.
 const MET: u64 = 95;
-
-/// The least share of Docker's disk, in bytes, that slots added for waits leave each slot: the least
-/// `cache::docker_budget_gib` gives. Under it the shares would add up past the quarter of Docker's disk the slots'
-/// stores may keep together (ADR 0054). It is not what a store keeps: a store fills the share it gets, so the stores'
-/// sizes would only hold the slots where they are (ADR 0090).
-pub const SLOT_DISK: u64 = 1 << 30;
 
 /// How long a profile's slots must stay `IDLE_SLOTS` above what ran at once before auto sizing takes one away, in ms:
 /// a week, so a quiet weekend does not take back what the weekdays' bursts need.
@@ -687,28 +681,52 @@ fn measured_slots(
         .sum();
     let Some(to) = (current.saturating_add(1)..=wanted)
         .rev()
-        .find(|slots| fits_disk(disk, others.saturating_add(*slots)))
+        .find(|slots| share(disk, others.saturating_add(*slots)) >= SLOT_DISK)
     else {
+        let next = current.saturating_add(1);
         return Raise::Refused(format!(
-            "{asked}; at {} slots, beside the other profiles' {others}, each slot would keep less than {} of the {} \
-             the slots' Docker stores may keep together",
-            current.saturating_add(1),
+            "{asked}; at {next} slots, beside the other profiles' {others}, each slot would keep {}, under the {} \
+             auto sizing leaves each slot",
+            kept(
+                disk,
+                others.saturating_add(current),
+                others.saturating_add(next)
+            ),
             ByteSize(SLOT_DISK),
-            ByteSize(disk)
         ));
     };
     Raise::To(SlotStep {
         to,
         reason: format!(
-            "{asked}; at {to} slots each slot keeps {}G of Docker's disk",
-            docker_budget_gib(disk, u64::from(others.saturating_add(to)))
+            "{asked}; at {to} slots each slot keeps {}",
+            kept(
+                disk,
+                others.saturating_add(current),
+                others.saturating_add(to)
+            )
         ),
     })
 }
 
-/// Whether `slots` slots each keep `SLOT_DISK` of the `disk` their Docker stores may keep together.
-fn fits_disk(disk: u64, slots: u32) -> bool {
-    disk / u64::from(slots.max(1)) >= SLOT_DISK
+/// One slot's share of the `disk` the slots' Docker stores may keep together among `slots`, in bytes, as the
+/// runners get it.
+fn share(disk: u64, slots: u32) -> u64 {
+    docker_budget_gib(disk, u64::from(slots)) << 30
+}
+
+/// What a slot keeps of Docker's disk at `to` slots in all, and what it keeps at `from` when that is more: `2G of
+/// Docker's disk, down from 3G`.
+fn kept(disk: u64, from: u32, to: u32) -> String {
+    let (before, after) = (share(disk, from), share(disk, to));
+    if after < before {
+        format!(
+            "{} of Docker's disk, down from {}",
+            ByteSize(after),
+            ByteSize(before)
+        )
+    } else {
+        format!("{} of Docker's disk", ByteSize(after))
+    }
 }
 
 /// Under `measured`, one slot fewer when, for the `IDLE_FOR` before now, its slots stayed `IDLE_SLOTS` or more above

@@ -58,21 +58,23 @@ What a slot does cost is disk. Every slot's Docker store shares the same quarter
   start; how many overlap is the deficit. One slot an hour was too slow for this host: jvm went 4 to 6 and light 4 to
   8, and bursts come every few hours, so +1 a raise would take days of bursts. At 50%, jvm gets its 6 in one raise
   and light its 8 in two.
-- The bound is disk, not memory: slots go up only while every slot keeps 1G of the quarter of Docker's disk the
-  slots' stores may keep together (`docker_budget_gib` of the measured total, among every profile's slots with this
-  change and the ones before it in the look), and never past `max_slots`. 1G is the least share a slot gets; under it
-  the shares would add up past the quarter. Docker's disk not measured yet, as just after a start, adds no slot.
-  This replaces "without `max_slots` and a `MemoryMax`, none is added".
+- The bound is disk, not memory: slots go up only while every slot keeps 2G (`api::SLOT_DISK`) of the quarter of
+  Docker's disk the slots' stores may keep together (`docker_budget_gib` of the measured total, among every profile's
+  slots with this change and the ones before it in the look), and never past `max_slots`. Docker's disk not measured
+  yet, as just after a start, adds no slot. This replaces "without `max_slots` and a `MemoryMax`, none is added".
 - What the stores hold does not bound slots, because a store fills the share it has. On the owner's host the slots'
   stores may keep 79G together, 4G a slot up to 18 slots, 3G up to 24. Over a week the slot volumes, measured after
   each job's cleanup, held at p50 / p90 / max: jvm 2.2 / 3.5 / 4.2G, node 0.7 / 2.8 / 8.2G, light 0.5 / 0.8 / 1.4G.
   jvm's stores fill their 4G share; one measured 4.2G. A floor of a week's p90, jvm's 3.5G, holds the host at 18 slots,
   under the 24 the owner set by hand; a floor of one measure's median swings between an emptied store and a full
-  one. The sizes follow the share, so such a floor follows the slot count it was measured at. With 1G the host takes up to 73 slots, and the share each slot gets is the one
-  [0054](0054-slot-docker-stores-share-the-disk.md) already sizes stores to; a store whose share shrinks keeps less
-  build cache between jobs. Raises are sized to the bursts that waited, and slots that sit idle for a week come back
-  down, which bounds how far the share shrinks in practice. A host that wants a larger share sets `max_slots`.
-- A raise the jobs ask for and auto sizing cannot make, at `max_slots`, before the measure or at the 1G share, is a
+  one. The sizes follow the share, so such a floor follows the slot count it was measured at.
+- So the bound is the least share at which those stores keep their images: 2G, 36 slots on the owner's host, 12 more
+  than the 24 it runs. Raises are sized to the bursts that waited, and the trigger needs memory and CPU room, but a
+  week's bursts overlapped up to 11 jvm, 20 light and 14 node jobs: had all of that been a wait for a slot alone,
+  the profiles would take about 69 slots, so in practice the share, not the trigger, is what stops them. Its cost is
+  in the consequences. A raise's reason and a refusal say how the share drops, as `each slot keeps 2G of Docker's
+  disk, down from 3G`.
+- A raise the jobs ask for and auto sizing cannot make, at `max_slots`, before the measure or at the 2G share, is a
   refusal (`AutoPlan::refused_slots`), which clients show as `No slot raise: …` beside the profile's next change, as
   they show a `cpus` raise the CPU budget refuses. The advice line then says auto sizing cannot add one now, instead
   of promising it.
@@ -103,9 +105,17 @@ every slot's share smaller.
 ## Consequences
 
 - A burst that only slots hold back adds slots within `raise_interval`, sized to the burst, up to `max_slots` and the
-  1G share; one that memory or CPU holds back adds none and waits as before.
-- More slots mean smaller shares: past 18 slots on the owner's host a JVM store keeps 3G of build cache instead of 4G
-  between jobs, and its first builds after a raise run colder.
+  2G share; one that memory or CPU holds back adds none and waits as before.
+- More slots mean smaller shares, and the job cleanup (`image/job-cleanup.sh`) holds each store to its share after
+  every job, reading its size in whole GiB rounded up. A store over its share loses its build layers, then its least
+  recently used cache mounts, then its images, then everything. On the owner's host, with stores at p50 / p90 of jvm
+  2.2 / 3.5G and node 0.7 / 2.8G:
+  - up to 18 slots each keeps 4G, and the stores keep what they hold now;
+  - 19 to 24 slots keep 3G: jvm's fuller stores lose build layers after a job;
+  - 25 to 36 keep 2G, the most auto sizing reaches: jvm stores lose their build layers after most jobs and node's
+    fuller ones after some, but they mostly keep their images, so a job pulls little and builds colder;
+  - 37 to 73 would keep 1G, the least a share can be: every store over 1G, most jvm and many node ones, is emptied
+    after each job, images included, and every job there starts cold. That is why the bound is 2G, not 1G.
 - The next check of the caches removes a lowered slot's volume ([0054](0054-slot-docker-stores-share-the-disk.md)),
   and a new slot starts with an empty layer and Docker store: its first jobs build cold.
 - Warm runners do not grow with slots: each pool's `warm` is a count, not a share. Reseeds read slot 1 as before.

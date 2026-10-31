@@ -1077,28 +1077,29 @@ mod auto {
     }
 
     #[test]
-    fn slots_stop_where_each_slot_would_keep_less_than_1g_of_dockers_disk_and_say_so() {
-        // Catches slots added past the quarter of Docker's disk the stores may keep together, a raise before the disk
-        // was measured, and a blocked raise nothing reports. jvm's 2 and node's 4 slots share 7G: 1G each at 7.
+    fn slots_stop_where_each_slot_would_keep_less_than_2g_of_dockers_disk_and_say_so() {
+        // Catches slots added until every store is emptied after its jobs, a raise before the disk was measured, and
+        // a blocked raise nothing reports. jvm's 2 and node's 4 slots share 18G: 3G each, 2G at 7 to 9, 1G at 10.
         let config = on(&measured(), "max_step = 50");
         let burst = history(slot_waits(10, 300, 0));
-        let raised = due_on(&config, &burst, Some(7 * G), &BTreeMap::new());
-        assert_eq!(slots_of(&raised.changes, "node"), Some(5));
+        let raised = due_on(&config, &burst, Some(18 * G), &BTreeMap::new());
+        assert_eq!(slots_of(&raised.changes, "node"), Some(6));
         assert!(
             raised.changes[0].reason.contains("waited 300s for a slot")
                 && raised.changes[0]
                     .reason
-                    .ends_with("at 5 slots each slot keeps 1G of Docker's disk"),
-            "the reason says what waited and what the share is: {}",
+                    .ends_with("at 6 slots each slot keeps 2G of Docker's disk, down from 3G"),
+            "the reason says what waited and how the share drops: {}",
             raised.changes[0].reason
         );
-        let full = due_on(&config, &burst, Some(6 * G), &BTreeMap::new());
+        // 12G: 2G each at 6, 1G at 7.
+        let full = due_on(&config, &burst, Some(12 * G), &BTreeMap::new());
         assert_eq!(full.changes, Vec::new());
         assert_eq!(
             full.refused_slots[0].reason,
             "10 jobs waited 300s for a slot (p95) while memory and CPU had room, 10 at once at most; at 5 slots, \
-             beside the other profiles' 2, each slot would keep less than 1G of the 6G the slots' Docker stores may \
-             keep together"
+             beside the other profiles' 2, each slot would keep 1G of Docker's disk, down from 2G, under the 2G auto \
+             sizing leaves each slot"
         );
         let unmeasured = due_on(&config, &burst, None, &BTreeMap::new());
         assert_eq!(unmeasured.changes, Vec::new());
@@ -1148,7 +1149,7 @@ mod auto {
         assert!(
             look.changes[0]
                 .reason
-                .ends_with("at 6 slots each slot keeps 3G of Docker's disk"),
+                .ends_with("at 6 slots each slot keeps 3G of Docker's disk, down from 4G"),
             "{}",
             look.changes[0].reason
         );
@@ -1158,7 +1159,7 @@ mod auto {
     #[test]
     fn two_profiles_never_both_take_a_slot_only_one_fits() {
         // Catches a look that sizes each profile against the disk as the config has it, not as the change before
-        // it left it. Both waited; 7G holds 7 slots of 1G, one more than the 6 there are.
+        // it left it. Both waited; 14G holds 7 slots of 2G, one more than the 6 there are.
         let config = on(&measured(), "");
         let mut jobs = slot_waits(10, 300, 0);
         jobs.extend(slot_waits(10, 300, 0).into_iter().map(|run| Ran {
@@ -1167,7 +1168,7 @@ mod auto {
             memory_cap: Some(9 * G),
             ..run
         }));
-        let look = due_on(&config, &history(jobs), Some(7 * G), &BTreeMap::new());
+        let look = due_on(&config, &history(jobs), Some(14 * G), &BTreeMap::new());
         assert_eq!(
             look.changes
                 .iter()

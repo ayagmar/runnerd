@@ -313,6 +313,12 @@ pub struct Spread {
     pub max: u64,
 }
 
+/// The least share of Docker's disk, in bytes, auto sizing leaves each slot when it adds slots under measured
+/// admission: 2G. Every slot's Docker store shares a quarter of Docker's disk; at a 2G share the stores measured on
+/// a busy host keep their images between jobs, and at 1G, the least a share can be, every store over 1G is emptied
+/// after each job. What a store keeps does not set it: a store fills the share it gets (ADR 0090).
+pub const SLOT_DISK: u64 = 2 << 30;
+
 /// What a cap keeps at least over the largest peak, for page cache: 1G. Peaks leave page cache out, and a container
 /// whose memory past them leaves the kernel less than about 500M of page cache to reclaim at its cap reclaims badly,
 /// which throttles its sockets and slows its downloads (ADR 0055).
@@ -484,8 +490,11 @@ impl Sizing {
             let then = if refused {
                 "auto sizing cannot add one now"
             } else if self.auto {
-                "auto sizing adds as many as waited at once, up to max_slots and while each slot keeps 1G of Docker's \
-                 disk"
+                &format!(
+                    "auto sizing adds as many as waited at once, up to max_slots and while each slot keeps {} of \
+                     Docker's disk",
+                    ByteSize(SLOT_DISK)
+                )
             } else {
                 "measured admission reserves predicted peaks, not caps, so more slots start them sooner: raise slots \
                  by hand"
