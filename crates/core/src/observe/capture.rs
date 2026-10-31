@@ -62,10 +62,8 @@ done
 /// The runner's diagnostic directory, which `SCRIPT` reads too.
 pub const DIAG: &str = "/home/runner/_diag";
 
-/// Whether a file in `DIAG` is a job's worker log, which `worker_job` reads.
-pub fn is_worker_log(name: &str) -> bool {
-    name.starts_with("Worker_")
-}
+/// How the names of the job's worker logs in `DIAG` start, which `worker_job` reads.
+pub const WORKER_LOG: &str = "Worker_";
 
 /// The job (`check_run_id`) a worker log's job message names, read as `SCRIPT` reads it: the first line with the key,
 /// or the one after it, holds its value. `None` when the log names no job, as before the runner took one.

@@ -61,6 +61,24 @@ struct Checked {
     free: Option<u64>,
 }
 
+/// Why recovery cannot yet tell whether a stopped runner container becomes its failed job's record.
+#[derive(Debug)]
+pub(super) enum Undecided {
+    /// Docker failed, and may not when asked again.
+    Docker(docker::Error),
+    /// Its diagnostic files were not all read, and those read name no job.
+    Unread,
+}
+
+impl std::fmt::Display for Undecided {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Undecided::Docker(error) => error.fmt(f),
+            Undecided::Unread => f.write_str("its diagnostic files were not all read"),
+        }
+    }
+}
+
 /// The records of failed jobs and the shells open in them.
 #[derive(Debug)]
 pub(super) struct RecordState {
@@ -219,13 +237,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// profile keeps failed jobs' runners, its log shows its job failed and no record of the job was made: the runner
     /// ended while no daemon ran, or a daemon stopped before it collected it or finished the record. A job the history
     /// never saw it take, as one an idle runner took while the daemon detached, is read from the runner's worker log.
-    /// Returns whether it took the container over; if not, the caller removes it. An error when Docker could not
+    /// Returns whether it took the container over; if not, the caller removes it. `Undecided` when Docker could not
     /// tell, and may once asked again: the caller keeps the container to try again.
     pub(super) async fn keep_left_record(
         &mut self,
         slot: &SlotRef,
         occupant: &Occupant,
-    ) -> Result<bool, docker::Error> {
+    ) -> Result<bool, Undecided> {
         let recorded =
             |records: &RecordState, job| records.list.iter().any(|record| record.job == job);
         if !self.records_failures(&slot.profile)
@@ -236,7 +254,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let failed = match self.docker.logs(&occupant.container).await {
             Ok(log) => record::failed(&log),
             Err(error) if docker::is_declined(&error) => false,
-            Err(error) => return Err(error),
+            Err(error) => return Err(Undecided::Docker(error)),
         };
         if !failed {
             return Ok(false);
@@ -264,16 +282,26 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// The job a stopped runner container took, from its worker log's job message, read without starting it: the
     /// capture reads the same while it runs. `None` when the runner wrote none, or Docker says it cannot read it.
-    async fn left_job(&self, container: &str) -> Result<Option<u64>, docker::Error> {
-        let files = match self.docker.files(container, capture::DIAG).await {
-            Ok(files) => files,
+    async fn left_job(&self, container: &str) -> Result<Option<u64>, Undecided> {
+        let read = match self
+            .docker
+            .files(container, capture::DIAG, capture::WORKER_LOG)
+            .await
+        {
+            Ok(read) => read,
             Err(error) if docker::is_declined(&error) => return Ok(None),
-            Err(error) => return Err(error),
+            Err(error) => return Err(Undecided::Docker(error)),
         };
-        Ok(files
+        match read
+            .files
             .iter()
-            .filter(|file| capture::is_worker_log(&file.name))
-            .find_map(|file| capture::worker_job(&file.contents)))
+            .find_map(|file| capture::worker_job(&file.contents))
+        {
+            Some(job) => Ok(Some(job)),
+            // A worker log the read did not reach may name it.
+            None if !read.complete => Err(Undecided::Unread),
+            None => Ok(None),
+        }
     }
 
     /// Notes in the history why a failed job has no record.

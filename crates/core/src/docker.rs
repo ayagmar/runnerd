@@ -128,13 +128,23 @@ pub struct TaggedImage {
 pub struct File {
     /// Its name in the directory read, such as `Worker_20261031-120000-utc.log`.
     pub name: String,
-    /// What it holds, as text: invalid UTF-8 is replaced. Cut short when the directory's archive is longer than
-    /// `FILES_LIMIT`.
+    /// What it holds, as text: invalid UTF-8 is replaced. Cut short past `FILES_LIMIT`.
     pub contents: String,
 }
 
-/// The most of a directory's archive `files` reads: a runner's `_diag` holds job logs too, which may be large.
-const FILES_LIMIT: usize = 64 << 20;
+/// What `files` read of a directory.
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
+pub struct Files {
+    /// The files read, in the archive's order.
+    pub files: Vec<File>,
+    /// Whether they are all there and whole: the archive ended as a tar does, and none was cut at `FILES_LIMIT`. A
+    /// file missing from an incomplete read may be in the directory.
+    pub complete: bool,
+}
+
+/// The most of the files `files` keeps, together. What it skips, such as a runner's job log pages below `_diag`,
+/// does not count: it is read through and dropped.
+pub(crate) const FILES_LIMIT: usize = 16 << 20;
 
 /// A container's terminal, attached once it was created and before it started, so none of its output is missed.
 pub struct Tty {
@@ -349,13 +359,14 @@ pub trait DockerApi: Send + Sync {
     fn changes(&self, container: &str) -> impl Future<Output = Result<Vec<String>, Error>> + Send;
     /// The bytes a container's own layer holds.
     fn written(&self, container: &str) -> impl Future<Output = Result<u64, Error>> + Send;
-    /// The files directly in a container's `directory`, not in the directories below it, read from its filesystem
-    /// whether it runs or stopped, without starting it.
+    /// The files directly in a container's `directory` whose names start with `prefix`, not those in the
+    /// directories below it, read from its filesystem whether it runs or stopped, without starting it.
     fn files(
         &self,
         container: &str,
         directory: &str,
-    ) -> impl Future<Output = Result<Vec<File>, Error>> + Send;
+        prefix: &str,
+    ) -> impl Future<Output = Result<Files, Error>> + Send;
     /// Commits a stopped container's own layer as the image `reference` (`repository:tag`) with `labels`; returns
     /// the disk the image takes beyond its parent.
     fn commit(
@@ -728,18 +739,52 @@ impl DockerApi for Docker {
             .unwrap_or(0))
     }
 
-    async fn files(&self, container: &str, directory: &str) -> Result<Vec<File>, Error> {
+    async fn files(&self, container: &str, directory: &str, prefix: &str) -> Result<Files, Error> {
         let options = DownloadFromContainerOptionsBuilder::new()
             .path(directory)
             .build();
         let mut archive = self.api.download_from_container(container, Some(options));
-        let mut tar = Vec::new();
-        while tar.len() < FILES_LIMIT
-            && let Some(chunk) = archive.next().await
-        {
-            tar.extend_from_slice(&chunk?);
+        // The archive is read as it arrives, by a blocking reader, so what it skips is never held.
+        let (chunks, received) = tokio::sync::mpsc::channel(4);
+        let prefix = prefix.to_owned();
+        let reader = tokio::task::spawn_blocking(move || {
+            files_in(
+                Chunks {
+                    received,
+                    chunk: Vec::new(),
+                    at: 0,
+                },
+                &prefix,
+            )
+        });
+        let mut failed = None;
+        while let Some(chunk) = archive.next().await {
+            match chunk {
+                // Fails once the reader is done, at the archive's end or `FILES_LIMIT`.
+                Ok(chunk) => {
+                    if chunks.send(chunk.to_vec()).await.is_err() {
+                        break;
+                    }
+                }
+                Err(error) => {
+                    failed = Some(error);
+                    break;
+                }
+            }
         }
-        Ok(files_in(&tar))
+        drop(chunks);
+        let files = match reader.await {
+            Ok(files) => files,
+            Err(error) => match error.try_into_panic() {
+                Ok(panic) => std::panic::resume_unwind(panic),
+                // Only while the runtime shuts down.
+                Err(_) => Files::default(),
+            },
+        };
+        match failed {
+            Some(error) => Err(error),
+            None => Ok(files),
+        }
     }
 
     async fn commit(
@@ -980,17 +1025,44 @@ fn connect_to(docker_host: Option<&str>) -> Result<Docker, Error> {
 }
 
 /// A tar archive, to extract at `/`, holding the config as a root-only file at `JIT_CONFIG_PATH`.
-/// The regular files at the top of a directory's archive, which Docker roots at the directory's own name. A file the
-/// archive is cut off in keeps what arrived of it, and what comes after it is left out.
-fn files_in(tar: &[u8]) -> Vec<File> {
-    let mut files = Vec::new();
+/// The chunks of an archive as they arrive, for a blocking reader: it ends when no more come.
+struct Chunks {
+    received: tokio::sync::mpsc::Receiver<Vec<u8>>,
+    chunk: Vec<u8>,
+    at: usize,
+}
+
+impl std::io::Read for Chunks {
+    fn read(&mut self, buf: &mut [u8]) -> std::io::Result<usize> {
+        while self.at == self.chunk.len() {
+            match self.received.blocking_recv() {
+                Some(chunk) => {
+                    self.chunk = chunk;
+                    self.at = 0;
+                }
+                None => return Ok(0),
+            }
+        }
+        let n = buf.len().min(self.chunk.len() - self.at);
+        buf[..n].copy_from_slice(&self.chunk[self.at..self.at + n]);
+        self.at += n;
+        Ok(n)
+    }
+}
+
+/// The regular files at the top of a directory's `tar` whose names start with `prefix`. Docker roots the archive at
+/// the directory's own name. Every other entry is read through and dropped, so only the files kept count against
+/// `FILES_LIMIT`. Incomplete when the archive breaks off or a file is cut at the limit; what was read is kept.
+pub(crate) fn files_in(tar: impl std::io::Read, prefix: &str) -> Files {
+    let mut read = Files::default();
     let mut archive = tar::Archive::new(tar);
     let Ok(entries) = archive.entries() else {
-        return files;
+        return read;
     };
+    let mut kept = 0;
     for entry in entries {
         let Ok(mut entry) = entry else {
-            break;
+            return read;
         };
         let name = match entry.path() {
             Ok(path) if path.components().count() == 2 => path
@@ -998,21 +1070,32 @@ fn files_in(tar: &[u8]) -> Vec<File> {
                 .map(|name| name.to_string_lossy().into_owned()),
             _ => None,
         };
-        let Some(name) = name.filter(|_| entry.header().entry_type().is_file()) else {
+        let Some(name) =
+            name.filter(|name| name.starts_with(prefix) && entry.header().entry_type().is_file())
+        else {
             continue;
         };
+        let room = FILES_LIMIT - kept;
         let mut contents = Vec::new();
-        // A cut-off file keeps what was read before the error.
-        let cut = std::io::Read::read_to_end(&mut entry, &mut contents).is_err();
-        files.push(File {
+        // One byte past the room tells a file cut at the limit from one that fits it exactly.
+        let whole = std::io::Read::read_to_end(
+            &mut std::io::Read::take(&mut entry, room as u64 + 1),
+            &mut contents,
+        )
+        .is_ok()
+            && contents.len() <= room;
+        contents.truncate(room);
+        kept += contents.len();
+        read.files.push(File {
             name,
             contents: String::from_utf8_lossy(&contents).into_owned(),
         });
-        if cut {
-            break;
+        if !whole {
+            return read;
         }
     }
-    files
+    read.complete = true;
+    read
 }
 
 fn jit_config_tar(jit_config: &JitConfig) -> std::io::Result<Vec<u8>> {
@@ -1035,4 +1118,4 @@ fn jit_config_tar(jit_config: &JitConfig) -> std::io::Result<Vec<u8>> {
 }
 
 #[cfg(test)]
-mod tests;
+pub(crate) mod tests;

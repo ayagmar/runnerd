@@ -63,9 +63,12 @@ listing, and a running seed container as its profile's reseed; it removes stoppe
     stopped container (`keep_left_record`) instead of noting the record lost, as `release` would have. A job the
     history never saw the runner take, as one an idle runner took while the daemon detached or could not remove it,
     is read from the job message in the runner's `_diag/Worker_*.log`, which Docker copies out of the stopped
-    container without starting it (`DockerApi::files`). Such a record has no job name or workflow unless the history
-    saw the job queued. A runner whose log names no job keeps no record, and recovery logs that. While Docker cannot
-    answer, short of declining (a 4xx, or 501), the container stays and each tick asks again.
+    container without starting it (`DockerApi::files`). The archive is read as it streams: the job log pages
+    below `_diag` are read through and dropped, and only the worker logs kept count against a 16 MiB cap. Such a
+    record has no job name or workflow unless the history saw the job queued. A runner whose worker logs, read
+    whole, name no job keeps no record, and recovery logs that. While Docker cannot answer, short of declining (a
+    4xx, or 501), or a read breaks off or hits the cap before a worker log names the job, the container stays and
+    each tick asks again.
   - A reseed is not waited for. Its seed container runs on, and the next start adopts it as its profile's reseed. A
     reseed that finished just before the stop is still collected, so its event and the slots' dropped layers are
     recorded.

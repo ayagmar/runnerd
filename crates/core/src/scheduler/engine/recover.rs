@@ -9,6 +9,7 @@ use std::time::{Duration, SystemTime};
 use tracing::{info, warn};
 
 use super::history::Closing;
+use super::records::Undecided;
 use super::{Engine, Occupant};
 use crate::api;
 use crate::cache;
@@ -184,7 +185,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         "cannot tell whether {} ran a failed job to keep; trying again: {error}",
                         container.name
                     );
-                    self.docker_failed(&error);
+                    if let Undecided::Docker(error) = &error {
+                        self.docker_failed(error);
+                    }
                     self.unread.push(Left {
                         container,
                         slot: slot.clone(),

@@ -4,7 +4,7 @@
 
 use std::collections::BTreeMap;
 
-use super::{DockerApi, JitConfig, RunnerSpec, connect_to, create_body};
+use super::{DockerApi, FILES_LIMIT, JitConfig, RunnerSpec, connect_to, create_body, files_in};
 use crate::isolation::Sysbox;
 
 const SECRET: &str = "sentinel-jit-config-c2VjcmV0";
@@ -250,34 +250,50 @@ async fn a_failed_start_names_the_container_it_left_only_while_docker_keeps_it()
     }
 }
 
-/// A tar as Docker archives a container's `/home/runner/_diag`: rooted at the directory's own name.
-fn diag_archive() -> Vec<u8> {
+/// A tar as Docker archives a stopped runner's `/home/runner/_diag`, rooted at the directory's own name, whose worker
+/// log names `job`. Before it, the pages the log capture kept hold more than `FILES_LIMIT`.
+pub(crate) fn diag_archive(job: u64) -> Vec<u8> {
+    use std::io::Read;
+
+    let page = (FILES_LIMIT + 1) as u64;
+    let worker = format!(
+        "[2026-10-31 12:00:01Z INFO Worker] Job message:\n {{\n  \"k\": \"check_run_id\",\n  \"v\": {job}.0\n}}\n"
+    );
     let mut tar = tar::Builder::new(Vec::new());
-    for (path, contents) in [
-        ("_diag/", None),
-        ("_diag/Runner_20261031-115959-utc.log", Some("listening")),
-        ("_diag/Worker_20261031-120000-utc.log", Some("job message")),
-        ("_diag/pages/", None),
-        ("_diag/pages/1_job_1.log", Some("a step's output")),
-    ] {
+    let mut append = |path: &str, size: Option<u64>, contents: &mut dyn Read| {
         let mut header = tar::Header::new_gnu();
         header.set_mode(0o644);
-        if let Some(contents) = contents {
-            header.set_size(contents.len() as u64);
-            tar.append_data(&mut header, path, contents.as_bytes())
-                .unwrap();
+        if let Some(size) = size {
+            header.set_size(size);
         } else {
             header.set_entry_type(tar::EntryType::Directory);
             header.set_size(0);
-            tar.append_data(&mut header, path, std::io::empty())
-                .unwrap();
         }
-    }
+        tar.append_data(&mut header, path, contents).unwrap();
+    };
+    append("_diag/", None, &mut std::io::empty());
+    append("_diag/.runnerd-pages/", None, &mut std::io::empty());
+    append(
+        "_diag/.runnerd-pages/1_5a1c0d9e-1b7e-4b52-9c8f-0e4f3a2b1c00_1.log",
+        Some(page),
+        &mut std::io::repeat(b'x').take(page),
+    );
+    append(
+        "_diag/Runner_20261031-115959-utc.log",
+        Some(9),
+        &mut "listening".as_bytes(),
+    );
+    append(
+        "_diag/Worker_20261031-120000-utc.log",
+        Some(worker.len() as u64),
+        &mut worker.as_bytes(),
+    );
+    append("_diag/pages/", None, &mut std::io::empty());
     tar.into_inner().unwrap()
 }
 
 #[tokio::test]
-async fn files_reads_the_files_at_the_top_of_a_containers_directory_and_no_deeper() {
+async fn files_reads_the_worker_log_past_the_pages_the_capture_kept_and_no_deeper() {
     let socket =
         std::env::temp_dir().join(format!("runnerd-test-{}-files.sock", std::process::id()));
     let server = serve(&socket, 1, |request| {
@@ -285,7 +301,7 @@ async fn files_reads_the_files_at_the_top_of_a_containers_directory_and_no_deepe
             request.starts_with("GET /containers/stopped/archive?path=%2Fhome%2Frunner%2F_diag"),
             "{request}"
         );
-        let tar = diag_archive();
+        let tar = diag_archive(5);
         let mut answer = format!(
             "HTTP/1.1 200 OK\r\nContent-Type: application/x-tar\r\nContent-Length: {}\r\nConnection: close\r\n\r\n",
             tar.len()
@@ -295,17 +311,24 @@ async fn files_reads_the_files_at_the_top_of_a_containers_directory_and_no_deepe
         answer
     });
     let docker = connect_to(Some(&format!("unix://{}", socket.display()))).unwrap();
-    let files = docker.files("stopped", "/home/runner/_diag").await.unwrap();
+    let read = docker
+        .files("stopped", "/home/runner/_diag", "Worker_")
+        .await
+        .unwrap();
     server.await.unwrap();
-    let read: Vec<(&str, &str)> = files
-        .iter()
-        .map(|file| (file.name.as_str(), file.contents.as_str()))
-        .collect();
+    assert!(read.complete, "the pages kept count for nothing");
+    let names: Vec<&str> = read.files.iter().map(|file| file.name.as_str()).collect();
+    assert_eq!(names, ["Worker_20261031-120000-utc.log"]);
     assert_eq!(
-        read,
-        [
-            ("Runner_20261031-115959-utc.log", "listening"),
-            ("Worker_20261031-120000-utc.log", "job message"),
-        ]
+        crate::observe::capture::worker_job(&read.files[0].contents),
+        Some(5)
     );
+}
+
+#[test]
+fn a_directory_read_that_breaks_off_is_not_complete() {
+    let tar = diag_archive(5);
+    let read = files_in(&tar[..tar.len() / 2], "Worker_");
+    assert_eq!(read.files, []);
+    assert!(!read.complete, "the worker log may be in the rest");
 }

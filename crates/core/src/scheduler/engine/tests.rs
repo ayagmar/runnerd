@@ -465,10 +465,12 @@ struct DockerState {
     changed: Vec<String>,
     /// The bytes a container's layer holds.
     written: u64,
-    /// The files in each runner container's `_diag`, by ID.
-    diag: HashMap<String, Vec<docker::File>>,
+    /// The archive of each runner container's `_diag`, by ID.
+    diag: HashMap<String, Vec<u8>>,
     /// How many reads of a container's files fail next, as when the Engine is busy.
     fail_files: u32,
+    /// How many reads of a container's files break off halfway through its archive next.
+    cut_files: u32,
     /// Docker's free disk; plenty when unset.
     free: Option<u64>,
     /// The images Docker has, record images among them.
@@ -964,7 +966,8 @@ impl DockerApi for FakeDocker {
         &self,
         container: &str,
         directory: &str,
-    ) -> Result<Vec<docker::File>, docker::Error> {
+        prefix: &str,
+    ) -> Result<docker::Files, docker::Error> {
         self.outage().await?;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("files {container} {directory}"));
@@ -975,14 +978,20 @@ impl DockerApi for FakeDocker {
                 message: "the Engine is busy".to_owned(),
             });
         }
-        state
-            .diag
-            .get(container)
-            .cloned()
-            .ok_or_else(|| docker::Error::DockerResponseServerError {
-                status_code: 404,
-                message: format!("Could not find the file {directory} in container {container}"),
-            })
+        let cut = state.cut_files > 0;
+        state.cut_files = state.cut_files.saturating_sub(1);
+        let tar =
+            state
+                .diag
+                .get(container)
+                .ok_or_else(|| docker::Error::DockerResponseServerError {
+                    status_code: 404,
+                    message: format!(
+                        "Could not find the file {directory} in container {container}"
+                    ),
+                })?;
+        let tar = if cut { &tar[..tar.len() / 2] } else { &tar[..] };
+        Ok(docker::files_in(tar, prefix))
     }
 
     async fn commit(
