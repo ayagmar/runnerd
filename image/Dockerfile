@@ -84,6 +84,8 @@ RUN chmod 755 /home/runner \
 
 COPY daemon.json /etc/docker/daemon.json
 COPY layers.sh /usr/local/lib/runnerd-layers.sh
+# BuildKit's GC policy for the default 20 GB share, from the same function the entrypoint sizes it with per slot.
+RUN bash -c ". /usr/local/lib/runnerd-layers.sh && docker_gc_policy"
 COPY build-cache.sh /usr/local/lib/runnerd-build-cache.sh
 COPY build-cache.gradle /usr/local/share/runnerd/build-cache.gradle
 COPY actions-cache.cjs /usr/local/lib/runnerd-actions-cache.cjs

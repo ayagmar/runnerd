@@ -316,7 +316,7 @@ async fn cache_mount_scenario(docker: &Docker, names: &Names) -> Result<(), Stri
         &format!(
             "docker builder prune -af > /dev/null && {SHELL_IMAGE} && build() {{ {MOUNT_BUILD}; }} \
              && build 1300 > /dev/null \
-             && {{ docker buildx du --verbose | grep -q exec.cachemount && echo MOUNT-BEFORE-CLEANUP || true; }} \
+             && {{ docker buildx du --verbose | grep exec.cachemount > /dev/null && echo MOUNT-BEFORE-CLEANUP || true; }} \
              && runnerd-job-cleanup \
              && ! docker buildx du --verbose | grep exec.cachemount > /dev/null \
              && [ \"$(size_gb \"$DOCKER_DATA_ROOT\")\" -le 1 ]"

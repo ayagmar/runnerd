@@ -25,11 +25,11 @@ A daemon.json GC rule takes only `key=value` filters (`toBuildkitPruneInfo` keep
 
 ## Decision
 
-- **The engine starts with a GC policy from the share.** `start_docker` keeps the share first
-  (`keep_docker_budget`, which ran after it), then writes `builder.gc` into the container's
-  `/etc/docker/daemon.json` (`docker_gc_policy` in `image/layers.sh`) before dockerd reads it. `image/daemon.json`
-  holds the same policy for the default 20 GB share, so an engine whose policy could not be written still keeps
-  its build cache bounded, not to Docker's disk-based defaults of most of the host's disk.
+- **The engine starts with a GC policy from the share.** `start_docker` keeps the share first (`keep_docker_budget`,
+  which ran after it), then writes `builder.gc` into the container's `/etc/docker/daemon.json` (`docker_gc_policy` in
+  `image/layers.sh`) before dockerd reads it. The image runs the same `docker_gc_policy` when it is built, for the
+  default 20 GB share, so an engine whose policy could not be written at start still keeps its build cache bounded,
+  not to Docker's disk-based defaults of most of the host's disk.
 - **The policy, in order.** Build contexts (`type=source.local`) and git checkouts (`type=source.git.checkout`) go,
   all of them, once the build cache holds over 512 MB; layers (`type=regular`) while the unshared build cache holds over half the share; everything, cache mounts
   included, only while it holds over three quarters. Each BuildKit rule compares the whole unshared build cache with
