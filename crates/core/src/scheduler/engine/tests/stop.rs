@@ -153,6 +153,38 @@ async fn a_signal_removes_idle_runners_and_leaves_busy_ones_and_the_mirror_to_th
 }
 
 #[tokio::test]
+async fn status_says_a_signal_leaves_running_jobs_while_it_removes_idle_runners() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    let (engine, handle) = busy_and_idle(&github, &docker, &dir);
+    let run = tokio::spawn(engine.run());
+    until_state(&handle, 1, JobState::Running).await;
+    github
+        .until_calls(
+            |calls| calls.iter().any(|call| call.starts_with("runners ")),
+            "asked for its runners",
+        )
+        .await;
+    // GitHub has not answered the idle runner's deregistration.
+    github.hold_deletes();
+    handle.control.shutdown(Shutdown::Detach);
+    github.until_waiting(1).await;
+    assert_eq!(
+        handle.status.borrow().stopping,
+        Some(Stopping::LeavesJobs),
+        "status shows the stop while the idle runner is removed"
+    );
+    github.release_deletes();
+    tokio::time::timeout(Duration::from_secs(10), run)
+        .await
+        .unwrap()
+        .unwrap();
+}
+
+#[tokio::test]
 async fn a_stop_ends_when_docker_is_gone_or_fails_midway_and_the_next_start_takes_over() {
     for gone in [true, false] {
         let (github, docker, dir) = (

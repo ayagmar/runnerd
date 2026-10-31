@@ -620,8 +620,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Schedules until a shutdown request is carried out, from a recovered engine.
     async fn schedule(&mut self) {
+        let mut shown = Shutdown::No;
         let mode = loop {
             let mode = self.stopping();
+            // A stop shows before it removes idle runners, which can take until `STOP_DEADLINE` on a slow GitHub or
+            // Docker: until then status would show a daemon that is not stopping.
+            if mode != shown {
+                self.publish();
+                shown = mode;
+            }
             if mode == Shutdown::Detach {
                 self.remove_idle().await;
                 self.collect_recordings().await;
