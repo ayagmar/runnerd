@@ -83,7 +83,7 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0073](0073-no-compatibility-before-0-0-19.md) | No compatibility before 0.0.19: the history starts at schema 15 | Amended by 0081 |
 | [0074](0074-the-cost-line-names-only-what-it-is-before.md) | The cost line names only what it is before | Accepted |
 | [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md) | `cpus` come down only under `caps` admission and a cap no run's bursts met; under `measured` the bursts raise them | Amended by 0079 |
-| [0076](0076-a-slot-is-free-once-docker-removed-its-container.md) | A slot is free once Docker removed its container, each start is admitted again as it starts, and a broken log capture starts again | Accepted |
+| [0076](0076-a-slot-is-free-once-docker-removed-its-container.md) | A slot is free once Docker removed its container, each start is admitted again as it starts, and a broken log capture starts again | Amended by 0092 |
 | [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md) | Credentials in the cache layer, closed slots' layers, and what the build cache counts | Accepted |
 | [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md) | A first run that can start its first job and keeps its secrets | Accepted |
 | [0079](0079-cpu-weights-and-throttling-as-evidence.md) | Runners share the slice's CPUs by their `cpus`, and throttling, not peaks, says the cap held a run back | Accepted |
@@ -98,6 +98,6 @@ with it. A replaced or amended decision stays, and its status names the record t
 | [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md) | Sizing advice keeps to a profile's memory bounds | Accepted |
 | [0089](0089-a-slots-cache-mounts-go-last.md) | A slot's build cache follows its share, and cache mounts go last | Accepted |
 | [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md) | Under measured admission, slots follow waits for a slot alone and Docker's disk | Accepted |
-| [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md) | A signal leaves running jobs to the next start, and the daemon exits within 45 s | Accepted |
+| [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md) | A signal leaves running jobs to the next start, and the daemon exits within 45 s | Amended by 0092 |
 | [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md) | Idle removals and deferred starts stay off the start path, and a job's wait says where it went | Accepted |
 | [0093](0093-clients-share-views-columns-and-health-figures.md) | Clients share their views, table columns and health figures | Accepted |
