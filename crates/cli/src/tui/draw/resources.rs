@@ -74,15 +74,9 @@ pub(super) fn metrics_line(open: &JobView, width: usize, theme: Theme) -> Line<'
     }
     .totals();
     if let Some(activity) = metrics.build_cache.activity() {
-        let what = match activity.counts.hit_percent() {
-            Some(percent) => format!("{percent}% hit"),
-            None => activity
-                .refused_line()
-                .unwrap_or_else(|| activity.stored_line()),
-        };
         totals.push(api::Total {
             label: "Build cache",
-            value: what,
+            value: activity.short_line(),
         });
     }
     let parts = totals;

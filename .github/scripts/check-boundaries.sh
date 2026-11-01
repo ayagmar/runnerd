@@ -92,4 +92,17 @@ if [ -n "$spelled" ]; then
 else
   echo "view names: ok"
 fi
+
+# What the build cache did for a job is worded by core (`BuildCacheActivity`): a client that writes a fragment of it
+# itself can choose, cut or drop what core says. Same files and test exclusions as above.
+worded=$(find crates/cli/src crates/web/src crates/daemon/src -name '*.rs' ! -name tests.rs ! -name testing.rs \
+  ! -name testdir.rs ! -name parity.rs ! -path '*/tests/*' -exec awk \
+  'FNR == 1 { done = 0 } /^mod tests \{/ { done = 1 } !done && $0 !~ /^ *\/\// && /% hit|uploads refused|lookups hit|read only"/ { print FILENAME ":" FNR ": " $0 }' {} +)
+if [ -n "$worded" ]; then
+  printf '%s\n' "$worded" >&2
+  echo "the build cache's wording is core's: use BuildCacheActivity" >&2
+  status=1
+else
+  echo "build cache wording: ok"
+fi
 exit "$status"

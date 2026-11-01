@@ -8,7 +8,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
-use runnerd_core::api::{Column, JobPage, JobState, View};
+use runnerd_core::api::{BuildCacheCounts, JobPage, JobState};
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
 use super::super::app::{App, Effect, Msg};
@@ -218,42 +218,42 @@ fn a_job_states_its_outcome_steps_caps_build_cache_and_failed_runs_as_core_does(
 }
 
 #[test]
-fn the_views_and_their_tables_are_named_as_core_names_them() {
+fn a_job_with_cache_hits_and_refused_uploads_shows_both() {
     let (daemon, _) = fixtures();
     let mut app = app(&daemon);
-    let (rows, _) = frame(&app);
-    let mut at = 0;
-    for (number, view) in [View::Overview, View::History, View::Records, View::Sizing]
-        .iter()
-        .enumerate()
-    {
-        let tab = format!(" {} {} ", number + 1, view.title());
-        let found = rows[0][at..]
-            .find(&tab)
-            .unwrap_or_else(|| panic!("{tab} after {at}: {}", rows[0]));
-        at += found + tab.len();
-    }
     history(&mut app, &daemon);
-    let (rows, _) = frame(&app);
-    let header = rows.iter().find(|row| row.contains("OUTCOME")).unwrap();
-    let mut at = 0;
-    for column in [
-        Column::Outcome,
-        Column::Repository,
-        Column::Job,
-        Column::Branch,
-        Column::Waited,
-        Column::Ran,
-        Column::MemoryPeak,
-        Column::Cpu,
-        Column::Queued,
-    ] {
-        let name = column.title().to_uppercase();
-        let found = header[at..]
-            .find(&name)
-            .unwrap_or_else(|| panic!("{name} after {at}: {header}"));
-        at += found + name.len();
+    let at = daemon
+        .finished()
+        .iter()
+        .position(|job| job.id == TIMED_OUT)
+        .unwrap();
+    for _ in 0..at {
+        app.update(key(KeyCode::Char('j')));
     }
+    app.update(key(KeyCode::Enter));
+    let mut job = daemon.job(TIMED_OUT).unwrap().clone();
+    job.summary.metrics.build_cache = BuildCacheCounts {
+        hits: 3,
+        misses: 1,
+        read_bytes: 3 << 29,
+        written_bytes: 1 << 30,
+        refused: 3,
+        writer: true,
+    };
+    let line = job
+        .summary
+        .metrics
+        .build_cache
+        .activity()
+        .unwrap()
+        .short_line();
+    app.update(Msg::Job(job));
+    let (rows, _) = frame(&app);
+    assert!(
+        shows(&rows, &line) && line.contains("3 uploads refused"),
+        "{line}: {}",
+        rows.join("\n")
+    );
 }
 
 #[test]
