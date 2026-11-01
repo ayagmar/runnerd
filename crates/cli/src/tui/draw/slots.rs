@@ -67,12 +67,6 @@ impl Usage<'_> {
     }
 }
 
-/// The slots' heading: how many run a job, as the health line counts them, and how many jobs wait.
-pub(super) fn slots_note(app: &App, now: u64) -> String {
-    let health = app.live.status.health(now);
-    format!("{} running · {} queued", health.running, health.waiting)
-}
-
 /// `line` as a sentence, its first letter a capital.
 pub(super) fn sentence(line: &str) -> String {
     let mut chars = line.chars();
@@ -89,7 +83,7 @@ pub(super) fn step_label(job: &Job) -> Option<(String, String)> {
 
 pub(super) fn slot_lines(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let [title, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    heading(frame, title, "Slots", slots_note(app, now), theme);
+    heading(frame, title, "Slots", String::new(), theme);
     let focused = app.pane == Pane::Slots;
     let width = usize::from(rest.width);
     let lines: Vec<Line<'_>> = app
@@ -166,7 +160,7 @@ pub(super) fn slot_cards(
     theme: Theme,
 ) {
     let [title, rest] = Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-    heading(frame, title, "Slots", slots_note(app, now), theme);
+    heading(frame, title, "Slots", String::new(), theme);
     let slots: Vec<_> = app.slots().collect();
     let rows =
         Layout::vertical(vec![Constraint::Length(7); slots.len().div_ceil(columns)]).split(rest);

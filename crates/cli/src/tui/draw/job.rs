@@ -1,4 +1,5 @@
-//! One job: its header, timeline and the latest runs of the same job.
+//! One job, in the order the dashboard's page has: its header, timeline, steps, memory and CPU, the latest runs of the
+//! same job, its log.
 
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
@@ -58,16 +59,16 @@ pub(super) fn job(
     let [
         head,
         timeline_area,
-        runs_area,
         steps_area,
         charts_area,
+        runs_area,
         log_area,
     ] = Layout::vertical([
         Constraint::Length(3),
         Constraint::Length(2),
-        Constraint::Length(runs_height),
         Constraint::Length(steps_height),
         Constraint::Length(charts_height),
+        Constraint::Length(runs_height),
         Constraint::Min(0),
     ])
     .areas(area);
@@ -108,6 +109,13 @@ pub(super) fn job(
         .filter(|_| summary.timeline.started_at.is_none());
     let reason = waiting.map(|queued| reason(app, queued, now, usize::from(area.width), theme));
     timeline(frame, timeline_area, summary, reason.as_ref(), now, theme);
+    steps(frame, steps_area, job, now, theme);
+    let cpu_held = cpu_held.as_deref();
+    match (charted, full_charts) {
+        (false, _) => {}
+        (true, true) => job_charts(frame, charts_area, app, open, cpu_held, theme),
+        (true, false) => job_spark(frame, charts_area, app, open, cpu_held, theme),
+    }
     if runs_height > 0 {
         job_runs(
             frame,
@@ -118,13 +126,6 @@ pub(super) fn job(
             now,
             theme,
         );
-    }
-    steps(frame, steps_area, job, now, theme);
-    let cpu_held = cpu_held.as_deref();
-    match (charted, full_charts) {
-        (false, _) => {}
-        (true, true) => job_charts(frame, charts_area, app, open, cpu_held, theme),
-        (true, false) => job_spark(frame, charts_area, app, open, cpu_held, theme),
     }
     log(frame, log_area, open, theme);
 }

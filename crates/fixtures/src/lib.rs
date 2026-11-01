@@ -889,6 +889,8 @@ pub struct JobFacts {
     pub build_cache: Vec<String>,
     /// The uploads the build cache refused it, the part a client with room for one shows.
     pub build_cache_refused: String,
+    /// What it used over its life, as core words each figure.
+    pub totals: Vec<api::Total>,
     /// Its CPU time.
     pub cpu_time: String,
     /// What held its CPU back: its cap's throttling and its waits for a CPU.
@@ -1043,6 +1045,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
             ]
             .into(),
             build_cache_refused,
+            totals: job.summary.metrics.totals(),
             cpu_time: api::cpu_time(job.summary.metrics.cpu_time.expect("its CPU time")),
             cpu_held: job
                 .summary

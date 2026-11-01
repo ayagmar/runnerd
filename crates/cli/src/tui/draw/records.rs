@@ -15,6 +15,7 @@ use crate::tui::app::App;
 
 /// The records of failed jobs, each a stopped runner `runnerctl shell` opens a shell in.
 pub(super) fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
+    let name = api::View::Records.title();
     let [title, table_area, hint] = Layout::vertical([
         Constraint::Length(1),
         Constraint::Min(0),
@@ -22,31 +23,18 @@ pub(super) fn records(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, th
     ])
     .areas(area);
     let Some(records) = &app.records else {
-        heading(
-            frame,
-            title,
-            api::View::Records.title(),
-            String::new(),
-            theme,
-        );
+        heading(frame, title, name, String::new(), theme);
         frame.render_widget(Line::styled("reading…", theme.dim()), table_area);
         return;
     };
     // Near max_total, that comes first and stands out: the usage is what a narrow heading drops.
     match records.pressure() {
         Some(pressure) => {
-            let room =
-                usize::from(title.width).saturating_sub(api::View::Records.title().width() + 2);
+            let room = usize::from(title.width).saturating_sub(name.width() + 2);
             let note = fit_details(vec![(0, pressure.to_owned()), (1, records.usage())], room);
-            styled_heading(frame, title, api::View::Records.title(), note, theme.wait());
+            styled_heading(frame, title, name, note, theme.wait());
         }
-        None => heading(
-            frame,
-            title,
-            api::View::Records.title(),
-            records.usage(),
-            theme,
-        ),
+        None => heading(frame, title, name, records.usage(), theme),
     }
     if records.records.is_empty() {
         frame.render_widget(

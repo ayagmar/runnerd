@@ -196,7 +196,7 @@ pub(super) fn health_items(
         let value = match figure.tone {
             api::Tone::Warn => theme.wait().add_modifier(Modifier::BOLD),
             api::Tone::Neutral | api::Tone::Quiet | api::Tone::Good => bold(),
-            tone => theme.tone(tone.into()),
+            tone @ api::Tone::Bad => theme.tone(tone.into()),
         };
         let mut head = Vec::new();
         if index > 0 {
@@ -313,9 +313,9 @@ pub(super) fn queue(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, them
         title,
         "Waiting",
         if hidden > 0 {
-            format!("{} queued, oldest first; {hidden} more below", queued.len())
+            format!("oldest first; {hidden} more below")
         } else {
-            format!("{} queued, oldest first", queued.len())
+            "oldest first".to_owned()
         },
         theme,
     );
@@ -487,6 +487,11 @@ pub(super) fn badge_width<'job>(jobs: impl IntoIterator<Item = &'job JobSummary>
         .unwrap_or(0)
 }
 
+/// How long ago GitHub queued `job`.
+fn queued_ago(job: &JobSummary, now: u64) -> String {
+    ago(job.timeline.queued_at, now)
+}
+
 /// The latest finished jobs, newest first: the outcome, the job, its repository where there is room, from 110 columns
 /// how long it waited and from 140 its branch, how long it ran and when it was queued.
 pub(super) fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
@@ -499,10 +504,7 @@ pub(super) fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
         .iter()
         .map(|job| job.ran(now).map_or_else(String::new, duration))
         .collect();
-    let queued: Vec<String> = jobs
-        .iter()
-        .map(|job| ago(job.timeline.queued_at, now))
-        .collect();
+    let queued: Vec<String> = jobs.iter().map(|job| queued_ago(job, now)).collect();
     // The times are as wide as the widest of them; the job and its repository take what is left, the job first.
     let ran_width = run_times.iter().map(|ran| ran.width()).max().unwrap_or(0);
     let ago_width = queued.iter().map(|ago| ago.width()).max().unwrap_or(0);

@@ -83,7 +83,7 @@ pub use jobs::{
     JobPage, JobQuery, JobRunner, JobState, JobSummary, JobTitle, Limit, LimitSource, Limits,
     LogQuery, LogSummary, Milestone, Outcome, OutcomeKind, Phase, PhaseKind, Pressure,
     RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
-    Timeline, job_title,
+    Timeline, Total, job_title,
 };
 pub use labels::{Column, View};
 pub use records::{

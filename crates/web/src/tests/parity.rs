@@ -174,6 +174,10 @@ async fn a_job_states_its_outcome_steps_build_cache_and_failed_runs_as_core_does
     {
         assert!(shown.contains(figure.as_str()), "{figure}: {shown}");
     }
+    for total in &job.totals {
+        let figure = format!("{} {}", total.label, total.value);
+        assert!(shown.contains(&figure), "{figure}: {shown}");
+    }
     for step in &job.steps {
         let name = format!("<span class=\"step-name\">{}</span>", step.name);
         let from = html

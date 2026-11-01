@@ -66,18 +66,13 @@ pub(super) fn metrics_line(open: &JobView, width: usize, theme: Theme) -> Line<'
     let peak_cpu = metrics
         .cpu_peak
         .or_else(|| open.samples.iter().map(|sample| sample.cpu).max());
-    let mut parts = vec![
-        ("mem peak", peak_memory.map(bytes)),
-        ("avg", metrics.memory_average.map(bytes)),
-        ("cpu peak", peak_cpu.map(cores_used)),
-        ("avg", metrics.cpu_average.map(cores_used)),
-        ("cpu time", metrics.cpu_time.map(api::cpu_time)),
-        ("in", metrics.network_received.map(bytes)),
-        ("out", metrics.network_sent.map(bytes)),
-    ];
-    if metrics.mirror_bytes > 0 {
-        parts.push(("mirror", Some(bytes(metrics.mirror_bytes))));
+    // A job still running has no totals yet: its samples stand in for the peaks.
+    let mut totals = api::JobMetrics {
+        memory_peak: peak_memory,
+        cpu_peak: peak_cpu,
+        ..metrics.clone()
     }
+    .totals();
     if let Some(activity) = metrics.build_cache.activity() {
         let what = match activity.counts.hit_percent() {
             Some(percent) => format!("{percent}% hit"),
@@ -85,11 +80,14 @@ pub(super) fn metrics_line(open: &JobView, width: usize, theme: Theme) -> Line<'
                 .refused_line()
                 .unwrap_or_else(|| activity.stored_line()),
         };
-        parts.push(("build cache", Some(what)));
+        totals.push(api::Total {
+            label: "Build cache",
+            value: what,
+        });
     }
+    let parts = totals;
     let mut line = Line::default();
-    for (label, value) in parts {
-        let Some(value) = value else { continue };
+    for api::Total { label, value } in parts {
         let gap = if line.spans.is_empty() { "" } else { "  " };
         if line.width() + gap.width() + label.width() + 1 + value.width() > width {
             break;

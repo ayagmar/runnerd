@@ -2,7 +2,7 @@
 //! ages, CPU time and cores in use are `runnerd_core::api`'s, as every client writes them. Pure functions of their
 //! arguments; the caller passes the current time.
 
-pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
+pub(crate) use runnerd_core::api::{ago, cores_used, duration};
 use runnerd_core::config::ByteSize;
 
 /// A size with a binary unit, as in `runnerd.toml`: `512M`, `9G`.

@@ -145,6 +145,13 @@ fn a_job_states_its_outcome_steps_caps_and_build_cache_as_core_does() {
     for part in &facts.job.build_cache {
         assert!(text.contains(part.as_str()), "{part}: {text}");
     }
+    for total in &facts.job.totals {
+        let row = text
+            .lines()
+            .find(|line| line.contains(total.label))
+            .unwrap_or_else(|| panic!("no row for {}: {text}", total.label));
+        assert!(row.contains(&total.value), "{}: {row}", total.label);
+    }
     for step in &facts.job.steps {
         let row = text
             .lines()

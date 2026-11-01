@@ -371,7 +371,7 @@ fn every_pane_fits_a_terminal_of_80_by_24() {
         "Set up job",
         "Unit tests",
         "Complete job",
-        "mem",
+        "Memory peak",
         "Log",
         "line 99",
     ] {
@@ -1729,11 +1729,14 @@ fn the_open_job_metrics_drop_whole_figures_to_fit() {
     };
     app.update(key(KeyCode::Enter));
     let full = screen(&app, 240, 40, false);
-    let figures: Vec<&str> = rows_with(&full, "mem peak")[0].trim().split("  ").collect();
-    assert!(figures.contains(&"mirror 110M"), "{full}");
+    let figures: Vec<&str> = rows_with(&full, "Memory peak")[0]
+        .trim()
+        .split("  ")
+        .collect();
+    assert!(figures.contains(&"From the mirror 110M"), "{full}");
     for (width, height) in [(80, 24), (96, 24), (96, 30), (104, 30)] {
         let job = screen(&app, width, height, false);
-        let row = rows_with(&job, "mem peak")[0].trim();
+        let row = rows_with(&job, "Memory peak")[0].trim();
         for figure in row.split("  ") {
             assert!(
                 figures.contains(&figure),

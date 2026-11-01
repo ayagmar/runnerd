@@ -1,6 +1,6 @@
 # 0062. Client parity is checked, not remembered
 
-Status: **Accepted** (2026-10-25).
+Status: **Accepted** (2026-10-25). Amended by [0093](0093-clients-share-views-columns-and-health-figures.md).
 
 ## Context
 

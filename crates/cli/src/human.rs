@@ -10,8 +10,8 @@ use runnerd_core::api::{
     JobSizing, JobSummary, NotifyTest, ProfilePlan, ProfileSizing, QueuedJob, RecordNote,
     RecordState, Records, Savings, Sizing, SlotState, Status, Step, WaitSpread,
 };
-use runnerd_core::api::{Column, in_cores, job_title};
-pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
+use runnerd_core::api::{Column, job_title};
+pub(crate) use runnerd_core::api::{ago, cores_used, duration};
 use runnerd_core::config::ByteSize;
 
 /// How a piece of text should stand out.
@@ -517,43 +517,18 @@ fn usage(summary: &JobSummary, now: u64, paint: Paint) -> String {
     let metrics = &summary.metrics;
     let _ = writeln!(out, "\n{}", paint.paint(Tone::Bold, "Usage"));
     let mut usage = Table::default();
-    if let Some(time) = metrics.cpu_time {
-        let mut parts = vec![format!("{} CPU time", cpu_time(time))];
-        if let Some(average) = metrics.cpu_average {
-            parts.push(format!("{} average", in_cores(average)));
-        }
-        if let Some(peak) = metrics.cpu_peak {
-            parts.push(format!("{} sampled peak", in_cores(peak)));
-        }
-        usage.row(vec![plain("cpu"), plain(parts.join(", "))]);
+    for total in metrics.totals() {
+        usage.row(vec![plain(total.label), plain(total.value)]);
     }
     if let Some(held) = summary.cpu_held(now) {
-        usage.row(vec![plain("cpu held back"), plain(held)]);
-    }
-    if let Some(peak) = metrics.memory_peak {
-        let mut parts = vec![format!("{} sampled peak", bytes(peak))];
-        if let Some(average) = metrics.memory_average {
-            parts.push(format!("{} average", bytes(average)));
-        }
-        usage.row(vec![plain("memory"), plain(parts.join(", "))]);
-    }
-    if let Some(received) = metrics.network_received {
-        let mut parts = vec![format!("{} received", bytes(received))];
-        if let Some(sent) = metrics.network_sent {
-            parts.push(format!("{} sent", bytes(sent)));
-        }
-        parts.push(format!("{} from the mirror", bytes(metrics.mirror_bytes)));
-        if let Some(throttled) = metrics.sock_throttled.filter(|count| *count > 0) {
-            parts.push(format!("throttled {throttled} times for memory pressure"));
-        }
-        usage.row(vec![plain("network"), plain(parts.join(", "))]);
+        usage.row(vec![plain("CPU held back"), plain(held)]);
     }
     if let Some(line) = build_cache(&metrics.build_cache) {
-        usage.row(vec![plain("build cache"), plain(line)]);
+        usage.row(vec![plain("Build cache"), plain(line)]);
     }
     let log = &summary.log;
     usage.row(vec![
-        plain("log"),
+        plain("Log"),
         // The last column: the hint's colour codes pad nothing after it.
         plain(format!(
             "{}  {}",

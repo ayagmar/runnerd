@@ -35,14 +35,16 @@ flowchart TB
 |---|---|---|---|
 | `runnerd-core` | `crates/core` | config, API types, the socket client every client uses, scheduling, Docker and GitHub clients, caches, the shared build cache's server, job history, sizing advice, insights, admission by measured peaks and CPU | anything; Docker and GitHub only behind the `host` feature, Tokio behind `host` or `client`, hyper's client behind `client` and its server behind `host` |
 | `runnerd` | `crates/daemon` | the daemon binary: `init`, `serve`, `stop`, `doctor`, `check-config`, `simulate`, the Unix-socket API, the notifications `[notify]` asks for | `runnerd-core` with `host`; `runnerd-web`, which it serves and whose `Sessions` it hands the sign-out and pairing routes; hyper for a shell's upgraded connection |
-| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
+| `runnerd-cli` | `crates/cli` | the command-line client, binary `runnerctl`: `human` (text), `watch`, `tui` (full-screen dashboard, `tui` feature; `tui/draw` has a module per view), `output` (the only printing) | `runnerd-core` with `client`, without `host`; `ratatui` for the TUI, `rustix` for the TUI and a shell's raw terminal |
 | `runnerd-web` | `crates/web` | the web dashboard: pages, charts, live updates, its session | `runnerd-core` with `client`, without `host` |
 | `runnerd-fixtures` | `crates/fixtures` | tests only: the daemon data every client's parity test draws, and the facts core computes from it ([ADR 0062](docs/adr/0062-client-parity-is-checked.md)); not published | `runnerd-core` without `host`; clients take it as a dev-dependency only |
 | `runnerd-wire-compat` | `crates/wire-compat` | tests only: this version and the previous release read each other's JSON ([ADR 0061](docs/adr/0061-the-previous-release-reads-the-wire.md)); a workspace of its own | `runnerd-core` without `host`, and the previous release's, pinned by commit |
 
 `runnerd-core` modules:
 
-- `api`, `config`: build without `host`. Every client reads these. `api::savings` prices this machine's job minutes
+- `api`, `config`: build without `host`. Every client reads these. `api::View` and `api::Column` name the views and table columns every client uses, `Health::figures` and
+  `JobMetrics::totals` word the overview's health figures and what a job used
+  ([ADR 0093](docs/adr/0093-clients-share-views-columns-and-health-figures.md)). `api::savings` prices this machine's job minutes
   at GitHub's per-minute rates and words the figure ([ADR 0072](docs/adr/0072-job-minutes-priced-at-github-hosted-rates.md));
   the daemon passes it the history and the config, and the store keeps each repository's visibility, which the
   engine asks GitHub for once a day in a task of its own, off the tick.
@@ -74,7 +76,7 @@ flowchart TB
 `runnerd` modules: `api` (the socket's routes; `api/auto` runs auto sizing, `api/notify` sends `[notify]`'s
 notifications, each kind of target a `Sender` in a module of its own), `init`, `doctor`, `simulate`, and
 `output`, the only module that prints. The main `runnerd-web` modules: `auth` (the session secret, the login links and pairing codes, and the `Origin`
-check), `views` (one per page), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
+check), `views` (one per page: overview, history, records, sizing, insights, caches, config, and a job), `live` (each page's event stream), `actions` (the writes, passed on to the API), and
 `assets` (the files the pages load, the web app manifest and icons included).
 
 The web dashboard (`crates/web`) is a client like `runnerctl`: the daemon runs it in its process, but it reads and
