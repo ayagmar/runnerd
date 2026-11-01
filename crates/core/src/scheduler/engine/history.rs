@@ -300,8 +300,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Records the jobs the last poll listed queued that no runner in `taken` has, and follows them.
-    fn record_listed(&mut self, taken: &BTreeSet<u64>) {
+    /// Follows the jobs the last poll listed queued that no runner in `taken` has; the listing recorded them.
+    fn follow_listed(&mut self, taken: &BTreeSet<u64>) {
         for repository in &self.config.repositories {
             let Some(state) = self.repositories.get(&repository.name) else {
                 continue;
@@ -311,7 +311,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             for job in &state.queued {
                 if crate::scheduler::matches(job, &repository.labels) && !taken.contains(&job.id) {
-                    self.store.queued(&repository.name, job, state.listed_at);
                     self.queued_jobs
                         .entry(job.id)
                         .or_insert_with(|| repository.name.clone());
@@ -399,7 +398,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }));
     }
 
-    /// Records the queued jobs the repositories' runners may run, and closes those that left the queue for another
+    /// Follows the queued jobs the repositories' runners may run, and closes those that left the queue for another
     /// machine's runner or were cancelled; asks GitHub for the steps of running jobs and whether the jobs of removed
     /// runners completed.
     pub(super) async fn follow_jobs(&mut self) {
@@ -407,7 +406,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
             .collect();
-        self.record_listed(&taken);
+        self.follow_listed(&taken);
         let left: Vec<(String, u64)> = self
             .queued_jobs
             .iter()

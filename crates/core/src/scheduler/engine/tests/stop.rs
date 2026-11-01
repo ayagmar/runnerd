@@ -153,6 +153,40 @@ async fn a_signal_removes_idle_runners_and_leaves_busy_ones_and_the_mirror_to_th
 }
 
 #[tokio::test]
+async fn a_stop_asked_for_while_github_registers_a_runner_deletes_it_and_starts_no_container() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("stop"),
+    );
+    {
+        let mut state = github.0.lock().unwrap();
+        state.strict = true;
+        state.queued = vec![job(1)];
+    }
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    github.hold_registrations();
+    let stops = async {
+        github.until_waiting(1).await;
+        handle.control.shutdown(Shutdown::Detach);
+        github.release_registrations();
+    };
+    tokio::join!(engine.tick(Shutdown::No), stops);
+    // The runner registered after the stop would take job 1 with no daemon to watch it.
+    assert!(
+        !docker.calls().iter().any(|call| call.starts_with("start ")),
+        "no runner container starts: {:?}",
+        docker.calls()
+    );
+    assert!(
+        github.0.lock().unwrap().runners.is_empty(),
+        "its registration is deleted: {:?}",
+        github.calls()
+    );
+}
+
+#[tokio::test]
 async fn status_says_a_signal_leaves_running_jobs_while_it_removes_idle_runners() {
     let (github, docker, dir) = (
         FakeGithub::default(),

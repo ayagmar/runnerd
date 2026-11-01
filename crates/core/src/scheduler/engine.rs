@@ -305,8 +305,6 @@ struct RepositoryState {
     queued: Vec<QueuedJob>,
     /// Whether the last poll of its queued jobs succeeded.
     listed: bool,
-    /// When GitHub answered that poll, in ms: what the history keeps as a job's first sight (ADR 0092).
-    listed_at: u64,
     /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
     /// not hold back the others (ADR 0058).
     holds: BTreeMap<String, PoolHold>,

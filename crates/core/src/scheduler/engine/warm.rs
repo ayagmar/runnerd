@@ -2,7 +2,7 @@
 //! workflow runs whose jobs it sees queued or taken, and says how many warm runners each repository wants. It must not
 //! start or stop runners: `plan` decides with what it says.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use tracing::warn;
@@ -127,23 +127,35 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Why `pool`'s next warm runner starts: as one of its configured warm runners while fewer of its runners wait
-    /// for a job, else for a job its runs are expected to queue (`warm::target`).
+    /// with no queued job to take, else for a job its runs are expected to queue (`warm::target`). Its idle runners
+    /// cover its queued jobs first, as the plan counts them.
     pub(super) fn warm_purpose(&self, pool: &Pool) -> Purpose {
-        let now = time::now_ms();
-        let configured = self
+        let Some(repository) = self
             .config
             .repositories
             .iter()
             .find(|repository| Pool::from(*repository) == *pool)
-            .and_then(|repository| {
-                let (learned, _) = self.warm.learned.as_ref()?;
-                Some(warm::target(
-                    repository.warm,
-                    learned.active(&repository.name, now),
-                    0,
-                ))
-            })
-            .unwrap_or(0);
+        else {
+            return Purpose::Burst;
+        };
+        let configured = self.warm.learned.as_ref().map_or(0, |(learned, _)| {
+            warm::target(
+                repository.warm,
+                learned.active(&repository.name, time::now_ms()),
+                0,
+            )
+        });
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
+        let queued = self.repositories.get(&pool.repository).map_or(0, |state| {
+            state
+                .queued
+                .iter()
+                .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels))
+                .count()
+        });
         let waiting = self
             .occupied()
             .filter(|(slot, occupant)| {
@@ -153,7 +165,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     && occupant.job.is_none()
             })
             .count();
-        if waiting < configured {
+        if waiting.saturating_sub(queued) < configured {
             Purpose::Warm
         } else {
             Purpose::Burst

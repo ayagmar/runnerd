@@ -93,8 +93,8 @@ struct GithubState {
     compare_fails: bool,
     /// While true, registering a runner fails.
     register_fails: bool,
-    /// While true, deleting a busy runner answers `Busy`, as GitHub does, and each runner gets an ID never given
-    /// before: for tests that delete and register runners at random.
+    /// While true, deleting a busy runner answers `Busy` and an absent one `NotFound`, as GitHub does, and each runner
+    /// gets an ID never given before: for tests that delete and register runners at random.
     strict: bool,
     /// Runners registered so far, for `strict` IDs.
     registrations: u64,
@@ -109,7 +109,11 @@ struct GithubState {
     held_repositories: tokio::sync::watch::Sender<bool>,
     /// While true, runner deletes do not answer.
     held_deletes: tokio::sync::watch::Sender<bool>,
-    /// Listings, job reads and deletes waiting for an answer.
+    /// While true, runner registrations do not answer.
+    held_registrations: tokio::sync::watch::Sender<bool>,
+    /// Repositories whose queued jobs listings do not answer, while others do.
+    held_queued: tokio::sync::watch::Sender<BTreeSet<String>>,
+    /// Listings, job reads, registrations and deletes waiting for an answer.
     waiting: usize,
     /// How long each listing, registration and delete takes to answer, where a test says: a workload's figures.
     latency: Duration,
@@ -173,6 +177,34 @@ impl FakeGithub {
         self.0.lock().unwrap().held_deletes.send_replace(false);
     }
 
+    /// Holds runner registrations until `release_registrations`.
+    fn hold_registrations(&self) {
+        self.0.lock().unwrap().held_registrations.send_replace(true);
+    }
+
+    fn release_registrations(&self) {
+        self.0
+            .lock()
+            .unwrap()
+            .held_registrations
+            .send_replace(false);
+    }
+
+    /// Holds the queued jobs listings of `repository` until `release_queued`.
+    fn hold_queued(&self, repository: &str) {
+        self.0.lock().unwrap().held_queued.send_modify(|held| {
+            held.insert(repository.to_owned());
+        });
+    }
+
+    fn release_queued(&self) {
+        self.0
+            .lock()
+            .unwrap()
+            .held_queued
+            .send_replace(BTreeSet::new());
+    }
+
     /// Holds repository reads, which never answer.
     fn hold_repositories(&self) {
         self.0.lock().unwrap().held_repositories.send_replace(true);
@@ -193,7 +225,7 @@ impl FakeGithub {
         self.0.lock().unwrap().waiting -= 1;
     }
 
-    /// Waits until `count` listings, job reads or deletes wait for an answer at once.
+    /// Waits until `count` listings, job reads, registrations or deletes wait for an answer at once.
     async fn until_waiting(&self, count: usize) {
         for _ in 0..500 {
             if self.0.lock().unwrap().waiting >= count {
@@ -227,6 +259,8 @@ impl FakeGithub {
 impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
         self.answer().await;
+        let mut held = self.0.lock().unwrap().held_queued.subscribe();
+        let _ = held.wait_for(|held| !held.contains(repository)).await;
         self.latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
@@ -274,6 +308,7 @@ impl GithubApi for FakeGithub {
         name: &str,
         _labels: &[String],
     ) -> Result<(Runner, JitConfig), github::Error> {
+        self.wait(|state| &state.held_registrations).await;
         self.latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("register {name}"));
@@ -312,6 +347,9 @@ impl GithubApi for FakeGithub {
                 .any(|runner| runner.id == id && runner.busy)
         {
             return Ok(Deleted::Busy);
+        }
+        if state.strict && !state.runners.iter().any(|runner| runner.id == id) {
+            return Ok(Deleted::NotFound);
         }
         state.runners.retain(|runner| runner.id != id);
         Ok(Deleted::Deleted)
@@ -1502,6 +1540,101 @@ async fn until_log_lines(handle: &Handle, job: u64, lines: u64) {
         tokio::time::sleep(Duration::from_millis(10)).await;
     }
     panic!("job {job} never stored {lines} log lines");
+}
+
+/// `o/r` with an idle runner in slot 1 whose capture waits for a job, job 5 of `o/r` queued, and `o/s`'s listing of
+/// queued jobs held: `o/r`'s answers first.
+async fn job_listed_while_another_listing_waits(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    dir: &TestDir,
+) -> (Engine<FakeGithub, FakeDocker>, Handle) {
+    idle_runner(github, docker);
+    docker.0.lock().unwrap().captures_wait = Some(github.clone());
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(5)];
+        state.queued_on.insert(5, "o/r".to_owned());
+    }
+    github.hold_queued("o/s");
+    let (mut engine, handle) = engine_with(github, docker, dir, &two_repositories());
+    engine.recover().await.unwrap();
+    (engine, handle)
+}
+
+async fn seen_at(handle: &Handle, job: u64) -> Option<u64> {
+    handle.store.flush().await;
+    handle
+        .store
+        .job(job)
+        .await
+        .unwrap()?
+        .summary
+        .timeline
+        .seen_at
+}
+
+#[tokio::test]
+async fn a_job_a_warm_runner_takes_while_other_listings_wait_keeps_when_runnerd_saw_it_queued() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("seen"),
+    );
+    let (mut engine, handle) = job_listed_while_another_listing_waits(&github, &docker, &dir).await;
+    // The idle runner takes job 5 once its listing answered, before `o/s`'s does.
+    let takes = async {
+        github
+            .until_calls(
+                |calls| calls.iter().any(|call| call == "queued o/r"),
+                "listing o/r",
+            )
+            .await;
+        docker
+            .0
+            .lock()
+            .unwrap()
+            .container_captures
+            .insert("container-1".to_owned(), "@@job 5 5\n".to_owned());
+        until_state(&handle, 5, JobState::Running).await;
+        github.release_queued();
+    };
+    tokio::join!(engine.tick(Shutdown::No), takes);
+    let seen = seen_at(&handle, 5).await;
+    assert!(
+        seen.is_some(),
+        "the listing that showed job 5 queued is kept"
+    );
+
+    // Later listings, which may still show it queued, and a restart keep the first.
+    engine.tick(Shutdown::No).await;
+    drop((engine, handle));
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    assert_eq!(seen_at(&handle, 5).await, seen);
+}
+
+#[tokio::test]
+async fn a_tick_that_ends_while_listings_wait_keeps_when_runnerd_saw_a_job_queued() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("seen"),
+    );
+    let (mut engine, handle) = job_listed_while_another_listing_waits(&github, &docker, &dir).await;
+    let listed = github.until_calls(
+        |calls| calls.iter().any(|call| call == "queued o/r"),
+        "listing o/r",
+    );
+    tokio::select! {
+        () = engine.tick(Shutdown::No) => panic!("the tick waits for o/s's listing"),
+        () = listed => {}
+    }
+    assert!(
+        seen_at(&handle, 5).await.is_some(),
+        "job 5's listing is kept though the tick never applied it"
+    );
 }
 
 #[tokio::test]

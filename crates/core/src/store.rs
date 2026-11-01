@@ -489,7 +489,8 @@ impl Store {
     }
 
     /// Records a queued job the repository's runners may run, which a listing answered at `seen_at` (ms) showed;
-    /// announces it the first time, and keeps the first listing's time.
+    /// announces it the first time, and keeps the first listing's time. A job a runner claimed first keeps its state
+    /// and gets `seen_at` if no listing showed it before and this one answered before it started.
     pub fn queued(&self, repository: &str, job: &QueuedJob, seen_at: u64) {
         self.send(Write::Queued {
             repository: repository.to_owned(),

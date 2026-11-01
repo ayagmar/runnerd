@@ -30,35 +30,43 @@ listing, the poll interval, the tick's own work, downtime) could not be told fro
 - **Idle runners are removed together, ahead of the starts** (`Engine::remove_idle`). A plan's stops run first, all
   at once: each runner is deregistered, a few GitHub requests at a time, then the containers are removed together,
   and only then do their captures end, which they do with their containers. GitHub's `Busy` still keeps a runner
-  that just took a job. A runner whose deregistration or removal fails keeps its slot and reservation until a later
+  that just took a job. GitHub also answers "not found" for a runner whose job ended, as an ephemeral runner's
+  registration goes with its job: such a runner stays when its capture named a job or its log shows one, and ends as
+  a busy runner does, its log read and a failed job recorded before its container goes; one whose log cannot be read
+  stays until it can. A runner whose deregistration or removal fails keeps its slot and reservation until a later
   removal is confirmed (ADR 0076). A forced stop still kills runner by runner. Runners that ended on their own are
   released as before: their logs are read and their failed jobs recorded before the removal.
 - **A deferred start makes the tick plan again** from the same listings, after the starts that went ahead, rather
   than skipping the rest of the plan until the next poll. It plans again only after a plan that removed or started a
   runner, at most three plans a tick, so a start that keeps not fitting costs one plan more, not a loop. Admission
   stays one start at a time against what runs by then. A replan lists nothing on GitHub: the runners it started
-  count as idle against the jobs they were started for, as at the next poll.
+  count as idle against the jobs they were started for, as at the next poll. Once a stop is asked for, mid-tick
+  included, the tick neither plans again nor starts another runner, and a runner GitHub registered while the stop
+  came is deleted before its container starts: a detaching stop would leave the job it takes running unwatched.
 - **Starts stay one at a time.** A start takes about 1.6 s on the owner's host. Starting them concurrently would need
   a pending-start state that every budget, slot, upkeep and status path counts, cancellation at a stop, and orphan
   sweeps that spare registrations not installed yet. The figures below do not ask for it.
 - **GitHub is polled as before**: every `poll_interval` after a tick ends, runners before queued jobs. A shorter tick
   only brings the next poll sooner, back to the configured interval.
 - **A job's history keeps when runnerd first listed it** (`jobs.seen_at`, schema 19): the time GitHub answered the
-  first listing that showed it queued, kept across later listings and restarts. `Timeline::seen_at` carries it and
-  `Timeline::milestones` shows it as "Seen by runnerd", between "Queued" and "Container started", so a job's wait
-  reads in three parts: runnerd had not seen it, runnerd had seen it and not started its runner, the runner booted.
-  It is `None` for a job no listing showed queued, as one a warm runner took first, and for one an older runnerd
-  recorded. `unseen` (ADR 0081) keeps its meaning: the part of the wait no runnerd ran; the time before "Seen by
-  runnerd" includes it and more, so it is not called GitHub's lag.
+  first listing that showed it queued, kept across later listings and restarts. It is written as each repository's
+  listing answers, before the others do, so a warm runner that takes the job meanwhile, or a stop that ends the tick,
+  does not lose it; a job a runner claimed first gets it if the listing answered before its runner took it, and keeps
+  its state. `Timeline::seen_at` carries it and `Timeline::milestones` shows it as "Seen by runnerd", between "Queued"
+  and "Container started", so a job's wait reads in three parts: runnerd had not seen it, runnerd had seen it and not
+  started its runner, the runner booted. It is `None` for a job no listing showed queued before its runner took it, as
+  one a warm runner took first, and for one an older runnerd recorded. `unseen` (ADR 0081) keeps its meaning: the part
+  of the wait no runnerd ran; the time before "Seen by runnerd" includes it and more, so it is not called GitHub's
+  lag.
 - **A tick logs its pace**: how long it took to reach its last start, by phase (collecting, listing, following,
   removing, starting), with its removals, starts and plans. At info level when that took longer than
   `poll_interval`, at debug level otherwise. A tick whose starts are still deferred after its last plan says how
   many.
 - **A runner's record says why it started and why it went.** `runners.purpose` is `job`, `warm` (one of the
-  repository's configured warm runners) or `burst` (one for a job its runs are expected to queue, ADR 0050), and the
-  start's log line says which. `runners.stopped_for` is why an idle runner was removed (`scheduler::StopReason`):
-  `expired`, `room`, `upkeep`, `paused`, `closed`, `changed`, `over_budget`, `clean` or `shutdown`; the "removed
-  idle" line says it in words.
+  repository's configured warm runners, counting only its idle runners left over once its queued jobs have theirs) or
+  `burst` (one for a job its runs are expected to queue, ADR 0050), and the start's log line says which.
+  `runners.stopped_for` is why an idle runner was removed (`scheduler::StopReason`): `expired`, `room`, `upkeep`,
+  `paused`, `closed`, `changed`, `over_budget`, `clean` or `shutdown`; the "removed idle" line says it in words.
 
 ## Consequences
 

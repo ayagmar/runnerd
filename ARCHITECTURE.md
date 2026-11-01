@@ -141,8 +141,9 @@ queued → slot → container → removed
    time. Each listing is read page by page, up to 10 pages; one repository's queued-jobs poll reads the jobs of at
    most 200 runs, queued runs before those in progress and the oldest first in each. A repository a reload removed
    is polled until two listings in a row show none of this machine's runners. The history keeps when a listing first
-   showed each job queued (`seen_at`), which job pages show as "Seen by runnerd" between its queueing and its
-   container's start ([ADR 0092](docs/adr/0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md)).
+   showed each job queued (`seen_at`), written as each listing answers, so a runner that takes the job before the
+   other listings answer, or a tick that ends meanwhile, keeps it; job pages show it as "Seen by runnerd" between
+   its queueing and its container's start ([ADR 0092](docs/adr/0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md)).
 2. `scheduler::plan`, a pure function, picks a free slot per queued job within the memory budget, in the profile of
    the repository's pool whose labels match the job (each `[[repositories]]` entry is a pool;
    [ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)): what each
@@ -164,13 +165,17 @@ queued → slot → container → removed
    expected to queue still), so a job finds a runner already registered
    ([ADR 0050](docs/adr/0050-warm-runners.md)).
 3. The plan's stops go first, all at once (`Engine::remove_idle`): each idle runner is deregistered, then the
-   containers are removed together, then their log captures end; a runner GitHub says just took a job stays, and a
-   slot stays held until Docker confirms its container's removal. Each record says why its runner was removed and
+   containers are removed together, then their log captures end; a runner GitHub says just took a job stays, as
+   does one whose registration was already gone but whose capture or log shows a job (its job may have ended, so it
+   ends as a busy runner does, its log read and its failed job recorded first), and a slot stays held until Docker
+   confirms its container's removal. Each record says why its runner was removed and
    why it started (`job`, `warm`, `burst`). Then, one at a time, `Engine::start` prepares the slot's volumes,
    registers a JIT runner (`GithubApi::jit_config`), opens the runner's build cache socket and starts its container
    (`DockerApi::start`) under the profile's limits and isolation backend. Right before, the start is admitted again
    against what runs and was sampled since the plan; one that no longer fits makes the tick plan again from the same
-   listings, up to three plans a tick, rather than holding back the plan's later starts until the next poll. A tick
+   listings, up to three plans a tick, rather than holding back the plan's later starts until the next poll. Once a
+   stop is asked for, no further start or plan runs, and a runner GitHub registered meanwhile is deleted before its
+   container starts. A tick
    that took longer than `poll_interval` to reach its last start logs its phases. A start that fails but leaves its
    container in Docker keeps it in the slot until Docker removes it
    ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md),

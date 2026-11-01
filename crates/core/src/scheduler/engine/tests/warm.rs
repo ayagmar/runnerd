@@ -131,6 +131,28 @@ async fn a_queued_job_takes_the_warm_runner_and_another_one_starts_for_the_next_
 }
 
 #[tokio::test]
+async fn the_configured_warm_runner_started_beside_a_queued_jobs_runner_is_recorded_as_warm() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    let (mut engine, handle, dir) = active(&github, &docker, &warm_config()).await;
+    engine.recover().await.unwrap();
+    github.0.lock().unwrap().queued = vec![job(5)];
+    engine.tick(Shutdown::No).await;
+    // The first runner waits for job 5; the second is the warm one `warm = 1` asks for, not one for a job its runs
+    // are expected to queue.
+    handle.store.flush().await;
+    let history = rusqlite::Connection::open(dir.0.join("history.db")).unwrap();
+    let purposes: Vec<String> = history
+        .prepare("SELECT purpose FROM runners ORDER BY started_at, name")
+        .unwrap()
+        .query_map([], |row| row.get(0))
+        .unwrap()
+        .collect::<Result<_, _>>()
+        .unwrap();
+    assert_eq!(purposes, ["job", "warm"]);
+}
+
+#[tokio::test]
 async fn a_job_queued_while_the_warm_runner_waits_counts_on_it() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();

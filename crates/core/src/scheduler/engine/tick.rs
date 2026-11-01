@@ -22,6 +22,7 @@ use crate::scheduler::{
     Budget, Decision, Left, Plan, Pool, Preparing, Profile, Repository, RunnerSlot, Slot, SlotRef,
     StopReason, plan,
 };
+use crate::store::Store;
 use crate::time;
 
 /// GitHub requests a tick has in flight at most. GitHub asks clients not to flood it with concurrent requests;
@@ -144,17 +145,28 @@ struct Listings {
     queued: Vec<Listed>,
 }
 
-/// A repository's queued jobs as GitHub answered them, and when, in ms.
+/// A repository's queued jobs as GitHub answered them.
 struct Listed {
     repository: String,
     answer: Result<Vec<QueuedJob>, github::Error>,
-    at: u64,
+}
+
+/// A repository to list the queued jobs of, with the labels of each of its pools.
+struct ToList {
+    repository: String,
+    pools: Vec<Vec<String>>,
 }
 
 /// Lists the runners of `runners`, then the queued jobs of `queued`, `CONCURRENT_REQUESTS` at a time. Owns what it
-/// needs, so the engine answers commands while it runs.
-async fn list<G: GithubApi>(github: Arc<G>, runners: Vec<String>, queued: Vec<String>) -> Listings {
-    let github = &*github;
+/// needs, so the engine answers commands while it runs. The history keeps each queued job a pool's labels match as
+/// seen the moment its listing answers (ADR 0092): a runner may take it, or the tick end, before the others answer.
+async fn list<G: GithubApi>(
+    github: Arc<G>,
+    store: Store,
+    runners: Vec<String>,
+    queued: Vec<ToList>,
+) -> Listings {
+    let (github, store) = (&*github, &store);
     let runners = futures_util::stream::iter(runners)
         .map(|repository| async move {
             let answer = github.runners(&repository).await;
@@ -165,13 +177,18 @@ async fn list<G: GithubApi>(github: Arc<G>, runners: Vec<String>, queued: Vec<St
         .await;
     // Only once every runner listing is in: see `tick`.
     let queued = futures_util::stream::iter(queued)
-        .map(|repository| async move {
+        .map(|ToList { repository, pools }| async move {
             let answer = github.queued_jobs(&repository).await;
-            Listed {
-                repository,
-                answer,
-                at: time::now_ms(),
+            let at = time::now_ms();
+            for job in answer.iter().flatten() {
+                if pools
+                    .iter()
+                    .any(|labels| crate::scheduler::matches(job, labels))
+                {
+                    store.queued(&repository, job, at);
+                }
             }
+            Listed { repository, answer }
         })
         .buffered(CONCURRENT_REQUESTS)
         .collect()
@@ -203,11 +220,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .cloned()
             .collect();
         let queued = match mode {
-            Shutdown::No => self.config.repository_names(),
+            Shutdown::No => self.to_list(),
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => Vec::new(),
         };
         let listings = self
-            .serving(list(self.github.clone(), runners, queued))
+            .serving(list(
+                self.github.clone(),
+                self.store.clone(),
+                runners,
+                queued,
+            ))
             .await;
         pace.lap(Phase::Listing);
         self.apply_runners(listings.runners).await;
@@ -241,9 +263,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut applied = self.apply(plan, &mut admitting, mode, &mut pace).await;
         // A start that no longer fits what runs now is decided again at once, from the same listings, rather than
         // holding back every later start of the plan until the next poll. A plan again only after one that did
-        // something, so a start that keeps not fitting costs one more plan, not a loop.
+        // something, so a start that keeps not fitting costs one more plan, not a loop. Not once a stop is asked for.
         let mut plans = 1;
-        while mode == Shutdown::No && applied.deferred > 0 && applied.acted && plans < MAX_PLANS {
+        while self.stopping() == Shutdown::No
+            && applied.deferred > 0
+            && applied.acted
+            && plans < MAX_PLANS
+        {
             let (plan, again) = self.plan();
             admitting = again;
             plans += 1;
@@ -275,9 +301,28 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.prune();
     }
 
+    /// Each configured repository with the labels of its pools, whose queued jobs a tick lists.
+    fn to_list(&self) -> Vec<ToList> {
+        self.config
+            .repository_names()
+            .into_iter()
+            .map(|repository| ToList {
+                pools: self
+                    .config
+                    .repositories
+                    .iter()
+                    .filter(|pool| pool.name == repository)
+                    .map(|pool| pool.labels.clone())
+                    .collect(),
+                repository,
+            })
+            .collect()
+    }
+
     /// Carries out `plan`: its stops first and all at once (`remove_idle`), as they only give room back and the starts
     /// that take it come after them in the plan anyway, then its starts one at a time, each admitted against what runs
     /// by then. Once a start is deferred, the plan's later starts counted on its room too and wait for the next plan.
+    /// None starts once a stop is asked for, even mid-plan.
     async fn apply(
         &mut self,
         plan: Plan,
@@ -311,6 +356,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         for decision in decisions {
             match decision {
                 Decision::Stop { .. } => {}
+                // A runner started after a stop was asked for could take a job a detaching stop leaves running.
+                Decision::Start { .. } if self.stopping() != Shutdown::No => {}
                 Decision::Start { .. } if applied.deferred > 0 => applied.deferred += 1,
                 start @ Decision::Start { .. } => {
                     if self.apply_start(start, admitting).await {
@@ -661,12 +708,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Takes each repository's queued jobs from its listing; a repository a command removed meanwhile is skipped.
     fn apply_queued(&mut self, listings: Vec<Listed>) {
-        for Listed {
-            repository,
-            answer,
-            at,
-        } in listings
-        {
+        for Listed { repository, answer } in listings {
             let mut listed = false;
             let queued = match answer {
                 Ok(queued) => {
@@ -695,7 +737,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if let Some(state) = self.repositories.get_mut(&repository) {
                 state.queued = queued;
                 state.listed = listed;
-                state.listed_at = at;
             }
         }
     }

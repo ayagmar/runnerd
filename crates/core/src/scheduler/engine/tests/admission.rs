@@ -1668,3 +1668,40 @@ async fn a_start_that_no_longer_fits_does_not_hold_back_the_plans_later_starts()
         })
     );
 }
+
+#[tokio::test]
+async fn a_stop_asked_for_while_a_runner_starts_starts_no_more_of_the_tick() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let config = sized("0G", "4G", "512M").replacen("slots = 1", "slots = 2", 1);
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(20 * G);
+    engine.recover().await.unwrap();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1), job(2), small_job(3)];
+        state
+            .queued_on
+            .extend([(1, "o/r".to_owned()), (2, "o/r".to_owned())]);
+        state.queued_on.insert(3, "o/s".to_owned());
+    }
+    host_at(&handle.store, 0, 20 * G, 0);
+    // While the first runner starts, the host's memory goes down, which defers the second, and a stop is asked for.
+    let (store, control) = (handle.store.clone(), handle.control.clone());
+    docker.0.lock().unwrap().on_start = Some(Box::new(move |_| {
+        host_at(&store, 0, 9 * G + 100 * M, 0);
+        control.shutdown(Shutdown::Detach);
+    }));
+    engine.tick(Shutdown::No).await;
+    // A runner started after the stop could take a job the detach then leaves running.
+    assert_eq!(registered(&github.calls()).len(), 1, "{:?}", github.calls());
+    let started = docker
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("start "))
+        .count();
+    assert_eq!(started, 1, "{:?}", docker.calls());
+}

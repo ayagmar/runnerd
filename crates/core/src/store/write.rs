@@ -473,9 +473,14 @@ impl Writer<'_> {
                 seen_at
             ],
         )?;
-        if inserted == 1
-            && let Some(job) = read::summary(&self.db, job.id)?
-        {
+        if inserted == 0 {
+            // A runner's capture may have claimed it first: the listing still saw it queued.
+            self.db.execute(
+                "UPDATE jobs SET seen_at = ?2 WHERE id = ?1 AND seen_at IS NULL \
+                 AND (started_at IS NULL OR started_at >= ?2)",
+                params![job.id, seen_at],
+            )?;
+        } else if let Some(job) = read::summary(&self.db, job.id)? {
             announced.push(Event::JobQueued { job });
         }
         Ok(())
