@@ -169,6 +169,7 @@ async fn waits_leave_out_the_time_no_runnerd_ran_wherever_they_are_counted() {
                 created_at: at,
                 ..queued(id)
             },
+            crate::time::now_ms(),
         );
     };
     // The first daemon sees jobs 1 and 5, and stops 20 s after it started.
@@ -273,6 +274,7 @@ async fn an_open_whose_start_then_fails_does_not_hand_out_the_same_downtime_agai
             created_at: start + 10 * SECOND,
             ..queued(1)
         },
+        crate::time::now_ms(),
     );
     first.flush().await;
     drop(first);

@@ -32,9 +32,11 @@ async fn active(
 ) -> (Engine<FakeGithub, FakeDocker>, Handle, TestDir) {
     let dir = TestDir::new("engine");
     let (engine, handle) = engine_with(github, docker, &dir, config);
-    handle
-        .store
-        .queued("o/r", &ci_job(1, 1, time::now_ms() - 10 * MINUTE));
+    handle.store.queued(
+        "o/r",
+        &ci_job(1, 1, time::now_ms() - 10 * MINUTE),
+        time::now_ms(),
+    );
     handle.store.flush().await;
     (engine, handle, dir)
 }
@@ -258,7 +260,7 @@ async fn a_runs_expected_jobs_get_runners_before_github_queues_them() {
             let id = run * 10 + n;
             handle
                 .store
-                .queued("o/r", &ci_job(id, run, then + run * MINUTE));
+                .queued("o/r", &ci_job(id, run, then + run * MINUTE), time::now_ms());
         }
     }
     handle.store.flush().await;
@@ -549,13 +551,17 @@ async fn a_run_under_way_before_a_restart_counts_from_its_jobs_not_from_the_rest
     let then = time::now_ms() - 2 * 24 * 60 * MINUTE;
     for run in 1..=3 {
         for n in 0..3 {
-            handle
-                .store
-                .queued("o/r", &ci_job(run * 10 + n, run, then + run * MINUTE));
+            handle.store.queued(
+                "o/r",
+                &ci_job(run * 10 + n, run, then + run * MINUTE),
+                time::now_ms(),
+            );
         }
     }
     let queued_at = time::now_ms() - 30 * MINUTE;
-    handle.store.queued("o/r", &ci_job(50, 50, queued_at));
+    handle
+        .store
+        .queued("o/r", &ci_job(50, 50, queued_at), time::now_ms());
     handle.store.claimed(
         50,
         50,
@@ -643,6 +649,8 @@ async fn a_warm_runner_whose_labels_image_or_limits_a_reload_changed_makes_way_f
     let other_image = warm_config().replace("image_stage = \"app\"", "image_stage = \"app-next\"");
     for config in [gpu, more_memory, other_image] {
         let github = FakeGithub::default();
+        // Each runner gets an ID of its own: the old one is removed before the new ones register.
+        github.0.lock().unwrap().strict = true;
         let docker = FakeDocker::default();
         let (mut engine, handle, _dir) = active(&github, &docker, &warm_config()).await;
         engine.recover().await.unwrap();

@@ -20,7 +20,7 @@ use crate::config::{ByteSize, Config};
 use crate::docker::{DockerApi, Tty, TtySize};
 use crate::github::GithubApi;
 use crate::isolation;
-use crate::scheduler::SlotRef;
+use crate::scheduler::{SlotRef, StopReason};
 use crate::sizing::auto;
 use crate::store::Store;
 use crate::sync::lock;
@@ -646,7 +646,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     tokio::time::Instant::now() + CANCEL_GRACE,
                 );
             } else {
-                self.stop(&slot, RunningJobs::Kill).await;
+                self.kill(&slot).await;
                 if self
                     .occupied()
                     .any(|(_, candidate)| candidate.runner_name == occupant.runner_name)
@@ -688,7 +688,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 CANCEL_GRACE.as_secs()
             );
             // The deadline stays until the runner is gone, so a failed removal is tried again next tick.
-            self.stop(&slot, RunningJobs::Kill).await;
+            self.kill(&slot).await;
         }
     }
 
@@ -777,14 +777,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         // Runners waiting for a job, warm ones too, give way: the next plan starts them again. One GitHub gave a
         // job meanwhile stays, and holds the clean back.
-        for slot in &using {
-            if self
-                .occupant(slot)
-                .is_some_and(|occupant| !occupant.busy && occupant.job.is_none())
-            {
-                self.stop(slot, RunningJobs::Keep).await;
-            }
-        }
+        let idle = using
+            .iter()
+            .filter(|slot| {
+                self.occupant(slot)
+                    .is_some_and(|occupant| !occupant.busy && occupant.job.is_none())
+            })
+            .map(|slot| (slot.clone(), StopReason::Clean))
+            .collect();
+        self.remove_idle(idle).await;
         let users: Vec<api::RunningJob> = using
             .iter()
             .filter_map(|slot| self.occupant(slot))

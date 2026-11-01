@@ -126,8 +126,10 @@ async fn ran_in(store: &Store, profile: &str, labels: &[&str], name: &str, first
                 labels: labels.iter().map(|label| (*label).to_owned()).collect(),
                 ..job(id)
             },
+            time::now_ms(),
         );
         store.runner_started(RunnerRecord {
+            purpose: None,
             name: runner.clone(),
             repository: "o/r".to_owned(),
             profile: profile.to_owned(),

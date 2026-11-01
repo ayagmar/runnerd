@@ -598,6 +598,7 @@ async fn a_failed_jobs_runner_a_stopped_daemon_did_not_keep_becomes_its_record_a
             name: "build".to_owned(),
             ..QueuedJob::default()
         },
+        crate::time::now_ms(),
     );
     store.flush().await;
     engine.recover().await.unwrap();

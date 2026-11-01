@@ -8,13 +8,13 @@ use std::time::{Duration, SystemTime};
 use futures_util::StreamExt;
 use tracing::{info, warn};
 
-use super::{DockerInStop, Engine, Occupant, Purpose, RunningJobs, unix_secs};
+use super::{DockerInStop, Engine, Occupant, Purpose, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
 use crate::docker::{DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi, Runner};
 use crate::record;
-use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef};
+use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef, StopReason};
 
 /// The runner container's label with the labels its runner registered with, comma-separated as GitHub's runner
 /// takes them, so a restart knows them.
@@ -29,15 +29,6 @@ pub(super) const SPEC: &str = "runnerd.spec";
 
 /// This release's `SPEC`.
 pub(super) const THIS_SPEC: &str = env!("CARGO_PKG_VERSION");
-
-/// Why a slot's runner is removed.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Release {
-    /// Its container stopped on its own.
-    Ended,
-    /// It was idle and is no longer needed.
-    Idle,
-}
 
 /// The labels of a runner container: what a restart adopts it by.
 fn container_labels(
@@ -108,27 +99,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             };
             if !running {
                 info!("{}: {} ended", occupant.repository, occupant.runner_name);
-                self.release(&slot, &occupant, Release::Ended).await;
+                self.release(&slot, &occupant).await;
             }
         }
     }
 
-    /// Removes a slot's container and its runner, then frees the slot. If the container `Ended` and its runner took
-    /// no job, the repository's next runners are held back for a while. A container Docker fails to remove keeps its
-    /// slot (ADR 0076): the next tick tries again, and a stop leaves it to the next start.
-    async fn release(&mut self, slot: &SlotRef, occupant: &Occupant, why: Release) {
+    /// Removes the container of a slot's runner that ended and its registration, then frees the slot. If its runner
+    /// took no job, the repository's next runners are held back for a while. A container Docker fails to remove keeps
+    /// its slot (ADR 0076): the next tick tries again, and a stop leaves it to the next start.
+    async fn release(&mut self, slot: &SlotRef, occupant: &Occupant) {
         // The runner logs each job it takes and how it ended; its exit code says nothing (run.sh exits 0 when it
         // fails to start).
-        let logs = if why == Release::Ended {
-            match self.docker.logs(&occupant.container).await {
-                Ok(logs) => Some(logs),
-                Err(error) => {
-                    warn!("cannot read the log of {}: {error}", occupant.runner_name);
-                    None
-                }
+        let logs = match self.docker.logs(&occupant.container).await {
+            Ok(logs) => Some(logs),
+            Err(error) => {
+                warn!("cannot read the log of {}: {error}", occupant.runner_name);
+                None
             }
-        } else {
-            None
         };
         let took_job = logs.as_ref().map(|logs| logs.contains("Running job: "));
         // The capture ends with the container; its last lines must be stored before the job's record closes.
@@ -147,12 +134,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 _ => {}
             }
         }
-        if why == Release::Idle {
-            info!(
-                "{}: removed idle {}",
-                occupant.repository, occupant.runner_name
-            );
-        }
         match self
             .github
             .delete_runner(&occupant.repository, occupant.runner_id)
@@ -163,13 +144,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }
         self.forget(occupant);
-        let ran = occupant.busy
-            || occupant.job.is_some()
-            || match why {
-                // Unread logs: it may have run one.
-                Release::Ended => took_job != Some(false),
-                Release::Idle => false,
-            };
+        // Unread logs: it may have run one.
+        let ran = occupant.busy || occupant.job.is_some() || took_job != Some(false);
         if let Some(state) = self
             .repositories
             .get_mut(&occupant.repository)
@@ -275,9 +251,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .unwrap_or_default()
     }
 
-    /// Removes an idle runner, or with `RunningJobs::Kill` a busy one and its job. Nothing once Docker stopped answering
-    /// a stop: the next start finds the runners as the stop left them.
-    pub(super) async fn stop(&mut self, slot: &SlotRef, jobs: RunningJobs) {
+    /// Removes a slot's runner, busy or not, and kills its job. Nothing once Docker stopped answering a stop: the
+    /// next start finds the runners as the stop left them.
+    pub(super) async fn kill(&mut self, slot: &SlotRef) {
         if self.docker_in_stop == DockerInStop::Failed {
             return;
         }
@@ -290,90 +266,84 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         else {
             return;
         };
-        if jobs == RunningJobs::Kill {
-            let busy = occupant.busy || occupant.job.is_some();
-            let what = if busy { "killing" } else { "removing idle" };
-            info!("{}: {what} {}", occupant.repository, occupant.runner_name);
-            if let Err(error) = self.docker.remove(&occupant.container).await
-                && !is_not_found(&error)
-            {
-                warn!("cannot remove {}: {error}", occupant.runner_name);
-                self.docker_failed(&error);
-                return;
-            }
-            self.end_capture(&occupant.runner_name).await;
-            // Responses the mirror logged since this tick's count: on a shutdown, the mirror and its log go next.
-            self.count_mirror_bytes().await;
-            self.forget(&occupant);
-            match self
-                .github
-                .delete_runner(&occupant.repository, occupant.runner_id)
-                .await
-            {
-                // GitHub refuses until it notices the job is gone, minutes later, even if the run is cancelled.
-                Ok(Deleted::Busy) => warn!(
-                    "{}: GitHub keeps {} until it notices its job is gone; the next runnerd start deletes it",
-                    occupant.repository, occupant.runner_name
-                ),
-                Ok(_) => {}
-                Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
-            }
-            self.vacate(slot, busy);
+        let busy = occupant.busy || occupant.job.is_some();
+        let what = if busy { "killing" } else { "removing idle" };
+        info!("{}: {what} {}", occupant.repository, occupant.runner_name);
+        if let Err(error) = self.docker.remove(&occupant.container).await
+            && !is_not_found(&error)
+        {
+            warn!("cannot remove {}: {error}", occupant.runner_name);
+            self.docker_failed(&error);
             return;
         }
+        self.end_capture(&occupant.runner_name).await;
+        // Responses the mirror logged since this tick's count: on a shutdown, the mirror and its log go next.
+        self.count_mirror_bytes().await;
+        self.forget(&occupant);
         match self
             .github
             .delete_runner(&occupant.repository, occupant.runner_id)
             .await
         {
-            Ok(Deleted::Busy) => {
-                if let Some(Some(entry)) = self
-                    .slots
-                    .get_mut(&slot.profile)
-                    .and_then(|slots| slots.get_mut(slot.index))
-                {
-                    entry.busy = true;
-                }
-            }
-            Ok(Deleted::Deleted | Deleted::NotFound) => {
-                self.release(slot, &occupant, Release::Idle).await;
-            }
+            // GitHub refuses until it notices the job is gone, minutes later, even if the run is cancelled.
+            Ok(Deleted::Busy) => warn!(
+                "{}: GitHub keeps {} until it notices its job is gone; the next runnerd start deletes it",
+                occupant.repository, occupant.runner_name
+            ),
+            Ok(_) => {}
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }
+        self.vacate(slot, busy);
     }
 
-    /// Removes the idle and warm runners a detaching stop leaves no work for, best effort and all at once: each is
-    /// deregistered, a few at a time as GitHub asks, and then the containers are removed together, as each removal
-    /// waits for its container to stop. GitHub's `Busy` keeps a runner that just took a job, and busy runners stay
-    /// for the next start, as does one whose deregistration or removal fails. An idle runner left registered would
-    /// take one more job with no daemon to watch it.
-    pub(super) async fn remove_idle(&mut self) {
+    /// Removes the idle and warm runners a detaching stop leaves no work for (ADR 0091). An idle runner left
+    /// registered would take one more job with no daemon to watch it.
+    pub(super) async fn remove_every_idle(&mut self) {
+        let idle: Vec<(SlotRef, StopReason)> = self
+            .occupied()
+            .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
+            .map(|(slot, _)| (slot, StopReason::Shutdown))
+            .collect();
+        self.remove_idle(idle).await;
+    }
+
+    /// Removes the idle runners of `stops`, each for its reason, all at once (ADR 0091, 0092): each is deregistered,
+    /// a few at a time as GitHub asks, then the containers are removed together, as each removal waits for its
+    /// container to stop, and only then their log captures end, which they do with their containers. Waiting for a
+    /// capture before its removal held every later start back by `CAPTURE_DRAIN`. GitHub's `Busy` keeps a runner that
+    /// just took a job, and busy runners stay, as does one whose deregistration or removal fails: its slot and
+    /// reservation stay its until a removal is confirmed (ADR 0076). Nothing once Docker stopped answering a stop.
+    pub(super) async fn remove_idle(&mut self, stops: Vec<(SlotRef, StopReason)>) {
         if self.docker_in_stop == DockerInStop::Failed {
             return;
         }
-        let idle: Vec<(SlotRef, Occupant)> = self
-            .occupied()
-            .filter(|(_, occupant)| !occupant.busy && occupant.job.is_none())
-            .map(|(slot, occupant)| (slot, occupant.clone()))
+        // A slot twice in `stops` is removed once.
+        let stops: BTreeMap<SlotRef, StopReason> = stops.into_iter().collect();
+        let idle: Vec<(SlotRef, Occupant, StopReason)> = stops
+            .into_iter()
+            .filter_map(|(slot, reason)| {
+                let occupant = self.occupant(&slot)?.clone();
+                Some((slot, occupant, reason))
+            })
             .collect();
         if idle.is_empty() {
             return;
         }
         let github = &*self.github;
         let deleted: Vec<_> = futures_util::stream::iter(idle)
-            .map(|(slot, occupant)| async move {
+            .map(|(slot, occupant, reason)| async move {
                 let answer = github
                     .delete_runner(&occupant.repository, occupant.runner_id)
                     .await;
-                (slot, occupant, answer)
+                (slot, occupant, reason, answer)
             })
             .buffer_unordered(super::tick::CONCURRENT_REQUESTS)
             .collect()
             .await;
         let mut removing = Vec::new();
-        for (slot, occupant, answer) in deleted {
+        for (slot, occupant, reason, answer) in deleted {
             match answer {
-                Ok(Deleted::Deleted | Deleted::NotFound) => removing.push((slot, occupant)),
+                Ok(Deleted::Deleted | Deleted::NotFound) => removing.push((slot, occupant, reason)),
                 Ok(Deleted::Busy) => {
                     if let Some(Some(entry)) = self
                         .slots
@@ -388,13 +358,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         let docker = &*self.docker;
         let removed = futures_util::future::join_all(removing.into_iter().map(
-            |(slot, occupant)| async move {
+            |(slot, occupant, reason)| async move {
                 let removed = docker.remove(&occupant.container).await;
-                (slot, occupant, removed)
+                (slot, occupant, reason, removed)
             },
         ))
         .await;
-        for (slot, occupant, removed) in removed {
+        let mut any = false;
+        for (slot, occupant, reason, removed) in removed {
             match removed {
                 Err(error) if !is_not_found(&error) => {
                     warn!("cannot remove {}: {error}", occupant.runner_name);
@@ -402,14 +373,23 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 _ => {
                     info!(
-                        "{}: removed idle {}",
-                        occupant.repository, occupant.runner_name
+                        "{}: removed idle {}: {}",
+                        occupant.repository,
+                        occupant.runner_name,
+                        reason.words()
                     );
                     self.end_capture(&occupant.runner_name).await;
+                    self.store
+                        .runner_stopped_for(&occupant.runner_name, reason.as_str());
                     self.forget(&occupant);
-                    self.vacate(&slot, false);
+                    self.vacate(&slot, occupant.busy || occupant.job.is_some());
+                    any = true;
                 }
             }
+        }
+        // What the mirror logged for them, as their containers went.
+        if any {
+            self.count_mirror_bytes().await;
         }
     }
 
@@ -562,6 +542,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             image: Some(image),
             spec: Some(THIS_SPEC.to_owned()),
             observed: false,
+            purpose: Some(purpose),
         };
         self.place(slot, occupant, purpose, failure).await;
     }
@@ -590,6 +571,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 let warm = match purpose {
                     Purpose::Job => "",
                     Purpose::Warm => " warm, for jobs not queued yet",
+                    Purpose::Burst => " warm, for a job its runs are expected to queue",
                 };
                 info!(
                     "{repository}: started {name} in {} slot {number}{warm}",

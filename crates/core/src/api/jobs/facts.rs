@@ -275,9 +275,16 @@ pub struct Milestone {
 
 impl Timeline {
     /// The moments it has times for, earliest first: a warm runner's container started before the job was queued.
+    /// When runnerd first listed it splits its wait in three (ADR 0092): before it, runnerd had not seen the job;
+    /// from it to its container's start, runnerd had; then the runner booted. A listing never comes before the
+    /// queueing, however GitHub's clock and this machine's differ.
     pub fn milestones(&self) -> Vec<Milestone> {
         let mut milestones: Vec<Milestone> = [
             ("Queued", Some(self.queued_at)),
+            (
+                "Seen by runnerd",
+                self.seen_at.map(|seen| seen.max(self.queued_at)),
+            ),
             ("Container started", self.container_started_at),
             ("Job started", self.started_at),
             ("Finished", self.finished_at),

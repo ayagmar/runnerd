@@ -97,3 +97,4 @@ decision stays, with a line under its title pointing to the record that changes 
 | [0089](0089-a-slots-cache-mounts-go-last.md) | A slot's build cache follows its share, and cache mounts go last |
 | [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md) | Under measured admission, slots follow waits for a slot alone and Docker's disk |
 | [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md) | A signal leaves running jobs to the next start, and the daemon exits within 45 s |
+| [0092](0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md) | Idle removals and deferred starts stay off the start path, and a job's wait says where it went |

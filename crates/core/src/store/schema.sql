@@ -1,4 +1,4 @@
--- The job history at schema version 17, which `Store::open` creates in a new database. Times are milliseconds since
+-- The job history at schema version 19, which `Store::open` creates in a new database. Times are milliseconds since
 -- the Unix epoch. A database from version 15 on is brought here by `store::MIGRATIONS`, an older or newer one is
 -- refused (ADR 0073); a change to this schema adds a step there, its columns appended where `ALTER TABLE` puts them.
 
@@ -49,7 +49,11 @@ CREATE TABLE jobs (
     cpu_stalled INTEGER,
     -- How long it waited with no slot of its profile free while the slice's memory, the host's and the CPU budget had
     -- room for its runner: what one more slot would have saved it (ADR 0090). 0 in rows from before schema 18.
-    slot_waited INTEGER NOT NULL DEFAULT 0
+    slot_waited INTEGER NOT NULL DEFAULT 0,
+    -- When runnerd first listed it queued (ADR 0092): its first listing's answer, kept across later listings and
+    -- restarts. NULL for a job no listing showed queued, such as one a warm runner took first, and in rows from
+    -- before schema 19.
+    seen_at INTEGER
 );
 CREATE INDEX jobs_by_repository ON jobs (repository, id);
 CREATE INDEX jobs_by_state ON jobs (state);
@@ -91,7 +95,14 @@ CREATE TABLE runners (
     sock_throttled INTEGER,
     -- How many times its own limit failed reclaim (`memory.events.local` `oom`), the largest value sampled, NULL
     -- while never read. Unlike `ooms` it leaves out a limit a descendant cgroup hit (ADR 0070).
-    local_ooms INTEGER
+    local_ooms INTEGER,
+    -- Why it started (ADR 0092): 'job' for a queued job; 'warm' for one of its repository's configured warm runners,
+    -- 'burst' for one of the jobs its runs are expected to queue still. NULL for one a restart adopted, and in rows
+    -- from before schema 19.
+    purpose TEXT,
+    -- Why it was removed while idle (`scheduler::StopReason::as_str`); NULL for one that ended, was killed or is
+    -- still up, and in rows from before schema 19.
+    stopped_for TEXT
 );
 
 CREATE TABLE steps (

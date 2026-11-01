@@ -129,6 +129,18 @@ fn a_job_states_its_outcome_steps_caps_and_build_cache_as_core_does() {
     assert!(text.contains(&facts.job.limits), "{text}");
     assert!(text.contains(&facts.job.cpu_time), "{text}");
     assert!(text.contains(&facts.job.unseen), "{text}");
+    let milestones: Vec<&str> = text
+        .lines()
+        .filter_map(|line| {
+            facts
+                .job
+                .milestones
+                .iter()
+                .find(|label| line.trim_start().starts_with(**label))
+                .copied()
+        })
+        .collect();
+    assert_eq!(milestones, facts.job.milestones, "{text}");
     assert!(text.contains(&facts.job.cpu_held), "{text}");
     for part in &facts.job.build_cache {
         assert!(text.contains(part.as_str()), "{part}: {text}");

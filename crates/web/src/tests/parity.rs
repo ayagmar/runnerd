@@ -151,6 +151,9 @@ async fn a_job_states_its_outcome_steps_build_cache_and_failed_runs_as_core_does
         job.row.label
     );
     assert!(html.contains(&badge), "{badge}");
+    for label in &job.milestones {
+        assert!(html.contains(&format!("<dt>{label}</dt>")), "{label}");
+    }
     // Its caps show on its charts, which a job without samples has none of.
     for figure in [
         job.cpu_time.clone(),

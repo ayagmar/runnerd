@@ -24,7 +24,7 @@ use crate::config::Admission;
 use crate::docker::DockerApi;
 use crate::github::{GithubApi, QueuedJob};
 use crate::observe::metrics::SAMPLE_INTERVAL;
-use crate::scheduler::{Decision, Pool, Repository, matches};
+use crate::scheduler::{Decision, Pool, Repository, StopReason, matches};
 use crate::time;
 
 /// How often the predictor reads the job history again.
@@ -608,7 +608,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 break;
             }
             let stopping = decisions.iter().any(
-                |decision| matches!(decision, Decision::Stop { slot: other } if *other == slot),
+                |decision| matches!(decision, Decision::Stop { slot: other, .. } if *other == slot),
             );
             if occupant.busy
                 || occupant.job.is_some()
@@ -624,7 +624,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 crate::config::ByteSize(occupant.reserved())
             );
             in_use = in_use.saturating_sub(self.takes(occupant));
-            stops.push(Decision::Stop { slot });
+            stops.push(Decision::Stop {
+                slot,
+                reason: StopReason::OverBudget,
+            });
         }
         stops
     }

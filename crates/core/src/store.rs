@@ -53,6 +53,12 @@ const MIGRATIONS: &[(u32, &str)] = &[
         18,
         "ALTER TABLE jobs ADD COLUMN slot_waited INTEGER NOT NULL DEFAULT 0;",
     ),
+    (
+        19,
+        "ALTER TABLE jobs ADD COLUMN seen_at INTEGER;\n\
+         ALTER TABLE runners ADD COLUMN purpose TEXT;\n\
+         ALTER TABLE runners ADD COLUMN stopped_for TEXT;",
+    ),
 ];
 
 /// The schema version this build reads and writes, the database's `user_version`: its last migration's.
@@ -137,6 +143,8 @@ pub struct RunnerRecord {
     pub cpu_cap: Option<u64>,
     /// How it was admitted; `None` for one a restart adopted without a record of it.
     pub admission: Option<api::Admission>,
+    /// Why it started: `job`, `warm` or `burst`; `None` for one a restart adopted.
+    pub purpose: Option<&'static str>,
 }
 
 /// One sample of one runner's container.
@@ -243,6 +251,7 @@ enum Write {
     Queued {
         repository: String,
         job: QueuedJob,
+        seen_at: u64,
     },
     RunnerStarted(RunnerRecord),
     RunnerAdmission {
@@ -250,6 +259,10 @@ enum Write {
         admission: api::Admission,
     },
     RunnerOomKilled(String),
+    RunnerStoppedFor {
+        runner: String,
+        reason: &'static str,
+    },
     HostWaited {
         jobs: Vec<u64>,
         ms: u64,
@@ -475,11 +488,13 @@ impl Store {
         let _ = self.writes.send(write);
     }
 
-    /// Records a queued job the repository's runners may run; announces it the first time.
-    pub fn queued(&self, repository: &str, job: &QueuedJob) {
+    /// Records a queued job the repository's runners may run, which a listing answered at `seen_at` (ms) showed;
+    /// announces it the first time, and keeps the first listing's time.
+    pub fn queued(&self, repository: &str, job: &QueuedJob, seen_at: u64) {
         self.send(Write::Queued {
             repository: repository.to_owned(),
             job: job.clone(),
+            seen_at,
         });
     }
 
@@ -607,6 +622,14 @@ impl Store {
     /// have missed: one in the last interval before the container stopped.
     pub fn runner_oom_killed(&self, runner: &str) {
         self.send(Write::RunnerOomKilled(runner.to_owned()));
+    }
+
+    /// Records why an idle runner was removed, as `scheduler::StopReason::as_str` names it.
+    pub fn runner_stopped_for(&self, runner: &str, reason: &'static str) {
+        self.send(Write::RunnerStoppedFor {
+            runner: runner.to_owned(),
+            reason,
+        });
     }
 
     /// Adds what the shared build cache served a runner and took from it, and records whether its job could write.

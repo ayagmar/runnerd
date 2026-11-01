@@ -271,6 +271,7 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             finished_at: finished,
             cleaned_at: finished.map(|finished| finished + 4),
             unseen: 0,
+            seen_at: None,
         },
         metrics: JobMetrics {
             cpu_time: Some(cpu_time),

@@ -7,7 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use tracing::warn;
 
-use super::Engine;
+use super::{Engine, Purpose};
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
 use crate::scheduler::warm::{self, Attempt, Learned, Runs};
@@ -123,6 +123,40 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 job.workflow.as_deref(),
                 now,
             );
+        }
+    }
+
+    /// Why `pool`'s next warm runner starts: as one of its configured warm runners while fewer of its runners wait
+    /// for a job, else for a job its runs are expected to queue (`warm::target`).
+    pub(super) fn warm_purpose(&self, pool: &Pool) -> Purpose {
+        let now = time::now_ms();
+        let configured = self
+            .config
+            .repositories
+            .iter()
+            .find(|repository| Pool::from(*repository) == *pool)
+            .and_then(|repository| {
+                let (learned, _) = self.warm.learned.as_ref()?;
+                Some(warm::target(
+                    repository.warm,
+                    learned.active(&repository.name, now),
+                    0,
+                ))
+            })
+            .unwrap_or(0);
+        let waiting = self
+            .occupied()
+            .filter(|(slot, occupant)| {
+                slot.profile == pool.profile
+                    && occupant.repository == pool.repository
+                    && !occupant.busy
+                    && occupant.job.is_none()
+            })
+            .count();
+        if waiting < configured {
+            Purpose::Warm
+        } else {
+            Purpose::Burst
         }
     }
 

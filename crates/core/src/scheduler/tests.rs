@@ -5,7 +5,7 @@ use std::time::{Duration, SystemTime};
 
 use super::{
     Budget, CPU_PRIORITY_AFTER, Decision, Hold, IDLE_TIMEOUT, Plan, Preparing, Profile, Repository,
-    RunnerSlot, Slot, SlotRef, plan,
+    RunnerSlot, Slot, SlotRef, StopReason, plan,
 };
 use crate::admission::Key;
 use crate::api::{HoldCause, Waiting};
@@ -237,6 +237,7 @@ fn an_idle_runner_stops_only_after_its_timeout_with_nothing_queued() {
             profile: "app".to_owned(),
             index: 0,
         },
+        reason: StopReason::Expired,
     };
     assert_eq!(
         plan(
@@ -702,7 +703,8 @@ fn the_idle_runner_of_a_paused_repository_stops_though_its_jobs_stay_queued() {
             slot: SlotRef {
                 profile: "app".to_owned(),
                 index: 0
-            }
+            },
+            reason: StopReason::Paused,
         }]
     );
     assert_eq!(plan.waiting, BTreeMap::from([(1, Waiting::Paused)]));
@@ -786,7 +788,13 @@ fn an_idle_runner_beyond_the_warm_ones_stops_after_the_idle_timeout() {
         budget(None, None),
         now(),
     );
-    assert_eq!(plan.decisions, [Decision::Stop { slot: slot(0) }]);
+    assert_eq!(
+        plan.decisions,
+        [Decision::Stop {
+            slot: slot(0),
+            reason: StopReason::Expired
+        }]
+    );
     assert_eq!(plan.warm, [slot(1)].into());
 }
 
@@ -822,7 +830,10 @@ fn a_queued_job_takes_the_slot_of_a_warm_runner_of_another_repository_in_the_sam
     assert_eq!(
         plan.decisions,
         [
-            Decision::Stop { slot: slot(0) },
+            Decision::Stop {
+                slot: slot(0),
+                reason: StopReason::Room
+            },
             Decision::Start {
                 slot: slot(0),
                 repository: "o/b".to_owned(),
@@ -872,7 +883,10 @@ fn a_queued_job_takes_the_memory_and_cpu_of_warm_runners_of_another_profile() {
     assert_eq!(
         plan.decisions,
         [
-            Decision::Stop { slot: web(0) },
+            Decision::Stop {
+                slot: web(0),
+                reason: StopReason::Room
+            },
             Decision::Start {
                 slot: slot(0),
                 repository: "o/a".to_owned(),
@@ -989,7 +1003,13 @@ fn a_profile_due_a_reseed_stops_its_warm_runners_at_once_and_starts_none() {
         budget(None, None),
         now(),
     );
-    assert_eq!(plan.decisions, [Decision::Stop { slot: slot(0) }]);
+    assert_eq!(
+        plan.decisions,
+        [Decision::Stop {
+            slot: slot(0),
+            reason: StopReason::Upkeep
+        }]
+    );
     assert!(plan.warm.is_empty(), "no runner is kept warm");
 }
 
@@ -1004,7 +1024,13 @@ fn a_paused_repository_keeps_no_warm_runner() {
         budget(None, None),
         now(),
     );
-    assert_eq!(plan.decisions, [Decision::Stop { slot: slot(0) }]);
+    assert_eq!(
+        plan.decisions,
+        [Decision::Stop {
+            slot: slot(0),
+            reason: StopReason::Paused
+        }]
+    );
 }
 
 #[test]
@@ -1020,7 +1046,10 @@ fn a_warm_runner_in_a_slot_a_lowered_count_closed_stops_and_its_slot_serves_no_j
     );
     assert_eq!(
         stopped.decisions,
-        [Decision::Stop { slot: slot(1) }],
+        [Decision::Stop {
+            slot: slot(1),
+            reason: StopReason::Closed
+        }],
         "it stops, and slot 1 takes the next warm runner"
     );
 

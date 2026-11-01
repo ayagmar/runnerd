@@ -111,6 +111,8 @@ struct GithubState {
     held_deletes: tokio::sync::watch::Sender<bool>,
     /// Listings, job reads and deletes waiting for an answer.
     waiting: usize,
+    /// How long each listing, registration and delete takes to answer, where a test says: a workload's figures.
+    latency: Duration,
 }
 
 impl GithubState {
@@ -214,9 +216,18 @@ impl FakeGithub {
     }
 }
 
+impl FakeGithub {
+    /// Waits as long as a request takes.
+    async fn latency(&self) {
+        let latency = self.0.lock().unwrap().latency;
+        tokio::time::sleep(latency).await;
+    }
+}
+
 impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
         self.answer().await;
+        self.latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
         let queued = state
@@ -236,6 +247,7 @@ impl GithubApi for FakeGithub {
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
         self.answer().await;
+        self.latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("runners {repository}"));
         if state.missed_listings.remove(repository) {
@@ -262,6 +274,7 @@ impl GithubApi for FakeGithub {
         name: &str,
         _labels: &[String],
     ) -> Result<(Runner, JitConfig), github::Error> {
+        self.latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("register {name}"));
         if state.register_fails {
@@ -286,6 +299,7 @@ impl GithubApi for FakeGithub {
     async fn delete_runner(&self, _repository: &str, id: u64) -> Result<Deleted, github::Error> {
         self.0.lock().unwrap().call(format!("delete {id}"));
         self.wait(|state| &state.held_deletes).await;
+        self.latency().await;
         let mut state = self.0.lock().unwrap();
         if state.busy_deletes > 0 {
             state.busy_deletes -= 1;
@@ -423,6 +437,12 @@ struct DockerState {
     /// as a runner's capture waits for the job GitHub gives it. It ends with its container, or once this GitHub no
     /// longer has its runner, which then exits.
     captures_wait: Option<FakeGithub>,
+    /// With `captures_wait`: what a waiting capture ends with.
+    capture_end: CaptureEnd,
+    /// How long Docker takes to answer, where a test says: a workload's figures.
+    latency: DockerLatency,
+    /// When each runner container started, on Tokio's clock, by name.
+    started_on_clock: HashMap<String, tokio::time::Instant>,
     /// What the Docker Hub mirror's log says.
     mirror_log: String,
     /// What the mirror logs while a runner container is removed, as when the runner's last pulls land just then.
@@ -499,6 +519,25 @@ struct DockerState {
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
     calls: Vec<String>,
+}
+
+/// What a log capture that waits for its runner's job ends with, without one.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+enum CaptureEnd {
+    /// Its container, or GitHub no longer having its runner, which then exits at once.
+    #[default]
+    RunnerOrContainer,
+    /// Its container only, as a real runner keeps running a while after its deregistration.
+    Container,
+}
+
+/// How long the fake Docker Engine takes to answer.
+#[derive(Debug, Default, Clone, Copy)]
+struct DockerLatency {
+    /// A runner container's start.
+    start: Duration,
+    /// The removal of a running container, which kills it first.
+    remove_running: Duration,
 }
 
 /// What the fake Docker runs once at a runner start.
@@ -608,8 +647,13 @@ impl DockerApi for FakeDocker {
                 error,
             });
         }
+        let latency = self.0.lock().unwrap().latency.start;
+        tokio::time::sleep(latency).await;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("start {}", spec.name));
+        state
+            .started_on_clock
+            .insert(spec.name.clone(), tokio::time::Instant::now());
         let refused = |error| {
             Err(docker::StartError {
                 container: None,
@@ -722,6 +766,18 @@ impl DockerApi for FakeDocker {
 
     async fn remove(&self, container: &str) -> Result<(), docker::Error> {
         self.outage().await?;
+        let latency = {
+            let state = self.0.lock().unwrap();
+            let running = state.containers.iter().any(|candidate| {
+                (candidate.id == container || candidate.name == container) && candidate.running
+            });
+            if running {
+                state.latency.remove_running
+            } else {
+                Duration::ZERO
+            }
+        };
+        tokio::time::sleep(latency).await;
         let mut state = self.0.lock().unwrap();
         state.calls.push(format!("remove {container}"));
         if state.remove_outage == Outage::Refused {
@@ -850,6 +906,7 @@ impl DockerApi for FakeDocker {
             return Ok(futures_util::stream::iter([Ok(printed), Err(broken())]).boxed());
         }
         if let (None, Some(github)) = (&output, state.captures_wait.clone()) {
+            let outlives = state.capture_end == CaptureEnd::Container;
             let docker = self.0.clone();
             let container = container.to_owned();
             return Ok(futures_util::stream::once(async move {
@@ -868,17 +925,20 @@ impl DockerApi for FakeDocker {
                             None => return Err(not_found()),
                         }
                     };
-                    let registered = github
-                        .0
-                        .lock()
-                        .unwrap()
-                        .runners
-                        .iter()
-                        .any(|runner| runner.name == name);
+                    let registered = outlives
+                        || github
+                            .0
+                            .lock()
+                            .unwrap()
+                            .runners
+                            .iter()
+                            .any(|runner| runner.name == name);
                     if !registered {
                         return Err(not_found());
                     }
-                    tokio::time::sleep(Duration::from_millis(2)).await;
+                    // Seldom where it waits for its container only, as a workload's runners do for minutes.
+                    let poll = if outlives { 50 } else { 2 };
+                    tokio::time::sleep(Duration::from_millis(poll)).await;
                 }
             })
             .boxed());
@@ -4878,6 +4938,7 @@ async fn a_log_capture_docker_breaks_off_starts_again_where_its_stored_log_ends(
 mod admission;
 mod build_cache;
 mod invariants;
+mod pacing;
 mod pools;
 mod records;
 mod stop;

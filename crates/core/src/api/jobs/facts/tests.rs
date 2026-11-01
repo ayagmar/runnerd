@@ -232,6 +232,38 @@ fn a_warm_runners_container_start_is_the_first_milestone() {
 }
 
 #[test]
+fn runnerds_first_listing_splits_a_cold_jobs_wait_and_never_comes_before_its_queueing() {
+    let cold = |seen_at: u64| Timeline {
+        queued_at: 100,
+        seen_at: Some(seen_at),
+        container_started_at: Some(140),
+        started_at: Some(146),
+        ..Timeline::default()
+    };
+    let at = |timeline: Timeline| -> Vec<(&str, u64)> {
+        timeline
+            .milestones()
+            .iter()
+            .map(|milestone| (milestone.label, milestone.at))
+            .collect()
+    };
+    assert_eq!(
+        at(cold(130)),
+        [
+            ("Queued", 100),
+            ("Seen by runnerd", 130),
+            ("Container started", 140),
+            ("Job started", 146)
+        ]
+    );
+    // This machine's clock behind GitHub's.
+    assert_eq!(
+        at(cold(97))[..2],
+        [("Queued", 100), ("Seen by runnerd", 100)]
+    );
+}
+
+#[test]
 fn a_timed_out_step_failed_and_a_cancelled_one_did_not() {
     assert_eq!(
         step("completed", Some("timed_out")).outcome().kind,
