@@ -1,6 +1,6 @@
 # 0002. JSON and SSE over a Unix socket; the web UI on loopback TCP
 
-Refined by [0017](0017-job-history-in-sqlite.md) (durable event IDs), [0020](0020-dashboard-is-an-api-client-on-loopback.md) (the dashboard and its login) and [0021](0021-clients-speak-http-over-the-socket-with-hyper.md) (how clients speak to the socket).
+Status: **Accepted**.
 
 ## Context
 

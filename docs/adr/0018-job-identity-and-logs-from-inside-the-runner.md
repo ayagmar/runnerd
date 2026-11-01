@@ -1,5 +1,7 @@
 # 0018. Job identity and logs from inside the runner container
 
+Status: **Accepted**.
+
 ## Context
 
 A JIT runner's container does not say which job its runner took, and GitHub's list of queued jobs lags the runner

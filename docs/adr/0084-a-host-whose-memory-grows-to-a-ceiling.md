@@ -1,8 +1,6 @@
 # 0084. A host whose memory grows to a ceiling counts what it can still grow by
 
-Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-hosts-memory.md). Amended by
-[0086](0086-sizing-and-init-know-the-memory-ceiling.md): auto sizing raises no profile past the ceiling less the
-mirror, and `runnerd init --memory-ceiling` writes the key and sizes for it.
+Status: **Accepted** (2026-10-30), amended by [0086](0086-sizing-and-init-know-the-memory-ceiling.md). Amends [0055](0055-admission-follows-the-hosts-memory.md).
 
 ## Context
 

@@ -1,8 +1,6 @@
 # 0068. Auto sizing moves `cpus` on each job's run average, not on CPU peaks
 
-Status: **Accepted** (2026-10-26), amended by [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md) on the
-lowering. Amends [0049](0049-auto-sizing-without-hand-tuning.md), where it states the CPU
-rule, and [0046](0046-sizing-says-what-auto-sizing-does-next.md).
+Status: **Accepted** (2026-10-26), amended by [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md). Amends [0049](0049-auto-sizing-without-hand-tuning.md), [0046](0046-sizing-says-what-auto-sizing-does-next.md).
 
 ## Context
 

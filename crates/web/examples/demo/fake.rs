@@ -271,7 +271,8 @@ fn job(spec: &Spec<'_>, now: u64, noise: &mut Noise) -> (Job, Vec<Sample>, Vec<S
             finished_at: finished,
             cleaned_at: finished.map(|finished| finished + 4),
             unseen: 0,
-            seen_at: None,
+            // Runnerd listed it on a poll between its queueing and its runner's start.
+            seen_at: Some(spec.queued_at + container.saturating_sub(spec.queued_at) / 2),
         },
         metrics: JobMetrics {
             cpu_time: Some(cpu_time),

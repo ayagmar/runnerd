@@ -1,0 +1,35 @@
+---
+title: Architecture
+description: What runs where inside runnerd, how a job moves through it, and where each part lives in the repository.
+---
+
+import Architecture from '../../components/diagrams/Architecture.astro';
+
+<Architecture />
+
+One daemon, `runnerd serve`, owns every slot. Clients never talk to GitHub or Docker: they read the daemon's status and history and send it commands over its Unix socket (`$XDG_RUNTIME_DIR/runnerd.sock`). The dashboard runs inside the daemon's process but uses the same socket.
+
+## Life of a job
+
+1. **Queued.** The job waits on GitHub, asking for labels that one of the repository's profiles serves.
+2. **Listed.** Every `poll_interval` the engine lists this machine's runners, then each repository's queued jobs. It reads runners first so a job whose runner just took it does not get a second one.
+3. **Admitted.** The planner picks a free slot in the repository's profile whose labels match the job. A job starts only if its runner's memory fits the budget: its cap, or under `admission = "measured"` its predicted peak, within what the host leaves the slice. A job that does not fit stays queued, and `runnerctl status` says why.
+4. **Runner started.** The engine registers an ephemeral runner with the pool's labels and starts a container for it in the slot, under sysbox, over the profile's snapshot. The runner takes one job that matches those labels, not necessarily the one that prompted the start, and exits after it.
+5. **Job.** While it runs, the engine records the job's steps, its log and, every 2 seconds, its container's CPU and memory in the history store. Clients stream this through `GET /v1/events`.
+6. **Recorded.** When the runner exits, its credentials are scrubbed and the engine removes the container and the runner's registration and frees the slot. The job's record is final once GitHub reports it completed. A failed job of a profile with `record_failures` leaves a record first, which `runnerctl shell` opens.
+
+## Where each part lives
+
+| Part | Where | What it owns |
+|---|---|---|
+| Daemon, socket API | `crates/daemon` | `runnerd` commands; the routes clients call; `[notify]` deliveries |
+| Engine | `crates/core/src/scheduler` | slot state, the tick, planning, starting and removing runners |
+| GitHub, Docker | `crates/core/src/github.rs`, `docker.rs` | the only code that talks to them, behind traits the engine's tests fake |
+| History store | `crates/core/src/store.rs` | SQLite; one writer |
+| Admission, sizing | `crates/core/src/admission`, `sizing` | predicted peaks, slot and memory advice |
+| API types, wording | `crates/core/src/api` | what every client shows of a fact: outcomes, waits, budgets, view and column names |
+| Dashboard | `crates/web` | server-rendered pages, charts, live updates |
+| CLI and TUI | `crates/cli` | `runnerctl`; the TUI is `src/tui`, one module per view |
+| Runner image | `image/` | the images the containers start from |
+
+Contributors: [ARCHITECTURE.md](https://github.com/ayagmar/runnerd/blob/main/ARCHITECTURE.md) has the crate rules, the request path and state, and every design decision links to its [ADR](https://github.com/ayagmar/runnerd/blob/main/docs/adr/README.md).

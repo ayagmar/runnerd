@@ -1,5 +1,7 @@
 # 0023. Runner image pinned to an Ubuntu snapshot date
 
+Status: **Accepted**.
+
 ## Context
 
 The base images were pinned by digest ([0009](0009-newest-stable-and-locked-dependencies.md)), but `apt-get install`

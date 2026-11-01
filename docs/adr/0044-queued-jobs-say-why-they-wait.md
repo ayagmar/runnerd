@@ -1,6 +1,6 @@
 # 0044. Queued jobs say why they wait
 
-Status: **Accepted** (2026-10-24).
+Status: **Accepted** (2026-10-24), amended by [0058](0058-a-repository-served-by-several-profiles.md).
 
 ## Context
 

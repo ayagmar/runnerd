@@ -1,5 +1,7 @@
 # 0016. Strict lints, every exception with a reason
 
+Status: **Accepted**.
+
 ## Context
 
 Agents and new contributors write most changes. Review should not be the first place `unwrap`, stray prints or undocumented public items are caught.

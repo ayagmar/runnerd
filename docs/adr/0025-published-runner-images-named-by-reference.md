@@ -1,5 +1,7 @@
 # 0025. Published runner images, named by reference
 
+Status: **Accepted**.
+
 ## Context
 
 runnerd ran only `runnerd-runner:<image_stage>`, an image the user built from a clone of the repository. Releases

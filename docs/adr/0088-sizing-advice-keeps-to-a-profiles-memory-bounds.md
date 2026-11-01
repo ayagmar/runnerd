@@ -1,7 +1,6 @@
 # 0088. Sizing advice keeps to a profile's memory bounds
 
-Status: **Accepted** (2026-10-30). Amends [0086](0086-sizing-and-init-know-the-memory-ceiling.md) and
-[0039](0039-auto-sizing.md).
+Status: **Accepted** (2026-10-30). Amends [0086](0086-sizing-and-init-know-the-memory-ceiling.md), [0039](0039-auto-sizing.md).
 
 ## Context
 

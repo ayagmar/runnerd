@@ -1,5 +1,7 @@
 # 0015. The engine calls GitHub and Docker through traits
 
+Status: **Accepted**.
+
 ## Context
 
 The engine's recovery, polling order and cleanup rules had no tests: they needed a real Docker and GitHub.

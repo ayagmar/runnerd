@@ -1,9 +1,6 @@
 # 0072. What this machine's job minutes would have cost on GitHub-hosted runners
 
-Status: **Accepted** (2026-10-26).
-
-Amended by [0074](0074-the-cost-line-names-only-what-it-is-before.md): the headline names only what the figure is
-before; its basis is the last line of `details`.
+Status: **Accepted** (2026-10-26), amended by [0074](0074-the-cost-line-names-only-what-it-is-before.md).
 
 ## Context
 

@@ -1,7 +1,6 @@
 # 0079. Runners share the slice's CPUs by their `cpus`, and throttling, not peaks, says the cap held a run back
 
-Status: **Accepted** (2026-10-30). Amends [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md), where it reads
-a run's peak as the cap's cost.
+Status: **Accepted** (2026-10-30). Amends [0075](0075-cpus-come-down-only-under-a-cap-no-burst-met.md).
 
 ## Context
 

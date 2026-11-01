@@ -1,4 +1,4 @@
-measured 15m 33s ago
+measured 16m 15s ago
 VOLUME               HOLDS                      SIZE             LIMIT
 runnerd-jvm-base     jvm snapshot                14G                 -
 runnerd-jvm-slot-1   jvm slot 1 layer          1.76G                 -

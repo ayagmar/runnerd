@@ -1,7 +1,6 @@
 # 0091. A signal leaves running jobs to the next start, and the daemon exits within 45 s
 
-Status: **Accepted** (2026-10-31). Amends [0031](0031-records-of-failed-jobs.md): the next start makes the
-record of a failed job whose stopped runner no daemon kept.
+Status: **Accepted** (2026-10-31), amended by 0092. Amends [0031](0031-records-of-failed-jobs.md).
 
 ## Context
 

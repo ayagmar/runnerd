@@ -1,7 +1,6 @@
 # 0021. Clients speak HTTP over the socket with hyper
 
-Where the client lives is superseded by [0030](0030-one-socket-client-in-core.md): `runnerd_core::client`, shared by
-every client.
+Status: **Accepted**, in part superseded by [0030](0030-one-socket-client-in-core.md).
 
 ## Context
 

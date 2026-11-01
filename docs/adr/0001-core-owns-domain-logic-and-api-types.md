@@ -1,5 +1,7 @@
 # 0001. `runnerd-core` owns domain logic and API types
 
+Status: **Accepted**.
+
 ## Context
 
 The daemon, the CLI, the web dashboard and the desktop app all need the same request and response types and the same rules about config and budgets.

@@ -1,5 +1,7 @@
 # 0011. Linux hosts and GitHub only, for v1
 
+Status: **Accepted**.
+
 ## Context
 
 Supporting other operating systems or forges multiplies the isolation and API work.

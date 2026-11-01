@@ -1,5 +1,7 @@
 # 0031. Records of failed jobs, without their secrets
 
+Status: **Accepted**, amended by [0091](0091-a-signal-leaves-running-jobs-to-the-next-start.md).
+
 ## Context
 
 A failed job's runner is gone by the time anyone looks: the container is removed once the runner exits, and what

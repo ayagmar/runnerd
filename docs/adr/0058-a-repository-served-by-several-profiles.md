@@ -1,7 +1,6 @@
 # 0058. A repository served by several profiles
 
-Status: **Accepted** (2026-10-25). Amends [0033](0033-measured-admission.md), [0044](0044-queued-jobs-say-why-they-wait.md)
-and [0050](0050-warm-runners.md).
+Status: **Accepted** (2026-10-25). Amends [0033](0033-measured-admission.md), [0044](0044-queued-jobs-say-why-they-wait.md), [0050](0050-warm-runners.md).
 
 ## Context
 

@@ -1,7 +1,6 @@
 # 0087. An insight for jobs their CPU cap holds back
 
-Status: **Accepted** (2026-10-30). Extends [0051](0051-insights-and-notifications.md), with the rule of
-[0079](0079-cpu-weights-and-throttling-as-evidence.md).
+Status: **Accepted** (2026-10-30). Extends [0051](0051-insights-and-notifications.md).
 
 ## Context
 

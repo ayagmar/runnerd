@@ -1,8 +1,6 @@
 # 0086. Auto sizing and `runnerd init` know the memory ceiling
 
-Status: **Accepted** (2026-10-30). Amends [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md). Amended by
-[0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md): the advice keeps to `max_memory` and `min_memory`
-too, and `ProfileSizing::ceiling` became `hold`.
+Status: **Accepted** (2026-10-30), amended by [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md). Amends [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md).
 
 ## Context
 

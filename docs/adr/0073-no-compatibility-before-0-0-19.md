@@ -1,6 +1,6 @@
 # 0073. No compatibility before 0.0.19
 
-Status: **Accepted** (2026-10-26).
+Status: **Accepted** (2026-10-26), amended by [0081](0081-waits-leave-out-the-time-no-runnerd-ran.md). Amends [0017](0017-job-history-in-sqlite.md).
 
 ## Context
 

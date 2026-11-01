@@ -1,5 +1,7 @@
 # 0010. MIT license, public repository
 
+Status: **Accepted**.
+
 ## Context
 
 The project is meant for anyone with Docker and `gh`.

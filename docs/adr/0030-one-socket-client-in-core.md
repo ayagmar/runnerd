@@ -1,7 +1,6 @@
 # 0030. One socket client for every client, in core
 
-Supersedes the part of [0021](0021-clients-speak-http-over-the-socket-with-hyper.md) that put the client in
-`crates/cli`.
+Status: **Accepted**.
 
 ## Context
 

@@ -6,11 +6,11 @@ description: Open runnerd's web dashboard and drive the daemon from runnerctl.
 import Shot from '../../components/Shot.astro';
 import Tui from '../../components/Tui.astro';
 
-Output and screenshots here come from the dashboard's demo daemon, whose made-up machine is the [example config](../configuration/).
+Output and screenshots come from a demo daemon running the [example config](../configuration/). How the clients fit the daemon is in [Architecture](/runnerd/architecture/).
 
 ## Dashboard
 
-`runnerd serve` serves it on `127.0.0.1:7477`; `--web <address>` picks another loopback address, `--web off` serves none. Each browser signs in once, through a one-time link the daemon keeps in `$XDG_RUNTIME_DIR/runnerd.web`:
+`runnerd serve` serves it on `127.0.0.1:7477`; `--web <address>` picks another loopback address, `--web off` serves none. A browser signs in once through a one-time link the daemon keeps in `$XDG_RUNTIME_DIR/runnerd.web`:
 
 ```sh
 runnerctl web
@@ -18,178 +18,121 @@ runnerctl web
 xdg-open "$(head -n 1 "$XDG_RUNTIME_DIR/runnerd.web")"
 ```
 
-A browser stays signed in for 30 days after its last visit, across restarts of runnerd and of the browser. The session secret is in `dashboard-session` beside the job history (`~/.local/state/runnerd/`), readable by you only. The directory must be one other users cannot write. To sign every browser out, this one included, stop the pages they have open from updating, and end every link and QR code made before:
+The browser stays signed in for 30 days after its last visit. `runnerctl web --sign-out-all` makes a new session secret (`dashboard-session` beside the job history), which signs every browser out and ends every earlier link and QR code. Writes such as a pause also need the dashboard's own `Origin`, so another site open in the browser cannot send them. Memory and CPU are sampled every 2 s, so a shorter peak does not show.
 
-```sh
-runnerctl web --sign-out-all
-```
-
-Pages update as things happen, over one server-sent event stream per page. Memory and CPU are sampled every 2 s, so a shorter peak does not show; the dashboard calls them sampled peaks.
-
-Any local user can reach the port, so every page needs the session cookie a login link sets, and writes such as a pause also need the dashboard's own `Origin`, so another site the browser has open cannot send them. A link to a page from elsewhere, such as GitHub, a notification or the browser's history, opens it signed in. The pages load nothing from elsewhere: the Datastar script and the font are in the binary.
-
-### From another device
-
-The dashboard listens on loopback only. To open it on a phone or another computer, put a proxy that serves HTTPS in front of it, such as `tailscale serve`, which reaches every device on your tailnet:
-
-```sh
-tailscale serve --https 8443 http://127.0.0.1:7477
-```
-
-Then add the proxy's address to [`[web] origins`](../configuration/#web) in `runnerd.toml` and restart runnerd, so writes from its pages pass the `Origin` check:
-
-```toml
-[web]
-origins = ["https://forge.tail0b5e.ts.net:8443"]
-```
-
-Now `runnerctl web` prints a one-time link for each address in `[web] origins` too, after opening the dashboard here. To sign a phone in, scan a QR code: open **Config** in the dashboard on this computer and choose **Show a QR code** under **Add a device**, or print one in the terminal:
-
-```sh
-runnerctl web --qr
-```
-
-If you always reach the dashboard through the proxy, even on this computer, name it in `open` too, and `runnerctl web` opens it there instead of on `127.0.0.1`, still printing the loopback link. `runnerctl web --local` opens the loopback address for one run:
-
-```toml
-[web]
-origins = ["https://forge.tail0b5e.ts.net:8443"]
-open = "https://forge.tail0b5e.ts.net:8443"
-```
-
-A QR code works once, within 5 minutes, and only on the address it shows; each one is new. A link from `runnerctl web` works once, and the daemon writes a new one in its place. Each address has its own link, so using one leaves the others working. `--base <origin>` prints the link for a proxy not in `[web] origins`, which can then only read. Behind a proxy that says it took the request over HTTPS (`X-Forwarded-Proto`, which `tailscale serve` sends), the session cookie is `Secure`. Anyone who can reach the proxy sees the sign-in page and nothing else without a link.
-
-runnerd does not trust Tailscale's identity headers such as `Tailscale-User-Login`: any local user could send them straight to `127.0.0.1:7477`.
-
-### Install it as an app
-
-Chromium-based browsers (Chrome, Edge, Brave) install the dashboard as an app with its own window: on the desktop, the install button in the address bar or **Install** in the menu; on Android, **Add to home screen** in Chrome's menu, then **Install**. Both work through the HTTPS proxy and on `http://127.0.0.1:7477`, which browsers treat as secure. Each address installs as its own app. The app is the same live pages and needs runnerd running; nothing is kept for offline use. Firefox installs web apps on Windows only, so on Linux it stays a tab.
-
-Views of the same thing are linked. On the overview, pointing at, focusing or tapping a slot's block, card, running job or repository lights up the others and says above the bar what the block holds, free space included; a slot's block opens its job. On a job, a step marks its stretch of the memory and CPU charts. On the history, a day, pointed at or stepped to with the arrow keys, is marked on all three charts and its numbers replace the 30 days' in the headline.
-
-### Overview
+| Page | Shows |
+|---|---|
+| Overview | slots running, jobs waiting, the p95 wait over 24 hours, failures (red only when a runner failed, not when a job's tests do); each waiting job with why it waits; the memory budget as a bar, hatched where the host or [measured admission](../admission/#measured-admission) closes it; a card per slot; the latest jobs; pause and resume per repository, which lasts across restarts |
+| History | the last 30 days in charts, then every matching job; filters by repository, workflow and outcome combine and can be bookmarked; workflow and outcome filter the job list only, the charts use the repository filter |
+| Records | the [records of failed jobs](../running/#records-of-failed-jobs) with size and age; remove one or all |
+| Sizing | per profile, memory peaks against the cap, waits, how busy the slots were and the [advice](../admission/#sizing), which a button opens in the config editor, unsaved; what [auto sizing](../admission/#auto-sizing) changes next and has changed, with a link that opens the last change undone |
+| Insights | a card per [insight](../insights/), warnings first; the last 24 hours; each repository's waits this week against the week before, warm and cold apart |
+| Caches | each volume's size over 30 days; the build cache's 7-day hit rate and whether it serves [GitHub Actions' cache](../running/#github-actions-cache); reseed a snapshot or empty a cache |
+| Config | `runnerd.toml` in an editor that checks it as you type against `MemoryMax` and saves only when it fits; **Add a device** shows a QR code |
 
 <Shot
   name="overview"
-  alt="The overview: 2 of 6 slots running, 1 runner starting and 2 warm, 5 jobs waiting, a p95 wait of 29s over 24 hours and 3 failed of 24 finished; the waiting halyard/storefront jobs, the oldest CI / lint because no profile serves the label storefornt-small, then one with a runner starting for it in node 2 and three waiting because both node slots are busy; then 26.25G of 33G reserved by predicted peaks, the CPU budget, the host line naming java and qemu-system-x86, the budget bar, and a card per slot, with warm runners in jvm 2 and small 1."
+  alt="The overview: slots running, jobs waiting with their reasons, the budget bar and a card per slot."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
-
-The page opens with four figures: slots running, jobs waiting and how long the oldest has, the p95 wait of every job that started in the 24 hours up to now, with the longest wait of each of those hours, and the failures among the jobs that ended in them. That figure turns red only when a runner failed its job, lost with it or killed for memory at its cap, and says how many; a job's own failing tests leave it plain. Under them, **Waiting** lists each queued job, oldest first, with how long it has waited and why runnerd has not started it: no profile serves its labels, its repository is paused, its runners failed to register, start or take a job and runnerd retries later, a runner is starting for it, its profile is reseeding or pulling its image, every slot of its profile is busy, its runner needs more memory or CPU than the budget has left, an older job waiting for CPU goes first, or an older job's runner starts first. The reason is the scheduler's own, worked out again each time the status changes.
-
-When [the host's memory](../admission/#the-hosts-memory) leaves the slice less than `MemoryMax` does, the bar's free part is what the host leaves, and a hatched part after it is held by the host. While [measured admission](../admission/#measured-admission) holds the slice past 90% of `MemoryMax`, or the host stalls short of memory, nothing is free: all the room past the runners is hatched and named for why it is closed. Under [CPU admission](../admission/#cpu-admission) the line above the budget bar adds the CPU the runners reserve of the budget, and says when a job waits for CPU. Below the slots: the latest jobs, pause and resume per repository or all at once, and the slice over the last half hour. A pause lasts until a resume, across restarts. On a phone the pages are a bar along the bottom edge.
 
 ### A job
 
 <Shot
   name="job"
-  alt="halyard/ledger's CI / build job, running: waited 4s for a runner, 5s to start, nine steps on one time axis with the seventh, integration tests, running; then memory against reserved 7.75G and cap 9G, CPU against reserved 3.6 CPUs and cap 8 CPUs, and how admission reserved them."
+  alt="halyard/ledger's CI / build job: steps on one time axis, memory and CPU against reserved and cap."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-Beside its wait, how much of it passed while runnerd was not running, when some did. Below the steps: CPU and memory against the container's caps, with a second line for what [admission](../admission/#measured-admission) reserved when that was less (`reserved 7.75G` under `cap 9G`); the same job's latest 30 runs (same repository, workflow and name), each a column of its wait and run time in its outcome's colour over its memory peak, with the median run and wait; and the log. Under the figures, how often the CPU cap held the job back and how long it waited for a CPU. A failed job kept as a [record](../running/#records-of-failed-jobs) shows the `runnerctl shell` command that opens a shell in it, with a copy button.
-
-### History
+A job's page shows its wait, split at when runnerd first saw the job queued (*Seen by runnerd*, missing for a job a waiting runner took before runnerd listed it, and for jobs older runnerd versions recorded) and when its runner started, its steps on one time axis, memory and CPU against the container's caps (with what [admission](../admission/#measured-admission) reserved when that was less), how often the CPU cap held it back, its latest 30 runs, and the log. For a failed job kept as a record it also shows the `runnerctl shell` command.
 
 <Shot
   name="history"
-  alt="History over the last 30 days: 861 jobs, 90% succeeded, 9m 07s average run, 18s average wait, charts of jobs per day, run and wait times and memory peaks."
+  alt="History over 30 days: totals, then charts of jobs, run and wait times and memory peaks per day."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
-
-Above the charts, links filter by repository, workflow and outcome; each keeps the others, so a filtered page can be bookmarked. Below the charts: every job that matches. The charts count every workflow and outcome of the repository.
-
-### Insights, Caches, Sizing and Config
-
-| Page | Shows |
-|---|---|
-| Insights | a card per [insight](../insights/), warnings first, with links to the runs in the history and on GitHub; the last 24 hours in a line; each repository's waits this week against the week before, warm and cold apart |
-| Caches | each volume, its bound and its size over 30 days; the build cache's hit rate over 7 days and whether it serves [GitHub Actions' cache](../running/#github-actions-cache); reseed a snapshot or empty a cache; the records of failed jobs, removed one at a time or all at once |
-| Sizing | per profile, its jobs' memory peaks against its cap, their waits and how busy its slots were, the [advice](../admission/#sizing), and a row per job; a button opens the advice in the config editor, unsaved; whether [auto sizing](../admission/#auto-sizing) is on and, per profile, what its next look changes or until when a recent change holds it, or why no look changes anything, such as a hand edit runnerd does not run with yet; the changes it made, with a link that opens the last one undone in the editor |
-| Config | `runnerd.toml` in an editor that checks it as you type by the rule its `admission` sets, on a bar against `MemoryMax`: under `caps` every slot at its cap, a block per profile; under `measured` one runner of the largest profile and the mirror. It saves and reloads only when it fits. Opened from the sizing page, it says what changed in the profile, such as `memory 7G → 3.25G, slots 2 → 4`, and a button selects those lines. The doctor's checks fill in once the doctor has read the host, and run again after a save |
 
 <Shot
   name="insights"
-  alt="Insights from the last 14 days, warnings first: halyard/ledger's CI / test on main slower, 6m 10s up from 4m 40s; CI / integration near jvm's 9G cap; halyard/storefront's CI / e2e flaky; then a notice that storefront waits longer this week, and each repository's waits this week, warm and cold apart, against the week before."
+  alt="Insights from the last 14 days, warnings first, then each repository's waits."
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-## runnerctl
+### From another device
 
-It talks to the socket (`--socket` picks another), prints aligned text, coloured on a terminal unless `NO_COLOR` is set, and with `--json` prints the API's response unchanged.
+To open the dashboard on a phone or another computer, put an HTTPS proxy in front of it, such as `tailscale serve`:
 
-```console wrap=false
-$ runnerctl status
-runnerd 0.0.26  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
-
-PROFILE  SLOT  STATE     REPOSITORY          RUNNER                                      UP
-jvm         1  running   halyard/ledger      runnerd-3f9a-forge-jvm-1-1793379165     7m 16s
-jvm         2  warm      halyard/ledger      runnerd-3f9a-forge-jvm-2-1793378992    10m 09s
-node        1  running   halyard/storefront  runnerd-3f9a-forge-node-1-1793379283    5m 18s
-node        2  starting  halyard/storefront  runnerd-3f9a-forge-node-2-1793379580       21s
-small       1  warm      halyard/storefront  runnerd-3f9a-forge-small-1-1793379332   4m 29s
-small       2  idle
-
-REPOSITORY          PROFILE  STATE   QUEUED  LABELS
-halyard/ledger      jvm      active       0  self-hosted,linux,x64,jvm
-halyard/storefront  node     active       4  self-hosted,linux,x64,node
-                    small                 0  storefront-small
-
-JOB           REPOSITORY                 WORKFLOW / NAME    QUEUED      WAITS FOR
-120055991720  halyard/storefront         CI / lint          4m 59s ago  No profile serves the label storefornt-small
-120055991710  halyard/storefront · node  E2E / visual-diff  50s ago     A runner is starting for it in node 2
-120055991711  halyard/storefront · node  E2E / a11y         44s ago     All 2 node slots are busy
-120055991712  halyard/storefront · node  E2E / lighthouse   31s ago     All 2 node slots are busy
-120055991713  halyard/storefront · node  E2E / unit         18s ago     All 2 node slots are busy
+```sh
+tailscale serve --https 8443 http://127.0.0.1:7477
 ```
 
-| Command | What it shows or does |
+Add the proxy's address to [`[web] origins`](../configuration/#web) and restart runnerd, so writes from its pages pass the `Origin` check:
+
+```toml
+[web]
+origins = ["https://forge.tail0b5e.ts.net:8443"]
+open = "https://forge.tail0b5e.ts.net:8443"   # optional: runnerctl web opens this, not 127.0.0.1
+```
+
+`runnerctl web` now prints a link for each origin too. To sign a phone in, scan a QR code: **Show a QR code** under **Add a device** on the Config page, or `runnerctl web --qr`. A QR code works once, within 5 minutes; a link works once. `--base <origin>` prints a read-only link for a proxy not in `origins`, `--local` opens the loopback address once. Behind a proxy that sends `X-Forwarded-Proto` the session cookie is `Secure`. runnerd ignores Tailscale's identity headers, since any local user could send them to the port.
+
+### Install as an app
+
+Chromium browsers install the dashboard as an app: the install button in the address bar, or **Add to home screen** in Chrome on Android. It works through the proxy and on `http://127.0.0.1:7477`, one app per address. Firefox installs web apps on Windows only.
+
+## runnerctl
+
+`--socket` picks another socket; `--json` prints the API's response unchanged.
+
+| Command | What it does |
 |---|---|
-| `runnerctl status` | the memory budget, and the CPU budget under [CPU admission](../admission/#cpu-admission), every slot and its runner, the repositories and their queues, and why each queued job waits |
-| `runnerctl jobs [--repo halyard/ledger] [--failed] [--since 7d]` | jobs newest first: result, time waited and run, sampled memory peak; `--state`, `--conclusion`, `--before`, `--limit` too |
-| `runnerctl job <id>` | one job: timeline and wait, steps with their durations, CPU, how often its CPU cap held it back and how long it waited for a CPU, memory, network and how often memory pressure throttled it, what it read from and stored in the build cache, log size |
-| `runnerctl logs <id> [-f]` | its log; `-f` follows it until the job's record is final, waiting out a daemon restart |
-| `runnerctl tui` | a [full-screen dashboard](#runnerctl-tui) in the terminal |
-| `runnerctl watch` | slots, running jobs with their current step and last sample, queued and finished jobs, redrawn as events arrive; one line per event when not on a terminal, one JSON event per line with `--json` |
-| `runnerctl pause <repo> [--force]`, `resume <repo>` | the repository gets no new runners, also after a restart; refused while it runs a job, naming the job, unless `--force` cancels the job's run and removes its runner |
-| `runnerctl pause --all [--force]`, `resume --all` | the same for every repository; refused while any runs a job, pausing none |
-| `runnerctl reseed <profile>` | makes slot 1's layers the profile's snapshot once its slots are free, and waits for it (`--no-wait`) |
-| `runnerctl shell <job> [--step 3]` | a shell in a failed job's [record](../running/#records-of-failed-jobs), in its workspace; exiting removes its container |
-| `runnerctl records`, `records rm <job>` | the records of failed jobs with their sizes and limits; removes one, or `--all`, or those `--older-than 2d` |
-| `runnerctl sizing [--since 7d]` | per profile and per job: percentiles and the largest of the sampled memory and CPU peaks, waits, how busy the slots were, the [advice](../admission/#sizing), and what [auto sizing](../admission/#auto-sizing) does next |
-| `runnerctl sizing apply <profile> [--yes]` | writes a profile's advised `memory` and `slots` into the daemon's config after showing the change and asking; the daemon checks it against the budget first |
-| `runnerctl sizing undo <profile> [--yes]` | writes back the `memory`, `slots` and `cpus` [auto sizing](../admission/#auto-sizing) last replaced, the same way; both refuse to write over a config changed since they read it |
-| `runnerctl insights [--days 30]`, `insights --digest` | what the job minutes [would have cost](../insights/#what-the-minutes-would-have-cost) on GitHub's runners, one line per [insight](../insights/), then each repository's waits this week against the last; or the last 24 hours |
-| `runnerctl notify test [--target phone]` | sends each `[notify]` target a test message and says what each did; fails unless every one got it |
-| `runnerctl caches [--clean <volume>]` | the cache volumes, their sizes and limits, the build cache's hits and whether it serves [GitHub Actions' cache](../running/#github-actions-cache); or empties a slot layer or shared cache no job uses, stopping the runners that wait for one |
-| `runnerctl config show`, `config check [file]` | the config the daemon runs with; a file checked against the daemon's budget, as `runnerd check-config` does |
-| `runnerctl doctor` | the daemon's host checks, or `runnerd doctor` run here when the daemon is not running |
-| `runnerctl web` | opens the dashboard with a one-time login link from `$XDG_RUNTIME_DIR/runnerd.web`, on `[web] open` if set, and prints one for each other address (`--local` opens the loopback address, `--base <origin>` a proxy's, `--no-open` prints them all, `--qr` shows a fresh 5-minute link on each origin as a QR code, `--sign-out-all` signs every browser out) |
+| `status` | budgets, slots, repositories and queues, and why each queued job waits |
+| `jobs [--repo R] [--failed] [--since 7d]` | jobs newest first; also `--state`, `--conclusion`, `--before` (next page), `--limit` |
+| `job <id>`, `logs <id> [-f] [--from N]` | one job's timeline, steps and usage; its log, `-f` following it to the end |
+| `tui`, `watch` | the [terminal dashboard](#terminal-dashboard); slots, running, queued and finished jobs redrawn as events arrive, or one line per event off a terminal |
+| `pause <repo> [--force]`, `resume <repo>`, `pause --all`, `resume --all` | no new runners, also after a restart. Refused while a job runs; `--force` cancels its run and removes the runner |
+| `reseed <profile> [--no-wait]` | makes slot 1's layers the profile's snapshot once its slots are free |
+| `shell <job> [--step N]` | a shell in a failed job's [record](../running/#records-of-failed-jobs); exiting removes the container |
+| `records`, `records rm <job>` | the records with sizes and limits; remove one, `--all`, or `--older-than 2d` |
+| `sizing [--since 30d]` | peak percentiles, waits, busy slots, the [advice](../admission/#sizing) and what [auto sizing](../admission/#auto-sizing) does next |
+| `sizing apply <profile> [--yes]`, `sizing undo <profile>` | writes the advised `memory` and `slots`, or what auto sizing replaced (`cpus` too), into the config after showing the change |
+| `insights [--days 14] [--digest]` | what the minutes [would have cost](../insights/#what-the-minutes-would-have-cost) on GitHub's runners and one line per [insight](../insights/); `--digest` the last 24 hours |
+| `notify test [--target NAME]` | sends each `[notify]` target a test message |
+| `caches [--clean <volume>]` | volumes, sizes, limits and build cache hits; or empties a volume no runner uses |
+| `config show`, `config check [file]` | the config the daemon runs with; a file checked against its budget |
+| `doctor` | the daemon's host checks, or `runnerd doctor` when no daemon runs |
+| `web` | opens the dashboard with a one-time link ([above](#from-another-device)) |
+
+### One job
+
+The job tables have the columns Outcome, Job, Repository, Branch, Queued, Waited, Ran, Memory peak and CPU. `runnerctl job` ends with what the job used:
+
+```console wrap=false
+$ runnerctl job 120055991526
+Usage
+  Memory peak      6.61G
+  Average memory   5.13G
+  CPU peak         7.57 cores
+  Average CPU      3.33 cores
+  CPU time         37m 43s
+  Received         506.45M
+  Sent             56.27M
+  From the mirror  168.82M
+  CPU held back    held at its CPU cap in 5% of its busy time, waited for a CPU 25% of its run
+  Build cache      30 of 36 lookups hit (83%), 101.29M served, 12.66M stored
+  Log              54 lines, 2.15K  runnerctl logs 120055991526
+  memory peaks are sampled every 2 s; spikes shorter than that do not show
+```
+
+`CPU held back` gives a share of the job's busy time, which reads higher than the share of the whole run that [auto sizing](../admission/#auto-sizing) counts.
 
 ### Sizing
 
-The demo daemon runs auto sizing with `interval = "3d"` and `max_step = 25`; the defaults are `"1h"` and 50 ([`[sizing]`](../configuration/#sizing)).
-
 ```console wrap=false
 $ runnerctl sizing
-from 30d 0h of history; peaks are sampled every 2 s, so a shorter spike goes unseen: advice sizes for the largest + 15%, at least 1G for page cache, rounded up to 256M, once a profile ran 10 jobs; auto sizing applies it
-auto sizing looks every 5 minutes, raises a profile at most once every 1 hour and lowers it at most once every 72 hours, moving its memory and CPUs by at most 25% at a time
-
-jvm  9G × 2, 8 CPUs; 460 jobs, slots busy 41%, waited p50 8s p95 35s
-  warm runners took 31 of 460 jobs: waited p50 2s, the others 21s
-  memory p50 5.2G p95 7.4G p99 7.7G max 7.8G of 400 recent runs
-  cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9 of the 400 at 8 CPUs
-  keep 9G: its largest peak + 15% is 9G
-  No change for 23h 59m, changed 2d 0h ago; the interval holds it until then
-  auto sizing 2d 0h ago: memory 10G → 9G, slots 2
-  runnerctl sizing undo jvm
-
-  REPOSITORY      JOB                     RUNS   P50   P95   P99   MAX  CPU P99  WAIT P95  NEEDS
-  halyard/ledger  CI / build               212  3.1G  4.2G  4.5G  4.6G      7.6       30s  5.75G
-  halyard/ledger  CI / integration tests   188  5.2G  7.4G  7.7G  7.8G      7.6       35s  9G
-
-node  7G × 2, 8 CPUs; 260 jobs, slots busy 78%, waited p50 12s p95 4m 20s
-  warm runners took 31 of 260 jobs: waited p50 2s, the others 21s
+[...]
+node  7G × 2, 8 CPUs; 242 jobs, slots busy 78%, waited p50 12s p95 4m 20s
+  warm runners took 187 of 242 jobs: waited p50 2s, the others 21s
   memory p50 1.4G p95 1.9G p99 2G max 2.1G of 242 recent runs
   cpu    p50 3.1 p95 6.9 p99 7.6 max 7.9 of the 242 at 8 CPUs
   lower memory to 3.25G from 7G, its largest peak + 1G for page cache; 4 slots fit in the same 14G
@@ -200,159 +143,36 @@ node  7G × 2, 8 CPUs; 260 jobs, slots busy 78%, waited p50 12s p95 4m 20s
   halyard/storefront  CI / e2e       6  1.8G    2G   2G    2G      7.6    4m 40s  max 2G
 ```
 
-The first line of a profile counts the jobs its waits are over, less the time runnerd was not running ([Admission and sizing](../admission/#how-a-wait-is-counted)). Its peaks are over each job's recent runs, fewer than that, and its CPU peaks only over those at the profile's `cpus` now, since a run at a larger cap can peak past them; until one has run at them, the line says `no run at 8 CPUs yet`. With [auto sizing](../admission/#auto-sizing) on, as here, the first line ends with `auto sizing applies it`, the second line says how often it looks and how far it moves a profile, and under each profile come what its next look changes or why a recent change holds it, and each change it made with the command that undoes it. Without it, the first line ends at `10 jobs` and a profile the advice would change ends with `runnerctl sizing apply node`, which shows `memory = "7G" -> "3.25G"` and `slots = 2 -> 4` under `[profiles.node]` and asks before it writes. Without a terminal to ask on it needs `--yes`. The rest of the file, comments included, stays as written.
+Peaks cover each job's recent runs, CPU peaks only runs at the profile's current `cpus`. The demo runs auto sizing with `interval = "3d"` and `max_step = 25` ([`[sizing]`](../configuration/#sizing)). With auto sizing off, a profile the advice would change ends with `runnerctl sizing apply node`, which shows `memory = "7G" -> "3.25G"` under `[profiles.node]` and asks before writing; without a terminal it needs `--yes`. The rest of the file stays as written.
 
-### One job
+## Terminal dashboard
 
-Its CPU line says how often the quota held the job back and how long it waited for a CPU (`cpu held back`). The first share is of the job's busy time, so it reads higher than the share of its run that [auto sizing](../admission/#auto-sizing) counts:
-
-```console wrap=false
-$ runnerctl job 120055991600
-CI / build  success  job 120055991600
-halyard/ledger · main · run 40018663866
-https://github.com/halyard/ledger/actions/runs/40018663866/job/120055991600
-runner runnerd-3f9a-forge-jvm-1-1793377785 (profile jvm, slot 1, capped at 9G and 8 CPUs)
-
-Timeline  queued 30m 20s ago
-  Queued                  +0s
-  Container started       +4s
-  Job started             +9s
-  Finished           +11m 14s
-  Cleaned up         +11m 18s
-
-Steps
-  ✓  1  Set up job                              3s
-  ✓  2  Run actions/checkout@v6                 4s
-  ✓  3  Set up JDK 21                           6s
-  ✓  4  Restore Gradle cache                    9s
-  ✓  5  Build                               2m 28s
-  ✓  6  Unit tests                          3m 32s
-  ✓  7  Integration tests (Testcontainers)  4m 41s
-  ✓  8  Post Run actions/checkout@v6            1s
-  ✓  9  Complete job                            1s
-
-Usage
-  cpu            37m 41s CPU time, 3.37 cores average, 7.6 cores sampled peak
-  cpu held back  held at its CPU cap in 4% of its busy time, waited for a CPU 25% of its run
-  memory         6.61G sampled peak, 5.14G average
-  network        493.35M received, 54.82M sent, 164.45M from the mirror
-  build cache    26 of 28 lookups hit (92%), 98.67M served, 12.33M stored
-  log            54 lines, 2.15K  runnerctl logs 120055991600
-  memory peaks are sampled every 2 s; spikes shorter than that do not show
-```
-
-A job that waited through a night the machine was off shows its whole wait and, under the timeline, how much of it passed while runnerd was not running (`7h 00m of it while runnerd was not running`).
-
-### Jobs and watch
-
-```console wrap=false
-$ runnerctl jobs --repo halyard/ledger --limit 4
-JOB           REPOSITORY      WORKFLOW / NAME  BRANCH            RESULT   WAITED      RAN  MEM PEAK  QUEUED
-120055991700  halyard/ledger  CI / build       main              running      9s   7m 11s     6.61G  7m 20s ago
-120055991600  halyard/ledger  CI / build       main              success      9s  11m 05s     6.61G  30m 20s ago
-120055991526  halyard/ledger  CI / build       feat/checkout-v2  success     27s  11m 05s     6.61G  1h 52m ago
-120055991489  halyard/ledger  CI / build       main              failure     11s  11m 05s     6.61G  2h 32m ago
-memory peaks are sampled every 2 s; spikes shorter than that do not show
-older jobs: --before 120055991489
-```
-
-One frame of `runnerctl watch`:
-
-```console wrap=false
-runnerd 0.0.26  26.25G of 33G reserved in runnerd.slice by predicted peaks; CPU 18.4 of 32 CPUs reserved; host: 23G of 64G available; leaves the slice 30G of its 33G, so 3.75G is free; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G  runnerd.slice uses 6.32 cores, 10.62G
-
-SLOT     JOB                                                      STEP                                         RAN   CPU    MEM
-jvm 1    halyard/ledger CI / build                                Integration tests (Testcontainers) (7/9)  7m 21s  4.92  4.33G
-jvm 2    a warm runner for halyard/ledger, waiting for a job
-node 1   halyard/storefront E2E / playwright                      Playwright e2e (6/8)                      5m 24s  4.92  2.76G
-node 2   a runner for halyard/storefront waiting for its job
-small 1  a warm runner for halyard/storefront, waiting for a job
-small 2  idle
-
-Queued
-  halyard/storefront         CI / lint          5m 09s ago  No profile serves the label storefornt-small
-  halyard/storefront · node  E2E / visual-diff  1m 00s ago  A runner is starting for it in node 2
-  halyard/storefront · node  E2E / a11y            54s ago  All 2 node slots are busy
-  halyard/storefront · node  E2E / lighthouse      41s ago  All 2 node slots are busy
-  halyard/storefront · node  E2E / unit            28s ago  All 2 node slots are busy
-
-Finished
-  success  halyard/ledger      CI / build        11m 05s  19m 16s ago
-  success  halyard/storefront  E2E / playwright   8m 57s  1h 01m ago
-  success  halyard/ledger      CI / build        11m 05s  1h 41m ago
-  failure  halyard/ledger      CI / build        11m 05s  2h 20m ago
-  success  halyard/storefront  E2E / playwright   8m 57s  3h 05m ago
-
-CPU and MEM are the last sample, taken every 2 s. Ctrl-C quits.
-```
-
-### A pause while a job runs
-
-```console
-$ runnerctl pause halyard/ledger
-error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1793379165
-`runnerctl pause --force halyard/ledger` cancels its run on GitHub and removes its runner
-```
-
-### Every repository at once
-
-```console wrap=false
-$ runnerctl pause --all
-error: halyard/ledger runs job 120055991700 on runnerd-3f9a-forge-jvm-1-1793379165; halyard/storefront runs job 120055991650 on runnerd-3f9a-forge-node-1-1793379283
-`runnerctl pause --force --all` cancels their runs on GitHub and removes their runners
-$ runnerctl pause --all --force
-every repository paused; stopped job 120055991700 on runnerd-3f9a-forge-jvm-1-1793379165, job 120055991650 on runnerd-3f9a-forge-node-1-1793379283
-$ runnerctl resume --all
-every repository resumed
-```
-
-## runnerctl tui
-
-The dashboard, for a host you reach over SSH. It shows what the web dashboard does, in the same words:
-
-- a health line: slots running, jobs waiting and the oldest's wait, and over the last 24 hours the p95 wait with a bar for the longest wait of each hour, and the failures, red only when a runner failed its job, then how many warning [insights](../insights/) hold;
-- the budget as one bar, a block per slot as wide as its memory cap and filled as far as its job uses it, then the mirror and each seed container, then what is free and, hatched, what no runner may start in: what the host's memory holds back, or all of it while the slice is held past 90% or the host stalls; its heading adds the CPU budget under [CPU admission](../admission/#cpu-admission);
-- a card per slot with the job, its step, run time, and memory and CPU sparklines;
-- **Waiting**: each queued job, oldest first, with how long it has waited and why runnerd has not started it;
-- the repositories, the latest jobs, and the slice's memory and CPU up to its MemoryMax and CPUs;
-- the history, filtered by outcome, repository and workflow;
-- the records of failed jobs, with the command that opens a shell in each;
-- sizing: each profile's peaks and advice, its jobs below, what auto sizing last changed and, while it is on, what its next look changes, how long a recent change holds a profile, or why no look changes anything;
-- a job: its timeline and, while it waits, why; the same job's latest runs as bars of their run times, waits and memory peaks, with the median run and wait; its steps on one time axis, memory and CPU against its container's caps and what admission reserved, how often its CPU cap held it back, and its log, followed while the job runs.
-
-```sh
-runnerctl tui
-```
+`runnerctl tui` shows the web pages' figures in the same words, for a host you reach over SSH. Its views, `1` to `4`, are Overview, History, Records and Sizing. `enter` opens a job: its timeline, latest runs, steps, memory and CPU against the caps, and the log, followed while the job runs.
 
 <Tui
   name="overview-96"
-  label="The overview at 96 by 26: a health line with 2 of 6 slots running, 5 jobs waiting and 3 insights, the budget bar reserved by predicted peaks, one line per slot with warm runners in jvm 2 and small 1, the five waiting jobs with why each waits: CI / lint because no profile serves storefornt-small, a runner starting for the next and every node slot busy for the rest, then the repositories, storefront on node + small, and the latest jobs."
+  label="The overview at 96 by 26: health line, budget bar, a line per slot, waiting jobs with reasons, repositories, latest jobs."
 />
-
-Profiles take the dashboard's colours in the order of their names, mint first and pink second. `NO_COLOR` leaves bold, dim and block glyphs. On a narrow terminal the slots become one line each and the charts, last on the page, drop out first; what does not fit a line goes as a whole figure or column, and a name that is cut ends in `…`. A wide terminal adds columns, and the charts take the rows the lists leave.
 
 <Tui
   name="job"
-  label="halyard/ledger's CI / build job at 120 by 36: waited 4s, started in 5s, its latest 17 runs with a median run of 11m 5s, nine steps on one time axis with integration tests running, memory and CPU charts with the cap in their top border and what admission reserved, 7.75G and 3.6 CPUs, in their bottom one, and the log, followed."
+  label="A job at 120 by 36: latest runs, steps on one time axis, memory and CPU charts, the followed log."
 />
 
 | Key | |
 |---|---|
 | `1` `2` `3` `4` | overview, history, records, sizing; `o` and `h` open the first two too |
-| `tab`, `j` `k` (or arrows) | the overview's pane (slots, waiting, repositories, latest jobs); move in it, or scroll a log; `PgDn` `PgUp` move by ten |
+| `tab`, `j` `k` or arrows, `PgDn` `PgUp` | the overview's pane; move in it, or scroll a log; by ten |
 | `enter`, `esc` | open the selected job; back |
-| `p` `r` | pause or resume the selected repository; a pause refused while it runs a job asks before forcing it |
-| `P` `U` | pause or resume every repository, asking the same way |
+| `p` `r`, `P` `U` | pause or resume the selected repository, or every one; a pause refused while a job runs asks before forcing it |
 | `R` | reseed the selected slot's profile |
-| `c` `s` `w` `]` `[` | history: cycle the outcome, repository and workflow filters, next and previous page |
-| `d` `D` | records: remove the selected record, or all of them, after `y` |
+| `c` `s` `w`, `]` `[` | history: cycle the outcome, repository and workflow filters; next and previous page |
+| `d` `D` | records: remove the selected record, or all, after `y` |
 | `a` | sizing: write the selected profile's advice into the config, after `y` |
 | `G` `g` | follow the log, or go to its start |
-| `?` `q` | all keys; quit. The footer shows the keys of the view, as many as fit |
-| `ctrl-z` | suspend; `fg` brings it back, redrawn |
+| `?`, `q` or `ctrl-c` | all keys; quit |
+| `ctrl-z` | suspend; `fg` brings it back |
 
-SIGINT, SIGTERM and SIGHUP quit and SIGTSTP suspends, each after giving the terminal back. When the daemon goes away the header says `reconnecting`. Once it is back, the event stream resumes after the last event read, and an open job's log carries on from its next line.
-
-`cargo build -p runnerd-cli --no-default-features` builds `runnerctl` without the TUI.
+When the daemon goes away the header says `reconnecting` and the event stream resumes where it stopped. `cargo build -p runnerd-cli --no-default-features` builds `runnerctl` without the TUI.
 
 Frames set in JetBrains Mono ([OFL](../fonts/JetBrainsMono-OFL.txt)).

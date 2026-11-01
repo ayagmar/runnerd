@@ -1,11 +1,6 @@
 # 0055. Admission follows the host's memory, and caps keep room for page cache
 
-Status: **Accepted** (2026-10-24). Amends [0033](0033-measured-admission.md),
-[0032](0032-sizing-advice-from-sampled-peaks.md) and [0039](0039-auto-sizing.md). Amended by
-[0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md): a stopped warm runner's room pays the host's
-deficit first, and a seed container fits the budget as a runner does. Amended by
-[0084](0084-a-host-whose-memory-grows-to-a-ceiling.md): with `[host] memory_ceiling`, what the host can still grow
-by counts as available and the margin is the ceiling's.
+Status: **Accepted** (2026-10-24), amended by [0063](0063-a-warm-runners-room-pays-the-hosts-deficit-first.md), [0070](0070-predictions-follow-recent-runs.md), [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md), [0084](0084-a-host-whose-memory-grows-to-a-ceiling.md). Amends [0033](0033-measured-admission.md), [0032](0032-sizing-advice-from-sampled-peaks.md), [0039](0039-auto-sizing.md).
 
 ## Context
 

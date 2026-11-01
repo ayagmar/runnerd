@@ -112,8 +112,11 @@ The tag must match the workspace version in `Cargo.toml`, and a tag without a su
    finds them; today they are:
    - `examples/runnerd.toml`: each profile's `image` tag (the doctor tests compare it with the crate version);
    - `crates/core/src/config.rs` and `crates/core/src/docker.rs`: the doc comments that show an image tag;
-   - the site: `install.md`, `configuration.mdx`, `admission.mdx`, `clients.mdx`, `src/pages/index.astro` and the TUI
-     frames in `src/assets/tui/`, which are recaptured rather than edited.
+   - the site: `install.md`, `configuration.mdx`, `admission.mdx`, `clients.mdx`, `src/pages/index.astro`, and the TUI
+     frames, dashboard screenshots and terminal transcripts in `site/src/assets/`, which are recaptured rather than
+     edited: `site/scripts/capture/capture.sh` builds the dashboard's demo daemon (a fake one on a scratch socket,
+     never a real runnerd), runs `runnerctl tui`, `status` and `caches` and a headless Chromium against it, and
+     rewrites them. It needs `uv` and a Chromium for playwright-core (`CHROMIUM=/path/to/chrome-headless-shell`).
 
    `crates/wire-compat` names the previous release, not this one; it moves after the tag (step 6).
    Tests that use a version only as an example stay.

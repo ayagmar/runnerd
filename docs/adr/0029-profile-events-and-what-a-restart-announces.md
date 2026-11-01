@@ -1,6 +1,6 @@
 # 0029. Profile events, and what a restart announces
 
-Amends [0027](0027-pruning-runs-beside-the-writer.md), whose `announced` table held repositories only.
+Status: **Accepted**. Amends [0027](0027-pruning-runs-beside-the-writer.md).
 
 ## Context
 

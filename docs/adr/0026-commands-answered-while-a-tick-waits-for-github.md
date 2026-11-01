@@ -1,6 +1,6 @@
 # 0026. Commands are answered while a tick waits for GitHub
 
-Amends [0019](0019-control-commands-through-the-engine.md), which had commands wait for the tick in progress.
+Status: **Accepted**. Amends [0019](0019-control-commands-through-the-engine.md).
 
 ## Context
 

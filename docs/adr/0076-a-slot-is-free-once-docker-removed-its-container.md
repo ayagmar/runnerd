@@ -1,6 +1,6 @@
 # 0076. A slot is free once Docker removed its container
 
-Status: **Accepted** (2026-10-30).
+Status: **Accepted** (2026-10-30), amended by 0092.
 
 ## Context
 

@@ -1,7 +1,6 @@
 # 0071. Auto sizing lowers every hour, by up to half
 
-Status: **Accepted** (2026-10-26). Amends [0039](0039-auto-sizing.md) and [0049](0049-auto-sizing-without-hand-tuning.md)
-on `[sizing] interval` and `max_step`.
+Status: **Accepted** (2026-10-26). Amends [0039](0039-auto-sizing.md), [0049](0049-auto-sizing-without-hand-tuning.md).
 
 ## Context
 

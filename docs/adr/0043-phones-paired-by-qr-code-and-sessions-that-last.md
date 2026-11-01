@@ -1,7 +1,6 @@
 # 0043. Phones signed in by QR code, and sessions that outlive a restart
 
-Status: **Accepted** (2026-10-24). Amends [0020](0020-dashboard-is-an-api-client-on-loopback.md) and
-[0042](0042-dashboard-behind-a-proxy-and-installable.md).
+Status: **Accepted** (2026-10-24), amended by [0078](0078-a-first-run-that-can-start-and-keeps-its-secrets.md). Amends [0020](0020-dashboard-is-an-api-client-on-loopback.md), [0042](0042-dashboard-behind-a-proxy-and-installable.md).
 
 ## Context
 

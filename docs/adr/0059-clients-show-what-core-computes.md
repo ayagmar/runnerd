@@ -1,6 +1,6 @@
 # 0059. Clients show what core computes about a job
 
-Status: **Accepted** (2026-10-25).
+Status: **Accepted** (2026-10-25), amended by [0069](0069-a-job-no-runner-took-did-not-run-elsewhere.md).
 
 ## Context
 

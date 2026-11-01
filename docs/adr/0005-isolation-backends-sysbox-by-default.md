@@ -1,5 +1,7 @@
 # 0005. Isolation backends: sysbox by default, privileged DinD only when asked
 
+Status: **Accepted**.
+
 ## Context
 
 Each job runs its own Docker Engine inside its container. Privileged containers give a job root on the host.
