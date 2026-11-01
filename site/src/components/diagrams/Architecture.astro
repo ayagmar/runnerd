@@ -1,0 +1,69 @@
+---
+// The parts of runnerd and what talks to what: the daemon with its engine, history store and socket API; GitHub and
+// Docker beyond it; the three clients below. Boxes are drawn as in Lifecycle.astro.
+import Diagram from '../Diagram.astro';
+
+const clients = [
+  { name: 'runnerctl', what: 'commands, scripts', x: 0 },
+  { name: 'runnerctl tui', what: 'terminal UI', x: 170 },
+  { name: 'dashboard', what: 'runnerd-web', x: 340 },
+];
+---
+
+<Diagram name="architecture" caption="The daemon is the only part that talks to GitHub and Docker. Every client reads and writes through its socket.">
+  <svg viewBox="0 0 480 440" role="img" aria-labelledby="architecture-title" aria-describedby="architecture-desc">
+    <title id="architecture-title">runnerd's parts</title>
+    <desc id="architecture-desc">
+      The daemon holds the engine, the history store and the socket API. Each tick the engine polls GitHub for queued
+      jobs and registers just-in-time runners there, and starts and removes one container per runner in Docker with the
+      sysbox runtime. The engine writes every job to the history store. The socket API serves the engine's status and the
+      store's history as JSON and server-sent events over a Unix socket to three clients: runnerctl, runnerctl tui
+      and the web dashboard.
+    </desc>
+    <defs>
+      <marker id="architecture-arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+        <path class="head" d="M0 1L10 5L0 9z"></path>
+      </marker>
+    </defs>
+
+    <rect class="box" x="0" y="0" width="200" height="56" />
+    <text class="t" x="16" y="24">GitHub</text>
+    <text class="m" x="16" y="45">queued jobs, JIT runners</text>
+    <rect class="box" x="280" y="0" width="200" height="56" />
+    <text class="t" x="296" y="24">Docker + sysbox</text>
+    <text class="m" x="296" y="45">one container per runner</text>
+
+    <rect class="frame" x="0" y="118" width="480" height="184" />
+    <text class="m" x="16" y="140">runnerd daemon</text>
+    <rect class="box-2" x="16" y="152" width="448" height="56" />
+    <text class="t" x="32" y="176">engine</text>
+    <text class="m" x="32" y="197">each tick: poll, plan, start and remove runners</text>
+    <rect class="box-2" x="16" y="226" width="210" height="56" />
+    <text class="t" x="32" y="250">history store</text>
+    <text class="m" x="32" y="271">SQLite: jobs, steps, samples</text>
+    <rect class="box-2" x="254" y="226" width="210" height="56" />
+    <text class="t" x="270" y="250">socket API</text>
+    <text class="m" x="270" y="271">JSON and SSE, Unix socket</text>
+
+    <path class="line" d="M60 58V116" marker-end="url(#architecture-arrow)" marker-start="url(#architecture-arrow)"></path>
+    <text class="m" x="72" y="92">poll, register</text>
+    <path class="line" d="M340 58V116" marker-end="url(#architecture-arrow)" marker-start="url(#architecture-arrow)"></path>
+    <text class="m" x="352" y="92">start, remove</text>
+    <path class="line" d="M121 210V224" marker-end="url(#architecture-arrow)"></path>
+    <path class="line" d="M359 224V210" marker-end="url(#architecture-arrow)"></path>
+    <path class="line" d="M228 254H252" marker-end="url(#architecture-arrow)"></path>
+
+    <path class="line" d="M359 304V330"></path>
+    <path class="line" d="M70 330H410"></path>
+    {
+      clients.map((client) => (
+        <g>
+          <path class="line" d={`M${client.x + 70} 330V358`} marker-end="url(#architecture-arrow)" marker-start="url(#architecture-arrow)"></path>
+          <rect class="box" x={client.x} y="360" width="140" height="56" />
+          <text class="t" x={client.x + 14} y="384">{client.name}</text>
+          <text class="m" x={client.x + 14} y="405">{client.what}</text>
+        </g>
+      ))
+    }
+  </svg>
+</Diagram>
