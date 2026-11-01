@@ -15,7 +15,8 @@ const pages = [
   ['overview', '/', { desktop: 1353, phone: 800 }],
   ['history', '/history', { desktop: 733 }],
   ['insights', '/insights', { desktop: 627 }],
-  ['job', '/jobs/120055991700', { desktop: 1133 }],
+  // The job page's exact times, where "Seen by runnerd" is listed, start closed.
+  ['job', '/jobs/120055991700', { desktop: 1290 }, 'details.marks summary'],
 ];
 const sizes = { desktop: { width: 1280, scale: 1.5, suffix: '' }, phone: { width: 390, scale: 2, suffix: '-phone' } };
 // The login link works once: sign in once, and give every context the session cookie it sets.
@@ -25,7 +26,7 @@ const cookies = await signIn.cookies();
 await signIn.close();
 for (const theme of ['light', 'dark']) {
   for (const [size, { width, scale, suffix }] of Object.entries(sizes)) {
-    for (const [name, path, heights] of pages) {
+    for (const [name, path, heights, open] of pages) {
       const height = heights[size];
       if (!height) continue;
       const context = await browser.newContext({
@@ -38,6 +39,8 @@ for (const theme of ['light', 'dark']) {
       const page = await context.newPage();
       await page.goto(new URL(path, login).href, { waitUntil: 'load' });
       await page.waitForTimeout(2500);
+      if (open) await page.click(open);
+      await page.waitForTimeout(300);
       await page.screenshot({ path: join(out, `${name}${suffix}-${theme}.png`) });
       await context.close();
     }
