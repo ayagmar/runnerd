@@ -555,8 +555,10 @@ struct DockerState {
     envs: HashMap<String, Vec<String>>,
     /// What seed containers exit with, at once; `None`: they run for the whole test.
     seed_exit: Option<i64>,
-    /// What measure containers print as they exit, at once; unset, slot 1 changed 4G, past the default `reseed_at`.
+    /// What measure containers print as they exit; unset, slot 1 changed 4G, past the default `reseed_at`.
     measured: Option<String>,
+    /// While true, measure containers do not exit.
+    measures_held: tokio::sync::watch::Sender<bool>,
     /// Measuring the volumes does not finish while this holds true, as when Docker takes long to measure them.
     volume_sizes_held: tokio::sync::watch::Sender<bool>,
     /// Commits do not finish while this holds true, as when Docker takes long to write a large layer.
@@ -884,6 +886,8 @@ impl DockerApi for FakeDocker {
     async fn wait(&self, container: &str) -> Result<i64, docker::Error> {
         self.outage().await?;
         if container.ends_with("-measure") {
+            let mut held = self.0.lock().unwrap().measures_held.subscribe();
+            let _ = held.wait_for(|held| !held).await;
             return Ok(0);
         }
         if let Some(code) = self.0.lock().unwrap().seed_exit {
@@ -3060,6 +3064,139 @@ async fn a_snapshot_over_its_limit_starts_over_at_the_next_idle_moment_however_l
         ["0".to_owned(), (10u64 << 30).to_string()],
         "the seed runs whatever slot 1 changed, against snapshot_max"
     );
+}
+
+/// How many times Docker was asked to start a container measuring `app`'s slot 1.
+fn measures(docker: &FakeDocker) -> usize {
+    let measure = format!("start {}", Names::new("runnerd").measure("app"));
+    docker
+        .calls()
+        .iter()
+        .filter(|call| **call == measure)
+        .count()
+}
+
+/// Ticks a few times, giving what they spawned time to run.
+async fn settle(engine: &mut Engine<FakeGithub, FakeDocker>) {
+    for _ in 0..5 {
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+}
+
+/// Ticks until `app`'s slot 1 was measured `count` times.
+async fn until_measured(
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    docker: &FakeDocker,
+    count: usize,
+) {
+    for _ in 0..100 {
+        if measures(docker) >= count {
+            break;
+        }
+        tokio::time::sleep(Duration::from_millis(10)).await;
+        engine.tick(Shutdown::No).await;
+    }
+    assert_eq!(measures(docker), count, "{:?}", docker.calls());
+}
+
+/// Job `job` of `o/r`, queued, takes slot 1 of a 1-slot `app` and runs until `ends_slot_1`.
+async fn job_runs_in_slot_1(
+    github: &FakeGithub,
+    docker: &FakeDocker,
+    engine: &mut Engine<FakeGithub, FakeDocker>,
+    handle: &Handle,
+    job_id: u64,
+) {
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .slot_captures
+        .insert(1, format!("@@job {job_id} {job_id}\n"));
+    github.0.lock().unwrap().queued = vec![job(job_id)];
+    engine.tick(Shutdown::No).await;
+    until_state(handle, job_id, JobState::Running).await;
+    github.0.lock().unwrap().queued.clear();
+}
+
+/// The runner in slot 1 of `app` exits.
+fn ends_slot_1(docker: &FakeDocker) {
+    let slot_1 = identity("ci", ID_A).runner_name("app", 1, 0);
+    let prefix = slot_1
+        .rsplit_once('-')
+        .map_or(slot_1.as_str(), |(prefix, _)| prefix);
+    for container in &mut docker.0.lock().unwrap().containers {
+        if container.name.starts_with(prefix) || container.id == "container-1" {
+            container.running = false;
+        }
+    }
+}
+
+#[tokio::test]
+async fn slot_1_is_measured_after_its_job_ends_never_while_one_runs_there_and_at_most_every_10_minutes()
+ {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    docker.0.lock().unwrap().measured = Some("slot 1 changed 1000 bytes\n".to_owned());
+    let dir = TestDir::new("measure");
+    let (mut engine, handle) = engine_with(
+        &github,
+        &docker,
+        &dir,
+        &CONFIG.replace("slots = 2", "slots = 1"),
+    );
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+
+    // Job 1 ends and job 2 takes slot 1 in the same tick: its container mounts, and may drop, the layers a measure
+    // would read, then its job changes them.
+    ends_slot_1(&docker);
+    job_runs_in_slot_1(&github, &docker, &mut engine, &handle, 2).await;
+    settle(&mut engine).await;
+    assert_eq!(measures(&docker), 0, "{:?}", docker.calls());
+
+    // Job 2 ends: slot 1 is measured.
+    ends_slot_1(&docker);
+    until_measured(&mut engine, &docker, 1).await;
+
+    // Job 3 runs and ends in slot 1 soon after: measured again only `MEASURE_EVERY` after the last. Its runner's
+    // name has its start's second, which keeps it apart from job 2's.
+    std::thread::sleep(Duration::from_millis(1001));
+    job_runs_in_slot_1(&github, &docker, &mut engine, &handle, 3).await;
+    ends_slot_1(&docker);
+    settle(&mut engine).await;
+    assert_eq!(measures(&docker), 1);
+    tokio::time::pause();
+    tokio::time::advance(super::caches::MEASURE_EVERY).await;
+    until_measured(&mut engine, &docker, 2).await;
+    let seed = format!("start {}", Names::new("runnerd").seed("app"));
+    assert!(!docker.calls().contains(&seed), "slot 1 changed too little");
+}
+
+#[tokio::test]
+async fn a_reseed_asked_for_while_slot_1_is_measured_waits_for_the_measure() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.measured = Some("slot 1 changed 1000 bytes\n".to_owned());
+        state.measures_held.send_replace(true);
+        state.seed_exit = Some(0);
+    }
+    let (mut engine, _handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    ends_slot_1(&docker);
+    until_measured(&mut engine, &docker, 1).await;
+
+    // The seed would drop slot 1's layers under the measure reading them.
+    engine.request_reseed("app").unwrap();
+    settle(&mut engine).await;
+    let seed = format!("start {}", Names::new("runnerd").seed("app"));
+    assert!(!docker.calls().contains(&seed), "{:?}", docker.calls());
+    docker.0.lock().unwrap().measures_held.send_replace(false);
+    until_called(&mut engine, &docker, &seed).await;
 }
 
 #[tokio::test]

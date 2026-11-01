@@ -12,7 +12,8 @@
 # that finds it, left by one killed in between, starts over from the image whatever its arguments.
 # With `measure` as its only argument, changes nothing: prints what slot 1 changed, as a reseed would weigh it, or that
 # the last reseed did not finish. runnerd runs it with /base and /workers/1 read-only while the profile's runners run,
-# so the profile's upkeep stops them only for a reseed that will replace the snapshot.
+# so the profile's upkeep stops them only for a reseed that will replace the snapshot. The count is advisory: files a
+# job deletes meanwhile are left out, and so are du's complaints about them.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/layers.sh
 . /usr/local/lib/runnerd-layers.sh
@@ -21,7 +22,9 @@ if [ "${1:-}" = measure ]; then
     if [ -e "$RESEED_MARKER" ]; then
         echo "the last reseed did not finish"
     else
-        changes=$(layer_changes /workers/1)
+        # A job slot 1 runs meanwhile may delete a file du is counting: the count is advisory, as the reseed
+        # weighs slot 1 again.
+        changes=$(layer_changes /workers/1 2> /dev/null)
         echo "slot 1 changed $changes bytes"
     fi
     exit 0

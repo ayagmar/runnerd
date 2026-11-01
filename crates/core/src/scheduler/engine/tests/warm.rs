@@ -383,22 +383,14 @@ async fn slot_1_job_ends_and_measures(
     (engine, handle, dir)
 }
 
-fn measures(docker: &FakeDocker) -> usize {
-    let measure = format!("start {}", Names::new("runnerd").measure("app"));
-    docker
-        .calls()
-        .iter()
-        .filter(|call| **call == measure)
-        .count()
-}
-
 #[tokio::test]
-async fn a_slot_1_that_changed_under_reseed_at_leaves_the_warm_runners_waiting_and_is_measured_at_most_every_10_minutes()
- {
+async fn a_slot_1_that_changed_under_reseed_at_leaves_the_warm_runners_waiting() {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
-    let (mut engine, handle, _dir) =
-        slot_1_job_ends_and_measures(&github, &docker, "slot 1 changed 201011459 bytes\n").await;
+    // `du` complained of a file a job deleted while it counted: the count is still the measure's.
+    let measured = "du: cannot access '/workers/1/cache/upper/gradle/tmp': No such file or directory\n\
+                    slot 1 changed 201011459 bytes\n";
+    let (mut engine, handle, _dir) = slot_1_job_ends_and_measures(&github, &docker, measured).await;
     // A reseed would change nothing: the profile's upkeep used to stop the warm runner for it anyway, then start it
     // again.
     let seed = format!("start {}", Names::new("runnerd").seed("app"));
@@ -407,24 +399,6 @@ async fn a_slot_1_that_changed_under_reseed_at_leaves_the_warm_runners_waiting_a
     assert_eq!(slots(&handle), [None, Some(warm_in("o/r"))]);
     assert_eq!(removed(&docker.calls()), ["remove container-1"]);
     assert_eq!(registered(&github.calls()).len(), 1, "nothing else starts");
-
-    // Slot 1 runs another job soon after: it is measured again only `MEASURE_EVERY` after the last.
-    engine.measure_due.insert("app".to_owned());
-    for _ in 0..5 {
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        engine.tick(Shutdown::No).await;
-    }
-    assert_eq!(measures(&docker), 1);
-    tokio::time::pause();
-    tokio::time::advance(super::super::caches::MEASURE_EVERY).await;
-    for _ in 0..100 {
-        if measures(&docker) == 2 {
-            break;
-        }
-        tokio::time::sleep(Duration::from_millis(10)).await;
-        engine.tick(Shutdown::No).await;
-    }
-    assert_eq!(measures(&docker), 2, "{:?}", docker.calls());
 }
 
 #[tokio::test]

@@ -56,9 +56,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Measures slot 1 of the profiles whose slot 1 ran a job, and reseeds the idle profiles due to reseed, once Docker
     /// has their image; with no runner running at all, stops the mirror and, unless shutting down, empties the shared
     /// caches over their limit.
-    pub(super) async fn idle_caches(&mut self, mode: Shutdown) {
+    pub(super) async fn idle_caches(&mut self, mode: Shutdown, tick_began: SystemTime) {
         if mode == Shutdown::No {
-            self.start_measures();
+            self.start_measures(tick_began);
             let due: Vec<String> = self
                 .reseed_due
                 .union(&self.reseed_requested)
@@ -143,10 +143,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Measures slot 1 of each profile whose slot 1 ran a job since its last measure (`cache::measure`), once
-    /// `MEASURE_EVERY` passed since that one, while slot 1 runs no job and Docker has the profile's image. It holds
-    /// no slot and stops no runner: its container reads slot 1 and the snapshot read-only. Not for a profile already
-    /// due to reseed, or reseeding.
-    fn start_measures(&mut self) {
+    /// `MEASURE_EVERY` passed since that one, when slot 1 runs no job and Docker has the profile's image. It holds
+    /// no slot and stops no runner: its container reads slot 1 and the snapshot read-only, and a job slot 1 takes
+    /// meanwhile only skews the number, which the reseed weighs again. Not for a profile already due to reseed, or
+    /// reseeding, nor in the tick that started slot 1's runner (`tick_began`), whose container is still mounting
+    /// the layers and may drop some.
+    fn start_measures(&mut self, tick_began: SystemTime) {
         let now = tokio::time::Instant::now();
         let due: Vec<String> = self
             .measure_due
@@ -167,8 +169,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .get(*name)
                     .and_then(|slots| slots.first())
                     .is_some_and(|slot| {
-                        slot.as_ref()
-                            .is_none_or(|occupant| !occupant.busy && occupant.job.is_none())
+                        slot.as_ref().is_none_or(|occupant| {
+                            !occupant.busy
+                                && occupant.job.is_none()
+                                && occupant.started_at < tick_began
+                        })
                     })
             })
             .filter(|name| {

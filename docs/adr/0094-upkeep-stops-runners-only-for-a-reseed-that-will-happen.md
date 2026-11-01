@@ -25,18 +25,21 @@ two hours against a `reseed_at` of 2G.
 - **Only a measure of `reseed_at` or more makes the reseed due**, and the upkeep that stops the profile's runners
   with it. One below it changes nothing until slot 1 runs another job. A reseed the last did not leave finished
   (ADR 0066) is due whatever slot 1 changed.
-- **A measure that fails makes the reseed due**, as every slot-1 job did before: the reseed measures slot 1 itself
-  and reports its own failure in `cache.reseeded`. A measure fails on a Docker or sysbox error, or when the profile's
-  image predates `seed.sh measure`.
+- **A measure that fails makes the reseed due**, as every slot-1 job did before: the reseed measures slot 1 itself and
+  reports its own failure in `cache.reseeded`. A measure fails on a Docker or sysbox error, or when the profile's
+  image predates `seed.sh measure`; not on a file a job deletes while it counts.
 - **Unchanged:** a requested reseed (`runnerctl reseed`) runs once the profile's slots are free, whatever slot 1
   changed, and one of a snapshot the caches' check found over `snapshot_max` starts it over. The reseed still checks
   `reseed_at` itself, so a measure that is stale by the time it runs replaces nothing. The shared caches' check stops
   warm runners an hour after the last, as before.
-- **When it runs.** A measure starts once a slot-1 job ended since the last, at most every `MEASURE_EVERY`
-  (10 minutes) per profile, while slot 1 runs no job and Docker has the profile's image. It does not start for a
-  profile already due to reseed or reseeding, and a reseed waits for a running measure to end, since the reseed drops
-  the layers it reads. A job that ends in slot 1 within 10 minutes of a measure waits for the next. The reseed
-  happens up to 10 minutes later than it could, and changes nothing that matters before then.
+- **When it runs.** A measure starts once a slot-1 job ended since the last, at most every `MEASURE_EVERY` (10
+  minutes) per profile, when slot 1 runs no job and Docker has the profile's image, and not in the tick that started
+  slot 1's runner, whose container may still be dropping layers as it mounts them. A job slot 1 takes meanwhile can
+  skew the number, which the reseed checks again; `du`'s complaints about files deleted under it are left out rather
+  than failing the measure. It does not start for a profile already due to reseed or reseeding, and a reseed waits for
+  a running measure to end, since the reseed drops the layers it reads. A job that ends in slot 1 within 10 minutes of
+  a measure waits for the next. The reseed happens up to 10 minutes later than it could, and changes nothing that
+  matters before then.
 - **What it costs.** A container start in the profile's isolation, capped at one CPU and 256M and not reserved in the
   budget, plus `du` over slot 1's layer changes: the work each no-op seed container did, minus stopping and
   restarting the warm runners. On the owner's host those seed containers ended within the tick that started them.

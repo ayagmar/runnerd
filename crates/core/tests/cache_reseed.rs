@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use runnerd_core::cache::{self, Measure, Measured, Names, Reseed, runner_mounts};
+use runnerd_core::cache::{self, Measure, Measured, Names, Reseed, measure_spec, runner_mounts};
 use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
@@ -285,6 +285,7 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
         slice: "system.slice",
         isolation: &Sysbox,
     };
+    measured_beside_a_runner(docker, names, &measure).await?;
     measured_changes(docker, names, &reseed("0K", "1T"), &measure).await?;
     old_snapshot(docker, names, &reseed("1T", "1T")).await?;
     let capped = reseed("0K", "3M");
@@ -426,6 +427,85 @@ async fn measured_changes(
             "slot 1 still changed {after} bytes after its reseed"
         )),
     }
+}
+
+/// A measure reads slot 1 while a runner container holds its volume with its layers mounted, as a warm runner does:
+/// the read-only mount beside the live overlay works, the count includes what the runner wrote, and the measure
+/// prints its one line and nothing on stderr. The next step's reseed then takes in what it wrote.
+async fn measured_beside_a_runner(
+    docker: &Docker,
+    names: &Names,
+    measure: &Measure<'_>,
+) -> Result<(), String> {
+    let spec = RunnerSpec {
+        name: format!("{}-slot-1-held", names.network()),
+        image: image(),
+        profile: PROFILE.to_owned(),
+        slice: "system.slice".to_owned(),
+        cpus: 1,
+        memory: "1G".parse().map_err(|e: String| e)?,
+        env: Vec::new(),
+        mounts: runner_mounts(names, PROFILE, 1),
+        network: Some("none".to_owned()),
+        labels: BTreeMap::new(),
+        entrypoint: Some(vec![
+            "bash".to_owned(),
+            "-euo".to_owned(),
+            "pipefail".to_owned(),
+            "-c".to_owned(),
+            format!(
+                ". /usr/local/lib/runnerd-layers.sh; mount_layers; \
+                 {AS_RUNNER} sh -c 'echo held > /home/runner/.cache/held'; echo mounted; sleep 600"
+            ),
+        ]),
+        jit_config: None,
+    };
+    let runner = docker
+        .start(&spec, &Sysbox)
+        .await
+        .map_err(|e| e.to_string())?;
+    let result = async {
+        let mut mounted = false;
+        for _ in 0..120 {
+            if docker
+                .logs(&runner)
+                .await
+                .map_err(|e| e.to_string())?
+                .contains("mounted")
+            {
+                mounted = true;
+                break;
+            }
+            tokio::time::sleep(std::time::Duration::from_millis(500)).await;
+        }
+        if !mounted {
+            return Err("the runner in slot 1 never mounted its layers".to_owned());
+        }
+        let measuring = measure_spec(measure);
+        let id = docker
+            .start(&measuring, &Sysbox)
+            .await
+            .map_err(|e| e.to_string())?;
+        let output = cache::finish_reseed(docker, &id)
+            .await
+            .map_err(|e| e.to_string())?;
+        println!("{output}");
+        let changed = output
+            .trim()
+            .strip_prefix("slot 1 changed ")
+            .and_then(|rest| rest.strip_suffix(" bytes"))
+            .and_then(|bytes| bytes.parse::<u64>().ok());
+        match changed {
+            Some(bytes) if bytes > 0 => Ok(()),
+            _ => Err(format!(
+                "measuring beside a runner printed more or less than its count:\n{output}"
+            )),
+        }
+    }
+    .await;
+    let removed = docker.remove(&runner).await.map_err(|e| e.to_string());
+    result?;
+    removed
 }
 
 /// A reseed killed between changing the snapshot and dropping the slots' changes leaves its marker: a slot's changes

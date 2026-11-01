@@ -510,10 +510,24 @@ const MEASURE_MEMORY: ByteSize = ByteSize(256 << 20);
 /// volume and the snapshot read-only, so it may run while the profile's runners do. A measure container an earlier
 /// daemon left is removed first.
 pub async fn measure(docker: &impl DockerApi, measure: &Measure<'_>) -> Result<Measured, Error> {
+    let spec = measure_spec(measure);
+    match docker.remove(&spec.name).await {
+        Err(error) if !is_not_found(&error) => return Err(error),
+        _ => {}
+    }
+    let id = docker.start(&spec, measure.isolation).await?;
+    let output = finish_reseed(docker, &id).await?;
+    measured(&output).ok_or_else(|| Error::DockerContainerWaitError {
+        error: format!("measuring printed {:?}", output.trim()),
+        code: 0,
+    })
+}
+
+/// The container `measure` runs: `seed.sh measure` on slot 1's volume and the snapshot, both read-only.
+pub fn measure_spec(measure: &Measure<'_>) -> RunnerSpec {
     let names = measure.names;
-    let name = names.measure(measure.profile);
-    let spec = RunnerSpec {
-        name: name.clone(),
+    RunnerSpec {
+        name: names.measure(measure.profile),
         image: measure.image.to_owned(),
         profile: measure.profile.to_owned(),
         slice: measure.slice.to_owned(),
@@ -532,31 +546,22 @@ pub async fn measure(docker: &impl DockerApi, measure: &Measure<'_>) -> Result<M
             "measure".to_owned(),
         ]),
         jit_config: None,
-    };
-    match docker.remove(&name).await {
-        Err(error) if !is_not_found(&error) => return Err(error),
-        _ => {}
     }
-    let id = docker.start(&spec, measure.isolation).await?;
-    let output = finish_reseed(docker, &id).await?;
-    measured(&output).ok_or_else(|| Error::DockerContainerWaitError {
-        error: format!("measuring printed {:?}", output.trim()),
-        code: 0,
-    })
 }
 
-/// What the output of `image/seed.sh measure` says.
+/// What the output of `image/seed.sh measure` says, in its last line that says it: a warning before it, such as
+/// one of `du` about a file a job deleted while it counted, leaves the number as advisory as it is anyway.
 fn measured(output: &str) -> Option<Measured> {
-    let output = output.trim();
-    if output == "the last reseed did not finish" {
-        return Some(Measured::Unfinished);
-    }
-    output
-        .strip_prefix("slot 1 changed ")?
-        .strip_suffix(" bytes")?
-        .parse()
-        .ok()
-        .map(Measured::Changed)
+    output.lines().rev().map(str::trim).find_map(|line| {
+        if line == "the last reseed did not finish" {
+            return Some(Measured::Unfinished);
+        }
+        line.strip_prefix("slot 1 changed ")?
+            .strip_suffix(" bytes")?
+            .parse()
+            .ok()
+            .map(Measured::Changed)
+    })
 }
 
 /// Whether the output of a reseed (`image/seed.sh`) says it replaced the snapshot, and so dropped every slot's own
