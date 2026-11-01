@@ -4,6 +4,9 @@
 
 use serde::{Deserialize, Serialize};
 
+use super::{cpu_time, in_cores};
+use crate::config::ByteSize;
+
 mod facts;
 
 pub use facts::{
@@ -101,7 +104,7 @@ impl Job {
             memory: chart_lines(
                 limits.memory,
                 admission.map(|admission| admission.reserved),
-                |value| crate::config::ByteSize(value).to_string(),
+                |value| ByteSize(value).to_string(),
                 name,
             ),
             cpu: chart_lines(
@@ -157,12 +160,9 @@ impl Limits {
     /// The limits as one clause, such as `capped at 6G and 4 CPUs`, `capped at 6G; profile now 4 CPUs` or `profile
     /// now 6G and 4 CPUs`; `None` without either.
     pub fn line(&self) -> Option<String> {
-        let memory = self.memory.map(|limit| {
-            (
-                limit.source,
-                crate::config::ByteSize(limit.value).to_string(),
-            )
-        });
+        let memory = self
+            .memory
+            .map(|limit| (limit.source, ByteSize(limit.value).to_string()));
         let cpu = self
             .cpu
             .map(|limit| (limit.source, super::cpus(limit.value)));
@@ -371,6 +371,48 @@ pub struct JobMetrics {
     pub cpu_stalled: Option<u64>,
 }
 
+/// One figure of what a job used, worded for every client.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Total {
+    /// What it measures: `Memory peak`, `Received`.
+    pub label: &'static str,
+    /// The figure with its unit.
+    pub value: String,
+}
+
+impl JobMetrics {
+    /// What the job used, over its whole life: memory, CPU and network, each where the daemon measured it. The
+    /// peaks are of the samples taken every few seconds, so the figures' note says that
+    /// ([`sampled_note`](super::sampled_note)).
+    pub fn totals(&self) -> Vec<Total> {
+        let mut totals = Vec::new();
+        let mut add = |label: &'static str, value: Option<String>| {
+            totals.extend(value.map(|value| Total { label, value }));
+        };
+        let bytes = |bytes: u64| ByteSize(bytes).to_string();
+        add("Memory peak", self.memory_peak.map(bytes));
+        add("Average memory", self.memory_average.map(bytes));
+        add("CPU peak", self.cpu_peak.map(in_cores));
+        add("Average CPU", self.cpu_average.map(in_cores));
+        add("CPU time", self.cpu_time.map(cpu_time));
+        add("Received", self.network_received.map(bytes));
+        add("Sent", self.network_sent.map(bytes));
+        // Counted from the mirror's own log, so a job without network samples still has it.
+        add(
+            "From the mirror",
+            (self.network_received.is_some() || self.mirror_bytes > 0)
+                .then(|| bytes(self.mirror_bytes)),
+        );
+        add(
+            "Throttled for memory pressure",
+            self.sock_throttled
+                .filter(|times| *times > 0)
+                .map(|times| format!("{times} times")),
+        );
+        totals
+    }
+}
+
 /// What the shared build cache served one runner and took from it (ADR 0052), counted by the cache itself.
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, Serialize, Deserialize)]
 pub struct BuildCacheCounts {
@@ -573,7 +615,7 @@ impl HostMemory {
     /// What holds the host's memory outside the slice, as the clients say it: `programs outside CI hold 30G` and,
     /// with `holders`, `, most java 9.3G and qemu-system-x86 5.8G`.
     pub fn outside_line(&self) -> String {
-        let size = |bytes: u64| crate::config::ByteSize(bytes).to_string();
+        let size = |bytes: u64| ByteSize(bytes).to_string();
         let line = format!("programs outside CI hold {}", size(self.outside()));
         let named: Vec<String> = self
             .holders

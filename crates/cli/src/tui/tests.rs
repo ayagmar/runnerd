@@ -371,7 +371,7 @@ fn every_pane_fits_a_terminal_of_80_by_24() {
         "Set up job",
         "Unit tests",
         "Complete job",
-        "mem",
+        "Memory peak",
         "Log",
         "line 99",
     ] {
@@ -398,7 +398,7 @@ fn every_pane_fits_a_terminal_of_80_by_24() {
 
 #[test]
 fn the_failed_figure_is_red_only_for_failures_of_the_runner() {
-    // The colour of the count's cell in "2 failed" on the health line.
+    // The colour of the count's cell in "Failed, 24 h: 2" on the health line.
     let colour_of_failed = |runner_failed| {
         let mut app = app();
         app.activity = Some(runnerd_core::api::Activity {
@@ -412,10 +412,10 @@ fn the_failed_figure_is_red_only_for_failures_of_the_runner() {
         let buffer = terminal.backend().buffer();
         let row: Vec<&str> = (0..160).map(|x| buffer[(x, 1)].symbol()).collect();
         let x = row
-            .windows(8)
-            .position(|cells| cells.concat() == "2 failed")
+            .windows(15)
+            .position(|cells| cells.concat() == "Failed, 24 h: 2")
             .unwrap();
-        buffer[(u16::try_from(x).unwrap(), 1)].fg
+        buffer[(u16::try_from(x + 14).unwrap(), 1)].fg
     };
     assert_ne!(
         colour_of_failed(0),
@@ -735,7 +735,7 @@ fn the_queue_lists_each_waiting_job_oldest_first_with_why_and_opens_and_pauses_l
             "{rows:?}"
         );
         assert!(
-            shown.contains("2 waiting, oldest 59s"),
+            shown.contains("Waiting: 2, oldest 59s"),
             "the health line counts them: {shown}"
         );
     }
@@ -1491,11 +1491,12 @@ fn a_job_read_again_as_finished_leaves_the_slots() {
     assert!(screen(&app, 120, 40, false).contains("SUCCESS"));
 }
 
-/// halyard/ledger's job `id`, which succeeded `ago` seconds before now.
+/// halyard/ledger's job `id`, which succeeded after it was queued `ago` seconds before now.
 fn finished(id: u64, ago: u64) -> JobSummary {
     let mut job = summary(id, JobState::Completed);
     job.conclusion = Some("success".to_owned());
-    job.timeline.finished_at = Some(NOW - ago);
+    job.timeline.queued_at = NOW - ago;
+    job.timeline.finished_at = Some(NOW);
     job.timeline.started_at = Some(0);
     job
 }
@@ -1506,7 +1507,7 @@ fn rows_with<'screen>(screen: &'screen str, text: &str) -> Vec<&'screen str> {
 }
 
 #[test]
-fn how_long_ago_a_job_finished_reads_in_full_at_every_width() {
+fn how_long_ago_a_job_was_queued_reads_in_full_at_every_width() {
     let mut app = app();
     app.live.recent = vec![finished(7, 17 * 60 + 31), finished(8, 5)];
     for width in [80, 96, 104, 120, 136] {
@@ -1728,11 +1729,14 @@ fn the_open_job_metrics_drop_whole_figures_to_fit() {
     };
     app.update(key(KeyCode::Enter));
     let full = screen(&app, 240, 40, false);
-    let figures: Vec<&str> = rows_with(&full, "mem peak")[0].trim().split("  ").collect();
-    assert!(figures.contains(&"mirror 110M"), "{full}");
+    let figures: Vec<&str> = rows_with(&full, "Memory peak")[0]
+        .trim()
+        .split("  ")
+        .collect();
+    assert!(figures.contains(&"From the mirror 110M"), "{full}");
     for (width, height) in [(80, 24), (96, 24), (96, 30), (104, 30)] {
         let job = screen(&app, width, height, false);
-        let row = rows_with(&job, "mem peak")[0].trim();
+        let row = rows_with(&job, "Memory peak")[0].trim();
         for figure in row.split("  ") {
             assert!(
                 figures.contains(&figure),
@@ -1876,10 +1880,10 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
     let wide = screen(&app, 160, 40, false);
     let health = wide.lines().nth(1).unwrap();
     for expected in [
-        "0/3 running",
-        "1 waiting, oldest 59s",
-        "24 h: wait p95 5m 00s",
-        "2 failed of 30 finished",
+        "Running: 0 of 3 slots",
+        "Waiting: 1, oldest 59s",
+        "Wait p95, 24 h: 5m 00s",
+        "Failed, 24 h: 2 of 30 finished",
     ] {
         assert!(health.contains(expected), "{expected}: {health}");
     }
@@ -1888,7 +1892,7 @@ fn the_overview_opens_with_ci_health_and_keeps_its_figures_whole_at_80_columns()
     let small = screen(&app, 80, 24, false);
     let health = small.lines().nth(1).unwrap();
     assert!(
-        health.contains("24 h: wait p95 5m 00s") && health.contains("2 failed"),
+        health.contains("Wait p95, 24 h: 5m 00s") && health.contains("Failed, 24 h: 2"),
         "at 80 columns the figures stay and the details go whole: {health}"
     );
     assert!(!health.contains('…'), "nothing cut mid-figure: {health}");
@@ -1930,7 +1934,7 @@ fn the_health_line_counts_the_warning_insights_and_says_where_to_read_them() {
     let small = screen(&app, 80, 24, false);
     let health = small.lines().nth(1).unwrap();
     assert!(
-        !health.contains("runnerctl insights") && health.contains("2 failed"),
+        !health.contains("runnerctl insights") && health.contains("Failed, 24 h: 2"),
         "the pointer goes first at 80 columns: {health}"
     );
 }
@@ -2233,7 +2237,7 @@ fn an_activity_read_that_answers_after_a_newer_one_is_ignored() {
     });
     let health = screen(&app, 160, 40, false);
     assert!(
-        health.contains("3 failed of 31 finished"),
+        health.contains("Failed, 24 h: 3 of 31 finished"),
         "the older read does not take the failure back: {health}"
     );
 }
@@ -2565,7 +2569,7 @@ fn a_warm_runner_reads_as_warm_not_as_a_runner_stuck_waiting_for_its_job() {
     let shown = screen(&app, 160, 40, false);
     let health = shown.lines().nth(1).unwrap();
     assert!(
-        health.contains("0/3 running") && health.contains("1 warm"),
+        health.contains("Running: 0 of 3 slots") && health.contains("1 warm, waiting for jobs"),
         "the warm runner runs nothing and is not starting: {health}"
     );
     assert!(!health.contains("starting"), "{health}");

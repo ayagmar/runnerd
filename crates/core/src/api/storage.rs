@@ -128,6 +128,17 @@ impl BuildCacheActivity {
         (self.counts.refused > 0).then(|| format!("{} uploads refused", self.counts.refused))
     }
 
+    /// A line for a client with little room: the hit rate and what it served, or what a job that only wrote stored,
+    /// and always the uploads it refused: `75% hit, 1.5G served, 3 uploads refused`, `read only`.
+    pub fn short_line(&self) -> String {
+        let mut parts = match self.counts.hit_percent() {
+            Some(percent) => vec![format!("{percent}% hit"), self.served_line()],
+            None => vec![self.stored_line()],
+        };
+        parts.extend(self.refused_line());
+        parts.join(", ")
+    }
+
     /// All of it in a line: `3 of 4 lookups hit (75%), 1.5G served, 2G stored, 3 uploads refused`.
     pub fn line(&self) -> String {
         let mut parts = vec![self.lookups_line(), self.served_line(), self.stored_line()];

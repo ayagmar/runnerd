@@ -10,8 +10,8 @@ use runnerd_core::api::{
     JobSizing, JobSummary, NotifyTest, ProfilePlan, ProfileSizing, QueuedJob, RecordNote,
     RecordState, Records, Savings, Sizing, SlotState, Status, Step, WaitSpread,
 };
-pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
-use runnerd_core::api::{in_cores, job_title};
+use runnerd_core::api::{Column, job_title};
+pub(crate) use runnerd_core::api::{ago, cores_used, duration};
 use runnerd_core::config::ByteSize;
 
 /// How a piece of text should stand out.
@@ -74,6 +74,15 @@ pub(crate) struct Table {
 }
 
 impl Table {
+    /// A table headed by core's names for `columns`, in capitals.
+    pub(crate) fn columns(columns: &[Column]) -> Table {
+        let headers: Vec<String> = columns
+            .iter()
+            .map(|column| column.title().to_uppercase())
+            .collect();
+        Table::new(&headers.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
     /// A table whose first row is `headers`, dimmed.
     pub(crate) fn new(headers: &[&str]) -> Table {
         Table {
@@ -269,16 +278,16 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
     if page.jobs.is_empty() {
         return "no jobs match\n".to_owned();
     }
-    let mut table = Table::new(&[
-        "JOB",
-        "REPOSITORY",
-        "WORKFLOW / NAME",
-        "BRANCH",
-        "RESULT",
-        "WAITED",
-        "RAN",
-        "MEM PEAK",
-        "QUEUED",
+    let mut table = Table::columns(&[
+        Column::Id,
+        Column::Repository,
+        Column::Job,
+        Column::Branch,
+        Column::Outcome,
+        Column::Waited,
+        Column::Ran,
+        Column::MemoryPeak,
+        Column::Queued,
     ])
     .right(&[5, 6, 7]);
     for job in &page.jobs {
@@ -416,7 +425,14 @@ pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
         out.push('\n');
         return out;
     }
-    let mut table = Table::new(&["JOB", "REPOSITORY", "NAME", "SIZE", "MADE"]).right(&[3]);
+    let mut table = Table::columns(&[
+        Column::Id,
+        Column::Repository,
+        Column::Job,
+        Column::Size,
+        Column::Made,
+    ])
+    .right(&[3]);
     for record in &records.records {
         let mut made = ago(record.created_at, now);
         if records.shell_open(record.job) {
@@ -501,43 +517,18 @@ fn usage(summary: &JobSummary, now: u64, paint: Paint) -> String {
     let metrics = &summary.metrics;
     let _ = writeln!(out, "\n{}", paint.paint(Tone::Bold, "Usage"));
     let mut usage = Table::default();
-    if let Some(time) = metrics.cpu_time {
-        let mut parts = vec![format!("{} CPU time", cpu_time(time))];
-        if let Some(average) = metrics.cpu_average {
-            parts.push(format!("{} average", in_cores(average)));
-        }
-        if let Some(peak) = metrics.cpu_peak {
-            parts.push(format!("{} sampled peak", in_cores(peak)));
-        }
-        usage.row(vec![plain("cpu"), plain(parts.join(", "))]);
+    for total in metrics.totals() {
+        usage.row(vec![plain(total.label), plain(total.value)]);
     }
     if let Some(held) = summary.cpu_held(now) {
-        usage.row(vec![plain("cpu held back"), plain(held)]);
-    }
-    if let Some(peak) = metrics.memory_peak {
-        let mut parts = vec![format!("{} sampled peak", bytes(peak))];
-        if let Some(average) = metrics.memory_average {
-            parts.push(format!("{} average", bytes(average)));
-        }
-        usage.row(vec![plain("memory"), plain(parts.join(", "))]);
-    }
-    if let Some(received) = metrics.network_received {
-        let mut parts = vec![format!("{} received", bytes(received))];
-        if let Some(sent) = metrics.network_sent {
-            parts.push(format!("{} sent", bytes(sent)));
-        }
-        parts.push(format!("{} from the mirror", bytes(metrics.mirror_bytes)));
-        if let Some(throttled) = metrics.sock_throttled.filter(|count| *count > 0) {
-            parts.push(format!("throttled {throttled} times for memory pressure"));
-        }
-        usage.row(vec![plain("network"), plain(parts.join(", "))]);
+        usage.row(vec![plain("CPU held back"), plain(held)]);
     }
     if let Some(line) = build_cache(&metrics.build_cache) {
-        usage.row(vec![plain("build cache"), plain(line)]);
+        usage.row(vec![plain("Build cache"), plain(line)]);
     }
     let log = &summary.log;
     usage.row(vec![
-        plain("log"),
+        plain("Log"),
         // The last column: the hint's colour codes pad nothing after it.
         plain(format!(
             "{}  {}",

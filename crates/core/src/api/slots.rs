@@ -1,7 +1,7 @@
 //! What a slot is doing and whether CI keeps up, as every client names and counts it. Plain derivations of
 //! [`Status`] and [`Activity`]: a client never infers a slot's state from whether it found the job's details.
 
-use super::{Activity, ProfileStatus, RunnerStatus, SlotStatus, Status, Tone};
+use super::{Activity, ProfileStatus, RunnerStatus, SlotStatus, Status, Tone, duration};
 
 /// What a slot is doing, from `Status::slot_state`.
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -147,6 +147,81 @@ impl Health {
         } else {
             Tone::Neutral
         }
+    }
+}
+
+/// One of the overview's four health figures, worded once for every client: the web dashboard lays them out as
+/// tiles, the TUI on one line.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct Figure {
+    /// What it counts: `Running`, `Waiting`, `Wait p95, 24 h` or `Failed, 24 h`.
+    pub label: &'static str,
+    /// The figure itself.
+    pub value: String,
+    /// What it is out of, such as `of 6 slots`.
+    pub of: Option<String>,
+    /// What qualifies it, most telling first.
+    pub notes: Vec<String>,
+    /// What it means.
+    pub tone: Tone,
+}
+
+impl Health {
+    /// The four figures that say whether CI keeps up: slots running, jobs waiting and the oldest's wait, and from
+    /// the last day's `activity`, the wait of the jobs that started and the failures. The last two are left out
+    /// until the day is read.
+    pub fn figures(&self, activity: Option<&Activity>) -> Vec<Figure> {
+        let mut running = Vec::new();
+        if self.starting > 0 {
+            let s = if self.starting == 1 { "" } else { "s" };
+            running.push(format!("{} runner{s} starting", self.starting));
+        }
+        if self.warm > 0 {
+            running.push(format!("{} warm, waiting for jobs", self.warm));
+        }
+        let waiting = match self.oldest_wait {
+            Some(oldest) => vec![format!("oldest {}", duration(oldest))],
+            None => Vec::new(),
+        };
+        let mut figures = vec![
+            Figure {
+                label: "Running",
+                value: self.running.to_string(),
+                of: Some(format!("of {} slots", self.slots)),
+                notes: running,
+                tone: Tone::Neutral,
+            },
+            Figure {
+                label: "Waiting",
+                value: self.waiting.to_string(),
+                of: None,
+                notes: waiting,
+                tone: self.waiting_tone(),
+            },
+        ];
+        if let Some(day) = activity {
+            let started = day.started.len();
+            figures.push(Figure {
+                label: "Wait p95, 24 h",
+                value: day.wait_p95().map_or_else(|| "–".to_owned(), duration),
+                of: None,
+                notes: vec![format!(
+                    "{started} job{} started",
+                    if started == 1 { "" } else { "s" }
+                )],
+                tone: Tone::Neutral,
+            });
+            let runner =
+                (day.runner_failed > 0).then(|| format!("{} by their runner", day.runner_failed));
+            figures.push(Figure {
+                label: "Failed, 24 h",
+                value: day.failed.to_string(),
+                of: Some(format!("of {} finished", day.finished)),
+                notes: runner.into_iter().collect(),
+                tone: day.failed_tone(),
+            });
+        }
+        figures
     }
 }
 

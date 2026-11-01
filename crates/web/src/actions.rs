@@ -17,7 +17,7 @@ use serde::Deserialize;
 
 use crate::App;
 use crate::views::config::{self, Outcome};
-use crate::views::{self, Tone, caches, overview};
+use crate::views::{self, Tone, overview, records};
 
 fn html(markup: &[Markup]) -> Response {
     Html(
@@ -248,7 +248,7 @@ async fn remove_records(app: &App, path: &str) -> Response {
     let status = app.daemon.get::<Status>("/v1/status").await;
     match (status, records) {
         (Ok(status), Ok(records)) => {
-            html(&[caches::records(&status, &records, crate::now()), notice])
+            html(&[records::section(&status, &records, crate::now()), notice])
         }
         _ => html(&[notice]),
     }

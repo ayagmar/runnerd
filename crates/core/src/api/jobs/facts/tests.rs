@@ -437,3 +437,25 @@ fn what_held_a_jobs_cpu_back_is_told_only_from_figures_the_kernel_kept() {
     );
     assert_eq!(held(None, None, None), None);
 }
+
+#[test]
+fn what_a_job_took_from_the_mirror_shows_without_network_samples() {
+    let metrics = JobMetrics {
+        mirror_bytes: 5 << 20,
+        ..JobMetrics::default()
+    };
+    let totals: Vec<_> = metrics
+        .totals()
+        .into_iter()
+        .map(|total| (total.label, total.value))
+        .collect();
+    assert_eq!(
+        totals,
+        [("From the mirror", "5M".to_owned())],
+        "the mirror's own log counts it though no network sample was taken"
+    );
+    assert!(
+        JobMetrics::default().totals().is_empty(),
+        "a job with nothing measured lists nothing"
+    );
+}

@@ -1,7 +1,7 @@
 //! What every client says a slot does, and how it counts whether CI keeps up.
 
 use crate::api::{
-    Activity, Budget, ProfileStatus, QueuedJob, RunnerStatus, SlotStatus, Status, Tone,
+    Activity, Budget, ProfileStatus, QueuedJob, RunnerStatus, SlotStatus, Started, Status, Tone,
 };
 
 fn runner(busy: bool, warm: bool) -> RunnerStatus {
@@ -118,4 +118,55 @@ fn the_days_failures_are_bad_only_when_a_runner_failed() {
     assert_eq!(day.failed_tone(), Tone::Neutral, "the jobs' own failures");
     day.runner_failed = 1;
     assert_eq!(day.failed_tone(), Tone::Bad);
+}
+
+#[test]
+fn the_health_figures_word_what_every_client_shows() {
+    let health = status().health(160);
+    let day = Activity {
+        since: 0,
+        until: 86_400,
+        started: vec![Started { at: 10, waited: 30 }],
+        finished: 10,
+        failed: 3,
+        runner_failed: 1,
+    };
+    let figures = health.figures(Some(&day));
+    let words: Vec<_> = figures
+        .iter()
+        .map(|figure| {
+            (
+                figure.label,
+                figure.value.as_str(),
+                figure.of.as_deref(),
+                figure.notes.join("; "),
+            )
+        })
+        .collect();
+    assert_eq!(
+        words,
+        [
+            (
+                "Running",
+                "1",
+                Some("of 4 slots"),
+                "1 runner starting; 1 warm, waiting for jobs".to_owned()
+            ),
+            ("Waiting", "3", None, "oldest 2m 00s".to_owned()),
+            ("Wait p95, 24 h", "30s", None, "1 job started".to_owned()),
+            (
+                "Failed, 24 h",
+                "3",
+                Some("of 10 finished"),
+                "1 by their runner".to_owned()
+            ),
+        ]
+    );
+    assert_eq!(figures[1].tone, Tone::Warn);
+    assert_eq!(figures[3].tone, Tone::Bad);
+    assert_eq!(
+        health.figures(None).len(),
+        2,
+        "the day's two wait for the day to be read"
+    );
 }

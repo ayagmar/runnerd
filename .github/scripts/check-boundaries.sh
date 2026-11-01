@@ -77,4 +77,32 @@ if [ "$duplicates" -eq 0 ]; then
 else
   status=1
 fi
+
+# The names of the views (`api::View`) are core's: a client that writes one as a string literal of its own, rather than
+# calling `View::title`, can drift from the others. Same files and exceptions for tests as above.
+views=$(sed -n '/pub fn title(self) -> &.static str {/,/^    }/p' crates/core/src/api/labels.rs | head -12 | grep -o '=> "[^"]*"' | sed 's/=> "//; s/"$//')
+pattern=$(printf '%s\n' "$views" | sed 's/.*/"&"/' | paste -sd'|' -)
+spelled=$(find crates/cli/src crates/web/src crates/daemon/src -name '*.rs' ! -name tests.rs ! -name testing.rs \
+  ! -name testdir.rs ! -name parity.rs ! -path '*/tests/*' -exec awk -v pattern="$pattern" \
+  'FNR == 1 { done = 0 } /^mod tests \{/ { done = 1 } !done && $0 !~ /^ *\/\// && $0 ~ pattern { print FILENAME ":" FNR ": " $0 }' {} +)
+if [ -n "$spelled" ]; then
+  printf '%s\n' "$spelled" >&2
+  echo "a view's name is written out: use api::View::title" >&2
+  status=1
+else
+  echo "view names: ok"
+fi
+
+# What the build cache did for a job is worded by core (`BuildCacheActivity`): a client that writes a fragment of it
+# itself can choose, cut or drop what core says. Same files and test exclusions as above.
+worded=$(find crates/cli/src crates/web/src crates/daemon/src -name '*.rs' ! -name tests.rs ! -name testing.rs \
+  ! -name testdir.rs ! -name parity.rs ! -path '*/tests/*' -exec awk \
+  'FNR == 1 { done = 0 } /^mod tests \{/ { done = 1 } !done && $0 !~ /^ *\/\// && /% hit|uploads refused|lookups hit|read only"/ { print FILENAME ":" FNR ": " $0 }' {} +)
+if [ -n "$worded" ]; then
+  printf '%s\n' "$worded" >&2
+  echo "the build cache's wording is core's: use BuildCacheActivity" >&2
+  status=1
+else
+  echo "build cache wording: ok"
+fi
 exit "$status"

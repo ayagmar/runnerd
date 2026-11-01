@@ -16,7 +16,7 @@
 
 use runnerd_core::api::{
     self, AdmissionPolicy, Budget, BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume,
-    Caches, CpuBudget, Health, HostBudget, HostMemory, Job, JobMetrics, JobRunner, JobState,
+    Caches, CpuBudget, Figure, HostBudget, HostMemory, Job, JobMetrics, JobRunner, JobState,
     JobSummary, LogSummary, OutcomeKind, PoolStatus, ProfileStatus, QueuedJob, Record,
     RecordLimits, Records, RepositoryStatus, RunnerStatus, SlotStatus, Status, Step, Timeline,
     Tone, WaitKind, Waiting,
@@ -889,6 +889,8 @@ pub struct JobFacts {
     pub build_cache: Vec<String>,
     /// The uploads the build cache refused it, the part a client with room for one shows.
     pub build_cache_refused: String,
+    /// What it used over its life, as core words each figure.
+    pub totals: Vec<api::Total>,
     /// Its CPU time.
     pub cpu_time: String,
     /// What held its CPU back: its cap's throttling and its waits for a CPU.
@@ -919,8 +921,8 @@ pub struct Facts {
     pub free: String,
     /// The bar's part the host holds back.
     pub host_part: String,
-    /// The slots' health: how many slots there are and run, start a runner or hold a warm one.
-    pub health: Health,
+    /// The health figures of the slots and the queue, worded by core: what runs, starts, is warm and waits.
+    pub figures: Vec<Figure>,
     /// Why each queued job waits, oldest first.
     pub waits: Vec<WaitFact>,
     /// Each slot that holds a runner.
@@ -1005,7 +1007,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
             .expect("the host holds room back")
             .reading
             .line(),
-        health: status.health(NOW),
+        figures: status.health(NOW).figures(None),
         waits: status
             .queued
             .iter()
@@ -1043,6 +1045,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
             ]
             .into(),
             build_cache_refused,
+            totals: job.summary.metrics.totals(),
             cpu_time: api::cpu_time(job.summary.metrics.cpu_time.expect("its CPU time")),
             cpu_held: job
                 .summary

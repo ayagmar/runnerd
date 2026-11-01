@@ -8,11 +8,11 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
-use runnerd_core::api::{JobPage, JobState};
+use runnerd_core::api::{BuildCacheCounts, Column, JobPage, JobState, View};
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
-use super::super::app::{App, Effect, Msg};
-use super::super::draw::{Theme, draw};
+use super::super::app::{App, Effect, Msg, View as AppView};
+use super::super::draw::{Theme, draw, view_keys};
 use super::key;
 use crate::{human, watch};
 
@@ -124,14 +124,12 @@ fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_doe
     assert!(shows(&rows, &facts.cpu), "{all}");
     assert!(shows(&rows, &facts.host), "{all}");
     assert!(shows(&rows, facts.stopping), "{}: {all}", facts.stopping);
-    let health = &facts.health;
-    for figure in [
-        format!("{}/{} running", health.running, health.slots),
-        format!("{} starting", health.starting),
-        format!("{} warm", health.warm),
-        format!("{} waiting", health.waiting),
-    ] {
-        assert!(shows(&rows, &figure), "{figure}: {all}");
+    for figure in &facts.figures {
+        let line = format!("{}: {}", figure.label, figure.value);
+        assert!(shows(&rows, &line), "{line}: {all}");
+        if let Some(of) = &figure.of {
+            assert!(shows(&rows, of), "{of}: {all}");
+        }
     }
     // A running slot shows its job instead.
     for slot in facts.slots.iter().filter(|slot| slot.word != "running") {
@@ -201,6 +199,10 @@ fn a_job_states_its_outcome_steps_caps_build_cache_and_failed_runs_as_core_does(
     ] {
         assert!(shows(&rows, figure), "{figure}: {all}");
     }
+    for total in &job.totals {
+        let figure = format!("{} {}", total.label, total.value);
+        assert!(shows(&rows, &figure), "{figure}: {all}");
+    }
     for step in &job.steps {
         let row = rows
             .iter()
@@ -213,6 +215,169 @@ fn a_job_states_its_outcome_steps_caps_build_cache_and_failed_runs_as_core_does(
     // What held its CPU back stays whole on a common terminal, where the details' line drops what does not fit.
     let (rows, _) = frame_of(&app, 120, 40);
     assert!(shows(&rows, &job.cpu_held), "{}", rows.join("\n"));
+}
+
+/// The columns `names` in order on the first row of `rows` that has them all.
+fn assert_heads(rows: &[String], names: &[Column]) {
+    let heads: Vec<String> = names
+        .iter()
+        .map(|column| column.title().to_uppercase())
+        .collect();
+    let row = rows
+        .iter()
+        .find(|row| row.contains(&heads[0]))
+        .unwrap_or_else(|| panic!("no row with {}: {rows:?}", heads[0]));
+    let mut at = 0;
+    for head in &heads {
+        let found = row[at..]
+            .find(head)
+            .unwrap_or_else(|| panic!("{head} after {at}: {row}"));
+        at += found + head.len();
+    }
+}
+
+#[test]
+fn the_tabs_follow_core_s_views_and_each_digit_opens_its_tab() {
+    use ratatui::style::Modifier;
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    // The views core lists that the TUI draws, by name, in core's order.
+    let (rows, _) = frame(&app);
+    let shown: Vec<&str> = View::ALL
+        .iter()
+        .map(|view| view.title())
+        .filter(|title| rows[0].contains(&format!(" {title} ")))
+        .collect();
+    assert_eq!(shown.first(), Some(&"Overview"), "{}", rows[0]);
+    assert!(
+        shown.contains(&"Records") && shown.contains(&"Sizing"),
+        "{}",
+        rows[0]
+    );
+    for (number, title) in (1..).zip(&shown) {
+        let digit = char::from_digit(number, 10).unwrap();
+        app.update(key(KeyCode::Char(digit)));
+        let (rows, buffer) = frame(&app);
+        let tab = format!(" {digit} {title} ");
+        let x = rows[0]
+            .find(&tab)
+            .unwrap_or_else(|| panic!("{tab} is a tab, in core's order: {}", rows[0]));
+        assert!(
+            buffer[(u16::try_from(x + 3).unwrap(), 0)]
+                .modifier
+                .contains(Modifier::REVERSED),
+            "key {digit} opens {title}: {}",
+            rows[0]
+        );
+    }
+    // A different order of core's views is a different order of tabs and of keys.
+    let swapped = [View::Records, View::Overview, View::Config, View::Sizing];
+    let tabs: Vec<_> = AppView::tabs_of(&swapped)
+        .into_iter()
+        .map(|(_, tui)| tui)
+        .collect();
+    assert_eq!(tabs, [AppView::Records, AppView::Overview, AppView::Sizing]);
+}
+
+#[test]
+fn the_footer_and_the_help_name_the_views_the_keys_open() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let tabs = AppView::tabs();
+    let (rows, _) = frame(&app);
+    let views = format!("1-{} views", tabs.len());
+    assert!(shows(&rows, &views), "the footer says {views}: {rows:?}");
+    app.update(key(KeyCode::Char('?')));
+    let (rows, _) = frame(&app);
+    let (digits, names) = view_keys(&tabs);
+    let row = rows
+        .iter()
+        .find(|row| row.contains(&digits))
+        .unwrap_or_else(|| panic!("help lists {digits}: {rows:?}"));
+    assert!(row.contains(&names), "help names the views {names}: {row}");
+    // Keys follow the order of the tabs, whatever it is, and the names follow the keys.
+    let swapped = AppView::tabs_of(&[View::Records, View::Overview, View::Config, View::Sizing]);
+    assert_eq!(
+        view_keys(&swapped),
+        (
+            "1 2 3".to_owned(),
+            "records, overview, sizing; o and h too".to_owned()
+        )
+    );
+}
+
+#[test]
+fn the_history_and_records_tables_are_headed_as_core_names_their_columns() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    history(&mut app, &daemon);
+    let (rows, _) = frame(&app);
+    assert_heads(
+        &rows,
+        &[
+            Column::Outcome,
+            Column::Repository,
+            Column::Job,
+            Column::Branch,
+            Column::Waited,
+            Column::Ran,
+            Column::MemoryPeak,
+            Column::Cpu,
+            Column::Queued,
+        ],
+    );
+    app.update(key(KeyCode::Char('3')));
+    app.update(Msg::Records(daemon.records.clone()));
+    let (rows, _) = frame(&app);
+    assert_heads(
+        &rows,
+        &[
+            Column::Id,
+            Column::Repository,
+            Column::Job,
+            Column::Size,
+            Column::Made,
+        ],
+    );
+}
+
+#[test]
+fn a_job_with_cache_hits_and_refused_uploads_shows_both() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    history(&mut app, &daemon);
+    let at = daemon
+        .finished()
+        .iter()
+        .position(|job| job.id == TIMED_OUT)
+        .unwrap();
+    for _ in 0..at {
+        app.update(key(KeyCode::Char('j')));
+    }
+    app.update(key(KeyCode::Enter));
+    let mut job = daemon.job(TIMED_OUT).unwrap().clone();
+    job.summary.metrics.build_cache = BuildCacheCounts {
+        hits: 3,
+        misses: 1,
+        read_bytes: 3 << 29,
+        written_bytes: 1 << 30,
+        refused: 3,
+        writer: true,
+    };
+    let line = job
+        .summary
+        .metrics
+        .build_cache
+        .activity()
+        .unwrap()
+        .short_line();
+    app.update(Msg::Job(job));
+    let (rows, _) = frame(&app);
+    assert!(
+        shows(&rows, &line) && line.contains("3 uploads refused"),
+        "{line}: {}",
+        rows.join("\n")
+    );
 }
 
 #[test]

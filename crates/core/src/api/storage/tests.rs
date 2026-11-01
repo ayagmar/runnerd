@@ -148,3 +148,26 @@ fn a_skipped_record_is_never_kept_and_a_removed_one_never_offers_a_shell() {
         "kept though its size is unknown"
     );
 }
+
+#[test]
+fn the_short_line_keeps_the_refused_uploads_beside_the_hit_rate() {
+    let mixed = BuildCacheCounts {
+        hits: 3,
+        misses: 1,
+        read_bytes: 3 * G / 2,
+        written_bytes: G,
+        refused: 3,
+        writer: true,
+    };
+    assert_eq!(
+        mixed.activity().unwrap().short_line(),
+        "75% hit, 1.5G served, 3 uploads refused",
+        "a job with hits and refusals says both"
+    );
+    let only_wrote = BuildCacheCounts {
+        written_bytes: G,
+        writer: true,
+        ..BuildCacheCounts::default()
+    };
+    assert_eq!(only_wrote.activity().unwrap().short_line(), "1G stored");
+}

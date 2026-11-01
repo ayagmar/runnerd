@@ -4,7 +4,7 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Bucket, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsSummary, Status,
+    Bucket, Column, JobPage, JobQuery, JobState, Stats, StatsQuery, StatsSummary, Status, View,
 };
 use runnerd_core::client::{Client, ClientError};
 use serde::{Deserialize, Serialize};
@@ -160,12 +160,12 @@ fn days(stats: &Stats, now: u64) -> Vec<StatsSummary> {
 /// The whole page.
 pub(crate) fn render(history: &History) -> Markup {
     let main = html! {
-        h1.visually-hidden { "History" }
+        h1.visually-hidden { (View::History.title()) }
         (filters(history))
         (trends(history))
         (jobs(history))
     };
-    page("History", Some(Page::History), None, &main)
+    page(View::History.title(), Some(Page::History), None, &main)
 }
 
 /// The filters, as links: each sets one filter and keeps the others, so they work without scripts and a filtered
@@ -452,13 +452,13 @@ fn jobs(history: &History) -> Markup {
                     table.job-table.history-table {
                         thead {
                             tr {
-                                th scope="col" { "Job" }
-                                th scope="col" { "Outcome" }
-                                th scope="col" { "Queued" }
-                                th scope="col" .number { "Waited" }
-                                th scope="col" .number { "Ran" }
-                                th scope="col" .number { abbr title="The highest of the samples taken every 2 seconds" { "Sampled peak" } }
-                                th scope="col" .number { "Avg CPU" }
+                                th scope="col" { (Column::Job.title()) }
+                                th scope="col" { (Column::Outcome.title()) }
+                                th scope="col" { (Column::Queued.title()) }
+                                th scope="col" .number { (Column::Waited.title()) }
+                                th scope="col" .number { (Column::Ran.title()) }
+                                th scope="col" .number { abbr title="The highest of the samples taken every 2 seconds" { (Column::MemoryPeak.title()) } }
+                                th scope="col" .number { (Column::Cpu.title()) }
                             }
                         }
                         tbody {

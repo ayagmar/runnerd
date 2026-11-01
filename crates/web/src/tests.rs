@@ -1349,7 +1349,7 @@ async fn a_job_whose_samples_were_deleted_still_shows_its_memory_peak() {
         .body;
     assert!(
         job.contains(&format!(
-            "<dt>Memory peak over the job</dt><dd>{}</dd>",
+            "<dt>Memory peak</dt><dd>{}</dd>",
             crate::format::bytes(peak)
         )),
         "the job's kept peak shows without samples"
@@ -1770,7 +1770,7 @@ async fn a_running_jobs_stream_appends_new_log_lines_and_updates_its_charts() {
     );
     assert!(update.contains("sampled peak 8G"), "{update}");
     assert!(
-        update.contains("<dt>Memory peak over the job</dt><dd>8G</dd>"),
+        update.contains("<dt>Memory peak</dt><dd>8G</dd>"),
         "the job's peak rises with the sample, as in the TUI: {update}"
     );
 }
@@ -2726,7 +2726,7 @@ async fn reseed_and_empty_from_the_caches_page_reach_the_daemon() {
 }
 
 #[tokio::test]
-async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_caches_page() {
+async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_records_page() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let (failed, others) = {
@@ -2742,10 +2742,10 @@ async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_caches_p
         job.contains("Open a shell") && job.contains(&format!("runnerctl shell {failed}")),
         "{job}"
     );
-    let caches = dashboard.page(&cookie, "/caches").await.body;
+    let records = dashboard.page(&cookie, "/records").await.body;
     assert!(
-        caches.contains(&format!("@delete('/v1/records/{failed}')")),
-        "{caches}"
+        records.contains(&format!("@delete('/v1/records/{failed}')")),
+        "{records}"
     );
 
     let removed = dashboard
@@ -3381,7 +3381,7 @@ async fn a_running_jobs_peak_is_its_samples_highest_once_its_page_opens_and_a_fi
         highest
     };
     let peak = |page: &str| {
-        let dt = "<dt>Memory peak over the job</dt><dd>";
+        let dt = "<dt>Memory peak</dt><dd>";
         let at = page.find(dt).unwrap() + dt.len();
         page[at..at + page[at..].find('<').unwrap()].to_owned()
     };
