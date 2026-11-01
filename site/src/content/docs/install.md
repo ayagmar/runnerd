@@ -12,7 +12,7 @@ description: Install runnerd, write a starter config and a user unit with runner
 
 `runnerd doctor` checks each of these, the slice the config names and that the config fits in it, and prints the fix for what is missing. It also warns when other users can read the config, and for each public repository the config serves. It reads `~/.config/runnerd/runnerd.toml` when it exists; `runnerd doctor <file>` checks another.
 
-The binaries are built for x86_64 and aarch64. The runner images are linux/amd64 only, so on aarch64 runners do not start yet.
+The binaries are built for x86_64 and aarch64. The published runner images are linux/amd64 only. On aarch64, build the `base` stage of `image/Dockerfile` on the host and name it with `image_stage`; `runnerd doctor` prints the command. The `android`, `jvm` and `node` stages carry x86_64 Android platform tools.
 
 ## First run
 
