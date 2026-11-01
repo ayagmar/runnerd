@@ -16,10 +16,16 @@ what=${*:-dashboard tui terminal}
 scratch=$(mktemp -d "${XDG_CACHE_HOME:-$HOME/.cache}/runnerd-capture.XXXXXX")
 demo_pid=
 cleanup() {
-  [ -z "$demo_pid" ] || kill "$demo_pid" 2>/dev/null || true
+  if [ -n "$demo_pid" ]; then
+    kill "$demo_pid" 2>/dev/null || true
+    wait "$demo_pid" 2>/dev/null || true
+  fi
   rm -rf "$scratch"
 }
-trap cleanup EXIT INT TERM
+# The cleanup runs on every way out; a signal ends the script instead of letting it capture on without its daemon.
+trap cleanup EXIT
+trap 'exit 130' INT
+trap 'exit 143' TERM
 
 nice -n 10 cargo build --locked -p runnerd-web --example demo
 nice -n 10 cargo build --locked -p runnerd-cli

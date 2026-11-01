@@ -7,6 +7,7 @@ import json
 import os
 import pty
 import select
+import signal
 import struct
 import termios
 import time
@@ -35,33 +36,8 @@ FRAMES = [
 ]
 
 
-def capture(name, cols, rows, keys):
-    pid, fd = pty.fork()
-    if pid == 0:
-        env = dict(os.environ, TERM="xterm-256color", HOME=HOME)
-        env.pop("NO_COLOR", None)
-        os.execve("target/debug/runnerctl", ["runnerctl", "--socket", SOCKET, "tui"], env)
-    fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
-    screen = pyte.Screen(cols, rows)
-    stream = pyte.ByteStream(screen)
-
-    def pump(seconds):
-        end = time.time() + seconds
-        while time.time() < end:
-            ready, _, _ = select.select([fd], [], [], 0.05)
-            if ready:
-                try:
-                    stream.feed(os.read(fd, 65536))
-                except OSError:
-                    return
-
-    pump(3)
-    for key in keys:
-        if key.startswith("wait:"):
-            pump(float(key[5:]))
-        else:
-            os.write(fd, key.encode())
-            pump(1.2)
+def render(screen, cols, rows):
+    """The screen's cells as lines of [text, classes] runs."""
     lines = []
     for y in range(rows):
         runs = []
@@ -84,8 +60,48 @@ def capture(name, cols, rows, keys):
         lines.append([run if run[1] else run[0] for run in runs if run[0]])
     while lines and not lines[-1]:
         lines.pop()
-    os.write(fd, b"q")
-    pump(0.5)
+    return lines
+
+
+def capture(name, cols, rows, keys):
+    pid, fd = pty.fork()
+    if pid == 0:
+        env = dict(os.environ, TERM="xterm-256color", HOME=HOME)
+        env.pop("NO_COLOR", None)
+        os.execve("target/debug/runnerctl", ["runnerctl", "--socket", SOCKET, "tui"], env)
+    try:
+        fcntl.ioctl(fd, termios.TIOCSWINSZ, struct.pack("HHHH", rows, cols, 0, 0))
+        screen = pyte.Screen(cols, rows)
+        stream = pyte.ByteStream(screen)
+
+        def pump(seconds):
+            end = time.time() + seconds
+            while time.time() < end:
+                ready, _, _ = select.select([fd], [], [], 0.05)
+                if ready:
+                    try:
+                        stream.feed(os.read(fd, 65536))
+                    except OSError:
+                        return
+
+        pump(3)
+        for key in keys:
+            if key.startswith("wait:"):
+                pump(float(key[5:]))
+            else:
+                os.write(fd, key.encode())
+                pump(1.2)
+        lines = render(screen, cols, rows)
+        os.write(fd, b"q")
+        pump(0.5)
+    finally:
+        # Whatever happened, no TUI is left running and no descriptor open.
+        os.close(fd)
+        try:
+            os.kill(pid, signal.SIGTERM)
+        except ProcessLookupError:
+            pass
+        os.waitpid(pid, 0)
     with open(f"{OUT}/{name}.json", "w") as out:
         json.dump({"cols": cols, "rows": rows, "lines": lines}, out, ensure_ascii=False, separators=(",", ":"))
 
