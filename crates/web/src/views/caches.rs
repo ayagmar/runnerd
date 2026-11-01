@@ -1,9 +1,8 @@
-//! `/caches`: every cache volume with its size against its bound, and each one's size over the last 30 days; then
-//! the records of failed jobs, the other disk runnerd keeps, with their limits.
+//! `/caches`: every cache volume with its size against its bound, and each one's size over the last 30 days.
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    BUILD_CACHE_TOOLS, CacheHistory, CacheKind, CacheVolume, Caches, Records, Status, Tone,
+    BUILD_CACHE_TOOLS, CacheHistory, CacheKind, CacheVolume, Caches, Status, View,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -20,7 +19,6 @@ pub(crate) struct CachesView {
     pub(crate) status: Status,
     pub(crate) caches: Caches,
     pub(crate) history: CacheHistory,
-    pub(crate) records: Records,
 }
 
 impl CachesView {
@@ -35,7 +33,6 @@ impl CachesView {
                     now.saturating_sub(WINDOW)
                 ))
                 .await?,
-            records: daemon.get("/v1/records").await?,
         })
     }
 }
@@ -62,7 +59,7 @@ pub(crate) fn render(view: &CachesView) -> Markup {
     let total: u64 = view.caches.volumes.iter().map(|volume| volume.bytes).sum();
     let main = html! {
         div.page-head {
-            h1.visually-hidden { "Caches" }
+            h1.visually-hidden { (View::Caches.title()) }
             p.figures title="Docker measures volumes slowly, so runnerd does at start and whenever no runner runs after jobs ended." {
                 span.big { (format::bytes(total)) }
                 span.muted {
@@ -73,9 +70,8 @@ pub(crate) fn render(view: &CachesView) -> Markup {
             }
         }
         (volumes(view))
-        (records(&view.status, &view.records, view.now))
     };
-    page("Caches", Some(Page::Caches), None, &main)
+    page(View::Caches.title(), Some(Page::Caches), None, &main)
 }
 
 /// A card per volume: its size, its bound, and its size over time.
@@ -122,65 +118,6 @@ pub(crate) fn volumes(view: &CachesView) -> Markup {
                         }.render(nice_top(peak.max(volume.limit.unwrap_or(0)), Base::Binary), &Parts::default()))
                     } @else {
                         p.muted { "One measurement so far." }
-                    }
-                }
-            }
-        }
-    }
-}
-
-/// The records of failed jobs, each removable, and the limits they are kept within.
-pub(crate) fn records(status: &Status, records: &Records, now: u64) -> Markup {
-    html! {
-        section #records .records aria-labelledby="records-title" {
-            div.section-head {
-                h2 #records-title { "Records of failed jobs" }
-                p class=(if records.summary_tone() == Tone::Warn { "muted over-limit" } else { "muted" }) { (format::sentence(&records.summary())) }
-                @if !records.records.is_empty() {
-                    button.button-quiet type="button"
-                        data-on:click="confirm('Remove every record? Their shells can no longer be opened.') && @delete('/v1/records?all=true')"
-                        { "Remove all" }
-                }
-            }
-            @if records.records.is_empty() {
-                p.muted { (format::sentence(Records::empty_reason())) "." }
-            } @else {
-                div.table-wrap {
-                    table.job-table.record-table {
-                        thead {
-                            tr {
-                                th scope="col" { "Job" }
-                                th scope="col" { "Made" }
-                                th scope="col" .number { "Size" }
-                                th scope="col" { span.visually-hidden { "Remove" } }
-                            }
-                        }
-                        tbody {
-                            @for record in records.records.iter().rev() {
-                                tr class=(profile_class(status, &record.profile)) {
-                                    th scope="row" {
-                                        a href=(format!("/jobs/{}", record.job)) {
-                                            span.swatch aria-hidden="true" {}
-                                            span.job-name { (record.title().name) }
-                                            span.repo {
-                                                // A narrow screen breaks it after the owner, not inside a name.
-                                                @if let Some((owner, name)) = record.repository.split_once('/') { (owner) "/" wbr; (name) } @else { (record.repository) }
-                                                @if let Some(workflow) = &record.workflow { " · " (workflow) } }
-                                        }
-                                    }
-                                    td {
-                                        (time_ago(record.created_at, now))
-                                        @if records.shell_open(record.job) { span.muted { ", shell open" } }
-                                    }
-                                    td.number { (format::bytes(record.bytes)) }
-                                    td.number {
-                                        button.button-quiet type="button"
-                                            data-on:click=(format!("confirm('Remove the record of job {}?') && @delete('/v1/records/{}')", record.job, record.job))
-                                            aria-label=(format!("Remove the record of job {}", record.job)) { "Remove" }
-                                    }
-                                }
-                            }
-                        }
                     }
                 }
             }

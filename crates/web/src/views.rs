@@ -7,7 +7,7 @@ use std::fmt::Write as _;
 use std::hash::{DefaultHasher, Hash as _, Hasher as _};
 
 use maud::{DOCTYPE, Markup, PreEscaped, html};
-use runnerd_core::api::{self, JobSummary, Status};
+use runnerd_core::api::{self, JobSummary, Status, View};
 
 use crate::assets;
 use crate::format;
@@ -18,17 +18,45 @@ pub(crate) mod history;
 pub(crate) mod insights;
 pub(crate) mod job;
 pub(crate) mod overview;
+pub(crate) mod records;
 pub(crate) mod sizing;
 
-/// The pages in the navigation.
+/// The pages in the navigation: core's views, in its order.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Page {
     Overview,
     History,
+    Records,
+    Sizing,
     Insights,
     Caches,
-    Sizing,
     Config,
+}
+
+impl Page {
+    fn of(view: View) -> Page {
+        match view {
+            View::Overview => Page::Overview,
+            View::History => Page::History,
+            View::Records => Page::Records,
+            View::Sizing => Page::Sizing,
+            View::Insights => Page::Insights,
+            View::Caches => Page::Caches,
+            View::Config => Page::Config,
+        }
+    }
+
+    fn path(self) -> &'static str {
+        match self {
+            Page::Overview => "/",
+            Page::History => "/history",
+            Page::Records => "/records",
+            Page::Sizing => "/sizing",
+            Page::Insights => "/insights",
+            Page::Caches => "/caches",
+            Page::Config => "/config",
+        }
+    }
 }
 
 const MARK: &str = include_str!("../assets/mark.svg");
@@ -126,14 +154,8 @@ pub(crate) fn page(
     live: Option<&Live<'_>>,
     main: &Markup,
 ) -> Markup {
-    let nav = [
-        (Page::Overview, "/", "Overview"),
-        (Page::History, "/history", "History"),
-        (Page::Insights, "/insights", "Insights"),
-        (Page::Caches, "/caches", "Caches"),
-        (Page::Sizing, "/sizing", "Sizing"),
-        (Page::Config, "/config", "Config"),
-    ];
+    let nav = View::ALL.map(|view| (Page::of(view), Page::of(view).path(), view.title()));
+
     html! {
         (DOCTYPE)
         html lang="en" {

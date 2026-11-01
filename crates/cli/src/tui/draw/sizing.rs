@@ -21,7 +21,13 @@ pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
     let Some(sizing) = &app.sizing else {
         let [title, rest] =
             Layout::vertical([Constraint::Length(1), Constraint::Min(0)]).areas(area);
-        heading(frame, title, "Sizing", String::new(), theme);
+        heading(
+            frame,
+            title,
+            api::View::Sizing.title(),
+            String::new(),
+            theme,
+        );
         frame.render_widget(Line::styled("reading…", theme.dim()), rest);
         return;
     };
@@ -40,7 +46,7 @@ pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
     heading(
         frame,
         title,
-        "Sizing",
+        api::View::Sizing.title(),
         fit_details(
             [(0, format!("{} of history", duration(sizing.covered())))]
                 .into_iter()
@@ -50,7 +56,7 @@ pub(super) fn sizing(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
                     format!("auto sizing {}", if sizing.auto { "on" } else { "off" }),
                 )])
                 .collect(),
-            usize::from(title.width).saturating_sub("Sizing".width() + 2),
+            usize::from(title.width).saturating_sub(api::View::Sizing.title().width() + 2),
         ),
         theme,
     );

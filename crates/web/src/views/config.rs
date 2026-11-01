@@ -8,7 +8,7 @@ use std::fmt::Write as _;
 
 use maud::{Markup, html};
 use qrcode::QrCode;
-use runnerd_core::api::{Check, ConfigCheck, ConfigFile, Doctor, Resize, Sizing, Tone};
+use runnerd_core::api::{Check, ConfigCheck, ConfigFile, Doctor, Resize, Sizing, Tone, View};
 use runnerd_core::client::{Client, ClientError};
 use runnerd_core::config::{Config, profile_sizes, resize_profile, resized_at};
 use serde::Deserialize;
@@ -198,7 +198,7 @@ fn quoted(revision: &str) -> Option<String> {
 pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
     let main = html! {
         div.section-head.page-head {
-            h1.visually-hidden { "Config" }
+            h1.visually-hidden { (View::Config.title()) }
             p.muted { code { (view.file.path) } }
         }
         div.config-layout {
@@ -231,7 +231,7 @@ pub(crate) fn render(view: &ConfigView, proxies: &[String]) -> Markup {
             }
         }
     };
-    page("Config", Some(Page::Config), None, &main)
+    page(View::Config.title(), Some(Page::Config), None, &main)
 }
 
 /// The check's verdict, what its admission rule holds to `MemoryMax` and the budget that is, and its warnings.

@@ -2726,7 +2726,7 @@ async fn reseed_and_empty_from_the_caches_page_reach_the_daemon() {
 }
 
 #[tokio::test]
-async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_caches_page() {
+async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_records_page() {
     let dashboard = Dashboard::start().await;
     let cookie = dashboard.sign_in().await;
     let (failed, others) = {
@@ -2742,10 +2742,10 @@ async fn a_failed_jobs_record_shows_its_shell_command_and_goes_from_the_caches_p
         job.contains("Open a shell") && job.contains(&format!("runnerctl shell {failed}")),
         "{job}"
     );
-    let caches = dashboard.page(&cookie, "/caches").await.body;
+    let records = dashboard.page(&cookie, "/records").await.body;
     assert!(
-        caches.contains(&format!("@delete('/v1/records/{failed}')")),
-        "{caches}"
+        records.contains(&format!("@delete('/v1/records/{failed}')")),
+        "{records}"
     );
 
     let removed = dashboard

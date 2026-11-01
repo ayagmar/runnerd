@@ -40,6 +40,7 @@ use views::history::{Filter, History};
 use views::insights::InsightsView;
 use views::job::JobView;
 use views::overview::Overview;
+use views::records::RecordsView;
 use views::sizing::SizingView;
 
 /// The dashboard's default address.
@@ -135,6 +136,7 @@ fn router(daemon: Client, auth: Arc<auth::Auth>, stopping: watch::Receiver<bool>
     let pages = Router::new()
         .route("/", get(overview))
         .route("/history", get(history))
+        .route("/records", get(records))
         .route("/caches", get(caches))
         .route("/sizing", get(sizing))
         .route("/insights", get(insights))
@@ -240,6 +242,14 @@ async fn history(State(app): State<App>, Query(filter): Query<Filter>) -> Respon
         History::load(&app.daemon, filter, now())
             .await
             .map(|history| views::history::render(&history)),
+    )
+}
+
+async fn records(State(app): State<App>) -> Response {
+    page(
+        RecordsView::load(&app.daemon, now())
+            .await
+            .map(|records| views::records::render(&records)),
     )
 }
 

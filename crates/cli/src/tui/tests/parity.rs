@@ -8,7 +8,7 @@ use ratatui::Terminal;
 use ratatui::backend::TestBackend;
 use ratatui::buffer::Buffer;
 use ratatui::crossterm::event::KeyCode;
-use runnerd_core::api::{JobPage, JobState};
+use runnerd_core::api::{Column, JobPage, JobState, View};
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
 use super::super::app::{App, Effect, Msg};
@@ -124,14 +124,12 @@ fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_core_doe
     assert!(shows(&rows, &facts.cpu), "{all}");
     assert!(shows(&rows, &facts.host), "{all}");
     assert!(shows(&rows, facts.stopping), "{}: {all}", facts.stopping);
-    let health = &facts.health;
-    for figure in [
-        format!("{}/{} running", health.running, health.slots),
-        format!("{} starting", health.starting),
-        format!("{} warm", health.warm),
-        format!("{} waiting", health.waiting),
-    ] {
-        assert!(shows(&rows, &figure), "{figure}: {all}");
+    for figure in &facts.figures {
+        let line = format!("{}: {}", figure.label, figure.value);
+        assert!(shows(&rows, &line), "{line}: {all}");
+        if let Some(of) = &figure.of {
+            assert!(shows(&rows, of), "{of}: {all}");
+        }
     }
     // A running slot shows its job instead.
     for slot in facts.slots.iter().filter(|slot| slot.word != "running") {
@@ -213,6 +211,45 @@ fn a_job_states_its_outcome_steps_caps_build_cache_and_failed_runs_as_core_does(
     // What held its CPU back stays whole on a common terminal, where the details' line drops what does not fit.
     let (rows, _) = frame_of(&app, 120, 40);
     assert!(shows(&rows, &job.cpu_held), "{}", rows.join("\n"));
+}
+
+#[test]
+fn the_views_and_their_tables_are_named_as_core_names_them() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let (rows, _) = frame(&app);
+    let mut at = 0;
+    for (number, view) in [View::Overview, View::History, View::Records, View::Sizing]
+        .iter()
+        .enumerate()
+    {
+        let tab = format!(" {} {} ", number + 1, view.title());
+        let found = rows[0][at..]
+            .find(&tab)
+            .unwrap_or_else(|| panic!("{tab} after {at}: {}", rows[0]));
+        at += found + tab.len();
+    }
+    history(&mut app, &daemon);
+    let (rows, _) = frame(&app);
+    let header = rows.iter().find(|row| row.contains("OUTCOME")).unwrap();
+    let mut at = 0;
+    for column in [
+        Column::Outcome,
+        Column::Repository,
+        Column::Job,
+        Column::Branch,
+        Column::Waited,
+        Column::Ran,
+        Column::MemoryPeak,
+        Column::Cpu,
+        Column::Queued,
+    ] {
+        let name = column.title().to_uppercase();
+        let found = header[at..]
+            .find(&name)
+            .unwrap_or_else(|| panic!("{name} after {at}: {header}"));
+        at += found + name.len();
+    }
 }
 
 #[test]

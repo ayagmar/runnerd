@@ -1,7 +1,4 @@
 //! The overview: the health line, the queue with why each job waits, the repositories and the latest jobs.
-
-use std::fmt::Write as _;
-
 use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::style::{Modifier, Style};
@@ -18,7 +15,7 @@ use super::job::drop_least;
 use super::slice::slice;
 use super::slots::{slot_cards, slot_lines};
 use super::{bold, fit, heading, length, list_block, selected, spark, wrap};
-use crate::human::{self, duration};
+use crate::human::{self, ago, duration};
 use crate::tui::app::{App, Pane};
 
 /// The fewest rows the repositories and latest jobs keep: a title and four jobs.
@@ -179,85 +176,60 @@ pub(super) fn health(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
     frame.render_widget(Line::from(spans), area);
 }
 
-/// The health line's figures, each with its rank for [`drop_least`]; `None` marks where the hours' bars go.
+/// The health line's figures, each with its rank for [`drop_least`]; `None` marks where the hours' bars go. The
+/// words are core's: a figure's label, value and notes, as the dashboard's tiles show them.
 pub(super) fn health_items(
     app: &App,
     now: u64,
     theme: Theme,
 ) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
-    let health = app.live.status.health(now);
-    let (running, slots) = (health.running, health.slots);
-    let mut idle = String::new();
-    for (count, what) in [(health.starting, "starting"), (health.warm, "warm")] {
-        if count > 0 {
-            let _ = write!(idle, ", {count} {what}");
-        }
-    }
     let sep = || Span::styled(" · ", theme.dim());
-    let mut items: Vec<(u8, Option<Vec<Span<'static>>>)> = vec![(
-        0,
-        Some(vec![
-            Span::styled(running.to_string(), bold()),
-            Span::raw(format!("/{slots} running")),
-        ]),
-    )];
-    if !idle.is_empty() {
-        items.push((4, Some(vec![Span::styled(idle, theme.dim())])));
-    }
-    items.push((
-        0,
-        Some(vec![
-            sep(),
-            Span::styled(
-                health.waiting.to_string(),
-                match health.waiting_tone() {
-                    api::Tone::Warn => theme.wait().add_modifier(Modifier::BOLD),
-                    _ => bold(),
-                },
-            ),
-            Span::raw(" waiting"),
-        ]),
-    ));
-    if let Some(oldest) = health.oldest_wait {
-        items.push((
-            1,
-            Some(vec![Span::raw(format!(", oldest {}", duration(oldest)))]),
-        ));
-    }
-    if let Some(day) = &app.activity {
-        items.push((
-            0,
-            Some(vec![
-                sep(),
-                Span::styled("24 h: ", theme.dim()),
-                Span::raw("wait p95 "),
-                Span::styled(
-                    day.wait_p95().map_or_else(|| "–".to_owned(), duration),
-                    bold(),
-                ),
-            ]),
-        ));
-        if day.wait_hours().iter().any(|wait| *wait > 0) {
+    let mut items: Vec<(u8, Option<Vec<Span<'static>>>)> = Vec::new();
+    for (index, figure) in app
+        .live
+        .status
+        .health(now)
+        .figures(app.activity.as_ref())
+        .into_iter()
+        .enumerate()
+    {
+        let value = match figure.tone {
+            api::Tone::Warn => theme.wait().add_modifier(Modifier::BOLD),
+            api::Tone::Neutral | api::Tone::Quiet | api::Tone::Good => bold(),
+            tone => theme.tone(tone.into()),
+        };
+        let mut head = Vec::new();
+        if index > 0 {
+            head.push(sep());
+        }
+        head.push(Span::styled(format!("{}: ", figure.label), theme.dim()));
+        head.push(Span::styled(figure.value, value));
+        // What the running figure is of is part of it; the failed figure's total is the first detail to go.
+        let of_rank = if figure.label == "Running" { 0 } else { 3 };
+        let of = figure
+            .of
+            .map(|of| (of_rank, Some(vec![Span::raw(format!(" {of}"))])));
+        items.push((0, Some(head)));
+        items.extend(of);
+        if figure.label == "Wait p95, 24 h"
+            && app
+                .activity
+                .as_ref()
+                .is_some_and(|day| day.wait_hours().iter().any(|wait| *wait > 0))
+        {
             items.push((2, None));
         }
-        items.push((
-            0,
-            Some(vec![
-                sep(),
-                Span::styled(
-                    day.failed.to_string(),
-                    match day.failed_tone() {
-                        api::Tone::Neutral => bold(),
-                        tone => theme.tone(tone.into()),
-                    },
-                ),
-                Span::raw(" failed"),
-            ]),
-        ));
-        items.push((
-            3,
-            Some(vec![Span::raw(format!(" of {} finished", day.finished))]),
-        ));
+        let rank = match figure.label {
+            "Waiting" => 1,
+            "Wait p95, 24 h" => 6,
+            _ => 4,
+        };
+        for note in figure.notes {
+            items.push((
+                rank,
+                Some(vec![Span::styled(format!(", {note}"), theme.dim())]),
+            ));
+        }
     }
     items.extend(insight_items(app, theme));
     items
@@ -265,20 +237,13 @@ pub(super) fn health_items(
 
 /// How many warning insights hold, and where to read them; nothing without one.
 pub(super) fn insight_items(app: &App, theme: Theme) -> Vec<(u8, Option<Vec<Span<'static>>>)> {
-    let sep = || Span::styled(" · ", theme.dim());
     let mut items = Vec::new();
-    let warnings = app.insights.as_ref().map_or(0, Insights::warning_count);
-    if warnings > 0 {
-        let what = if warnings == 1 { "insight" } else { "insights" };
+    if let Some(line) = app.insights.as_ref().and_then(Insights::warning_line) {
         items.push((
             1,
             Some(vec![
-                sep(),
-                Span::styled(
-                    warnings.to_string(),
-                    theme.wait().add_modifier(Modifier::BOLD),
-                ),
-                Span::raw(format!(" {what}")),
+                Span::styled(" · ", theme.dim()),
+                Span::styled(line, theme.wait().add_modifier(Modifier::BOLD)),
             ]),
         ));
         items.push((
@@ -522,15 +487,8 @@ pub(super) fn badge_width<'job>(jobs: impl IntoIterator<Item = &'job JobSummary>
         .unwrap_or(0)
 }
 
-/// How long ago a job finished, or nothing while it has not.
-pub(super) fn finished_ago(job: &JobSummary, now: u64) -> String {
-    job.timeline
-        .finished_at
-        .map_or_else(String::new, |at| human::ago(at, now))
-}
-
 /// The latest finished jobs, newest first: the outcome, the job, its repository where there is room, from 110 columns
-/// how long it waited and from 140 its branch, how long it ran and when it finished.
+/// how long it waited and from 140 its branch, how long it ran and when it was queued.
 pub(super) fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
     let focused = app.pane == Pane::Latest;
     let block = list_block("Latest jobs", focused, theme);
@@ -541,10 +499,13 @@ pub(super) fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
         .iter()
         .map(|job| job.ran(now).map_or_else(String::new, duration))
         .collect();
-    let finished: Vec<String> = jobs.iter().map(|job| finished_ago(job, now)).collect();
+    let queued: Vec<String> = jobs
+        .iter()
+        .map(|job| ago(job.timeline.queued_at, now))
+        .collect();
     // The times are as wide as the widest of them; the job and its repository take what is left, the job first.
     let ran_width = run_times.iter().map(|ran| ran.width()).max().unwrap_or(0);
-    let ago_width = finished.iter().map(|ago| ago.width()).max().unwrap_or(0);
+    let ago_width = queued.iter().map(|ago| ago.width()).max().unwrap_or(0);
     let waits: Vec<String> = jobs
         .iter()
         .map(|job| job.waited(now).map_or_else(String::new, duration))
@@ -587,7 +548,7 @@ pub(super) fn latest(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, the
     let rows = jobs
         .iter()
         .zip(titles)
-        .zip(run_times.into_iter().zip(finished))
+        .zip(run_times.into_iter().zip(queued))
         .zip(waits)
         .map(|(((job, title), (ran, ago)), wait)| {
             let mut cells = vec![

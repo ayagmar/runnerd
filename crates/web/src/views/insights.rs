@@ -4,7 +4,7 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Digest, Insight, InsightKind, Insights, RepositoryWaits, RunLink, Tone, WaitSpread,
+    Digest, Insight, InsightKind, Insights, RepositoryWaits, RunLink, Tone, View, WaitSpread,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -36,7 +36,7 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
     let day = &view.digest;
     let main = html! {
         div.page-head {
-            h1.visually-hidden { "Insights" }
+            h1.visually-hidden { (View::Insights.title()) }
             p.figures {
                 span.big { (count) @if count == 1 { " insight" } @else { " insights" } }
                 span.muted { " " (insights.window_line()) }
@@ -48,7 +48,7 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
         @if insights.insights.is_empty() {
             p.empty { (format::sentence(&insights.empty_line())) "." }
         } @else {
-            ul.insight-list aria-label="Insights" {
+            ul.insight-list aria-label=(View::Insights.title()) {
                 @for insight in &insights.insights {
                     (card(insight, view.now))
                 }
@@ -58,7 +58,7 @@ pub(crate) fn render(view: &InsightsView) -> Markup {
             (waits(&insights.waits))
         }
     };
-    page("Insights", Some(Page::Insights), None, &main)
+    page(View::Insights.title(), Some(Page::Insights), None, &main)
 }
 
 fn card(insight: &Insight, now: u64) -> Markup {

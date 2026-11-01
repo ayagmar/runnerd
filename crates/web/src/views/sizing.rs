@@ -6,7 +6,7 @@
 
 use maud::{Markup, html};
 use runnerd_core::api::{
-    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Sizing, Tone, job_title,
+    Advice, AutoPlan, JobSizing, ProfilePlan, ProfileSizing, Sizing, Tone, View, job_title,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -40,7 +40,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
         .sum();
     let main = html! {
         div.page-head {
-            h1.visually-hidden { "Sizing" }
+            h1.visually-hidden { (View::Sizing.title()) }
             p.figures {
                 span.big { (jobs) " jobs" }
                 span.muted { " since " (format::date(sizing.since)) }
@@ -52,7 +52,7 @@ pub(crate) fn render(view: &SizingView) -> Markup {
             (profile_section(sizing, profile, index))
         }
     };
-    page("Sizing", Some(Page::Sizing), None, &main)
+    page(View::Sizing.title(), Some(Page::Sizing), None, &main)
 }
 
 /// Whether auto sizing is on, its rules in words, and per profile what its next look changes, or until when a recent

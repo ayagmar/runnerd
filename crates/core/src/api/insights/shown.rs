@@ -67,6 +67,15 @@ impl Insights {
             .count()
     }
 
+    /// How many insights warn, worded for the overview: `3 insights`; `None` when none does.
+    pub fn warning_line(&self) -> Option<String> {
+        match self.warning_count() {
+            0 => None,
+            1 => Some("1 insight".to_owned()),
+            count => Some(format!("{count} insights")),
+        }
+    }
+
     /// The whole days its window covers.
     pub fn days(&self) -> u64 {
         self.until.saturating_sub(self.since) / 86_400

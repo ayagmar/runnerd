@@ -51,6 +51,7 @@ mod control;
 mod events;
 mod insights;
 mod jobs;
+mod labels;
 mod records;
 mod results;
 mod savings;
@@ -84,6 +85,7 @@ pub use jobs::{
     RunComparison, Sample, SampleSeries, SampleUsage, Started, Stats, StatsQuery, StatsRow, Step,
     Timeline, job_title,
 };
+pub use labels::{Column, View};
 pub use records::{
     Record, RecordLimits, RecordNote, RecordRemoval, Records, RemoveRecordsQuery, RemovedRecords,
     SHELL_PROTOCOL, ShellQuery,
@@ -99,7 +101,7 @@ pub use sizing::{
     SizingChange, SizingHold, SizingQuery, SizingRefused, SizingRevert, Spread, Starts, need,
     period, sampled_note,
 };
-pub use slots::{Health, SlotState};
+pub use slots::{Figure, Health, SlotState};
 pub use stats::StatsSummary;
 pub use storage::{
     ACTIONS_CACHE, BUILD_CACHE_TOOLS, BuildCacheActivity, CacheLimit, RECORDS_NEAR_FULL,

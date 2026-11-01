@@ -4,13 +4,14 @@ use ratatui::Frame;
 use ratatui::layout::{Constraint, Layout, Rect};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Cell, Row, Table, TableState};
+use runnerd_core::api::{self, Column};
 use unicode_width::UnicodeWidthStr;
 
 use super::Theme;
 use super::job::fit_details;
-use super::overview::{badge, badge_width, finished_ago};
-use super::{fit, heading, selected};
-use crate::human::{bytes, cores_used, duration};
+use super::overview::{badge, badge_width};
+use super::{column_title, fit, heading, selected};
+use crate::human::{ago, bytes, cores_used, duration};
 use crate::tui::app::{App, History};
 
 pub(super) fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, theme: Theme) {
@@ -20,10 +21,10 @@ pub(super) fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, th
     heading(
         frame,
         title,
-        "History",
+        api::View::History.title(),
         history_note(
             filters,
-            usize::from(title.width).saturating_sub("History".width() + 2),
+            usize::from(title.width).saturating_sub(api::View::History.title().width() + 2),
         ),
         theme,
     );
@@ -39,20 +40,28 @@ pub(super) fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, th
     let finished = jobs
         .jobs
         .iter()
-        .map(|job| finished_ago(job, now).width())
-        .chain(["FINISHED".len()])
+        .map(|job| ago(job.timeline.queued_at, now).width())
+        .chain([column_title(Column::Queued).len()])
         .max()
         .unwrap_or(0);
-    let outcome_width = badge_width(&jobs.jobs).max("OUTCOME".len());
-    let mut columns = vec![("OUTCOME", outcome_width), ("REPOSITORY", 0), ("JOB", 0)];
+    let outcome_width = badge_width(&jobs.jobs).max(column_title(Column::Outcome).len());
+    let mut columns = vec![
+        (Column::Outcome, outcome_width),
+        (Column::Repository, 0),
+        (Column::Job, 0),
+    ];
     if wide {
-        columns.push(("BRANCH", 14));
+        columns.push((Column::Branch, 14));
     }
-    columns.extend([("WAITED", 7), ("RAN", 8), ("MEM", 6)]);
+    columns.extend([
+        (Column::Waited, 7),
+        (Column::Ran, 8),
+        (Column::MemoryPeak, column_title(Column::MemoryPeak).len()),
+    ]);
     if wide {
-        columns.push(("CPU", 5));
+        columns.push((Column::Cpu, 5));
     }
-    columns.push(("FINISHED", finished));
+    columns.push((Column::Queued, finished));
     // The repository and the job share what the other columns and the spaces between them leave.
     let fixed: usize = columns.iter().map(|(_, width)| width + 1).sum::<usize>() - 1;
     let shared = usize::from(table_area.width).saturating_sub(fixed);
@@ -81,17 +90,20 @@ pub(super) fn history(frame: &mut Frame<'_>, area: Rect, app: &App, now: u64, th
             ));
         }
         cells.push(Cell::from(Span::styled(
-            finished_ago(job, now),
+            ago(job.timeline.queued_at, now),
             theme.dim(),
         )));
         Row::new(cells)
     });
-    let header: Vec<_> = columns.iter().map(|(name, _)| *name).collect();
+    let header: Vec<_> = columns
+        .iter()
+        .map(|(column, _)| column_title(*column))
+        .collect();
     let widths: Vec<_> = columns
         .iter()
-        .map(|(name, width)| match *name {
-            "REPOSITORY" => Constraint::Length(u16::try_from(repository_width).unwrap_or(0)),
-            "JOB" => Constraint::Fill(1),
+        .map(|(column, width)| match column {
+            Column::Repository => Constraint::Length(u16::try_from(repository_width).unwrap_or(0)),
+            Column::Job => Constraint::Fill(1),
             _ => Constraint::Length(u16::try_from(*width).unwrap_or(u16::MAX)),
         })
         .collect();

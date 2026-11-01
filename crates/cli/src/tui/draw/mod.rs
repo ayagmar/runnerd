@@ -9,6 +9,7 @@ use ratatui::layout::{Alignment, Constraint, Layout, Rect};
 use ratatui::style::{Color, Modifier, Style};
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph};
+use runnerd_core::api;
 use runnerd_core::config::ByteSize;
 use unicode_width::UnicodeWidthStr;
 
@@ -96,6 +97,11 @@ impl Theme {
     }
 }
 
+/// A column's heading, in capitals as the tables draw them.
+fn column_title(column: api::Column) -> String {
+    column.title().to_uppercase()
+}
+
 fn bold() -> Style {
     Style::new().add_modifier(Modifier::BOLD)
 }
@@ -130,21 +136,24 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) {
     }
 }
 
+/// The views the TUI has, in core's order; the others are the dashboard's and `runnerctl`'s.
+const TABS: [(api::View, View); 4] = [
+    (api::View::Overview, View::Overview),
+    (api::View::History, View::History),
+    (api::View::Records, View::Records),
+    (api::View::Sizing, View::Sizing),
+];
+
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let mut spans = vec![Span::styled(" runnerd ", bold())];
     let version = Span::styled(format!("{}  ", app.live.status.version), theme.dim());
-    for (key, name, view) in [
-        ("1", "Overview", View::Overview),
-        ("2", "History", View::History),
-        ("3", "Records", View::Records),
-        ("4", "Sizing", View::Sizing),
-    ] {
+    for (key, (shown, view)) in (1..).zip(TABS) {
         let style = if app.view == view {
             selected()
         } else {
             Style::new()
         };
-        spans.push(Span::styled(format!(" {key} {name} "), style));
+        spans.push(Span::styled(format!(" {key} {} ", shown.title()), style));
     }
     if let Some(open) = &app.job {
         spans.push(Span::styled(

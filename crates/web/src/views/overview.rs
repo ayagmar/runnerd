@@ -10,7 +10,7 @@ use maud::{Markup, html};
 use runnerd_core::api::{
     Activity, ActivityQuery, ClosedPart, HeldKind, HeldPart, HostSample, HostSamples, Job, JobPage,
     JobQuery, JobState, JobSummary, JobTitle, ProfileStatus, QueuedJob, RepositoryStatus, Sample,
-    SampleSeries, Savings, SlotState, SlotStatus, Status, Tone, WaitKind, cpus, in_cores,
+    SampleSeries, Savings, SlotState, SlotStatus, Status, Tone, View, WaitKind, cpus, in_cores,
 };
 use runnerd_core::client::{Client, ClientError};
 
@@ -202,7 +202,7 @@ pub(crate) fn render(overview: &Overview) -> Markup {
         .collect(),
     };
     let main = html! {
-        h1.visually-hidden { "Overview" }
+        h1.visually-hidden { (View::Overview.title()) }
         (health.1)
         div.overview {
             (queue.1)
@@ -213,7 +213,12 @@ pub(crate) fn render(overview: &Overview) -> Markup {
             (host.1)
         }
     };
-    page("Overview", Some(Page::Overview), Some(&live), &main)
+    page(
+        View::Overview.title(),
+        Some(Page::Overview),
+        Some(&live),
+        &main,
+    )
 }
 
 #[allow(
@@ -1041,49 +1046,32 @@ pub(crate) fn recent(overview: &Overview) -> Markup {
 /// The figures that say whether CI keeps up: slots running, jobs waiting and the oldest's wait, the waits of the
 /// last day with the longest of each hour, and the failures of the last day.
 pub(crate) fn health(overview: &Overview) -> Markup {
-    let health = overview.status.health(overview.now);
-    let day = &overview.day;
-    let waits = &day.started;
-    let p95 = day.wait_p95();
+    let figures = overview
+        .status
+        .health(overview.now)
+        .figures(Some(&overview.day));
     html! {
         section #health .health aria-labelledby="health-title" {
             h2 #health-title .visually-hidden { "Health" }
             dl.headline.health-figures {
-                div {
-                    dt { "Running" }
-                    dd { span.figure-main { (health.running) } span.figure-of { " of " (health.slots) " slots" } }
-                    @if health.starting > 0 {
-                        dd.figure-note { (health.starting) " runner" @if health.starting > 1 { "s" } " starting" }
-                    }
-                    @if health.warm > 0 {
-                        dd.figure-note { (health.warm) " warm, waiting for jobs" }
-                    }
-                }
-                div class=(tone_class(health.waiting_tone())) {
-                    dt { "Waiting" }
-                    dd { a.figure-main href="#queue" { (health.waiting) } }
-                    @if let Some(oldest) = health.oldest_wait {
-                        dd.figure-note { "oldest " (format::duration(oldest)) }
-                    } @else if health.waiting == 0 {
-                        dd.figure-note { "none queued" }
-                    }
-                }
-                div {
-                    dt { "Wait p95, 24 h" }
-                    dd { span.figure-main { (p95.map_or("–".to_owned(), format::duration)) } }
-                    dd.figure-note { (waits.len()) " job" @if waits.len() != 1 { "s" } " started" }
-                    (wait_hours(&overview.day))
-                }
-                // Red only for the failures runnerd may be to blame for; a job's own failing steps are its repository's.
-                div class=(tone_class(day.failed_tone())) {
-                    dt { "Failed, 24 h" }
-                    dd { span.figure-main { (day.failed) } }
-                    dd.figure-note {
-                        "of " (day.finished) " finished; "
-                        @if day.runner_failed > 0 {
-                            (day.runner_failed) " by their runner; "
+                @for figure in &figures {
+                    div class=(tone_class(figure.tone)) {
+                        dt { (figure.label) }
+                        dd {
+                            @if figure.label == "Waiting" {
+                                a.figure-main href="#queue" { (figure.value) }
+                            } @else {
+                                span.figure-main { (figure.value) }
+                            }
+                            @if let Some(of) = &figure.of { span.figure-of { " " (of) } }
                         }
-                        a href="/history?outcome=failure" { "failures" }
+                        @for note in &figure.notes {
+                            dd.figure-note { (note) }
+                        }
+                        @if figure.label == "Wait p95, 24 h" { (wait_hours(&overview.day)) }
+                        @if figure.label == "Failed, 24 h" {
+                            dd.figure-note { a href="/history?outcome=failure" { "failures" } }
+                        }
                     }
                 }
             }

@@ -10,8 +10,8 @@ use runnerd_core::api::{
     JobSizing, JobSummary, NotifyTest, ProfilePlan, ProfileSizing, QueuedJob, RecordNote,
     RecordState, Records, Savings, Sizing, SlotState, Status, Step, WaitSpread,
 };
+use runnerd_core::api::{Column, in_cores, job_title};
 pub(crate) use runnerd_core::api::{ago, cores_used, cpu_time, duration};
-use runnerd_core::api::{in_cores, job_title};
 use runnerd_core::config::ByteSize;
 
 /// How a piece of text should stand out.
@@ -74,6 +74,15 @@ pub(crate) struct Table {
 }
 
 impl Table {
+    /// A table headed by core's names for `columns`, in capitals.
+    pub(crate) fn columns(columns: &[Column]) -> Table {
+        let headers: Vec<String> = columns
+            .iter()
+            .map(|column| column.title().to_uppercase())
+            .collect();
+        Table::new(&headers.iter().map(String::as_str).collect::<Vec<_>>())
+    }
+
     /// A table whose first row is `headers`, dimmed.
     pub(crate) fn new(headers: &[&str]) -> Table {
         Table {
@@ -269,16 +278,16 @@ pub(crate) fn jobs(page: &JobPage, now: u64, paint: Paint) -> String {
     if page.jobs.is_empty() {
         return "no jobs match\n".to_owned();
     }
-    let mut table = Table::new(&[
-        "JOB",
-        "REPOSITORY",
-        "WORKFLOW / NAME",
-        "BRANCH",
-        "RESULT",
-        "WAITED",
-        "RAN",
-        "MEM PEAK",
-        "QUEUED",
+    let mut table = Table::columns(&[
+        Column::Id,
+        Column::Repository,
+        Column::Job,
+        Column::Branch,
+        Column::Outcome,
+        Column::Waited,
+        Column::Ran,
+        Column::MemoryPeak,
+        Column::Queued,
     ])
     .right(&[5, 6, 7]);
     for job in &page.jobs {
@@ -416,7 +425,14 @@ pub(crate) fn records(records: &Records, now: u64, paint: Paint) -> String {
         out.push('\n');
         return out;
     }
-    let mut table = Table::new(&["JOB", "REPOSITORY", "NAME", "SIZE", "MADE"]).right(&[3]);
+    let mut table = Table::columns(&[
+        Column::Id,
+        Column::Repository,
+        Column::Job,
+        Column::Size,
+        Column::Made,
+    ])
+    .right(&[3]);
     for record in &records.records {
         let mut made = ago(record.created_at, now);
         if records.shell_open(record.job) {

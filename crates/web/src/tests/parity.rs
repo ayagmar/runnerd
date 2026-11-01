@@ -3,6 +3,7 @@
 //! each is found in its row or element, read as text. The dashboard reads the wall clock, so only facts that do not
 //! change with it are checked: no ages, and no waits or run times of jobs still going.
 
+use runnerd_core::api::{Column, View};
 use runnerd_fixtures::{Daemon, Facts, JobRow, TIMED_OUT, daemon, facts};
 
 use super::{Dashboard, fake};
@@ -100,14 +101,21 @@ async fn the_overview_states_the_budget_health_slots_waits_and_latest_jobs_as_co
         "{}: {shown}",
         facts.stopping
     );
-    let health = &facts.health;
-    for figure in [
-        format!("Running {} of {} slots", health.running, health.slots),
-        format!("{} runners starting", health.starting),
-        format!("{} warm", health.warm),
-        format!("Waiting {}", health.waiting),
-    ] {
-        assert!(shown.contains(&figure), "{figure}: {shown}");
+    for figure in &facts.figures {
+        let line = [
+            Some(figure.label),
+            Some(&figure.value),
+            figure.of.as_deref(),
+        ]
+        .into_iter()
+        .flatten()
+        .collect::<Vec<_>>()
+        .join(" ");
+        assert!(shown.contains(&line), "{line}: {shown}");
+        // The oldest wait follows the clock the dashboard reads, not the fixtures'.
+        for note in figure.notes.iter().filter(|_| figure.label != "Waiting") {
+            assert!(shown.contains(note), "{note}: {shown}");
+        }
     }
     // A running slot shows its job instead.
     for slot in facts.slots.iter().filter(|slot| slot.word != "running") {
@@ -187,16 +195,22 @@ async fn a_job_states_its_outcome_steps_build_cache_and_failed_runs_as_core_does
 }
 
 #[tokio::test]
-async fn records_and_the_build_cache_state_their_limits_as_core_does() {
+async fn the_build_cache_states_its_week_and_tools_as_core_does() {
     let (dashboard, cookie, _, facts) = dashboard().await;
-    let html = dashboard.page(&cookie, "/caches").await.body;
-    let shown = text(&html);
+    let shown = text(&dashboard.page(&cookie, "/caches").await.body);
     assert!(shown.contains(&facts.build_cache_week), "{shown}");
     assert!(shown.contains(&facts.actions_cache), "{shown}");
     assert!(
         shown.contains(runnerd_core::api::BUILD_CACHE_TOOLS),
         "the build cache names the tools it serves: {shown}"
     );
+}
+
+#[tokio::test]
+async fn records_state_their_limits_as_core_does() {
+    let (dashboard, cookie, _, facts) = dashboard().await;
+    let html = dashboard.page(&cookie, "/records").await.body;
+    let shown = text(&html);
     let summary = format!("{}; {}", facts.records_usage, facts.records_pressure);
     let at = html
         .find(&sentence(&summary))
@@ -269,4 +283,40 @@ async fn insights_state_each_insight_s_kind_and_sentence_as_core_does() {
             "classed by its severity and kind: {card}"
         );
     }
+}
+
+/// `names` appear in `html`'s text in this order.
+fn in_order(html: &str, names: &[&str]) {
+    let shown = text(html);
+    let mut at = 0;
+    for name in names {
+        let found = shown[at..]
+            .find(name)
+            .unwrap_or_else(|| panic!("{name} after {at}: {shown}"));
+        at += found + name.len();
+    }
+}
+
+#[tokio::test]
+async fn the_pages_and_their_tables_are_named_as_core_names_them() {
+    let (dashboard, cookie, _, _) = dashboard().await;
+    let views: Vec<_> = View::ALL.iter().map(|view| view.title()).collect();
+    in_order(&dashboard.page(&cookie, "/").await.body, &views);
+    in_order(
+        &dashboard.page(&cookie, "/history").await.body,
+        &[
+            Column::Job,
+            Column::Outcome,
+            Column::Queued,
+            Column::Waited,
+            Column::Ran,
+            Column::MemoryPeak,
+            Column::Cpu,
+        ]
+        .map(Column::title),
+    );
+    in_order(
+        &dashboard.page(&cookie, "/records").await.body,
+        &[Column::Job, Column::Made, Column::Size].map(Column::title),
+    );
 }

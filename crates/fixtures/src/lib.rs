@@ -16,7 +16,7 @@
 
 use runnerd_core::api::{
     self, AdmissionPolicy, Budget, BuildCacheCounts, BuildCacheStats, CacheKind, CacheVolume,
-    Caches, CpuBudget, Health, HostBudget, HostMemory, Job, JobMetrics, JobRunner, JobState,
+    Caches, CpuBudget, Figure, HostBudget, HostMemory, Job, JobMetrics, JobRunner, JobState,
     JobSummary, LogSummary, OutcomeKind, PoolStatus, ProfileStatus, QueuedJob, Record,
     RecordLimits, Records, RepositoryStatus, RunnerStatus, SlotStatus, Status, Step, Timeline,
     Tone, WaitKind, Waiting,
@@ -919,8 +919,8 @@ pub struct Facts {
     pub free: String,
     /// The bar's part the host holds back.
     pub host_part: String,
-    /// The slots' health: how many slots there are and run, start a runner or hold a warm one.
-    pub health: Health,
+    /// The health figures of the slots and the queue, worded by core: what runs, starts, is warm and waits.
+    pub figures: Vec<Figure>,
     /// Why each queued job waits, oldest first.
     pub waits: Vec<WaitFact>,
     /// Each slot that holds a runner.
@@ -1005,7 +1005,7 @@ pub fn facts(daemon: &Daemon) -> Facts {
             .expect("the host holds room back")
             .reading
             .line(),
-        health: status.health(NOW),
+        figures: status.health(NOW).figures(None),
         waits: status
             .queued
             .iter()
