@@ -1,8 +1,6 @@
 # 0017. Job history in SQLite, written by one thread
 
-Amended by [0027](0027-pruning-runs-beside-the-writer.md): pruning runs beside the writer; by
-[0028](0028-job-records-expire.md): job records expire after `history.jobs`; and by
-[0073](0073-no-compatibility-before-0-0-19.md): the schema starts at version 15, and an older database is refused.
+Status: **Accepted**, amended by [0027](0027-pruning-runs-beside-the-writer.md), [0028](0028-job-records-expire.md), [0073](0073-no-compatibility-before-0-0-19.md).
 
 ## Context
 

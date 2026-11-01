@@ -1,5 +1,7 @@
 # 0012. Handlers take a principal from one place
 
+Status: **Accepted**.
+
 ## Context
 
 Remote hosts, later, add SSH and Tailscale transports. Each must not need its own copy of the API.

@@ -1,15 +1,6 @@
 # 0007. Warm caches: per-profile snapshot plus per-slot layer
 
-Amended by [0041](0041-snapshot-and-mirror-limits.md): a snapshot over `[caches] snapshot_max` starts over at its
-next reseed, from the image since [0065](0065-a-snapshot-starts-over-from-the-image.md), and the mirror's storage is
-emptied above `mirror.max_size`. Amended by [0052](0052-shared-build-cache.md): a build cache the daemon keeps per
-repository is shared by every slot, written only by the default branch's pushes, schedules and manual runs. Amended
-by [0054](0054-slot-docker-stores-share-the-disk.md): the slots' Docker stores share a quarter of the disk not
-otherwise used. Amended by [0066](0066-a-reseed-that-did-not-finish.md): a reseed that did not finish starts the
-profile over from the image, and containers use neither its snapshot nor their slot's changes until then. Amended
-by [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md): whiteouts in `/base/<layer>.hidden`, between the
-snapshot and the image, hide what a job deleted of the image. Amended by
-[0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md): a queued job starts in the free slot that ran it last.
+Status: **Accepted**, amended by [0041](0041-snapshot-and-mirror-limits.md), [0052](0052-shared-build-cache.md), [0054](0054-slot-docker-stores-share-the-disk.md), [0066](0066-a-reseed-that-did-not-finish.md), [0067](0067-whiteouts-of-the-image-beside-the-snapshot.md), [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md), [0080](0080-a-job-starts-in-the-slot-that-ran-it-last.md).
 
 ## Context
 

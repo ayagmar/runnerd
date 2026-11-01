@@ -1,7 +1,6 @@
 # 0036. A young job predicted from its own runs, one copy at a time
 
-Amends [0033](0033-measured-admission.md), which predicted a job with fewer than `[sizing] min_jobs` runs as the
-larger of its profile's p95 and its own largest peak.
+Status: **Accepted**, amended by [0070](0070-predictions-follow-recent-runs.md). Amends [0033](0033-measured-admission.md).
 
 ## Context
 

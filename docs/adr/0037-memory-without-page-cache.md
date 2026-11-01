@@ -1,6 +1,6 @@
 # 0037. A job's memory is estimated without page cache; a cap is met when the kernel says so
 
-Status: **Accepted** (2026-10-23).
+Status: **Accepted** (2026-10-23), amended by [0070](0070-predictions-follow-recent-runs.md). Amends [0032](0032-sizing-advice-from-sampled-peaks.md), [0033](0033-measured-admission.md).
 
 ## Context
 

@@ -1,10 +1,6 @@
 # 0033. Admission by measured peaks, behind a flag
 
-Amended by [0036](0036-young-jobs-predicted-from-their-own-runs.md): a job with 2 successful runs reserves its own
-largest peak, not its profile's p95, while no other copy of it is queued or running.
-
-Amended by [0037](0037-memory-without-page-cache.md): job samples leave out page cache, and a run
-met its cap when its container's `memory.events` say so, not when its peak came within 5% of it.
+Status: **Accepted**, amended by [0036](0036-young-jobs-predicted-from-their-own-runs.md), [0037](0037-memory-without-page-cache.md), [0055](0055-admission-follows-the-hosts-memory.md), [0056](0056-adopted-runners-keep-their-reservations.md), [0058](0058-a-repository-served-by-several-profiles.md), [0070](0070-predictions-follow-recent-runs.md).
 
 ## Context
 

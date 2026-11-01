@@ -1,9 +1,6 @@
 # 0049. Auto sizing changes CPUs and slots too, raises within the hour, and needs no hand-set ceiling
 
-Status: **Accepted** (2026-10-24). Amends [0039](0039-auto-sizing.md) and [0046](0046-sizing-says-what-auto-sizing-does-next.md).
-Amended by [0068](0068-cpus-follow-run-averages.md): `cpus` move on each job's run average, not on CPU peaks.
-Amended by [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md): under `measured`, waits for a slot
-alone add slots, as many as waited at once, bounded by Docker's disk instead of summed peaks.
+Status: **Accepted** (2026-10-24), amended by [0068](0068-cpus-follow-run-averages.md), [0071](0071-lowerings-every-hour.md), [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md). Amends [0039](0039-auto-sizing.md), [0046](0046-sizing-says-what-auto-sizing-does-next.md).
 
 ## Context
 

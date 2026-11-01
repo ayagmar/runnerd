@@ -1,7 +1,6 @@
 # 0081. Waits leave out the time no runnerd ran
 
-Status: **Accepted** (2026-10-30). Amends [0073](0073-no-compatibility-before-0-0-19.md), where it says how the
-history's schema changes.
+Status: **Accepted** (2026-10-30). Amends [0073](0073-no-compatibility-before-0-0-19.md).
 
 ## Context
 

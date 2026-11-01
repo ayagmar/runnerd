@@ -1,6 +1,6 @@
 # 0004. GPUI desktop app pinned to a Zed commit
 
-Superseded by [0034](0034-desktop-framework.md).
+Status: **Superseded by [0034](0034-desktop-framework.md)**.
 
 ## Context
 

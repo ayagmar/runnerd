@@ -1,7 +1,6 @@
 # 0042. The dashboard behind a proxy the owner runs, and installable as an app
 
-Status: **Accepted** (2026-10-23), amended by [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md). Amends [0020](0020-dashboard-is-an-api-client-on-loopback.md); builds the second
-piece of [0034](0034-desktop-framework.md).
+Status: **Accepted** (2026-10-23), amended by [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md). Amends [0020](0020-dashboard-is-an-api-client-on-loopback.md). Builds on [0034](0034-desktop-framework.md).
 
 ## Context
 

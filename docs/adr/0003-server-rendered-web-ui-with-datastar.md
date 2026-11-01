@@ -1,5 +1,7 @@
 # 0003. Web UI: axum, server-rendered HTML and Datastar
 
+Status: **Accepted**.
+
 ## Context
 
 The dashboard shows live jobs. A JavaScript build would need TypeScript copies of the API types.

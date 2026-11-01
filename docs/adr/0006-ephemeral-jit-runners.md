@@ -1,5 +1,7 @@
 # 0006. Ephemeral JIT runners, one per job
 
+Status: **Accepted**, amended by [0050](0050-warm-runners.md).
+
 ## Context
 
 Persistent registered runners keep state between jobs and form one pool per repository.

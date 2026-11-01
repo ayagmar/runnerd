@@ -1,5 +1,7 @@
 # 0013. Runs on the user's existing machines
 
+Status: **Accepted**.
+
 ## Context
 
 People already have laptops, VMs and home servers.

@@ -1,7 +1,6 @@
 # 0027. Pruning runs beside the writer, a batch at a time
 
-Amends [0017](0017-job-history-in-sqlite.md), which had one thread make every write. Amended by
-[0029](0029-profile-events-and-what-a-restart-announces.md): `announced_profiles` keeps each profile's latest event too.
+Status: **Accepted**, amended by [0029](0029-profile-events-and-what-a-restart-announces.md). Amends [0017](0017-job-history-in-sqlite.md).
 
 ## Context
 

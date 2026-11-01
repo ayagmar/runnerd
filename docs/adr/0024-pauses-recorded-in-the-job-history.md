@@ -1,5 +1,7 @@
 # 0024. Pauses are recorded in the job history and survive restarts
 
+Status: **Accepted**.
+
 ## Context
 
 A pause lived only in `Control`'s memory, so a daemon restart, planned or not, resumed every repository: an owner who

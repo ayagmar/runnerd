@@ -1,6 +1,6 @@
 # 0035. A stack-neutral base image, with Android in its own stage
 
-Status: **Accepted** (2026-10-23).
+Status: **Accepted** (2026-10-23), amended by [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md).
 
 ## Context
 

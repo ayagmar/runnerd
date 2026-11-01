@@ -1,7 +1,6 @@
 # 0077. Credentials in the cache layer, closed slots' layers, and what the build cache counts
 
-Status: **Accepted** (2026-10-30). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md),
-[0035](0035-runner-image-stages.md) and [0052](0052-shared-build-cache.md).
+Status: **Accepted** (2026-10-30). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md), [0035](0035-runner-image-stages.md), [0052](0052-shared-build-cache.md).
 
 ## Context
 

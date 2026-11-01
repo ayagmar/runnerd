@@ -1,8 +1,6 @@
 # 0090. Under measured admission, slots follow waits for a slot alone and Docker's disk
 
-Status: **Accepted** (2026-10-31). Amends [0039](0039-auto-sizing.md) and
-[0049](0049-auto-sizing-without-hand-tuning.md), where they say when auto sizing adds slots under `measured`, and
-[0054](0054-slot-docker-stores-share-the-disk.md), whose share now also bounds how many slots auto sizing adds.
+Status: **Accepted** (2026-10-31). Amends [0039](0039-auto-sizing.md), [0049](0049-auto-sizing-without-hand-tuning.md), [0054](0054-slot-docker-stores-share-the-disk.md).
 
 ## Context
 

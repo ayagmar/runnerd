@@ -1,6 +1,6 @@
 # 0028. Job records expire after `history.jobs`
 
-Amends [0017](0017-job-history-in-sqlite.md), which kept a job's record and totals for good.
+Status: **Accepted**. Amends [0017](0017-job-history-in-sqlite.md).
 
 ## Context
 

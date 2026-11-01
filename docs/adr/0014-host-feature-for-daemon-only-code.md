@@ -1,5 +1,7 @@
 # 0014. Daemon-only code behind core's `host` feature
 
+Status: **Accepted**.
+
 ## Context
 
 Clients need `api` and `config` from `runnerd-core`, but the crate also holds the Docker client (`bollard`), the GitHub client (`reqwest`) and the scheduler. Documentation alone did not stop a client from depending on them.

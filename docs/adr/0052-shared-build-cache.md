@@ -1,11 +1,6 @@
 # 0052. A build cache every runner shares, written only by the default branch
 
-Amended by [0053](0053-build-cache-written-by-own-pull-requests.md): a repository can let its own branches' pull
-requests that people opened write. Amended by [0082](0082-github-actions-cache-served-from-the-host.md): the same
-socket and store can serve GitHub Actions' cache. Amended by [0083](0083-turborepo-and-nx-from-the-build-cache.md):
-they serve Turborepo's remote cache, and Nx's to workflows that ask.
-
-Status: **Accepted** (2026-10-24). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md).
+Status: **Accepted** (2026-10-24), amended by [0053](0053-build-cache-written-by-own-pull-requests.md), [0077](0077-cache-credentials-closed-slots-and-build-cache-counts.md), [0082](0082-github-actions-cache-served-from-the-host.md), [0083](0083-turborepo-and-nx-from-the-build-cache.md). Amends [0007](0007-warm-caches-snapshot-plus-slot-layer.md).
 
 ## Context
 

@@ -1,5 +1,7 @@
 # 0022. The terminal UI is ratatui in runnerctl, behind a feature
 
+Status: **Accepted**.
+
 ## Context
 
 Hosts reached over SSH have no browser open on the dashboard's loopback port. `runnerctl watch` redraws a table,

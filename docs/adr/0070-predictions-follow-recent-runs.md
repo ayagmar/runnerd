@@ -1,9 +1,6 @@
 # 0070. Predictions and memory sizing follow each job's recent runs
 
-Status: **Proposed** (2026-10-26). Amends [0032](0032-sizing-advice-from-sampled-peaks.md),
-[0033](0033-measured-admission.md), [0036](0036-young-jobs-predicted-from-their-own-runs.md),
-[0037](0037-memory-without-page-cache.md), [0039](0039-auto-sizing.md) and
-[0055](0055-admission-follows-the-hosts-memory.md).
+Status: **Accepted** (2026-10-26). Amends [0032](0032-sizing-advice-from-sampled-peaks.md), [0033](0033-measured-admission.md), [0036](0036-young-jobs-predicted-from-their-own-runs.md), [0037](0037-memory-without-page-cache.md), [0039](0039-auto-sizing.md), [0055](0055-admission-follows-the-hosts-memory.md).
 
 ## Context
 

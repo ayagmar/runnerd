@@ -1,9 +1,6 @@
 # 0020. The dashboard is an API client, on loopback behind a one-time login
 
-Amended by [0042](0042-dashboard-behind-a-proxy-and-installable.md): writes are also taken from the origins of
-proxies listed in `[web] origins`, and a login through an HTTPS proxy sets a `Secure` cookie. Amended by
-[0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md): the session secret is kept in a file across
-restarts, and a phone signs in by a QR code.
+Status: **Accepted**, amended by [0042](0042-dashboard-behind-a-proxy-and-installable.md), [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md).
 
 ## Context
 

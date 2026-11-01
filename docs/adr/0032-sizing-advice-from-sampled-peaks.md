@@ -1,8 +1,6 @@
 # 0032. Sizing advice from sampled peaks, applied through the config check
 
-Amended by [0037](0037-memory-without-page-cache.md): job samples leave out page cache, and a run
-met its cap when its container's `memory.events` say so, not when its peak came within 5% of it. Amended by
-[0039](0039-auto-sizing.md): under `[sizing] auto` the daemon applies advice itself, through the same check.
+Status: **Accepted**, amended by [0037](0037-memory-without-page-cache.md), [0039](0039-auto-sizing.md), [0050](0050-warm-runners.md), [0055](0055-admission-follows-the-hosts-memory.md), [0070](0070-predictions-follow-recent-runs.md).
 
 ## Context
 

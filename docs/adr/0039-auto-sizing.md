@@ -1,11 +1,6 @@
 # 0039. Auto sizing: the daemon applies advice itself, a step at a time, off by default
 
-Status: **Accepted** (2026-10-23). Amends [0032](0032-sizing-advice-from-sampled-peaks.md). Amended by
-[0049](0049-auto-sizing-without-hand-tuning.md): `cpus` too, slots without `max_slots`, raises within the hour.
-Amended by [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md): the advice keeps to `min_memory` and
-`max_memory`, so a change goes as far as they allow. Amended by
-[0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md): under `measured`, slots follow waits for a slot
-alone and Docker's disk, and idle ones are taken back.
+Status: **Accepted** (2026-10-23), amended by [0049](0049-auto-sizing-without-hand-tuning.md), [0055](0055-admission-follows-the-hosts-memory.md), [0070](0070-predictions-follow-recent-runs.md), [0071](0071-lowerings-every-hour.md), [0088](0088-sizing-advice-keeps-to-a-profiles-memory-bounds.md), [0090](0090-slots-follow-waits-for-a-slot-alone-and-dockers-disk.md). Amends [0032](0032-sizing-advice-from-sampled-peaks.md).
 
 ## Context
 

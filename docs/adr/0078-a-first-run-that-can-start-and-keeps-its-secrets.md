@@ -1,7 +1,6 @@
 # 0078. A first run that can start its first job and keeps its secrets
 
-Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-hosts-memory.md) and
-[0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md).
+Status: **Accepted** (2026-10-30). Amends [0055](0055-admission-follows-the-hosts-memory.md), [0043](0043-phones-paired-by-qr-code-and-sessions-that-last.md).
 
 ## Context
 

@@ -1,5 +1,7 @@
 # 0008. Authenticate with the `gh` CLI's token
 
+Status: **Accepted**.
+
 ## Context
 
 Individuals running runnerd already have `gh` logged in. A GitHub App needs setup per user.

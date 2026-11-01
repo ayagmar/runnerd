@@ -1,8 +1,6 @@
 # 0075. `cpus` come down only under `caps` admission and a cap no run's bursts met; under `measured` the bursts raise them
 
-Status: **Accepted** (2026-10-30). Amends [0068](0068-cpus-follow-run-averages.md), where it states the lowering.
-Amended by [0079](0079-cpu-weights-and-throttling-as-evidence.md): where a run has a throttling figure, its quota's
-throttling, not its peak, says whether the cap held it back, for the measured raise and the lowering's hold alike.
+Status: **Accepted** (2026-10-30), amended by [0079](0079-cpu-weights-and-throttling-as-evidence.md). Amends [0068](0068-cpus-follow-run-averages.md).
 
 ## Context
 
