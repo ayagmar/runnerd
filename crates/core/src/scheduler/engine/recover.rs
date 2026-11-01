@@ -191,6 +191,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             image: container.labels.get(super::runners::IMAGE).cloned(),
             spec: container.labels.get(super::runners::SPEC).cloned(),
             observed: false,
+            purpose: None,
         }
     }
 

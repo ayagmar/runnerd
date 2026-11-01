@@ -60,8 +60,10 @@ async fn runs_of(
                 name: name.to_owned(),
                 ..job(id)
             },
+            time::now_ms(),
         );
         store.runner_started(RunnerRecord {
+            purpose: None,
             name: runner.clone(),
             repository: "o/r".to_owned(),
             profile: "app".to_owned(),
@@ -454,6 +456,7 @@ async fn once_its_job_is_known_a_runner_reserves_that_jobs_prediction() {
             name: "e2e".to_owned(),
             ..job(9)
         },
+        time::now_ms(),
     );
     docker
         .0
@@ -1620,4 +1623,85 @@ async fn runners_a_restart_adopts_keep_the_cpu_they_reserved_not_their_limits() 
         handle.status.borrow().budget.cpu.map(|cpu| cpu.in_use),
         Some(2000)
     );
+}
+
+#[tokio::test]
+async fn a_start_that_no_longer_fits_does_not_hold_back_the_plans_later_starts() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let config = sized("0G", "4G", "512M").replacen("slots = 1", "slots = 2", 1);
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(20 * G);
+    engine.recover().await.unwrap();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1), job(2), small_job(3)];
+        state
+            .queued_on
+            .extend([(1, "o/r".to_owned()), (2, "o/r".to_owned())]);
+        state.queued_on.insert(3, "o/s".to_owned());
+    }
+    // The plan has room for all three; while the first runner starts, other programs take the host's memory down to
+    // what it and a 512M runner fit in, not a second 4G one.
+    host_at(&handle.store, 0, 20 * G, 0);
+    let store = handle.store.clone();
+    docker.0.lock().unwrap().on_start = Some(Box::new(move |_| {
+        host_at(&store, 0, 9 * G + 100 * M, 0);
+    }));
+    engine.tick(Shutdown::No).await;
+    // Skipping every start after the one that no longer fit left o/s's job to the next poll, though it fit.
+    let registered: Vec<String> = registered(&github.calls()).into_iter().cloned().collect();
+    assert_eq!(registered.len(), 2, "{registered:?}");
+    assert!(
+        registered[1].contains("-small-"),
+        "o/s's runner starts in the same tick: {registered:?}"
+    );
+    engine.publish();
+    assert_eq!(
+        waits(&handle)[1],
+        Some(api::Waiting::HostMemory {
+            needs: 4 * G,
+            free: 0
+        })
+    );
+}
+
+#[tokio::test]
+async fn a_stop_asked_for_while_a_runner_starts_starts_no_more_of_the_tick() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let config = sized("0G", "4G", "512M").replacen("slots = 1", "slots = 2", 1);
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.memory_max = Some(20 * G);
+    engine.recover().await.unwrap();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(1), job(2), small_job(3)];
+        state
+            .queued_on
+            .extend([(1, "o/r".to_owned()), (2, "o/r".to_owned())]);
+        state.queued_on.insert(3, "o/s".to_owned());
+    }
+    host_at(&handle.store, 0, 20 * G, 0);
+    // While the first runner starts, the host's memory goes down, which defers the second, and a stop is asked for.
+    let (store, control) = (handle.store.clone(), handle.control.clone());
+    docker.0.lock().unwrap().on_start = Some(Box::new(move |_| {
+        host_at(&store, 0, 9 * G + 100 * M, 0);
+        control.shutdown(Shutdown::Detach);
+    }));
+    engine.tick(Shutdown::No).await;
+    // A runner started after the stop could take a job the detach then leaves running.
+    assert_eq!(registered(&github.calls()).len(), 1, "{:?}", github.calls());
+    let started = docker
+        .calls()
+        .iter()
+        .filter(|call| call.starts_with("start "))
+        .count();
+    assert_eq!(started, 1, "{:?}", docker.calls());
 }

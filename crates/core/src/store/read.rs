@@ -53,7 +53,7 @@ const SUMMARY: &str = "j.id, j.repository, j.run_id, j.run_attempt, j.workflow, 
      r.memory_cap, r.cpu_cap, coalesce(r.build_cache_hits, 0), coalesce(r.build_cache_misses, 0), \
      coalesce(r.build_cache_read_bytes, 0), coalesce(r.build_cache_written_bytes, 0), \
      coalesce(r.build_cache_refused, 0), coalesce(r.build_cache_writer, 0), r.sock_throttled, j.unseen, \
-     j.cpu_periods, j.cpu_throttled, j.cpu_stalled FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
+     j.cpu_periods, j.cpu_throttled, j.cpu_stalled, j.seen_at FROM jobs j LEFT JOIN runners r ON r.name = j.runner";
 
 fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
     let labels: String = row.get(8)?;
@@ -90,6 +90,7 @@ fn summary_from(row: &Row<'_>) -> rusqlite::Result<api::JobSummary> {
             finished_at: seconds(17)?,
             cleaned_at: seconds(18)?,
             unseen: secs(row.get(39)?),
+            seen_at: seconds(43)?,
         },
         metrics: api::JobMetrics {
             cpu_time: row.get(19)?,

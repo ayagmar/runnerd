@@ -306,7 +306,8 @@ fn job_runner(name: &str, profile: &str, slot: usize) -> JobRunner {
     }
 }
 
-/// A job that ran from `started` to `finished` seconds before now, queued 20 seconds before it started.
+/// A job that ran from `started` to `finished` seconds before now, queued 20 seconds before it started and seen
+/// by runnerd 3 seconds after GitHub queued it.
 fn ran(mut summary: JobSummary, started: u64, finished: Option<u64>) -> JobSummary {
     summary.runner = Some(job_runner("runnerd-ab12-jvm-1", "jvm", 1));
     summary.timeline = Timeline {
@@ -316,6 +317,7 @@ fn ran(mut summary: JobSummary, started: u64, finished: Option<u64>) -> JobSumma
         finished_at: finished.map(|finished| NOW - finished),
         cleaned_at: finished.map(|finished| NOW - finished + 4),
         unseen: 0,
+        seen_at: Some(NOW - started - 17),
     };
     summary
 }
@@ -893,6 +895,8 @@ pub struct JobFacts {
     pub cpu_held: String,
     /// What of its wait passed while runnerd was not running.
     pub unseen: String,
+    /// The labels of its milestones in order, `Seen by runnerd` among them.
+    pub milestones: Vec<&'static str>,
     /// Of its latest runs that started and ended, how many failed.
     pub failed: usize,
     /// How many of its latest runs started and ended.
@@ -1045,6 +1049,13 @@ pub fn facts(daemon: &Daemon) -> Facts {
                 .cpu_held(NOW)
                 .expect("its CPU throttled and waiting"),
             unseen: job.summary.unseen_note(NOW).expect("downtime in its wait"),
+            milestones: job
+                .summary
+                .timeline
+                .milestones()
+                .iter()
+                .map(|milestone| milestone.label)
+                .collect(),
             failed: compared.failed,
             finished: compared.finished,
         },

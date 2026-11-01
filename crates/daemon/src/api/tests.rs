@@ -418,8 +418,10 @@ async fn a_raised_memory_max_counts_in_the_sizing_advice_without_a_restart() {
                 created_at: now - 60_000,
                 ..QueuedJob::default()
             },
+            now,
         );
         daemon.store.runner_started(RunnerRecord {
+            purpose: None,
             admission: None,
             name: runner.clone(),
             repository: "o/app".to_owned(),
@@ -508,8 +510,10 @@ async fn finished_jobs_at(store: &Store, profile: &str, cap: u64, peak: u64, now
                 created_at: now - 60_000,
                 ..QueuedJob::default()
             },
+            now,
         );
         store.runner_started(RunnerRecord {
+            purpose: None,
             admission: None,
             name: runner.clone(),
             repository: "o/app".to_owned(),
@@ -737,8 +741,10 @@ async fn met_cap(store: &Store, profile: &str, cap: u64) {
             created_at: now - 60_000,
             ..QueuedJob::default()
         },
+        now,
     );
     store.runner_started(RunnerRecord {
+        purpose: None,
         admission: None,
         name: "runner-11".to_owned(),
         repository: "o/app".to_owned(),
@@ -1926,8 +1932,10 @@ async fn a_followed_log_sends_stored_and_new_lines_and_ends_when_the_job_finishe
             name: "build".to_owned(),
             ..QueuedJob::default()
         },
+        1_000,
     );
     store.runner_started(RunnerRecord {
+        purpose: None,
         admission: None,
         name: "runner-1".to_owned(),
         repository: "o/app".to_owned(),
@@ -2046,9 +2054,11 @@ fn failed_job(store: &Store, id: u64) {
             name: "build".to_owned(),
             ..QueuedJob::default()
         },
+        1_000,
     );
     let runner = format!("runner-{id}");
     store.runner_started(RunnerRecord {
+        purpose: None,
         admission: None,
         name: runner.clone(),
         repository: "o/app".to_owned(),

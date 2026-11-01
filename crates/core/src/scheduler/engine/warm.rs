@@ -2,12 +2,12 @@
 //! workflow runs whose jobs it sees queued or taken, and says how many warm runners each repository wants. It must not
 //! start or stop runners: `plan` decides with what it says.
 
-use std::collections::BTreeMap;
+use std::collections::{BTreeMap, BTreeSet};
 use std::time::{Duration, SystemTime};
 
 use tracing::warn;
 
-use super::Engine;
+use super::{Engine, Purpose};
 use crate::docker::DockerApi;
 use crate::github::GithubApi;
 use crate::scheduler::warm::{self, Attempt, Learned, Runs};
@@ -123,6 +123,52 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 job.workflow.as_deref(),
                 now,
             );
+        }
+    }
+
+    /// Why `pool`'s next warm runner starts: as one of its configured warm runners while fewer of its runners wait
+    /// with no queued job to take, else for a job its runs are expected to queue (`warm::target`). Its idle runners
+    /// cover its queued jobs first, as the plan counts them.
+    pub(super) fn warm_purpose(&self, pool: &Pool) -> Purpose {
+        let Some(repository) = self
+            .config
+            .repositories
+            .iter()
+            .find(|repository| Pool::from(*repository) == *pool)
+        else {
+            return Purpose::Burst;
+        };
+        let configured = self.warm.learned.as_ref().map_or(0, |(learned, _)| {
+            warm::target(
+                repository.warm,
+                learned.active(&repository.name, time::now_ms()),
+                0,
+            )
+        });
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
+        let queued = self.repositories.get(&pool.repository).map_or(0, |state| {
+            state
+                .queued
+                .iter()
+                .filter(|job| !taken.contains(&job.id) && matches(job, &repository.labels))
+                .count()
+        });
+        let waiting = self
+            .occupied()
+            .filter(|(slot, occupant)| {
+                slot.profile == pool.profile
+                    && occupant.repository == pool.repository
+                    && !occupant.busy
+                    && occupant.job.is_none()
+            })
+            .count();
+        if waiting.saturating_sub(queued) < configured {
+            Purpose::Warm
+        } else {
+            Purpose::Burst
         }
     }
 

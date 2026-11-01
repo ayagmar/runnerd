@@ -76,14 +76,19 @@ impl Writer<'_> {
     )]
     fn apply(&self, write: Write) {
         match write {
-            Write::Queued { repository, job } => {
+            Write::Queued {
+                repository,
+                job,
+                seen_at,
+            } => {
                 self.change("record a queued job", |announced| {
-                    self.queued(&repository, &job, announced)
+                    self.queued(&repository, &job, seen_at, announced)
                 });
             }
             Write::RunnerStarted(runner) => self.runner_started(&runner),
             Write::RunnerAdmission { runner, admission } => self.admission(&runner, admission),
             Write::RunnerOomKilled(runner) => self.runner_oom_killed(&runner),
+            Write::RunnerStoppedFor { runner, reason } => self.runner_stopped_for(&runner, reason),
             Write::HostWaited { jobs, ms } => self.host_waited(&jobs, ms),
             Write::SlotWaited { jobs, ms } => self.slot_waited(&jobs, ms),
             Write::BuildCache { runner, counts } => self.build_cache(&runner, &counts),
@@ -262,8 +267,8 @@ impl Writer<'_> {
             "record a runner",
             self.db.execute(
                 "INSERT OR IGNORE INTO runners (name, repository, profile, slot, container, started_at, \
-                 memory_cap, cpu_cap, admission, memory_measure) \
-                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'without_page_cache')",
+                 memory_cap, cpu_cap, admission, memory_measure, purpose) \
+                 VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'without_page_cache', ?10)",
                 params![
                     runner.name,
                     runner.repository,
@@ -275,7 +280,8 @@ impl Writer<'_> {
                     runner.cpu_cap,
                     runner
                         .admission
-                        .and_then(|admission| serde_json::to_string(&admission).ok())
+                        .and_then(|admission| serde_json::to_string(&admission).ok()),
+                    runner.purpose
                 ],
             ),
         );
@@ -309,6 +315,16 @@ impl Writer<'_> {
             self.db.execute(
                 "UPDATE runners SET oom_kills = max(coalesce(oom_kills, 0), 1) WHERE name = ?1",
                 [runner],
+            ),
+        );
+    }
+
+    fn runner_stopped_for(&self, runner: &str, reason: &str) {
+        logged(
+            "record why a runner stopped",
+            self.db.execute(
+                "UPDATE runners SET stopped_for = ?2 WHERE name = ?1",
+                params![runner, reason],
             ),
         );
     }
@@ -428,6 +444,7 @@ impl Writer<'_> {
         &self,
         repository: &str,
         job: &QueuedJob,
+        seen_at: u64,
         announced: &mut Announced,
     ) -> rusqlite::Result<()> {
         let labels = serde_json::to_string(&job.labels).unwrap_or_else(|_| "[]".to_owned());
@@ -439,7 +456,7 @@ impl Writer<'_> {
         let unseen = self.downtime.map_or(0, |downtime| downtime.of(queued_at));
         let inserted = self.db.execute(
             "INSERT INTO jobs (id, repository, run_id, run_attempt, workflow, name, branch, url, labels, state, \
-             queued_at, unseen) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?11) \
+             queued_at, unseen, seen_at) VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, 'queued', ?10, ?11, ?12) \
              ON CONFLICT (id) DO NOTHING",
             params![
                 job.id,
@@ -452,12 +469,18 @@ impl Writer<'_> {
                 job.url,
                 labels,
                 queued_at,
-                unseen
+                unseen,
+                seen_at
             ],
         )?;
-        if inserted == 1
-            && let Some(job) = read::summary(&self.db, job.id)?
-        {
+        if inserted == 0 {
+            // A runner's capture may have claimed it first: the listing still saw it queued.
+            self.db.execute(
+                "UPDATE jobs SET seen_at = ?2 WHERE id = ?1 AND seen_at IS NULL \
+                 AND (started_at IS NULL OR started_at >= ?2)",
+                params![job.id, seen_at],
+            )?;
+        } else if let Some(job) = read::summary(&self.db, job.id)? {
             announced.push(Event::JobQueued { job });
         }
         Ok(())

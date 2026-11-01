@@ -180,13 +180,26 @@ pub struct Setup {
     pub build_cache: Option<BuildCache>,
 }
 
-/// Why a runner starts.
+/// Why a runner starts, as its start's log line and its record say (ADR 0092).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum Purpose {
     /// For a queued job.
     Job,
-    /// As a warm runner, for jobs not queued yet.
+    /// As one of its repository's configured warm runners, for jobs not queued yet.
     Warm,
+    /// As a warm runner past those, for a job its runs are expected to queue still.
+    Burst,
+}
+
+impl Purpose {
+    /// How the history stores it.
+    fn as_str(self) -> &'static str {
+        match self {
+            Purpose::Job => "job",
+            Purpose::Warm => "warm",
+            Purpose::Burst => "burst",
+        }
+    }
 }
 
 /// Whether Docker answers a stop.
@@ -228,6 +241,8 @@ struct Occupant {
     /// Whether `observe` watches it: recorded, sampled and its job captured. Not while Docker fails to inspect its
     /// container, which each tick tries again.
     observed: bool,
+    /// Why this daemon started it; `None` for one a restart adopted.
+    purpose: Option<Purpose>,
 }
 
 impl Occupant {
@@ -630,7 +645,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 shown = mode;
             }
             if mode == Shutdown::Detach {
-                self.remove_idle().await;
+                self.remove_every_idle().await;
                 self.collect_recordings().await;
             } else {
                 self.tick(mode).await;

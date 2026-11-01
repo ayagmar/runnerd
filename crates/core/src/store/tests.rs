@@ -36,7 +36,7 @@ async fn a_fresh_database_is_created_at_the_schema_version() {
     let dir = TestDir::new("store");
     let path = dir.0.join("nested/runnerd.db");
     let store = Store::open(&path).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.flush().await;
     let job = store.job(1).await.unwrap().unwrap();
     assert_eq!(job.summary.state, JobState::Queued);
@@ -112,7 +112,7 @@ fn a_database_from_a_newer_runnerd_is_refused() {
 async fn a_log_stops_at_its_cap_and_says_so() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     let position = LogPosition { page: 1, offset: 0 };
     // Each line takes its length plus a newline: 6 bytes.
     store
@@ -131,7 +131,11 @@ async fn jobs_list_newest_first_by_repository_in_pages() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     for id in 1..=5 {
-        store.queued(if id % 2 == 0 { "o/even" } else { "o/odd" }, &queued(id));
+        store.queued(
+            if id % 2 == 0 { "o/even" } else { "o/odd" },
+            &queued(id),
+            crate::time::now_ms(),
+        );
     }
     store.flush().await;
     let page = |before| {
@@ -167,6 +171,7 @@ async fn jobs_list_by_workflow_and_name_to_compare_runs_of_one_job() {
                 name: name.to_owned(),
                 ..queued(id)
             },
+            crate::time::now_ms(),
         );
     }
     store.flush().await;
@@ -209,6 +214,7 @@ async fn cache_sizes_now_are_the_last_measurement_of_each_volume() {
 
 fn runner(name: &str, started_at: u64) -> RunnerRecord {
     RunnerRecord {
+        purpose: None,
         admission: None,
         name: name.to_owned(),
         repository: "o/r".to_owned(),
@@ -225,7 +231,7 @@ fn runner(name: &str, started_at: u64) -> RunnerRecord {
 async fn stats_count_a_lost_job_without_a_conclusion_as_failed() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.runner_started(runner("r1", 1_000_100));
     store.claimed(1, 10, "r1", 1_000_200);
     store.lost(1, 1_000_300);
@@ -272,6 +278,7 @@ fn completed_in_window(
             created_at: ms(since + 190),
             ..queued(id)
         },
+        crate::time::now_ms(),
     );
     store.runner_started(self::runner(runner, ms(since)));
     store.claimed(id, 10, runner, ms(since + 200));
@@ -317,6 +324,7 @@ async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_
             created_at: ms(since - 3 * day),
             ..queued(1)
         },
+        crate::time::now_ms(),
     );
     store.claimed(1, 10, "r", ms(since + 60));
     store.lost(1, ms(since + 120));
@@ -327,6 +335,7 @@ async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_
             created_at: ms(since - 7200),
             ..queued(2)
         },
+        crate::time::now_ms(),
     );
     store.claimed(2, 10, "r", ms(since - 3600));
     store.lost(2, ms(since + 30));
@@ -337,6 +346,7 @@ async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_
             created_at: ms(since - 7200),
             ..queued(3)
         },
+        crate::time::now_ms(),
     );
     store.claimed(3, 10, "r", ms(since - 3600));
     store.lost(3, ms(since - 1));
@@ -353,6 +363,7 @@ async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_
                 created_at: ms(since + id * 10),
                 ..queued(id)
             },
+            crate::time::now_ms(),
         );
         store.claimed(id, 10, "r", ms(since + id * 10 + 10));
     }
@@ -381,7 +392,7 @@ async fn activity_counts_every_job_by_when_it_started_or_ended_however_long_ago_
 async fn hourly_stats_count_at_most_the_last_31_days() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.runner_started(runner("r1", 1_000_100));
     store.claimed(1, 10, "r1", 1_000_200);
     store.lost(1, 1_000_300);
@@ -443,7 +454,7 @@ fn sample(runner: &str, at: u64, cpu_usage: u64, received: u64) -> SampleRecord 
 async fn metrics_of(samples: Vec<SampleRecord>) -> crate::api::JobMetrics {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.runner_started(runner("r1", 1_000_100));
     store.claimed(1, 10, "r1", 1_000_200);
     store.samples(samples);
@@ -529,7 +540,7 @@ async fn a_restart_mid_job_keeps_what_held_its_cpu_back() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.runner_started(runner("r1", 1_000_100));
     store.claimed(1, 10, "r1", 1_000_200);
     store.samples(vec![
@@ -565,14 +576,14 @@ async fn a_change_whose_event_cannot_be_stored_is_not_made_or_announced() {
             "CREATE TRIGGER no_events BEFORE INSERT ON events BEGIN SELECT RAISE(ABORT, 'disk full'); END;",
         )
         .unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.flush().await;
     assert_eq!(store.job(1).await.unwrap(), None);
     assert!(events.try_recv().is_err());
 
     // Once events can be stored again, the same change goes through with its event.
     fault.execute_batch("DROP TRIGGER no_events").unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.flush().await;
     assert!(store.job(1).await.unwrap().is_some());
     let stored = store.events_after(0, 10).await.unwrap();
@@ -633,7 +644,7 @@ async fn log_lines_wait_while_the_writer_is_behind_by_the_backlog() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.flush().await;
     // Another process holds the database: the writer waits.
     let holder = Connection::open(&path).unwrap();
@@ -669,7 +680,7 @@ async fn a_log_batch_larger_than_the_backlog_waits_for_the_writer_too() {
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.flush().await;
     let holder = Connection::open(&path).unwrap();
     holder.execute_batch("BEGIN EXCLUSIVE").unwrap();
@@ -865,7 +876,7 @@ const DAY_MS: u64 = 24 * 3600 * 1000;
 async fn pruning_drops_samples_and_logs_then_finished_jobs_past_their_ages_and_keeps_open_jobs() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.runner_started(runner("r1", 1_000_100));
     store.claimed(1, 10, "r1", 1_000_200);
     store.samples(vec![sample("r1", 1_000_250, 1, 1)]);
@@ -879,7 +890,7 @@ async fn pruning_drops_samples_and_logs_then_finished_jobs_past_their_ages_and_k
         .await;
     store.runner_removed("r1", 1_000_290);
     store.lost(1, 1_000_300);
-    store.queued("o/r", &queued(2));
+    store.queued("o/r", &queued(2), crate::time::now_ms());
     store.flush().await;
     let history = crate::config::History::default();
     let samples = |store: Store| async move {
@@ -989,7 +1000,7 @@ async fn sizing_reads_finished_jobs_peaks_and_leaves_cancelled_ones_out() {
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
     for (id, name) in [(1, "r1"), (2, "r2")] {
-        store.queued("o/r", &queued(id));
+        store.queued("o/r", &queued(id), crate::time::now_ms());
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
     }
@@ -1041,7 +1052,7 @@ async fn a_warm_runner_holds_its_slot_for_its_job_from_when_the_job_was_queued()
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     // Up at 400_000, its job queued at 1_000_001 and taken right away: it waited warm before.
     store.runner_started(runner("warm", 400_000));
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.claimed(1, 10, "warm", 1_000_002);
     store.lost(1, 1_000_400);
     store.runner_removed("warm", 1_000_400);
@@ -1063,7 +1074,7 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
     for (id, name, kills) in [(1, "r1", 0), (2, "r2", 2)] {
-        store.queued("o/r", &queued(id));
+        store.queued("o/r", &queued(id), crate::time::now_ms());
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
@@ -1092,7 +1103,7 @@ async fn a_kill_for_memory_in_a_runners_container_marks_its_job() {
 async fn a_cancelled_job_is_read_for_how_it_ended_and_what_its_runner_reserved() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.runner_started(RunnerRecord {
         admission: Some(crate::api::Admission {
             policy: crate::api::AdmissionPolicy::Measured,
@@ -1228,7 +1239,7 @@ async fn peaks_sampled_before_page_cache_was_left_out_are_told_from_new_ones() {
     let store = Store::open(&path).unwrap();
     // r4's memory.events had no `oom` counter: unknown, not "never ran out".
     for (id, name, oom) in [(2, "r2", Some(0)), (3, "r3", Some(1)), (4, "r4", None)] {
-        store.queued("o/r", &queued(id));
+        store.queued("o/r", &queued(id), crate::time::now_ms());
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
@@ -1269,7 +1280,7 @@ async fn a_runners_own_limit_failing_reclaim_is_read_apart_from_a_limit_below_it
     let store = Store::open(&path).unwrap();
     // r2's limit held while a service container's did not; r3's own failed; r4's kernel had no counter.
     for (id, name, local_oom) in [(2, "r2", Some(0)), (3, "r3", Some(2)), (4, "r4", None)] {
-        store.queued("o/r", &queued(id));
+        store.queued("o/r", &queued(id), crate::time::now_ms());
         store.runner_started(runner(name, 1_000_100));
         store.claimed(id, 10, name, 1_000_200);
         store.samples(vec![SampleRecord {
@@ -1414,8 +1425,8 @@ async fn what_the_notifier_delivered_outlives_a_restart_and_a_removed_target_is_
 async fn insights_read_finished_jobs_with_when_their_runner_started() {
     let dir = TestDir::new("store");
     let store = Store::open(&dir.0.join("runnerd.db")).unwrap();
-    store.queued("o/r", &queued(1));
-    store.queued("o/r", &queued(2));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
+    store.queued("o/r", &queued(2), crate::time::now_ms());
     store.runner_started(runner("r1", 900_000));
     store.claimed(1, 10, "r1", 1_000_200);
     store.lost(1, 1_000_300);
@@ -1451,8 +1462,8 @@ async fn sizing_reads_how_long_each_job_waited_for_the_hosts_memory_and_for_a_sl
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    store.queued("o/r", &queued(1));
-    store.queued("o/r", &queued(2));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
+    store.queued("o/r", &queued(2), crate::time::now_ms());
     store.runner_started(runner("r1", 1_000_100));
     store.claimed(1, 10, "r1", 1_000_200);
     store.samples(vec![sample("r1", 1_000_300, 0, 0)]);
@@ -1494,11 +1505,11 @@ async fn pricing_reads_the_jobs_this_machine_ran_by_when_they_ended_and_visibili
     let store = Store::open(&path).unwrap();
     let since = 864_000;
     completed_in_window(&store, since, 1, "r1", "success", Oom::No);
-    store.queued("o/r", &queued(2));
+    store.queued("o/r", &queued(2), crate::time::now_ms());
     store.runner_started(runner("r2", 1_000_100));
     store.claimed(2, 10, "r2", 1_000_200);
     store.lost(2, 1_000_300);
-    store.queued("o/r", &queued(3));
+    store.queued("o/r", &queued(3), crate::time::now_ms());
     store.visibility("o/r".to_owned(), crate::api::Visibility::Public, 5);
     store.visibility("o/r".to_owned(), crate::api::Visibility::Private, 6);
     store.flush().await;
@@ -1533,12 +1544,12 @@ async fn pruning_job_records_moves_where_the_priced_history_starts_across_a_rest
     let dir = TestDir::new("store");
     let path = dir.0.join("runnerd.db");
     let store = Store::open(&path).unwrap();
-    store.queued("o/r", &queued(1));
+    store.queued("o/r", &queued(1), crate::time::now_ms());
     store.runner_started(runner("r1", 1_000_100));
     store.claimed(1, 10, "r1", 1_000_200);
     store.lost(1, 1_000_300);
     // Never final, so never pruned: it must not stand for the history's start.
-    store.queued("o/r", &queued(2));
+    store.queued("o/r", &queued(2), crate::time::now_ms());
     store.flush().await;
     let created = store.pricing(0).await.unwrap().kept_since;
     assert!(

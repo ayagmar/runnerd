@@ -187,12 +187,68 @@ pub enum Decision {
         /// The pool's profile.
         profile: String,
     },
-    /// Remove the slot's runner: it waited `IDLE_TIMEOUT` for a job no longer queued and is not kept warm, or it is a
-    /// warm runner whose room a queued job takes.
+    /// Remove the slot's idle runner, for `reason`.
     Stop {
         /// The slot whose runner stops.
         slot: SlotRef,
+        /// Why it stops.
+        reason: StopReason,
     },
+}
+
+/// Why an idle runner is removed: what its removal log line and the history say (ADR 0092).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StopReason {
+    /// It waited `IDLE_TIMEOUT`, and neither a queued job nor its repository's warm runners want it.
+    Expired,
+    /// A queued job of another pool takes its room.
+    Room,
+    /// Its profile's reseed or the shared caches' check waits for its slot.
+    Upkeep,
+    /// Its repository is paused.
+    Paused,
+    /// Its slot is past a lowered slot count.
+    Closed,
+    /// A reload changed its pool or profile, or a newer image or container spec replaces it.
+    Changed,
+    /// It was raised for a heavier queued job and no longer fits the budget.
+    OverBudget,
+    /// A cache clean needs the volumes it mounts.
+    Clean,
+    /// runnerd stops.
+    Shutdown,
+}
+
+impl StopReason {
+    /// How the history stores it.
+    pub fn as_str(self) -> &'static str {
+        match self {
+            StopReason::Expired => "expired",
+            StopReason::Room => "room",
+            StopReason::Upkeep => "upkeep",
+            StopReason::Paused => "paused",
+            StopReason::Closed => "closed",
+            StopReason::Changed => "changed",
+            StopReason::OverBudget => "over_budget",
+            StopReason::Clean => "clean",
+            StopReason::Shutdown => "shutdown",
+        }
+    }
+
+    /// Why, as the removal's log line says it.
+    pub fn words(self) -> &'static str {
+        match self {
+            StopReason::Expired => "no job came for it",
+            StopReason::Room => "a queued job takes its room",
+            StopReason::Upkeep => "its profile's upkeep waits for it",
+            StopReason::Paused => "its repository is paused",
+            StopReason::Closed => "its slot closed",
+            StopReason::Changed => "the config or runnerd changed its runners",
+            StopReason::OverBudget => "raised for a heavier job, it does not fit the budget",
+            StopReason::Clean => "a cache clean needs its volumes",
+            StopReason::Shutdown => "runnerd stops",
+        }
+    }
 }
 
 /// What `plan` decides, and why each queued job it starts no runner for waits.
@@ -386,9 +442,10 @@ pub fn plan(
             left.give(room.memory, room.cpu);
             for slot in &room.stopped {
                 decided.warm.remove(slot);
-                decided
-                    .decisions
-                    .push(Decision::Stop { slot: slot.clone() });
+                decided.decisions.push(Decision::Stop {
+                    slot: slot.clone(),
+                    reason: StopReason::Room,
+                });
             }
             room.stopped
         });
@@ -830,7 +887,10 @@ fn sort_out(
     // Idle runners in slots a lowered `slots` closed stop now: neither warm nor room for a job, their slots close.
     decided
         .decisions
-        .extend(closing.into_iter().map(|(slot, _)| Decision::Stop { slot }));
+        .extend(closing.into_iter().map(|(slot, _)| Decision::Stop {
+            slot,
+            reason: StopReason::Closed,
+        }));
     let surplus = idle.len().saturating_sub(matching.len());
     let stops: Vec<SlotRef> = idle
         .iter()
@@ -855,7 +915,16 @@ fn sort_out(
     let warm = warm.saturating_sub(kept.len().saturating_sub(matching.len()));
     decided
         .decisions
-        .extend(stops.into_iter().map(|slot| Decision::Stop { slot }));
+        .extend(stops.into_iter().map(|slot| Decision::Stop {
+            slot,
+            reason: if repository.paused {
+                StopReason::Paused
+            } else if upkeep_due {
+                StopReason::Upkeep
+            } else {
+                StopReason::Expired
+            },
+        }));
     let missing = matching.len().saturating_sub(idle.len());
     // The oldest jobs are the ones still waiting once the idle runners take theirs.
     let skip = matching.len() - missing;

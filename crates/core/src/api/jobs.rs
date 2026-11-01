@@ -316,6 +316,10 @@ pub struct Timeline {
     /// for a slot, as sizing, insights and the history's figures count them, leave them out; its own wait does not.
     #[serde(default)]
     pub unseen: u64,
+    /// When runnerd first listed it queued (ADR 0092). `None` for a job no listing showed queued, such as one a
+    /// warm runner took first, and for one an older runnerd recorded.
+    #[serde(default)]
+    pub seen_at: Option<u64>,
 }
 
 impl Timeline {

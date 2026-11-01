@@ -114,6 +114,119 @@ async fn a_failed_job_leaves_a_record_and_its_container_goes_once_committed() {
 }
 
 #[tokio::test]
+async fn an_idle_runner_whose_job_fails_while_it_is_deregistered_is_recorded_not_removed() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("record");
+    idle_runner(&github, &docker);
+    github.0.lock().unwrap().strict = true;
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.captures_wait = Some(github.clone());
+        state.capture_end = CaptureEnd::Container;
+    }
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    for occupant in engine.slots.values_mut().flatten().flatten() {
+        occupant.started_at -= crate::scheduler::IDLE_TIMEOUT;
+    }
+    // The tick saw it running and idle, so it removes it as expired; meanwhile it takes job 1, which fails, and its
+    // runner exits, which ends its registration. Its capture reads the job and its last line a moment later.
+    github.hold_deletes();
+    let ends = async {
+        github.until_waiting(1).await;
+        {
+            let mut state = github.0.lock().unwrap();
+            state.runners.clear();
+            state
+                .jobs
+                .insert(1, details(1, "completed", Some("failure")));
+        }
+        {
+            let mut state = docker.0.lock().unwrap();
+            state.runner_log = Some(FAILED.to_owned());
+            state.written = 1 << 30;
+            state.containers[0].running = false;
+            state.container_captures.insert(
+                "container-1".to_owned(),
+                "@@job 1 1\n@@page 1 0 7\nfailed\n".to_owned(),
+            );
+        }
+        github.release_deletes();
+    };
+    tokio::join!(engine.tick(Shutdown::No), ends);
+    until_recorded(&mut engine).await;
+
+    let calls = docker.calls();
+    let commit = calls
+        .iter()
+        .position(|call| call == "commit container-1 runnerd-record:1");
+    let remove = calls.iter().position(|call| call == "remove container-1");
+    assert!(
+        commit.is_some() && commit < remove,
+        "the failed job's container is committed, then removed: {calls:?}"
+    );
+    let note = note(&handle, 1).await.unwrap();
+    assert!(note.created_at.is_some(), "job 1's record was made");
+    until_log_lines(&handle, 1, 1).await;
+}
+
+#[tokio::test]
+async fn an_idle_runner_whose_capture_names_a_failed_job_while_github_still_deregisters_it_is_recorded()
+ {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("record");
+    idle_runner(&github, &docker);
+    github.0.lock().unwrap().strict = true;
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.captures_wait = Some(github.clone());
+        state.capture_end = CaptureEnd::Container;
+    }
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &recording());
+    engine.recover().await.unwrap();
+    for occupant in engine.slots.values_mut().flatten().flatten() {
+        occupant.started_at -= crate::scheduler::IDLE_TIMEOUT;
+    }
+    // While its delete waits, it takes job 1, which its capture reports, and the job fails; GitHub has not dropped
+    // its registration yet, so the delete answers `Deleted`, not "not found".
+    github.hold_deletes();
+    let ends = async {
+        github.until_waiting(1).await;
+        docker.0.lock().unwrap().container_captures.insert(
+            "container-1".to_owned(),
+            "@@job 1 1\n@@page 1 0 7\nfailed\n".to_owned(),
+        );
+        until_state(&handle, 1, JobState::Running).await;
+        github
+            .0
+            .lock()
+            .unwrap()
+            .jobs
+            .insert(1, details(1, "completed", Some("failure")));
+        {
+            let mut state = docker.0.lock().unwrap();
+            state.runner_log = Some(FAILED.to_owned());
+            state.written = 1 << 30;
+            state.containers[0].running = false;
+        }
+        github.release_deletes();
+    };
+    tokio::join!(engine.tick(Shutdown::No), ends);
+    until_recorded(&mut engine).await;
+
+    let calls = docker.calls();
+    let commit = calls
+        .iter()
+        .position(|call| call == "commit container-1 runnerd-record:1");
+    let remove = calls.iter().position(|call| call == "remove container-1");
+    assert!(
+        commit.is_some() && commit < remove,
+        "the failed job's container is committed, then removed: {calls:?}"
+    );
+    until_log_lines(&handle, 1, 1).await;
+}
+
+#[tokio::test]
 async fn a_signal_waits_for_the_record_being_made() {
     let (github, docker) = (FakeGithub::default(), FakeDocker::default());
     let dir = TestDir::new("record");
@@ -598,6 +711,7 @@ async fn a_failed_jobs_runner_a_stopped_daemon_did_not_keep_becomes_its_record_a
             name: "build".to_owned(),
             ..QueuedJob::default()
         },
+        crate::time::now_ms(),
     );
     store.flush().await;
     engine.recover().await.unwrap();
