@@ -58,6 +58,7 @@
       "container_started_at": 1761400010,
       "finished_at": 1761400600,
       "queued_at": 1761400000,
+      "seen_at": 1761400004,
       "started_at": 1761400020,
       "unseen": 15
     },
@@ -151,6 +152,7 @@
       "container_started_at": 1761400010,
       "finished_at": 1761400600,
       "queued_at": 1761400000,
+      "seen_at": 1761400004,
       "started_at": 1761400020,
       "unseen": 15
     },
