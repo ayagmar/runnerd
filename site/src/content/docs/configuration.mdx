@@ -118,7 +118,7 @@ A slot's `~/.cache`, tool cache, Docker images and cache mounts serve the next j
 
 ## Every key
 
-A key without a default must be set. Sizes take `K`, `M`, `G` or `T`, durations a number and `s`, `m`, `h`, `d` or `w`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, an enabled build cache's `max_size`, `poll_interval`, `records.max_total` and `max_count`, and the `[sizing]` counts and intervals. A saved config applies without a restart, except `[web]`, `history.database` and `caches.build.directory`; changing `host.slice` is refused.
+A key without a default must be set. Sizes take `K`, `M`, `G` or `T`, durations a number and `s`, `m`, `h` or `d`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, an enabled build cache's `max_size`, `poll_interval`, `records.max_total` and `max_count`, and the `[sizing]` counts and intervals. A config saved through the dashboard or `PUT /v1/config` applies without a restart, except `[web]`, `history.database` and `caches.build.directory`; changing `host.slice` is refused. After editing the file by hand, restart the service.
 
 ### `[host]`
 
@@ -149,7 +149,7 @@ A key without a default must be set. Sizes take `K`, `M`, `G` or `T`, durations 
 - `record_failures` (default `false`): keep failed jobs as [records](#records-of-failed-jobs)
 - `min_memory`, `max_memory` (default unset): bounds for sizing advice and [auto sizing](../admission/#auto-sizing); unset, what its jobs need and `MemoryMax` holds
 - `max_slots` (default unset): the most `slots` auto sizing raises to; unset, as many as `MemoryMax` holds, or under `measured` as leave each slot 2G of disk
-- `priced_as` (default `actions_linux`): the GitHub-hosted runner its jobs are [priced at](../insights/#what-the-minutes-would-have-cost), by billing name, such as `linux_4_core`
+- `priced_as` (default `actions_linux`, `actions_linux_arm` on aarch64): the GitHub-hosted runner its jobs are [priced at](../insights/#what-the-minutes-would-have-cost), by billing name, such as `linux_4_core`
 
 ### `[[repositories]]`
 

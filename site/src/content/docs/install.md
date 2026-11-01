@@ -10,7 +10,7 @@ description: Install runnerd, write a starter config and a user unit with runner
 - A systemd slice whose `MemoryMax` is the budget for all runners. `runnerd init` prints one sized for the host.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 
-Binaries ship for x86_64 and aarch64; the runner images are linux/amd64 only, so on aarch64 build the `base` stage of `image/Dockerfile` on the host and name it with `image_stage` (`runnerd doctor` prints the command).
+Binaries ship for x86_64 and aarch64; the runner images are linux/amd64 only, so on aarch64 build the `base` stage of `image/Dockerfile` on the host and name it with `image_stage` (`runnerd doctor` prints the command). The `android`, `jvm` and `node` stages carry x86_64 Android platform tools.
 
 `runnerd doctor` checks each requirement, the slice the config names, that the config fits in it and who can read the config, and warns for each public repository the config serves. It reads `~/.config/runnerd/runnerd.toml`; `runnerd doctor <file>` checks another.
 

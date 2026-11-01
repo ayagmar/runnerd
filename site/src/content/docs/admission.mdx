@@ -70,7 +70,7 @@ With `auto = true` runnerd sizes each profile's `memory`, `slots` and `cpus`. At
 - **A lowering is taken back** at the next look when a run meets the lowered cap, or a job that succeeded before fails 3 times in a row at it. For 30 days no lowering goes under it.
 - **Slots under `caps`:** one more when jobs waited a minute or more at p95, or the slots were busy half the time, while every profile's caps fit `MemoryMax`, up to `max_slots`.
 - **Slots under `measured`:** as many more as waited at once, at most `max_step` percent, when jobs waited a minute or more at p95 for a slot alone. Slots cost disk, not memory: they go up only while each keeps 2G of the quarter of Docker's disk that all Docker stores share. A profile whose slots stayed 2 or more above its use for a week loses one.
-- **CPUs** follow average use and throttling, not peaks. A run is held back when the CPU quota throttled it in 15% or more of its run. A job with 3 held-back runs, or 3 averaging 70% of the cap, gets more `cpus`, up to the slice's CPUs (under `caps`, the CPU budget), while each raise helps. Under `caps` they come down when `min_jobs` runs say so and none was held back.
+- **CPUs** follow average use and throttling, not peaks. A run is held back when the CPU quota throttled it in 15% or more of its run. A job with 3 runs averaging 70% of the cap gets more `cpus`, under either policy; under `measured`, 3 held-back runs earn a raise too. Raises go up to the slice's CPUs (under `caps`, the CPU budget), while each one helps. Under `caps` they come down when `min_jobs` runs say so and none was held back.
 
 When a bound or the budget blocks a change, `runnerctl sizing` says `No slot raise:` or `No CPU raise` and why. A raise waits `raise_interval` (1 hour) after the last change, a lowering `interval` (1 hour). A change is never written over a file you edited on disk: until runnerd runs with your edit (restart it), auto sizing changes nothing and logs why. Each change is recorded in the job history, sent as a `sizing.changed` event, and listed by `runnerctl sizing`. `runnerctl sizing undo <profile>` writes the old values back; with `auto` on, a later change can undo the undo, so bound the profile to keep it.
 
@@ -87,8 +87,8 @@ memory = "7G"   # still the container's hard limit
 slots = 8       # 8 × 7G may exceed MemoryMax
 ```
 
-- A job (repository, workflow and job name) is predicted from its last 20 successful runs, or `min_jobs` when that is more: their p95 peak plus `margin`, rounded up to 256M. A run that met its cap counts at least its cap.
-- With fewer runs: the larger of its profile's p95 and its own largest peak, plus the margin; with none, its profile's largest peak plus the margin. Without `min_jobs` runs of the profile, the cap.
+- A job (repository, workflow and job name) is predicted from its last 20 runs, or `min_jobs` when that is more, counting any that failed among them: their p95 peak plus `margin`, rounded up to 256M. A run that met its cap counts at least its cap.
+- With fewer runs: the larger of its profile's p95 and its own largest peak, plus the margin; with none, its profile's largest peak plus the margin. Once 2 of its runs succeeded, one copy of the job at a time reserves its own largest peak plus the margin instead; a copy queued or running beside another takes the larger. Without `min_jobs` runs of the profile, the cap.
 - A job whose run met its cap or was killed for memory goes back on its cap until 3 runs in a row succeed clear of it, 7 days at most.
 - A runner reserves the largest prediction among the queued jobs its labels match ([split light and heavy jobs](../configuration/#split-light-and-heavy-jobs)), then its own job's once known.
 - A running runner counts at the larger of what it reserved and what it last used, or its cap without a recent sample.

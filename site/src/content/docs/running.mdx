@@ -97,6 +97,8 @@ Nx fails the run when its cache does not answer, so a step before Nx opts in:
 
 A job writes only when GitHub says it runs a push, schedule or manual run (`workflow_dispatch`) of the default branch or of one of [`build.branches`](../configuration/#caches). With `build_cache_writers = "pull-requests"` ([Configuration](../configuration/#repositories)), a `pull_request` event from the repository's own branch that a person, not a bot, opened, reopened or pushed to also writes. Anyone who can push a branch can then change what `main` builds load, so enable it only where that is you. runnerd asks GitHub about each job's runner, trigger and commit; nothing a job writes to its log or environment counts. Every other job, fork and bot pull requests included, reads only; its uploads are answered as stored and dropped.
 
+sccache uses the shared cache instead of its disk cache in the slot, not as well as it: a pull request's own compilations are not kept, so a second push compiles again what the first did. A Rust repository with many pull requests may do better with its own backend or `build_cache = false`.
+
 Containers a job starts itself, such as `container:` jobs, do not reach the cache. `build_cache = false` under a repository keeps it out; a workflow turns off Gradle's part with `RUNNERD_BUILD_CACHE_URL: ""` and Turborepo's with `TURBO_CACHE: local:rw`. `runnerctl caches --clean runnerd-build-cache` empties it.
 
 ### GitHub Actions' cache
@@ -173,4 +175,4 @@ Every other event has an ID. Send the last one seen as `Last-Event-ID` and the s
 
 ### Reloading
 
-A saved config applies without a restart, and running jobs keep running. A removed profile, or slots past a lowered `slots`, stay until their runners finish. A waiting runner, warm ones included, is removed when its repository is removed or moved, or its `labels` or the profile's `image`, `memory` or `cpus` changed, by hand or by auto sizing; a new `image` waits until Docker has it. `[web]`, `history.database` and `caches.build.directory` change only at the next start.
+A config saved through the dashboard or `PUT /v1/config` applies without a restart, and running jobs keep running; after a hand edit, restart the service. A removed profile, or slots past a lowered `slots`, stay until their runners finish. A waiting runner, warm ones included, is removed when its repository is removed or moved, or its `labels` or the profile's `image`, `memory` or `cpus` changed, by hand or by auto sizing; a new `image` waits until Docker has it. `[web]`, `history.database` and `caches.build.directory` change only at the next start.

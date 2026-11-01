@@ -23,7 +23,7 @@ The browser stays signed in for 30 days after its last visit. `runnerctl web --s
 | Page | Shows |
 |---|---|
 | Overview | slots running, jobs waiting, the p95 wait over 24 hours, failures (red only when a runner failed, not when a job's tests do); each waiting job with why it waits; the memory budget as a bar, hatched where the host or [measured admission](../admission/#measured-admission) closes it; a card per slot; the latest jobs; pause and resume per repository, which lasts across restarts |
-| History | the last 30 days in charts, then every matching job; filters by repository, workflow and outcome combine and can be bookmarked |
+| History | the last 30 days in charts, then every matching job; filters by repository, workflow and outcome combine and can be bookmarked; workflow and outcome filter the job list only, the charts use the repository filter |
 | Records | the [records of failed jobs](../running/#records-of-failed-jobs) with size and age; remove one or all |
 | Sizing | per profile, memory peaks against the cap, waits, how busy the slots were and the [advice](../admission/#sizing), which a button opens in the config editor, unsaved; what [auto sizing](../admission/#auto-sizing) changes next and has changed, with a link that opens the last change undone |
 | Insights | a card per [insight](../insights/), warnings first; the last 24 hours; each repository's waits this week against the week before, warm and cold apart |
