@@ -397,9 +397,11 @@ impl JobMetrics {
         add("CPU time", self.cpu_time.map(cpu_time));
         add("Received", self.network_received.map(bytes));
         add("Sent", self.network_sent.map(bytes));
+        // Counted from the mirror's own log, so a job without network samples still has it.
         add(
             "From the mirror",
-            self.network_received.map(|_| bytes(self.mirror_bytes)),
+            (self.network_received.is_some() || self.mirror_bytes > 0)
+                .then(|| bytes(self.mirror_bytes)),
         );
         add(
             "Throttled for memory pressure",
