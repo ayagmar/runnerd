@@ -1,19 +1,17 @@
 ---
 title: Configuration
-description: The runnerd.toml file, every key with its default, runner images, records of failed jobs, the budget check and isolation.
+description: The runnerd.toml file, every key with its default, runner images, the budget check and isolation.
 ---
 
 import Budget from '../../components/diagrams/Budget.astro';
 
-One file, `~/.config/runnerd/runnerd.toml`: the repositories to serve, the profile each one runs on, the shared caches, and the systemd slice whose `MemoryMax` is the budget. `runnerd init` writes a starter one. [Every key](#every-key), at the end, says what each key means and its default.
+`~/.config/runnerd/runnerd.toml` names the repositories to serve, the profile each runs on, the shared caches and the systemd slice whose `MemoryMax` is the budget.
 
 ## An example
 
-Two repositories with two runners each, in a slice with `MemoryMax=33G`. [`examples/runnerd.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/runnerd.toml) in the repository is another complete one.
+Two runners each for two repositories in a slice with `MemoryMax=33G`; 2 × 9G + 2 × 7G + 512M for the mirror is 32.5G ([`examples/runnerd.toml`](https://github.com/ayagmar/runnerd/blob/main/examples/runnerd.toml) is a complete one):
 
 ```toml
-# 2 × 9G + 2 × 7G + 512M for the mirror = 32.5G.
-
 [host]
 slice = "runnerd.slice"
 isolation = "sysbox"
@@ -22,10 +20,6 @@ isolation = "sysbox"
 mirror = { enabled = true, memory = "512M", cpus = 1, ttl = "168h", max_size = "10G" }
 pnpm = { max_size = "5G" }
 maven = { max_size = "5G" }
-# Slot 1's layers become a profile's snapshot once they changed this much and the profile is idle.
-reseed_at = "2G"
-# A reseed that would make a snapshot larger than this starts it over from slot 1's changes.
-snapshot_max = "10G"
 
 [profiles.jvm]
 image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.26"
@@ -52,20 +46,13 @@ labels = ["self-hosted", "linux", "x64", "node"]
 
 ## Split light and heavy jobs
 
-A runner may take any queued job of its repository whose labels it has, so it is sized for the heaviest of them: under `caps` every job takes a slot at the profile's `memory`, and under [measured admission](../admission/#measured-admission) a runner reserves the largest prediction among its repository's queued jobs. A 300M linter queued beside a 6G build waits like the build.
+A runner may take any queued job of its repository whose labels it has, so it is sized for the heaviest: a 300M linter beside a 6G build waits like the build.
 
-You see it in two places:
-
-- The linter waits for room it does not need: `Needs 6.5G of memory; 3G of the budget is free`, or `All 2 node slots are busy`.
-- In `runnerctl sizing`, its row has a `P95` peak far under the profile's `memory` and a `WAIT P95` as long as the build's.
-
-Serve the repository in a second, smaller profile: another `[[repositories]]` entry with the same `name`, its own `profile` and a label of its own. Added to [the example above](#an-example), under measured admission:
+Serve the repository in a smaller second profile with another `[[repositories]]` entry: same `name`, its own `profile` and label. Added to [the example](#an-example):
 
 ```toml
 [host]
-slice = "runnerd.slice"
-isolation = "sysbox"
-admission = "measured"   # the check holds the largest runner and the mirror, 9.5G, to MemoryMax
+admission = "measured"   # the check then holds the largest runner and the mirror (9.5G) to MemoryMax
 
 [profiles.small]
 image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.26"
@@ -75,58 +62,23 @@ slots = 4
 
 [[repositories]]
 name = "halyard/storefront"
-profile = "node"
-labels = ["self-hosted", "linux", "x64", "node"]
-
-[[repositories]]
-name = "halyard/storefront"
 profile = "small"
 labels = ["storefront-small"]
 ```
 
-Then point the light jobs at it:
-
-```yaml
-jobs:
-  lint:
-    runs-on: storefront-small   # was [self-hosted, linux, x64]
-```
-
-Under `caps` the check holds every slot at its cap to `MemoryMax`: the small profile's 4 × 1G takes the example to 36.5G, past its 33G, so lower another profile's `slots` or raise `MemoryMax` to make room.
-
-A job runs in the pool that has every label in its `runs-on`. The `small` pool leaves out `self-hosted` on purpose: every job you did not move still asks for `self-hosted`, which only the `node` pool has, so a heavy job can never land on a 1G runner. Each pool runs in its own profile's slots, reserves only for its own queued jobs, and has its own `warm` and `build_cache`. `runnerctl status` lists the repository once per pool, and the clients name a waiting job's pool (`halyard/storefront · small`).
-
-The config check refuses two pools of a repository that share a label (a job asking only for that label could run in either), two in the same profile, and pools whose `build_cache_writers` differ. A job no pool has every label for, such as one with a typo in `runs-on`, waits with `No profile serves the label storefornt-small`; one that asks for no labels waits with `It asks for no labels, so no profile serves it`. Only a job asking for exactly one GitHub-hosted label, such as `ubuntu-latest` or `macos-15`, is left to GitHub and not listed. Pause and resume apply to the whole repository; a pool whose runners keep failing holds back only itself.
+Then set `runs-on: storefront-small` on the light jobs. A job runs in the pool that has every label in its `runs-on`; `small` leaves out `self-hosted` so unmoved jobs stay on `node`. Each pool has its own slots, `warm` and `build_cache`. The check refuses two pools of a repository that share a label or profile, or whose `build_cache_writers` differ.
 
 ## Runner images
 
-[`image/Dockerfile`](https://github.com/ayagmar/runnerd/tree/main/image) has four stages. Each release publishes every one, for linux/amd64.
+[`image/Dockerfile`](https://github.com/ayagmar/runnerd/tree/main/image) has four published stages: `base` (runner, Docker Engine, GitHub CLI), `android` (the Android SDK and JDK 17), `jvm` (nothing yet over `android`) and `node` (pipx, Playwright's libraries). Runner images are linux/amd64 only; binaries ship for x86_64 and aarch64, and on aarch64 the base stage is built on the host with `image_stage`.
 
-| Stage | Adds |
-|---|---|
-| `base` | the GitHub Actions runner, Docker Engine with Compose and Buildx, the GitHub CLI, make, xz, zip, zstd, and runnerd's scripts; every common toolchain's cache in `~/.cache` |
-| `android` | the Android SDK command-line tools and platform-tools, and a JDK 17 |
-| `jvm` | nothing yet over `android` |
-| `node` | pipx and Playwright's system libraries, over `android` |
+A profile sets `image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.26"`, pulled before its first runner (keep the tag at the daemon's version; `runnerd doctor` warns when they differ), or `image_stage = "jvm"`, which runs `runnerd-runner:jvm` built from a clone with `docker build --target jvm -t runnerd-runner:jvm image` and never pulls.
 
-Workflows install their language toolchains themselves (`setup-java`, `setup-node`, `rust-toolchain`), and the slot keeps them warm. A profile sets one of:
-
-| Key | Runs | Pulled |
-|---|---|---|
-| `image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.26"` | the published stage | before the profile's first runner |
-| `image_stage = "jvm"` | `runnerd-runner:jvm`, built on this host | never |
-
-runnerd logs the pull's progress, and `runnerd doctor` says whether each image is present or can be pulled. Keep the tag at the daemon's version: the image's scripts and the daemon change together, and `runnerd doctor` warns when they differ. To run your own changes to `image/`, build the stage from a clone and set `image_stage`:
-
-```sh
-docker build --target jvm -t runnerd-runner:jvm image
-```
-
-At start, after a reload and after a pull, runnerd removes the published images, `ghcr.io/ayagmar/runnerd-runner`, that no profile names and no container was made from, such as an older version's ([ADR 0040](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0040-unused-runner-images-removed.md)). It never removes an image built on this host or any other image; remove an old `runnerd-runner:<stage>` yourself.
+runnerd removes published images that no profile names ([ADR 0040](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0040-unused-runner-images-removed.md)).
 
 ### Your own image
 
-When your jobs need system packages the stages lack, build on `base`, or on `android` for Android builds:
+For system packages the stages lack, build on `base` or `android`:
 
 ```dockerfile
 FROM ghcr.io/ayagmar/runnerd-runner:base-0.0.26
@@ -135,40 +87,17 @@ RUN apt-get update \
     && rm -rf /var/lib/apt/lists/*
 ```
 
-```sh
-docker build -t quillstack-runner:0.0.26 .
-```
-
-```toml
-[profiles.quillstack]
-image = "quillstack-runner:0.0.26"
-# cpus, memory and slots as for any profile
-```
-
-Keep the entrypoint, and root as the image's user: the entrypoint starts as root and runs the job as `runner`. runnerd pulls an `image` only when Docker lacks it, so build yours before the profile's first runner. After you update runnerd, rebuild from the new version's `base` tag: your image inherits its `runnerd.version` label, and `runnerd doctor` warns when that is not the daemon's version.
-
-Rebuilds install the same versions: Ubuntu packages come from one snapshot date, and every download is checked against its SHA-256 ([ADR 0023](https://github.com/ayagmar/runnerd/blob/main/docs/adr/0023-runner-image-pinned-to-a-snapshot-date.md)). [Install](../install/#verify-a-release) shows how to check where a published image came from.
+Build it, set `image = "quillstack-runner:0.0.26"` on a profile, and keep its entrypoint and root user. runnerd pulls an `image` only when Docker lacks it, so build yours first and rebuild from each new `base`; `runnerd doctor` warns when its inherited `runnerd.version` label is not the daemon's.
 
 ## Records of failed jobs
 
-A profile with `record_failures = true` keeps the runner of each failed job as a Docker image, so `runnerctl shell <job>` can open a shell where the job failed ([Running](../running/#records-of-failed-jobs)). [`[records]`](#records) bounds them:
-
-```toml
-[profiles.jvm]
-image = "ghcr.io/ayagmar/runnerd-runner:jvm-0.0.26"
-cpus = 8
-memory = "9G"
-slots = 2
-record_failures = true
-```
-
-A new record pushes out the oldest past `max_count` or `max_total`; without room under `min_free`, the job gets no record, and its page says why. `runnerd doctor` warns once the records take 80% of `max_total`.
+`record_failures = true` on a profile keeps each failed job's runner for `runnerctl shell <job>` ([Running](../running/#records-of-failed-jobs)). [`[records]`](#records) bounds them.
 
 ## The budget check
 
 <Budget />
 
-`runnerd check-config [file]`, by default on `~/.config/runnerd/runnerd.toml`, reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
+`runnerd check-config [file]` reads the slice's `MemoryMax` from systemd, or takes `--memory-max`, and fails when `slots × memory` over all profiles plus the mirror does not fit:
 
 ```text
 $ runnerd check-config runnerd.toml
@@ -177,142 +106,91 @@ $ runnerd check-config runnerd.toml --memory-max 24G
 error: slots × memory over all profiles plus the mirror is 32.5G, the slice runnerd.slice's MemoryMax is 24G; lower `slots` or `memory`, or raise the slice's MemoryMax (`runnerd doctor` prints its unit)
 ```
 
-A slice without a unit file has no `MemoryMax`; the check then passes with a warning, since nothing would hold the runners to their caps. Under [measured admission](../admission/#measured-admission) it holds one runner of each profile, with the mirror, to `MemoryMax`, and refuses a slice without one. The caps may then add up past `MemoryMax`, and the check says both figures:
-
-```text
-$ runnerd check-config runnerd.toml --memory-max 24G
-runnerd.toml: valid under admission = "measured": the largest runner with the mirror needs 9.5G of the 24G MemoryMax; every slot at its cap at once would take 32.5G
-```
+A slice without a unit file has no `MemoryMax`; the check then warns. Under [measured admission](../admission/#measured-admission) it holds one runner of each profile with the mirror to `MemoryMax` instead, refusing a slice without one.
 
 ## Isolation
 
-`isolation = "sysbox"`, which `runnerd init` writes: each runner container runs its own Docker Engine, unprivileged.
-
-`isolation = "unsafe-dind"` runs privileged containers, so a job can take over the host. It is refused unless `[host]` also sets `allow_unsafe = true`:
-
-```text
-$ runnerd check-config runnerd.toml
-error: isolation "unsafe-dind" runs runner containers privileged, so a job can take over the host; set allow_unsafe = true under [host] to use it anyway
-```
-
-Never serve public repositories from self-hosted runners: anyone who can open a pull request could run code on your machine, and their jobs share runnerd's caches with your trusted jobs. `runnerd init` and `runnerd doctor` ask GitHub for each repository's visibility and warn for a public one.
+`sysbox`, which `runnerd init` writes, gives each runner container its own unprivileged Docker Engine. `unsafe-dind` runs privileged containers, so a job can take over the host, and the check refuses it unless `[host]` sets `allow_unsafe = true`. Never serve public repositories: anyone who can open a pull request could run code on your machine. `runnerd doctor` warns for one.
 
 ## Caches are shared between repositories
 
-A cache is a trust boundary. A slot's `~/.cache`, tool cache, Docker images and Docker cache mounts are kept for the next job in the slot, whichever repository it belongs to, and reach every slot of the profile through its snapshot. The pnpm store and the Maven repository are shared by every slot of every profile. A job that can write there can leave a package or a tool that a later job of another repository runs. runnerd removes the credential files it knows of from `~/.cache` ([Warm caches](../running/#warm-caches)), and the [build cache](../running/#build-cache) keeps only what trusted jobs write, but nothing else is checked. Put repositories that must not trust each other on different profiles, and keep them off the same machine if they must not share the pnpm store or the Maven repository.
+A slot's `~/.cache`, tool cache, Docker images and cache mounts serve the next job in the slot whichever repository it belongs to, and reach the profile's other slots through its snapshot. The pnpm store and Maven repository are shared by all profiles. A job that writes there can leave a package or tool that another repository's later job runs. runnerd removes only the credential files it knows of ([Warm caches](../running/#warm-caches)). Keep repositories that must not trust each other on different profiles, and on different machines if they must not share the pnpm store or Maven repository.
 
 ## Every key
 
-A key without a default must be set. Sizes take a binary unit (`K`, `M`, `G`, `T`), as Docker and systemd use them; durations a number and `s`, `m`, `h` or `d`, such as `"168h"` or `"7d"`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, an enabled build cache's `max_size`, `poll_interval`, `memory_ceiling` when set, `records.max_total` and `max_count`, a profile's `max_slots` when set, and `sizing.min_jobs`, `interval`, `raise_interval` and `max_step`. A config saved from the dashboard or `PUT /v1/config` applies without a restart, except `[web]`, `history.database` and `caches.build.directory`, which runnerd reads when it starts. A config that changes `host.slice` is refused: restart runnerd to change the slice.
+A key without a default must be set. Sizes take `K`, `M`, `G` or `T`, durations a number and `s`, `m`, `h`, `d` or `w`. The check refuses 0 for a profile's `cpus`, `memory` and `slots`, an enabled mirror's `memory` and `cpus`, an enabled build cache's `max_size`, `poll_interval`, `records.max_total` and `max_count`, and the `[sizing]` counts and intervals. A saved config applies without a restart, except `[web]`, `history.database` and `caches.build.directory`; changing `host.slice` is refused.
 
 ### `[host]`
 
-| Key | Default | Means |
-|---|---|---|
-| `slice` | | the systemd slice every runner container runs in; its `MemoryMax` is the [budget](#the-budget-check) |
-| `isolation` | | `"sysbox"` or `"unsafe-dind"` ([Isolation](#isolation)) |
-| `allow_unsafe` | `false` | must be `true` for `isolation = "unsafe-dind"` |
-| `poll_interval` | `"15s"` | how often runnerd asks GitHub for queued jobs |
-| `admission` | `"caps"` | what a runner reserves before it starts: its profile's `memory`, or with `"measured"` its job's predicted peak ([Measured admission](../admission/#measured-admission)) |
-| `cpu_overcommit` | unset | a factor above 0, at most 16; set, a runner also has to fit the slice's CPUs times it ([CPU admission](../admission/#cpu-admission)) |
-| `memory_ceiling` | unset | a size: the most memory the host can grow to, for a VM whose memory grows on demand, such as `MemTotal` at Hyper-V Dynamic Memory's maximum; admission counts what it can still grow by ([A host whose memory grows](../admission/#a-host-whose-memory-grows)), and auto sizing raises no profile past it less the mirror. no effect at or under the host's memory now, and `runnerd doctor` warns when it is under; at least one runner of the largest profile with the mirror |
+- `slice`: the systemd slice runners run in; its `MemoryMax` is the [budget](#the-budget-check)
+- `isolation`: `"sysbox"`, or `"unsafe-dind"` with `allow_unsafe = true` ([Isolation](#isolation))
+- `poll_interval` (default `"15s"`): how often GitHub is asked for queued jobs
+- `admission` (default `"caps"`): a runner reserves its profile's `memory`, or with `"measured"` its job's predicted peak ([Admission](../admission/#measured-admission))
+- `cpu_overcommit` (default unset): a factor above 0, at most 16; a runner must also fit the slice's CPUs times it ([CPU admission](../admission/#cpu-admission))
+- `memory_ceiling` (default unset): for a VM whose memory grows on demand, the most it grows to ([A host whose memory grows](../admission/#a-host-whose-memory-grows))
 
 ### `[caches]`
 
-| Key | Default | Means |
-|---|---|---|
-| `mirror.enabled` | | whether runners pull from Docker Hub through the mirror |
-| `mirror.memory`, `mirror.cpus` | | the mirror container's limits; its `memory` counts in the budget |
-| `mirror.ttl` | | how long the mirror keeps an image no runner pulls again |
-| `mirror.max_size` | `"10G"` | the mirror's storage is emptied above this when no runner runs, with the shared caches |
-| `pnpm.max_size`, `maven.max_size` | | the shared pnpm store and Maven repository are emptied above this when no runner runs; warm runners stop for it at most hourly, at the first moment no job runs |
-| `reseed_at` | `"2G"` | once slot 1's layers changed this much and the profile is idle, they become the profile's snapshot ([Warm caches](../running/#warm-caches)) |
-| `snapshot_max` | `"10G"` | a reseed that would make a snapshot larger starts it over from the image, and every slot of the profile runs its next job cold; a snapshot measured larger is reseeded once its profile is idle, whatever `reseed_at` says |
-| `build.enabled` | `true` | whether runners get the shared [build cache](../running/#build-cache) |
-| `build.max_size` | `"10G"` | above this, the build cache's least recently used entries go when no runner runs, with the shared caches; between two checks it grows to twice this at most. Each entry counts at least 4K, however small. [GitHub Actions' cache](../running/#github-actions-cache)'s entries count here too, and one may take at most a quarter of it |
-| `build.branches` | `[]` | the branches whose pushes, scheduled and manual runs write to the build cache besides each repository's default branch, which always does |
-| `build.directory` | `$XDG_CACHE_HOME/runnerd/build-cache` | where the build cache's entries are kept; read when runnerd starts |
-| `build.actions_cache` | `true` | whether the build cache also serves [GitHub Actions' cache](../running/#github-actions-cache) to the repositories it serves, in place of GitHub's; `false` leaves their jobs on GitHub's |
+- `mirror.enabled`, `.memory`, `.cpus`, `.ttl`: the Docker Hub mirror, its limits (`memory` counts in the budget) and how long it keeps an unused image
+- `mirror.max_size` (default `"10G"`), `pnpm.max_size`, `maven.max_size`: emptied above this when no runner runs
+- `reseed_at` (default `"2G"`): slot 1's layers become the profile's snapshot once they changed this much and it is idle ([Warm caches](../running/#warm-caches))
+- `snapshot_max` (default `"10G"`): a larger snapshot starts over from the image
+- `build.enabled` (default `true`): the shared [build cache](../running/#build-cache)
+- `build.max_size` (default `"10G"`): above this its least recently used entries go when no runner runs; [GitHub Actions' cache](../running/#github-actions-cache) counts too
+- `build.branches` (default `[]`): branches besides the default branch whose pushes, schedules and manual runs write to it
+- `build.directory` (default `$XDG_CACHE_HOME/runnerd/build-cache`): its entries
+- `build.actions_cache` (default `true`): it also serves GitHub Actions' cache in place of GitHub's
 
 ### `[profiles.<name>]`
 
-| Key | Default | Means |
-|---|---|---|
-| `image` or `image_stage` | | exactly one: a published or your own image to pull, or a stage of `image/Dockerfile` built on this host ([Runner images](#runner-images)) |
-| `cpus`, `memory` | | each runner's CPU and memory limits; `memory` is its container's hard limit, `cpus` its CPU quota and, when the slice's CPUs are all in use, its share of them ([Sharing the CPUs](../admission/#sharing-the-cpus)) |
-| `slots` | | the most runners of the profile at once |
-| `record_failures` | `false` | keep each failed job's runner as a [record](#records-of-failed-jobs), to open a shell in |
-| `min_memory`, `max_memory` | unset | the bounds [sizing advice](../admission/#auto-sizing) and auto sizing keep `memory` in; unset, as low as its jobs need and as high as `MemoryMax` holds |
-| `max_slots` | unset | the most `slots` auto sizing raises the profile to; unset, as many as leave each slot 2G of Docker's disk under `measured`, or `MemoryMax` holds under `caps` ([Auto sizing](../admission/#auto-sizing)) |
-| `priced_as` | `actions_linux` | the GitHub-hosted runner its jobs are [priced at](../insights/#what-the-minutes-would-have-cost), by GitHub's billing name: `actions_linux_slim`, `actions_linux`, `actions_linux_arm`, `linux_2_core_advanced`, `linux_4_core` to `linux_96_core`, `linux_2_core_arm` to `linux_64_core_arm`. `actions_linux_arm` on an arm64 host |
-
-The config check refuses a `memory` or `slots` outside the profile's own bounds.
+- `image` or `image_stage`: exactly one ([Runner images](#runner-images))
+- `cpus`, `memory`: each runner's CPU quota and memory limit ([Sharing the CPUs](../admission/#sharing-the-cpus))
+- `slots`: the most runners at once
+- `record_failures` (default `false`): keep failed jobs as [records](#records-of-failed-jobs)
+- `min_memory`, `max_memory` (default unset): bounds for sizing advice and [auto sizing](../admission/#auto-sizing); unset, what its jobs need and `MemoryMax` holds
+- `max_slots` (default unset): the most `slots` auto sizing raises to; unset, as many as `MemoryMax` holds, or under `measured` as leave each slot 2G of disk
+- `priced_as` (default `actions_linux`): the GitHub-hosted runner its jobs are [priced at](../insights/#what-the-minutes-would-have-cost), by billing name, such as `linux_4_core`
 
 ### `[[repositories]]`
 
-| Key | Default | Means |
-|---|---|---|
-| `name` | | `owner/name` on GitHub; repeat an entry to serve the repository in [several profiles](#split-light-and-heavy-jobs) |
-| `profile` | | the profile its jobs run on; one entry per profile for a repository |
-| `labels` | | at least one; a job runs here when every label in its `runs-on` is one of these; no two entries of a repository share one |
-| `warm` | `1` | runners kept registered for jobs not queued yet while the repository is active ([warm runners](../running/#warm-runners)); `0` turns them off |
-| `build_cache` | `true` | whether its runners get the shared [build cache](../running/#build-cache) |
-| `build_cache_writers` | `"default-branch"` | whose jobs write to the build cache: `"default-branch"`, the default branch's and `build.branches`' pushes, schedules and manual runs; `"pull-requests"`, those and [pull requests people opened from the repository's own branches](../running/#build-cache) |
+- `name`: `owner/name`; repeat the entry for [several profiles](#split-light-and-heavy-jobs)
+- `profile`: the profile its jobs run on
+- `labels`: at least one; a job runs here when all its `runs-on` labels are listed
+- `warm` (default `1`): [warm runners](../running/#warm-runners) kept while active; `0` turns off
+- `build_cache` (default `true`): its runners get the build cache
+- `build_cache_writers` (default `"default-branch"`): whose jobs write to it: `"pull-requests"` adds [people's pull requests from its own branches](../running/#build-cache)
 
 ### `[history]`
 
-| Key | Default | Means |
-|---|---|---|
-| `database` | `$XDG_STATE_HOME/runnerd/runnerd.db` | the [job history](../running/#job-history)'s SQLite file |
-| `samples` | `"7d"` | how long a job's CPU, memory and network samples are kept; its totals and peaks stay with the job |
-| `logs` | `"30d"` | how long a finished job's log is kept |
-| `events` | `"30d"` | how long events are kept for clients that resume with `Last-Event-ID` |
-| `jobs` | `"90d"` | how long a finished job's record is kept, with its steps, totals and runner |
-| `log_max` | `"50M"` | the most log kept per job; later lines are dropped |
+- `database` (default `$XDG_STATE_HOME/runnerd/runnerd.db`): the [job history](../running/#job-history)'s file
+- `samples` (default `"7d"`), `logs` (`"30d"`), `events` (`"30d"`, for `Last-Event-ID` resumes), `jobs` (`"90d"`): how long a job's samples, a finished job's log, events and a finished job are kept; totals and peaks outlive the samples
+- `log_max` (default `"50M"`): the most log kept per job
 
 ### `[records]`
 
-| Key | Default | Means |
-|---|---|---|
-| `max_total` | `"20G"` | the disk all records may take together; `runnerd doctor` warns at 80% |
-| `max_count` | `10` | the most records kept |
-| `max_age` | `"7d"` | how long a record is kept |
-| `min_free` | `"10G"` | the disk Docker must keep free: no record is made that would leave less |
+- `max_total` (default `"20G"`), `max_count` (`10`), `max_age` (`"7d"`): the disk all records may take (`runnerd doctor` warns at 80%), how many are kept, and for how long; the oldest go first
+- `min_free` (default `"10G"`): the job gets no record if it would leave Docker less free disk than this
 
 ### `[sizing]`
 
-| Key | Default | Means |
-|---|---|---|
-| `margin` | `15` | the percent added to a sampled peak, in [advice](../admission/#sizing) and predictions; advice adds at least 1G |
-| `min_jobs` | `10` | the fewest runs of a profile, or of one job, before its peaks become advice or a prediction |
-| `auto` | `false` | runnerd sizes each profile's `memory`, `slots` and `cpus` itself ([Auto sizing](../admission/#auto-sizing)); `runnerd init` writes `true` |
-| `interval` | `"1h"` | auto sizing: the least time between a change of one profile and one that lowers its `memory` or `cpus` |
-| `raise_interval` | `"1h"` | auto sizing: the least time between a change of one profile and one that only raises it; at most `interval` |
-| `max_step` | `50` | auto sizing: the most one change lowers a profile's `memory` or moves its `cpus`, in percent of them; a raise of `memory` after a run met the cap goes straight to the need |
+- `margin` (default `15`): percent added to a sampled peak in [advice](../admission/#sizing) and predictions
+- `min_jobs` (default `10`): the fewest runs before a peak becomes advice or a prediction
+- `auto` (default `false`): runnerd sizes each profile's `memory`, `slots` and `cpus` itself (`runnerd init` writes `true`)
+- `interval`, `raise_interval` (default `"1h"`): the least time between a change to a profile and one that lowers its `memory` or `cpus`, or that only raises; `raise_interval` is at most `interval`
+- `max_step` (default `50`): the most percent one change lowers `memory` or moves `cpus`
 
 ### `[web]`
 
-| Key | Default | Means |
-|---|---|---|
-| `origins` | `[]` | addresses of proxies in front of the dashboard whose pages may write: pause, reseed, save the config ([From another device](../clients/#from-another-device)). Each is a scheme, host and port as the browser's address bar shows them, with no path, and an IPv4 address as four decimal numbers: `https`, or `http` for a loopback host only, since the session cookie would otherwise cross the network in the clear |
-| `open` | none | the one of `origins` that `runnerctl web` opens the dashboard on, such as the tailnet's address; it still prints the loopback link. `check-config` refuses an `open` not in `origins`. `runnerctl web --local` or `--base` overrides it for one run |
+- `origins` (default `[]`): proxy addresses whose dashboard pages may write ([From another device](../clients/#from-another-device)): `https://host:port`, or `http` for loopback only
+- `open` (default none): the one of `origins` that `runnerctl web` opens
 
 ### `[notify]`
 
-Where runnerd sends [notifications](../insights/#notifications). Without targets nothing is sent.
+[Notifications](../insights/#notifications) go nowhere without targets. `digest_at` (default `"09:00"`, host-local `HH:MM`) is when targets that list `digest` get it. Each `[[notify.targets]]`:
 
-| Key | Default | Means |
-|---|---|---|
-| `digest_at` | `"09:00"` | when the digest goes to targets that list `digest`, `HH:MM` in the host's local time |
+- `name`, `kind` (required): what logs and `runnerctl notify test` call it; `"ntfy"`, `"discord"` or `"webhook"`
+- `url` (required): the topic or webhook URL; a redirect counts as a failed send
+- `headers` (default `{}`): sent with each post, such as `{ Authorization = "Bearer tk_…" }`
+- `events` (default `["failed", "lost", "runner", "insights"]`): what it is sent; add `"digest"`
 
-Each `[[notify.targets]]`:
-
-| Key | Default | Means |
-|---|---|---|
-| `name` | required | what logs and `runnerctl notify test` call it; where it got to is kept under this name |
-| `kind` | required | `"ntfy"`, `"discord"` or `"webhook"` |
-| `url` | required | an ntfy topic's URL (`https://ntfy.sh/<topic>`), a Discord webhook's (`https://discord.com/api/webhooks/123/abc`) or the webhook's, where it answers without a redirect: a redirect counts as a failed send; a secret that no log line, error or client shows |
-| `headers` | `{}` | sent with each post, such as `{ Authorization = "Bearer tk_…" }`; their values are secrets too |
-| `events` | `["failed", "lost", "runner", "insights"]` | what it is sent; add `"digest"` for the daily digest |
-
-The dashboard's config editor, `runnerctl config show` and `GET /v1/config` show `url` and header values as `"<secret>"`. Leave them so and saving keeps the values in the file; write a new value over one to change it. A target renamed in the editor has nothing to keep, so write its values again. Comments are shown as written. Since the file can hold these secrets, `runnerd init` writes it readable by you only (mode 0600, in a directory of mode 0700), every save from the dashboard or `PUT /v1/config` leaves it so, and `runnerd doctor` warns when other users can read it.
+`url` and header values are secrets: the dashboard, `runnerctl config show` and `GET /v1/config` show them as `"<secret>"`, and saving that text keeps the values. Write a new value to change one, and all values again after renaming a target. The file is mode 0600; `runnerd doctor` warns otherwise.

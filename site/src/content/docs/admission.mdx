@@ -3,192 +3,134 @@ title: Admission and sizing
 description: What a runner must fit before it starts, how runnerd measures jobs, the sizing advice it gives from them, and the auto sizing that applies it.
 ---
 
-A runner starts only when it fits the slice's `MemoryMax` beside what already runs, and what [the host's memory](#the-hosts-memory) leaves the slice beside its other programs. By default it reserves its profile's `memory`, and [the budget check](../configuration/#the-budget-check) holds `slots × memory` to `MemoryMax`. runnerd also keeps every job's sampled peaks, and from them it can:
+A runner starts only when it fits the slice's `MemoryMax` beside what already runs, and what [the host's memory](#the-hosts-memory) leaves the slice. By default it reserves its profile's `memory`; [the budget check](../configuration/#the-budget-check) holds `slots × memory` to `MemoryMax`. From the jobs' sampled peaks runnerd also gives:
 
-- advise each profile's `memory` and `slots` ([Sizing](#sizing)), and apply the advice itself ([Auto sizing](#auto-sizing));
-- reserve each job's predicted peak instead of its cap ([Measured admission](#measured-admission));
-- hold back jobs the CPUs cannot take ([CPU admission](#cpu-admission)).
+- [Sizing](#sizing) advice for each profile's `memory` and `slots`, always on. [Auto sizing](#auto-sizing) applies it (`[sizing] auto`, off by default; `runnerd init` turns it on).
+- [Measured admission](#measured-admission): runners reserve their job's predicted peak, not their cap (`[host] admission = "measured"`, off by default).
+- [CPU admission](#cpu-admission): a job waits when the CPUs are spoken for (`[host] cpu_overcommit`, off by default).
 
-Advice is always there; the other three are off by default. [`runnerd simulate`](#try-it-first) replays your own history through measured and CPU admission before you turn either on. The keys and their defaults are in [Configuration](../configuration/#every-key).
+[`runnerd simulate`](#simulating) replays your history through the last two first. Keys: [Configuration](../configuration/#every-key).
 
 ## What a job's memory is
 
-A container is sampled every 2 s, so a shorter spike goes unseen. Its memory is an estimate of what the job holds without page cache, which the kernel mostly reclaims before it kills anything: anonymous memory, tmpfs and kernel memory, read as `memory.current` less the file page cache lists. That is lower than `docker stats`, which still counts page cache read twice. A job that only fills its cap with page cache has not met it.
-
-The slice's memory, which [measured admission](#measured-admission)'s high-water mark reads, is `memory.current` less inactive page cache, as `docker stats` counts it, so it errs toward holding starts back. Kills and out-of-memory events come from the cgroup's `memory.events`, and so does `sock_throttled`: how many times the kernel held the container's downloads to a trickle because its reclaim was going badly. The job page and `runnerctl job` show it, and the [memory pressure](../insights/#insights) insight names a repository whose jobs it slowed.
+Containers are sampled every 2 s, so a shorter spike goes unseen. A job's memory is `memory.current` less the file page cache, lower than `docker stats`. The slice's memory, which [measured admission](#measured-admission)'s high-water mark reads, is counted as `docker stats` does. `runnerctl job` shows `sock_throttled`, how often the kernel throttled the container's downloads for want of memory ([memory pressure](../insights/#insights) insight).
 
 ## The host's memory
 
-The slice's `MemoryMax` is fixed, but the rest of the host is not: a desktop, local builds or other services take RAM the budget assumed was free. When the host runs short, the kernel reclaims memory from every cgroup at once, and while that reclaim goes badly it throttles every runner's sockets, so checkouts and downloads stall for a minute or more. runnerd keeps new runners out of that state on its own, under either policy:
+A desktop or local builds take RAM the budget assumed was free, and a host short of memory throttles every runner's sockets. Under either policy runnerd keeps new runners out of that state:
 
-- Every 2 s it reads the host's `MemAvailable` and `/proc/pressure/memory`. The slice may hold what its runners hold now, without page cache or reclaimable kernel caches, plus `MemAvailable`, less a margin kept free for the host's page cache: the larger of 2G and a sixteenth of the host's memory, 4G on 64G. A new runner starts only when what it reserves fits that beside what the running ones reserve, as it must fit `MemoryMax`.
-- Nothing starts while the host has under twice the margin available and every task that could run on it waits for memory 5% of the time or more over the last 10 s (`full` pressure), until that falls under 1%. With more available, such stalls come from runners reclaiming page cache at their own caps, which a start elsewhere does not make worse.
-- Once a job waits for the host while runners run, the margin grows by half until the host has room again, so starts do not resume at the edge and push it straight back. The first runner into an empty slice needs only the margin.
-- Running jobs are never stopped for it. A job that waits says so: `The host is short of memory: needs 6G; the host has 2G to spare; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G`. It names up to three programs outside the slice that hold 512M or more each, by process name only, read every 30 s. The status line, `runnerctl watch`, the TUI and the dashboard show the host's line beside the budget (`host: 31G of 64G available; leaves the slice 40G`, followed by the same programs when there are any). When the host leaves the slice less room than `MemoryMax` does, the line says what that leaves free, `leaves the slice 30G of its 33G, so 3.75G is free`, the budget bar's free part is what of that is past every slot's block, and the rest of the room is hatched, held by the host. Without `MemoryMax` the host alone bounds the slice, and the line says what it leaves free: `leaves the slice 40G, so 12G is free`. `runnerd doctor` warns while the host has less to spare than the smallest profile's `memory`, or stalls short of memory, and says which programs hold it.
-- Each job's record keeps how long it waited for the host. Sizing and auto sizing take that out of its wait for a slot, so a busy desktop does not make auto sizing add slots.
+- Every 2 s it reads `MemAvailable` and `/proc/pressure/memory`. The slice may hold what its runners hold now plus `MemAvailable`, less a margin for the host: the larger of 2G and a sixteenth of the host's memory. A runner starts only when its reservation fits that beside the running ones'.
+- Nothing starts while the host has under twice the margin available and every task that could run waits for memory 5% of the time or more over 10 s (`full` pressure), until that falls under 1%.
+- Once a job waits for the host, the margin grows by half until the host has room again.
+- Running jobs are never stopped.
+- A start is admitted once more just before it begins, against what runs and was sampled since the plan. A runner that no longer fits waits, and the tick plans again for the others at once.
 
-Without a reading from the last few seconds, only `MemoryMax` bounds starts.
+Without a recent reading only `MemoryMax` bounds starts. A waiting job says why, naming up to three programs outside the slice holding 512M or more:
+
+```text
+The host is short of memory: needs 6G; the host has 2G to spare; programs outside CI hold 30G, most java 9.3G and qemu-system-x86 5.8G
+```
+
+The status line, the TUI and the dashboard show the host beside the budget (`host: 31G of 64G available; leaves the slice 40G`), and `runnerd doctor` warns when it has less to spare than the smallest `memory`.
 
 ### A host whose memory grows
 
-A VM whose hypervisor hands out memory as the guest asks for it, such as Hyper-V with Dynamic Memory, shrinks while it is idle. Its `MemTotal` and `MemAvailable` then say only what it has now, and a queued job, which allocates nothing, waits for memory the VM would get as soon as a runner asked for it. `memory_ceiling` under [`[host]`](../configuration/#host) says how far the host can grow, as `MemTotal` reads at the VM's maximum:
+A VM whose hypervisor hands out memory on demand, such as Hyper-V Dynamic Memory, shrinks while idle, so a queued job waits for memory the VM would give. `memory_ceiling` under [`[host]`](../configuration/#host) says how far the host can grow:
 
 ```toml
 [host]
 memory_ceiling = "24G"
 ```
 
-The slice may then hold what its runners hold plus `MemAvailable` plus what the host can still grow by, `memory_ceiling` less `MemTotal`, less the margin of the ceiling: on a VM at 2.12G with 1.48G available that can grow to 24G, 21.36G. The host's line says so, `host: 1.48G of 2.12G available, growing to 24G; leaves the slice 21.36G`, and so does `runnerd doctor`. The stall rule does not count the ceiling: when the hypervisor does not give what it promises, every task waits for memory and nothing more starts. Set the ceiling to `MemTotal` as the VM reports it at its maximum, about 2% under the maximum itself, and lower when other VMs compete for the hypervisor's RAM. A ceiling the hypervisor cannot give brings back the stalls this bound prevents, and the guest's OOM killer can kill a job that started against it. On a balloon that keeps `MemTotal` at the maximum, as virtio-balloon with free page reporting does, the key does nothing. At or under `MemTotal` the ceiling has no effect; `runnerd doctor` warns when it is under. `runnerd init --memory-ceiling 24G` writes the key and sizes the first runner for the host as it can grow.
+The slice may then also hold `memory_ceiling` less `MemTotal`, less the margin of the ceiling (`host: 1.48G of 2.12G available, growing to 24G; leaves the slice 21.36G`). Set it to `MemTotal` as the VM reports it at its maximum, lower when other VMs compete for RAM; a ceiling the hypervisor cannot give brings the stalls back.
 
 ## Sizing
 
-`runnerctl sizing`, the dashboard's Sizing page and the TUI turn each job's recent sampled memory and CPU peaks ([what memory counts](#what-a-jobs-memory-is)) into advice for each profile's `memory` and `slots`. A job's recent runs are its last 60 successful ones in the 30 days (3 × 20, or 3 × `min_jobs` when that is more), with any that failed among them, so a job that got lighter stops holding its cap up after 60 runs, not a month:
+`runnerctl sizing`, the dashboard's Sizing page and the TUI turn each job's recent peaks into advice for each profile's `memory` and `slots`. A job's recent runs are its last 60 successful ones in 30 days (3 × `min_jobs` when that is more than 20), failed ones included.
 
-- The need is the largest peak plus a margin, or plus 1G when that is more, rounded up to 256M. The cap kills a job that goes over it, so the need follows the heaviest run, not a percentile: a profile whose builds fit in 2G but whose end-to-end job takes 6G keeps room for the 6G. The percentiles are shown to say how rare that run is. A run at a larger cap than now counts at no more than that cap: a JVM grows its heap toward the room it has, so its peak under a 14G cap says little about what it needs under 8G.
-- The 1G is room for page cache. Peaks leave page cache out, and a job that writes files fills its cap with it. With less than about 500M of it left above the job's own memory, the kernel's reclaim at the cap goes badly and throttles the job's downloads; 1G keeps twice that.
-- Below `min_jobs` jobs there is no advice, only the peaks.
-- A run met its cap when its container's own limit ran out of memory (`memory.events.local` `oom`): the job needs more than it shows, and counts at least its cap. A peak near the cap with no `oom` at it is not a need for more. A kill for memory while the container's own limit held (the slice ran out, or a service container hit its own limit) holds the cap but raises nothing.
-- A job with a run that met its cap or was killed for memory is on its cap until 3 of its runs in a row succeed clear of it. While any job is, the profile is not lowered, and the advice line says how many are.
-- When the need is a tenth or more under `memory`, the advice is to lower it. Under `caps`, if jobs waited a minute or more (p95, [how a wait is counted](#how-a-wait-is-counted)), or the slots were busy half the time, it also adds as many slots as the profile's memory now holds. A slot counts as busy from when its runner's job was queued: a [warm runner](../running/#warm-runners) waiting for a job does not.
-- A raise reads only runs that met the current `memory` since the profile has had it, toward the larger of what they need and what the same job needed at larger caps. A job whose runs at a larger cap need more than `memory`, with none running out at it, keeps it, and the advice line says so. Slots go down only if `MemoryMax` cannot hold them. When it cannot hold even one, the advice is to grow the slice first, and there is nothing to apply.
-- Under `admission = "measured"`, `memory` is only each container's limit; runners reserve their predicted peaks, not it. So advice never changes `slots` there: a raise only has to fit one runner beside the mirror, as [the budget check](../configuration/#the-budget-check) does, and a lower keeps the slots. When jobs waited a minute or more for a slot while memory and CPU had room (p95), the advice line says more slots would start them sooner; [auto sizing](#auto-sizing) adds them itself, and without it `runnerd simulate --slots` replays the history with more before you raise `slots`.
+- The need is the largest peak plus `margin`, at least 1G for the page cache peaks leave out, rounded up to 256M. It follows the heaviest run, not a percentile: the cap kills a job that goes over. Under `min_jobs` jobs there is no advice.
+- A run met its cap when its container's own limit ran out of memory (`oom` in `memory.events.local`); it counts at least its cap. A peak near the cap without `oom` is not a need for more.
+- A job with such a run, or one killed for memory, stays on its cap until 3 runs in a row succeed clear of it; the profile is not lowered meanwhile.
+- The advice lowers `memory` when the need is a tenth or more under it. Under `caps`, if jobs waited a minute or more (p95, [how a wait is counted](#how-a-wait-is-counted)) or the slots were busy half the time, it also adds as many slots as the memory now holds.
+- Under `measured`, advice never changes `slots`; the advice line says when more would help.
 
-`margin` and `min_jobs` under [`[sizing]`](../configuration/#sizing) set the margin and the fewest jobs.
-
-What sizing cannot see:
-
-- How much a job killed for memory needed. A job that idles at 3G and is killed within one 2 s interval shows a 3G peak; the kill keeps its cap from being lowered, but its need still reads 3G. Failed runs add their peaks but do not push successful ones out of a job's recent runs. Cancelled jobs are left out, since a cancel stops a job before its peak, unless one met its cap.
-
-Without [auto sizing](#auto-sizing), advice is only written when you apply it: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button, which opens the change in the config editor. Each goes through the same check as any config, so a change `MemoryMax` cannot hold is refused. The advice keeps to the profile's `min_memory`, `max_memory` and `max_slots` and to [`memory_ceiling`](#a-host-whose-memory-grows), so it is never a size the check refuses for them. Under `caps`, lowering never asks for more than the profile's slots take now, and raising takes only what `MemoryMax` has spare, so two raises applied one after the other can be refused. `runnerd doctor` warns when a profile's jobs need more than its `memory`. Run without a daemon, it reads the history database read-only. SQLite still leaves the `-wal` and `-shm` files a WAL database needs next to it when it may write there, so run it as the user who runs the daemon. Where it may not write, it reads the database file alone, and skips the sizing check while the `-wal` holds changes the file lacks. Sizing reads the slice's `MemoryMax` on each request, so one raised after `systemctl daemon-reload` counts without restarting runnerd.
+[`[sizing]`](../configuration/#sizing) sets `margin` and `min_jobs`. Advice is written only when applied: `runnerctl sizing apply <profile>`, `a` in the TUI, or the Sizing page's button. It goes through the same check as any config and keeps to the profile's `min_memory`, `max_memory`, `max_slots` and [`memory_ceiling`](#a-host-whose-memory-grows). `runnerd doctor` warns when a profile's jobs need more than its `memory`.
 
 ### How a wait is counted
 
-Sizing, auto sizing, insights and the dashboard's wait figures count a job's wait for a slot from when it was queued, or from when runnerd first ran if that came later, to when it started. They leave out the time runnerd was not running, such as a night with the machine off; sizing and auto sizing also leave out the time the job waited for [the host's memory](#the-hosts-memory). When runnerd starts, it counts the time since it last ran as down, and every job queued through it leaves that part out. Time a repository was paused, and GitHub's own delay in listing a job, stay in the wait. Under `caps` that wait is what asks for more slots: a slot there is bought with its cap, and with every cap filling `MemoryMax` no job has room for a runner.
+A job's wait runs from when it was queued, or when runnerd first ran if later, to its start. Time runnerd was down is left out; sizing also leaves out time spent waiting for [the host's memory](#the-hosts-memory).
 
-Under `measured`, what adds slots is narrower: a wait for a slot alone. Each time the scheduler plans, it marks the jobs one more slot would start now: no slot of their profile is free, and the slice's memory, the host's and the CPU budget still have room for their runners beside the older such jobs. The time until the next plan is added to each one's record, so it survives restarts. A job that also lacked memory or CPU does not count, since a slot would not have started it. `runnerctl sizing` and the advice line give it as `jobs waited 300s for a slot (p95) while memory and CPU had room`.
-
-A job's own page shows its whole wait and says how much of it passed while runnerd was not running. [`runnerd simulate`](#try-it-first) keeps each job queued when GitHub queued it.
+Under `measured`, only a wait for a slot alone adds slots: jobs one more slot would have started, with memory and CPU to spare (`jobs waited 300s for a slot (p95) while memory and CPU had room`).
 
 ### Auto sizing
 
-With `auto = true` runnerd sizes each profile's `memory`, `slots` and `cpus` itself; `runnerd init` turns it on. When it starts and every 5 minutes after, it works out each profile's change and writes it into the config file the way `runnerctl sizing apply` does: the same budget check, the rest of the file kept as written, comments included, and the daemon runs with it.
+With `auto = true` runnerd sizes each profile's `memory`, `slots` and `cpus`. At start and every 5 minutes it writes each change into the config as `runnerctl sizing apply` does, with the same budget check.
 
-- `memory` follows the advice, which takes `min_jobs` runs. It is written to the byte, so the config check reads back the size auto sizing chose. No lowering while a job is on its cap. With [`memory_ceiling`](#a-host-whose-memory-grows), no raise goes past the ceiling less the mirror, rounded down to 256M, as the config check refuses a profile that does not fit the ceiling beside the mirror. No raise goes past `max_memory` either, and no lowering under `min_memory`; where `max_memory` and the ceiling give the same size, `runnerctl sizing` names the ceiling. A profile at one of them whose jobs need more keeps its `memory`, and `runnerctl sizing` says which holds it, with what the jobs need; the TUI's table reads `at ceiling` or `at max_memory`. That says no raise is possible, not that the jobs fit. A config saved through the dashboard or `PUT /v1/config` that puts a profile's `memory` under what auto sizing raised it to in the last day still runs, with a warning in the save's answer and runnerd's log: the jobs that needed the raise may run out of memory again.
-- A lowering that went too far is taken back at the next look, without waiting for `raise_interval`: when a run meets the lowered cap, or a job that succeeded at the old `memory` fails 3 times in a row at it (`failure` or `timed_out`, one per workflow run, on at least two branches). `memory` goes back to what the lowering came from and, under `caps`, `slots` to what they were, as many as the slice holds beside the other profiles now; for 30 days no lowering goes under it again. When `memory_ceiling` or `max_memory` holds the revert short, it goes as far as they allow, and finishes at the first look after a reload raises or removes the bound. When the slice cannot hold one runner of it, nothing is written and `runnerctl sizing` says the slice has to grow. A `memory` set by hand is not taken back: a run that meets it raises it straight to what the job needs.
-- `slots` under `measured`: a profile whose jobs waited a minute or more at p95 for a slot alone, with memory and CPU to spare ([how a wait is counted](#how-a-wait-is-counted)), gets as many more as waited at once, at least 1 and at most `max_step` percent of its slots. A slot costs no memory there, since each runner reserves its own job's prediction; it costs disk, as every slot's Docker store shares a quarter of Docker's disk. So slots go up only while each slot keeps at least 2G of that quarter, the least at which the stores keep their images between jobs; under it the job cleanup empties every store over its share after each job. A slot store fills whatever share it has, so what the stores hold says nothing of how many slots fit. A raise says how the share drops, as `each slot keeps 2G of Docker's disk, down from 3G`. Until Docker's disk is measured after a start, none is added. When the jobs ask for a slot and none can be added, at `max_slots`, before that measure or at the 2G share, `runnerctl sizing` and the dashboard say `No slot raise:` and why. Slots busy without a job waiting add none. A profile whose slots stayed 2 or more above the most runners it ran at once, warm runners counted, for a whole week loses one, once it has had its slots that long and ran `min_jobs` jobs in it; a hand edit, an undo or a change of its slots by auto sizing starts the week again, a change of its memory or cpus does not. That takes back slots set by hand too.
-- `slots` under `caps`: a profile whose jobs waited a minute or more at p95, or whose slots were busy half the time, gets one more while every profile's caps still fit `MemoryMax` with the mirror. A lowered `memory` also adds the slots the advice gives, and with a [CPU budget](#cpu-admission) only the slots whose `cpus` it holds beside every other profile's.
-- Slots are never lowered under what runs, nor raised past `max_slots`.
-- `cpus` read how each job used its CPUs over its run: its average CPU and whether the quota throttled it, not its peaks, since a parallel build bursts to whatever cap it gets. Only successful runs with a measured average count, and only those at the profile's current `cpus` since its last change and since runnerd started running those `cpus`, so a hand edit, a reload or an undo starts the evidence over.
-  - The cap held a run back when its CPU quota throttled it in 15% or more of its run, counted in the quota's 100 ms periods over the run's wall time, so a job idle between a few bursts is not held back by them. `runnerctl job` shows another share of the same periods, of the job's busy time, which reads higher than the share of the run that sizing uses ([Dashboard and CLI](../clients/#one-job)). A run without it, as on a kernel without the cpu controller, counts as held back when it peaked at 95% of the cap or more. A run slowed by the host's other work, waiting for a CPU without its quota throttling it, raises nothing: the slice is short, not the profile. The [CPU cap](../insights/#insights) insight names a job its cap held back in 3 or more runs, under either policy.
-  - They go up when one job (repository, workflow and name) has 3 such runs averaging 70% of the cap or more at the median, up to the slice's CPUs (and under `caps`, the [CPU budget](#cpu-admission) when one is set). A raise those leave no room for is not written, and `runnerctl sizing` says "No CPU raise" and why, beside any memory or slot change.
-  - Under `measured` they never go down, and 3 runs of one job the cap held back raise them too, up to the slice's CPUs: a running job reserves its average there, so a cap that throttles the jobs only slows them. With a CPU budget, such a raise stops where every profile's warm runners at their caps and one more runner at the largest cap would fill it, since those reserve caps.
-  - Such a raise goes on only while the one before helped: the job's runs at the new `cpus` took less time at the median, or were throttled in less of their run, than at the `cpus` before. A tool that sizes its pool from the CPUs it sees, such as Gradle, cargo or Go, starts more workers at each raise and stays throttled; its raises stop there, and `runnerctl sizing` says "No CPU raise" and why.
-  - Under `caps` they go down when `min_jobs` such runs say so, every job among them has a measured average, and the cap held none of them back: such a run ran as fast as the cap let it, so its average says nothing about what it needs. They go toward the larger of twice the heaviest job's p95 average and the highest peak, rounded up to whole CPUs, at least 1. Other programs slowing the runs for a day can bring them down a step, which the next raise takes back.
+- **Memory** follows the advice, between `min_memory` and `max_memory` and under `memory_ceiling` less the mirror. A lowering moves at most `max_step` percent at a time. A raise comes only from a run that met the cap, straight to the need.
+- **A lowering is taken back** at the next look when a run meets the lowered cap, or a job that succeeded before fails 3 times in a row at it. For 30 days no lowering goes under it.
+- **Slots under `caps`:** one more when jobs waited a minute or more at p95, or the slots were busy half the time, while every profile's caps fit `MemoryMax`, up to `max_slots`.
+- **Slots under `measured`:** as many more as waited at once, at most `max_step` percent, when jobs waited a minute or more at p95 for a slot alone. Slots cost disk, not memory: they go up only while each keeps 2G of the quarter of Docker's disk that all Docker stores share. A profile whose slots stayed 2 or more above its use for a week loses one.
+- **CPUs** follow average use and throttling, not peaks. A run is held back when the CPU quota throttled it in 15% or more of its run. A job with 3 held-back runs, or 3 averaging 70% of the cap, gets more `cpus`, up to the slice's CPUs (under `caps`, the CPU budget), while each raise helps. Under `caps` they come down when `min_jobs` runs say so and none was held back.
 
-A change that raises comes at most once every `raise_interval` (1 hour) and reads only the runs since the profile's last change, so one slot that fixed a month of waits is not followed by another every hour. A change that lowers `memory` or `cpus` waits `interval` (1 hour): a lowering that goes too far costs one job, as the first run killed at it takes it back. Slot and CPU raises need 3 runs, so a new profile gets them before it has `min_jobs` of memory history. A lowering of `memory`, and any change of `cpus`, moves by at most `max_step` percent, `memory` in steps of 256M, so a profile far above its need gets there over a few changes. A raise of `memory` comes only from a run that met the cap, and goes straight to what the job needs.
-
-Bounds are optional: `min_memory` and `max_memory` keep `memory` between them, and `max_slots` caps `slots`, for instance to leave another profile room.
-
-```toml
-[sizing]
-auto = true
-
-[profiles.node]
-image = "ghcr.io/ayagmar/runnerd-runner:node-0.0.26"
-cpus = 8
-memory = "7G"
-slots = 2
-min_memory = "2G"   # optional: never lower than this
-max_slots = 6       # optional: never more slots than this
-```
-
-Changes picked in one look each count against the budget the ones before them take, so two profiles never both take the one slot that fits. A change is never written over a file you edited on disk: until runnerd runs with your edit (restart it, or make the edit in the dashboard's editor instead), auto sizing changes nothing and logs why. An editor opened before an auto change, or before an edit on disk, cannot save over it either: the save is refused, and reloading the page shows the new file. The daemon also refuses a change that would drop a slot a runner is in at the moment it writes.
-
-Each change is recorded in the job history before the file is written, logged, sent as a `sizing.changed` event once written, and listed by `runnerctl sizing`, the dashboard's Sizing page and the TUI with what it replaced. A change the history cannot record is not written; one a crash interrupted is settled from the file at the next start, with `auto` on or off: done if the profile has its values, else listed as one that may not have been written, still holding the interval. `runnerctl sizing undo <profile>` writes the old values back, `cpus` included, as the Sizing page's link does through the config editor; with `auto` still on, a raise can come after `raise_interval` and a lowering after `interval`, so bound the profile to keep it.
+When a bound or the budget blocks a change, `runnerctl sizing` says `No slot raise:` or `No CPU raise` and why. A raise waits `raise_interval` (1 hour) after the last change, a lowering `interval` (1 hour). A change is never written over a file you edited on disk: until runnerd runs with your edit (restart it), auto sizing changes nothing and logs why. Each change is recorded in the job history, sent as a `sizing.changed` event, and listed by `runnerctl sizing`. `runnerctl sizing undo <profile>` writes the old values back; with `auto` on, a later change can undo the undo, so bound the profile to keep it.
 
 ## Measured admission
 
-By default a runner starts only when its profile's `memory` fits `MemoryMax` beside the caps of everything running, and [the budget check](../configuration/#the-budget-check) holds `slots × memory` to `MemoryMax`. Most jobs peak far under their caps, so that memory sits reserved and unused. `admission = "measured"` under `[host]` has each runner reserve its job's predicted peak instead:
+`admission = "measured"` has each runner reserve its job's predicted peak instead of its cap:
 
 ```toml
 [host]
-slice = "runnerd.slice"
-isolation = "sysbox"
 admission = "measured"
 
 [profiles.node]
-image_stage = "node"
-cpus = 8
-memory = "7G"   # still each container's hard limit
-slots = 8       # how many run at once; 8 × 7G may exceed MemoryMax
+memory = "7G"   # still the container's hard limit
+slots = 8       # 8 × 7G may exceed MemoryMax
 ```
 
-- A job is predicted from its own last 20 successful runs (repository, workflow and job name), or `[sizing] min_jobs` when that is more, with any that failed among them: with `min_jobs` of them, their p95 peak plus `[sizing] margin`, rounded up to 256M. A run that met its cap counts at least its cap.
-- With fewer, the larger of its profile's p95 and its own largest peak, plus the margin. Once 2 of its runs succeeded, one copy of it at a time reserves its own largest peak plus the margin instead; a copy queued or running beside another, as when a burst follows a cleared cache, takes the larger, as does every job of a repository with a busy runner whose job is not known yet. A job with no runs yet gets its profile's largest peak plus the margin, since a new workflow may be the heaviest. These need `min_jobs` runs of the profile; without them, or when every run of the job was cancelled, the cap.
-- A run that met its cap or was killed for memory, as [sizing](#sizing) tells it, puts its job back on its cap until 3 of its runs in a row succeed clear of it, 7 days at most, cancelled runs included. A run that went past what it reserved, cancelled or not, has its job reserve the larger of its recent runs' largest peak and that run's while that run is among its recent runs, 7 days at most.
-- A runner may take any of its repository's queued jobs that its labels match, so it reserves the largest of their predictions ([splitting light and heavy jobs](../configuration/#split-light-and-heavy-jobs) keeps a heavy job's out of a linter's runner), and more if a heavier job queues while it waits; when that no longer fits, the runner is stopped and the job waits for one that fits. Once its job is known, it reserves that job's prediction.
-- A running runner counts at the larger of what it reserved and what it last used, so a job past its prediction leaves less for the next starts. Without a sample of it or of the slice from the last few seconds, it counts at its cap.
-- Nothing starts while the slice uses 90% of `MemoryMax` or more, counted as [`docker stats` does](#what-a-jobs-memory-is). Without a sample of the slice from the last few seconds, runners reserve their caps. Switching back to `admission = "caps"` counts every running runner at its cap.
-- The check asks only that one runner of each profile, with the mirror, fits `MemoryMax`, and that the slice has one.
+- A job (repository, workflow and job name) is predicted from its last 20 successful runs, or `min_jobs` when that is more: their p95 peak plus `margin`, rounded up to 256M. A run that met its cap counts at least its cap.
+- With fewer runs: the larger of its profile's p95 and its own largest peak, plus the margin; with none, its profile's largest peak plus the margin. Without `min_jobs` runs of the profile, the cap.
+- A job whose run met its cap or was killed for memory goes back on its cap until 3 runs in a row succeed clear of it, 7 days at most.
+- A runner reserves the largest prediction among the queued jobs its labels match ([split light and heavy jobs](../configuration/#split-light-and-heavy-jobs)), then its own job's once known.
+- A running runner counts at the larger of what it reserved and what it last used, or its cap without a recent sample.
+- Nothing starts while the slice uses 90% of `MemoryMax`, counted [as `docker stats` does](#what-a-jobs-memory-is).
 
-The caps still stop a container that goes over them. What measured admission trades for the shorter waits is that several jobs going over their predictions at once can fill the slice, which the kernel then answers by reclaiming page cache and killing a process inside it, a runner's before the mirror's. Each job's record says what its runner reserved and why (`runnerctl job <id>`, the dashboard's job page). The job page's charts draw the reservation as a line under the cap, so a container capped at 22 CPUs that reserved 3.6 shows both.
+The caps still stop a container that goes over them, but several jobs going over their predictions at once can fill the slice, and the kernel then kills a process in it. `runnerctl job <id>` says what a runner reserved and why.
 
-### Try it first
+### Simulating
 
-`runnerd simulate` replays the last 30 days through both policies, each job queued when it was and running as long as it ran, and changes nothing:
-
-```text
-$ runnerd simulate --memory-max 33G --slots node=8
-196 finished jobs replayed against a MemoryMax of 33G, each queued when it was and running as long as it ran.
-PEAKS is every running job's peak added up at the busiest moment, with the mirror: more than the slice ever held, but a lower bound on what the daemon could overlap. The replay holds each running job at its peak, where the daemon admits against what jobs use while they warm up, and it leaves out start latency, seeds, shells and cancelled jobs.
-
-POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD    CPU CPU HELD
-caps      jvm 2, node 6                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -
-caps*     jvm 3, node 8                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -
-measured  jvm 3, node 8                 0s     1m55s     3m20s       18s       8   24.35G       4     0      7        -
-cpu ×1    jvm 3, node 8                 0s     1m55s     3m20s       18s       8   24.35G       4     0      7        0
-
-* more slots than the caps fit in MemoryMax, which the config check refuses with admission = "caps".
-UNDER: jobs that peaked above what admission reserved for them. HELD: times the high-water mark held back a job the predictions had room for.
-cpu ×N: measured admission, and each runner reserves its job's predicted average CPU of the slice's 32 CPUs times N. CPU: the most the running jobs' average CPUs added up to at once. CPU HELD: times the CPU budget held back a job memory and its slots had room for. The replay keeps each job's run time, so it shows what a CPU budget holds back, not how much sharing the CPUs slows the jobs.
-```
-
-Without `--memory-max` it reads the slice's from systemd, and without `--slots` it gives each profile as many slots as `MemoryMax` holds of it alone, or its configured ones if more; `--since 7d` (or `12h`, `2w`) sets the window. A `PEAKS` over `MemoryMax` is marked `!`. A `PEAKS` well under `MemoryMax` is what the replay shows, not a promise: leave the daemon room for what it does not model. The `cpu ×N` rows replay [CPU admission](#cpu-admission).
-
-## CPU admission
-
-Memory admission does not see CPU: eight image builds that each fit in memory can still ask for more CPUs than the host has, and every job on it slows down. `cpu_overcommit` under `[host]` adds a CPU budget, the slice's CPUs times the factor, and a runner starts only when what it reserves of that fits too:
-
-```toml
-[host]
-slice = "runnerd.slice"
-isolation = "sysbox"
-admission = "measured"
-cpu_overcommit = 1.0
-```
-
-- The slice's CPUs are its `AllowedCPUs`, or the host's, and fewer when its `CPUQuota` allows less. runnerd reads them from systemd at start, and again whenever a config is applied. A config that sets `cpu_overcommit` is refused when they cannot be read; without it they only scale the dashboard's CPU chart.
-- Under `admission = "measured"` a runner reserves its job's average CPU, its CPU time over its run time, predicted from the job history as memory is: with `[sizing] min_jobs` runs of the job, their p95; with fewer, its own largest once 2 succeeded, else the larger of that and its profile's p95; with none, its profile's largest. Without `min_jobs` runs of the profile, its `cpus`. There is no margin: the factor is the margin.
-- Under `admission = "caps"` every runner reserves its profile's `cpus`, and every running one counts at its container's CPU limit, also one admitted by its prediction before a reload.
-- A runner reserves the largest of its pool's queued jobs until it knows its job, then that job's; never more than the whole budget, so one runner can always start.
-- The mirror, seed containers and shells reserve no CPU.
-
-A job that had a slot and memory but not CPU waits. Once it has waited 2 minutes, no younger job starts until it fits, so a stream of light jobs cannot keep a heavy one waiting forever. The wait counts from when the job was first held for CPU until it starts or leaves the queue, also through ticks that hold it for memory or a slot instead. The status line and the dashboard say so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`), the daemon logs it, and the job's record says how long it waited (`runnerctl job <id>`).
-
-It is off by default, and auto sizing does not set it. A job's average is far under its peak: the image builds that peak at 6 CPUs average under one, so reserving peaks would leave most of the host idle, and averages admit nearly everything on a host with many CPUs. On one host's history at 32 CPUs, the running jobs' averages never added up past 8 CPUs, even with twice the node slots, so a budget at 1.0 held nothing back. It matters on a small host. The same history replayed against 8 CPUs:
+`runnerd simulate` replays the last 30 days through each policy, every job queued when it was and running as long as it ran. It changes nothing. This history on 8 CPUs, node's slots raised to 8:
 
 ```text
 $ runnerd simulate --memory-max 33G --slots node=8 --cpus 8 --cpu-overcommit 1 --cpu-overcommit 1.5
 POLICY    SLOTS                   WAIT P50  WAIT P95  WAIT MAX      MEAN AT ONCE    PEAKS   UNDER  HELD    CPU CPU HELD
 caps      jvm 2, node 6                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -
-caps*     jvm 3, node 8                 0s     4m19s     7m38s       57s       5   18.95G       0     0    6.2        -
 measured  jvm 3, node 8                 0s     1m55s     3m20s       18s       8   24.35G       4     0      7        -
 cpu ×1    jvm 3, node 8                 0s     2m30s     4m21s       32s       8   24.16G       4     0      7      281
 cpu ×1.5  jvm 3, node 8                 0s     2m08s     4m21s       21s       8   24.35G       4     0      7        8
 ```
 
-Start at `1.0`: the running jobs' averages fill the CPUs, and peaks that land together cost a short slowdown, not a kill. Raise it when jobs wait for CPU the host shows idle; lower it to keep CPU free for the host itself. `--cpus` replays another number of CPUs, and `--cpu-overcommit`, repeated, compares factors.
+- `PEAKS`: every running job's peak added up at the busiest moment. `UNDER`: jobs that peaked above what admission reserved. `HELD`: starts the high-water mark held back.
+- `cpu ×N`: a CPU budget of N times the slice's CPUs. `CPU`: the most the jobs' average CPUs added up to. `CPU HELD`: starts the budget held back.
+
+Options: `--memory-max`, `--slots PROFILE=N`, `--since 7d`, `--cpus`, and `--cpu-overcommit`, repeated to compare factors.
+
+## CPU admission
+
+`cpu_overcommit` under `[host]` adds a CPU budget, the slice's CPUs times the factor, and a runner starts only when what it reserves of that fits too:
+
+```toml
+[host]
+admission = "measured"
+cpu_overcommit = 1.0
+```
+
+- The slice's CPUs are its `AllowedCPUs`, or the host's, fewer when its `CPUQuota` allows less, read from systemd.
+- Under `measured` a runner reserves its job's average CPU, predicted from the history as memory is, with no margin: the factor is the margin. Under `caps` it reserves its profile's `cpus`.
+
+A job that had a slot and memory but not CPU waits; after 2 minutes no younger job starts first. The status line says so (`CPU 30 of 32 CPUs reserved; a job waits for CPU`).
+
+Averages are far under peaks, so on a host with many CPUs they admit nearly everything; on 8 CPUs ([above](#simulating)) the budget holds jobs. Start at `1.0`: peaks that land together cost a short slowdown, not a kill.
 
 ### Sharing the CPUs
 
-Admission or not, Linux shares the slice's CPUs between containers by weight, each runner's in proportion to its profile's `cpus` (1024 CPU shares a CPU, which Docker writes as `cpu.weight`), so when the slice's CPUs are all in use a 9-CPU runner gets more of them than a 2-CPU one; a container never gets more than its `cpus`. The mirror keeps Docker's default weight, about that of a 2.5-CPU runner. The weights only split what the slice gets: programs outside it, such as a local build or an emulator, share the host's CPUs with the whole slice by the slice's own `CPUWeight`. A slice with a low `CPUWeight`, such as 20, leaves the desktop its share however many jobs run, so without a budget a busy host costs jobs time, not failures. `runnerctl job` shows how often a job's cap held it back and how long it waited for a CPU.
+Linux shares the slice's CPUs between containers in proportion to each profile's `cpus`, and no container gets more than its `cpus`. A low `CPUWeight` on the slice, such as 20, leaves the desktop its share.

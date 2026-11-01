@@ -3,16 +3,16 @@ title: Install
 description: Install runnerd, write a starter config and a user unit with runnerd init, and start the service.
 ---
 
-## What the host needs
+## Requirements
 
 - Linux with cgroup v2, and Docker with the systemd cgroup driver.
-- [Sysbox](https://github.com/nestybox/sysbox), so runner containers run Docker unprivileged. When it is missing, `runnerd doctor` prints the install for this distribution: Nestybox's `.deb` on Ubuntu and Debian, the AUR package `sysbox-ce-bin` on Arch, a source build on Fedora, CentOS Stream, Rocky, Alma and Amazon Linux, and Nestybox's support table elsewhere. Nestybox supports Red Hat Enterprise Linux with Sysbox-EE only.
+- [Sysbox](https://github.com/nestybox/sysbox), so runner containers run Docker unprivileged. `runnerd doctor` prints the install for your distribution.
 - A systemd slice whose `MemoryMax` is the budget for all runners. `runnerd init` prints one sized for the host.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
 
-`runnerd doctor` checks each of these, the slice the config names and that the config fits in it, and prints the fix for what is missing. It also warns when other users can read the config, and for each public repository the config serves. It reads `~/.config/runnerd/runnerd.toml` when it exists; `runnerd doctor <file>` checks another.
+Binaries ship for x86_64 and aarch64; the runner images are linux/amd64 only, so on aarch64 build the `base` stage of `image/Dockerfile` on the host and name it with `image_stage` (`runnerd doctor` prints the command).
 
-The binaries are built for x86_64 and aarch64. The published runner images are linux/amd64 only. On aarch64, build the `base` stage of `image/Dockerfile` on the host and name it with `image_stage`; `runnerd doctor` prints the command. The `android`, `jvm` and `node` stages carry x86_64 Android platform tools.
+`runnerd doctor` checks each requirement, the slice the config names, that the config fits in it and who can read the config, and warns for each public repository the config serves. It reads `~/.config/runnerd/runnerd.toml`; `runnerd doctor <file>` checks another.
 
 ## First run
 
@@ -21,9 +21,7 @@ curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.s
 runnerd init halyard/ledger halyard/storefront
 ```
 
-The installer checks the SHA-256 of `runnerd` and `runnerctl`, copies them to `~/.local/bin` and runs `runnerd doctor`. It never uses sudo.
-
-`init` writes two files, runs the doctor against them and prints what is left. On a 62G, 32-CPU host with no slice yet:
+The installer checks the SHA-256 of `runnerd` and `runnerctl`, copies them to `~/.local/bin` and runs `runnerd doctor`. It never uses sudo. `init` writes `~/.config/runnerd/runnerd.toml` and `~/.config/systemd/user/runnerd.service`, runs the doctor against them and prints what is left. On a 62G, 32-CPU host with no slice yet (checks shortened):
 
 ```text
 $ runnerd init halyard/ledger halyard/storefront
@@ -32,24 +30,16 @@ wrote ~/.config/systemd/user/runnerd.service
 
 runnerd doctor:
 ok    Docker: reachable, Docker 29.9.2
-ok    cgroups: cgroup v2 with the systemd driver
 info  isolation: sysbox: runners run unprivileged
-ok    sysbox: Docker has the sysbox-runc runtime and sysbox's services run
 FAIL  slice: runnerd.slice has no unit file with a MemoryMax, so nothing holds runners to the budget
       fix: sudo tee /etc/systemd/system/runnerd.slice >/dev/null <<'EOF'
            [Slice]
            MemoryMax=46.5G
            EOF
            sudo systemctl daemon-reload
-ok    config: valid, with warnings: the slice runnerd.slice has no MemoryMax, so nothing holds runners to their 40.5G of caps; install a unit file for it
-ok    config file: ~/.config/runnerd/runnerd.toml: only you can read it
-ok    image: ghcr.io/ayagmar/runnerd-runner:base-0.0.26: not pulled yet; runnerd pulls it before the first runner
-info  records: the records of failed jobs take 0B of [records] max_total = 20G
 ok    gh: logged in to github.com with the repo scope
 ok    repository: halyard/ledger: private
-ok    repository: halyard/storefront: private
-info  GitHub Actions' cache: served from the build cache on this host, in place of GitHub's
-info  /dev/kvm: present, for a future Kata Containers backend
+[...]
 
 First run the fixes above for slice; runnerd init runs nothing as root.
 Start runnerd and have it start at login; it pulls ghcr.io/ayagmar/runnerd-runner:base-0.0.26 before the first runner:
@@ -63,35 +53,11 @@ Send a workflow job here with:
 A job runs here only when every label in its runs-on is in its repository's labels in runnerd.toml; other jobs, such as runs-on: ubuntu-latest, stay on GitHub's runners.
 ```
 
-On a VM whose hypervisor adds memory as the guest asks for it, such as Hyper-V with Dynamic Memory, an idle guest has too little memory for init to size a runner. Give init the most memory the VM can grow to, as `MemTotal` reads at its maximum:
-
-```sh
-runnerd init --memory-ceiling 24G halyard/ledger halyard/storefront
-```
-
-init writes it as `memory_ceiling` under `[host]` and sizes the first runner for the host as it can grow, still within the slice's `MemoryMax` and what admission leaves it ([A host whose memory grows](../admission/#a-host-whose-memory-grows)). The ceiling is the hypervisor's promise: a VM that does not get it stalls, and a job can run out of memory. init refuses a ceiling of 0, and one under a runner and the mirror, as `runnerd check-config` would.
-
-A repository that is public gets a warning instead of an `ok`, with the fix:
+Run the root commands `init` printed, then the three `systemctl` and `runnerctl` lines. A public repository gets a warning with its fix:
 
 ```text
 WARN  repository: halyard/docs-site is public: anyone who opens a pull request on it can run code on this host, and their jobs share runnerd's caches with your trusted jobs
       fix: serve private repositories only; for a public one, have GitHub require approval before it runs workflows from fork pull requests (the repository's Actions settings)
-```
-
-Run the root commands your `init` printed, then:
-
-```sh
-systemctl --user daemon-reload
-systemctl --user enable --now runnerd
-runnerctl status
-```
-
-Then point a job at the runners. `init` gives each repository the labels GitHub gives its own self-hosted runners, so a workflow written for those runs here unchanged:
-
-```yaml
-jobs:
-  build:
-    runs-on: [self-hosted, linux, x64]
 ```
 
 | Flag | |
@@ -99,10 +65,11 @@ jobs:
 | `--slice NAME` | another slice than `runnerd.slice` |
 | `--config PATH` | write the config elsewhere |
 | `--force` | replace files that exist; without it `init` writes neither |
+| `--memory-ceiling SIZE` | for a VM whose memory grows on demand, such as Hyper-V Dynamic Memory: the most it can grow to, written as `memory_ceiling` ([A host whose memory grows](../admission/#a-host-whose-memory-grows)) |
 
-`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory, or the slice's `MemoryMax` if smaller. A slot is also no larger than what the host has available now, less the mirror's 512M, the margin runnerd keeps free for the host (at least 2G, [the host's memory](../admission/#the-hosts-memory)) and 512M for what starts with runnerd, so the first job can start. On a host that leaves less than 2G for a runner, such as a 4G VM, `init` writes nothing and says why. [Configuration](../configuration/) says what to change.
+`init` sizes slots of up to 8G, one per 4 CPUs, inside three quarters of the host's memory or the slice's `MemoryMax` if smaller. A slot is also no larger than the host has available now, less the mirror's 512M, [the host's margin](../admission/#the-hosts-memory) and 512M for what starts with runnerd. On a host that leaves less than 2G for a runner, such as a 4G VM, `init` writes nothing and says why. [Configuration](../configuration/) says what to change.
 
-## Pick a directory or release
+## Directory and version
 
 ```sh
 curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.26
@@ -117,7 +84,7 @@ cargo binstall runnerd runnerd-cli           # the release archives
 
 ## Verify a release
 
-Every release archive, `install.sh` and `sha256.sum` has a GitHub build provenance attestation, and so does every runner image:
+Every release archive, `install.sh`, `sha256.sum` and runner image has a GitHub build provenance attestation:
 
 ```sh
 curl -fsSLO https://github.com/ayagmar/runnerd/releases/latest/download/install.sh
