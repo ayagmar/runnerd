@@ -166,7 +166,7 @@ queued → slot → container → removed
    ([ADR 0050](docs/adr/0050-warm-runners.md)).
 3. The plan's stops go first, all at once (`Engine::remove_idle`): each idle runner is deregistered, then the
    containers are removed together, then their log captures end; a runner GitHub says just took a job stays, as
-   does one whose registration was already gone but whose capture or log shows a job (its job may have ended, so it
+   does one whose capture names a job by then or whose registration was already gone and whose log shows a job (its job may have ended, so it
    ends as a busy runner does, its log read and its failed job recorded first), and a slot stays held until Docker
    confirms its container's removal. Each record says why its runner was removed and
    why it started (`job`, `warm`, `burst`). Then, one at a time, `Engine::start` prepares the slot's volumes,

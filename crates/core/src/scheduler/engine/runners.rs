@@ -311,8 +311,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// a few at a time as GitHub asks, then the containers are removed together, as each removal waits for its
     /// container to stop, and only then their log captures end, which they do with their containers. Waiting for a
     /// capture before its removal held every later start back by `CAPTURE_DRAIN`. GitHub's `Busy` keeps a runner that
-    /// just took a job, as does a registration already gone whose capture or logs show a job: its job may have ended
-    /// meanwhile, and its logs and record come before its container goes. Busy runners stay, as does one whose
+    /// just took a job, as does one whose capture named a job by the time GitHub answered, or whose registration is
+    /// already gone and whose logs show a job: its job may have ended meanwhile, and its logs and record come before
+    /// its container goes. Busy runners stay, as does one whose
     /// deregistration, logs or removal fails: its slot and reservation stay its until a removal is confirmed
     /// (ADR 0076). Nothing once Docker stopped answering a stop.
     pub(super) async fn remove_idle(&mut self, stops: Vec<(SlotRef, StopReason)>) {
@@ -347,7 +348,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let mut removing = Vec::new();
         let mut unregistered = Vec::new();
         for (slot, occupant, reason, answer) in deleted {
+            let took_job = self.occupant(&slot).is_some_and(|now| now.job.is_some());
             match answer {
+                // Its capture named a job since the plan, which may have ended before GitHub dropped its
+                // registration: it ends as busy runners do, its logs and record before its container goes.
+                Ok(_) if took_job => self.keep_busy(&slot),
                 Ok(Deleted::Deleted) => removing.push((slot, occupant, reason)),
                 // GitHub also drops a runner's registration once its job ends: one that took a job since the plan
                 // ends as runners do, its logs read and its failed job recorded before its container goes.
@@ -365,9 +370,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         ))
         .await;
         for (slot, occupant, reason, logs) in read {
-            let took_job = self.occupant(&slot).is_some_and(|now| now.job.is_some());
             match logs {
-                _ if took_job => self.keep_busy(&slot),
                 Ok(logs) if logs.contains("Running job: ") => self.keep_busy(&slot),
                 Ok(_) => removing.push((slot, occupant, reason)),
                 // It may have run a job: it stays until its logs say.

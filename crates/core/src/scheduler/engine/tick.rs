@@ -145,10 +145,11 @@ struct Listings {
     queued: Vec<Listed>,
 }
 
-/// A repository's queued jobs as GitHub answered them.
+/// A repository's queued jobs as GitHub answered them, and those of them the history recorded.
 struct Listed {
     repository: String,
     answer: Result<Vec<QueuedJob>, github::Error>,
+    recorded: Vec<u64>,
 }
 
 /// A repository to list the queued jobs of, with the labels of each of its pools.
@@ -180,15 +181,21 @@ async fn list<G: GithubApi>(
         .map(|ToList { repository, pools }| async move {
             let answer = github.queued_jobs(&repository).await;
             let at = time::now_ms();
+            let mut recorded = Vec::new();
             for job in answer.iter().flatten() {
                 if pools
                     .iter()
                     .any(|labels| crate::scheduler::matches(job, labels))
                 {
                     store.queued(&repository, job, at);
+                    recorded.push(job.id);
                 }
             }
-            Listed { repository, answer }
+            Listed {
+                repository,
+                answer,
+                recorded,
+            }
         })
         .buffered(CONCURRENT_REQUESTS)
         .collect()
@@ -706,9 +713,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         configured.max(running)
     }
 
-    /// Takes each repository's queued jobs from its listing; a repository a command removed meanwhile is skipped.
+    /// Takes each repository's queued jobs from its listing. A repository a command removed meanwhile is skipped, but
+    /// the jobs its listing recorded are followed until GitHub says what became of them.
     fn apply_queued(&mut self, listings: Vec<Listed>) {
-        for Listed { repository, answer } in listings {
+        let taken: BTreeSet<u64> = self
+            .occupied()
+            .filter_map(|(_, occupant)| occupant.job)
+            .collect();
+        for Listed {
+            repository,
+            answer,
+            recorded,
+        } in listings
+        {
             let mut listed = false;
             let queued = match answer {
                 Ok(queued) => {
@@ -737,6 +754,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if let Some(state) = self.repositories.get_mut(&repository) {
                 state.queued = queued;
                 state.listed = listed;
+            } else {
+                for job in recorded.into_iter().filter(|job| !taken.contains(job)) {
+                    self.queued_jobs
+                        .entry(job)
+                        .or_insert_with(|| repository.clone());
+                }
             }
         }
     }

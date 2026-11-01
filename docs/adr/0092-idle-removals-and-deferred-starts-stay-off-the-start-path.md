@@ -27,15 +27,15 @@ listing, the poll interval, the tick's own work, downtime) could not be told fro
 
 ## Decision
 
-- **Idle runners are removed together, ahead of the starts** (`Engine::remove_idle`). A plan's stops run first, all
-  at once: each runner is deregistered, a few GitHub requests at a time, then the containers are removed together,
-  and only then do their captures end, which they do with their containers. GitHub's `Busy` still keeps a runner
-  that just took a job. GitHub also answers "not found" for a runner whose job ended, as an ephemeral runner's
-  registration goes with its job: such a runner stays when its capture named a job or its log shows one, and ends as
-  a busy runner does, its log read and a failed job recorded before its container goes; one whose log cannot be read
-  stays until it can. A runner whose deregistration or removal fails keeps its slot and reservation until a later
-  removal is confirmed (ADR 0076). A forced stop still kills runner by runner. Runners that ended on their own are
-  released as before: their logs are read and their failed jobs recorded before the removal.
+- **Idle runners are removed together, ahead of the starts** (`Engine::remove_idle`). A plan's stops run first, all at
+  once: each runner is deregistered, a few GitHub requests at a time, then the containers are removed together, and
+  only then do their captures end, which they do with their containers. GitHub's `Busy` still keeps a runner that just
+  took a job, as does one whose capture named a job by the time GitHub answered. GitHub also answers "not found" for a
+  runner whose job ended, as an ephemeral runner's registration goes with its job: such a runner stays when its log
+  shows a job. Either ends as a busy runner does, its log read and a failed job recorded before its container goes;
+  one whose log cannot be read stays until it can. A runner whose deregistration or removal fails keeps its slot and
+  reservation until a later removal is confirmed (ADR 0076). A forced stop still kills runner by runner. Runners that
+  ended on their own are released as before: their logs are read and their failed jobs recorded before the removal.
 - **A deferred start makes the tick plan again** from the same listings, after the starts that went ahead, rather
   than skipping the rest of the plan until the next poll. It plans again only after a plan that removed or started a
   runner, at most three plans a tick, so a start that keeps not fitting costs one plan more, not a loop. Admission

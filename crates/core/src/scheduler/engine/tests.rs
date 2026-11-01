@@ -259,8 +259,13 @@ impl FakeGithub {
 impl GithubApi for FakeGithub {
     async fn queued_jobs(&self, repository: &str) -> Result<Vec<QueuedJob>, github::Error> {
         self.answer().await;
-        let mut held = self.0.lock().unwrap().held_queued.subscribe();
+        let mut held = {
+            let mut state = self.0.lock().unwrap();
+            state.waiting += 1;
+            state.held_queued.subscribe()
+        };
         let _ = held.wait_for(|held| !held.contains(repository)).await;
+        self.0.lock().unwrap().waiting -= 1;
         self.latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
@@ -3782,6 +3787,66 @@ async fn a_whole_tick(github: &FakeGithub, handle: &Handle) {
         handle.control.wake.notify_one();
         until_polled(github, polled + more).await;
     }
+}
+
+#[tokio::test]
+async fn a_job_listed_for_a_repository_a_new_config_removed_meanwhile_is_still_followed() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(5)];
+        state.queued_on.insert(5, "o/s".to_owned());
+    }
+    github.hold_queued("o/s");
+    let dir = TestDir::new("engine");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &two_repositories());
+    let run = tokio::spawn(engine.run());
+    github.until_waiting(1).await;
+    // `o/s` goes while its listing is out; the listing then shows job 5, which another machine's runner ran.
+    let committed = handle
+        .control
+        .replace_config(
+            Config::parse(CONFIG).unwrap(),
+            None,
+            None,
+            Commit::new(|| Ok(None)),
+            RunningSlots::Drain,
+            Author::Owner,
+        )
+        .await;
+    assert_eq!(committed, Ok(Vec::new()));
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(5, details(5, "completed", Some("success")));
+    github.release_queued();
+    // The history keeps job 5 from that listing; GitHub then says what became of it.
+    let mut state = None;
+    for _ in 0..5 {
+        a_whole_tick(&github, &handle).await;
+        handle.store.flush().await;
+        state = handle
+            .store
+            .job(5)
+            .await
+            .unwrap()
+            .map(|job| job.summary.state);
+        if state.is_some_and(|state| state != JobState::Queued) {
+            break;
+        }
+    }
+    assert!(
+        state.is_some_and(|state| state != JobState::Queued),
+        "job 5 does not stay queued: {state:?}"
+    );
+    handle.control.shutdown(Shutdown::Force);
+    tokio::time::timeout(Duration::from_secs(60), run)
+        .await
+        .unwrap()
+        .unwrap();
 }
 
 #[tokio::test]
