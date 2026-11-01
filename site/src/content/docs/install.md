@@ -42,7 +42,7 @@ ok    repository: halyard/ledger: private
 [...]
 
 First run the fixes above for slice; runnerd init runs nothing as root.
-Start runnerd and have it start at login; it pulls ghcr.io/ayagmar/runnerd-runner:base-0.0.26 before the first runner:
+Start runnerd and have it start at login; it pulls ghcr.io/ayagmar/runnerd-runner:base-0.0.27 before the first runner:
   systemctl --user daemon-reload
   systemctl --user enable --now runnerd
   runnerctl status
@@ -72,7 +72,7 @@ WARN  repository: halyard/docs-site is public: anyone who opens a pull request o
 ## Directory and version
 
 ```sh
-curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.26
+curl -fsSL https://github.com/ayagmar/runnerd/releases/latest/download/install.sh | sh -s -- --prefix /opt/runnerd --version v0.0.27
 ```
 
 From crates.io, `runnerctl` is in `runnerd-cli`:
@@ -90,5 +90,5 @@ Every release archive, `install.sh`, `sha256.sum` and runner image has a GitHub 
 curl -fsSLO https://github.com/ayagmar/runnerd/releases/latest/download/install.sh
 gh attestation verify install.sh -R ayagmar/runnerd
 sh install.sh
-gh attestation verify oci://ghcr.io/ayagmar/runnerd-runner:base-0.0.26 --repo ayagmar/runnerd
+gh attestation verify oci://ghcr.io/ayagmar/runnerd-runner:base-0.0.27 --repo ayagmar/runnerd
 ```
