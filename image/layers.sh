@@ -47,6 +47,18 @@ size_gb() {
     echo "${size:-0}"
 }
 
+# Bytes a slot's changes to the layers hold under $1, its volume as mounted: what seed.sh weighs against runnerd's
+# reseed_at. Not its Docker Engine's data (DOCKER_DATA_ROOT), which a reseed leaves alone.
+layer_changes() {
+    local layer changes=0 size
+    for layer in "${LAYERS[@]}"; do
+        [ -d "$1/${layer%%:*}/upper" ] || continue
+        size=$(du -sxb "$1/${layer%%:*}/upper" | cut -f1)
+        changes=$((changes + size))
+    done
+    echo "$changes"
+}
+
 # Bytes the container received on eth0. From /proc/net/dev, which is the container's own under sysbox, where
 # /sys/class/net shows the host's interfaces. The count follows the colon without a space once it is long.
 rx_bytes() {

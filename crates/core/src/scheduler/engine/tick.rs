@@ -205,8 +205,10 @@ async fn list<G: GithubApi>(
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn tick(&mut self, mode: Shutdown) {
+        let began = SystemTime::now();
         let mut pace = Pace::new();
         self.collect_reseeds().await;
+        self.collect_measures().await;
         self.collect_trim().await;
         self.collect_disk().await;
         self.collect_recordings().await;
@@ -299,7 +301,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             _ => self.note_host(&admitting, &BTreeMap::new()),
         }
-        self.idle_caches(mode).await;
+        self.idle_caches(mode, began).await;
         if self.records.listed {
             self.expire_records().await;
         } else {

@@ -58,7 +58,7 @@ A job that finds no runner waits 15 to 25 seconds for the next poll, a registrat
 
 - Each pool keeps [`warm`](../configuration/#repositories) runners (1 by default) while its repository is active: a job was queued in the last hour, or it is an hour of the day (UTC) its jobs came in on 3 of the last 14 days. Otherwise they go after 5 idle minutes.
 - When a job is seen, the other jobs of its run get runners too: per pool, the median number that workflow's runs had there over 14 days (from 3 runs), less those seen.
-- Warm runners start last, once every queued job that fits has a runner, and reserve their profile's `memory` (and `cpus` under CPU admission). A queued job of another repository takes their room. A profile due a reseed removes them once its other runners are idle.
+- Warm runners start last, once every queued job that fits has a runner, and reserve their profile's `memory` (and `cpus` under CPU admission). A queued job of another repository takes their room. After a job in slot 1, the profile measures what slot 1 changed without stopping anything, at most every 10 minutes. Only a reseed due by that measure (slot 1 reached [`reseed_at`](../configuration/#caches)) or asked for removes them, once its other runners are idle.
 
 ## Warm caches
 

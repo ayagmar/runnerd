@@ -376,7 +376,15 @@ pub struct Engine<G = Github, D = Docker> {
     unread: Vec<recover::Left>,
     /// Profiles a reload removed, kept while their runners or reseed still run.
     retired: BTreeMap<String, crate::config::Profile>,
-    /// Profiles whose slot 1 ran a job since their last reseed check.
+    /// Profiles whose slot 1 ran a job since their last measure or reseed (ADR 0094).
+    measure_due: BTreeSet<String>,
+    /// The measures of slot 1 running, by profile.
+    measures: BTreeMap<String, JoinHandle<Result<cache::Measured, docker::Error>>>,
+    /// When each profile's last measure started: the next waits `MEASURE_EVERY`.
+    measured_at: BTreeMap<String, tokio::time::Instant>,
+    /// Profiles whose upkeep reseeds once their runners are idle: a measure found slot 1 changed `reseed_at` or more,
+    /// or the last reseed unfinished, or could not tell, or the last check of the caches found the snapshot over
+    /// `snapshot_max`.
     reseed_due: BTreeSet<String>,
     /// Profiles whose snapshot the last check of the caches measured over `snapshot_max`: due, and reseeded however
     /// little slot 1 changed.
@@ -538,6 +546,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             drained_once: BTreeSet::new(),
             leftover: BTreeMap::new(),
             unread: Vec::new(),
+            measure_due: BTreeSet::new(),
+            measures: BTreeMap::new(),
+            measured_at: BTreeMap::new(),
             reseed_due: BTreeSet::new(),
             oversized: BTreeSet::new(),
             reseeded_at: BTreeMap::new(),

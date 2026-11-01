@@ -225,7 +225,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             None => {}
         }
         if slot.index == 0 && ran {
-            self.reseed_due.insert(slot.profile.clone());
+            self.measure_due.insert(slot.profile.clone());
         }
         self.trim_due = true;
         self.drop_closed_slots();

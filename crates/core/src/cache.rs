@@ -76,6 +76,11 @@ impl Names {
         format!("{}-{profile}-seed", self.prefix)
     }
 
+    /// The container that measures what the profile's slot 1 changed, before its upkeep (`measure`).
+    pub fn measure(&self, profile: &str) -> String {
+        format!("{}-{profile}-measure", self.prefix)
+    }
+
     /// The mirror's container and its storage volume.
     pub fn mirror(&self) -> String {
         format!("{}-mirror", self.prefix)
@@ -473,14 +478,100 @@ pub async fn reseed(docker: &impl DockerApi, reseed: &Reseed<'_>) -> Result<Stri
     finish_reseed(docker, &id).await
 }
 
+/// What a measure container (`image/seed.sh measure`) runs on: the profile's image, its slot 1 and the snapshot,
+/// both read-only, and the isolation backend.
+#[derive(Debug)]
+pub struct Measure<'profile> {
+    /// Where the profile's volumes are.
+    pub names: &'profile Names,
+    /// The profile whose slot 1 is measured.
+    pub profile: &'profile str,
+    /// The profile's runner image, which holds the seed script.
+    pub image: &'profile str,
+    /// The systemd slice the measure container runs in.
+    pub slice: &'profile str,
+    /// How the measure container is isolated, as runners are.
+    pub isolation: &'profile dyn Isolation,
+}
+
+/// What a measure found: what a reseed would weigh against `caches.reseed_at`.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Measured {
+    /// Slot 1's changes to the layers hold this many bytes, its Docker Engine's data aside.
+    Changed(u64),
+    /// The profile's last reseed did not finish (docs/adr/0066): the next one starts over, whatever slot 1 changed.
+    Unfinished,
+}
+
+/// The memory a measure container may use: it only adds up file sizes.
+const MEASURE_MEMORY: ByteSize = ByteSize(256 << 20);
+
+/// Measures what the profile's slot 1 changed (`image/seed.sh measure`), in a container that mounts slot 1's
+/// volume and the snapshot read-only, so it may run while the profile's runners do. A measure container an earlier
+/// daemon left is removed first.
+pub async fn measure(docker: &impl DockerApi, measure: &Measure<'_>) -> Result<Measured, Error> {
+    let spec = measure_spec(measure);
+    match docker.remove(&spec.name).await {
+        Err(error) if !is_not_found(&error) => return Err(error),
+        _ => {}
+    }
+    let id = docker.start(&spec, measure.isolation).await?;
+    let output = finish_reseed(docker, &id).await?;
+    measured(&output).ok_or_else(|| Error::DockerContainerWaitError {
+        error: format!("measuring printed {:?}", output.trim()),
+        code: 0,
+    })
+}
+
+/// The container `measure` runs: `seed.sh measure` on slot 1's volume and the snapshot, both read-only.
+pub fn measure_spec(measure: &Measure<'_>) -> RunnerSpec {
+    let names = measure.names;
+    RunnerSpec {
+        name: names.measure(measure.profile),
+        image: measure.image.to_owned(),
+        profile: measure.profile.to_owned(),
+        slice: measure.slice.to_owned(),
+        cpus: 1,
+        memory: MEASURE_MEMORY,
+        env: Vec::new(),
+        mounts: vec![
+            volume(names.base(measure.profile), "/base", true),
+            volume(names.slot(measure.profile, 1), "/workers/1", true),
+        ],
+        network: Some("none".to_owned()),
+        // As a seed container's: a restart finds it beside them (`seed`), and removes it.
+        labels: BTreeMap::from([("runnerd.seed".to_owned(), String::new())]),
+        entrypoint: Some(vec![
+            "/usr/local/sbin/runnerd-seed".to_owned(),
+            "measure".to_owned(),
+        ]),
+        jit_config: None,
+    }
+}
+
+/// What the output of `image/seed.sh measure` says, in its last line that says it: a warning before it, such as
+/// one of `du` about a file a job deleted while it counted, leaves the number as advisory as it is anyway.
+fn measured(output: &str) -> Option<Measured> {
+    output.lines().rev().map(str::trim).find_map(|line| {
+        if line == "the last reseed did not finish" {
+            return Some(Measured::Unfinished);
+        }
+        line.strip_prefix("slot 1 changed ")?
+            .strip_suffix(" bytes")?
+            .parse()
+            .ok()
+            .map(Measured::Changed)
+    })
+}
+
 /// Whether the output of a reseed (`image/seed.sh`) says it replaced the snapshot, and so dropped every slot's own
 /// layer changes, rather than left them because slot 1 changed too little.
 pub fn seeded(output: &str) -> bool {
     !output.trim_start().starts_with("not seeded")
 }
 
-/// Waits for a seed container to exit, removes it, and returns its output. Also takes over a seed container an
-/// earlier daemon left running: stopping it between its `rm` and `mv` would lose that snapshot layer.
+/// Waits for a seed or measure container to exit, removes it, and returns its output. Also takes over a seed
+/// container an earlier daemon left running: stopping it between its `rm` and `mv` would lose that snapshot layer.
 pub async fn finish_reseed(docker: &impl DockerApi, container: &str) -> Result<String, Error> {
     let result = async {
         let code = docker.wait(container).await?;
@@ -585,6 +676,41 @@ mod tests {
         for path in kept {
             assert!(upper.join("files").join(path).exists(), "{path} stays");
         }
+    }
+
+    #[test]
+    #[allow(
+        clippy::unwrap_used,
+        reason = "a test: a file it cannot write fails it"
+    )]
+    fn what_slot_1_changed_counts_its_layers_and_not_its_docker_engines_data() {
+        let dir = TestDir::new("layer-changes");
+        let state = dir.0.join("state");
+        let write = |path: &str, bytes: usize| {
+            let path = state.join(path);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, vec![0u8; bytes]).unwrap();
+        };
+        let changes = || -> u64 {
+            with_layers("layer_changes \"$1\"", &[&state])
+                .trim()
+                .parse()
+                .unwrap()
+        };
+        write("cache/upper/npm/index", 1);
+        let before = changes();
+        // A job's images in the slot's Docker Engine: a reseed leaves them, so they must not reach `reseed_at`.
+        write("docker/overlay2/layer", 1 << 20);
+        // Layer work directories hold nothing a reseed copies.
+        write("tools/work/scratch", 1 << 20);
+        assert_eq!(changes(), before);
+        write("tools/upper/node/bin", 100_000);
+        write("android/upper/ndk/lib", 200_000);
+        let after = changes();
+        assert!(
+            after >= before + 300_000 && after < before + 400_000,
+            "the tools and android layers count: {before} then {after}"
+        );
     }
 
     #[test]
