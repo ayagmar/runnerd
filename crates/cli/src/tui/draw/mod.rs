@@ -231,6 +231,7 @@ fn footer(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
 /// The keys that matter on the view, those that do not fit left out from the least used: each view's own first,
 /// then moving and opening, then help and quit, which stay.
 fn footer_keys(app: &App, width: usize) -> String {
+    let views = format!("1-{} views", View::tabs().len());
     let mut keys: Vec<(u8, &str)> = match app.view {
         View::Overview => {
             let mut keys = vec![
@@ -268,7 +269,7 @@ fn footer_keys(app: &App, width: usize) -> String {
             (1, "esc back"),
         ],
     };
-    keys.extend([(4, "1-4 views"), (0, "? help"), (0, "q quit")]);
+    keys.extend([(4, views.as_str()), (0, "? help"), (0, "q quit")]);
     let line = |keys: &[(u8, &str)]| {
         keys.iter()
             .map(|(_, key)| *key)
@@ -279,10 +280,24 @@ fn footer_keys(app: &App, width: usize) -> String {
     line(&keys)
 }
 
+/// The help row for the number keys: the digits, and the views they open, in the order of the tabs.
+pub(super) fn view_keys(tabs: &[(api::View, View)]) -> (String, String) {
+    let digits: Vec<String> = (1..=tabs.len()).map(|key| key.to_string()).collect();
+    let names: Vec<String> = tabs
+        .iter()
+        .map(|(shown, _)| shown.title().to_lowercase())
+        .collect();
+    (
+        digits.join(" "),
+        format!("{}; o and h too", names.join(", ")),
+    )
+}
+
 fn help(frame: &mut Frame<'_>, area: Rect) {
+    let (digits, views) = view_keys(&View::tabs());
     // At most 20, so it fits a terminal of 24 rows.
-    const KEYS: [(&str, &str); 16] = [
-        ("1 2 3 4", "overview, history, records, sizing; o and h too"),
+    let keys: [(&str, &str); 16] = [
+        (digits.as_str(), views.as_str()),
         ("tab", "overview: slots, waiting, repositories, latest"),
         ("j k ↓ ↑", "move, or scroll the log"),
         ("PgDn PgUp", "move by ten"),
@@ -302,14 +317,14 @@ fn help(frame: &mut Frame<'_>, area: Rect) {
     let width = area.width.min(60);
     let height = area
         .height
-        .min(u16::try_from(KEYS.len()).unwrap_or(u16::MAX) + 2);
+        .min(u16::try_from(keys.len()).unwrap_or(u16::MAX) + 2);
     let popup = Rect {
         x: area.x + (area.width - width) / 2,
         y: area.y + (area.height - height) / 2,
         width,
         height,
     };
-    let lines: Vec<Line<'_>> = KEYS
+    let lines: Vec<Line<'_>> = keys
         .iter()
         .map(|(key, what)| {
             Line::from(vec![

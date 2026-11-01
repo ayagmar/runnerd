@@ -12,7 +12,7 @@ use runnerd_core::api::{BuildCacheCounts, Column, JobPage, JobState, View};
 use runnerd_fixtures::{Daemon, Facts, JobRow, NOW, TIMED_OUT, daemon, facts};
 
 use super::super::app::{App, Effect, Msg, View as AppView};
-use super::super::draw::{Theme, draw};
+use super::super::draw::{Theme, draw, view_keys};
 use super::key;
 use crate::{human, watch};
 
@@ -277,6 +277,33 @@ fn the_tabs_follow_core_s_views_and_each_digit_opens_its_tab() {
         .map(|(_, tui)| tui)
         .collect();
     assert_eq!(tabs, [AppView::Records, AppView::Overview, AppView::Sizing]);
+}
+
+#[test]
+fn the_footer_and_the_help_name_the_views_the_keys_open() {
+    let (daemon, _) = fixtures();
+    let mut app = app(&daemon);
+    let tabs = AppView::tabs();
+    let (rows, _) = frame(&app);
+    let views = format!("1-{} views", tabs.len());
+    assert!(shows(&rows, &views), "the footer says {views}: {rows:?}");
+    app.update(key(KeyCode::Char('?')));
+    let (rows, _) = frame(&app);
+    let (digits, names) = view_keys(&tabs);
+    let row = rows
+        .iter()
+        .find(|row| row.contains(&digits))
+        .unwrap_or_else(|| panic!("help lists {digits}: {rows:?}"));
+    assert!(row.contains(&names), "help names the views {names}: {row}");
+    // Keys follow the order of the tabs, whatever it is, and the names follow the keys.
+    let swapped = AppView::tabs_of(&[View::Records, View::Overview, View::Config, View::Sizing]);
+    assert_eq!(
+        view_keys(&swapped),
+        (
+            "1 2 3".to_owned(),
+            "records, overview, sizing; o and h too".to_owned()
+        )
+    );
 }
 
 #[test]
