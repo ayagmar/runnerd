@@ -72,7 +72,8 @@ Serve only private repositories: on a public one, anyone who opens a pull reques
 
 ## Requirements
 
-- Linux x86-64 with cgroup v2, and Docker with the systemd cgroup driver. Runner images are linux/amd64 only.
+- Linux with cgroup v2, and Docker with the systemd cgroup driver. Published runner images are linux/amd64; on aarch64,
+  build the image's `base` stage on the host.
 - [Sysbox](https://github.com/nestybox/sysbox). `runnerd doctor` prints install commands for common distros.
 - A systemd slice whose `MemoryMax` is the runners' budget; `init` prints one.
 - The [GitHub CLI](https://cli.github.com), logged in with the `repo` scope.
