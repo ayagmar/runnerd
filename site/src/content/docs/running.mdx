@@ -46,8 +46,8 @@ systemctl --user stop runnerd           # exits within 45s; running jobs carry o
 - The pool whose `labels` include every label in a job's `runs-on` serves it: one `[[repositories]]` entry, or one of [several](../configuration/#split-light-and-heavy-jobs).
 - It registers a just-in-time runner and starts it in a free slot of the pool's profile if the slice's `MemoryMax` has room for the profile's `memory` (under [measured admission](../admission/#measured-admission), the job's predicted peak) and, under [CPU admission](../admission/#cpu-admission), the CPU budget has room too.
 - A runner takes one job, then runnerd removes it. A runner with no job after 5 minutes is removed unless it is [warm](#warm-runners).
-- Each tick removes the idle runners it no longer needs first, all at once, then starts runners for queued jobs. A start that no longer fits what runs by then makes the tick plan again at once instead of waiting for the next poll.
-- A job's page shows when runnerd first saw it queued (*Seen by runnerd*), so its wait splits into the time before runnerd knew of it, the time it took to start a runner, and the runner's boot.
+- Each tick removes the idle runners it no longer needs first, all at once, then starts runners for queued jobs. A runner that no longer fits what runs by then waits; the others start, then the tick plans again from the same listings (at most three times) instead of waiting for the next poll.
+- A job's page shows when runnerd first saw it queued (*Seen by runnerd*; a job a waiting runner took before any listing showed it has none, nor do jobs recorded by older versions), so its wait splits into the time before runnerd knew of it, the time it took to start a runner, and the runner's boot.
 - A restarted runnerd adopts running runner containers.
 
 <Lifecycle />

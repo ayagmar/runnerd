@@ -23,7 +23,7 @@ A desktop or local builds take RAM the budget assumed was free, and a host short
 - Nothing starts while the host has under twice the margin available and every task that could run waits for memory 5% of the time or more over 10 s (`full` pressure), until that falls under 1%.
 - Once a job waits for the host, the margin grows by half until the host has room again.
 - Running jobs are never stopped.
-- A start is admitted once more just before it begins, against what runs and was sampled since the plan. A runner that no longer fits waits, and the tick plans again for the others at once.
+- A start is admitted once more just before it begins, against what runs and was sampled since the plan. A runner that no longer fits waits; the others start, then the tick plans again from the same listings (at most three times).
 
 Without a recent reading only `MemoryMax` bounds starts. A waiting job says why, naming up to three programs outside the slice holding 512M or more:
 

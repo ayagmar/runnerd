@@ -44,7 +44,7 @@ The browser stays signed in for 30 days after its last visit. `runnerctl web --s
   sizes="(min-width: 72rem) 45rem, calc(100vw - 3rem)"
 />
 
-A job's page shows its wait, split at when runnerd first saw the job queued (*Seen by runnerd*) and when its runner started, its steps on one time axis, memory and CPU against the container's caps (with what [admission](../admission/#measured-admission) reserved when that was less), how often the CPU cap held it back, its latest 30 runs, and the log. For a failed job kept as a record it also shows the `runnerctl shell` command.
+A job's page shows its wait, split at when runnerd first saw the job queued (*Seen by runnerd*, missing for a job a waiting runner took before runnerd listed it, and for jobs older runnerd versions recorded) and when its runner started, its steps on one time axis, memory and CPU against the container's caps (with what [admission](../admission/#measured-admission) reserved when that was less), how often the CPU cap held it back, its latest 30 runs, and the log. For a failed job kept as a record it also shows the `runnerctl shell` command.
 
 <Shot
   name="history"
