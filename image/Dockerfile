@@ -32,21 +32,23 @@ COPY --from=docker \
 COPY --from=docker /usr/local/libexec/docker/cli-plugins/ /usr/local/lib/docker/cli-plugins/
 RUN rm /usr/bin/docker
 
-# GitHub CLI, for workflows that comment on pull requests or file issues, for the platform the image is built for. The
-# SHA-256s are from the release's published checksums file.
+# GitHub CLI, for workflows that comment on pull requests or file issues, for the platform the image is built for:
+# BuildKit's TARGETARCH, or this stage's own under the legacy builder. The SHA-256s are from the release's published
+# checksums file.
 ARG TARGETARCH
 ARG GH_VERSION=2.102.0
 ARG GH_SHA256_AMD64=bb766f710eef8ede859c18578c72c327597cd4c8a85b06001b1f3843c6019386
 ARG GH_SHA256_ARM64=7862c86c72f43df3a2d93ddde6f473285b4e2af61b494849846827e513ef6484
-RUN case "${TARGETARCH}" in \
+RUN arch="${TARGETARCH:-$(dpkg --print-architecture)}" \
+    && case "${arch}" in \
         amd64) sha="${GH_SHA256_AMD64}" ;; \
         arm64) sha="${GH_SHA256_ARM64}" ;; \
-        *) echo "no GitHub CLI pinned for ${TARGETARCH}" >&2; exit 1 ;; \
-    esac \
+        *) echo "no GitHub CLI pinned for ${arch}" >&2; exit 1 ;; \
+       esac \
     && curl -sSfL -o /tmp/gh.tar.gz \
-        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${TARGETARCH}.tar.gz" \
+        "https://github.com/cli/cli/releases/download/v${GH_VERSION}/gh_${GH_VERSION}_linux_${arch}.tar.gz" \
     && echo "${sha}  /tmp/gh.tar.gz" | sha256sum --check \
-    && tar -xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_${TARGETARCH}/bin/gh" \
+    && tar -xzf /tmp/gh.tar.gz -C /usr/local --strip-components=1 "gh_${GH_VERSION}_linux_${arch}/bin/gh" \
     && rm /tmp/gh.tar.gz
 
 # Job code runs as `runner` without sudo, so it cannot read the root entrypoint's environment or reconfigure its
