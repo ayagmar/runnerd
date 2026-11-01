@@ -1,6 +1,6 @@
 # 0050. Warm runners: a runner waits for a job before it is queued
 
-Status: **Accepted** (2026-10-24), amended by [0058](0058-a-repository-served-by-several-profiles.md). Amends [0006](0006-ephemeral-jit-runners.md), [0032](0032-sizing-advice-from-sampled-peaks.md).
+Status: **Accepted** (2026-10-24), amended by [0058](0058-a-repository-served-by-several-profiles.md), [0094](0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md). Amends [0006](0006-ephemeral-jit-runners.md), [0032](0032-sizing-advice-from-sampled-peaks.md).
 
 ## Context
 

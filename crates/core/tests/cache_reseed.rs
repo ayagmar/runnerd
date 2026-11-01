@@ -15,7 +15,7 @@
 use std::collections::BTreeMap;
 use std::sync::OnceLock;
 
-use runnerd_core::cache::{self, Names, Reseed, runner_mounts};
+use runnerd_core::cache::{self, Measure, Measured, Names, Reseed, runner_mounts};
 use runnerd_core::docker::{Docker, DockerApi, RunnerSpec};
 use runnerd_core::isolation::Sysbox;
 
@@ -278,11 +278,19 @@ async fn scenario(docker: &Docker, names: &Names) -> Result<(), String> {
         ));
     }
 
+    let measure = Measure {
+        names,
+        profile: PROFILE,
+        image: &image,
+        slice: "system.slice",
+        isolation: &Sysbox,
+    };
+    measured_changes(docker, names, &reseed("0K", "1T"), &measure).await?;
     old_snapshot(docker, names, &reseed("1T", "1T")).await?;
     let capped = reseed("0K", "3M");
     fitting_snapshot(docker, names, &capped).await?;
     capped_snapshot(docker, names, &capped).await?;
-    interrupted_reseed(docker, names, &reseed("1T", "1T")).await?;
+    interrupted_reseed(docker, names, &reseed("1T", "1T"), &measure).await?;
     closed_slot(docker, names, &reseed("0K", "1T")).await?;
     image_entries_hidden(docker, names, &reseed("0K", "1T")).await
 }
@@ -379,13 +387,55 @@ async fn closed_slot(docker: &Docker, names: &Names, reseed: &Reseed<'_>) -> Res
     Ok(())
 }
 
+/// What a measure of slot 1 says it changed; an error if it says anything else.
+async fn changed(docker: &Docker, measure: &Measure<'_>) -> Result<u64, String> {
+    match cache::measure(docker, measure).await {
+        Ok(Measured::Changed(bytes)) => Ok(bytes),
+        other => Err(format!("measuring slot 1 gave {other:?}")),
+    }
+}
+
+/// A measure counts what slot 1's job changed, and nothing once a reseed made that the snapshot.
+async fn measured_changes(
+    docker: &Docker,
+    names: &Names,
+    reseed: &Reseed<'_>,
+    measure: &Measure<'_>,
+) -> Result<(), String> {
+    let (code, output) = run_in_slot(
+        docker,
+        names,
+        1,
+        &format!("{AS_RUNNER} sh -c 'echo measured > /home/runner/.cache/measured'"),
+    )
+    .await?;
+    if code != 0 {
+        return Err(format!("the job in slot 1 exited {code}:\n{output}"));
+    }
+    let before = changed(docker, measure).await?;
+    println!("slot 1 changed {before} bytes");
+    if before == 0 {
+        return Err("the measure missed slot 1's job's changes".to_owned());
+    }
+    cache::reseed(docker, reseed)
+        .await
+        .map_err(|e| e.to_string())?;
+    match changed(docker, measure).await? {
+        0 => Ok(()),
+        after => Err(format!(
+            "slot 1 still changed {after} bytes after its reseed"
+        )),
+    }
+}
+
 /// A reseed killed between changing the snapshot and dropping the slots' changes leaves its marker: a slot's changes
 /// may name what the snapshot no longer holds. Until the next reseed starts both over from the image, whatever its
-/// threshold, a container sees neither.
+/// threshold, a container sees neither, and a measure says so.
 async fn interrupted_reseed(
     docker: &Docker,
     names: &Names,
     below_threshold: &Reseed<'_>,
+    measure: &Measure<'_>,
 ) -> Result<(), String> {
     let (code, output) = run_in_slot(
         docker,
@@ -415,6 +465,10 @@ async fn interrupted_reseed(
         return Err(format!(
             "slot 2 used a snapshot or changes a killed reseed left (exit {code}):\n{output}"
         ));
+    }
+    match cache::measure(docker, measure).await {
+        Ok(Measured::Unfinished) => {}
+        other => return Err(format!("measuring after a killed reseed gave {other:?}")),
     }
     let output = cache::reseed(docker, below_threshold)
         .await

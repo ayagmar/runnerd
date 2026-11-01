@@ -207,6 +207,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn tick(&mut self, mode: Shutdown) {
         let mut pace = Pace::new();
         self.collect_reseeds().await;
+        self.collect_measures().await;
         self.collect_trim().await;
         self.collect_disk().await;
         self.collect_recordings().await;

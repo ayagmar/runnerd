@@ -68,12 +68,23 @@ fn unread_backoff(poll_interval: Duration, undecided: u32) -> Duration {
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Takes over the seed containers a previous daemon left: a running one counts as its profile's reseed, so no
-    /// runner of the profile starts while it rewrites the snapshot and the slots' layers.
+    /// runner of the profile starts while it rewrites the snapshot and the slots' layers. A measure container it left
+    /// changed nothing and is removed; slot 1 is measured again after its next job.
     async fn recover_reseeds(&mut self, containers: Vec<docker::Container>) {
         for container in containers {
             let Some(profile) = container.labels.get("runnerd.profile").cloned() else {
                 continue;
             };
+            if container.name == self.names.measure(&profile) {
+                match self.docker.remove(&container.id).await {
+                    Err(error) if !is_not_found(&error) => {
+                        warn!("cannot remove {}: {error}", container.name);
+                        self.leftover.insert(container.id, container.name);
+                    }
+                    _ => info!("removed {}, left by an earlier run", container.name),
+                }
+                continue;
+            }
             // Only this daemon's own names: tests seed under other prefixes on the same Engine.
             if container.name != self.names.seed(&profile) || !self.slots.contains_key(&profile) {
                 continue;

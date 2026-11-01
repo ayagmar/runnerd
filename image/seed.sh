@@ -10,9 +10,22 @@
 # go in /base/<layer>.hidden, which containers mount between the snapshot and the image (layers.sh).
 # RESEED_MARKER is there from the first change to the snapshot or a slot's layers until the last is on disk; a run
 # that finds it, left by one killed in between, starts over from the image whatever its arguments.
+# With `measure` as its only argument, changes nothing: prints what slot 1 changed, as a reseed would weigh it, or that
+# the last reseed did not finish. runnerd runs it with /base and /workers/1 read-only while the profile's runners run,
+# so the profile's upkeep stops them only for a reseed that will replace the snapshot.
 set -euo pipefail
 # shellcheck source=SCRIPTDIR/layers.sh
 . /usr/local/lib/runnerd-layers.sh
+
+if [ "${1:-}" = measure ]; then
+    if [ -e "$RESEED_MARKER" ]; then
+        echo "the last reseed did not finish"
+    else
+        changes=$(layer_changes /workers/1)
+        echo "slot 1 changed $changes bytes"
+    fi
+    exit 0
+fi
 
 # Writes what the snapshot's and every slot's volumes hold to disk.
 flush() {
@@ -55,14 +68,12 @@ if [ -e "$RESEED_MARKER" ]; then
     exit 0
 fi
 
-changes=0
 for layer in "${LAYERS[@]}"; do
     name=${layer%%:*}
     # What a run killed before its first change left.
     rm -rf "/base/$name.new" "/base/$name.hidden.new"
-    [ ! -d "/workers/1/$name/upper" ] \
-        || changes=$((changes + $(du -sxb "/workers/1/$name/upper" | cut -f1)))
 done
+changes=$(layer_changes /workers/1)
 if [ "$changes" -lt "${1:-0}" ]; then
     echo "not seeded: slot 1 changed $changes bytes"
     exit 0

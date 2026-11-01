@@ -555,6 +555,8 @@ struct DockerState {
     envs: HashMap<String, Vec<String>>,
     /// What seed containers exit with, at once; `None`: they run for the whole test.
     seed_exit: Option<i64>,
+    /// What measure containers print as they exit, at once; unset, slot 1 changed 4G, past the default `reseed_at`.
+    measured: Option<String>,
     /// Measuring the volumes does not finish while this holds true, as when Docker takes long to measure them.
     volume_sizes_held: tokio::sync::watch::Sender<bool>,
     /// Commits do not finish while this holds true, as when Docker takes long to write a large layer.
@@ -879,8 +881,11 @@ impl DockerApi for FakeDocker {
             .collect())
     }
 
-    async fn wait(&self, _container: &str) -> Result<i64, docker::Error> {
+    async fn wait(&self, container: &str) -> Result<i64, docker::Error> {
         self.outage().await?;
+        if container.ends_with("-measure") {
+            return Ok(0);
+        }
         if let Some(code) = self.0.lock().unwrap().seed_exit {
             return Ok(code);
         }
@@ -890,6 +895,12 @@ impl DockerApi for FakeDocker {
     async fn logs(&self, container: &str) -> Result<String, docker::Error> {
         self.outage().await?;
         let state = self.0.lock().unwrap();
+        if container.ends_with("-measure") {
+            return Ok(state
+                .measured
+                .clone()
+                .unwrap_or_else(|| format!("slot 1 changed {} bytes\n", 4u64 << 30)));
+        }
         Ok(state
             .container_logs
             .get(container)
@@ -1410,6 +1421,37 @@ async fn a_restart_adopts_running_runners_and_reseeds_and_removes_stopped_runner
     // The reseed still runs, so slot 2 starts nothing for the queued job.
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+#[tokio::test]
+async fn a_restart_removes_the_measure_of_slot_1_an_earlier_run_left_and_starts_runners() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    docker.0.lock().unwrap().containers = vec![Container {
+        id: "measure".to_owned(),
+        name: Names::new("runnerd").measure("app"),
+        running: true,
+        labels: HashMap::from([
+            ("runnerd.seed".to_owned(), String::new()),
+            ("runnerd.profile".to_owned(), "app".to_owned()),
+        ]),
+    }];
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let (mut engine, handle, _dir) = engine(&github, &docker);
+    engine.recover().await.unwrap();
+    engine.publish();
+    // Taken for a reseed, it would hold back the profile's runners until it exits; it changes nothing.
+    assert!(
+        !handle.status.borrow().profiles[0].reseeding,
+        "app does not reseed"
+    );
+    assert!(docker.calls().contains(&"remove measure".to_owned()));
+    engine.tick(Shutdown::No).await;
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "job 1 gets its runner"
+    );
 }
 
 #[tokio::test]

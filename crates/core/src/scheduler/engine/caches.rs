@@ -1,6 +1,6 @@
-//! Cache upkeep: reseeds idle profiles, stops the mirror, empties the shared caches and the mirror's storage over
+//! Cache upkeep: measures what slot 1 changed, reseeds idle profiles, stops the mirror, empties the shared caches and the mirror's storage over
 //! their limit and trims the build cache to its own when no runner runs, and counts what the mirror served each
-//! runner. Reseeds and cache checks run as background tasks the tick collects; the build cache's trim runs before the
+//! runner. Measures, reseeds and cache checks run as background tasks the tick collects; the build cache's trim runs before the
 //! tick goes on, as no runner may start during it. It must not start or stop runners.
 
 use std::collections::BTreeMap;
@@ -13,7 +13,7 @@ use super::{Engine, Occupant, Shutdown};
 use crate::admission::host;
 use crate::api;
 use crate::buildcache::BuildCache;
-use crate::cache::{self, Emptied, Refused, Trimmed};
+use crate::cache::{self, Emptied, Measured, Refused, Trimmed};
 use crate::config::ByteSize;
 use crate::docker::{DockerApi, is_not_found};
 use crate::github::GithubApi;
@@ -22,6 +22,10 @@ use crate::time;
 /// How long after the shared caches' last check the next stops warm runners to run (ADR 0050). Without warm runners
 /// the check runs whenever no runner runs; warm runners can keep one running all day.
 const CHECK_EVERY: Duration = Duration::from_secs(3600);
+
+/// How long after a profile's last measure of slot 1 the next may start (ADR 0094). A profile whose slot 1 runs a
+/// job a minute would otherwise run a measure container as often, most of them to find what the last one found.
+pub(super) const MEASURE_EVERY: Duration = Duration::from_secs(600);
 
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Counts what the mirror served each runner since the last count.
@@ -49,10 +53,12 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Reseeds the idle profiles whose slot 1 ran a job, once Docker has their image; with no runner running at all,
-    /// stops the mirror and, unless shutting down, empties the shared caches over their limit.
+    /// Measures slot 1 of the profiles whose slot 1 ran a job, and reseeds the idle profiles due to reseed, once Docker
+    /// has their image; with no runner running at all, stops the mirror and, unless shutting down, empties the shared
+    /// caches over their limit.
     pub(super) async fn idle_caches(&mut self, mode: Shutdown) {
         if mode == Shutdown::No {
+            self.start_measures();
             let due: Vec<String> = self
                 .reseed_due
                 .union(&self.reseed_requested)
@@ -63,6 +69,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 })
                 // A shell mounts the snapshot a reseed replaces.
                 .filter(|name| !self.shell_profiles().contains(name.as_str()))
+                // One that measures slot 1 would read layers the reseed drops: it ends in seconds.
+                .filter(|name| !self.measures.contains_key(*name))
                 // The seed container runs the profile's image: a reseed waits for its pull, still due.
                 .filter(|name| {
                     !self
@@ -80,6 +88,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     continue;
                 }
                 self.reseed_due.remove(&name);
+                // The reseed weighs slot 1's changes itself.
+                self.measure_due.remove(&name);
                 let requested = self.reseed_requested.remove(&name);
                 let oversized = self.oversized.remove(&name);
                 self.spawn_reseed(name, requested || oversized);
@@ -129,6 +139,118 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 Ok(trimmed)
             }));
+        }
+    }
+
+    /// Measures slot 1 of each profile whose slot 1 ran a job since its last measure (`cache::measure`), once
+    /// `MEASURE_EVERY` passed since that one, while slot 1 runs no job and Docker has the profile's image. It holds
+    /// no slot and stops no runner: its container reads slot 1 and the snapshot read-only. Not for a profile already
+    /// due to reseed, or reseeding.
+    fn start_measures(&mut self) {
+        let now = tokio::time::Instant::now();
+        let due: Vec<String> = self
+            .measure_due
+            .iter()
+            .filter(|name| {
+                !self.reseed_due.contains(*name)
+                    && !self.reseed_requested.contains(*name)
+                    && !self.reseeds.contains_key(*name)
+                    && !self.measures.contains_key(*name)
+                    && self
+                        .measured_at
+                        .get(*name)
+                        .is_none_or(|at| now.duration_since(*at) >= MEASURE_EVERY)
+            })
+            // Mid-job, it would measure what the job is still changing.
+            .filter(|name| {
+                self.slots
+                    .get(*name)
+                    .and_then(|slots| slots.first())
+                    .is_some_and(|slot| {
+                        slot.as_ref()
+                            .is_none_or(|occupant| !occupant.busy && occupant.job.is_none())
+                    })
+            })
+            .filter(|name| {
+                self.config
+                    .profiles
+                    .get(*name)
+                    .is_some_and(|profile| !self.awaits_image(&profile.image))
+            })
+            .cloned()
+            .collect();
+        for name in due {
+            let Some(profile) = self.config.profiles.get(&name) else {
+                continue;
+            };
+            let docker = self.docker.clone();
+            let names = self.names.clone();
+            let image = profile.image.reference();
+            let slice = self.config.host.slice.clone();
+            let isolation = self.isolation;
+            let profile_name = name.clone();
+            let task = tokio::spawn(async move {
+                cache::measure(
+                    &*docker,
+                    &cache::Measure {
+                        names: &names,
+                        profile: &profile_name,
+                        image: &image,
+                        slice: &slice,
+                        isolation,
+                    },
+                )
+                .await
+            });
+            self.measure_due.remove(&name);
+            self.measured_at.insert(name.clone(), now);
+            self.measures.insert(name, task);
+        }
+    }
+
+    /// Takes in the measures of slot 1 that ended: a profile whose slot 1 changed `reseed_at` or more, whose last
+    /// reseed did not finish, or whose measure failed, is due to reseed, which its upkeep then stops its runners for.
+    /// One that changed less keeps them: a reseed would change nothing.
+    pub(super) async fn collect_measures(&mut self) {
+        let finished: Vec<String> = self
+            .measures
+            .iter()
+            .filter(|(_, task)| task.is_finished())
+            .map(|(name, _)| name.clone())
+            .collect();
+        let reseed_at = self.config.caches.reseed_at;
+        for name in finished {
+            let Some(task) = self.measures.remove(&name) else {
+                continue;
+            };
+            let measured = match task.await {
+                Ok(measured) => measured.map_err(|error| error.to_string()),
+                Err(error) => Err(error.to_string()),
+            };
+            // A reload removed the profile meanwhile.
+            if !self.config.profiles.contains_key(&name) {
+                continue;
+            }
+            match measured {
+                Ok(Measured::Changed(bytes)) if bytes < reseed_at.0 => {
+                    info!(
+                        "{name}: slot 1 changed {}, under reseed_at ({reseed_at}): no reseed",
+                        ByteSize(bytes)
+                    );
+                    continue;
+                }
+                Ok(Measured::Changed(bytes)) => info!(
+                    "{name}: slot 1 changed {}, reseed_at ({reseed_at}) or more: reseeding once its runners are idle",
+                    ByteSize(bytes)
+                ),
+                Ok(Measured::Unfinished) => info!(
+                    "{name}: its last reseed did not finish: reseeding once its runners are idle"
+                ),
+                Err(error) => warn!(
+                    "{name}: cannot measure what slot 1 changed, so its runners stop for a reseed that does: {error}"
+                ),
+            }
+            self.reseed_due.insert(name);
         }
     }
 

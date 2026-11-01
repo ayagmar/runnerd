@@ -198,14 +198,17 @@ queued → slot → container → removed
    ([ADR 0057](docs/adr/0057-name-what-holds-the-hosts-memory.md))), and the
    mirror's bytes from its access log (`observe::mirror`), and the build cache's counts when the runner is removed. The record is final once GitHub reports the job completed
    and the container is gone, or 15 minutes after the container is gone (`lost`).
-6. When a profile is idle after its slot 1 ran a job, or after the caches' check measured its snapshot over
-   `[caches] snapshot_max`, `cache::reseed` makes slot 1's layers the profile's snapshot, which starts over above
-   that limit, from the image ([ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md),
+6. After a job in slot 1, `cache::measure` reads what slot 1's layers changed, read-only beside the profile's runners,
+   at most every 10 minutes per profile. When that reaches `[caches] reseed_at`, the last reseed did not finish or the
+   measure failed, or the caches' check measured the snapshot over `[caches] snapshot_max`, the profile is due to
+   reseed: once it is idle, `cache::reseed` makes slot 1's layers the profile's snapshot, which starts over above
+   that limit, from the image ([ADR 0094](docs/adr/0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md),
+   [ADR 0041](docs/adr/0041-snapshot-and-mirror-limits.md),
    [ADR 0065](docs/adr/0065-a-snapshot-starts-over-from-the-image.md)). What slot 1's jobs deleted of the image goes
    in whiteouts beside the snapshot ([ADR 0067](docs/adr/0067-whiteouts-of-the-image-beside-the-snapshot.md)).
 
-On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`) and schedules
-nothing until Docker has listed them. A running runner in a slot, profile or repository the config no longer has is
+On start the engine adopts the runner and seed containers a previous daemon left (`Engine::recover`), removes its
+measure containers, and schedules nothing until Docker has listed them. A running runner in a slot, profile or repository the config no longer has is
 adopted too and drains as it would after a reload. An idle one another release started (its `runnerd.spec` label) is
 replaced at the first tick. A stopped runner whose failed job has no record yet becomes that record, its job read from
 the history or, if the history never saw it, from the stopped container's `_diag` Worker log.
@@ -298,8 +301,9 @@ always returns, so the daemon closes and flushes the history.
   ([ADR 0058](docs/adr/0058-a-repository-served-by-several-profiles.md)).
 - A warm runner never holds back a queued job: it starts only with room no job waits for, and gives a job its slot,
   memory and CPU.
-- A warm runner never holds back upkeep: a reseed, or the shared caches' check an hour after the last, stops idle
-  warm runners and starts none until it runs. A due reseed whose seed would not fit even once they stop leaves
+- A warm runner never holds back upkeep: a due reseed, or the shared caches' check an hour after the last, stops
+  idle warm runners and starts none until it runs. A reseed is due only when it will replace the snapshot; measuring
+  that stops nothing ([ADR 0094](docs/adr/0094-upkeep-stops-runners-only-for-a-reseed-that-will-happen.md)). A due reseed whose seed would not fit even once they stop leaves
   them waiting ([ADR 0063](docs/adr/0063-a-warm-runners-room-pays-the-hosts-deficit-first.md)).
 - A runner never mounts a slot's changes over a snapshot other than the one they were made against: `seed.sh` keeps
   `/base/.reseeding` from its first change to its last, a runner that finds it uses the image alone, and the next
