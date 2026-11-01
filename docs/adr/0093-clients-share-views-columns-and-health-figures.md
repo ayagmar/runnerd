@@ -22,8 +22,10 @@ figures with different words. `runnerctl job` worded a job's totals a third way.
   `runnerctl job`.
 - A job's age in a list is when it was queued, in every client.
 - The dashboard's records have a page of their own, `/records`, as the TUI has a view.
-- `check-boundaries.sh` fails when a client writes a view's name as a string literal instead of calling
-  `View::title`; the parity tests of each client assert the order of its views and the names of its columns.
+- The TUI's tabs and number keys come from `View::ALL`, in core's order, leaving out the views it lacks. What the
+  build cache did for a job is worded by `BuildCacheActivity`, in full or as `short_line` for a line with little room.
+- `check-boundaries.sh` fails when a client writes a view's name or a fragment of the build cache's wording as a
+  string literal; the parity tests of each client assert the order of its views and the names of its columns.
 
 ## Consequences
 

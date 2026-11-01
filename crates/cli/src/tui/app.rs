@@ -196,6 +196,36 @@ pub(crate) enum View {
     Job,
 }
 
+impl View {
+    /// The views the TUI has, in core's order, each with core's name for it: tab `n` and key `n` open the `n`th. A
+    /// view core lists that the TUI lacks is left out, and a view added to core fails to compile here until it is
+    /// either drawn or left out.
+    pub(crate) fn tabs() -> Vec<(runnerd_core::api::View, View)> {
+        View::tabs_of(&runnerd_core::api::View::ALL)
+    }
+
+    /// [`View::tabs`] for `order`, a list of core's views.
+    pub(crate) fn tabs_of(
+        order: &[runnerd_core::api::View],
+    ) -> Vec<(runnerd_core::api::View, View)> {
+        use runnerd_core::api::View as Core;
+        order
+            .iter()
+            .copied()
+            .filter_map(|view| {
+                let ours = match view {
+                    Core::Overview => View::Overview,
+                    Core::History => View::History,
+                    Core::Records => View::Records,
+                    Core::Sizing => View::Sizing,
+                    Core::Insights | Core::Caches | Core::Config => return None,
+                };
+                Some((view, ours))
+            })
+            .collect()
+    }
+}
+
 /// The overview's list that takes the selection keys.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub(crate) enum Pane {
@@ -805,10 +835,14 @@ impl App {
         match key.code {
             KeyCode::Char('q') => return vec![Effect::Quit],
             KeyCode::Char('?') => self.help = true,
-            KeyCode::Char('1' | 'o') => return self.show(View::Overview),
-            KeyCode::Char('2' | 'h') => return self.show(View::History),
-            KeyCode::Char('3') => return self.show(View::Records),
-            KeyCode::Char('4') => return self.show(View::Sizing),
+            KeyCode::Char('o') => return self.show(View::Overview),
+            KeyCode::Char('h') => return self.show(View::History),
+            KeyCode::Char(digit @ '1'..='9') => {
+                let tab = usize::from(u8::try_from(digit).unwrap_or(b'1') - b'1');
+                if let Some((_, view)) = View::tabs().get(tab) {
+                    return self.show(*view);
+                }
+            }
             KeyCode::Esc if self.view == View::Job => return self.show(self.back),
             KeyCode::Tab => self.next_pane(Direction::Forward),
             KeyCode::BackTab => self.next_pane(Direction::Backward),

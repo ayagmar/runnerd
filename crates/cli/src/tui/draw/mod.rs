@@ -136,18 +136,10 @@ pub(crate) fn draw(frame: &mut Frame<'_>, app: &App, now: u64, theme: Theme) {
     }
 }
 
-/// The views the TUI has, in core's order; the others are the dashboard's and `runnerctl`'s.
-const TABS: [(api::View, View); 4] = [
-    (api::View::Overview, View::Overview),
-    (api::View::History, View::History),
-    (api::View::Records, View::Records),
-    (api::View::Sizing, View::Sizing),
-];
-
 fn header(frame: &mut Frame<'_>, area: Rect, app: &App, theme: Theme) {
     let mut spans = vec![Span::styled(" runnerd ", bold())];
     let version = Span::styled(format!("{}  ", app.live.status.version), theme.dim());
-    for (key, (shown, view)) in (1..).zip(TABS) {
+    for (key, (shown, view)) in (1..).zip(View::tabs()) {
         let style = if app.view == view {
             selected()
         } else {
