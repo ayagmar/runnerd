@@ -674,23 +674,27 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Notes that a runner of `repository`'s pool in `profile` may have taken one of its listed jobs without the
-    /// engine knowing which (`RepositoryState::unnamed`).
+    /// engine knowing which (`Claims::unnamed`).
     pub(super) fn spend(&mut self, repository: &str, profile: &str) {
         let listing = self.listing;
-        if let Some(state) = self.repositories.get_mut(repository) {
-            state.unnamed.push(super::Unnamed {
+        self.claims
+            .entry(repository.to_owned())
+            .or_default()
+            .unnamed
+            .push(super::Unnamed {
                 profile: profile.to_owned(),
                 listing,
             });
-        }
     }
 
-    /// Notes that a runner of this machine took `job` of `repository` and is gone (`RepositoryState::consumed`).
+    /// Notes that a runner of this machine took `job` of `repository` and is gone (`Claims::consumed`).
     pub(super) fn consume(&mut self, repository: &str, job: u64) {
         let listing = self.listing;
-        if let Some(state) = self.repositories.get_mut(repository) {
-            state.consumed.insert(job, listing);
-        }
+        self.claims
+            .entry(repository.to_owned())
+            .or_default()
+            .consumed
+            .insert(job, listing);
     }
 
     /// The jobs `pool`'s repository's last listing showed queued that may still want a runner (ADR 0018, 0095).
@@ -705,6 +709,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         taken: &BTreeSet<u64>,
     ) -> Vec<QueuedJob> {
         let state = &self.repositories[&pool.name];
+        let claims = self.claims.get(&pool.name);
         let busy = self
             .slots
             .get(&pool.profile)
@@ -715,16 +720,19 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 occupant.repository == pool.name && occupant.newly_busy && occupant.job.is_none()
             })
             .count();
-        let gone = state
-            .unnamed
-            .iter()
+        let gone = claims
+            .into_iter()
+            .flat_map(|claims| &claims.unnamed)
             .filter(|claim| claim.profile == pool.profile)
             .count();
         let unnamed = busy + gone;
         let mut queued: Vec<QueuedJob> = state
             .queued
             .iter()
-            .filter(|job| !taken.contains(&job.id) && !state.consumed.contains_key(&job.id))
+            .filter(|job| {
+                !taken.contains(&job.id)
+                    && !claims.is_some_and(|claims| claims.consumed.contains_key(&job.id))
+            })
             .cloned()
             .collect();
         let claimed: BTreeSet<u64> = {
@@ -939,13 +947,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     Vec::new()
                 }
             };
-            if let Some(state) = self.repositories.get_mut(&repository) {
-                if listed {
-                    state.unnamed.retain(|claim| claim.listing >= listing);
-                    state.consumed.retain(|job, since| {
-                        *since >= listing || queued.iter().any(|q| q.id == *job)
-                    });
+            if listed && let Some(claims) = self.claims.get_mut(&repository) {
+                claims.unnamed.retain(|claim| claim.listing >= listing);
+                claims
+                    .consumed
+                    .retain(|job, since| *since >= listing || queued.iter().any(|q| q.id == *job));
+                if claims.unnamed.is_empty() && claims.consumed.is_empty() {
+                    self.claims.remove(&repository);
                 }
+            }
+            if let Some(state) = self.repositories.get_mut(&repository) {
                 state.queued = queued;
                 state.listed = listed;
             } else {

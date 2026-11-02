@@ -321,20 +321,26 @@ struct Unnamed {
     listing: u64,
 }
 
+/// What a repository's listings may show queued that this machine's runners took (ADR 0018, 0095). It outlives the
+/// repository's removal from the config: a listing begun before the removal may answer after it is added back.
+#[derive(Debug, Default)]
+struct Claims {
+    /// Its runners gone that may have taken a listed job without the engine knowing which: one ended before its
+    /// log capture named its job, or one whose start failed may have run. Each counts against one listed job of its
+    /// pool until a listing begun after it went answers.
+    unnamed: Vec<Unnamed>,
+    /// The jobs this machine's runners took whose runners are gone, by the `listing` begun last when they went:
+    /// GitHub lists a job queued for a while after a runner took it, so a listing begun before that, or one GitHub
+    /// lags on, still shows it. A listing begun after that and showing it no longer drops it.
+    consumed: BTreeMap<u64, u64>,
+}
+
 /// A repository's state, shared by its pools but for their holds and what they wait for CPU.
 #[derive(Debug, Default)]
 struct RepositoryState {
     queued: Vec<QueuedJob>,
     /// Whether the last poll of its queued jobs succeeded.
     listed: bool,
-    /// Its runners gone that may have taken a job of `queued` without the engine knowing which: one ended before its
-    /// log capture named its job, or one whose start failed may have run. Each counts against one listed job of its
-    /// pool until a listing begun after it went answers (ADR 0018, 0095).
-    unnamed: Vec<Unnamed>,
-    /// The jobs this machine's runners took whose runners are gone, by the `listing` begun last when they went:
-    /// GitHub lists a job queued for a while after a runner took it, so a listing begun before that, or one GitHub
-    /// lags on, still shows it. A listing begun after that and showing it no longer drops it.
-    consumed: BTreeMap<u64, u64>,
     /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
     /// not hold back the others (ADR 0058).
     holds: BTreeMap<String, PoolHold>,
@@ -498,8 +504,10 @@ pub struct Engine<G = Github, D = Docker> {
     /// pass the event wakes while the tick waits for GitHub starts runners into their room.
     released: BTreeSet<String>,
     /// How many times the engine began listing GitHub's queued jobs: the listing each answer comes from, and how
-    /// old a claim on a listed job is (`RepositoryState::unnamed`, `consumed`).
+    /// old a claim on a listed job is (`Claims`).
     listing: u64,
+    /// By repository, the jobs its listings may show that this machine's runners took.
+    claims: BTreeMap<String, Claims>,
     /// The second in the name of the last runner the engine named: the next one's is later, so no two runners share
     /// a name, which GitHub, Docker and the history know them by. A restart takes it from the containers and the
     /// history, so a name ahead of the clock, or a clock that stepped back, is not used again.
@@ -638,6 +646,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             released: BTreeSet::new(),
             listing: 0,
             named: 0,
+            claims: BTreeMap::new(),
         };
         engine.publish();
         (

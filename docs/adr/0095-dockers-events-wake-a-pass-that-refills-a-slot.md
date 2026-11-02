@@ -56,10 +56,11 @@ what happened meanwhile, and Docker keeps no history to ask again.
   that job. Before it plans, the pass applies the jobs captures named since; it leaves out the jobs runners in slots
   run and those of runners released since, until a listing begun after the release no longer shows them. A runner
   that ended with no job named and not known idle, or whose start failed once Docker may have started it, counts
-  against one listed job of its pool until a listing begun after it; ticks plan with the same rule. A runner a
-  listing shows busy for the first time, whose capture has not named its job yet, counts against one of its pool's
-  listed jobs; this also closed a twin a
-  poll could start before, with a capture that failed. What a cached listing cannot know: a job cancelled or taken by
+  against one listed job of its pool until a listing begun after it; ticks plan with the same rule. These claims
+  outlive a repository's removal from the config, since a listing begun before the removal may answer once it is
+  added back. A runner a listing shows busy for the first time, whose capture has not named its job yet, counts
+  against one of its pool's listed jobs; this also closed a twin a poll could start before, with a capture that
+  failed. What a cached listing cannot know: a job cancelled or taken by
   another machine since it may get a runner. That runner waits as any idle runner does: it takes the next job of its
   labels, yields its room to a queued job, or stops after `IDLE_TIMEOUT`, as one a tick started just before the job
   went did.

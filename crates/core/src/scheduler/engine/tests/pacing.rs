@@ -826,3 +826,83 @@ async fn a_runner_whose_capture_named_its_job_shows_running_before_the_next_poll
     handle.shutdown(Shutdown::Force);
     run.await.unwrap();
 }
+
+/// With one slot, job 2 of `o/r` waits behind job 1's runner. A poll lists `o/r`'s queue, job 2 in it, while `o/s`'s
+/// listing waits; meanwhile job 1 ends, a pass starts a runner that takes job 2 and names it, that runner ends too,
+/// and `o/r` is removed from the config and added back. The bug it catches: the engine forgetting with the
+/// repository that this machine ran job 2, so the listing that began before, once it answers, started a second
+/// runner for it.
+#[tokio::test(start_paused = true)]
+async fn a_repository_removed_and_added_back_keeps_what_its_runners_took() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().captures_wait = Some(github.clone());
+    running_job(&github, &docker, "o/r", 1, 1);
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(2)];
+        state.queued_on.insert(2, "o/r".to_owned());
+        let mut running = details(1, "in_progress", None);
+        running.runner_name = Some(state.runners[0].name.clone());
+        state.jobs.insert(1, running);
+    }
+    let dir = TestDir::new("readded");
+    let config = two_repositories().replace("slots = 2", "slots = 1");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let run = tokio::spawn(engine.run());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    github.hold_queued("o/s");
+    // The next poll: `o/r`'s queue answers with job 2, `o/s`'s waits.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let first = github.0.lock().unwrap().runners[0].name.clone();
+    complete(&github, 1, &first);
+    stop_container(&docker, "container-1");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let calls = github.calls();
+    let started = registered(&calls);
+    assert_eq!(
+        started.len(),
+        1,
+        "a pass started a runner for job 2: {calls:?}"
+    );
+    let second = started[0].strip_prefix("register ").unwrap().to_owned();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .container_captures
+        .insert(second.clone(), "@@job 2 2\n".to_owned());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    complete(&github, 2, &second);
+    stop_container(&docker, &second);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    for config in [
+        config.replace("name = \"o/r\"", "name = \"o/t\""),
+        config.clone(),
+    ] {
+        handle
+            .control
+            .replace_config(
+                Config::parse(&config).unwrap(),
+                None,
+                None,
+                Commit::new(|| Ok(None)),
+                RunningSlots::Keep,
+                Author::Owner,
+            )
+            .await
+            .unwrap();
+    }
+    // GitHub still lists job 2 queued, as it does for a while after a runner took it.
+    github.0.lock().unwrap().queued = vec![job(2)];
+    github.release_queued();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "job 2 got one runner: {:?}",
+        github.calls()
+    );
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+}
