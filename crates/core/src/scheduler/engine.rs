@@ -764,8 +764,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Waits until the next tick in `mode` is `due`, or something calls for one sooner: a wake-up or a command.
-    /// Runners Docker says stopped meanwhile are released by passes, and finished records collected, both leaving
-    /// `due` as it is; during a stop they call for the tick instead, which a detach does not wait for runners.
+    /// Runners Docker says stopped meanwhile are released by passes, finished records collected and the jobs
+    /// captures name noted, all leaving `due` as it is; during a stop they call for the tick instead, which a detach does not wait for runners.
     async fn wait_for_tick(&mut self, mode: Shutdown, due: tokio::time::Instant) {
         loop {
             let exits = self.exits.clone();
@@ -786,6 +786,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     if mode != Shutdown::No || self.stopping() != mode {
                         return;
                     }
+                }
+                // A capture named its runner's job: status says the runner runs it now, not after the next poll.
+                Some(found) = self.found.1.recv() => {
+                    self.note_found(&found);
+                    self.publish();
                 }
                 () = exits.noted(), if mode != Shutdown::Detach => {
                     if mode != Shutdown::No {
@@ -843,7 +848,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// waits for a slow GitHub no longer than for the command before it. A tick follows each such command, as one
     /// follows a command answered between ticks. The task goes on while a command runs: a request's timeout runs on
     /// the clock, not on polls. With `Meanwhile::Turnover`, runners Docker says stopped are released and their slots
-    /// taken meanwhile too (`turnover`, ADR 0095), so a tick's wait for GitHub does not hold them.
+    /// taken meanwhile too (`turnover`, ADR 0095), so a tick's wait for GitHub does not hold them, and the jobs
+    /// captures name are noted as they come.
     async fn serving<T: Send + 'static>(
         &mut self,
         work: impl Future<Output = T> + Send + 'static,
@@ -870,6 +876,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
                 () = exits.noted(), if meanwhile == Meanwhile::Turnover => {
                     self.turnover().await;
+                    self.publish();
+                }
+                Some(found) = self.found.1.recv(), if meanwhile == Meanwhile::Turnover => {
+                    self.note_found(&found);
                     self.publish();
                 }
             }

@@ -791,3 +791,38 @@ async fn a_slow_release_does_not_hold_back_another_slots_next_runner() {
         run.await.unwrap();
     }
 }
+
+/// A runner started for job 1 takes it, and its capture names it, with the next poll an hour away. The bug it
+/// catches: status showing the runner starting, still waiting for its job, until the next listing said it was busy.
+#[tokio::test(start_paused = true)]
+async fn a_runner_whose_capture_named_its_job_shows_running_before_the_next_poll() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    docker.0.lock().unwrap().captures_wait = Some(github.clone());
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let dir = TestDir::new("named-job-status");
+    let config = CONFIG.replace("[host]\n", "[host]\npoll_interval = \"1h\"\n");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let run = tokio::spawn(engine.run());
+    let state = |handle: &Handle| {
+        let status = handle.status.borrow();
+        api::Status::slot_state(&status.profiles[0], &status.profiles[0].slots[0])
+    };
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    assert_eq!(state(&handle).word(), "starting", "{:?}", docker.calls());
+
+    let name = registered(&github.calls())[0]
+        .strip_prefix("register ")
+        .unwrap()
+        .to_owned();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .container_captures
+        .insert(name, "@@job 1 1\n".to_owned());
+    tokio::time::sleep(Duration::from_secs(1)).await;
+    assert_eq!(state(&handle).word(), "running");
+
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+}

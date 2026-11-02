@@ -274,30 +274,35 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Notes the jobs runners took since the last call.
     pub(super) fn take_found(&mut self) {
         while let Ok(found) = self.found.1.try_recv() {
-            self.queued_jobs.remove(&found.job);
-            let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
-                slots
-                    .iter_mut()
-                    .flatten()
-                    .find(|occupant| occupant.runner_name == found.runner)
-                    .map(|occupant| (profile, occupant))
-            }) else {
-                continue;
-            };
-            // A capture started again reports the job it reported before.
-            if occupant.job == Some(found.job) {
-                continue;
-            }
-            occupant.job = Some(found.job);
-            // A warm runner takes its job before a listing shows it queued: its run is seen here first. After a
-            // restart, `recover` noted it with its jobs' queued times. Its job is its pool's.
-            let pool = Pool {
-                repository: occupant.repository.clone(),
-                profile: profile.clone(),
-            };
-            let attempt = self.latest_attempt(found.run_id);
-            self.note_job(&pool, attempt, found.job, None, time::now_ms());
+            self.note_found(&found);
         }
+    }
+
+    /// Notes the job a runner's capture found.
+    pub(super) fn note_found(&mut self, found: &Found) {
+        self.queued_jobs.remove(&found.job);
+        let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
+            slots
+                .iter_mut()
+                .flatten()
+                .find(|occupant| occupant.runner_name == found.runner)
+                .map(|occupant| (profile, occupant))
+        }) else {
+            return;
+        };
+        // A capture started again reports the job it reported before.
+        if occupant.job == Some(found.job) {
+            return;
+        }
+        occupant.job = Some(found.job);
+        // A warm runner takes its job before a listing shows it queued: its run is seen here first. After a
+        // restart, `recover` noted it with its jobs' queued times. Its job is its pool's.
+        let pool = Pool {
+            repository: occupant.repository.clone(),
+            profile: profile.clone(),
+        };
+        let attempt = self.latest_attempt(found.run_id);
+        self.note_job(&pool, attempt, found.job, None, time::now_ms());
     }
 
     /// Follows the jobs the last poll listed queued that no runner in `taken` has; the listing recorded them.
