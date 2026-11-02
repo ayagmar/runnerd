@@ -89,12 +89,12 @@ what happened meanwhile, and Docker keeps no history to ask again.
   stopped container's removal 0.3 s), 16 jobs through 4 slots, a slot whose job ended started its next runner within
   4 s, at most 20 s while Docker's events were down (`tests/pacing.rs`). Six bursts of 40 jobs through 8 slots
   (`workload_figures`): a slot's job end to its next container start went from a median 24.5 s, p90 28.5 s, to
-  1.9 s and 3.6 s (4.4 s at most), and a job's queueing to its container's start from a median 92.1 s, p90 177.7 s,
-  to 60.8 s and 106.8 s. Jobs still wait for slots: 40 jobs outnumber 8 slots.
+  1.9 s and 3.0 s (3.8 s at most), and a job's queueing to its container's start from a median 92.1 s, p90 177.7 s,
+  to 60.0 s and 105.9 s. Jobs still wait for slots: 40 jobs outnumber 8 slots.
 - A pass lists nothing on GitHub: it asks only for the registration and the deletion each runner needs anyway. Ticks
   got shorter, as passes start many of the runners, so the next poll comes sooner after one, never sooner than
   `poll_interval`: at 15 s, 240 listings an hour at most, as before. In those bursts, per hour: queued-jobs listings
-  174 before, 212 after; runners listings 176 and 214; job reads 800 and 844; registrations 480 and 480; deletions
-  480 and 484.
+  174 before, 208 after; runners listings 176 and 210; job reads 800 and 818; registrations 480 and 480; deletions
+  480 and 492.
 - A hint that comes while a tick removes or starts runners waits for that tick's end, about 1.3 s per start left.
 - Docker's events down only slows turnover back to the poll's.
