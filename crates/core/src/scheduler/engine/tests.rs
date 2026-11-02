@@ -618,6 +618,11 @@ fn give_job(github: &FakeGithub, spec: &RunnerSpec) -> Option<u64> {
                 .queued_on
                 .get(&job.id)
                 .is_none_or(|on| on == repository)
+                // A job a stale listing still shows runs on the runner that took it.
+                && state
+                    .jobs
+                    .get(&job.id)
+                    .is_none_or(|details| details.runner_name.is_none())
                 && !job.labels.is_empty()
                 && job
                     .labels
