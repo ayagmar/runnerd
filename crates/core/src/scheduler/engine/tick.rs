@@ -391,10 +391,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
-        debug!(
+        // At info only when it started one, so the journal shows what woke each such start, one line a turnover.
+        let line = format!(
             "pass after runners ended: {freed} slots freed, {started} runners started in {}",
             seconds(began.elapsed())
         );
+        if started > 0 {
+            info!("{line}");
+        } else {
+            debug!("{line}");
+        }
     }
 
     /// Starts runners for the listed jobs into the room a pass freed; returns how many started.

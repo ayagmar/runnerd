@@ -72,7 +72,9 @@ what happened meanwhile, and Docker keeps no history to ask again.
   history's newest runner of the slot, so a name ahead of the clock, or a clock that stepped back, still yields a new
   one.
 - **The "ended" line says how long after its container stopped**, from Docker's `FinishedAt`, so the journal shows
-  the detection's share of a turnover.
+  the detection's share of a turnover. A pass that started a runner logs one line at info, saying how many slots it
+  freed and runners it started and how long it took, so the journal shows which starts an exit woke; the daemon logs
+  at info with no switch for debug lines, and one more line a turnover costs less than adding such a switch.
 
 ## Consequences
 
