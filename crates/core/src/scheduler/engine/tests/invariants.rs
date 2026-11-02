@@ -872,8 +872,8 @@ impl Case {
     }
 
     /// GitHub completes a running job, and its ephemeral runner leaves. Its stopped container's log still names the
-    /// job, as Docker keeps it until the container is removed; `no_name_twice` keeps a later runner from taking its
-    /// name and so its log.
+    /// job, as Docker keeps it until the container is removed; the engine names a slot's later runners otherwise, so
+    /// none takes its log.
     ///
     /// It also leaves GitHub's queued listing, even if `AssignListed` left it there: the harness assumes a stale
     /// listing never outlives its job. Where it does, as for a runner killed during its job's setup within GitHub's
@@ -1047,7 +1047,6 @@ impl Case {
     }
 
     async fn restart(&mut self) -> Result<(), Violation> {
-        self.no_name_twice().await;
         for (_, capture) in std::mem::take(&mut self.engine.captures) {
             capture.abort();
         }
@@ -1117,37 +1116,6 @@ impl Case {
                 self.jobs.get_mut(&id).unwrap().taken_by = None;
                 self.end_job(id, &container, "failure");
             }
-        }
-    }
-
-    /// Before a restart, waits past the second the name of every gone runner carries. An engine names a slot's
-    /// runners a second apart at least, later than the clock when the slot started more than one within a second;
-    /// a restarted one knows the names of the containers it finds, not of those removed before, and a real restart
-    /// takes longer than that, so the next runner in a slot would take a gone one's name, and the history would take
-    /// the two for one.
-    async fn no_name_twice(&mut self) {
-        let now = time::now_ms() / 1000;
-        let running: BTreeSet<String> = self
-            .running_containers()
-            .into_iter()
-            .map(|container| container.name)
-            .collect();
-        // A slot's runners are named a second apart at least, later than the wall clock when a slot started more
-        // than one within a second: the latest second a gone runner's name carries.
-        let latest = self
-            .docker
-            .0
-            .lock()
-            .unwrap()
-            .calls
-            .iter()
-            .filter_map(|call| call.strip_prefix("start "))
-            .filter(|name| !running.contains(*name))
-            .filter_map(|name| name.rsplit_once('-')?.1.parse::<u64>().ok())
-            .max();
-        if let Some(latest) = latest.filter(|latest| *latest >= now) {
-            let wait = (latest + 1) * 1000 - time::now_ms();
-            tokio::time::sleep(Duration::from_millis(wait)).await;
         }
     }
 
@@ -1764,7 +1732,7 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         Some(seed) => vec![seed],
         None => (0..env_u64("RUNNERD_INVARIANT_CASES").unwrap_or(CASES)).collect(),
     };
-    // Cases at once: each waits out seconds now and then (`Case::no_name_twice`), which the others use.
+    // Cases at once: each waits now and then for its captures, which the others use.
     for batch in seeds.chunks(64) {
         let runs = batch.iter().map(|&seed| async move {
             let steps = generate(&mut Rng(seed));

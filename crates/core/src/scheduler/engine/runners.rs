@@ -8,10 +8,11 @@ use std::time::{Duration, SystemTime};
 use futures_util::StreamExt;
 use tracing::{info, warn};
 
+use super::history::CAPTURE_DRAIN;
 use super::{DockerInStop, Engine, Occupant, Purpose, Shutdown, unix_secs};
 use crate::api::{Admission, Event, HoldCause, RunnerFailure};
 use crate::cache;
-use crate::docker::{DockerApi, RunnerSpec, is_not_found};
+use crate::docker::{self, DockerApi, RunnerSpec, is_not_found};
 use crate::github::{Deleted, GithubApi, Runner};
 use crate::record;
 use crate::scheduler::{Hold, IDLE_TIMEOUT, SlotRef, StopReason};
@@ -62,6 +63,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// on, which are a pass's.
     pub(super) async fn collect_finished(&mut self) {
         self.exits.inspecting_all();
+        self.released.clear();
         let now = tokio::time::Instant::now();
         let (due, waiting) = std::mem::take(&mut self.unread)
             .into_iter()
@@ -89,13 +91,24 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if self.stopping() == Shutdown::No && self.exits.noted_stopped(&occupant.container) {
                 continue;
             }
-            self.reap(&slot, &occupant).await;
+            if self.reap(&slot, &occupant).await {
+                self.released.insert(occupant.container);
+            }
         }
     }
 
     /// Releases a slot's runner if Docker says its container stopped or is gone; returns whether the slot is free
     /// now. Docker's say, not an event's: an event only says when to ask (ADR 0095).
     pub(super) async fn reap(&mut self, slot: &SlotRef, occupant: &Occupant) -> bool {
+        if !self.ended(occupant).await {
+            return false;
+        }
+        self.release(slot, occupant).await;
+        !self.holds_runner(slot)
+    }
+
+    /// Whether Docker says a runner's container stopped or is gone; notes a kill for memory and logs the end.
+    pub(super) async fn ended(&mut self, occupant: &Occupant) -> bool {
         let state = match self.docker.inspect(&occupant.container).await {
             Ok(state) => Some(state),
             Err(error) if is_not_found(&error) => None,
@@ -128,60 +141,113 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             "{}: {} ended{noticed}",
             occupant.repository, occupant.runner_name
         );
-        self.release(slot, occupant).await;
-        !self.holds_runner(slot)
+        true
     }
 
     /// Removes the container of a slot's runner that ended and its registration, then frees the slot. If its runner
     /// took no job, the repository's next runners are held back for a while. A container Docker fails to remove keeps
-    /// its slot (ADR 0076): the next tick tries again, and a stop leaves it to the next start.
+    /// its slot (ADR 0076): the next tick tries again, and a stop leaves it to the next start. In steps a pass runs
+    /// for several runners at once: `drain`, `record`, `remove`, `released`.
     async fn release(&mut self, slot: &SlotRef, occupant: &Occupant) {
-        // The runner logs each job it takes and how it ended; its exit code says nothing (run.sh exits 0 when it
-        // fails to start).
-        let logs = match self.docker.logs(&occupant.container).await {
-            Ok(logs) => Some(logs),
-            Err(error) => {
-                warn!("cannot read the log of {}: {error}", occupant.runner_name);
-                None
-            }
-        };
-        let took_job = logs.as_ref().map(|logs| logs.contains("Running job: "));
-        // The capture ends with the container; its last lines must be stored before the job's record closes.
-        self.end_capture(&occupant.runner_name).await;
-        self.count_mirror_bytes().await;
-        // A failed job's container is kept as its record, then removed, in the background.
-        let recorded =
-            logs.as_deref().is_some_and(record::failed) && self.begin_record(slot, occupant).await;
-        if !recorded {
-            match self.docker.remove(&occupant.container).await {
-                Err(error) if !is_not_found(&error) => {
-                    warn!("cannot remove {}: {error}", occupant.runner_name);
-                    self.docker_failed(&error);
-                    return;
+        let logs = self.drain(occupant).await;
+        let recorded = self.record(slot, occupant, logs.as_deref()).await;
+        let removed = self.remove(occupant, recorded).await;
+        self.released(slot, occupant, logs.as_deref(), removed);
+    }
+
+    /// A release's first step, on its own: reads the log of a runner that ended, then lets its capture end, which it
+    /// does with the container, within `CAPTURE_DRAIN`.
+    pub(super) fn drain(
+        &mut self,
+        occupant: &Occupant,
+    ) -> impl Future<Output = Option<String>> + Send + 'static {
+        self.take_found();
+        let capture = self.captures.remove(&occupant.runner_name);
+        let docker = self.docker.clone();
+        let (container, runner) = (occupant.container.clone(), occupant.runner_name.clone());
+        async move {
+            // The runner logs each job it takes and how it ended; its exit code says nothing (run.sh exits 0 when it
+            // fails to start).
+            let logs = match docker.logs(&container).await {
+                Ok(logs) => Some(logs),
+                Err(error) => {
+                    warn!("cannot read the log of {runner}: {error}");
+                    None
                 }
-                _ => {}
+            };
+            // The capture ends with the container; its last lines must be stored before the job's record closes.
+            if let Some(mut task) = capture
+                && tokio::time::timeout(CAPTURE_DRAIN, &mut task)
+                    .await
+                    .is_err()
+            {
+                task.abort();
             }
+            logs
         }
-        match self
-            .github
-            .delete_runner(&occupant.repository, occupant.runner_id)
-            .await
-        {
+    }
+
+    /// A release's second step: whether a failed job's container is kept as its record, which is then removed in the
+    /// background.
+    pub(super) async fn record(
+        &mut self,
+        slot: &SlotRef,
+        occupant: &Occupant,
+        logs: Option<&str>,
+    ) -> bool {
+        self.take_found();
+        self.count_mirror_bytes().await;
+        logs.is_some_and(record::failed) && self.begin_record(slot, occupant).await
+    }
+
+    /// A release's third step, on its own: removes the container, unless it is `recorded`, then deletes the
+    /// runner's registration.
+    pub(super) fn remove(
+        &self,
+        occupant: &Occupant,
+        recorded: bool,
+    ) -> impl Future<Output = Result<(), docker::Error>> + Send + 'static {
+        let (docker, github) = (self.docker.clone(), self.github.clone());
+        let (container, runner) = (occupant.container.clone(), occupant.runner_name.clone());
+        let (repository, runner_id) = (occupant.repository.clone(), occupant.runner_id);
+        async move {
+            if !recorded {
+                match docker.remove(&container).await {
+                    Err(error) if !is_not_found(&error) => return Err(error),
+                    _ => {}
+                }
+            }
             // Busy: left to the next poll's cleanup of runners without a container.
-            Ok(_) => {}
-            Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
+            if let Err(error) = github.delete_runner(&repository, runner_id).await {
+                warn!("cannot delete {runner}: {error}");
+            }
+            Ok(())
         }
+    }
+
+    /// A release's last step, once its container's removal `removed` it: frees the slot, or keeps it if Docker failed
+    /// to remove the container.
+    pub(super) fn released(
+        &mut self,
+        slot: &SlotRef,
+        occupant: &Occupant,
+        logs: Option<&str>,
+        removed: Result<(), docker::Error>,
+    ) {
+        if let Err(error) = removed {
+            warn!("cannot remove {}: {error}", occupant.runner_name);
+            self.docker_failed(&error);
+            return;
+        }
+        let took_job = logs.map(|logs| logs.contains("Running job: "));
         // Its capture may have named its job by now.
         let job = self.occupant(slot).and_then(|now| now.job).or(occupant.job);
         self.forget(occupant);
         // Unread logs: it may have run one.
         let ran = occupant.busy || job.is_some() || took_job != Some(false);
-        // A job the last poll listed queued may be the one it ran: a pass leaves the repository to the next poll.
-        if job.is_none()
-            && took_job != Some(false)
-            && let Some(state) = self.repositories.get_mut(&occupant.repository)
-        {
-            state.spent = true;
+        // A job the last poll listed queued may be the one it ran.
+        if job.is_none() && took_job != Some(false) {
+            self.spend(&occupant.repository, &slot.profile);
         }
         if let Some(state) = self
             .repositories
@@ -451,8 +517,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Keeps a slot's runner that took a job after all: it ends as busy runners do. Unless its capture named the job,
-    /// a pass leaves its repository to the next poll, which may still list that job queued.
+    /// Keeps a slot's runner that took a job after all: it ends as busy runners do. Until its capture names the job,
+    /// it counts against one of its pool's listed jobs, which may be the one it took (`newly_busy`).
     fn keep_busy(&mut self, slot: &SlotRef) {
         if let Some(Some(entry)) = self
             .slots
@@ -461,11 +527,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         {
             entry.newly_busy = !entry.busy;
             entry.busy = true;
-            if entry.job.is_none()
-                && let Some(state) = self.repositories.get_mut(&entry.repository)
-            {
-                state.spent = true;
-            }
         }
     }
 
@@ -506,13 +567,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// After a start in `profile` that failed and left nothing in Docker, deletes its `runner`'s registration and
-    /// closes its build cache, and holds back its pool. Its runner may have taken a listed job before its container
-    /// went, which no capture names: a pass leaves the repository to the next poll.
+    /// closes its build cache, and holds back its pool.
     async fn abandon(&mut self, profile: &str, repository: &str, runner: &Runner, failure: String) {
         self.close_build_cache(&runner.name);
-        if let Some(state) = self.repositories.get_mut(repository) {
-            state.spent = true;
-        }
         if let Err(error) = self.github.delete_runner(repository, runner.id).await {
             warn!("{repository}: cannot delete {}: {error}", runner.name);
         }
@@ -607,6 +664,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 warn!("{repository}: {failure}");
                 self.recheck_image(&spec.image);
                 let Some(container) = failed.container else {
+                    // Its runner may have taken a listed job, which no capture names.
+                    if failed.may_have_run {
+                        self.spend(repository, &slot.profile);
+                    }
                     return self
                         .abandon(&slot.profile, repository, &runner, failure)
                         .await;

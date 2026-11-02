@@ -234,6 +234,9 @@ pub struct StartError {
     /// The container the start left, by ID, or by name when Docker could not say whether one exists; `None` when
     /// none does. It may run.
     pub container: Option<String>,
+    /// Whether Docker may have started the container before the start failed: its runner may have taken a job,
+    /// even if the container is gone now.
+    pub may_have_run: bool,
     /// Why the start failed.
     pub error: Error,
 }
@@ -415,7 +418,7 @@ pub struct Docker {
 impl Docker {
     /// Removes the container a failed start `made`, if any; the start's `error` is the one worth reporting. The
     /// container stays in the answer unless its removal is confirmed.
-    async fn clean_up(&self, made: Option<String>, error: Error) -> StartError {
+    async fn clean_up(&self, made: Option<String>, error: Error, may_have_run: bool) -> StartError {
         let container = match made {
             Some(container) => match self.remove(&container).await {
                 Err(failed) if !is_not_found(&failed) => Some(container),
@@ -423,7 +426,11 @@ impl Docker {
             },
             None => None,
         };
-        StartError { container, error }
+        StartError {
+            container,
+            may_have_run,
+            error,
+        }
     }
 
     /// Connects to the Docker Engine at `DOCKER_HOST`, or its local socket. Only `unix://` hosts are supported.
@@ -485,6 +492,7 @@ impl DockerApi for Docker {
             Err(error) if refused(&error) => {
                 return Err(StartError {
                     container: None,
+                    may_have_run: false,
                     error,
                 });
             }
@@ -495,10 +503,11 @@ impl DockerApi for Docker {
                     Err(missing) if is_not_found(&missing) => None,
                     Err(_) => Some(spec.name.clone()),
                 };
-                return Err(self.clean_up(made, error).await);
+                // Made at most, never started.
+                return Err(self.clean_up(made, error, false).await);
             }
         };
-        let started = async {
+        let uploaded = async {
             if let Some(jit_config) = &spec.jit_config {
                 let options = UploadToContainerOptionsBuilder::new().path("/").build();
                 let tar = jit_config_tar(jit_config)?;
@@ -508,10 +517,14 @@ impl DockerApi for Docker {
                     .upload_to_container(&id, Some(options), bollard::body_stream(tar))
                     .await?;
             }
-            self.api.start_container(&id, None).await
+            Ok::<(), Error>(())
         };
-        if let Err(error) = started.await {
-            return Err(self.clean_up(Some(id), error).await);
+        if let Err(error) = uploaded.await {
+            return Err(self.clean_up(Some(id), error, false).await);
+        }
+        // A start whose answer is lost may have started it.
+        if let Err(error) = self.api.start_container(&id, None).await {
+            return Err(self.clean_up(Some(id), error, true).await);
         }
         Ok(id)
     }

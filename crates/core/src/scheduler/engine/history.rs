@@ -587,6 +587,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.leases.end(&occupant.runner_name, time::ms(now));
         if let Some(job) = job {
             self.closing.insert(job, Closing::now(&occupant.repository));
+            self.consume(&occupant.repository, job);
         }
     }
 }

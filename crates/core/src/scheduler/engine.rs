@@ -312,16 +312,29 @@ impl Occupant {
     }
 }
 
+/// A runner gone that may have taken one of its repository's listed jobs, which no capture named.
+#[derive(Debug)]
+struct Unnamed {
+    /// The profile of its pool.
+    profile: String,
+    /// The `Engine::listing` begun last when it went.
+    listing: u64,
+}
+
 /// A repository's state, shared by its pools but for their holds and what they wait for CPU.
 #[derive(Debug, Default)]
 struct RepositoryState {
     queued: Vec<QueuedJob>,
     /// Whether the last poll of its queued jobs succeeded.
     listed: bool,
-    /// Whether one of its runners may have taken a job of `queued` since that poll without the engine knowing which:
-    /// it ended or turned busy before its log capture named the job. A pass between ticks starts none of its runners
-    /// from `queued` until the next poll (ADR 0095).
-    spent: bool,
+    /// Its runners gone that may have taken a job of `queued` without the engine knowing which: one ended before its
+    /// log capture named its job, or one whose start failed may have run. Each counts against one listed job of its
+    /// pool until a listing begun after it went answers (ADR 0018, 0095).
+    unnamed: Vec<Unnamed>,
+    /// The jobs this machine's runners took whose runners are gone, by the `listing` begun last when they went:
+    /// GitHub lists a job queued for a while after a runner took it, so a listing begun before that, or one GitHub
+    /// lags on, still shows it. A listing begun after that and showing it no longer drops it.
+    consumed: BTreeMap<u64, u64>,
     /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
     /// not hold back the others (ADR 0058).
     holds: BTreeMap<String, PoolHold>,
@@ -481,6 +494,12 @@ pub struct Engine<G = Github, D = Docker> {
     exits: Arc<exits::Exits>,
     /// The task following Docker's events into `exits`, while the engine schedules.
     watcher: Option<exits::Watcher>,
+    /// The runner containers this tick's inspect found stopped and released before Docker's event for them came: a
+    /// pass the event wakes while the tick waits for GitHub starts runners into their room.
+    released: BTreeSet<String>,
+    /// How many times the engine began listing GitHub's queued jobs: the listing each answer comes from, and how
+    /// old a claim on a listed job is (`RepositoryState::unnamed`, `consumed`).
+    listing: u64,
     /// The second in the name of each slot's last runner: the next one's is later, so two runners of a slot never
     /// share a name, which GitHub and Docker know them by.
     named: BTreeMap<SlotRef, u64>,
@@ -615,6 +634,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             visibility_asking: None,
             exits: Arc::default(),
             watcher: None,
+            released: BTreeSet::new(),
+            listing: 0,
             named: BTreeMap::new(),
         };
         engine.publish();
@@ -742,9 +763,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         info!("stopped");
     }
 
-    /// Waits until the next tick in `mode` is `due`, or something calls for one sooner: a wake-up, a command or a
-    /// finished record. Runners Docker says stopped meanwhile are released by passes that leave `due` as it is;
-    /// during a stop they call for the tick instead, which a detach does not wait for.
+    /// Waits until the next tick in `mode` is `due`, or something calls for one sooner: a wake-up or a command.
+    /// Runners Docker says stopped meanwhile are released by passes, and finished records collected, both leaving
+    /// `due` as it is; during a stop they call for the tick instead, which a detach does not wait for runners.
     async fn wait_for_tick(&mut self, mode: Shutdown, due: tokio::time::Instant) {
         loop {
             let exits = self.exits.clone();
@@ -757,10 +778,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     self.publish();
                     return;
                 }
+                // Running on, a record's end changes nothing GitHub must be asked about: the next poll stays when
+                // it was due. A stop returns to see whether it is done.
                 Some(()) = self.records.finished.recv() => {
                     self.collect_recordings().await;
                     self.publish();
-                    return;
+                    if mode != Shutdown::No || self.stopping() != mode {
+                        return;
+                    }
                 }
                 () = exits.noted(), if mode != Shutdown::Detach => {
                     if mode != Shutdown::No {

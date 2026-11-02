@@ -588,6 +588,10 @@ struct DockerState {
     /// How many of the next runner containers stop as soon as they start, before `start` returns, as a runner whose
     /// configuration is broken does; Docker's events say so.
     exit_at_start: u32,
+    /// Containers whose log capture prints what it has and then never ends, as when Docker hangs on an exec.
+    stuck_captures: BTreeSet<String>,
+    /// How much longer the removal of each of these containers takes, as when Docker hangs on one.
+    slow_removes: HashMap<String, Duration>,
     calls: Vec<String>,
 }
 
@@ -623,6 +627,37 @@ struct LateFailure {
     takes_job: bool,
     /// The start's removal of its container fails too, which leaves it running.
     cleanup_fails: bool,
+}
+
+impl LateFailure {
+    /// Fails the start of container `id`, which Docker made for `spec`.
+    fn fail(self, state: &mut DockerState, spec: &RunnerSpec, id: String) -> docker::StartError {
+        // Docker gives each container a new ID; here a start that reuses the name of one that failed and left no
+        // history must not read that one's capture.
+        state.container_captures.remove(&id);
+        let job = self
+            .takes_job
+            .then(|| state.captures_wait.clone())
+            .flatten()
+            .and_then(|github| give_job(&github, spec));
+        if let Some(job) = job {
+            state
+                .container_captures
+                .insert(id.clone(), format!("@@job {job} {job}\n"));
+        }
+        state.late_started.push((id.clone(), job));
+        let container = if self.cleanup_fails {
+            Some(id)
+        } else {
+            state.containers.retain(|container| container.id != id);
+            None
+        };
+        docker::StartError {
+            container,
+            may_have_run: true,
+            error: docker::Error::RequestTimeoutError,
+        }
+    }
 }
 
 /// GitHub gives the runner `spec` registered the first queued job of its repository whose labels it has; returns
@@ -746,6 +781,7 @@ impl DockerApi for FakeDocker {
         if let Err(error) = self.outage().await {
             return Err(docker::StartError {
                 container: None,
+                may_have_run: false,
                 error,
             });
         }
@@ -759,6 +795,7 @@ impl DockerApi for FakeDocker {
         let refused = |error| {
             Err(docker::StartError {
                 container: None,
+                may_have_run: false,
                 error,
             })
         };
@@ -820,27 +857,7 @@ impl DockerApi for FakeDocker {
         let Some(late) = late else {
             return Ok(id);
         };
-        let job = late
-            .takes_job
-            .then(|| state.captures_wait.clone())
-            .flatten()
-            .and_then(|github| give_job(&github, spec));
-        if let Some(job) = job {
-            state
-                .container_captures
-                .insert(id.clone(), format!("@@job {job} {job}\n"));
-        }
-        state.late_started.push((id.clone(), job));
-        let container = if late.cleanup_fails {
-            Some(id)
-        } else {
-            state.containers.retain(|container| container.id != id);
-            None
-        };
-        Err(docker::StartError {
-            container,
-            error: docker::Error::RequestTimeoutError,
-        })
+        Err(late.fail(&mut state, spec, id))
     }
 
     async fn inspect(&self, container: &str) -> Result<RunnerState, docker::Error> {
@@ -883,7 +900,12 @@ impl DockerApi for FakeDocker {
             let running = state.containers.iter().any(|candidate| {
                 (candidate.id == container || candidate.name == container) && candidate.running
             });
-            if running {
+            let slow = state
+                .slow_removes
+                .get(container)
+                .copied()
+                .unwrap_or_default();
+            slow + if running {
                 state.latency.remove_running
             } else {
                 state.latency.remove_stopped
@@ -1027,6 +1049,12 @@ impl DockerApi for FakeDocker {
         if breaks {
             let printed = output.unwrap_or_default().into_bytes();
             return Ok(futures_util::stream::iter([Ok(printed), Err(broken())]).boxed());
+        }
+        if state.stuck_captures.contains(container) {
+            let printed = output.unwrap_or_default().into_bytes();
+            return Ok(futures_util::stream::iter([Ok(printed)])
+                .chain(futures_util::stream::pending())
+                .boxed());
         }
         if let (None, Some(github)) = (&output, state.captures_wait.clone()) {
             let outlives = state.capture_end == CaptureEnd::Container;
@@ -1446,6 +1474,49 @@ async fn a_runner_that_takes_its_job_between_polls_gets_no_twin() {
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+/// A slot's next runner is named later than every runner the slot had, across a restart too. A name carries a
+/// second, which runs ahead of the clock when a slot started more than one within a second, and is ahead of it after
+/// the clock stepped back. The bug it catches: a restarted engine giving a runner the name of an earlier one of its
+/// slot whose container is gone, which GitHub, Docker and the history (keyed by name) take for the same runner.
+#[tokio::test]
+async fn a_slots_runner_after_a_restart_is_named_later_than_every_earlier_one() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    let ahead = crate::time::now_ms() / 1000 + 3600;
+    engine.named.insert(
+        crate::scheduler::SlotRef {
+            profile: "app".to_owned(),
+            index: 0,
+        },
+        ahead,
+    );
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    drop((engine, handle));
+    // Its container went while no daemon ran.
+    docker.0.lock().unwrap().containers.clear();
+    let (mut engine, _handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+
+    let seconds: Vec<u64> = registered(&github.calls())
+        .iter()
+        .map(|call| call.rsplit_once('-').unwrap().1.parse().unwrap())
+        .collect();
+    assert_eq!(
+        seconds.len(),
+        2,
+        "slot 1 got a runner before and after: {seconds:?}"
+    );
+    assert!(
+        seconds[1] > seconds[0],
+        "the second runner is named later than the first: {seconds:?}"
+    );
 }
 
 #[tokio::test]

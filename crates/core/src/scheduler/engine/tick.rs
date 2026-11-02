@@ -16,7 +16,7 @@ use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::host;
 use crate::api::{AdmissionPolicy, Basis};
 use crate::config::Admission;
-use crate::docker::DockerApi;
+use crate::docker::{self, DockerApi};
 use crate::github::{self, Deleted, GithubApi, QueuedJob, Runner};
 use crate::observe::metrics::SAMPLE_INTERVAL;
 use crate::scheduler::{
@@ -33,14 +33,19 @@ pub(super) const CONCURRENT_REQUESTS: usize = 4;
 /// Plans a tick makes at most: its first, and those after starts that no longer fit what ran by then.
 const MAX_PLANS: usize = 3;
 
-/// How current the listings a plan reads are.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum Listing {
-    /// Polled in this tick, runners before queued jobs.
-    Current,
-    /// Polled in the last tick, read by a pass between ticks: a repository whose runner may have taken one of its
-    /// listed jobs unnamed since (`RepositoryState::spent`) has none to start for.
-    Cached,
+/// A runner a pass releases, and its log once read.
+struct Ending {
+    slot: SlotRef,
+    occupant: Occupant,
+    logs: Option<String>,
+}
+
+/// A step of a release a pass waited for.
+enum Step {
+    /// Its log read, and its capture ended: what the log says.
+    Drained(Option<String>),
+    /// Its container removed and its registration deleted, or why Docker did not remove it.
+    Removed(Result<(), docker::Error>),
 }
 
 /// What carrying out one plan did.
@@ -243,6 +248,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Shutdown::No => self.to_list(),
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => Vec::new(),
         };
+        // What a runner takes from here on, this listing may still show queued.
+        self.listing += 1;
+        let listing = self.listing;
         let listings = self
             .serving(
                 list(self.github.clone(), self.store.clone(), runners, queued),
@@ -252,7 +260,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         pace.lap(Phase::Listing);
         self.apply_runners(listings.runners).await;
         if mode == Shutdown::No {
-            self.apply_queued(listings.queued);
+            self.apply_queued(listings.queued, listing);
             self.refresh_warm().await;
             self.note_queued();
         } else {
@@ -320,36 +328,86 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// A pass between ticks for the runners Docker said stopped (ADR 0095): releases those whose containers did, as
-    /// the tick's `collect_finished` does, then starts runners for the jobs the last poll listed queued into the room
-    /// they left, without asking GitHub again. Only starts for jobs: stops, warm runners and starts that take a warm
-    /// runner's room wait for the tick, which also follows jobs and keeps the caches. The listing it plans from is
-    /// that of the runners before the queued jobs, as every tick's; jobs runners took since are left out by their
-    /// captures, while their runners hold slots and once they are gone (`closing`), and a repository whose runner
-    /// took one unnamed starts nothing until the next poll.
+    /// the tick's `collect_finished` does, and as each one's slot is free starts runners for the jobs the last poll
+    /// listed queued into the room left, without asking GitHub again. Each release keeps its steps' order, but their
+    /// waits for Docker and GitHub run side by side, so a slow one holds no other slot. Only starts for jobs: stops,
+    /// warm runners and starts that take a warm runner's room wait for the tick, which also follows jobs and keeps the
+    /// caches. The listing it plans from is that of the runners before the queued jobs, as every tick's; jobs runners
+    /// took since are left out (`listed_demand`).
     pub(super) async fn turnover(&mut self) {
         let noted = self.exits.take();
         if noted.is_empty() {
             return;
         }
         let began = tokio::time::Instant::now();
-        // The jobs captures named since: their runners are busy, and their jobs no longer queued.
-        self.take_found();
-        let stopped: Vec<(SlotRef, Occupant)> = self
+        // The tick inspected one first, in the moment before its event came: its room waits for no listing either.
+        let mut freed = noted
+            .containers
+            .iter()
+            .filter(|container| self.released.remove(*container))
+            .count();
+        let noted: Vec<(SlotRef, Occupant)> = self
             .occupied()
             .filter(|(_, occupant)| noted.any || noted.containers.contains(&occupant.container))
             .map(|(slot, occupant)| (slot, occupant.clone()))
             .collect();
-        let mut freed = 0;
-        for (slot, occupant) in stopped {
-            if self.reap(&slot, &occupant).await {
-                freed += 1;
+        let mut ended = Vec::new();
+        for (slot, occupant) in noted {
+            if self.ended(&occupant).await {
+                ended.push(Ending {
+                    slot,
+                    occupant,
+                    logs: None,
+                });
             }
         }
-        // Only the room this pass freed: the room a tick freed is its own plan's, from the listing it just made.
-        if freed == 0 || self.stopping() != Shutdown::No {
-            return;
+        let mut waits = tokio::task::JoinSet::new();
+        for (index, ending) in ended.iter().enumerate() {
+            let drained = self.drain(&ending.occupant);
+            waits.spawn(async move { (index, Step::Drained(drained.await)) });
         }
-        let (plan, mut admitting) = self.plan_from(Listing::Cached);
+        let mut started = if freed > 0 { self.refill().await } else { 0 };
+        // A wait that panicked leaves its runner in its slot, which the next tick's inspect finds again.
+        while let Some(Ok((index, step))) = waits.join_next().await {
+            let Ending {
+                slot,
+                occupant,
+                logs,
+            } = &mut ended[index];
+            match step {
+                Step::Drained(read) => {
+                    *logs = read;
+                    let recorded = self.record(slot, occupant, logs.as_deref()).await;
+                    let removed = self.remove(occupant, recorded);
+                    waits.spawn(async move { (index, Step::Removed(removed.await)) });
+                }
+                Step::Removed(removed) => {
+                    let (slot, occupant, logs) = (slot.clone(), occupant.clone(), logs.take());
+                    self.released(&slot, &occupant, logs.as_deref(), removed);
+                    if !self.holds_runner(&slot) {
+                        freed += 1;
+                        started += self.refill().await;
+                    }
+                }
+            }
+        }
+        debug!(
+            "pass after runners ended: {freed} slots freed, {started} runners started in {}",
+            seconds(began.elapsed())
+        );
+    }
+
+    /// Starts runners for the listed jobs into the room a pass freed; returns how many started.
+    async fn refill(&mut self) -> usize {
+        if self.stopping() != Shutdown::No {
+            return 0;
+        }
+        // The jobs captures named since: their runners are busy, and their jobs no longer queued.
+        self.take_found();
+        // What waiting runners reserve for the jobs listed now, as a tick raises it before its plan: a pass may run
+        // after a tick took its listing and before it did.
+        self.rereserve().await;
+        let (plan, mut admitting) = self.plan();
         let mut started = 0;
         for decision in plan.decisions {
             let for_a_job = matches!(
@@ -366,10 +424,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             started += 1;
         }
-        debug!(
-            "pass after runners ended: {freed} slots freed, {started} runners started in {}",
-            seconds(began.elapsed())
-        );
+        started
     }
 
     /// Each configured repository with the labels of its pools, whose queued jobs a tick lists.
@@ -531,13 +586,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         true
     }
 
-    /// Plans from the last poll's listings, in the tick that polled.
+    /// Plans from the last poll's listings, as they stand now.
     pub(super) fn plan(&self) -> (Plan, Admitting) {
-        self.plan_from(Listing::Current)
-    }
-
-    /// Plans from the last poll's listings, as `listing` says they are now.
-    fn plan_from(&self, listing: Listing) -> (Plan, Admitting) {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
@@ -558,7 +608,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .holds
                         .get(&repository.profile)
                         .and_then(|hold| hold.held),
-                    queued: self.listed_demand(repository, listing, &taken),
+                    queued: self.listed_demand(repository, &taken),
                     runner_memory: None,
                     runner_cpu: None,
                     cpu_waiting_since: state
@@ -617,23 +667,39 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         (plan, admitting)
     }
 
+    /// Notes that a runner of `repository`'s pool in `profile` may have taken one of its listed jobs without the
+    /// engine knowing which (`RepositoryState::unnamed`).
+    pub(super) fn spend(&mut self, repository: &str, profile: &str) {
+        let listing = self.listing;
+        if let Some(state) = self.repositories.get_mut(repository) {
+            state.unnamed.push(super::Unnamed {
+                profile: profile.to_owned(),
+                listing,
+            });
+        }
+    }
+
+    /// Notes that a runner of this machine took `job` of `repository` and is gone (`RepositoryState::consumed`).
+    pub(super) fn consume(&mut self, repository: &str, job: u64) {
+        let listing = self.listing;
+        if let Some(state) = self.repositories.get_mut(repository) {
+            state.consumed.insert(job, listing);
+        }
+    }
+
     /// The jobs `pool`'s repository's last listing showed queued that may still want a runner (ADR 0018, 0095).
-    /// GitHub lists a job queued for a few seconds after a runner took it, so not those its captures named (`taken`),
-    /// nor those of runners gone since (`closing`), which a pass's listing may be older than; and for each busy runner
-    /// of the pool whose job no capture named yet, one fewer, the oldest the pool matches: that runner's job may be
-    /// one of them. Until the capture names it, which it does within moments, a pool may get one runner too few
-    /// rather than two for one job. A pass has none for a repository whose runner may have taken one unnamed since.
+    /// GitHub lists a job queued for a while after a runner took it, and a listing may have begun before that, so
+    /// not those its captures named (`taken`), nor those of runners gone since (`consumed`); and one fewer, the oldest
+    /// the pool matches, for each runner of the pool that may have taken one no capture named: one a listing first
+    /// showed busy, and one gone since the listing began (`unnamed`). Until the job is named, a pool may get one
+    /// runner too few rather than two for one job.
     fn listed_demand(
         &self,
         pool: &crate::config::Repository,
-        listing: Listing,
         taken: &BTreeSet<u64>,
     ) -> Vec<QueuedJob> {
         let state = &self.repositories[&pool.name];
-        if listing == Listing::Cached && state.spent {
-            return Vec::new();
-        }
-        let unnamed = self
+        let busy = self
             .slots
             .get(&pool.profile)
             .into_iter()
@@ -643,10 +709,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 occupant.repository == pool.name && occupant.newly_busy && occupant.job.is_none()
             })
             .count();
+        let gone = state
+            .unnamed
+            .iter()
+            .filter(|claim| claim.profile == pool.profile)
+            .count();
+        let unnamed = busy + gone;
         let mut queued: Vec<QueuedJob> = state
             .queued
             .iter()
-            .filter(|job| !taken.contains(&job.id) && !self.closing.contains_key(&job.id))
+            .filter(|job| !taken.contains(&job.id) && !state.consumed.contains_key(&job.id))
             .cloned()
             .collect();
         let claimed: BTreeSet<u64> = {
@@ -822,9 +894,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         configured.max(running)
     }
 
-    /// Takes each repository's queued jobs from its listing. A repository a command removed meanwhile is skipped, but
-    /// the jobs its listing recorded are followed until GitHub says what became of them.
-    fn apply_queued(&mut self, listings: Vec<Listed>) {
+    /// Takes each repository's queued jobs from its listing, begun as `listing`. A repository a command removed
+    /// meanwhile is skipped, but the jobs its listing recorded are followed until GitHub says what became of them. A
+    /// claim on a listed job made after the listing began outlives it.
+    fn apply_queued(&mut self, listings: Vec<Listed>, listing: u64) {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
@@ -861,9 +934,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             };
             if let Some(state) = self.repositories.get_mut(&repository) {
+                if listed {
+                    state.unnamed.retain(|claim| claim.listing >= listing);
+                    state.consumed.retain(|job, since| {
+                        *since >= listing || queued.iter().any(|q| q.id == *job)
+                    });
+                }
                 state.queued = queued;
                 state.listed = listed;
-                state.spent = false;
             } else {
                 for job in recorded.into_iter().filter(|job| !taken.contains(job)) {
                     self.queued_jobs

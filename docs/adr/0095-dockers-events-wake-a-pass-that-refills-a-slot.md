@@ -42,27 +42,35 @@ what happened meanwhile, and Docker keeps no history to ask again.
   and events for containers no slot holds change nothing. While runnerd runs on, the tick's inspect skips the runners
   noted stopped, which the pass during its listing releases; the tick still inspects every other runner, so a
   runner whose event never came is found as before.
-- **The pass then starts runners into the room it freed, from the last listing**, asking GitHub nothing more. It
-  starts only runners for listed jobs into empty slots: no stops, no warm runners, no start that takes a warm
-  runner's room; those wait for the tick. Each start is admitted as a tick's is, and the first that no longer fits
-  ends the pass. No start begins once a stop is asked for, and a runner registered meanwhile is deleted before its
+- **The pass then starts runners into the room it freed, from the last listing**, asking GitHub nothing more. Each
+  runner's release goes on its own (its log read and failed job recorded, then its removal), and the pass plans
+  after each slot that frees, so a slow release holds back only its own slot. It starts only runners for listed jobs
+  into empty slots: no stops, no warm runners, no start that takes a warm runner's room; those wait for the tick.
+  Before it plans, it raises what idle runners reserve for the jobs listed now, as a tick does. Each start is admitted
+  as a tick's is, and the first that no longer fits ends the pass. No start begins once a stop is asked for, and a runner registered meanwhile is deleted before its
   container starts (ADR 0092).
 - **No job gets a second runner from a listing older than its first** ([ADR 0018](0018-job-identity-and-logs-from-inside-the-runner.md)).
-  The listing a pass plans from is a tick's, runners before queued jobs. Before it plans, the pass applies the jobs
-  captures named since; it leaves out the jobs runners in slots run and those of runners released since (`closing`,
-  until a listing stops showing them). A repository whose runner took a job no capture named, ended without one
-  named, or whose start failed after registering it, plans nothing from that listing until the next poll. A runner a listing shows busy for the first time,
-  whose capture has not named its job yet, counts against one of its pool's listed jobs; this also closed a twin a
+  The listing a pass plans from is a tick's, runners before queued jobs. Each listing the engine begins is numbered,
+  and only a listing begun after a fact can clear it, so one that was in flight while a runner took a job still shows
+  that job. Before it plans, the pass applies the jobs captures named since; it leaves out the jobs runners in slots
+  run and those of runners released since, until a listing begun after the release no longer shows them. A runner
+  that ended with no job named and not known idle, or whose start failed once Docker may have started it, counts
+  against one listed job of its pool until a listing begun after it; ticks plan with the same rule. A runner a
+  listing shows busy for the first time, whose capture has not named its job yet, counts against one of its pool's
+  listed jobs; this also closed a twin a
   poll could start before, with a capture that failed. What a cached listing cannot know: a job cancelled or taken by
   another machine since it may get a runner. That runner waits as any idle runner does: it takes the next job of its
   labels, yields its room to a queued job, or stops after `IDLE_TIMEOUT`, as one a tick started just before the job
   went did.
-- **GitHub is polled as before**: every `poll_interval` after a tick ends. A pass neither moves nor resets that.
+- **GitHub is polled as before**: every `poll_interval` after a tick ends. A pass neither moves nor resets that, and
+  neither does a failed job's record the pass began: the engine takes its result while it waits for the next tick.
 - **The release keeps its order** (log, failed-job record, history, removal, registration). It takes 0.6 s in the
   fakes, against 1.3 s for a start; neither dominates once the exit is seen at once.
 - **Starts stay one at a time** (ADR 0092): a pass's start is the next in line, not one in parallel.
 - **A slot's runners never share a name**: each one's name carries a second later than the slot's last, as a slot can
-  now start two within a second.
+  now start two within a second. After a restart the engine takes the slot's last from its containers and from the
+  history's newest runner of the slot, so a name ahead of the clock, or a clock that stepped back, still yields a new
+  one.
 - **The "ended" line says how long after its container stopped**, from Docker's `FinishedAt`, so the journal shows
   the detection's share of a turnover.
 

@@ -274,8 +274,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// container, go at the first poll.
     /// Changes nothing unless Docker lists both kinds and tells the caps of the runners of removed profiles, so it can
     /// be tried again.
-    /// Notes the name of a runner container found in `profile`'s slot `index`, so the slot's next runner is named
-    /// later, even within the second its name carries.
+    /// Notes the name of a runner `profile`'s slot `index` had, so the slot's next runner is named later, even
+    /// within the second its name carries or after the clock stepped back.
     fn named_before(&mut self, profile: &str, index: usize, name: &str) {
         let Some(secs) = name
             .rsplit_once('-')
@@ -449,6 +449,20 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         self.store.runner_removed(runner, time::now_ms());
                     }
                     self.closing.insert(job.id, Closing::now(&job.repository));
+                    self.consume(&job.repository, job.id);
+                }
+            }
+            Err(error) => warn!("cannot read the job history: {error}"),
+        }
+        // A slot's next runner is named later than the last it had, whose container may be gone.
+        match self.store.slot_runners().await {
+            Ok(runners) => {
+                for runner in runners {
+                    if let Some(index) = runner.slot.checked_sub(1)
+                        && runner.name.starts_with(&self.runner_prefix)
+                    {
+                        self.named_before(&runner.profile, index, &runner.name);
+                    }
                 }
             }
             Err(error) => warn!("cannot read the job history: {error}"),

@@ -580,3 +580,214 @@ async fn workload_figures() {
         );
     }
 }
+
+/// Stops a runner container and says so in Docker's events.
+fn stop_container(docker: &FakeDocker, id: &str) {
+    let mut state = docker.0.lock().unwrap();
+    for container in &mut state.containers {
+        if container.id == id {
+            container.running = false;
+        }
+    }
+    state
+        .events
+        .retain(|events| events.send(Ok(id.to_owned())).is_ok());
+}
+
+/// GitHub completes `job`, which `runner` ran, and drops the runner's registration.
+fn complete(github: &FakeGithub, job: u64, runner: &str) {
+    let mut state = github.0.lock().unwrap();
+    state.queued.retain(|queued| queued.id != job);
+    state.runners.retain(|registered| registered.name != runner);
+    let mut completed = details(job, "completed", Some("success"));
+    completed.runner_name = Some(runner.to_owned());
+    state.jobs.insert(job, completed);
+}
+
+/// A runner takes job 1 while GitHub still lists it queued, and its capture names it; the tick's read of that job
+/// waits while the job ends and a pass releases the runner, then says it completed. The bug it catches: the end of
+/// the job's history dropping the engine's knowledge that a runner of this machine took it, so the tick, still
+/// holding a listing that shows it queued, started a second runner for it.
+#[tokio::test(start_paused = true)]
+async fn a_job_that_ended_while_the_tick_read_it_gets_no_second_runner() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.captures_wait = Some(github.clone());
+        state.capture_end = CaptureEnd::Container;
+    }
+    github.0.lock().unwrap().queued = vec![job(1)];
+    let dir = TestDir::new("closing");
+    let (engine, handle) = engine_in(&github, &docker, &dir);
+    let run = tokio::spawn(engine.run());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let name = registered(&github.calls())[0]
+        .strip_prefix("register ")
+        .unwrap()
+        .to_owned();
+    {
+        let mut state = github.0.lock().unwrap();
+        for runner in &mut state.runners {
+            if runner.name == name {
+                runner.busy = true;
+            }
+        }
+        let mut running = details(1, "in_progress", None);
+        running.runner_name = Some(name.clone());
+        state.jobs.insert(1, running);
+    }
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .container_captures
+        .insert(name.clone(), "@@job 1 1\n".to_owned());
+    github.hold_jobs();
+    // The next poll lists job 1 queued still, and its read waits.
+    tokio::time::sleep(Duration::from_secs(15)).await;
+    complete(&github, 1, &name);
+    stop_container(&docker, &name);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    github.release_jobs();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "job 1 got one runner: {:?}",
+        github.calls()
+    );
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+}
+
+/// With one slot, job 2 waits behind job 1's runner. A poll lists `o/r`'s queue, job 2 in it, while `o/s`'s listing
+/// waits; meanwhile job 1 ends, a pass starts a runner that takes job 2, whose capture names nothing, and that runner
+/// ends too. The bug it catches: the listing that began before that runner took job 2 clearing the engine's
+/// suspicion of it once it answers, so the tick started a second runner for job 2.
+#[tokio::test(start_paused = true)]
+async fn a_listing_older_than_a_runners_unnamed_job_does_not_bring_the_job_back() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    running_job(&github, &docker, "o/r", 1, 1);
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued = vec![job(2)];
+        state.queued_on.insert(2, "o/r".to_owned());
+        let mut running = details(1, "in_progress", None);
+        running.runner_name = Some(state.runners[0].name.clone());
+        state.jobs.insert(1, running);
+    }
+    let dir = TestDir::new("generation");
+    let config = two_repositories().replace("slots = 2", "slots = 1");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let run = tokio::spawn(engine.run());
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    github.hold_queued("o/s");
+    // The next poll: `o/r`'s queue answers with job 2, `o/s`'s waits.
+    tokio::time::sleep(Duration::from_secs(12)).await;
+    let first = github.0.lock().unwrap().runners[0].name.clone();
+    complete(&github, 1, &first);
+    stop_container(&docker, "container-1");
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    let calls = github.calls();
+    let started = registered(&calls);
+    assert_eq!(
+        started.len(),
+        1,
+        "a pass started a runner for job 2: {calls:?}"
+    );
+    let second = started[0].strip_prefix("register ").unwrap().to_owned();
+    {
+        let mut state = github.0.lock().unwrap();
+        state.queued.clear();
+        let mut ran = details(2, "completed", Some("success"));
+        ran.runner_name = Some(second.clone());
+        state.jobs.insert(2, ran);
+        state.runners.retain(|runner| runner.name != second);
+    }
+    stop_container(&docker, &second);
+    tokio::time::sleep(Duration::from_secs(3)).await;
+    github.release_queued();
+    tokio::time::sleep(Duration::from_secs(5)).await;
+
+    assert_eq!(
+        registered(&github.calls()).len(),
+        1,
+        "job 2 got one runner: {:?}",
+        github.calls()
+    );
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+}
+
+/// How one runner's release is held up.
+#[derive(Debug, Clone, Copy)]
+enum Slow {
+    /// Its log capture never ends: the release waits out `CAPTURE_DRAIN`.
+    Capture,
+    /// Docker takes a minute to remove its container.
+    Removal,
+}
+
+/// Two runners end at once while listed jobs wait; one's release is slow. The other's slot takes the next job
+/// within seconds, and the slow one's slot stays held until Docker removed its container. The bug it catches: a pass
+/// releasing the runners one after the other before starting any, so an unrelated slow release held every slot.
+#[tokio::test(start_paused = true)]
+async fn a_slow_release_does_not_hold_back_another_slots_next_runner() {
+    for slow in [Slow::Capture, Slow::Removal] {
+        let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+        running_job(&github, &docker, "o/r", 1, 1);
+        running_job(&github, &docker, "o/r", 2, 2);
+        {
+            let mut state = github.0.lock().unwrap();
+            state.queued = vec![job(3), job(4)];
+            for id in [1, 2] {
+                let name = state.runners[usize::try_from(id - 1).unwrap()].name.clone();
+                let mut running = details(id, "in_progress", None);
+                running.runner_name = Some(name);
+                state.jobs.insert(id, running);
+            }
+        }
+        {
+            let mut state = docker.0.lock().unwrap();
+            match slow {
+                Slow::Capture => {
+                    state.stuck_captures.insert("container-1".to_owned());
+                }
+                Slow::Removal => {
+                    state
+                        .slow_removes
+                        .insert("container-1".to_owned(), Duration::from_mins(1));
+                }
+            }
+        }
+        let dir = TestDir::new("slow-release");
+        let (engine, handle) = engine_with(&github, &docker, &dir, CONFIG);
+        let run = tokio::spawn(engine.run());
+        tokio::time::sleep(Duration::from_secs(5)).await;
+        assert!(
+            registered(&github.calls()).is_empty(),
+            "both slots are busy"
+        );
+        for (id, slot) in [(1, 1), (2, 2)] {
+            let name = github.0.lock().unwrap().runners[0].name.clone();
+            complete(&github, id, &name);
+            stop_container(&docker, &format!("container-{slot}"));
+        }
+        tokio::time::sleep(Duration::from_secs(4)).await;
+
+        let calls = github.calls();
+        let started: Vec<&String> = registered(&calls);
+        assert_eq!(
+            started.len(),
+            1,
+            "{slow:?}: slot 2 took a job, slot 1 waits for its release: {calls:?}"
+        );
+        assert!(
+            started[0].contains("-app-2-"),
+            "{slow:?}: the runner started in slot 2: {started:?}"
+        );
+        handle.shutdown(Shutdown::Force);
+        run.await.unwrap();
+    }
+}

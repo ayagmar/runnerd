@@ -8,7 +8,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use tracing::warn;
 
-use super::{LogPosition, OpenJob, SlotJob};
+use super::{LogPosition, OpenJob, SlotJob, SlotRunner};
 use crate::admission::Key;
 use crate::api::{self, EventEnvelope, JobState};
 use crate::sizing;
@@ -1045,6 +1045,19 @@ pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
         })
     })?
     .collect()
+}
+
+pub(super) fn slot_runners(db: &Connection) -> rusqlite::Result<Vec<SlotRunner>> {
+    // The bare columns of a `max()` aggregate come from the row that has the maximum: the last one written.
+    db.prepare_cached("SELECT profile, slot, name, max(rowid) FROM runners GROUP BY profile, slot")?
+        .query_map([], |row| {
+            Ok(SlotRunner {
+                profile: row.get(0)?,
+                slot: row.get(1)?,
+                name: row.get(2)?,
+            })
+        })?
+        .collect()
 }
 
 pub(super) fn slot_jobs(db: &Connection) -> rusqlite::Result<Vec<SlotJob>> {

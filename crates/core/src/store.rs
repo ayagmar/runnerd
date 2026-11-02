@@ -225,6 +225,17 @@ pub struct SlotJob {
     pub key: crate::admission::Key,
 }
 
+/// The newest runner a slot had, as the history has it.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SlotRunner {
+    /// The profile the slot is in.
+    pub profile: String,
+    /// 1-based.
+    pub slot: usize,
+    /// The runner's name.
+    pub name: String,
+}
+
 /// Where a job's log capture continues: the runner's page file and the byte offset in it.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct LogPosition {
@@ -970,6 +981,11 @@ impl Store {
     /// The newest named job each slot ran, for the engine after a restart.
     pub async fn slot_jobs(&self) -> Result<Vec<SlotJob>, StoreError> {
         self.read(read::slot_jobs).await
+    }
+
+    /// The newest runner each slot had, for the engine after a restart: its next runner is named later.
+    pub async fn slot_runners(&self) -> Result<Vec<SlotRunner>, StoreError> {
+        self.read(read::slot_runners).await
     }
 
     /// The job a runner took, if the history knows it.
