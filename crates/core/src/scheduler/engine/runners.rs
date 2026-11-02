@@ -610,8 +610,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let number = slot.index + 1;
         let now = SystemTime::now();
-        let secs = unix_secs(now).max(self.named.get(slot).map_or(0, |last| last + 1));
-        self.named.insert(slot.clone(), secs);
+        let secs = unix_secs(now).max(self.named + 1);
+        self.named = secs;
         let name = self.identity.runner_name(&slot.profile, number, secs);
         if let Err(error) = cache::prepare(&*self.docker, &self.names, &slot.profile, number).await
         {

@@ -67,10 +67,12 @@ what happened meanwhile, and Docker keeps no history to ask again.
 - **The release keeps its order** (log, failed-job record, history, removal, registration). It takes 0.6 s in the
   fakes, against 1.3 s for a start; neither dominates once the exit is seen at once.
 - **Starts stay one at a time** (ADR 0092): a pass's start is the next in line, not one in parallel.
-- **A slot's runners never share a name**: each one's name carries a second later than the slot's last, as a slot can
-  now start two within a second. After a restart the engine takes the slot's last from its containers and from the
-  history's newest runner of the slot, so a name ahead of the clock, or a clock that stepped back, still yields a new
-  one.
+- **No two runners share a name**: each one's name carries a second later than the last runner the engine named, as
+  a slot can now start two within a second. After a restart the engine starts after the latest second of the names
+  its containers and its history hold, the jobs' runners included, since a job can name a runner that never got a
+  row of its own. A name ahead of the clock, or a clock that stepped back, still yields a new one. One counter for
+  every slot, rather than one per slot, needs no record of which slot used which second; starts go one at a time,
+  so it runs ahead of the clock only by the odd second.
 - **The "ended" line says how long after its container stopped**, from Docker's `FinishedAt`, so the journal shows
   the detection's share of a turnover. A pass that started a runner logs one line at info, saying how many slots it
   freed and runners it started and how long it took, so the journal shows which starts an exit woke; the daemon logs

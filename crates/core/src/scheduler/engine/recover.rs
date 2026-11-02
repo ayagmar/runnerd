@@ -55,6 +55,12 @@ impl Left {
     }
 }
 
+/// The second a runner's name carries: the engine names the next runner later, even within that second or after the
+/// clock stepped back.
+fn name_second(name: &str) -> Option<u64> {
+    name.rsplit_once('-')?.1.parse().ok()
+}
+
 /// The longest a container recovery could not decide on waits before it is asked about again.
 const UNREAD_BACKOFF_MAX: Duration = Duration::from_secs(600);
 
@@ -274,25 +280,6 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// container, go at the first poll.
     /// Changes nothing unless Docker lists both kinds and tells the caps of the runners of removed profiles, so it can
     /// be tried again.
-    /// Notes the name of a runner `profile`'s slot `index` had, so the slot's next runner is named later, even
-    /// within the second its name carries or after the clock stepped back.
-    fn named_before(&mut self, profile: &str, index: usize, name: &str) {
-        let Some(secs) = name
-            .rsplit_once('-')
-            .and_then(|(_, secs)| secs.parse::<u64>().ok())
-        else {
-            return;
-        };
-        let last = self
-            .named
-            .entry(SlotRef {
-                profile: profile.to_owned(),
-                index,
-            })
-            .or_default();
-        *last = (*last).max(secs);
-    }
-
     pub(super) async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
@@ -327,8 +314,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .parse::<usize>()
                 .ok()
                 .and_then(|slot| slot.checked_sub(1));
-            if ours && let Some(index) = index {
-                self.named_before(&profile, index, &container.name);
+            if ours && let Some(secs) = name_second(&container.name) {
+                self.named = self.named.max(secs);
             }
             let retired = retired_caps.remove(&container.id);
             let known_caps = retired.is_some() || self.config.profiles.contains_key(&profile);
@@ -454,17 +441,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             }
             Err(error) => warn!("cannot read the job history: {error}"),
         }
-        // A slot's next runner is named later than the last it had, whose container may be gone.
-        match self.store.slot_runners().await {
-            Ok(runners) => {
-                for runner in runners {
-                    if let Some(index) = runner.slot.checked_sub(1)
-                        && runner.name.starts_with(&self.runner_prefix)
-                    {
-                        self.named_before(&runner.profile, index, &runner.name);
-                    }
-                }
-            }
+        // The next runner is named later than every one the history names, whose containers may be gone.
+        match self
+            .store
+            .last_runner_second(self.runner_prefix.clone())
+            .await
+        {
+            Ok(secs) => self.named = self.named.max(secs.unwrap_or_default()),
             Err(error) => warn!("cannot read the job history: {error}"),
         }
         // The slots' layers outlive the daemon, and so does what ran last in each.

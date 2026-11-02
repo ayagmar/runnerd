@@ -8,7 +8,7 @@ use rusqlite::types::Value;
 use rusqlite::{Connection, OptionalExtension, Row, params, params_from_iter};
 use tracing::warn;
 
-use super::{LogPosition, OpenJob, SlotJob, SlotRunner};
+use super::{LogPosition, OpenJob, SlotJob};
 use crate::admission::Key;
 use crate::api::{self, EventEnvelope, JobState};
 use crate::sizing;
@@ -1047,17 +1047,17 @@ pub(super) fn open_jobs(db: &Connection) -> rusqlite::Result<Vec<OpenJob>> {
     .collect()
 }
 
-pub(super) fn slot_runners(db: &Connection) -> rusqlite::Result<Vec<SlotRunner>> {
-    // The bare columns of a `max()` aggregate come from the row that has the maximum: the last one written.
-    db.prepare_cached("SELECT profile, slot, name, max(rowid) FROM runners GROUP BY profile, slot")?
-        .query_map([], |row| {
-            Ok(SlotRunner {
-                profile: row.get(0)?,
-                slot: row.get(1)?,
-                name: row.get(2)?,
-            })
-        })?
-        .collect()
+pub(super) fn last_runner_second(db: &Connection, prefix: &str) -> rusqlite::Result<Option<u64>> {
+    // A name ends in its second: the digits after the last `-`. A job names its runner even when the runner never
+    // got a row, as when Docker never let the engine inspect it.
+    db.prepare_cached(
+        "SELECT max(CAST(substr(name, length(rtrim(name, '0123456789')) + 1) AS INTEGER)) FROM (
+            SELECT name FROM runners WHERE substr(name, 1, length(?1)) = ?1
+            UNION ALL
+            SELECT runner AS name FROM jobs WHERE substr(runner, 1, length(?1)) = ?1
+        )",
+    )?
+    .query_row([prefix], |row| row.get(0))
 }
 
 pub(super) fn slot_jobs(db: &Connection) -> rusqlite::Result<Vec<SlotJob>> {

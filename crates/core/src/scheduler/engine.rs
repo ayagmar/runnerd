@@ -500,9 +500,10 @@ pub struct Engine<G = Github, D = Docker> {
     /// How many times the engine began listing GitHub's queued jobs: the listing each answer comes from, and how
     /// old a claim on a listed job is (`RepositoryState::unnamed`, `consumed`).
     listing: u64,
-    /// The second in the name of each slot's last runner: the next one's is later, so two runners of a slot never
-    /// share a name, which GitHub and Docker know them by.
-    named: BTreeMap<SlotRef, u64>,
+    /// The second in the name of the last runner the engine named: the next one's is later, so no two runners share
+    /// a name, which GitHub, Docker and the history know them by. A restart takes it from the containers and the
+    /// history, so a name ahead of the clock, or a clock that stepped back, is not used again.
+    named: u64,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -636,7 +637,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             watcher: None,
             released: BTreeSet::new(),
             listing: 0,
-            named: BTreeMap::new(),
+            named: 0,
         };
         engine.publish();
         (

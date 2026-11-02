@@ -1489,13 +1489,7 @@ async fn a_slots_runner_after_a_restart_is_named_later_than_every_earlier_one() 
     let (mut engine, handle) = engine_in(&github, &docker, &dir);
     engine.recover().await.unwrap();
     let ahead = crate::time::now_ms() / 1000 + 3600;
-    engine.named.insert(
-        crate::scheduler::SlotRef {
-            profile: "app".to_owned(),
-            index: 0,
-        },
-        ahead,
-    );
+    engine.named = ahead;
     github.0.lock().unwrap().queued = vec![job(1)];
     engine.tick(Shutdown::No).await;
     handle.store.flush().await;
@@ -1518,6 +1512,95 @@ async fn a_slots_runner_after_a_restart_is_named_later_than_every_earlier_one() 
     assert!(
         seconds[1] > seconds[0],
         "the second runner is named later than the first: {seconds:?}"
+    );
+}
+
+/// One slot. Runner A, named an hour ahead of the clock, runs job 1 and gets its history row. Runner B, named a second
+/// after A, takes job 2 while Docker answers none of its inspects, so only job 2's record names it; it ends, and a
+/// restart finds no container. The bug it catches: the restarted engine naming its next runner after A, which gave
+/// it B's name, so job 2's record took the new runner for its own.
+#[tokio::test]
+async fn a_runner_only_a_jobs_record_names_keeps_its_name_across_a_restart() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    let config = CONFIG.replace("slots = 2", "slots = 1");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    engine.named = crate::time::now_ms() / 1000 + 3600;
+    let names = |github: &FakeGithub| -> Vec<String> {
+        registered(&github.calls())
+            .iter()
+            .map(|call| call.strip_prefix("register ").unwrap().to_owned())
+            .collect()
+    };
+    let run = |github: &FakeGithub, docker: &FakeDocker, id: u64, runner: &str| {
+        let mut state = github.0.lock().unwrap();
+        state.queued.retain(|queued| queued.id != id);
+        for registered in &mut state.runners {
+            if registered.name == runner {
+                registered.busy = true;
+            }
+        }
+        let mut running = details(id, "in_progress", None);
+        running.runner_name = Some(runner.to_owned());
+        state.jobs.insert(id, running);
+        drop(state);
+        docker
+            .0
+            .lock()
+            .unwrap()
+            .container_logs
+            .insert(runner.to_owned(), "Running job: build\n".to_owned());
+    };
+    let stop = |engine: &mut Engine<FakeGithub, FakeDocker>, docker: &FakeDocker, runner: &str| {
+        for container in &mut docker.0.lock().unwrap().containers {
+            if container.id == runner {
+                container.running = false;
+            }
+        }
+        engine.exits.stopped(runner.to_owned());
+    };
+
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    let a = names(&github)[0].clone();
+    run(&github, &docker, 1, &a);
+    stop(&mut engine, &docker, &a);
+    engine.turnover().await;
+
+    github.0.lock().unwrap().queued = vec![job(2)];
+    docker.0.lock().unwrap().fail_started_inspects = 1;
+    engine.tick(Shutdown::No).await;
+    let b = names(&github)[1].clone();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .fail_inspects
+        .insert(b.clone(), 100);
+    run(&github, &docker, 2, &b);
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().fail_inspects.remove(&b);
+    stop(&mut engine, &docker, &b);
+    engine.turnover().await;
+    handle.store.flush().await;
+    assert_eq!(
+        handle.store.runner_job(&b).await.unwrap(),
+        Some(2),
+        "job 2's record names {b}"
+    );
+    drop((engine, handle));
+
+    docker.0.lock().unwrap().containers.clear();
+    github.0.lock().unwrap().queued = vec![job(3)];
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let names = names(&github);
+    assert_eq!(names.len(), 3, "job 3 got a runner: {names:?}");
+    assert!(
+        !names[..2].contains(&names[2]),
+        "the restarted engine named a new runner: {names:?}"
     );
 }
 
