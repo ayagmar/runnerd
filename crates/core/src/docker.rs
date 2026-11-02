@@ -16,10 +16,10 @@ use bollard::models::{
 use bollard::query_parameters::{
     AttachContainerOptionsBuilder, CommitContainerOptionsBuilder, CreateContainerOptionsBuilder,
     CreateImageOptionsBuilder, DataUsageOptionsBuilder, DownloadFromContainerOptionsBuilder,
-    InspectContainerOptionsBuilder, ListContainersOptionsBuilder, ListImagesOptionsBuilder,
-    LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder,
-    RemoveVolumeOptionsBuilder, ResizeContainerTTYOptionsBuilder, UploadToContainerOptionsBuilder,
-    WaitContainerOptionsBuilder,
+    EventsOptionsBuilder, InspectContainerOptionsBuilder, ListContainersOptionsBuilder,
+    ListImagesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
+    RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder, ResizeContainerTTYOptionsBuilder,
+    UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -92,6 +92,8 @@ pub struct RunnerState {
     pub address: Option<String>,
     /// When it started, in milliseconds since the epoch.
     pub started_at: Option<u64>,
+    /// When it stopped, in milliseconds since the epoch; `None` while it runs.
+    pub finished_at: Option<u64>,
     /// Its memory cap in bytes; `None` when it has none.
     pub memory: Option<u64>,
     /// Its CPU limit in millicores; `None` when it has none.
@@ -325,6 +327,10 @@ pub trait DockerApi: Send + Sync {
     ) -> impl Future<Output = Result<String, Error>> + Send;
     /// Every container, running or not, that has the label.
     fn list(&self, label: &str) -> impl Future<Output = Result<Vec<Container>, Error>> + Send;
+    /// The IDs of runner containers (labelled `runnerd.job`) as each stops, from Docker's events. A hint: Docker sends
+    /// an event once at most, none while the stream is down, and keeps none to replay. The stream fails or ends with
+    /// the connection, or when Docker restarts.
+    fn exits(&self) -> BoxStream<'static, Result<String, Error>>;
     /// Waits for a container to exit; returns its exit code.
     fn wait(&self, container: &str) -> impl Future<Output = Result<i64, Error>> + Send;
     /// A container's output so far, stdout and stderr interleaved.
@@ -534,6 +540,8 @@ impl DockerApi for Docker {
                 .filter(|pid| *pid > 0),
             address,
             started_at: state.started_at.as_deref().and_then(crate::time::parse_ms),
+            // Docker says 0001-01-01 for one that never stopped, which reads as none.
+            finished_at: state.finished_at.as_deref().and_then(crate::time::parse_ms),
             memory: host_config
                 .memory
                 .and_then(|memory| u64::try_from(memory).ok())
@@ -585,6 +593,19 @@ impl DockerApi for Docker {
                 labels: container.labels.unwrap_or_default(),
             })
             .collect())
+    }
+
+    fn exits(&self) -> BoxStream<'static, Result<String, Error>> {
+        let filters = HashMap::from([
+            ("type", vec!["container"]),
+            ("event", vec!["die"]),
+            ("label", vec!["runnerd.job"]),
+        ]);
+        let options = EventsOptionsBuilder::new().filters(&filters).build();
+        self.api
+            .events(Some(options))
+            .try_filter_map(|event| std::future::ready(Ok(event.actor.and_then(|actor| actor.id))))
+            .boxed()
     }
 
     async fn wait(&self, container: &str) -> Result<i64, Error> {

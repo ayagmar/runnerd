@@ -1,7 +1,8 @@
 //! One tick: collects finished work, polls GitHub for runners then queued jobs, plans with `scheduler::plan` and
-//! applies the decisions. It owns the memory budget's arithmetic and deletes this machine's runners no slot
-//! holds; starting and removing a slot's runner is `runners`. It lists every repository at once, a few requests at
-//! a time, and answers the API's commands while it waits for the listings (ADR 0026).
+//! applies the decisions; and the passes between ticks that start runners for listed jobs in the slots of runners
+//! Docker said stopped, without polling (ADR 0095). It owns the memory budget's arithmetic and deletes this machine's
+//! runners no slot holds; starting and removing a slot's runner is `runners`. It lists every repository at once, a
+//! few requests at a time, and answers the API's commands while it waits for the listings (ADR 0026).
 
 use std::collections::{BTreeMap, BTreeSet};
 use std::sync::Arc;
@@ -11,7 +12,7 @@ use futures_util::StreamExt;
 use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
-use super::{Engine, Occupant, Purpose, Shutdown};
+use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::host;
 use crate::api::{AdmissionPolicy, Basis};
 use crate::config::Admission;
@@ -31,6 +32,16 @@ pub(super) const CONCURRENT_REQUESTS: usize = 4;
 
 /// Plans a tick makes at most: its first, and those after starts that no longer fit what ran by then.
 const MAX_PLANS: usize = 3;
+
+/// How current the listings a plan reads are.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Listing {
+    /// Polled in this tick, runners before queued jobs.
+    Current,
+    /// Polled in the last tick, read by a pass between ticks: a repository whose runner may have taken one of its
+    /// listed jobs unnamed since (`RepositoryState::spent`) has none to start for.
+    Cached,
+}
 
 /// What carrying out one plan did.
 #[derive(Debug, Default)]
@@ -132,7 +143,7 @@ impl Pace {
 }
 
 /// A phase's length for the pacing log line, to a tenth of a second.
-fn seconds(took: std::time::Duration) -> String {
+pub(super) fn seconds(took: std::time::Duration) -> String {
     format!("{:.1}s", took.as_secs_f64())
 }
 
@@ -233,12 +244,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Shutdown::Graceful | Shutdown::Detach | Shutdown::Force => Vec::new(),
         };
         let listings = self
-            .serving(list(
-                self.github.clone(),
-                self.store.clone(),
-                runners,
-                queued,
-            ))
+            .serving(
+                list(self.github.clone(), self.store.clone(), runners, queued),
+                Meanwhile::Turnover,
+            )
             .await;
         pace.lap(Phase::Listing);
         self.apply_runners(listings.runners).await;
@@ -308,6 +317,59 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             self.list_records().await;
         }
         self.prune();
+    }
+
+    /// A pass between ticks for the runners Docker said stopped (ADR 0095): releases those whose containers did, as
+    /// the tick's `collect_finished` does, then starts runners for the jobs the last poll listed queued into the room
+    /// they left, without asking GitHub again. Only starts for jobs: stops, warm runners and starts that take a warm
+    /// runner's room wait for the tick, which also follows jobs and keeps the caches. The listing it plans from is
+    /// that of the runners before the queued jobs, as every tick's; jobs runners took since are left out by their
+    /// captures, while their runners hold slots and once they are gone (`closing`), and a repository whose runner
+    /// took one unnamed starts nothing until the next poll.
+    pub(super) async fn turnover(&mut self) {
+        let noted = self.exits.take();
+        if noted.is_empty() {
+            return;
+        }
+        let began = tokio::time::Instant::now();
+        // The jobs captures named since: their runners are busy, and their jobs no longer queued.
+        self.take_found();
+        let stopped: Vec<(SlotRef, Occupant)> = self
+            .occupied()
+            .filter(|(_, occupant)| noted.any || noted.containers.contains(&occupant.container))
+            .map(|(slot, occupant)| (slot, occupant.clone()))
+            .collect();
+        let mut freed = 0;
+        for (slot, occupant) in stopped {
+            if self.reap(&slot, &occupant).await {
+                freed += 1;
+            }
+        }
+        // Only the room this pass freed: the room a tick freed is its own plan's, from the listing it just made.
+        if freed == 0 || self.stopping() != Shutdown::No {
+            return;
+        }
+        let (plan, mut admitting) = self.plan_from(Listing::Cached);
+        let mut started = 0;
+        for decision in plan.decisions {
+            let for_a_job = matches!(
+                &decision,
+                Decision::Start { warm: false, replacing, .. } if replacing.is_empty()
+            );
+            // A runner started after a stop was asked for could take a job a detaching stop leaves running.
+            if !for_a_job || self.stopping() != Shutdown::No {
+                continue;
+            }
+            // The plan's later starts counted on the room of one that no longer fits: the tick plans again.
+            if !self.apply_start(decision, &mut admitting).await {
+                break;
+            }
+            started += 1;
+        }
+        debug!(
+            "pass after runners ended: {freed} slots freed, {started} runners started in {}",
+            seconds(began.elapsed())
+        );
     }
 
     /// Each configured repository with the labels of its pools, whose queued jobs a tick lists.
@@ -469,7 +531,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         true
     }
 
+    /// Plans from the last poll's listings, in the tick that polled.
     pub(super) fn plan(&self) -> (Plan, Admitting) {
+        self.plan_from(Listing::Current)
+    }
+
+    /// Plans from the last poll's listings, as `listing` says they are now.
+    fn plan_from(&self, listing: Listing) -> (Plan, Admitting) {
         let taken: BTreeSet<u64> = self
             .occupied()
             .filter_map(|(_, occupant)| occupant.job)
@@ -490,14 +558,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         .holds
                         .get(&repository.profile)
                         .and_then(|hold| hold.held),
-                    // GitHub lists a job queued for a few seconds after a runner took it: without this, a tick in
-                    // between starts a second runner for it.
-                    queued: state
-                        .queued
-                        .iter()
-                        .filter(|job| !taken.contains(&job.id))
-                        .cloned()
-                        .collect(),
+                    queued: self.listed_demand(repository, listing, &taken),
                     runner_memory: None,
                     runner_cpu: None,
                     cpu_waiting_since: state
@@ -554,6 +615,51 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let stops = self.over_budget(&plan.decisions);
         plan.decisions.extend(stops);
         (plan, admitting)
+    }
+
+    /// The jobs `pool`'s repository's last listing showed queued that may still want a runner (ADR 0018, 0095).
+    /// GitHub lists a job queued for a few seconds after a runner took it, so not those its captures named (`taken`),
+    /// nor those of runners gone since (`closing`), which a pass's listing may be older than; and for each busy runner
+    /// of the pool whose job no capture named yet, one fewer, the oldest the pool matches: that runner's job may be
+    /// one of them. Until the capture names it, which it does within moments, a pool may get one runner too few
+    /// rather than two for one job. A pass has none for a repository whose runner may have taken one unnamed since.
+    fn listed_demand(
+        &self,
+        pool: &crate::config::Repository,
+        listing: Listing,
+        taken: &BTreeSet<u64>,
+    ) -> Vec<QueuedJob> {
+        let state = &self.repositories[&pool.name];
+        if listing == Listing::Cached && state.spent {
+            return Vec::new();
+        }
+        let unnamed = self
+            .slots
+            .get(&pool.profile)
+            .into_iter()
+            .flatten()
+            .flatten()
+            .filter(|occupant| {
+                occupant.repository == pool.name && occupant.newly_busy && occupant.job.is_none()
+            })
+            .count();
+        let mut queued: Vec<QueuedJob> = state
+            .queued
+            .iter()
+            .filter(|job| !taken.contains(&job.id) && !self.closing.contains_key(&job.id))
+            .cloned()
+            .collect();
+        let claimed: BTreeSet<u64> = {
+            let mut matching: Vec<u64> = queued
+                .iter()
+                .filter(|job| crate::scheduler::matches(job, &pool.labels))
+                .map(|job| job.id)
+                .collect();
+            matching.sort_unstable();
+            matching.into_iter().take(unnamed).collect()
+        };
+        queued.retain(|job| !claimed.contains(&job.id));
+        queued
     }
 
     /// The budgets a plan has beside what runs now, as `admitting` admits.
@@ -619,7 +725,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 None => Slot::Closed,
                 Some(occupant) => Slot::Runner(RunnerSlot {
                     repository: occupant.repository.clone(),
-                    busy: occupant.busy,
+                    // Its capture named its job before a listing showed it busy: it waits for none of those queued.
+                    busy: occupant.busy || occupant.job.is_some(),
                     started_at: occupant.started_at,
                     memory: self.takes(occupant),
                     cpu: self.reserves_cpu(occupant),
@@ -653,7 +760,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// Whether a slot holds a runner.
-    fn holds_runner(&self, slot: &SlotRef) -> bool {
+    pub(super) fn holds_runner(&self, slot: &SlotRef) -> bool {
         self.slots
             .get(&slot.profile)
             .and_then(|slots| slots.get(slot.index))
@@ -756,6 +863,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             if let Some(state) = self.repositories.get_mut(&repository) {
                 state.queued = queued;
                 state.listed = listed;
+                state.spent = false;
             } else {
                 for job in recorded.into_iter().filter(|job| !taken.contains(job)) {
                     self.queued_jobs
@@ -768,6 +876,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
 
     /// Updates each runner's busy flag from the listings and deletes this host's runners that no slot holds.
     async fn apply_runners(&mut self, listings: Answers<Vec<Runner>>) {
+        for occupant in self.slots.values_mut().flatten().flatten() {
+            occupant.newly_busy = false;
+        }
         for (repository, answer) in listings {
             // Whether this machine still has a runner registered on it.
             let mut left = false;
@@ -788,6 +899,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     .find(|occupant| occupant.runner_id == runner.id);
                 match held {
                     Some(occupant) => {
+                        occupant.newly_busy |= runner.busy && !occupant.busy;
                         occupant.busy = runner.busy;
                         left = true;
                     }

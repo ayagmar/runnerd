@@ -1,5 +1,8 @@
 //! How soon the engine starts runners for queued jobs on the fakes: idle runners it removes in the same tick do not
-//! hold the starts back.
+//! hold the starts back, and a slot whose job ended takes the next listed job within seconds, through the engine's
+//! own loop (ADR 0095).
+
+use tokio::time::Instant;
 
 use super::*;
 use crate::scheduler::IDLE_TIMEOUT;
@@ -37,7 +40,7 @@ async fn removing_an_idle_runner_does_not_hold_back_a_start_for_another_reposito
     let dir = TestDir::new("pacing");
     let (mut engine, handle) = idle_runner_beside_a_queued_job(&github, &docker, &dir).await;
 
-    let began = tokio::time::Instant::now();
+    let began = Instant::now();
     engine.tick(Shutdown::No).await;
     let took = began.elapsed();
 
@@ -68,228 +71,512 @@ async fn removing_an_idle_runner_does_not_hold_back_a_start_for_another_reposito
     );
 }
 
-/// A workload on the fakes, with the latencies the owner's host shows, for the figures ADR 0092 gives: how long
-/// `o/s`'s jobs wait from their queueing to their runner's container start, and what the engine asks GitHub.
-/// Every `PERIOD`, three jobs of `o/s` are queued that run `RUN`, and three of `o/r` that another machine takes
-/// `TAKEN_AFTER` later, which leaves the runners started for them idle: they are removed as surplus while later
-/// jobs of `o/s` wait. A runner's log capture ends only once its container goes, as a real runner's does.
-#[tokio::test(start_paused = true)]
-#[ignore = "prints a workload's figures; run with --ignored --nocapture"]
-#[allow(clippy::print_stdout, reason = "the figures are its output")]
-async fn workload_figures() {
-    const PERIOD: Duration = Duration::from_secs(40);
-    const RUN: Duration = Duration::from_secs(25);
-    const TAKEN_AFTER: Duration = Duration::from_secs(20);
-    const LENGTH: Duration = Duration::from_mins(12);
-    const POLL: Duration = Duration::from_secs(15);
+/// What a burst's world saw.
+#[derive(Debug, Default)]
+struct Seen {
+    /// Each job's wait from its queueing to its runner's container start.
+    waits: Vec<Duration>,
+    /// Each runner start that took the room of one whose job ended while a listed job waited: when that one's
+    /// container stopped, and how long until this one's container started.
+    turnovers: Vec<(Instant, Duration)>,
+    /// Runner containers started.
+    starts: usize,
+    /// Jobs runners took.
+    taken: usize,
+    /// Runner starts past the slice's memory, what ran then.
+    over_budget: Vec<u64>,
+}
 
+/// A runner of the burst with a job.
+struct Running {
+    container: String,
+    name: String,
+    job: u64,
+    /// When its capture names its job.
+    named_at: Instant,
+    ends_at: Instant,
+}
+
+/// The world around an engine that runs its own loop: `o/r`'s jobs, each taken by an idle runner of this machine
+/// `boot` after its container started, named by its log capture `named_after` later, and ending `run` to twice that
+/// after it was taken, when its container stops and Docker's events say so, twice, beside one for a container runnerd never ran.
+/// GitHub drops an ended runner's registration, as an ephemeral runner's goes with its job.
+struct Burst {
+    github: FakeGithub,
+    docker: FakeDocker,
+    boot: Duration,
+    run: Duration,
+    named_after: Duration,
+    /// The slice's `MemoryMax`.
+    budget: u64,
+    queued_at: HashMap<u64, Instant>,
+    /// The jobs a listing of queued jobs showed.
+    listed: BTreeSet<u64>,
+    /// Listings of queued jobs so far.
+    listings: usize,
+    running: Vec<Running>,
+    /// The runner containers seen so far, and those that took a job.
+    started: BTreeSet<String>,
+    assigned: BTreeSet<String>,
+    /// When runners stopped while a listed job waited, oldest first: the next starts take their room.
+    freed: VecDeque<Instant>,
+    seen: Seen,
+}
+
+impl Burst {
+    fn new(github: &FakeGithub, docker: &FakeDocker, budget: u64) -> Burst {
+        Burst {
+            github: github.clone(),
+            docker: docker.clone(),
+            boot: Duration::from_secs(6),
+            run: Duration::from_secs(10),
+            named_after: Duration::from_secs(1),
+            budget,
+            queued_at: HashMap::new(),
+            listed: BTreeSet::new(),
+            listings: 0,
+            running: Vec::new(),
+            started: BTreeSet::new(),
+            assigned: BTreeSet::new(),
+            freed: VecDeque::new(),
+            seen: Seen::default(),
+        }
+    }
+
+    /// GitHub queues `count` jobs of `o/r`.
+    fn queue(&mut self, count: u64) {
+        let mut github = self.github.0.lock().unwrap();
+        let first = github
+            .queued
+            .iter()
+            .map(|job| job.id)
+            .max()
+            .unwrap_or(0)
+            .max(self.queued_at.keys().copied().max().unwrap_or(0))
+            + 1;
+        for id in first..first + count {
+            github.queued.push(job(id));
+            github.queued_on.insert(id, "o/r".to_owned());
+            self.queued_at.insert(id, Instant::now());
+        }
+    }
+
+    /// Whether every job queued so far ran.
+    fn done(&self) -> bool {
+        self.seen.taken == self.queued_at.len() && self.running.is_empty()
+    }
+
+    /// One step of the world, at `now`.
+    fn step(&mut self, now: Instant) {
+        let (github, docker) = (self.github.clone(), self.docker.clone());
+        let mut github = github.0.lock().unwrap();
+        let mut docker = docker.0.lock().unwrap();
+        let listings = github
+            .calls
+            .iter()
+            .filter(|call| call.starts_with("queued "))
+            .count();
+        if listings > self.listings {
+            self.listings = listings;
+            self.listed.extend(github.queued.iter().map(|job| job.id));
+        }
+        self.see_starts(&docker, now);
+        self.take_jobs(&mut github, &mut docker, now);
+        self.end_jobs(&mut github, &mut docker, now);
+    }
+
+    /// Each runner container started since: what runs then fits the slice, and it takes a stopped one's room.
+    fn see_starts(&mut self, docker: &DockerState, now: Instant) {
+        // Each runner container started since: what runs then fits the slice, and it takes a stopped one's room.
+        let new: Vec<String> = docker
+            .containers
+            .iter()
+            .filter(|container| {
+                container.labels.contains_key("runnerd.job")
+                    && !self.started.contains(&container.id)
+            })
+            .map(|container| container.id.clone())
+            .collect();
+        for id in new {
+            self.started.insert(id.clone());
+            self.seen.starts += 1;
+            let using: u64 = docker
+                .containers
+                .iter()
+                .filter(|container| {
+                    container.running && container.labels.contains_key("runnerd.job")
+                })
+                .filter_map(|container| docker.memory.get(&container.id))
+                .sum();
+            if using > self.budget {
+                self.seen.over_budget.push(using);
+            }
+            let name = docker
+                .containers
+                .iter()
+                .find(|container| container.id == id)
+                .map(|container| container.name.clone())
+                .unwrap_or_default();
+            let at = docker.started_on_clock.get(&name).copied().unwrap_or(now);
+            if let Some(stopped) = self.freed.pop_front() {
+                self.seen
+                    .turnovers
+                    .push((stopped, at.saturating_duration_since(stopped)));
+            }
+        }
+    }
+
+    /// Each runner up `boot` and idle takes the oldest job queued.
+    fn take_jobs(&mut self, github: &mut GithubState, docker: &mut DockerState, now: Instant) {
+        let idle: Vec<(String, String)> = docker
+            .containers
+            .iter()
+            .filter(|container| {
+                container.running
+                    && container.labels.contains_key("runnerd.job")
+                    && !self.assigned.contains(&container.id)
+                    && docker
+                        .started_on_clock
+                        .get(&container.name)
+                        .is_some_and(|at| now.saturating_duration_since(*at) >= self.boot)
+            })
+            .map(|container| (container.id.clone(), container.name.clone()))
+            .collect();
+        for (container, name) in idle {
+            let Some(job) = github.queued.iter().map(|job| job.id).min() else {
+                break;
+            };
+            github.queued.retain(|queued| queued.id != job);
+            for runner in &mut github.runners {
+                if runner.name == name {
+                    runner.busy = true;
+                }
+            }
+            let mut details = details(job, "in_progress", None);
+            details.runner_name = Some(name.clone());
+            github.jobs.insert(job, details);
+            let started = docker.started_on_clock.get(&name).copied().unwrap_or(now);
+            self.seen
+                .waits
+                .push(started.saturating_duration_since(self.queued_at[&job]));
+            self.seen.taken += 1;
+            self.assigned.insert(container.clone());
+            self.running.push(Running {
+                container,
+                name,
+                job,
+                named_at: now + self.named_after,
+                // From `run` to twice it, so jobs end apart, as a burst's do.
+                ends_at: now + self.run + self.run * u32::try_from(job * 7 % 11).unwrap() / 10,
+            });
+        }
+    }
+
+    /// Names the jobs of runners up `named_after`, and ends those whose time came.
+    fn end_jobs(&mut self, github: &mut GithubState, docker: &mut DockerState, now: Instant) {
+        for running in &self.running {
+            if running.named_at <= now {
+                docker
+                    .container_captures
+                    .entry(running.container.clone())
+                    .or_insert_with(|| format!("@@job {0} {0}\n", running.job));
+            }
+        }
+        let (ended, left): (Vec<Running>, Vec<Running>) = std::mem::take(&mut self.running)
+            .into_iter()
+            .partition(|running| running.ends_at <= now);
+        self.running = left;
+        // Listed jobs no runner up waits for, past the one the world may be giving a runner: the room of a runner
+        // that stops now is theirs.
+        let idle = docker
+            .containers
+            .iter()
+            .filter(|container| {
+                container.running
+                    && container.labels.contains_key("runnerd.job")
+                    && !self.assigned.contains(&container.id)
+            })
+            .count();
+        let listed = github
+            .queued
+            .iter()
+            .filter(|job| self.listed.contains(&job.id))
+            .count();
+        let waiting = listed > idle + 1;
+        for running in ended {
+            github.runners.retain(|runner| runner.name != running.name);
+            let mut details = details(running.job, "completed", Some("success"));
+            details.runner_name = Some(running.name.clone());
+            github.jobs.insert(running.job, details);
+            if let Some(container) = docker
+                .containers
+                .iter_mut()
+                .find(|container| container.id == running.container)
+            {
+                container.running = false;
+            }
+            for id in [
+                running.container.as_str(),
+                running.container.as_str(),
+                "not-a-runner",
+            ] {
+                docker
+                    .events
+                    .retain(|events| events.send(Ok(id.to_owned())).is_ok());
+            }
+            if waiting {
+                self.freed.push_back(now);
+            }
+        }
+    }
+}
+
+/// The fakes for a burst, with the latencies the owner's host shows (ADR 0092), GitHub's listings taking
+/// `listing_lag` more.
+fn burst_fakes(listing_lag: Duration) -> (FakeGithub, FakeDocker) {
     let github = FakeGithub::default();
     let docker = FakeDocker::default();
-    let dir = TestDir::new("workload");
     {
         let mut state = github.0.lock().unwrap();
         state.strict = true;
         // A request to the API, from the journal's gaps: a listing, a registration, a delete.
         state.latency = Duration::from_millis(300);
+        state.listing_latency = listing_lag;
     }
     {
         let mut state = docker.0.lock().unwrap();
         state.captures_wait = Some(github.clone());
         state.capture_end = CaptureEnd::Container;
+        // Slot 1's jobs change little: no reseed holds the profile back.
+        state.measured = Some(format!("slot 1 changed {} bytes\n", 1 << 20));
         state.latency = DockerLatency {
             start: Duration::from_millis(1000),
             remove_running: Duration::from_millis(1000),
+            remove_stopped: Duration::from_millis(300),
         };
     }
-    let config = two_repositories().replace("slots = 2", "slots = 8");
-    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
-    engine.recover().await.unwrap();
-
-    let began = tokio::time::Instant::now();
-    let waits: Arc<Mutex<Vec<Duration>>> = Arc::default();
-    let world = tokio::spawn(world(
-        github.clone(),
-        docker.clone(),
-        waits.clone(),
-        began,
-        [PERIOD, RUN, TAKEN_AFTER, LENGTH],
-    ));
-    while began.elapsed() < LENGTH {
-        engine.tick(Shutdown::No).await;
-        // Another machine took `o/r`'s jobs: its idle runners are surplus at once.
-        for occupant in engine.slots.values_mut().flatten().flatten() {
-            if occupant.repository == "o/r" && occupant.job.is_none() && !occupant.busy {
-                occupant.started_at = std::time::SystemTime::now() - IDLE_TIMEOUT;
-            }
-        }
-        // A runner's name has its start's second on the wall clock, which Tokio's paused one does not move: one
-        // wall second between ticks keeps each slot's runners apart.
-        std::thread::sleep(Duration::from_millis(1001));
-        tokio::time::sleep(POLL).await;
-    }
-    world.abort();
-    drop(handle);
-
-    let mut waits = waits.lock().unwrap().clone();
-    waits.sort();
-    let at =
-        |percent: usize| waits[(waits.len() * percent / 100).min(waits.len() - 1)].as_secs_f64();
-    let calls = github.calls();
-    let count = |prefix: &str| calls.iter().filter(|call| call.starts_with(prefix)).count();
-    println!(
-        "o/s jobs {}: queued to container start p50 {:.1}s, p90 {:.1}s, max {:.1}s",
-        waits.len(),
-        at(50),
-        at(90),
-        at(100)
-    );
-    println!(
-        "GitHub: {} queued listings, {} runner listings, {} registrations, {} deletes",
-        count("queued "),
-        count("runners "),
-        count("register "),
-        count("delete ")
-    );
+    (github, docker)
 }
 
-/// What happens on GitHub and in the runners while the workload's engine ticks: jobs queued and taken elsewhere,
-/// each `o/s` runner up takes the oldest job queued, and its container stops and its registration goes once the
-/// job ran. Records each `o/s`
-/// job's wait from its queueing to its runner's container start in `waits`.
-async fn world(
-    github: FakeGithub,
-    docker: FakeDocker,
-    waits: Arc<Mutex<Vec<Duration>>>,
-    began: tokio::time::Instant,
-    [period, run, taken_after, length]: [Duration; 4],
-) {
-    let mut world = World {
-        next_id: 1,
-        next_burst: began,
-        queued_at: HashMap::new(),
-        taken_elsewhere: Vec::new(),
-        ends: Vec::new(),
-        assigned: BTreeSet::new(),
-    };
+/// Steps `burst` every 100ms until `until` says it is over, or 30 minutes passed.
+async fn play(burst: &mut Burst, until: impl Fn(&Burst, Instant) -> bool) {
+    let began = Instant::now();
     loop {
-        let now = tokio::time::Instant::now();
-        if now >= world.next_burst && now - began < length {
-            world.burst(&github, now, taken_after);
-            world.next_burst += period;
+        let now = Instant::now();
+        burst.step(now);
+        if until(burst, now) || now - began > Duration::from_mins(30) {
+            return;
         }
-        world.step(&github, &docker, &waits, now, run);
-        tokio::time::sleep(Duration::from_millis(250)).await;
+        tokio::time::sleep(Duration::from_millis(100)).await;
     }
 }
 
-/// The workload's state between steps.
-struct World {
-    next_id: u64,
-    next_burst: tokio::time::Instant,
-    /// When each `o/s` job was queued.
-    queued_at: HashMap<u64, tokio::time::Instant>,
-    /// When each `o/r` job is taken by another machine.
-    taken_elsewhere: Vec<(tokio::time::Instant, u64)>,
-    /// When each busy container stops, and its runner's name.
-    ends: Vec<(tokio::time::Instant, String, String)>,
-    /// The containers that took a job.
-    assigned: BTreeSet<String>,
+/// Docker's events follow runner containers as they stop, through a stream that breaks off and two that fail to
+/// connect, as when Docker restarts. A slot whose job ended while listed jobs waited takes the next one within
+/// seconds, not at the next poll, whatever the listings, a removal or a capture take; no job gets two runners and
+/// no start passes the slice's memory. The bug it catches: an exit noticed only by the next poll's inspect, a pass
+/// that plans from a listing still showing a job a runner took, and one started while the slice was full.
+#[tokio::test(start_paused = true)]
+async fn a_slot_whose_job_ended_takes_the_next_listed_job_within_seconds() {
+    const JOBS: u64 = 16;
+    const G: u64 = 1 << 30;
+    let (github, docker) = burst_fakes(Duration::from_secs(3));
+    let dir = TestDir::new("turnover");
+    let config = CONFIG.replace("slots = 2", "slots = 4");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    // Three 4G runners fit, not four: memory binds before slots.
+    engine.memory_max = Some(12 * G + G / 2);
+    let mut burst = Burst::new(&github, &docker, 12 * G + G / 2);
+    burst.queue(JOBS);
+    let run = tokio::spawn(engine.run());
+    let broke = Instant::now() + Duration::from_secs(40);
+    play(&mut burst, |burst, now| {
+        now >= broke && !burst.running.is_empty()
+    })
+    .await;
+    {
+        docker.0.lock().unwrap().fail_events = 2;
+        docker.break_events();
+    }
+    play(&mut burst, Burst::done_at).await;
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+
+    let seen = &burst.seen;
+    assert_eq!(
+        seen.taken,
+        usize::try_from(JOBS).unwrap(),
+        "every job ran: {seen:?}"
+    );
+    assert_eq!(
+        seen.starts,
+        usize::try_from(JOBS).unwrap(),
+        "no job got a second runner: {seen:?}"
+    );
+    assert!(
+        seen.over_budget.is_empty(),
+        "starts passed the slice: {seen:?}"
+    );
+    // Every slot freed while the events were followed; the others by the next poll or the reconnect's pass.
+    let followed: Vec<Duration> = seen
+        .turnovers
+        .iter()
+        .filter(|(stopped, _)| *stopped < broke || *stopped > broke + Duration::from_secs(10))
+        .map(|(_, took)| *took)
+        .collect();
+    assert!(followed.len() >= 8, "too few slots turned over: {seen:?}");
+    assert!(
+        followed.iter().all(|took| *took <= Duration::from_secs(4)),
+        "a slot waited for its next runner: {followed:?}"
+    );
+    assert!(
+        seen.turnovers
+            .iter()
+            .all(|(_, took)| *took <= Duration::from_secs(20)),
+        "a slot freed while Docker's events were down waited past a poll: {:?}",
+        seen.turnovers
+    );
+    assert!(
+        docker
+            .0
+            .lock()
+            .unwrap()
+            .events
+            .iter()
+            .all(tokio::sync::mpsc::UnboundedSender::is_closed),
+        "the engine stopped following Docker's events as it stopped"
+    );
 }
 
-impl World {
-    fn burst(&mut self, github: &FakeGithub, now: tokio::time::Instant, taken_after: Duration) {
-        let mut state = github.0.lock().unwrap();
-        for repository in ["o/s", "o/s", "o/s", "o/r", "o/r", "o/r"] {
-            let id = self.next_id;
-            self.next_id += 1;
-            state.queued.push(job(id));
-            state.queued_on.insert(id, repository.to_owned());
-            if repository == "o/r" {
-                self.taken_elsewhere.push((now + taken_after, id));
-            } else {
-                self.queued_at.insert(id, now);
-            }
-        }
-    }
+/// The containers of `o/r`'s runners in the first profile's slots, as the status says.
+fn runner_containers(handle: &Handle) -> Vec<String> {
+    handle.status.borrow().profiles[0]
+        .slots
+        .iter()
+        .filter_map(|slot| slot.runner.as_ref().map(|runner| runner.container.clone()))
+        .collect()
+}
 
-    fn step(
-        &mut self,
-        github: &FakeGithub,
-        docker: &FakeDocker,
-        waits: &Mutex<Vec<Duration>>,
-        now: tokio::time::Instant,
-        run: Duration,
-    ) {
-        let mut docker_state = docker.0.lock().unwrap();
-        let mut github_state = github.0.lock().unwrap();
-        let gone: Vec<u64> = self
-            .taken_elsewhere
-            .iter()
-            .filter(|(at, _)| *at <= now)
-            .map(|(_, id)| *id)
-            .collect();
-        github_state.queued.retain(|job| !gone.contains(&job.id));
-        self.taken_elsewhere.retain(|(at, _)| *at > now);
-        // Each `o/s` runner up and idle takes the oldest `o/s` job queued.
-        let up: Vec<(String, String)> = docker_state
-            .containers
-            .iter()
-            .filter(|container| {
-                container.running
-                    && container
-                        .labels
-                        .get("runnerd.repository")
-                        .map(String::as_str)
-                        == Some("o/s")
-                    && !self.assigned.contains(&container.id)
-            })
-            .map(|container| (container.id.clone(), container.name.clone()))
-            .collect();
-        for (id, name) in up {
-            let Some(job) = github_state
-                .queued
-                .iter()
-                .find(|job| github_state.queued_on.get(&job.id).map(String::as_str) == Some("o/s"))
-                .map(|job| job.id)
-            else {
-                break;
+/// A runner that stops before its start returned, and one someone else removed, free their slots on Docker's word
+/// within seconds, with the next poll an hour away. The bugs it catches: the hint for a container the engine did not
+/// track yet dropped, so its slot waits for the poll; a container gone by the pass's inspect kept as if it still ran.
+#[tokio::test(start_paused = true)]
+async fn runners_that_stop_at_once_or_are_removed_free_their_slots_before_the_next_poll() {
+    let github = FakeGithub::default();
+    let docker = FakeDocker::default();
+    github.0.lock().unwrap().queued = vec![job(1), job(2)];
+    docker.0.lock().unwrap().exit_at_start = 1;
+    let dir = TestDir::new("early-exits");
+    let config = CONFIG.replace("[host]\n", "[host]\npoll_interval = \"1h\"\n");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let run = tokio::spawn(engine.run());
+
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let left = runner_containers(&handle);
+    assert_eq!(
+        left.len(),
+        1,
+        "the runner that stopped as it started left its slot: {:?}",
+        docker.calls()
+    );
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.containers.retain(|container| container.id != left[0]);
+        state
+            .events
+            .retain(|events| events.send(Ok(left[0].clone())).is_ok());
+    }
+    tokio::time::sleep(Duration::from_secs(2)).await;
+    let now = runner_containers(&handle);
+    assert!(
+        !now.contains(&left[0]),
+        "the removed runner left its slot: {now:?}"
+    );
+
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+}
+
+impl Burst {
+    fn done_at(&self, _: Instant) -> bool {
+        self.done()
+    }
+}
+
+/// A burst for the figures ADR 0092 and 0095 give, with the latencies the owner's host shows: `BURSTS` bursts of
+/// `JOBS` short jobs of `o/r` every `PERIOD`, more than its 8 slots take, through the engine's own loop. Prints how
+/// long jobs waited from their queueing to their runner's container start, how long a slot whose job ended waited
+/// for its next runner while listed jobs waited, and what the engine asked GitHub per hour; first with Docker's
+/// events not followed, as before them, then followed.
+#[tokio::test(start_paused = true)]
+#[ignore = "prints a workload's figures; run with --ignored --nocapture"]
+#[allow(clippy::print_stdout, reason = "the figures are its output")]
+#[allow(
+    clippy::cast_precision_loss,
+    reason = "counts per hour, far below 2^52"
+)]
+async fn workload_figures() {
+    const BURSTS: u64 = 6;
+    const JOBS: u64 = 40;
+    const PERIOD: Duration = Duration::from_mins(5);
+    for followed in [false, true] {
+        let (github, docker) = burst_fakes(Duration::ZERO);
+        if !followed {
+            docker.0.lock().unwrap().fail_events = u32::MAX;
+        }
+        let dir = TestDir::new("workload");
+        let config = CONFIG.replace("slots = 2", "slots = 8");
+        let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+        let mut burst = Burst::new(&github, &docker, u64::MAX);
+        let run = tokio::spawn(engine.run());
+        let began = Instant::now();
+        for _ in 0..BURSTS {
+            burst.queue(JOBS);
+            let next = Instant::now() + PERIOD;
+            play(&mut burst, |_, now| now >= next).await;
+        }
+        let hours = began.elapsed().as_secs_f64() / 3600.0;
+        handle.shutdown(Shutdown::Force);
+        run.await.unwrap();
+
+        let figures = |mut durations: Vec<Duration>| {
+            durations.sort();
+            let at = |percent: usize| {
+                durations[(durations.len() * percent / 100).min(durations.len() - 1)].as_secs_f64()
             };
-            github_state.queued.retain(|queued| queued.id != job);
-            for runner in &mut github_state.runners {
-                if runner.name == name {
-                    runner.busy = true;
-                }
-            }
-            let mut running = details(job, "in_progress", None);
-            running.runner_name = Some(name.clone());
-            github_state.jobs.insert(job, running);
-            docker_state
-                .container_captures
-                .insert(id.clone(), format!("@@job {job} {job}\n"));
-            let started = docker_state
-                .started_on_clock
-                .get(&name)
-                .copied()
-                .unwrap_or(now);
-            waits
-                .lock()
-                .unwrap()
-                .push(started.saturating_duration_since(self.queued_at[&job]));
-            self.assigned.insert(id.clone());
-            self.ends.push((now + run, id, name));
-        }
-        // A runner whose job ended exits, and GitHub forgets it, as an ephemeral runner's registration goes with
-        // its job.
-        for (_, id, name) in self.ends.iter().filter(|(at, _, _)| *at <= now) {
-            if let Some(container) = docker_state
-                .containers
-                .iter_mut()
-                .find(|container| container.id == *id)
-            {
-                container.running = false;
-            }
-            github_state.runners.retain(|runner| runner.name != *name);
-        }
-        self.ends.retain(|(at, _, _)| *at > now);
+            format!(
+                "p50 {:.1}s, p90 {:.1}s, max {:.1}s over {}",
+                at(50),
+                at(90),
+                at(100),
+                durations.len()
+            )
+        };
+        let seen = &burst.seen;
+        println!(
+            "Docker's events {}:",
+            if followed { "followed" } else { "not followed" }
+        );
+        println!(
+            "  queued to container start: {}",
+            figures(seen.waits.clone())
+        );
+        println!(
+            "  a slot's job ended to its next container start: {}",
+            figures(seen.turnovers.iter().map(|(_, took)| *took).collect())
+        );
+        let calls = github.calls();
+        let per_hour = |prefix: &str| {
+            calls.iter().filter(|call| call.starts_with(prefix)).count() as f64 / hours
+        };
+        println!(
+            "  GitHub per hour: {:.0} queued listings, {:.0} runner listings, {:.0} job reads, {:.0} registrations, \
+             {:.0} deletes",
+            per_hour("queued "),
+            per_hour("runners "),
+            github.0.lock().unwrap().job_reads as f64 / hours,
+            per_hour("register "),
+            per_hour("delete ")
+        );
     }
 }

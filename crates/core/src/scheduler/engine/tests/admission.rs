@@ -734,14 +734,17 @@ async fn copies_arriving_one_by_one_beside_busy_runners_whose_job_is_unknown_tak
     docker.0.lock().unwrap().fail_execs = u32::MAX;
     let mut started = Vec::new();
     for copy in 1..=4 {
-        // One build queues per poll; the runners before took theirs and warm up at 300M, sampled just now.
+        // The runners before took theirs, which a poll saw; they warm up at 300M, sampled just now. A runner first
+        // listed busy may have taken a job the same poll still lists queued, so the copy queues after.
         {
             let mut state = github.0.lock().unwrap();
             for runner in &mut state.runners {
                 (runner.status, runner.busy) = ("online".to_owned(), true);
             }
-            state.queued = vec![job(copy)];
+            state.queued.clear();
         }
+        engine.tick(Shutdown::No).await;
+        github.0.lock().unwrap().queued = vec![job(copy)];
         runners_use(&github, &handle.store, 300 * M);
         slice_at(&handle.store, G);
         engine.tick(Shutdown::No).await;

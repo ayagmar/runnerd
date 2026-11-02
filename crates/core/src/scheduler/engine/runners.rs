@@ -58,8 +58,10 @@ pub(super) fn backoff(failures: u32) -> Duration {
 impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Frees the slots whose container stopped: the runner took its job and exited, or it never started. First
     /// removes again the containers recovery failed to remove, and keeps or removes those it could not tell about
-    /// once their backoff is over.
+    /// once their backoff is over. It inspects every runner but those Docker's events said stopped while runnerd runs
+    /// on, which are a pass's.
     pub(super) async fn collect_finished(&mut self) {
+        self.exits.inspecting_all();
         let now = tokio::time::Instant::now();
         let (due, waiting) = std::mem::take(&mut self.unread)
             .into_iter()
@@ -82,26 +84,52 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .map(|(slot, occupant)| (slot, occupant.clone()))
             .collect();
         for (slot, occupant) in occupied {
-            let running = match self.docker.inspect(&occupant.container).await {
-                // A kill in the last interval before it stopped, which no sample of its cgroup saw.
-                Ok(state) if state.oom_killed => {
-                    self.store.runner_oom_killed(&occupant.runner_name);
-                    state.running
-                }
-                Ok(state) => state.running,
-                Err(error) if is_not_found(&error) => false,
-                // Its slot stays its until Docker says it stopped (ADR 0076); a stop leaves it to the next start.
-                Err(error) => {
-                    warn!("cannot inspect {}: {error}", occupant.runner_name);
-                    self.docker_failed(&error);
-                    continue;
-                }
-            };
-            if !running {
-                info!("{}: {} ended", occupant.repository, occupant.runner_name);
-                self.release(&slot, &occupant).await;
+            // Docker said it stopped: a pass reaps it while this tick waits for GitHub, and starts the next runner
+            // into its room from the last listing, rather than after this tick's (ADR 0095).
+            if self.stopping() == Shutdown::No && self.exits.noted_stopped(&occupant.container) {
+                continue;
             }
+            self.reap(&slot, &occupant).await;
         }
+    }
+
+    /// Releases a slot's runner if Docker says its container stopped or is gone; returns whether the slot is free
+    /// now. Docker's say, not an event's: an event only says when to ask (ADR 0095).
+    pub(super) async fn reap(&mut self, slot: &SlotRef, occupant: &Occupant) -> bool {
+        let state = match self.docker.inspect(&occupant.container).await {
+            Ok(state) => Some(state),
+            Err(error) if is_not_found(&error) => None,
+            // Its slot stays its until Docker says it stopped (ADR 0076); a stop leaves it to the next start.
+            Err(error) => {
+                warn!("cannot inspect {}: {error}", occupant.runner_name);
+                self.docker_failed(&error);
+                return false;
+            }
+        };
+        // A kill in the last interval before it stopped, which no sample of its cgroup saw.
+        if state.as_ref().is_some_and(|state| state.oom_killed) {
+            self.store.runner_oom_killed(&occupant.runner_name);
+        }
+        if state.as_ref().is_some_and(|state| state.running) {
+            return false;
+        }
+        // How long it took to notice: the pacing of slots between jobs (ADR 0095).
+        let noticed = state
+            .and_then(|state| state.finished_at)
+            .map(|stopped| {
+                let after = Duration::from_millis(crate::time::now_ms().saturating_sub(stopped));
+                format!(
+                    " {} after its container stopped",
+                    super::tick::seconds(after)
+                )
+            })
+            .unwrap_or_default();
+        info!(
+            "{}: {} ended{noticed}",
+            occupant.repository, occupant.runner_name
+        );
+        self.release(slot, occupant).await;
+        !self.holds_runner(slot)
     }
 
     /// Removes the container of a slot's runner that ended and its registration, then frees the slot. If its runner
@@ -143,9 +171,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             Ok(_) => {}
             Err(error) => warn!("cannot delete {}: {error}", occupant.runner_name),
         }
+        // Its capture may have named its job by now.
+        let job = self.occupant(slot).and_then(|now| now.job).or(occupant.job);
         self.forget(occupant);
         // Unread logs: it may have run one.
-        let ran = occupant.busy || occupant.job.is_some() || took_job != Some(false);
+        let ran = occupant.busy || job.is_some() || took_job != Some(false);
+        // A job the last poll listed queued may be the one it ran: a pass leaves the repository to the next poll.
+        if job.is_none()
+            && took_job != Some(false)
+            && let Some(state) = self.repositories.get_mut(&occupant.repository)
+        {
+            state.spent = true;
+        }
         if let Some(state) = self
             .repositories
             .get_mut(&occupant.repository)
@@ -414,14 +451,21 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
     }
 
-    /// Keeps a slot's runner that took a job after all: it ends as busy runners do.
+    /// Keeps a slot's runner that took a job after all: it ends as busy runners do. Unless its capture named the job,
+    /// a pass leaves its repository to the next poll, which may still list that job queued.
     fn keep_busy(&mut self, slot: &SlotRef) {
         if let Some(Some(entry)) = self
             .slots
             .get_mut(&slot.profile)
             .and_then(|slots| slots.get_mut(slot.index))
         {
+            entry.newly_busy = !entry.busy;
             entry.busy = true;
+            if entry.job.is_none()
+                && let Some(state) = self.repositories.get_mut(&entry.repository)
+            {
+                state.spent = true;
+            }
         }
     }
 
@@ -462,9 +506,13 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     }
 
     /// After a start in `profile` that failed and left nothing in Docker, deletes its `runner`'s registration and
-    /// closes its build cache, and holds back its pool.
+    /// closes its build cache, and holds back its pool. Its runner may have taken a listed job before its container
+    /// went, which no capture names: a pass leaves the repository to the next poll.
     async fn abandon(&mut self, profile: &str, repository: &str, runner: &Runner, failure: String) {
         self.close_build_cache(&runner.name);
+        if let Some(state) = self.repositories.get_mut(repository) {
+            state.spent = true;
+        }
         if let Err(error) = self.github.delete_runner(repository, runner.id).await {
             warn!("{repository}: cannot delete {}: {error}", runner.name);
         }
@@ -505,9 +553,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         };
         let number = slot.index + 1;
         let now = SystemTime::now();
-        let name = self
-            .identity
-            .runner_name(&slot.profile, number, unix_secs(now));
+        let secs = unix_secs(now).max(self.named.get(slot).map_or(0, |last| last + 1));
+        self.named.insert(slot.clone(), secs);
+        let name = self.identity.runner_name(&slot.profile, number, secs);
         if let Err(error) = cache::prepare(&*self.docker, &self.names, &slot.profile, number).await
         {
             warn!(
@@ -572,6 +620,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             runner_id: runner.id,
             container,
             busy: false,
+            newly_busy: false,
             started_at: now,
             memory: spec.memory.0,
             cpus: u64::from(spec.cpus) * 1000,

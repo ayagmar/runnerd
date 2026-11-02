@@ -181,6 +181,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
             container: container.id.clone(),
             busy: true,
+            newly_busy: false,
             // Its uptime goes on from its container's start, not from this restart.
             started_at: caps.started_at.unwrap_or_else(SystemTime::now),
             memory: caps.memory,
@@ -273,6 +274,25 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// container, go at the first poll.
     /// Changes nothing unless Docker lists both kinds and tells the caps of the runners of removed profiles, so it can
     /// be tried again.
+    /// Notes the name of a runner container found in `profile`'s slot `index`, so the slot's next runner is named
+    /// later, even within the second its name carries.
+    fn named_before(&mut self, profile: &str, index: usize, name: &str) {
+        let Some(secs) = name
+            .rsplit_once('-')
+            .and_then(|(_, secs)| secs.parse::<u64>().ok())
+        else {
+            return;
+        };
+        let last = self
+            .named
+            .entry(SlotRef {
+                profile: profile.to_owned(),
+                index,
+            })
+            .or_default();
+        *last = (*last).max(secs);
+    }
+
     pub(super) async fn recover(&mut self) -> Result<(), docker::Error> {
         let seeds = self.docker.list("runnerd.seed").await?;
         let containers = self.docker.list("runnerd.job").await?;
@@ -307,6 +327,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .parse::<usize>()
                 .ok()
                 .and_then(|slot| slot.checked_sub(1));
+            if ours && let Some(index) = index {
+                self.named_before(&profile, index, &container.name);
+            }
             let retired = retired_caps.remove(&container.id);
             let known_caps = retired.is_some() || self.config.profiles.contains_key(&profile);
             let caps = match retired {

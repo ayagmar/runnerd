@@ -117,6 +117,10 @@ struct GithubState {
     waiting: usize,
     /// How long each listing, registration and delete takes to answer, where a test says: a workload's figures.
     latency: Duration,
+    /// How much longer the runners and queued jobs listings take, as when GitHub lags.
+    listing_latency: Duration,
+    /// How many times a job was read, which `calls` leaves out.
+    job_reads: usize,
 }
 
 impl GithubState {
@@ -254,6 +258,15 @@ impl FakeGithub {
         let latency = self.0.lock().unwrap().latency;
         tokio::time::sleep(latency).await;
     }
+
+    /// Waits as long as a listing takes.
+    async fn listing_latency(&self) {
+        let latency = {
+            let state = self.0.lock().unwrap();
+            state.latency + state.listing_latency
+        };
+        tokio::time::sleep(latency).await;
+    }
 }
 
 impl GithubApi for FakeGithub {
@@ -266,7 +279,7 @@ impl GithubApi for FakeGithub {
         };
         let _ = held.wait_for(|held| !held.contains(repository)).await;
         self.0.lock().unwrap().waiting -= 1;
-        self.latency().await;
+        self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
         let queued = state
@@ -286,7 +299,7 @@ impl GithubApi for FakeGithub {
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
         self.answer().await;
-        self.latency().await;
+        self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("runners {repository}"));
         if state.missed_listings.remove(repository) {
@@ -362,7 +375,8 @@ impl GithubApi for FakeGithub {
 
     async fn job(&self, _repository: &str, id: u64) -> Result<JobDetails, github::Error> {
         self.wait(|state| &state.held_jobs).await;
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        state.job_reads += 1;
         state
             .jobs
             .get(&id)
@@ -565,6 +579,15 @@ struct DockerState {
     commits_held: tokio::sync::watch::Sender<bool>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
+    /// Where Docker's events go: the streams `exits` gave out, while followed.
+    events: Vec<tokio::sync::mpsc::UnboundedSender<Result<String, docker::Error>>>,
+    /// How many streams of events were asked for.
+    followed: usize,
+    /// How many of the next streams of events fail at once, as when Docker is down.
+    fail_events: u32,
+    /// How many of the next runner containers stop as soon as they start, before `start` returns, as a runner whose
+    /// configuration is broken does; Docker's events say so.
+    exit_at_start: u32,
     calls: Vec<String>,
 }
 
@@ -585,6 +608,8 @@ struct DockerLatency {
     start: Duration,
     /// The removal of a running container, which kills it first.
     remove_running: Duration,
+    /// The removal of a stopped container.
+    remove_stopped: Duration,
 }
 
 /// What the fake Docker runs once at a runner start.
@@ -687,7 +712,32 @@ fn not_found() -> docker::Error {
     }
 }
 
+impl FakeDocker {
+    /// Breaks off every stream of events, as a Docker restart does.
+    fn break_events(&self) {
+        for events in std::mem::take(&mut self.0.lock().unwrap().events) {
+            let _ = events.send(Err(docker::Error::RequestTimeoutError));
+        }
+    }
+}
+
 impl DockerApi for FakeDocker {
+    fn exits(&self) -> futures_util::stream::BoxStream<'static, Result<String, docker::Error>> {
+        let mut state = self.0.lock().unwrap();
+        state.followed += 1;
+        if state.fail_events > 0 {
+            state.fail_events -= 1;
+            return futures_util::stream::iter([Err(docker::Error::RequestTimeoutError)]).boxed();
+        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        state.events.push(sender);
+        futures_util::stream::unfold(receiver, |mut receiver| async move {
+            let event = receiver.recv().await?;
+            Some((event, receiver))
+        })
+        .boxed()
+    }
+
     async fn start(
         &self,
         spec: &RunnerSpec,
@@ -758,6 +808,15 @@ impl DockerApi for FakeDocker {
             running: true,
             labels,
         });
+        if runner && state.exit_at_start > 0 {
+            state.exit_at_start -= 1;
+            if let Some(container) = state.containers.last_mut() {
+                container.running = false;
+            }
+            state
+                .events
+                .retain(|events| events.send(Ok(id.clone())).is_ok());
+        }
         let Some(late) = late else {
             return Ok(id);
         };
@@ -811,6 +870,7 @@ impl DockerApi for FakeDocker {
             address: Some("172.18.0.3".to_owned()),
             // When `start` started it; the seeded containers ran since long before.
             started_at: Some(state.started.get(&found.id).copied().unwrap_or(1_000)),
+            finished_at: None,
             memory: state.memory.get(&found.id).copied(),
             cpus: state.cpus.get(&found.id).copied(),
         })
@@ -826,7 +886,7 @@ impl DockerApi for FakeDocker {
             if running {
                 state.latency.remove_running
             } else {
-                Duration::ZERO
+                state.latency.remove_stopped
             }
         };
         tokio::time::sleep(latency).await;

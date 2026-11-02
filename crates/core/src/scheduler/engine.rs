@@ -16,6 +16,7 @@ mod admission;
 mod build_cache;
 mod caches;
 mod control;
+mod exits;
 mod history;
 mod images;
 mod records;
@@ -202,6 +203,15 @@ impl Purpose {
     }
 }
 
+/// What else the engine does while it waits for a tick's work in `serving`, besides answering commands.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum Meanwhile {
+    /// Releases runners Docker says stopped and starts runners in their room (`turnover`).
+    Turnover,
+    /// Only answers commands: the work must not see a runner start or go, as a trim of the build cache.
+    Commands,
+}
+
 /// Whether Docker answers a stop.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum DockerInStop {
@@ -219,6 +229,9 @@ struct Occupant {
     runner_id: u64,
     container: String,
     busy: bool,
+    /// Whether the last runners listing was the first to show it busy, or GitHub said so since: the queued jobs
+    /// listing after it may still show the job it took, as GitHub lists one queued for a few seconds after.
+    newly_busy: bool,
     started_at: SystemTime,
     /// Its container's memory cap, which a reload does not change.
     memory: u64,
@@ -305,6 +318,10 @@ struct RepositoryState {
     queued: Vec<QueuedJob>,
     /// Whether the last poll of its queued jobs succeeded.
     listed: bool,
+    /// Whether one of its runners may have taken a job of `queued` since that poll without the engine knowing which:
+    /// it ended or turned busy before its log capture named the job. A pass between ticks starts none of its runners
+    /// from `queued` until the next poll (ADR 0095).
+    spent: bool,
     /// By the profile of each of its pools, that pool's runners held back after they failed: a broken pool does
     /// not hold back the others (ADR 0058).
     holds: BTreeMap<String, PoolHold>,
@@ -460,6 +477,13 @@ pub struct Engine<G = Github, D = Docker> {
     visibility_due: Arc<Mutex<BTreeMap<String, SystemTime>>>,
     /// The task asking GitHub repositories' visibility, off the tick (`follow_visibility`).
     visibility_asking: Option<JoinHandle<()>>,
+    /// The runner containers Docker said stopped since the last pass or tick took them (ADR 0095).
+    exits: Arc<exits::Exits>,
+    /// The task following Docker's events into `exits`, while the engine schedules.
+    watcher: Option<exits::Watcher>,
+    /// The second in the name of each slot's last runner: the next one's is later, so two runners of a slot never
+    /// share a name, which GitHub and Docker know them by.
+    named: BTreeMap<SlotRef, u64>,
 }
 
 fn unix_secs(time: SystemTime) -> u64 {
@@ -589,6 +613,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             ended_uploads: BTreeMap::new(),
             visibility_due: Arc::default(),
             visibility_asking: None,
+            exits: Arc::default(),
+            watcher: None,
+            named: BTreeMap::new(),
         };
         engine.publish();
         (
@@ -644,8 +671,14 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.schedule().await;
     }
 
-    /// Schedules until a shutdown request is carried out, from a recovered engine.
+    /// Schedules until a shutdown request is carried out, from a recovered engine. Between ticks, a runner whose
+    /// container Docker says stopped is released at once, and its slot taken by a job the last poll listed
+    /// (`turnover`, ADR 0095); that leaves the next tick when it was due.
     async fn schedule(&mut self) {
+        self.watcher = Some(exits::Watcher::start(
+            self.docker.clone(),
+            self.exits.clone(),
+        ));
         let mut shown = Shutdown::No;
         let mode = loop {
             let mode = self.stopping();
@@ -675,20 +708,11 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             } else {
                 Duration::from_secs(5)
             };
-            tokio::select! {
-                () = tokio::time::sleep(interval) => {}
-                () = self.control.wake.notified() => {}
-                // A detaching stop changes nothing more: a command waiting for it fails once the engine is gone.
-                Some(command) = self.commands.recv(), if mode != Shutdown::Detach => {
-                    self.command(command).await;
-                    self.publish();
-                }
-                Some(()) = self.records.finished.recv() => {
-                    self.collect_recordings().await;
-                    self.publish();
-                }
-            }
+            self.wait_for_tick(mode, tokio::time::Instant::now() + interval)
+                .await;
         };
+        // Nothing more is started or released: what Docker says now is the next start's.
+        self.watcher = None;
         // A reseed that finished meanwhile says so; one still running is the next start's (`recover_reseeds`).
         self.collect_reseeds().await;
         if self.docker_in_stop == DockerInStop::Failed {
@@ -716,6 +740,40 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             warn!("cannot stop the mirror: {error}");
         }
         info!("stopped");
+    }
+
+    /// Waits until the next tick in `mode` is `due`, or something calls for one sooner: a wake-up, a command or a
+    /// finished record. Runners Docker says stopped meanwhile are released by passes that leave `due` as it is;
+    /// during a stop they call for the tick instead, which a detach does not wait for.
+    async fn wait_for_tick(&mut self, mode: Shutdown, due: tokio::time::Instant) {
+        loop {
+            let exits = self.exits.clone();
+            tokio::select! {
+                () = tokio::time::sleep_until(due) => return,
+                () = self.control.wake.notified() => return,
+                // A detaching stop changes nothing more: a command waiting for it fails once the engine is gone.
+                Some(command) = self.commands.recv(), if mode != Shutdown::Detach => {
+                    self.command(command).await;
+                    self.publish();
+                    return;
+                }
+                Some(()) = self.records.finished.recv() => {
+                    self.collect_recordings().await;
+                    self.publish();
+                    return;
+                }
+                () = exits.noted(), if mode != Shutdown::Detach => {
+                    if mode != Shutdown::No {
+                        return;
+                    }
+                    self.turnover().await;
+                    self.publish();
+                    if self.stopping() != mode {
+                        return;
+                    }
+                }
+            }
+        }
     }
 
     /// How the stop goes on: as requested, or as a detach once Docker stopped answering it.
@@ -759,13 +817,16 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Runs `work` as a task of its own, answering commands and publishing after each until it is done, so a command
     /// waits for a slow GitHub no longer than for the command before it. A tick follows each such command, as one
     /// follows a command answered between ticks. The task goes on while a command runs: a request's timeout runs on
-    /// the clock, not on polls.
+    /// the clock, not on polls. With `Meanwhile::Turnover`, runners Docker says stopped are released and their slots
+    /// taken meanwhile too (`turnover`, ADR 0095), so a tick's wait for GitHub does not hold them.
     async fn serving<T: Send + 'static>(
         &mut self,
         work: impl Future<Output = T> + Send + 'static,
+        meanwhile: Meanwhile,
     ) -> T {
         let mut task = tokio::spawn(work);
         loop {
+            let exits = self.exits.clone();
             tokio::select! {
                 biased;
                 done = &mut task => match done.map_err(tokio::task::JoinError::try_into_panic) {
@@ -781,6 +842,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     // A tick follows it, as one follows a command answered between ticks: a config it replaced
                     // polls its repositories then, not a poll interval later.
                     self.control.wake.notify_one();
+                }
+                () = exits.noted(), if meanwhile == Meanwhile::Turnover => {
+                    self.turnover().await;
+                    self.publish();
                 }
             }
         }
