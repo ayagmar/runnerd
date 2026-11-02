@@ -188,10 +188,11 @@ queued → slot → container → removed
    dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`). Docker's `die` event wakes
    the engine (`engine/exits`), between ticks or while a tick waits for GitHub, for a pass (`Engine::turnover`): an
    event is a hint, and Docker's inspect decides. A stopped runner is released, its container removed and then its
-   registration, and its slot is free. Each runner's release goes on its own, and after each slot it frees the pass
-   starts runners for the jobs the last poll listed, without asking GitHub, leaving out jobs runners took since and,
-   for each runner that may have taken a job no capture named, one listed job of its pool, until a listing begun
-   after it ([ADR 0095](docs/adr/0095-dockers-events-wake-a-pass-that-refills-a-slot.md)).
+   registration, and its slot is free. Each runner's release goes on its own, runners that stop meanwhile join the
+   pass, and after each slot it frees the pass starts runners for the jobs the last poll listed, without asking
+   GitHub, leaving out jobs runners took since and, for each runner that may have taken a job no capture named, one
+   listed job of its pool, until a listing begun after it
+   ([ADR 0095](docs/adr/0095-dockers-events-wake-a-pass-that-refills-a-slot.md)).
    Each tick's `Engine::collect_finished` inspects every other runner too, so a runner whose event never came, or
    that stopped while the events were not followed, is released at the next poll as before; the events are followed
    again with a backoff, and every runner is inspected once they are. A runner that took no job holds the repository

@@ -43,8 +43,11 @@ what happened meanwhile, and Docker keeps no history to ask again.
   noted stopped, which the pass during its listing releases; the tick still inspects every other runner, so a
   runner whose event never came is found as before.
 - **The pass then starts runners into the room it freed, from the last listing**, asking GitHub nothing more. Each
-  runner's release goes on its own (its log read and failed job recorded, then its removal), and the pass plans
-  after each slot that frees, so a slow release holds back only its own slot. It starts only runners for listed jobs
+  runner's release goes on its own (its log read and failed job recorded, then its removal), runners Docker says
+  stopped while those wait join them, and the pass plans after each slot that frees, so a slow release holds back
+  only its own slot. The pass owns its releases until each is done, so no tick, stop or idle removal sees a runner
+  half released; a tick that falls due meanwhile waits for them, as a command does. Once a stop is asked for, it
+  takes no more runners and starts none, and the stop's ticks release what stopped since. It starts only runners for listed jobs
   into empty slots: no stops, no warm runners, no start that takes a warm runner's room; those wait for the tick.
   Before it plans, it raises what idle runners reserve for the jobs listed now, as a tick does; a pass stops no
   runner, so the next tick stops those it raised past the budget, as it stops those it raised itself. Each start is admitted

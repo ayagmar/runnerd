@@ -729,12 +729,25 @@ enum Slow {
     Removal,
 }
 
-/// Two runners end at once while listed jobs wait; one's release is slow. The other's slot takes the next job
-/// within seconds, and the slow one's slot stays held until Docker removed its container. The bug it catches: a pass
-/// releasing the runners one after the other before starting any, so an unrelated slow release held every slot.
+/// When two runners end, the second at once or once the first's release began.
+#[derive(Debug, Clone, Copy)]
+enum Ends {
+    Together,
+    SlowFirst,
+}
+
+/// Two runners end while listed jobs wait; one's release is slow. The other's slot takes the next job within seconds,
+/// and the slow one's slot stays held until Docker removed its container. The bugs it catches: a pass releasing the
+/// runners one after the other before starting any, so an unrelated slow release held every slot; and a pass
+/// waiting out the releases it began before it heeds a runner that ended since.
 #[tokio::test(start_paused = true)]
 async fn a_slow_release_does_not_hold_back_another_slots_next_runner() {
-    for slow in [Slow::Capture, Slow::Removal] {
+    for (slow, ends) in [
+        (Slow::Capture, Ends::Together),
+        (Slow::Removal, Ends::Together),
+        (Slow::Capture, Ends::SlowFirst),
+        (Slow::Removal, Ends::SlowFirst),
+    ] {
         let (github, docker) = (FakeGithub::default(), FakeDocker::default());
         running_job(&github, &docker, "o/r", 1, 1);
         running_job(&github, &docker, "o/r", 2, 2);
@@ -773,6 +786,10 @@ async fn a_slow_release_does_not_hold_back_another_slots_next_runner() {
             let name = github.0.lock().unwrap().runners[0].name.clone();
             complete(&github, id, &name);
             stop_container(&docker, &format!("container-{slot}"));
+            if let Ends::SlowFirst = ends {
+                // Slot 1's release begins and waits.
+                tokio::time::sleep(Duration::from_secs(2)).await;
+            }
         }
         tokio::time::sleep(Duration::from_secs(4)).await;
 
@@ -781,11 +798,11 @@ async fn a_slow_release_does_not_hold_back_another_slots_next_runner() {
         assert_eq!(
             started.len(),
             1,
-            "{slow:?}: slot 2 took a job, slot 1 waits for its release: {calls:?}"
+            "{slow:?}, {ends:?}: slot 2 took a job, slot 1 waits for its release: {calls:?}"
         );
         assert!(
             started[0].contains("-app-2-"),
-            "{slow:?}: the runner started in slot 2: {started:?}"
+            "{slow:?}, {ends:?}: the runner started in slot 2: {started:?}"
         );
         handle.shutdown(Shutdown::Force);
         run.await.unwrap();

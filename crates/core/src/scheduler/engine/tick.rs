@@ -40,6 +40,24 @@ struct Ending {
     logs: Option<String>,
 }
 
+/// The releases a pass began, by index: each `None` once done.
+#[derive(Default)]
+struct Releases {
+    ended: Vec<Option<Ending>>,
+    /// The step each waits for.
+    waits: tokio::task::JoinSet<(usize, Step)>,
+}
+
+impl Releases {
+    /// Whether the pass is releasing the runner of `container`.
+    fn releasing(&self, container: &str) -> bool {
+        self.ended
+            .iter()
+            .flatten()
+            .any(|ending| ending.occupant.container == container)
+    }
+}
+
 /// A step of a release a pass waited for.
 enum Step {
     /// Its log read, and its capture ended: what the log says.
@@ -330,62 +348,52 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// A pass between ticks for the runners Docker said stopped (ADR 0095): releases those whose containers did, as
     /// the tick's `collect_finished` does, and as each one's slot is free starts runners for the jobs the last poll
     /// listed queued into the room left, without asking GitHub again. Each release keeps its steps' order, but their
-    /// waits for Docker and GitHub run side by side, so a slow one holds no other slot. Only starts for jobs: stops,
-    /// warm runners and starts that take a warm runner's room wait for the tick, which also follows jobs and keeps the
-    /// caches. The listing it plans from is that of the runners before the queued jobs, as every tick's; jobs runners
-    /// took since are left out (`listed_demand`).
+    /// waits for Docker and GitHub run side by side, and runners Docker says stopped while they wait join them, so a
+    /// slow one holds no other slot. The pass owns its releases until each is done: nothing else sees a runner half
+    /// released. Only starts for jobs: stops, warm runners and starts that take a warm runner's room wait for the
+    /// tick, which also follows jobs and keeps the caches. The listing it plans from is that of the runners before the
+    /// queued jobs, as every tick's; jobs runners took since are left out (`listed_demand`).
     pub(super) async fn turnover(&mut self) {
-        let noted = self.exits.take();
-        if noted.is_empty() {
+        let began = tokio::time::Instant::now();
+        let mut releases = Releases::default();
+        let mut freed = self.begin_releases(&mut releases).await;
+        if freed == 0 && releases.waits.is_empty() {
             return;
         }
-        let began = tokio::time::Instant::now();
-        // The tick inspected one first, in the moment before its event came: its room waits for no listing either.
-        let mut freed = noted
-            .containers
-            .iter()
-            .filter(|container| self.released.remove(*container))
-            .count();
-        let noted: Vec<(SlotRef, Occupant)> = self
-            .occupied()
-            .filter(|(_, occupant)| noted.any || noted.containers.contains(&occupant.container))
-            .map(|(slot, occupant)| (slot, occupant.clone()))
-            .collect();
-        let mut ended = Vec::new();
-        for (slot, occupant) in noted {
-            if self.ended(&occupant).await {
-                ended.push(Ending {
-                    slot,
-                    occupant,
-                    logs: None,
-                });
-            }
-        }
-        let mut waits = tokio::task::JoinSet::new();
-        for (index, ending) in ended.iter().enumerate() {
-            let drained = self.drain(&ending.occupant);
-            waits.spawn(async move { (index, Step::Drained(drained.await)) });
-        }
         let mut started = if freed > 0 { self.refill().await } else { 0 };
-        // A wait that panicked leaves its runner in its slot, which the next tick's inspect finds again.
-        while let Some(Ok((index, step))) = waits.join_next().await {
-            let Ending {
-                slot,
-                occupant,
-                logs,
-            } = &mut ended[index];
-            match step {
-                Step::Drained(read) => {
-                    *logs = read;
-                    let recorded = self.record(slot, occupant, logs.as_deref()).await;
-                    let removed = self.remove(occupant, recorded);
-                    waits.spawn(async move { (index, Step::Removed(removed.await)) });
-                }
-                Step::Removed(removed) => {
-                    let (slot, occupant, logs) = (slot.clone(), occupant.clone(), logs.take());
-                    self.released(&slot, &occupant, logs.as_deref(), removed);
-                    if !self.holds_runner(&slot) {
-                        freed += 1;
+        let exits = self.exits.clone();
+        while !releases.waits.is_empty() {
+            tokio::select! {
+                joined = releases.waits.join_next() => match joined {
+                    Some(Ok((index, Step::Drained(read)))) => {
+                        let Some(Ending { slot, occupant, logs }) = &mut releases.ended[index] else {
+                            continue;
+                        };
+                        *logs = read;
+                        let recorded = self.record(slot, occupant, logs.as_deref()).await;
+                        let removed = self.remove(occupant, recorded);
+                        releases
+                            .waits
+                            .spawn(async move { (index, Step::Removed(removed.await)) });
+                    }
+                    Some(Ok((index, Step::Removed(removed)))) => {
+                        let Some(Ending { slot, occupant, logs }) = releases.ended[index].take() else {
+                            continue;
+                        };
+                        self.released(&slot, &occupant, logs.as_deref(), removed);
+                        if !self.holds_runner(&slot) {
+                            freed += 1;
+                            started += self.refill().await;
+                        }
+                    }
+                    // A wait that panicked leaves its runner in its slot, which the next tick's inspect finds again.
+                    Some(Err(_)) | None => {}
+                },
+                // Once a stop is asked for, the tick releases what stopped since.
+                () = exits.noted(), if self.stopping() == Shutdown::No => {
+                    let more = self.begin_releases(&mut releases).await;
+                    if more > 0 {
+                        freed += more;
                         started += self.refill().await;
                     }
                 }
@@ -401,6 +409,42 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         } else {
             debug!("{line}");
         }
+    }
+
+    /// Takes the runners Docker said stopped since, inspects those not already being released and begins releasing
+    /// those that did stop; returns how many of them this tick's inspect released first, in the moment before their
+    /// event came, whose room waits for no listing either.
+    async fn begin_releases(&mut self, releases: &mut Releases) -> usize {
+        let noted = self.exits.take();
+        if noted.is_empty() {
+            return 0;
+        }
+        let freed = noted
+            .containers
+            .iter()
+            .filter(|container| self.released.remove(*container))
+            .count();
+        let noted: Vec<(SlotRef, Occupant)> = self
+            .occupied()
+            .filter(|(_, occupant)| noted.any || noted.containers.contains(&occupant.container))
+            .filter(|(_, occupant)| !releases.releasing(&occupant.container))
+            .map(|(slot, occupant)| (slot, occupant.clone()))
+            .collect();
+        for (slot, occupant) in noted {
+            if self.ended(&occupant).await {
+                let drained = self.drain(&occupant);
+                let index = releases.ended.len();
+                releases.ended.push(Some(Ending {
+                    slot,
+                    occupant,
+                    logs: None,
+                }));
+                releases
+                    .waits
+                    .spawn(async move { (index, Step::Drained(drained.await)) });
+            }
+        }
+        freed
     }
 
     /// Starts runners for the listed jobs into the room a pass freed; returns how many started.
