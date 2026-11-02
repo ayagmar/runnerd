@@ -933,6 +933,8 @@ impl DockerApi for FakeDocker {
         state
             .containers
             .retain(|candidate| candidate.id != container && candidate.name != container);
+        // Docker gives the next container a new ID: one that takes the name gets none of this one's output.
+        state.container_captures.remove(container);
         Ok(())
     }
 
