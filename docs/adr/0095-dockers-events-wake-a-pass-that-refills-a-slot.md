@@ -46,7 +46,8 @@ what happened meanwhile, and Docker keeps no history to ask again.
   runner's release goes on its own (its log read and failed job recorded, then its removal), and the pass plans
   after each slot that frees, so a slow release holds back only its own slot. It starts only runners for listed jobs
   into empty slots: no stops, no warm runners, no start that takes a warm runner's room; those wait for the tick.
-  Before it plans, it raises what idle runners reserve for the jobs listed now, as a tick does. Each start is admitted
+  Before it plans, it raises what idle runners reserve for the jobs listed now, as a tick does; a pass stops no
+  runner, so the next tick stops those it raised past the budget, as it stops those it raised itself. Each start is admitted
   as a tick's is, and the first that no longer fits ends the pass. No start begins once a stop is asked for, and a runner registered meanwhile is deleted before its
   container starts (ADR 0092).
 - **No job gets a second runner from a listing older than its first** ([ADR 0018](0018-job-identity-and-logs-from-inside-the-runner.md)).

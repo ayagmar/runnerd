@@ -1760,3 +1760,61 @@ async fn a_pass_raises_what_waiting_runners_reserve_before_it_admits() {
         "the runners reserve {in_use} bytes of the 10G slice"
     );
 }
+
+/// Four builds run at 1.25G each. One ends while the tick that listed an e2e beside the other three has not raised
+/// their reservations yet: the pass that releases it raises them to 3.5G each, 10.5G of the 10G slice, and stops
+/// none, as passes stop no runner. The bug it catches: the next tick finding nothing left to raise and forgetting
+/// that the three were raised, so none stopped and they stayed past the budget.
+#[tokio::test]
+async fn waiting_runners_a_pass_raised_past_the_budget_are_stopped_by_the_next_tick() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4, "4 × 1.25G");
+    let ended = {
+        let occupant = engine
+            .slots
+            .values_mut()
+            .flatten()
+            .flatten()
+            .last()
+            .unwrap();
+        occupant.job = Some(4);
+        occupant.busy = true;
+        occupant.container.clone()
+    };
+    for container in &mut docker.0.lock().unwrap().containers {
+        if container.id == ended {
+            container.running = false;
+        }
+    }
+    let e2e = QueuedJob {
+        name: "e2e".to_owned(),
+        ..job(5)
+    };
+    let queued = vec![job(1), job(2), job(3), e2e];
+    engine.repositories.get_mut("o/r").unwrap().queued = queued.clone();
+    github.0.lock().unwrap().queued = queued;
+    engine.exits.stopped(ended);
+    engine.turnover().await;
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.memory_in_use,
+        3 * 3584 * M,
+        "the pass raised the three left"
+    );
+
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let in_use = handle.status.borrow().budget.memory_in_use;
+    assert!(
+        in_use <= 10 * G,
+        "the runners reserve {in_use} bytes of the 10G slice"
+    );
+}
