@@ -55,6 +55,12 @@ impl Left {
     }
 }
 
+/// The second a runner's name carries: the engine names the next runner later, even within that second or after the
+/// clock stepped back.
+fn name_second(name: &str) -> Option<u64> {
+    name.rsplit_once('-')?.1.parse().ok()
+}
+
 /// The longest a container recovery could not decide on waits before it is asked about again.
 const UNREAD_BACKOFF_MAX: Duration = Duration::from_secs(600);
 
@@ -181,6 +187,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             runner_id: label("runnerd.runner-id").parse().unwrap_or(0),
             container: container.id.clone(),
             busy: true,
+            newly_busy: false,
             // Its uptime goes on from its container's start, not from this restart.
             started_at: caps.started_at.unwrap_or_else(SystemTime::now),
             memory: caps.memory,
@@ -307,6 +314,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 .parse::<usize>()
                 .ok()
                 .and_then(|slot| slot.checked_sub(1));
+            if ours && let Some(secs) = name_second(&container.name) {
+                self.named = self.named.max(secs);
+            }
             let retired = retired_caps.remove(&container.id);
             let known_caps = retired.is_some() || self.config.profiles.contains_key(&profile);
             let caps = match retired {
@@ -426,8 +436,18 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                         self.store.runner_removed(runner, time::now_ms());
                     }
                     self.closing.insert(job.id, Closing::now(&job.repository));
+                    self.consume(&job.repository, job.id);
                 }
             }
+            Err(error) => warn!("cannot read the job history: {error}"),
+        }
+        // The next runner is named later than every one the history names, whose containers may be gone.
+        match self
+            .store
+            .last_runner_second(self.runner_prefix.clone())
+            .await
+        {
+            Ok(secs) => self.named = self.named.max(secs.unwrap_or_default()),
             Err(error) => warn!("cannot read the job history: {error}"),
         }
         // The slots' layers outlive the daemon, and so does what ran last in each.

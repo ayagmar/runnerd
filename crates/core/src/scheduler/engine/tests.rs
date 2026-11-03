@@ -117,6 +117,10 @@ struct GithubState {
     waiting: usize,
     /// How long each listing, registration and delete takes to answer, where a test says: a workload's figures.
     latency: Duration,
+    /// How much longer the runners and queued jobs listings take, as when GitHub lags.
+    listing_latency: Duration,
+    /// How many times a job was read, which `calls` leaves out.
+    job_reads: usize,
 }
 
 impl GithubState {
@@ -254,6 +258,15 @@ impl FakeGithub {
         let latency = self.0.lock().unwrap().latency;
         tokio::time::sleep(latency).await;
     }
+
+    /// Waits as long as a listing takes.
+    async fn listing_latency(&self) {
+        let latency = {
+            let state = self.0.lock().unwrap();
+            state.latency + state.listing_latency
+        };
+        tokio::time::sleep(latency).await;
+    }
 }
 
 impl GithubApi for FakeGithub {
@@ -266,7 +279,7 @@ impl GithubApi for FakeGithub {
         };
         let _ = held.wait_for(|held| !held.contains(repository)).await;
         self.0.lock().unwrap().waiting -= 1;
-        self.latency().await;
+        self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("queued {repository}"));
         let queued = state
@@ -286,7 +299,7 @@ impl GithubApi for FakeGithub {
 
     async fn runners(&self, repository: &str) -> Result<Vec<Runner>, github::Error> {
         self.answer().await;
-        self.latency().await;
+        self.listing_latency().await;
         let mut state = self.0.lock().unwrap();
         state.call(format!("runners {repository}"));
         if state.missed_listings.remove(repository) {
@@ -362,7 +375,8 @@ impl GithubApi for FakeGithub {
 
     async fn job(&self, _repository: &str, id: u64) -> Result<JobDetails, github::Error> {
         self.wait(|state| &state.held_jobs).await;
-        let state = self.0.lock().unwrap();
+        let mut state = self.0.lock().unwrap();
+        state.job_reads += 1;
         state
             .jobs
             .get(&id)
@@ -565,6 +579,19 @@ struct DockerState {
     commits_held: tokio::sync::watch::Sender<bool>,
     /// The create requests of the shells started, by container ID.
     shells: HashMap<String, ContainerCreateBody>,
+    /// Where Docker's events go: the streams `exits` gave out, while followed.
+    events: Vec<tokio::sync::mpsc::UnboundedSender<Result<String, docker::Error>>>,
+    /// How many streams of events were asked for.
+    followed: usize,
+    /// How many of the next streams of events fail at once, as when Docker is down.
+    fail_events: u32,
+    /// How many of the next runner containers stop as soon as they start, before `start` returns, as a runner whose
+    /// configuration is broken does; Docker's events say so.
+    exit_at_start: u32,
+    /// Containers whose log capture prints what it has and then never ends, as when Docker hangs on an exec.
+    stuck_captures: BTreeSet<String>,
+    /// How much longer the removal of each of these containers takes, as when Docker hangs on one.
+    slow_removes: HashMap<String, Duration>,
     calls: Vec<String>,
 }
 
@@ -585,6 +612,8 @@ struct DockerLatency {
     start: Duration,
     /// The removal of a running container, which kills it first.
     remove_running: Duration,
+    /// The removal of a stopped container.
+    remove_stopped: Duration,
 }
 
 /// What the fake Docker runs once at a runner start.
@@ -598,6 +627,37 @@ struct LateFailure {
     takes_job: bool,
     /// The start's removal of its container fails too, which leaves it running.
     cleanup_fails: bool,
+}
+
+impl LateFailure {
+    /// Fails the start of container `id`, which Docker made for `spec`.
+    fn fail(self, state: &mut DockerState, spec: &RunnerSpec, id: String) -> docker::StartError {
+        // Docker gives each container a new ID; here a start that reuses the name of one that failed and left no
+        // history must not read that one's capture.
+        state.container_captures.remove(&id);
+        let job = self
+            .takes_job
+            .then(|| state.captures_wait.clone())
+            .flatten()
+            .and_then(|github| give_job(&github, spec));
+        if let Some(job) = job {
+            state
+                .container_captures
+                .insert(id.clone(), format!("@@job {job} {job}\n"));
+        }
+        state.late_started.push((id.clone(), job));
+        let container = if self.cleanup_fails {
+            Some(id)
+        } else {
+            state.containers.retain(|container| container.id != id);
+            None
+        };
+        docker::StartError {
+            container,
+            may_have_run: true,
+            error: docker::Error::RequestTimeoutError,
+        }
+    }
 }
 
 /// GitHub gives the runner `spec` registered the first queued job of its repository whose labels it has; returns
@@ -618,6 +678,11 @@ fn give_job(github: &FakeGithub, spec: &RunnerSpec) -> Option<u64> {
                 .queued_on
                 .get(&job.id)
                 .is_none_or(|on| on == repository)
+                // A job a stale listing still shows runs on the runner that took it.
+                && state
+                    .jobs
+                    .get(&job.id)
+                    .is_none_or(|details| details.runner_name.is_none())
                 && !job.labels.is_empty()
                 && job
                     .labels
@@ -682,7 +747,32 @@ fn not_found() -> docker::Error {
     }
 }
 
+impl FakeDocker {
+    /// Breaks off every stream of events, as a Docker restart does.
+    fn break_events(&self) {
+        for events in std::mem::take(&mut self.0.lock().unwrap().events) {
+            let _ = events.send(Err(docker::Error::RequestTimeoutError));
+        }
+    }
+}
+
 impl DockerApi for FakeDocker {
+    fn exits(&self) -> futures_util::stream::BoxStream<'static, Result<String, docker::Error>> {
+        let mut state = self.0.lock().unwrap();
+        state.followed += 1;
+        if state.fail_events > 0 {
+            state.fail_events -= 1;
+            return futures_util::stream::iter([Err(docker::Error::RequestTimeoutError)]).boxed();
+        }
+        let (sender, receiver) = tokio::sync::mpsc::unbounded_channel();
+        state.events.push(sender);
+        futures_util::stream::unfold(receiver, |mut receiver| async move {
+            let event = receiver.recv().await?;
+            Some((event, receiver))
+        })
+        .boxed()
+    }
+
     async fn start(
         &self,
         spec: &RunnerSpec,
@@ -691,6 +781,7 @@ impl DockerApi for FakeDocker {
         if let Err(error) = self.outage().await {
             return Err(docker::StartError {
                 container: None,
+                may_have_run: false,
                 error,
             });
         }
@@ -704,6 +795,7 @@ impl DockerApi for FakeDocker {
         let refused = |error| {
             Err(docker::StartError {
                 container: None,
+                may_have_run: false,
                 error,
             })
         };
@@ -753,30 +845,19 @@ impl DockerApi for FakeDocker {
             running: true,
             labels,
         });
+        if runner && state.exit_at_start > 0 {
+            state.exit_at_start -= 1;
+            if let Some(container) = state.containers.last_mut() {
+                container.running = false;
+            }
+            state
+                .events
+                .retain(|events| events.send(Ok(id.clone())).is_ok());
+        }
         let Some(late) = late else {
             return Ok(id);
         };
-        let job = late
-            .takes_job
-            .then(|| state.captures_wait.clone())
-            .flatten()
-            .and_then(|github| give_job(&github, spec));
-        if let Some(job) = job {
-            state
-                .container_captures
-                .insert(id.clone(), format!("@@job {job} {job}\n"));
-        }
-        state.late_started.push((id.clone(), job));
-        let container = if late.cleanup_fails {
-            Some(id)
-        } else {
-            state.containers.retain(|container| container.id != id);
-            None
-        };
-        Err(docker::StartError {
-            container,
-            error: docker::Error::RequestTimeoutError,
-        })
+        Err(late.fail(&mut state, spec, id))
     }
 
     async fn inspect(&self, container: &str) -> Result<RunnerState, docker::Error> {
@@ -806,6 +887,7 @@ impl DockerApi for FakeDocker {
             address: Some("172.18.0.3".to_owned()),
             // When `start` started it; the seeded containers ran since long before.
             started_at: Some(state.started.get(&found.id).copied().unwrap_or(1_000)),
+            finished_at: None,
             memory: state.memory.get(&found.id).copied(),
             cpus: state.cpus.get(&found.id).copied(),
         })
@@ -818,10 +900,15 @@ impl DockerApi for FakeDocker {
             let running = state.containers.iter().any(|candidate| {
                 (candidate.id == container || candidate.name == container) && candidate.running
             });
-            if running {
+            let slow = state
+                .slow_removes
+                .get(container)
+                .copied()
+                .unwrap_or_default();
+            slow + if running {
                 state.latency.remove_running
             } else {
-                Duration::ZERO
+                state.latency.remove_stopped
             }
         };
         tokio::time::sleep(latency).await;
@@ -846,6 +933,8 @@ impl DockerApi for FakeDocker {
         state
             .containers
             .retain(|candidate| candidate.id != container && candidate.name != container);
+        // Docker gives the next container a new ID: one that takes the name gets none of this one's output.
+        state.container_captures.remove(container);
         Ok(())
     }
 
@@ -962,6 +1051,12 @@ impl DockerApi for FakeDocker {
         if breaks {
             let printed = output.unwrap_or_default().into_bytes();
             return Ok(futures_util::stream::iter([Ok(printed), Err(broken())]).boxed());
+        }
+        if state.stuck_captures.contains(container) {
+            let printed = output.unwrap_or_default().into_bytes();
+            return Ok(futures_util::stream::iter([Ok(printed)])
+                .chain(futures_util::stream::pending())
+                .boxed());
         }
         if let (None, Some(github)) = (&output, state.captures_wait.clone()) {
             let outlives = state.capture_end == CaptureEnd::Container;
@@ -1381,6 +1476,132 @@ async fn a_runner_that_takes_its_job_between_polls_gets_no_twin() {
     engine.recover().await.unwrap();
     engine.tick(Shutdown::No).await;
     assert_eq!(registered(&github.calls()), Vec::<&String>::new());
+}
+
+/// A slot's next runner is named later than every runner the slot had, across a restart too. A name carries a
+/// second, which runs ahead of the clock when a slot started more than one within a second, and is ahead of it after
+/// the clock stepped back. The bug it catches: a restarted engine giving a runner the name of an earlier one of its
+/// slot whose container is gone, which GitHub, Docker and the history (keyed by name) take for the same runner.
+#[tokio::test]
+async fn a_slots_runner_after_a_restart_is_named_later_than_every_earlier_one() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    let (mut engine, handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    let ahead = crate::time::now_ms() / 1000 + 3600;
+    engine.named = ahead;
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    handle.store.flush().await;
+    drop((engine, handle));
+    // Its container went while no daemon ran.
+    docker.0.lock().unwrap().containers.clear();
+    let (mut engine, _handle) = engine_in(&github, &docker, &dir);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+
+    let seconds: Vec<u64> = registered(&github.calls())
+        .iter()
+        .map(|call| call.rsplit_once('-').unwrap().1.parse().unwrap())
+        .collect();
+    assert_eq!(
+        seconds.len(),
+        2,
+        "slot 1 got a runner before and after: {seconds:?}"
+    );
+    assert!(
+        seconds[1] > seconds[0],
+        "the second runner is named later than the first: {seconds:?}"
+    );
+}
+
+/// One slot. Runner A, named an hour ahead of the clock, runs job 1 and gets its history row. Runner B, named a second
+/// after A, takes job 2 while Docker answers none of its inspects, so only job 2's record names it; it ends, and a
+/// restart finds no container. The bug it catches: the restarted engine naming its next runner after A, which gave
+/// it B's name, so job 2's record took the new runner for its own.
+#[tokio::test]
+async fn a_runner_only_a_jobs_record_names_keeps_its_name_across_a_restart() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("restart");
+    let config = CONFIG.replace("slots = 2", "slots = 1");
+    let (mut engine, handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    engine.named = crate::time::now_ms() / 1000 + 3600;
+    let names = |github: &FakeGithub| -> Vec<String> {
+        registered(&github.calls())
+            .iter()
+            .map(|call| call.strip_prefix("register ").unwrap().to_owned())
+            .collect()
+    };
+    let run = |github: &FakeGithub, docker: &FakeDocker, id: u64, runner: &str| {
+        let mut state = github.0.lock().unwrap();
+        state.queued.retain(|queued| queued.id != id);
+        for registered in &mut state.runners {
+            if registered.name == runner {
+                registered.busy = true;
+            }
+        }
+        let mut running = details(id, "in_progress", None);
+        running.runner_name = Some(runner.to_owned());
+        state.jobs.insert(id, running);
+        drop(state);
+        docker
+            .0
+            .lock()
+            .unwrap()
+            .container_logs
+            .insert(runner.to_owned(), "Running job: build\n".to_owned());
+    };
+    let stop = |engine: &mut Engine<FakeGithub, FakeDocker>, docker: &FakeDocker, runner: &str| {
+        for container in &mut docker.0.lock().unwrap().containers {
+            if container.id == runner {
+                container.running = false;
+            }
+        }
+        engine.exits.stopped(runner.to_owned());
+    };
+
+    github.0.lock().unwrap().queued = vec![job(1)];
+    engine.tick(Shutdown::No).await;
+    let a = names(&github)[0].clone();
+    run(&github, &docker, 1, &a);
+    stop(&mut engine, &docker, &a);
+    engine.turnover().await;
+
+    github.0.lock().unwrap().queued = vec![job(2)];
+    docker.0.lock().unwrap().fail_started_inspects = 1;
+    engine.tick(Shutdown::No).await;
+    let b = names(&github)[1].clone();
+    docker
+        .0
+        .lock()
+        .unwrap()
+        .fail_inspects
+        .insert(b.clone(), 100);
+    run(&github, &docker, 2, &b);
+    engine.tick(Shutdown::No).await;
+    docker.0.lock().unwrap().fail_inspects.remove(&b);
+    stop(&mut engine, &docker, &b);
+    engine.turnover().await;
+    handle.store.flush().await;
+    assert_eq!(
+        handle.store.runner_job(&b).await.unwrap(),
+        Some(2),
+        "job 2's record names {b}"
+    );
+    drop((engine, handle));
+
+    docker.0.lock().unwrap().containers.clear();
+    github.0.lock().unwrap().queued = vec![job(3)];
+    let (mut engine, _handle) = engine_with(&github, &docker, &dir, &config);
+    engine.recover().await.unwrap();
+    engine.tick(Shutdown::No).await;
+    let names = names(&github);
+    assert_eq!(names.len(), 3, "job 3 got a runner: {names:?}");
+    assert!(
+        !names[..2].contains(&names[2]),
+        "the restarted engine named a new runner: {names:?}"
+    );
 }
 
 #[tokio::test]

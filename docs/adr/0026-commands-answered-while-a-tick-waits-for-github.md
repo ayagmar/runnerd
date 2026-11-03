@@ -1,6 +1,6 @@
 # 0026. Commands are answered while a tick waits for GitHub
 
-Status: **Accepted**. Amends [0019](0019-control-commands-through-the-engine.md).
+Status: **Accepted**, amended by [0095](0095-dockers-events-wake-a-pass-that-refills-a-slot.md). Amends [0019](0019-control-commands-through-the-engine.md).
 
 ## Context
 

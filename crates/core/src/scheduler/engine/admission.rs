@@ -46,7 +46,8 @@ pub(super) struct Measured {
     predictor: Option<(Predictor, SystemTime)>,
     /// Whether the slice was at the high-water mark at the last plan, so the change is logged once.
     pub high_water: bool,
-    /// The waiting runners this tick's `rereserve` raised for a heavier queued job.
+    /// The waiting runners `rereserve` raised for a heavier queued job, until they take a job or go. A raise stays
+    /// once made, so a pass's raise is still known to the tick after it, which stops those past the budget.
     raised: Vec<String>,
 }
 
@@ -487,8 +488,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// queued jobs, since GitHub may still give it any of them. A runner a restart adopted without a record of its
     /// admission keeps its cap. Each change goes into the runner's row.
     pub(super) async fn rereserve(&mut self) {
-        self.measured.raised.clear();
         if self.config.host.admission != Admission::Measured {
+            self.measured.raised.clear();
             return;
         }
         self.find_keys().await;
@@ -506,7 +507,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         // as does every runner of a repository with a busy runner whose job is not known yet.
         let mut seen = BTreeSet::new();
         let mut changed = Vec::new();
-        let mut raised = Vec::new();
+        let mut raised = std::mem::take(&mut self.measured.raised);
         for (profile, slots) in &mut self.slots {
             for occupant in slots.iter_mut().flatten() {
                 let first = occupant
@@ -560,7 +561,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     admission.reserved = prediction.memory;
                     admission.basis = prediction.basis;
                     dirty = true;
-                    if occupant.key.is_none() {
+                    if occupant.key.is_none() && !raised.contains(&occupant.runner_name) {
                         raised.push(occupant.runner_name.clone());
                     }
                 }
@@ -569,6 +570,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                 }
             }
         }
+        raised.retain(|name| {
+            self.occupied()
+                .any(|(_, occupant)| occupant.key.is_none() && occupant.runner_name == *name)
+        });
         self.measured.raised = raised;
         for (runner, admission) in changed {
             self.store.runner_admission(&runner, admission);

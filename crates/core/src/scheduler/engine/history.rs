@@ -12,7 +12,7 @@ use tokio::sync::mpsc;
 use tracing::{info, warn};
 
 use super::tick::CONCURRENT_REQUESTS;
-use super::{Engine, Occupant};
+use super::{Engine, Meanwhile, Occupant};
 use crate::admission::Key;
 use crate::docker::{DockerApi, is_not_found};
 use crate::github::{self, GithubApi, JobDetails};
@@ -274,30 +274,35 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// Notes the jobs runners took since the last call.
     pub(super) fn take_found(&mut self) {
         while let Ok(found) = self.found.1.try_recv() {
-            self.queued_jobs.remove(&found.job);
-            let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
-                slots
-                    .iter_mut()
-                    .flatten()
-                    .find(|occupant| occupant.runner_name == found.runner)
-                    .map(|occupant| (profile, occupant))
-            }) else {
-                continue;
-            };
-            // A capture started again reports the job it reported before.
-            if occupant.job == Some(found.job) {
-                continue;
-            }
-            occupant.job = Some(found.job);
-            // A warm runner takes its job before a listing shows it queued: its run is seen here first. After a
-            // restart, `recover` noted it with its jobs' queued times. Its job is its pool's.
-            let pool = Pool {
-                repository: occupant.repository.clone(),
-                profile: profile.clone(),
-            };
-            let attempt = self.latest_attempt(found.run_id);
-            self.note_job(&pool, attempt, found.job, None, time::now_ms());
+            self.note_found(&found);
         }
+    }
+
+    /// Notes the job a runner's capture found.
+    pub(super) fn note_found(&mut self, found: &Found) {
+        self.queued_jobs.remove(&found.job);
+        let Some((profile, occupant)) = self.slots.iter_mut().find_map(|(profile, slots)| {
+            slots
+                .iter_mut()
+                .flatten()
+                .find(|occupant| occupant.runner_name == found.runner)
+                .map(|occupant| (profile, occupant))
+        }) else {
+            return;
+        };
+        // A capture started again reports the job it reported before.
+        if occupant.job == Some(found.job) {
+            return;
+        }
+        occupant.job = Some(found.job);
+        // A warm runner takes its job before a listing shows it queued: its run is seen here first. After a
+        // restart, `recover` noted it with its jobs' queued times. Its job is its pool's.
+        let pool = Pool {
+            repository: occupant.repository.clone(),
+            profile: profile.clone(),
+        };
+        let attempt = self.latest_attempt(found.run_id);
+        self.note_job(&pool, attempt, found.job, None, time::now_ms());
     }
 
     /// Follows the jobs the last poll listed queued that no runner in `taken` has; the listing recorded them.
@@ -419,7 +424,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             })
             .map(|(id, repository)| (repository.clone(), *id))
             .collect();
-        for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), left)).await {
+        for (repository, id, answer) in self
+            .serving(read_jobs(self.github.clone(), left), Meanwhile::Turnover)
+            .await
+        {
             // One of this machine's runners took it, and its log capture has not said so, as when Docker failed it:
             // the job is that runner's.
             let unclaimed = match &answer {
@@ -467,7 +475,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .chain(ended)
             .collect();
         let mut described = Vec::new();
-        for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), running)).await
+        for (repository, id, answer) in self
+            .serving(read_jobs(self.github.clone(), running), Meanwhile::Turnover)
+            .await
         {
             match answer {
                 Ok(details) => {
@@ -509,7 +519,9 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             .iter()
             .map(|(id, closing)| (closing.repository.clone(), *id))
             .collect();
-        for (repository, id, answer) in self.serving(read_jobs(self.github.clone(), closing)).await
+        for (repository, id, answer) in self
+            .serving(read_jobs(self.github.clone(), closing), Meanwhile::Turnover)
+            .await
         {
             let Some(Closing {
                 since, since_ms, ..
@@ -580,6 +592,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         self.leases.end(&occupant.runner_name, time::ms(now));
         if let Some(job) = job {
             self.closing.insert(job, Closing::now(&occupant.repository));
+            self.consume(&occupant.repository, job);
         }
     }
 }

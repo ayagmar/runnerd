@@ -111,8 +111,9 @@ client → transport → principal → handler → core
    GitHub's listings and job reads, never in the middle of applying them
    ([ADR 0026](docs/adr/0026-commands-answered-while-a-tick-waits-for-github.md)).
    `engine.rs` holds `Engine`'s state, its construction and its loop; each submodule of
-   [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling
-   and planning), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images and removing the published runner images none runs,
+   [`engine/`](crates/core/src/scheduler/engine) adds one concern's methods: `recover` (startup), `tick` (polling,
+   planning, and the passes that refill a slot between polls), `exits` (following Docker's events of runner
+   containers that stop, as hints), `runners` (a slot's runner from start to removal), `images` (pulling the profiles' images and removing the published runner images none runs,
    [ADR 0040](docs/adr/0040-unused-runner-images-removed.md)),
    `caches` (reseeds, the mirror, the shared caches), `build_cache` (a runner's socket of the build cache, and
    whether its job may write), `records` (records of failed jobs and the shells in them),
@@ -178,13 +179,24 @@ queued → slot → container → removed
    listings, up to three plans a tick, rather than holding back the plan's later starts until the next poll. Once a
    stop is asked for, no further start or plan runs, and a runner GitHub registered meanwhile is deleted before its
    container starts. A tick
-   that took longer than `poll_interval` to reach its last start logs its phases. A start that fails but leaves its
+   that took longer than `poll_interval` to reach its last start logs its phases. Between polls, a pass starts
+   runners for listed jobs into the room of runners that ended (step 4). A start that fails but leaves its
    container in Docker keeps it in the slot until Docker removes it
    ([ADR 0076](docs/adr/0076-a-slot-is-free-once-docker-removed-its-container.md),
    [ADR 0092](docs/adr/0092-idle-removals-and-deferred-starts-stay-off-the-start-path.md)).
 4. The runner takes one job and exits; the image's entrypoint then deletes the runner's credentials and every
-   dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`). `Engine::collect_finished` sees the container stopped, removes it and the runner's
-   registration, and frees the slot. A runner that took no job holds the repository back for a while. If the job
+   dot-file in its home and file in `/tmp` the job added or changed (`image/scrub.sh`). Docker's `die` event wakes
+   the engine (`engine/exits`), between ticks or while a tick waits for GitHub, for a pass (`Engine::turnover`): an
+   event is a hint, and Docker's inspect decides. A stopped runner is released, its container removed and then its
+   registration, and its slot is free. Each runner's release goes on its own, runners that stop meanwhile join the
+   pass, and after each slot it frees the pass starts runners for the jobs the last poll listed, without asking
+   GitHub, leaving out jobs runners took since and, for each runner that may have taken a job no capture named, one
+   listed job of its pool, until a listing begun after it
+   ([ADR 0095](docs/adr/0095-dockers-events-wake-a-pass-that-refills-a-slot.md)).
+   Each tick's `Engine::collect_finished` inspects every other runner too, so a runner whose event never came, or
+   that stopped while the events were not followed, is released at the next poll as before; the events are followed
+   again with a backoff, and every runner is inspected once they are. A runner that took no job holds the repository
+   back for a while. If the job
    failed and its profile has `record_failures`, the engine first commits the container to a record
    (`runnerd-record:<job>`) within `[records]`' limits, then removes it
    ([ADR 0031](docs/adr/0031-records-of-failed-jobs.md)).

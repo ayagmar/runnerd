@@ -972,6 +972,13 @@ impl Store {
         self.read(read::slot_jobs).await
     }
 
+    /// The latest second any runner name starting with `prefix` carries, of a runner or of a job's runner: the
+    /// engine names runners later after a restart, so no name the history holds is used twice.
+    pub async fn last_runner_second(&self, prefix: String) -> Result<Option<u64>, StoreError> {
+        self.read(move |db| read::last_runner_second(db, &prefix))
+            .await
+    }
+
     /// The job a runner took, if the history knows it.
     pub async fn runner_job(&self, runner: &str) -> Result<Option<u64>, StoreError> {
         let runner = runner.to_owned();

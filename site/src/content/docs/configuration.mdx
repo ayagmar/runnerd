@@ -124,7 +124,7 @@ A key without a default must be set. Sizes take `K`, `M`, `G` or `T`, durations 
 
 - `slice`: the systemd slice runners run in; its `MemoryMax` is the [budget](#the-budget-check)
 - `isolation`: `"sysbox"`, or `"unsafe-dind"` with `allow_unsafe = true` ([Isolation](#isolation))
-- `poll_interval` (default `"15s"`): how often GitHub is asked for queued jobs
+- `poll_interval` (default `"15s"`): how often GitHub is asked for queued jobs and this machine's runners. A slot whose runner ended takes the next listed job when Docker says so, not at the next poll
 - `admission` (default `"caps"`): a runner reserves its profile's `memory`, or with `"measured"` its job's predicted peak ([Admission](../admission/#measured-admission))
 - `cpu_overcommit` (default unset): a factor above 0, at most 16; a runner must also fit the slice's CPUs times it ([CPU admission](../admission/#cpu-admission))
 - `memory_ceiling` (default unset): for a VM whose memory grows on demand, the most it grows to ([A host whose memory grows](../admission/#a-host-whose-memory-grows))

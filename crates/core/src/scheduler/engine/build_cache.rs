@@ -11,7 +11,7 @@ use futures_util::StreamExt;
 use tracing::warn;
 
 use super::tick::CONCURRENT_REQUESTS;
-use super::{Engine, Occupant};
+use super::{Engine, Meanwhile, Occupant};
 use crate::buildcache::{self, ActionsCache, Scopes, Writes};
 use crate::cache;
 use crate::config::BuildCacheWriters;
@@ -234,7 +234,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         let known = self.known_default_branches();
         let github = self.github.clone();
         let answers = self
-            .serving(read_answers(github, undecided, branches, known))
+            .serving(
+                read_answers(github, undecided, branches, known),
+                Meanwhile::Commands,
+            )
             .await;
         self.take_answers(answers);
     }

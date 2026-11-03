@@ -808,3 +808,54 @@ async fn a_left_runner_docker_cannot_read_is_asked_about_less_and_less_and_never
         "the runner is never removed"
     );
 }
+
+/// A failed job whose runner ends between polls is recorded without GitHub being listed sooner than
+/// `poll_interval`. The bug it catches: the end of each recording's check and commit waking a full tick, so failed
+/// jobs released by a pass (ADR 0095) multiplied the polls.
+#[tokio::test(start_paused = true)]
+async fn recording_a_failed_job_between_polls_lists_github_no_sooner() {
+    let (github, docker) = (FakeGithub::default(), FakeDocker::default());
+    let dir = TestDir::new("record");
+    running_runner(&github, &docker, "@@job 1 1\n");
+    github
+        .0
+        .lock()
+        .unwrap()
+        .jobs
+        .insert(1, details(1, "completed", Some("failure")));
+    let config = recording().replace("[host]\n", "[host]\npoll_interval = \"1h\"\n");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let run = tokio::spawn(engine.run());
+    until_state(&handle, 1, JobState::Running).await;
+    tokio::time::sleep(Duration::from_secs(5)).await;
+    let listings = || {
+        github
+            .calls()
+            .iter()
+            .filter(|call| call.starts_with("runners "))
+            .count()
+    };
+    let before = listings();
+    {
+        let mut state = docker.0.lock().unwrap();
+        state.runner_log = Some(FAILED.to_owned());
+        state.written = 1 << 30;
+        state.containers[0].running = false;
+        let id = state.containers[0].id.clone();
+        state
+            .events
+            .retain(|events| events.send(Ok(id.clone())).is_ok());
+    }
+    tokio::time::sleep(Duration::from_secs(60)).await;
+
+    assert!(
+        docker
+            .calls()
+            .contains(&"commit container-1 runnerd-record:1".to_owned()),
+        "the failed job was recorded: {:?}",
+        docker.calls()
+    );
+    assert_eq!(listings(), before, "GitHub was listed before the next poll");
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+}

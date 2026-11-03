@@ -314,6 +314,9 @@ enum Step {
     /// Time passes: idle runners waited `IDLE_TIMEOUT`, holds after failures ran out.
     Elapse,
     Tick,
+    /// Docker says runners stopped, and a pass between ticks frees their slots and starts runners from the last
+    /// tick's listings (ADR 0095).
+    Pass,
 }
 
 fn generate(rng: &mut Rng) -> Vec<Step> {
@@ -376,6 +379,7 @@ fn generate(rng: &mut Rng) -> Vec<Step> {
             81..=82 => Step::Stop {
                 docker_gone: rng.below(2) == 0,
             },
+            83..=89 => Step::Pass,
             _ => Step::Tick,
         })
         .collect()
@@ -466,6 +470,8 @@ struct Case {
     took_job: BTreeSet<String>,
     /// Jobs a runner took that GitHub still lists queued until the next tick.
     still_listed: BTreeSet<u64>,
+    /// Jobs the last tick listed queued that were cancelled since: a pass plans from that listing.
+    cancelled_since_tick: BTreeSet<u64>,
     /// Docker calls checked so far.
     calls_seen: usize,
     /// The last reading of the host this daemon's store has, which a restart loses.
@@ -509,6 +515,7 @@ impl Case {
             next_job: 1,
             took_job: BTreeSet::new(),
             still_listed: BTreeSet::new(),
+            cancelled_since_tick: BTreeSet::new(),
             calls_seen: 0,
             host: None,
             host_during_start: Arc::default(),
@@ -648,7 +655,11 @@ impl Case {
                     let mut cancelled = details(id, "completed", Some("cancelled"));
                     cancelled.runner_name = None;
                     github.jobs.insert(id, cancelled);
-                    self.jobs.get_mut(&id).unwrap().phase = Phase::Done { ran: None };
+                    let job = self.jobs.get_mut(&id).unwrap();
+                    job.phase = Phase::Done { ran: None };
+                    if job.listed {
+                        self.cancelled_since_tick.insert(id);
+                    }
                 }
             }
             Step::Lose(pick) => self.lose(pick),
@@ -729,6 +740,7 @@ impl Case {
             }
             Step::Elapse => self.elapse(),
             Step::Tick => self.tick().await?,
+            Step::Pass => self.pass().await?,
         }
         self.no_removal_of_a_running_job()
     }
@@ -860,8 +872,8 @@ impl Case {
     }
 
     /// GitHub completes a running job, and its ephemeral runner leaves. Its stopped container's log still names the
-    /// job, as Docker keeps it until the container is removed; `no_name_twice` keeps a later runner from taking its
-    /// name and so its log.
+    /// job, as Docker keeps it until the container is removed; the engine names a slot's later runners otherwise, so
+    /// none takes its log.
     ///
     /// It also leaves GitHub's queued listing, even if `AssignListed` left it there: the harness assumes a stale
     /// listing never outlives its job. Where it does, as for a runner killed during its job's setup within GitHub's
@@ -1107,32 +1119,8 @@ impl Case {
         }
     }
 
-    /// Waits for the next second if a slot whose runner started this second has no running runner now: runner names
-    /// have a resolution of a second, and a real runner does not start and end within one, so the next runner in that
-    /// slot would take its name, and the history would take the two for one.
-    async fn no_name_twice(&mut self) {
-        let now = time::now_ms() / 1000;
-        let running: BTreeSet<String> = self
-            .running_containers()
-            .into_iter()
-            .map(|container| container.id)
-            .collect();
-        let reused = self
-            .docker
-            .0
-            .lock()
-            .unwrap()
-            .started
-            .iter()
-            .any(|(id, at)| at / 1000 == now && !running.contains(id));
-        if reused {
-            tokio::time::sleep(Duration::from_millis(1000 - time::now_ms() % 1000)).await;
-        }
-    }
-
     async fn tick(&mut self) -> Result<(), Violation> {
         self.unregistered_runners_exit();
-        self.no_name_twice().await;
         let calls_before = self.docker.0.lock().unwrap().calls.len();
         let seeds_before: BTreeSet<String> = self.engine.reseed_memory.keys().cloned().collect();
         self.capture_faults = self.docker.0.lock().unwrap().capture_faults.clone();
@@ -1147,6 +1135,7 @@ impl Case {
                 _ => {}
             }
         }
+        self.cancelled_since_tick.clear();
         self.engine.tick(Shutdown::No).await;
         self.failed_late();
         let after = self.status();
@@ -1196,6 +1185,77 @@ impl Case {
         self.docker_runs_no_runner_the_engine_lost(&after)?;
         self.only_unserved_jobs_wait_for_a_pool(&after)?;
         self.no_removal_of_a_running_job()
+    }
+
+    /// A pass between ticks, after Docker said every runner may have stopped: the checks of a tick that bind a pass,
+    /// which plans from the last tick's listings.
+    async fn pass(&mut self) -> Result<(), Violation> {
+        self.unregistered_runners_exit();
+        let calls_before = self.docker.0.lock().unwrap().calls.len();
+        self.engine.exits.any();
+        self.engine.turnover().await;
+        self.failed_late();
+        let after = self.status();
+        let running: BTreeSet<String> = self
+            .running_containers()
+            .into_iter()
+            .map(|container| container.name)
+            .collect();
+        let starts: BTreeSet<String> = self.docker.0.lock().unwrap().calls[calls_before..]
+            .iter()
+            .filter_map(|call| call.strip_prefix("start "))
+            .filter(|name| running.contains(*name))
+            .map(str::to_owned)
+            .collect();
+        self.no_pass_starts_a_second_runner_for_a_job(&after, &starts)?;
+        self.starts_fit_the_budget(&after, &starts)?;
+        self.docker_runs_no_runner_the_engine_lost(&after)?;
+        self.no_removal_of_a_running_job()
+    }
+
+    /// Invariant 1 for a pass: a pass that starts runners in a pool leaves it no more runners waiting for a job than
+    /// the jobs queued now and those the listing it planned from showed queued that were cancelled since. A job that
+    /// left the queue for one of this machine's runners is never counted twice: no job gets a second runner from
+    /// a listing older than its first.
+    fn no_pass_starts_a_second_runner_for_a_job(
+        &self,
+        status: &api::Status,
+        started: &BTreeSet<String>,
+    ) -> Result<(), Violation> {
+        let idle: BTreeSet<String> = self.idle_containers().into_iter().map(|c| c.id).collect();
+        let pools: BTreeSet<(String, String)> = runners_of(status)
+            .filter(|(_, runner)| started.contains(&runner.name))
+            .map(|(profile, runner)| (runner.repository.clone(), profile.to_owned()))
+            .collect();
+        for (repository, profile) in pools {
+            let waiting = runners_of(status)
+                .filter(|(in_profile, runner)| {
+                    *in_profile == profile
+                        && runner.repository == repository
+                        && idle.contains(&runner.container)
+                })
+                .count();
+            let wanted = self
+                .queued()
+                .into_iter()
+                .chain(self.cancelled_since_tick.iter().copied())
+                .filter(|id| {
+                    let job = &self.jobs[id];
+                    job.repository == repository
+                        && self.shape.serves(job.repository, &job.labels) == Some(profile.as_str())
+                })
+                .count();
+            if waiting > wanted {
+                return violation(
+                    self,
+                    "no_pass_starts_a_second_runner_for_a_job",
+                    format!(
+                        "{repository} in {profile}: {waiting} runners wait for {wanted} jobs queued or cancelled"
+                    ),
+                );
+            }
+        }
+        Ok(())
     }
 
     /// Invariant 1: a tick that starts runners in a pool leaves it no more runners waiting for a job than it has
@@ -1672,7 +1732,7 @@ async fn the_scheduler_keeps_its_invariants_over_generated_sequences() {
         Some(seed) => vec![seed],
         None => (0..env_u64("RUNNERD_INVARIANT_CASES").unwrap_or(CASES)).collect(),
     };
-    // Cases at once: each waits out seconds now and then (`Case::no_name_twice`), which the others use.
+    // Cases at once: each waits now and then for its captures, which the others use.
     for batch in seeds.chunks(64) {
         let runs = batch.iter().map(|&seed| async move {
             let steps = generate(&mut Rng(seed));
@@ -1848,6 +1908,62 @@ async fn a_reseed_starts_only_where_its_seed_container_fits_the_budget() {
         },
         Step::Finish(0),
         Step::Tick,
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
+
+/// A runner whose log capture fails takes a queued job just before a poll that lists it busy while GitHub still
+/// lists its job queued: no second runner starts for that job.
+#[tokio::test]
+async fn a_runner_first_listed_busy_beside_its_job_still_listed_gets_no_twin() {
+    let steps = [
+        Step::StartedInspectFails,
+        Step::CaptureFails { mid_stream: false },
+        Step::Queue {
+            second: false,
+            labels: Labels::SelfHosted,
+        },
+        Step::Restart,
+        Step::AssignListed(2),
+        Step::Reload(Change::LightPool),
+    ];
+    assert_eq!(broken(&steps).await, None);
+}
+
+/// A start whose runner took a listed job and then failed, leaving nothing in Docker, names no job; a pass after
+/// another runner went must not start a runner for that job from the listing that still shows it.
+#[tokio::test]
+async fn a_pass_starts_no_runner_for_a_job_a_failed_start_may_have_taken() {
+    let steps = [
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        Step::Queue {
+            second: false,
+            labels: Labels::Heavy,
+        },
+        // The first start leaves its container in its slot; the next, in the tick after the restart, takes job 1
+        // after that tick's listing, then fails and leaves nothing.
+        Step::StartFailsLate {
+            takes_job: false,
+            cleanup_fails: true,
+        },
+        Step::Sample {
+            percent: 120,
+            available: 8,
+            stalled: false,
+        },
+        Step::StartFailsLate {
+            takes_job: true,
+            cleanup_fails: false,
+        },
+        Step::Tick,
+        Step::Restart,
+        // Job 2 runs in the container the first start left, which someone removes: a pass frees its slot.
+        Step::Assign(7),
+        Step::Lose(5),
+        Step::Pass,
     ];
     assert_eq!(broken(&steps).await, None);
 }

@@ -734,14 +734,17 @@ async fn copies_arriving_one_by_one_beside_busy_runners_whose_job_is_unknown_tak
     docker.0.lock().unwrap().fail_execs = u32::MAX;
     let mut started = Vec::new();
     for copy in 1..=4 {
-        // One build queues per poll; the runners before took theirs and warm up at 300M, sampled just now.
+        // The runners before took theirs, which a poll saw; they warm up at 300M, sampled just now. A runner first
+        // listed busy may have taken a job the same poll still lists queued, so the copy queues after.
         {
             let mut state = github.0.lock().unwrap();
             for runner in &mut state.runners {
                 (runner.status, runner.busy) = ("online".to_owned(), true);
             }
-            state.queued = vec![job(copy)];
+            state.queued.clear();
         }
+        engine.tick(Shutdown::No).await;
+        github.0.lock().unwrap().queued = vec![job(copy)];
         runners_use(&github, &handle.store, 300 * M);
         slice_at(&handle.store, G);
         engine.tick(Shutdown::No).await;
@@ -1704,4 +1707,114 @@ async fn a_stop_asked_for_while_a_runner_starts_starts_no_more_of_the_tick() {
         .filter(|call| call.starts_with("start "))
         .count();
     assert_eq!(started, 1, "{:?}", docker.calls());
+}
+
+/// A pass that runs while a tick follows its jobs plans after the tick took a new listing but before it raised
+/// what waiting runners reserve for it: it must raise them first. The bug it catches: a pass admitting runners
+/// beside a waiting runner still counted at its old, smaller reservation, past the slice once it is raised.
+#[tokio::test]
+async fn a_pass_raises_what_waiting_runners_reserve_before_it_admits() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    github.0.lock().unwrap().queued = vec![job(1), job(2)];
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 2, "1.25G for each build");
+    // One runner ran build 2, which ended; the tick that follows has listed two e2e jobs beside build 1 and not yet
+    // raised the waiting runner's reservation for them when Docker says the other's container stopped.
+    let ended = {
+        let occupant = engine
+            .slots
+            .values_mut()
+            .flatten()
+            .flatten()
+            .last()
+            .unwrap();
+        occupant.job = Some(2);
+        occupant.busy = true;
+        occupant.container.clone()
+    };
+    for container in &mut docker.0.lock().unwrap().containers {
+        if container.id == ended {
+            container.running = false;
+        }
+    }
+    let e2e = |id| QueuedJob {
+        name: "e2e".to_owned(),
+        ..job(id)
+    };
+    engine.repositories.get_mut("o/r").unwrap().queued = vec![job(1), e2e(5), e2e(6)];
+    engine.exits.stopped(ended);
+    engine.turnover().await;
+
+    engine.rereserve().await;
+    engine.publish();
+    let in_use = handle.status.borrow().budget.memory_in_use;
+    assert!(
+        in_use <= 10 * G,
+        "the runners reserve {in_use} bytes of the 10G slice"
+    );
+}
+
+/// Four builds run at 1.25G each. One ends while the tick that listed an e2e beside the other three has not raised
+/// their reservations yet: the pass that releases it raises them to 3.5G each, 10.5G of the 10G slice, and stops
+/// none, as passes stop no runner. The bug it catches: the next tick finding nothing left to raise and forgetting
+/// that the three were raised, so none stopped and they stayed past the budget.
+#[tokio::test]
+async fn waiting_runners_a_pass_raised_past_the_budget_are_stopped_by_the_next_tick() {
+    let (github, docker, dir) = (
+        FakeGithub::default(),
+        FakeDocker::default(),
+        TestDir::new("engine"),
+    );
+    let (mut engine, handle) = measured_engine(&github, &docker, &dir, G, 0).await;
+    history_of(&handle.store, "e2e", 2000, 3 * G, 0).await;
+    slice_at(&handle.store, 2 * G);
+    engine.tick(Shutdown::No).await;
+    assert_eq!(registered(&github.calls()).len(), 4, "4 × 1.25G");
+    let ended = {
+        let occupant = engine
+            .slots
+            .values_mut()
+            .flatten()
+            .flatten()
+            .last()
+            .unwrap();
+        occupant.job = Some(4);
+        occupant.busy = true;
+        occupant.container.clone()
+    };
+    for container in &mut docker.0.lock().unwrap().containers {
+        if container.id == ended {
+            container.running = false;
+        }
+    }
+    let e2e = QueuedJob {
+        name: "e2e".to_owned(),
+        ..job(5)
+    };
+    let queued = vec![job(1), job(2), job(3), e2e];
+    engine.repositories.get_mut("o/r").unwrap().queued = queued.clone();
+    github.0.lock().unwrap().queued = queued;
+    engine.exits.stopped(ended);
+    engine.turnover().await;
+    engine.publish();
+    assert_eq!(
+        handle.status.borrow().budget.memory_in_use,
+        3 * 3584 * M,
+        "the pass raised the three left"
+    );
+
+    engine.tick(Shutdown::No).await;
+    engine.publish();
+    let in_use = handle.status.borrow().budget.memory_in_use;
+    assert!(
+        in_use <= 10 * G,
+        "the runners reserve {in_use} bytes of the 10G slice"
+    );
 }

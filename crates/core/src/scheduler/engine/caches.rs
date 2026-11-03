@@ -9,7 +9,7 @@ use std::time::{Duration, SystemTime};
 use tokio::task::JoinHandle;
 use tracing::{info, warn};
 
-use super::{Engine, Occupant, Shutdown};
+use super::{Engine, Meanwhile, Occupant, Shutdown};
 use crate::admission::host;
 use crate::api;
 use crate::buildcache::BuildCache;
@@ -128,7 +128,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             // Here, not in the background task: runners start only in the tick, so none starts while it removes
             // entries. Commands are answered meanwhile; none starts a runner.
             let build = match self.build_cache.clone() {
-                Some(build) => self.serving(trim_build_cache(build)).await,
+                Some(build) => {
+                    self.serving(trim_build_cache(build), Meanwhile::Commands)
+                        .await
+                }
                 None => None,
             };
             self.trim = Some(tokio::spawn(async move {

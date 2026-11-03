@@ -16,10 +16,10 @@ use bollard::models::{
 use bollard::query_parameters::{
     AttachContainerOptionsBuilder, CommitContainerOptionsBuilder, CreateContainerOptionsBuilder,
     CreateImageOptionsBuilder, DataUsageOptionsBuilder, DownloadFromContainerOptionsBuilder,
-    InspectContainerOptionsBuilder, ListContainersOptionsBuilder, ListImagesOptionsBuilder,
-    LogsOptionsBuilder, RemoveContainerOptionsBuilder, RemoveImageOptionsBuilder,
-    RemoveVolumeOptionsBuilder, ResizeContainerTTYOptionsBuilder, UploadToContainerOptionsBuilder,
-    WaitContainerOptionsBuilder,
+    EventsOptionsBuilder, InspectContainerOptionsBuilder, ListContainersOptionsBuilder,
+    ListImagesOptionsBuilder, LogsOptionsBuilder, RemoveContainerOptionsBuilder,
+    RemoveImageOptionsBuilder, RemoveVolumeOptionsBuilder, ResizeContainerTTYOptionsBuilder,
+    UploadToContainerOptionsBuilder, WaitContainerOptionsBuilder,
 };
 use futures_util::stream::BoxStream;
 use futures_util::{StreamExt, TryStreamExt};
@@ -92,6 +92,8 @@ pub struct RunnerState {
     pub address: Option<String>,
     /// When it started, in milliseconds since the epoch.
     pub started_at: Option<u64>,
+    /// When it stopped, in milliseconds since the epoch; `None` while it runs.
+    pub finished_at: Option<u64>,
     /// Its memory cap in bytes; `None` when it has none.
     pub memory: Option<u64>,
     /// Its CPU limit in millicores; `None` when it has none.
@@ -232,6 +234,9 @@ pub struct StartError {
     /// The container the start left, by ID, or by name when Docker could not say whether one exists; `None` when
     /// none does. It may run.
     pub container: Option<String>,
+    /// Whether Docker may have started the container before the start failed: its runner may have taken a job,
+    /// even if the container is gone now.
+    pub may_have_run: bool,
     /// Why the start failed.
     pub error: Error,
 }
@@ -325,6 +330,10 @@ pub trait DockerApi: Send + Sync {
     ) -> impl Future<Output = Result<String, Error>> + Send;
     /// Every container, running or not, that has the label.
     fn list(&self, label: &str) -> impl Future<Output = Result<Vec<Container>, Error>> + Send;
+    /// The IDs of runner containers (labelled `runnerd.job`) as each stops, from Docker's events. A hint: Docker sends
+    /// an event once at most, none while the stream is down, and keeps none to replay. The stream fails or ends with
+    /// the connection, or when Docker restarts.
+    fn exits(&self) -> BoxStream<'static, Result<String, Error>>;
     /// Waits for a container to exit; returns its exit code.
     fn wait(&self, container: &str) -> impl Future<Output = Result<i64, Error>> + Send;
     /// A container's output so far, stdout and stderr interleaved.
@@ -409,7 +418,7 @@ pub struct Docker {
 impl Docker {
     /// Removes the container a failed start `made`, if any; the start's `error` is the one worth reporting. The
     /// container stays in the answer unless its removal is confirmed.
-    async fn clean_up(&self, made: Option<String>, error: Error) -> StartError {
+    async fn clean_up(&self, made: Option<String>, error: Error, may_have_run: bool) -> StartError {
         let container = match made {
             Some(container) => match self.remove(&container).await {
                 Err(failed) if !is_not_found(&failed) => Some(container),
@@ -417,7 +426,11 @@ impl Docker {
             },
             None => None,
         };
-        StartError { container, error }
+        StartError {
+            container,
+            may_have_run,
+            error,
+        }
     }
 
     /// Connects to the Docker Engine at `DOCKER_HOST`, or its local socket. Only `unix://` hosts are supported.
@@ -479,6 +492,7 @@ impl DockerApi for Docker {
             Err(error) if refused(&error) => {
                 return Err(StartError {
                     container: None,
+                    may_have_run: false,
                     error,
                 });
             }
@@ -489,10 +503,11 @@ impl DockerApi for Docker {
                     Err(missing) if is_not_found(&missing) => None,
                     Err(_) => Some(spec.name.clone()),
                 };
-                return Err(self.clean_up(made, error).await);
+                // Made at most, never started.
+                return Err(self.clean_up(made, error, false).await);
             }
         };
-        let started = async {
+        let uploaded = async {
             if let Some(jit_config) = &spec.jit_config {
                 let options = UploadToContainerOptionsBuilder::new().path("/").build();
                 let tar = jit_config_tar(jit_config)?;
@@ -502,10 +517,14 @@ impl DockerApi for Docker {
                     .upload_to_container(&id, Some(options), bollard::body_stream(tar))
                     .await?;
             }
-            self.api.start_container(&id, None).await
+            Ok::<(), Error>(())
         };
-        if let Err(error) = started.await {
-            return Err(self.clean_up(Some(id), error).await);
+        if let Err(error) = uploaded.await {
+            return Err(self.clean_up(Some(id), error, false).await);
+        }
+        // A start whose answer is lost may have started it.
+        if let Err(error) = self.api.start_container(&id, None).await {
+            return Err(self.clean_up(Some(id), error, true).await);
         }
         Ok(id)
     }
@@ -534,6 +553,8 @@ impl DockerApi for Docker {
                 .filter(|pid| *pid > 0),
             address,
             started_at: state.started_at.as_deref().and_then(crate::time::parse_ms),
+            // Docker says 0001-01-01 for one that never stopped, which reads as none.
+            finished_at: state.finished_at.as_deref().and_then(crate::time::parse_ms),
             memory: host_config
                 .memory
                 .and_then(|memory| u64::try_from(memory).ok())
@@ -585,6 +606,19 @@ impl DockerApi for Docker {
                 labels: container.labels.unwrap_or_default(),
             })
             .collect())
+    }
+
+    fn exits(&self) -> BoxStream<'static, Result<String, Error>> {
+        let filters = HashMap::from([
+            ("type", vec!["container"]),
+            ("event", vec!["die"]),
+            ("label", vec!["runnerd.job"]),
+        ]);
+        let options = EventsOptionsBuilder::new().filters(&filters).build();
+        self.api
+            .events(Some(options))
+            .try_filter_map(|event| std::future::ready(Ok(event.actor.and_then(|actor| actor.id))))
+            .boxed()
     }
 
     async fn wait(&self, container: &str) -> Result<i64, Error> {
