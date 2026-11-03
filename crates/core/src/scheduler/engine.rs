@@ -38,7 +38,7 @@ pub use self::control::{
     Author, Command, Commands, Commit, Control, ControlError, RunningJobs, RunningSlots, Shutdown,
     Target, same_slice,
 };
-use self::history::{Closing, Found};
+use self::history::{CAPTURE_DRAIN, Closing, Found};
 use self::images::Images;
 pub use self::records::RecordSelection;
 use super::{Hold, SlotRef};
@@ -503,6 +503,9 @@ pub struct Engine<G = Github, D = Docker> {
     /// The runner containers this tick's inspect found stopped and released before Docker's event for them came: a
     /// pass the event wakes while the tick waits for GitHub starts runners into their room.
     released: BTreeSet<String>,
+    /// How long the passes this tick's waits for GitHub held took. Each waits for its slowest release: a tick holds
+    /// passes until they took `CAPTURE_DRAIN`, or while slots keep turning over it would take minutes to its plan.
+    passes_in_tick: Duration,
     /// How many times the engine began listing GitHub's queued jobs: the listing each answer comes from, and how
     /// old a claim on a listed job is (`Claims`).
     listing: u64,
@@ -644,6 +647,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
             exits: Arc::default(),
             watcher: None,
             released: BTreeSet::new(),
+            passes_in_tick: Duration::ZERO,
             listing: 0,
             named: 0,
             claims: BTreeMap::new(),
@@ -779,7 +783,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     async fn wait_for_tick(&mut self, mode: Shutdown, due: tokio::time::Instant) {
         loop {
             let exits = self.exits.clone();
+            // A due tick and a command go before a pass: passes back to back would otherwise hold them while slots
+            // keep turning over.
             tokio::select! {
+                biased;
                 () = tokio::time::sleep_until(due) => return,
                 () = self.control.wake.notified() => return,
                 // A detaching stop changes nothing more: a command waiting for it fails once the engine is gone.
@@ -858,8 +865,8 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     /// waits for a slow GitHub no longer than for the command before it. A tick follows each such command, as one
     /// follows a command answered between ticks. The task goes on while a command runs: a request's timeout runs on
     /// the clock, not on polls. With `Meanwhile::Turnover`, runners Docker says stopped are released and their slots
-    /// taken meanwhile too (`turnover`, ADR 0095), so a tick's wait for GitHub does not hold them, and the jobs
-    /// captures name are noted as they come.
+    /// taken meanwhile too (`turnover`, ADR 0095), so a tick's wait for GitHub does not hold them, for a
+    /// while, and the jobs captures name are noted as they come.
     async fn serving<T: Send + 'static>(
         &mut self,
         work: impl Future<Output = T> + Send + 'static,
@@ -884,8 +891,10 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     // polls its repositories then, not a poll interval later.
                     self.control.wake.notify_one();
                 }
-                () = exits.noted(), if meanwhile == Meanwhile::Turnover => {
+                () = exits.noted(), if meanwhile == Meanwhile::Turnover && self.passes_in_tick < CAPTURE_DRAIN => {
+                    let began = tokio::time::Instant::now();
                     self.turnover().await;
+                    self.passes_in_tick += began.elapsed();
                     self.publish();
                 }
                 Some(found) = self.found.1.recv(), if meanwhile == Meanwhile::Turnover => {

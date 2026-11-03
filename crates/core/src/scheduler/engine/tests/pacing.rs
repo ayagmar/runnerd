@@ -109,11 +109,15 @@ struct Burst {
     named_after: Duration,
     /// The slice's `MemoryMax`.
     budget: u64,
+    /// Whether removing a runner's container takes 5 to 25 s, different for each, so the slots' generations drift
+    /// apart rather than end together.
+    slow_removals: bool,
     queued_at: HashMap<u64, Instant>,
     /// The jobs a listing of queued jobs showed.
     listed: BTreeSet<u64>,
-    /// Listings of queued jobs so far.
+    /// Listings of queued jobs so far, and when the world first saw each.
     listings: usize,
+    listed_at: Vec<Instant>,
     running: Vec<Running>,
     /// The runner containers seen so far, and those that took a job.
     started: BTreeSet<String>,
@@ -132,9 +136,11 @@ impl Burst {
             run: Duration::from_secs(10),
             named_after: Duration::from_secs(1),
             budget,
+            slow_removals: false,
             queued_at: HashMap::new(),
             listed: BTreeSet::new(),
             listings: 0,
+            listed_at: Vec::new(),
             running: Vec::new(),
             started: BTreeSet::new(),
             assigned: BTreeSet::new(),
@@ -178,15 +184,16 @@ impl Burst {
             .count();
         if listings > self.listings {
             self.listings = listings;
+            self.listed_at.push(now);
             self.listed.extend(github.queued.iter().map(|job| job.id));
         }
-        self.see_starts(&docker, now);
+        self.see_starts(&mut docker, now);
         self.take_jobs(&mut github, &mut docker, now);
         self.end_jobs(&mut github, &mut docker, now);
     }
 
     /// Each runner container started since: what runs then fits the slice, and it takes a stopped one's room.
-    fn see_starts(&mut self, docker: &DockerState, now: Instant) {
+    fn see_starts(&mut self, docker: &mut DockerState, now: Instant) {
         // Each runner container started since: what runs then fits the slice, and it takes a stopped one's room.
         let new: Vec<String> = docker
             .containers
@@ -200,6 +207,12 @@ impl Burst {
         for id in new {
             self.started.insert(id.clone());
             self.seen.starts += 1;
+            if self.slow_removals {
+                let step = u64::try_from(self.seen.starts * 7 % 5).unwrap();
+                docker
+                    .slow_removes
+                    .insert(id.clone(), Duration::from_secs(5 + step * 5));
+            }
             let using: u64 = docker
                 .containers
                 .iter()
@@ -445,6 +458,69 @@ async fn a_slot_whose_job_ended_takes_the_next_listed_job_within_seconds() {
             .iter()
             .all(tokio::sync::mpsc::UnboundedSender::is_closed),
         "the engine stopped following Docker's events as it stopped"
+    );
+}
+
+/// Four slots work through a long backlog while each removal takes 5 to 25 s, so a slot's next runner ends while
+/// another's release still waits, generation after generation. Polls keep their pace and a command is answered
+/// within a pass's bound. The bug it catches: a pass taking every later exit for as long as some release waited,
+/// which, with a backlog, held the engine until it drained: no poll, no command.
+#[tokio::test(start_paused = true)]
+async fn overlapping_slow_releases_leave_the_polls_and_commands_their_turn() {
+    const JOBS: u64 = 48;
+    let (github, docker) = burst_fakes(Duration::ZERO);
+    let dir = TestDir::new("overlapping-releases");
+    let config = CONFIG.replace("slots = 2", "slots = 4");
+    let (engine, handle) = engine_with(&github, &docker, &dir, &config);
+    let mut burst = Burst::new(&github, &docker, u64::MAX);
+    burst.boot = Duration::from_secs(1);
+    burst.run = Duration::from_secs(3);
+    burst.slow_removals = true;
+    burst.queue(JOBS);
+    let run = tokio::spawn(engine.run());
+    let command = async {
+        tokio::time::sleep(Duration::from_mins(1)).await;
+        let sent = Instant::now();
+        handle
+            .control
+            .replace_config(
+                Config::parse(&config).unwrap(),
+                None,
+                None,
+                Commit::new(|| Ok(None)),
+                RunningSlots::Keep,
+                Author::Owner,
+            )
+            .await
+            .unwrap();
+        sent.elapsed()
+    };
+    let ((), answered) = tokio::join!(play(&mut burst, Burst::done_at), command);
+    let drained = Instant::now();
+    handle.shutdown(Shutdown::Force);
+    run.await.unwrap();
+
+    assert_eq!(
+        burst.seen.taken,
+        usize::try_from(JOBS).unwrap(),
+        "every job ran: {:?}",
+        burst.seen
+    );
+    assert!(
+        answered < Duration::from_secs(90),
+        "the command waited {answered:?}"
+    );
+    let gaps: Vec<Duration> = burst
+        .listed_at
+        .windows(2)
+        .map(|pair| pair[1] - pair[0])
+        .chain(burst.listed_at.last().map(|last| drained - *last))
+        .collect();
+    // A poll interval, the pass before the tick and the one the tick holds, each its join window and its slowest
+    // removal.
+    assert!(
+        gaps.iter().all(|gap| *gap < Duration::from_secs(90)),
+        "a poll waited for the backlog: {gaps:?}"
     );
 }
 

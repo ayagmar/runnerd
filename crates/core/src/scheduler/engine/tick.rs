@@ -12,6 +12,7 @@ use futures_util::StreamExt;
 use tracing::{debug, info, warn};
 
 use super::admission::Admitting;
+use super::history::CAPTURE_DRAIN;
 use super::{Engine, Meanwhile, Occupant, Purpose, Shutdown};
 use crate::admission::host;
 use crate::api::{AdmissionPolicy, Basis};
@@ -241,6 +242,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
     pub(super) async fn tick(&mut self, mode: Shutdown) {
         let began = SystemTime::now();
         let mut pace = Pace::new();
+        self.passes_in_tick = std::time::Duration::ZERO;
         self.collect_reseeds().await;
         self.collect_measures().await;
         self.collect_trim().await;
@@ -362,8 +364,15 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
         }
         let mut started = if freed > 0 { self.refill().await } else { 0 };
         let exits = self.exits.clone();
+        // Runners that stop later join only for as long as one release may drain: past that, a pass whose slots
+        // keep turning over would hold the engine until the backlog drained, no tick nor command between. Those
+        // stopping after are the next pass's, which their hint wakes.
+        let joining = tokio::time::sleep_until(began + CAPTURE_DRAIN);
+        tokio::pin!(joining);
+        let mut join = true;
         while !releases.waits.is_empty() {
             tokio::select! {
+                () = &mut joining, if join => join = false,
                 joined = releases.waits.join_next() => match joined {
                     Some(Ok((index, Step::Drained(read)))) => {
                         let Some(Ending { slot, occupant, logs }) = &mut releases.ended[index] else {
@@ -390,7 +399,7 @@ impl<G: GithubApi + 'static, D: DockerApi + 'static> Engine<G, D> {
                     Some(Err(_)) | None => {}
                 },
                 // Once a stop is asked for, the tick releases what stopped since.
-                () = exits.noted(), if self.stopping() == Shutdown::No => {
+                () = exits.noted(), if join && self.stopping() == Shutdown::No => {
                     let more = self.begin_releases(&mut releases).await;
                     if more > 0 {
                         freed += more;

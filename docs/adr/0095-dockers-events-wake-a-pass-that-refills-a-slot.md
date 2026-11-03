@@ -46,7 +46,11 @@ what happened meanwhile, and Docker keeps no history to ask again.
   runner's release goes on its own (its log read and failed job recorded, then its removal), runners Docker says
   stopped while those wait join them, and the pass plans after each slot that frees, so a slow release holds back
   only its own slot. The pass owns its releases until each is done, so no tick, stop or idle removal sees a runner
-  half released; a tick that falls due meanwhile waits for them, as a command does. Once a stop is asked for, it
+  half released; a tick that falls due meanwhile waits for them, as a command does. So that a pass whose slots keep
+  turning over does not hold the engine until the backlog drains, runners join a pass only within `CAPTURE_DRAIN` of
+  its start, and those stopping later are the next pass's. A pass therefore lasts at most that window plus its
+  slowest release. Between ticks, a due tick and a command go before the next pass; a tick hosts passes in its waits
+  for GitHub until they took `CAPTURE_DRAIN` together, and exits after that wait for the tick to end. Once a stop is asked for, it
   takes no more runners and starts none, and the stop's ticks release what stopped since. It starts only runners for listed jobs
   into empty slots: no stops, no warm runners, no start that takes a warm runner's room; those wait for the tick.
   Before it plans, it raises what idle runners reserve for the jobs listed now, as a tick does; a pass stops no
@@ -88,9 +92,9 @@ what happened meanwhile, and Docker keeps no history to ask again.
 - On the fakes with the owner's latencies (a GitHub request 0.3 s, a listing 3 s more, a container's start 1 s, a
   stopped container's removal 0.3 s), 16 jobs through 4 slots, a slot whose job ended started its next runner within
   4 s, at most 20 s while Docker's events were down (`tests/pacing.rs`). Six bursts of 40 jobs through 8 slots
-  (`workload_figures`): a slot's job end to its next container start went from a median 24.5 s, p90 28.5 s, to
+  (`workload_figures`): a slot's job end to its next container start went from a median 24.3 s, p90 28.0 s, to
   1.9 s and 3.0 s (3.8 s at most), and a job's queueing to its container's start from a median 92.1 s, p90 177.7 s,
-  to 60.0 s and 105.9 s. Jobs still wait for slots: 40 jobs outnumber 8 slots.
+  to 60.1 s and 106.7 s. Jobs still wait for slots: 40 jobs outnumber 8 slots.
 - A pass lists nothing on GitHub: it asks only for the registration and the deletion each runner needs anyway. Ticks
   got shorter, as passes start many of the runners, so the next poll comes sooner after one, never sooner than
   `poll_interval`: at 15 s, 240 listings an hour at most, as before. In those bursts, per hour: queued-jobs listings
