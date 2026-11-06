@@ -40,14 +40,17 @@ held for the host.
   message: a wait that lasts across a boundary is told again after the boundary, so two messages can be minutes
   apart. On the week replayed to choose the rule, it gives 2 to 3 messages.
 - **A kind with a fallback.** `InsightKind::HostHeld { jobs, waited }`. 0.0.28's `Unknown` reads it by its sentence,
-  under the label `Insight`; `crates/wire-compat` accepts that read as a difference.
+  under the label `Insight`; `crates/wire-compat` accepts that read alone, as `insight-kind/host-held`; the insights, digest and notification
+  samples leave the kind out, so a real break of those documents still fails.
 
 ## Consequences
 
 - With `[notify]` off nothing is sent; the insight is still in `runnerctl insights` and the dashboard while it holds.
-- `host_waited` keeps its meaning (the host's wait as labelled by `plan`, which checks the slice's budget first), so
-  a job short of both budgets counts as waiting for the host's memory. The insight says what the host holds; it
-  does not say closing it would start the job.
+- `host_waited` keeps its meaning, and `plan` labels a job's wait by the first budget it fails, the slice's before
+  the host's. A job short of both is labelled `Memory`, so it is not among the jobs counted and adds to no
+  `host_waited`; the same holds for jobs labelled `BehindMemory` and `BehindStart`. The count and the longest wait
+  are lower bounds, and the insight can be silent while the host is short and the slice is full too. The insight says
+  what the host holds; it does not say closing it would start the job.
 - Insights are no longer a pure function of the history alone: `History::host` is a fact of now. Its freshness rule
   is in `insights::host_held`, so the endpoint, the notifier and the digest apply the same one.
 - Rejected: a new `Event` variant for each span (`Event` has no fallback, and 252 messages a week), and an
