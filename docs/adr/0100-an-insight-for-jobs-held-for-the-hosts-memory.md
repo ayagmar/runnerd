@@ -51,6 +51,9 @@ held for the host.
   `host_waited`; the same holds for jobs labelled `BehindMemory` and `BehindStart`. The count and the longest wait
   are lower bounds, and the insight can be silent while the host is short and the slice is full too. The insight says
   what the host holds; it does not say closing it would start the job.
+- `host_waited` adds the wall-clock gap since the last plan, so a suspend or a clock step forward with a job held
+  shows in the longest wait the owner is told, as it already does in the figure sizing reads. Accepted; the gap is
+  not capped.
 - Insights are no longer a pure function of the history alone: `History::host` is a fact of now. Its freshness rule
   is in `insights::host_held`, so the endpoint, the notifier and the digest apply the same one.
 - Rejected: a new `Event` variant for each span (`Event` has no fallback, and 252 messages a week), and an
